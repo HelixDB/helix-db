@@ -112,7 +112,7 @@ async fn correlated_sources_build_once_across_outer_batches_and_bound_cardinalit
                 .await
                 .unwrap_err();
             assert!(
-                matches!(&error,Error::Query(error) if error.detail=="MemoryLimit")
+                matches!(&error,Error::Query(error) if error.detail=="memory_limit")
                     || matches!(
                         &error,
                         Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)
@@ -134,10 +134,10 @@ async fn correlated_source_boundaries_keep_write_visibility_errors_and_rollback(
     .unwrap();
     assert_eq!(db.cypher(crate::cypher::Request::new("MATCH (n:A) UNWIND [n,null] AS start OPTIONAL MATCH (start)-[:R]->(b:B),(c:A) RETURN count(*),count(b),count(c)")).await.unwrap().rows,vec![vec![json!(2),json!(1),json!(1)]]);
     for (text, detail) in [
-        ("UNWIND [null,1] AS start OPTIONAL MATCH (start),(a:A),(b:B) RETURN a LIMIT 0","ExpectedNode"),
-        ("UNWIND [null] AS left UNWIND [1] AS right OPTIONAL MATCH (left),(right),(a:A) RETURN a LIMIT 0","ExpectedNode"),
-        ("UNWIND [1,2] AS key MATCH (a:A),(b:B) WHERE 1/(2-key)>0 RETURN a LIMIT 1","DivisionByZero"),
-        ("CREATE (:Rollback) WITH 1 AS marker UNWIND [1,2] AS key MATCH (a:A),(b:B) WHERE 1/(2-key)>0 RETURN a LIMIT 1","DivisionByZero"),
+        ("UNWIND [null,1] AS start OPTIONAL MATCH (start),(a:A),(b:B) RETURN a LIMIT 0","expected_node"),
+        ("UNWIND [null] AS left UNWIND [1] AS right OPTIONAL MATCH (left),(right),(a:A) RETURN a LIMIT 0","expected_node"),
+        ("UNWIND [1,2] AS key MATCH (a:A),(b:B) WHERE 1/(2-key)>0 RETURN a LIMIT 1","division_by_zero"),
+        ("CREATE (:Rollback) WITH 1 AS marker UNWIND [1,2] AS key MATCH (a:A),(b:B) WHERE 1/(2-key)>0 RETURN a LIMIT 1","division_by_zero"),
     ] {
         let plan=r::plan(helix_cypher::compile(text).unwrap(),&db.planner_context(context::ParamBindings::default())).unwrap();
         for batch_rows in [1,2,7] {
@@ -245,7 +245,7 @@ async fn correlated_source_owners_survive_cursor_changes_and_release_on_failure(
                             crate::HelixDbError::QueryDeadlineExceeded
                                 | crate::HelixDbError::QueryMemoryLimitExceeded
                         )
-                    ) || matches!(&error,Error::Query(error) if error.detail=="MemoryLimit")
+                    ) || matches!(&error,Error::Query(error) if error.detail=="memory_limit")
                 );
             }
             drop(cursor);

@@ -222,7 +222,7 @@ fn incremental_aggregates_bound_distinct_state_and_keep_failed_updates_atomic() 
             .push(r::Value::Integer(3), 1, 2048)
             .unwrap_err()
             .detail,
-        "CollectionLimit"
+        "collection_limit"
     );
     assert_eq!(
         collect.finish().unwrap(),
@@ -234,7 +234,7 @@ fn incremental_aggregates_bound_distinct_state_and_keep_failed_updates_atomic() 
             .push(r::Value::String("x".repeat(4096)), 10, 2048)
             .unwrap_err()
             .detail,
-        "MemoryLimit"
+        "memory_limit"
     );
     assert_eq!(minimum.finish().unwrap(), r::Value::Null);
 }

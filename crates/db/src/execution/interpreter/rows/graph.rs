@@ -8,6 +8,7 @@ use crate::encoding::v2::{
     },
 };
 use helix_planner::relational as r;
+use helix_planner::relational::{category, detail};
 use std::collections::BTreeMap;
 
 #[cfg(test)]
@@ -61,8 +62,8 @@ impl r::GraphValues for GraphBatch {
 
 fn missing(entity: r::Entity) -> r::QueryError {
     r::QueryError::runtime(
-        "EntityNotFound",
-        "DeletedEntityAccess",
+        category::ENTITY_NOT_FOUND,
+        detail::DELETED_ENTITY_ACCESS,
         format!("graph entity {entity:?} is unavailable"),
     )
 }
@@ -368,8 +369,8 @@ impl ExecutionContext<'_> {
                         };
                         let label = label.ok_or_else(|| {
                             r::QueryError::runtime(
-                                "UnsupportedFeature",
-                                "UntypedStoredRelationship",
+                                category::UNSUPPORTED_FEATURE,
+                                detail::UNTYPED_STORED_RELATIONSHIP,
                                 "stored relationship has no type",
                             )
                         })?;
@@ -559,8 +560,8 @@ impl GraphBatch {
                     }
                     _ => {
                         return Err(r::QueryError::runtime(
-                            "InternalPlannerError",
-                            "EntityKindMismatch",
+                            category::INTERNAL_PLANNER_ERROR,
+                            detail::ENTITY_KIND_MISMATCH,
                             "hydrated entity kind does not match its identity",
                         )
                         .into())
@@ -665,8 +666,8 @@ pub(super) fn to_property(value: r::Value) -> Result<P> {
 }
 fn property_type() -> Error {
     r::QueryError::runtime(
-        "TypeError",
-        "InvalidPropertyType",
+        category::TYPE_ERROR,
+        detail::INVALID_PROPERTY_TYPE,
         "stored properties must be scalars or homogeneous scalar lists",
     )
     .into()
@@ -678,11 +679,11 @@ pub(super) fn properties(values: BTreeMap<String, r::Value>) -> Result<Vec<Prope
         .filter_map(|(name, value)| {
             if name.starts_with('$') || name.is_empty() {
                 return Some(Err(r::QueryError::runtime(
-                    "UnsupportedFeature",
+                    category::UNSUPPORTED_FEATURE,
                     if name.is_empty() {
-                        "EmptyPropertyName"
+                        detail::EMPTY_PROPERTY_NAME
                     } else {
-                        "ReservedPropertyName"
+                        detail::RESERVED_PROPERTY_NAME
                     },
                     "property names must be nonempty and outside the reserved metadata namespace",
                 )

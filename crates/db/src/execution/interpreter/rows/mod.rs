@@ -27,6 +27,7 @@ use super::{ExecutionContext, ExecutionValue, Interpreter};
 use crate::cypher::{output, Error, Limits, Response, Result};
 use graph::GraphBatch;
 use helix_planner::relational as r;
+use helix_planner::relational::{category, detail};
 use memory::Rows;
 use std::collections::BTreeMap;
 
@@ -142,7 +143,7 @@ impl ExecutionContext<'_> {
             > limits.memory_bytes
         {
             return Err(resource(
-                "MemoryLimit",
+                detail::MEMORY_LIMIT,
                 "row schema exceeds the query memory budget",
             ));
         }
@@ -461,7 +462,7 @@ impl ExecutionContext<'_> {
                     }
                     if wire_size.bytes > limits.result_bytes {
                         return Err(resource(
-                            "ResultLimit",
+                            detail::RESULT_LIMIT,
                             "query result exceeds the response byte budget",
                         ));
                     }
@@ -475,7 +476,7 @@ impl ExecutionContext<'_> {
         }
         if wire_size.bytes > limits.result_bytes {
             return Err(resource(
-                "ResultLimit",
+                detail::RESULT_LIMIT,
                 "query result exceeds the response byte budget",
             ));
         }
@@ -516,7 +517,7 @@ impl ExecutionContext<'_> {
     }
 }
 fn resource(detail: &str, message: &str) -> Error {
-    r::QueryError::runtime("ResourceLimit", detail, message).into()
+    r::QueryError::runtime(category::RESOURCE_LIMIT, detail, message).into()
 }
 fn row_bytes(row: &r::Row) -> usize {
     row.iter().fold(
@@ -534,7 +535,10 @@ fn rows_bytes(rows: &[r::Row]) -> usize {
 }
 fn check_memory(rows: &[r::Row], limits: Limits) -> Result<()> {
     if rows_bytes(rows) > limits.memory_bytes {
-        Err(resource("MemoryLimit", "query exceeds its memory budget"))
+        Err(resource(
+            detail::MEMORY_LIMIT,
+            "query exceeds its memory budget",
+        ))
     } else {
         Ok(())
     }
@@ -579,7 +583,7 @@ impl RowBuffer {
             self.rows
                 .data
                 .try_reserve_exact(additional)
-                .map_err(|_| resource("MemoryLimit", "row allocation failed"))?;
+                .map_err(|_| resource(detail::MEMORY_LIMIT, "row allocation failed"))?;
         }
         let row = build();
         assert!(

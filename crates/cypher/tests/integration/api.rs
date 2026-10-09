@@ -1,4 +1,4 @@
-use helix_cypher::api::{self, ErrorClass};
+use helix_cypher::api::{self, category, detail, ErrorClass};
 use helix_cypher::{QueryError, Span};
 use serde_json::json;
 
@@ -10,27 +10,35 @@ fn paths_are_the_public_cypher_routes() {
 
 #[test]
 fn every_category_maps_to_one_class_and_http_status() {
-    for (category, class, status) in [
-        ("ResourceLimit", ErrorClass::ResourceLimit, 429),
-        ("AccessModeError", ErrorClass::WriterRequired, 503),
-        ("InternalPlannerError", ErrorClass::Internal, 500),
-        ("SyntaxError", ErrorClass::InvalidQuery, 400),
-        ("TypeError", ErrorClass::InvalidQuery, 400),
-        ("UnsupportedFeature", ErrorClass::InvalidQuery, 400),
-        ("ParameterMissing", ErrorClass::InvalidQuery, 400),
-        ("ArgumentError", ErrorClass::InvalidQuery, 400),
-        ("EntityNotFound", ErrorClass::InvalidQuery, 400),
-        ("ArithmeticError", ErrorClass::InvalidQuery, 400),
+    let cases = [
+        (category::RESOURCE_LIMIT, ErrorClass::ResourceLimit, 429),
+        (category::ACCESS_MODE_ERROR, ErrorClass::WriterRequired, 503),
+        (category::INTERNAL_PLANNER_ERROR, ErrorClass::Internal, 500),
+        (category::SYNTAX_ERROR, ErrorClass::InvalidQuery, 400),
+        (category::TYPE_ERROR, ErrorClass::InvalidQuery, 400),
+        (category::UNSUPPORTED_FEATURE, ErrorClass::InvalidQuery, 400),
+        (category::PARAMETER_MISSING, ErrorClass::InvalidQuery, 400),
+        (category::ARGUMENT_ERROR, ErrorClass::InvalidQuery, 400),
+        (category::ENTITY_NOT_FOUND, ErrorClass::InvalidQuery, 400),
+        (category::ARITHMETIC_ERROR, ErrorClass::InvalidQuery, 400),
         (
-            "ConstraintVerificationFailed",
+            category::CONSTRAINT_VERIFICATION_FAILED,
             ErrorClass::InvalidQuery,
             400,
         ),
-        ("CategoryAddedLater", ErrorClass::InvalidQuery, 400),
-    ] {
+        // A category from a newer database node is still reported.
+        ("category_added_later", ErrorClass::InvalidQuery, 400),
+    ];
+    assert!(
+        category::ALL
+            .iter()
+            .all(|code| cases.iter().any(|(case, _, _)| case == code)),
+        "every category has a reviewed class"
+    );
+    for (category, class, status) in cases {
         for error in [
-            QueryError::compile(category, "Detail", "message"),
-            QueryError::runtime(category, "Detail", "message"),
+            QueryError::compile(category, detail::INVALID_STATEMENT, "message"),
+            QueryError::runtime(category, detail::INVALID_STATEMENT, "message"),
         ] {
             assert_eq!(ErrorClass::of(&error), class, "{category}");
             assert_eq!(ErrorClass::of(&error).http_status(), status, "{category}");
@@ -39,9 +47,30 @@ fn every_category_maps_to_one_class_and_http_status() {
 }
 
 #[test]
+fn every_code_is_unique_lower_snake_case() {
+    for codes in [category::ALL, detail::ALL] {
+        for (index, code) in codes.iter().enumerate() {
+            assert!(
+                code.split('_').all(|word| !word.is_empty()
+                    && word.starts_with(|c: char| c.is_ascii_lowercase())
+                    && word
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())),
+                "{code} is not lower snake case"
+            );
+            assert!(!codes[index + 1..].contains(code), "{code} is listed twice");
+        }
+    }
+}
+
+#[test]
 fn error_bodies_keep_the_documented_envelope() {
-    let error = QueryError::runtime("ResourceLimit", "MemoryLimit", "over budget")
-        .at(Span { start: 7, end: 12 });
+    let error = QueryError::runtime(
+        category::RESOURCE_LIMIT,
+        detail::MEMORY_LIMIT,
+        "over budget",
+    )
+    .at(Span { start: 7, end: 12 });
     assert_eq!(
         serde_json::to_value(api::ErrorBody::from(&error)).unwrap(),
         json!({
@@ -50,13 +79,13 @@ fn error_bodies_keep_the_documented_envelope() {
             "details": {"detail": "memory_limit", "phase": "runtime", "span": {"start": 7, "end": 12}},
         })
     );
+    assert_eq!(error.code(), "resource_limit:runtime:memory_limit");
 
     let error = helix_cypher::compile("RETURN (").unwrap_err();
     let body = serde_json::to_value(api::ErrorBody::from(&error)).unwrap();
-    let code = api::ErrorCode::from(&error);
-    assert_eq!(body["error"], code.category);
+    assert_eq!(body["error"], category::SYNTAX_ERROR);
     assert_eq!(body["msg"], error.message);
-    assert_eq!(body["details"]["detail"], code.detail);
+    assert_eq!(body["details"]["detail"], error.detail);
     assert_eq!(body["details"]["phase"], "compile");
     assert_eq!(
         body["details"]["span"],
@@ -65,54 +94,22 @@ fn error_bodies_keep_the_documented_envelope() {
 }
 
 #[test]
-fn error_codes_use_the_lower_snake_case_of_native_codes() {
-    for (category, code) in [
-        ("ResourceLimit", "resource_limit"),
-        ("AccessModeError", "access_mode_error"),
-        ("InternalPlannerError", "internal_planner_error"),
-        ("SyntaxError", "syntax_error"),
-        ("TypeError", "type_error"),
-        ("UnsupportedFeature", "unsupported_feature"),
-        ("ParameterMissing", "parameter_missing"),
-        ("ArgumentError", "argument_error"),
-        ("EntityNotFound", "entity_not_found"),
-        ("ArithmeticError", "arithmetic_error"),
-        (
-            "ConstraintVerificationFailed",
-            "constraint_verification_failed",
-        ),
-        ("IDOverflow", "id_overflow"),
-        ("Utf8Literal", "utf8_literal"),
-        ("already_snake", "already_snake"),
+fn unsupported_functions_report_a_code_and_name_the_function_in_the_message() {
+    for (query, function) in [
+        ("RETURN sqrt(4) AS x", "sqrt"),
+        ("RETURN DATE() AS d", "date"),
     ] {
-        let error = QueryError::compile(category, category, "message");
-        let error_code = api::ErrorCode::from(&error);
-        assert_eq!(error_code.category, code);
-        assert_eq!(error_code.detail, code);
+        let error = helix_cypher::compile(query).unwrap_err();
+        assert_eq!(error.category, category::UNSUPPORTED_FEATURE, "{query}");
+        assert_eq!(error.detail, detail::FUNCTION, "{query}");
         assert!(
-            code.split('_').all(|word| !word.is_empty()
-                && word
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())),
-            "{code}"
+            error.message.contains(&format!("`{function}`")),
+            "{}",
+            error.message
         );
+        assert_eq!(error.code(), "unsupported_feature:compile:function");
+        let body = serde_json::to_value(api::ErrorBody::from(&error)).unwrap();
+        assert_eq!(body["error"], "unsupported_feature");
+        assert_eq!(body["details"]["detail"], "function");
     }
-}
-
-#[test]
-fn single_string_codes_join_category_phase_and_detail() {
-    let compile = QueryError::compile("SyntaxError", "UndefinedVariable", "message");
-    assert_eq!(
-        api::ErrorCode::from(&compile).to_string(),
-        "syntax_error:compile:undefined_variable"
-    );
-    let runtime = QueryError::runtime(
-        "ConstraintVerificationFailed",
-        "DeleteConnectedNode",
-        "message",
-    );
-    assert_eq!(
-        api::ErrorCode::from(&runtime).to_string(),
-        "constraint_verification_failed:runtime:delete_connected_node"
-    );
 }

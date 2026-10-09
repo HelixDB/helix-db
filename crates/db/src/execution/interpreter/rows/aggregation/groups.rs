@@ -4,6 +4,7 @@ use super::super::{
 };
 use super::{Group, Specification};
 use helix_planner::relational as r;
+use helix_planner::relational::detail;
 use std::collections::HashMap;
 
 pub(super) struct GroupBuffer {
@@ -109,11 +110,14 @@ impl GroupBuffer {
         if capacity > self.groups.capacity() {
             self.groups
                 .try_reserve_exact(capacity - self.groups.len())
-                .map_err(|_| resource("MemoryLimit", "aggregate group allocation failed"))?;
+                .map_err(|_| resource(detail::MEMORY_LIMIT, "aggregate group allocation failed"))?;
         }
-        self.by_key
-            .try_reserve(1)
-            .map_err(|_| resource("MemoryLimit", "aggregate key table allocation failed"))?;
+        self.by_key.try_reserve(1).map_err(|_| {
+            resource(
+                detail::MEMORY_LIMIT,
+                "aggregate key table allocation failed",
+            )
+        })?;
         let mut base = vec![r::Value::Null; width];
         for (slot, value) in row
             .into_iter()

@@ -3,6 +3,7 @@ use super::memory::Rows;
 use super::{push_row, ExecutionContext, ExecutionValue, Limits, Result, RowBuffer};
 use crate::query_resources::bitmap;
 use futures::StreamExt;
+use helix_planner::relational::{category, detail};
 use helix_planner::{exec, ir, relational as r};
 use r::GraphValues;
 use std::collections::BTreeMap;
@@ -34,8 +35,8 @@ impl Match<'_> {
                 )
             {
                 return Err(r::QueryError::runtime(
-                    "TypeError",
-                    "ExpectedNode",
+                    category::TYPE_ERROR,
+                    detail::EXPECTED_NODE,
                     "a bound node pattern requires a node or null",
                 )
                 .into());
@@ -49,8 +50,8 @@ impl Match<'_> {
                 )
             {
                 return Err(r::QueryError::runtime(
-                    "TypeError",
-                    "ExpectedRelationship",
+                    category::TYPE_ERROR,
+                    detail::EXPECTED_RELATIONSHIP,
                     "a bound relationship pattern requires a relationship or null",
                 )
                 .into());
@@ -353,13 +354,17 @@ impl ExecutionContext<'_> {
             source.access.root(),
         )
         .map_err(|e| {
-            r::QueryError::runtime("InternalPlannerError", "InvalidAccessPlan", e.to_string())
+            r::QueryError::runtime(
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_ACCESS_PLAN,
+                e.to_string(),
+            )
         })?;
         let value = self.execute_subplan(&subplan).await?;
         let ExecutionValue::Stream(rows) = value else {
             return Err(r::QueryError::runtime(
-                "InternalPlannerError",
-                "InvalidAccessResult",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_ACCESS_RESULT,
                 "graph access did not produce rows",
             )
             .into());

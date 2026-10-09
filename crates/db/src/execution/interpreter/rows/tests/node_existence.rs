@@ -171,7 +171,7 @@ async fn existence_admission_precedes_key_allocation_and_storage_reads() {
             .now_or_never()
             .expect("admission fails before polling storage")
     });
-    assert!(matches!(result, Err(Error::Query(ref error)) if error.detail == "MemoryLimit"));
+    assert!(matches!(result, Err(Error::Query(ref error)) if error.detail == "memory_limit"));
     // Apart from the structured error, only the one-ID buffer may allocate.
     assert_eq!(allocation.allocations, error_allocation.allocations + 1);
     assert_eq!(allocation.bytes, error_allocation.bytes + size_of::<u64>());

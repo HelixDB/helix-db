@@ -5421,7 +5421,7 @@ envelope and the codes below.
 | Category | Meaning | HTTP | Retry |
 | --- | --- | --- | --- |
 | `syntax_error` | The statement is not valid Cypher, for example `undefined_variable`, `unexpected_syntax`, or `invalid_parameter_use`. | 400 | After fixing the statement |
-| `unsupported_feature` | Valid openCypher outside the supported profile, for example `merge` or `variable_length_pattern`. | 400 | After rewriting the statement |
+| `unsupported_feature` | Valid openCypher outside the supported profile, for example `merge`, `variable_length_pattern`, or `function` (an openCypher function this profile lacks; `msg` names it). | 400 | After rewriting the statement |
 | `type_error` | A value has the wrong type for its use, for example `expected_node` or `invalid_property_type`. | 400 | After fixing the statement or data |
 | `argument_error` | A function argument is invalid, for example `number_out_of_range`. | 400 | After fixing the argument |
 | `arithmetic_error` | Arithmetic failed, for example `division_by_zero`. | 400 | After fixing the expression or data |

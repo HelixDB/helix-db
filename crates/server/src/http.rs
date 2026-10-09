@@ -511,28 +511,28 @@ mod tests {
     async fn cypher_errors_follow_the_shared_error_contract() {
         let query = |category| {
             db::cypher::Error::Query(
-                helix_cypher::QueryError::runtime(category, "Detail", "msg")
+                helix_cypher::QueryError::runtime(category, "detail", "msg")
                     .at(helix_cypher::Span { start: 1, end: 2 }),
             )
         };
         let cases = [
             (
-                query("SyntaxError"),
+                query("syntax_error"),
                 StatusCode::BAD_REQUEST,
                 "syntax_error",
             ),
             (
-                query("ResourceLimit"),
+                query("resource_limit"),
                 StatusCode::TOO_MANY_REQUESTS,
                 "resource_limit",
             ),
             (
-                query("AccessModeError"),
+                query("access_mode_error"),
                 StatusCode::SERVICE_UNAVAILABLE,
                 "access_mode_error",
             ),
             (
-                query("InternalPlannerError"),
+                query("internal_planner_error"),
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_planner_error",
             ),

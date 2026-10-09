@@ -1,6 +1,7 @@
 //! Prepare primitive text without allocating, then write into admitted capacity.
 //! The byte count preserves the existing Cypher finite-float decimal suffix.
 use super::{QueryError, Result, Value};
+use crate::relational::{category, detail};
 use std::fmt::{self, Write as _};
 
 // Formatting preparation allocates nothing; callers admit bytes before writing.
@@ -18,8 +19,8 @@ impl<'a> ScalarText<'a> {
             Value::Boolean(value) => value,
             _ => {
                 return Err(QueryError::runtime(
-                    "TypeError",
-                    "InvalidArgumentType",
+                    category::TYPE_ERROR,
+                    detail::INVALID_ARGUMENT_TYPE,
                     "value cannot be converted to a string",
                 ))
             }

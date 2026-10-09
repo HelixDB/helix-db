@@ -43,11 +43,11 @@ fn invalid_offsets_and_expression_errors_are_not_hidden_by_empty_windows() {
     let skip = r::Expression::Parameter("skip".into());
     let limit = r::Expression::Parameter("limit".into());
     for (invalid, detail) in [
-        (r::Value::Null, "InvalidArgumentType"),
-        (r::Value::Integer(-1), "NegativeIntegerArgument"),
-        (r::Value::Float(1.0), "InvalidArgumentType"),
-        (r::Value::Boolean(false), "InvalidArgumentType"),
-        (r::Value::String("1".into()), "InvalidArgumentType"),
+        (r::Value::Null, "invalid_argument_type"),
+        (r::Value::Integer(-1), "negative_integer_argument"),
+        (r::Value::Float(1.0), "invalid_argument_type"),
+        (r::Value::Boolean(false), "invalid_argument_type"),
+        (r::Value::String("1".into()), "invalid_argument_type"),
     ] {
         for invalid_skip in [false, true] {
             let mut visited = Vec::new();
@@ -60,13 +60,13 @@ fn invalid_offsets_and_expression_errors_are_not_hidden_by_empty_windows() {
                 })
             })
             .unwrap_err();
-            assert_eq!(error.category, "SyntaxError");
+            assert_eq!(error.category, "syntax_error");
             assert_eq!(error.detail, detail);
             assert_eq!(error.phase, r::ErrorPhase::Runtime);
             assert_eq!(visited.len(), if invalid_skip { 1 } else { 2 });
         }
     }
-    let expected = r::QueryError::runtime("ParameterMissing", "MissingParameter", "missing");
+    let expected = r::QueryError::runtime("parameter_missing", "missing_parameter", "missing");
     for fails_first in [false, true] {
         let error = r::Window::evaluate(Some(&skip), Some(&limit), |expression| {
             if (expression == &skip) == fails_first {
@@ -209,8 +209,8 @@ fn dynamic_windows_keep_evaluation_order_and_rebuild_derived_proofs() {
                 .demand(|expression| match expression {
                     r::Expression::Literal(value) => Ok(value.clone()),
                     r::Expression::Parameter(_) => Err(r::QueryError::runtime(
-                        "ParameterMissing",
-                        "MissingParameter",
+                        "parameter_missing",
+                        "missing_parameter",
                         "missing offset",
                     )),
                     _ => unreachable!(),
@@ -220,9 +220,9 @@ fn dynamic_windows_keep_evaluation_order_and_rebuild_derived_proofs() {
             assert_eq!(
                 error.detail,
                 match &dynamic {
-                    r::Expression::Parameter(_) => "MissingParameter",
-                    r::Expression::Literal(r::Value::Integer(_)) => "NegativeIntegerArgument",
-                    _ => "InvalidArgumentType",
+                    r::Expression::Parameter(_) => "missing_parameter",
+                    r::Expression::Literal(r::Value::Integer(_)) => "negative_integer_argument",
+                    _ => "invalid_argument_type",
                 }
             );
         }

@@ -338,8 +338,8 @@ async fn verify_indexed_membership() {
     assert!(
         errors[1..4]
             .iter()
-            .all(|error| error.contains("DivisionByZero"))
-            && errors[4].contains("InvalidArgumentType"),
+            .all(|error| error.contains("division_by_zero"))
+            && errors[4].contains("invalid_argument_type"),
         "{errors:?}"
     );
     let rows = |response: &cypher::Response| response.rows.clone();

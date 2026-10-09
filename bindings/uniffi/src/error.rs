@@ -48,7 +48,7 @@ impl From<db::cypher::Error> for HelixError {
         match error {
             db::cypher::Error::Storage(error) => Self::from(error),
             db::cypher::Error::Query(error) => Self::InvalidRequest {
-                error: db::cypher::ErrorCode::from(&error).to_string(),
+                error: error.code(),
                 msg: error.message,
             },
             db::cypher::Error::Json(error) => Self::Internal {

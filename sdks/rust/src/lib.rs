@@ -379,7 +379,7 @@ impl CypherExecutionRequest<'_, '_> {
 fn embedded_cypher_error(error: db::cypher::Error) -> HelixError {
     HelixError::EmbeddedError {
         code: match &error {
-            db::cypher::Error::Query(e) => db::cypher::ErrorCode::from(e).to_string(),
+            db::cypher::Error::Query(e) => e.code(),
             db::cypher::Error::Storage(e) => e.error_code().to_string(),
             db::cypher::Error::Json(_) => "response_serialization_error".into(),
         },

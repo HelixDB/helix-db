@@ -102,7 +102,7 @@ async fn create_metadata_is_admitted_before_copying_labels_or_allocating_ids() {
                 }
             });
             assert!(
-                matches!(result, Err(cypher::Error::Query(ref error)) if error.detail == "MemoryLimit")
+                matches!(result, Err(cypher::Error::Query(ref error)) if error.detail == "memory_limit")
             );
             assert!(
                 allocations.bytes < label.len(),
@@ -111,7 +111,7 @@ async fn create_metadata_is_admitted_before_copying_labels_or_allocating_ids() {
         }
         let error = ctx.row_create_edge(1, 1, "", vec![]).await.unwrap_err();
         assert!(
-            matches!(error, cypher::Error::Query(ref error) if error.detail == "NoRelationshipType")
+            matches!(error, cypher::Error::Query(ref error) if error.detail == "no_relationship_type")
         );
     }
     assert_eq!(
@@ -171,11 +171,11 @@ async fn maps_keep_separate_item_order_and_rollback_every_error_without_changing
                 ("$reserved".to_owned(), QueryValue::I64(1)),
                 ("later".into(), QueryValue::Object(BTreeMap::new())),
             ]),
-            "ReservedPropertyName",
+            "reserved_property_name",
         ),
         (
             BTreeMap::from([("".to_owned(), QueryValue::I64(1))]),
-            "EmptyPropertyName",
+            "empty_property_name",
         ),
     ] {
         let mut request = cypher::Request::new("MATCH (n:N) SET n += $map");
@@ -200,8 +200,8 @@ async fn property_edits_reject_invalid_names_and_missing_set_targets() {
     let db = test_support::open_db("property-edit-validation").await;
     let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
     for (key, detail) in [
-        ("$label", "ReservedPropertyName"),
-        ("", "EmptyPropertyName"),
+        ("$label", "reserved_property_name"),
+        ("", "empty_property_name"),
     ] {
         let error = ctx
             .row_edit_property(
@@ -328,7 +328,7 @@ async fn map_admission_failure_and_cancelled_requests_release_all_versions_and_r
             Ok(()) => completed += 1,
             Err(error) => {
                 assert!(
-                    matches!(error, cypher::Error::Query(ref error) if error.detail == "MemoryLimit"),
+                    matches!(error, cypher::Error::Query(ref error) if error.detail == "memory_limit"),
                     "{error:?}"
                 );
                 break;

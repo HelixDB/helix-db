@@ -14,8 +14,8 @@ async fn mixed_aggregate_failures_release_groups_and_allow_retry() {
 
     let db = test_support::open_db("mixed-aggregate-failure-admission").await;
     for (memory_bytes, divisor, expected_error) in [
-        (512, 1, Some("MemoryLimit")),
-        (64 * 1024, 0, Some("DivisionByZero")),
+        (512, 1, Some("memory_limit")),
+        (64 * 1024, 0, Some("division_by_zero")),
         (64 * 1024, 1, None),
     ] {
         let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
@@ -197,7 +197,7 @@ async fn mixed_aggregate_memory_and_cancellation_boundaries_release_every_owner(
                         );
                     }
                 }
-                Err(Error::Query(error)) if error.detail == "MemoryLimit" => memory_failures += 1,
+                Err(Error::Query(error)) if error.detail == "memory_limit" => memory_failures += 1,
                 Err(Error::Storage(crate::HelixDbError::QueryDeadlineExceeded)) => {
                     cancellations += 1
                 }
@@ -293,7 +293,7 @@ async fn direct_aggregation_admission_failures_release_every_group() {
                 );
                 successes += 1;
             }
-            Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+            Err(Error::Query(error)) if error.detail == "memory_limit" => failures += 1,
             Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
             Err(error) => panic!("{memory_bytes}: {error:?}"),
         }
@@ -333,7 +333,7 @@ async fn grouping_keys_share_the_structural_item_limit() {
             (Err(Error::Query(error)), false) => {
                 assert_eq!(
                     (error.category.as_str(), error.detail.as_str()),
-                    ("ResourceLimit", "ValueDepth")
+                    ("resource_limit", "value_depth")
                 )
             }
             (result, fits) => panic!("{last} fits={fits}: {:?}", result.map(|r| r.rows)),
@@ -358,7 +358,7 @@ fn distinct_rejected_inputs_do_not_copy_payloads_or_poison_accumulator_state() {
         let input = next.clone();
         let (result, allocations) =
             allocation_testing::observe(|| accumulator.push(input, 10, retained));
-        assert_eq!(result.unwrap_err().detail, "MemoryLimit");
+        assert_eq!(result.unwrap_err().detail, "memory_limit");
         // The structured error owns short strings; it must not copy the value.
         assert!(
             allocations.bytes < 1024,
@@ -403,12 +403,12 @@ fn accumulator_admission_failure_preserves_every_state_and_ignored_inputs_skip_i
                     assert!(bound >= before);
                     calls += 1;
                     Err(r::QueryError::runtime(
-                        "ResourceLimit",
-                        "MemoryLimit",
+                        "resource_limit",
+                        "memory_limit",
                         "test admission refused",
                     ))
                 });
-            assert_eq!(result.unwrap_err().detail, "MemoryLimit");
+            assert_eq!(result.unwrap_err().detail, "memory_limit");
             assert_eq!(calls, 1);
             assert_eq!(accumulator.allocated_bytes(), before);
             accumulator
@@ -494,13 +494,13 @@ fn accumulator_growth_is_admitted_before_clones_and_matches_real_allocations() {
         let (result, allocations) = allocation_testing::observe(|| {
             accumulator.push_with_admission(value, 100, 1024 * 1024, |_| {
                 Err(r::QueryError::runtime(
-                    "ResourceLimit",
-                    "MemoryLimit",
+                    "resource_limit",
+                    "memory_limit",
                     "test refusal",
                 ))
             })
         });
-        assert_eq!(result.unwrap_err().detail, "MemoryLimit");
+        assert_eq!(result.unwrap_err().detail, "memory_limit");
         assert!(
             allocations.bytes < 1024,
             "{function:?}: copied before admission: {allocations:?}"

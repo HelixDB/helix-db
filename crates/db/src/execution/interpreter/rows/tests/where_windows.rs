@@ -80,7 +80,7 @@ async fn total_where_predicates_let_windows_stop_initial_matches() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&error, crate::cypher::Error::Query(error) if error.detail == "DivisionByZero"),
+        matches!(&error, crate::cypher::Error::Query(error) if error.detail == "division_by_zero"),
         "{error:?}"
     );
     db.close().await.unwrap();

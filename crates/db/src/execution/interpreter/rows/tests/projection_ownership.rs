@@ -111,7 +111,7 @@ async fn compound_group_keys_share_admission_before_copying_input_rows() {
         allocated.bytes <= memory_bytes,
         "group keys copied before admission: {allocated:?}"
     );
-    assert!(matches!(result, Err(Error::Query(error)) if error.detail=="MemoryLimit"));
+    assert!(matches!(result, Err(Error::Query(error)) if error.detail=="memory_limit"));
     assert_eq!(ctx.row_budget().available(), memory_bytes);
     db.close().await.unwrap();
 }

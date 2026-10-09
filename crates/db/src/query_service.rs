@@ -2608,33 +2608,33 @@ mod tests {
 
         let cases = [
             (
-                Error::Query(QueryError::compile("SyntaxError", "Unexpected", "bad")),
+                Error::Query(QueryError::compile("syntax_error", "unexpected", "bad")),
                 QueryFailureClass::InvalidRequest,
             ),
             (
                 Error::Query(QueryError::runtime(
-                    "ArithmeticError",
-                    "DivisionByZero",
+                    "arithmetic_error",
+                    "division_by_zero",
                     "x",
                 )),
                 QueryFailureClass::Execution,
             ),
             (
-                Error::Query(QueryError::runtime("ResourceLimit", "MemoryLimit", "x")),
+                Error::Query(QueryError::runtime("resource_limit", "memory_limit", "x")),
                 QueryFailureClass::Execution,
             ),
             (
                 Error::Query(QueryError::compile(
-                    "AccessModeError",
-                    "WriterRequired",
+                    "access_mode_error",
+                    "writer_required",
                     "x",
                 )),
                 QueryFailureClass::WriterModeRequired,
             ),
             (
                 Error::Query(QueryError::compile(
-                    "InternalPlannerError",
-                    "Invariant",
+                    "internal_planner_error",
+                    "invariant",
                     "x",
                 )),
                 QueryFailureClass::Planning,

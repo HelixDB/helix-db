@@ -169,6 +169,7 @@ async fn cypher_routing_checks_effects_before_parameter_validation() {
         ("RETURN $missing", false, true, None),
         ("RETURN $missing", true, false, Some("missing_parameter")),
         ("RETURN missing", false, true, Some("undefined_variable")),
+        ("RETURN sqrt(4) AS x", false, true, Some("function")),
     ] {
         let body = json!({"query":text}).to_string();
         let response = router

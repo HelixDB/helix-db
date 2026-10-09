@@ -57,7 +57,7 @@ async fn numeric_averages_preserve_representable_results_and_transaction_rules()
         .await
         .unwrap_err();
     assert!(
-        matches!(error,cypher::Error::Query(error) if error.category=="TypeError" && error.detail=="InvalidArgumentType")
+        matches!(error,cypher::Error::Query(error) if error.category=="type_error" && error.detail=="invalid_argument_type")
     );
     assert_eq!(
         run(&db, "MATCH (:AverageRollback) RETURN count(*)")
@@ -71,6 +71,6 @@ async fn numeric_averages_preserve_representable_results_and_transaction_rules()
         ))
         .await
         .unwrap_err();
-    assert!(matches!(error,cypher::Error::Query(error) if error.detail=="NumberOutOfRange"));
+    assert!(matches!(error,cypher::Error::Query(error) if error.detail=="number_out_of_range"));
     db.close().await.unwrap();
 }

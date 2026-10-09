@@ -5,6 +5,7 @@ use crate::{
     encoding::v2::values::property::{property_value::PropertyValue, Property},
     index_lifecycle::graph_mutation::{self, CanonicalPropertyRow},
 };
+use helix_planner::relational::{category, detail};
 use helix_planner::{ir, relational as r};
 use std::collections::BTreeSet;
 
@@ -140,8 +141,8 @@ impl ExecutionContext<'_> {
     ) -> cypher::Result<u64> {
         if label.is_empty() {
             return Err(r::QueryError::runtime(
-                "SyntaxError",
-                "NoRelationshipType",
+                category::SYNTAX_ERROR,
+                detail::NO_RELATIONSHIP_TYPE,
                 "a relationship requires a nonempty type",
             )
             .into());
@@ -196,16 +197,16 @@ impl ExecutionContext<'_> {
     ) -> cypher::Result<()> {
         if key.starts_with('$') {
             return Err(r::QueryError::runtime(
-                "UnsupportedFeature",
-                "ReservedPropertyName",
+                category::UNSUPPORTED_FEATURE,
+                detail::RESERVED_PROPERTY_NAME,
                 "internal metadata cannot be assigned",
             )
             .into());
         }
         let name = ir::NonEmptyString::new(key.to_owned()).ok_or_else(|| {
             r::QueryError::runtime(
-                "UnsupportedFeature",
-                "EmptyPropertyName",
+                category::UNSUPPORTED_FEATURE,
+                detail::EMPTY_PROPERTY_NAME,
                 "storage requires nonempty property names",
             )
         })?;
@@ -314,8 +315,8 @@ impl ExecutionContext<'_> {
                     .is_empty()
             {
                 return Err(r::QueryError::runtime(
-                    "ConstraintVerificationFailed",
-                    "DeleteConnectedNode",
+                    category::CONSTRAINT_VERIFICATION_FAILED,
+                    detail::DELETE_CONNECTED_NODE,
                     "cannot delete a node with relationships; use DETACH DELETE",
                 )
                 .into());
@@ -354,7 +355,7 @@ mod target_tests {
         }
         for entity in [r::Entity::Node(u64::MAX), r::Entity::Relationship(u64::MAX)] {
             assert!(
-                matches!(targets.insert(entity), Err(cypher::Error::Query(error)) if error.detail == "MemoryLimit")
+                matches!(targets.insert(entity), Err(cypher::Error::Query(error)) if error.detail == "memory_limit")
             );
             assert!(!targets.entities.contains(&entity));
             assert_eq!(targets.entities.len(), 2000);

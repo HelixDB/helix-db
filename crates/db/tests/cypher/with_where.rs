@@ -70,7 +70,7 @@ async fn with_where_after_a_window_uses_only_projected_bindings() {
             panic!("expected a compile error: {query}");
         };
         assert_eq!(error.phase, r::ErrorPhase::Compile, "{query}");
-        assert_eq!(error.detail, "UndefinedVariable", "{query}");
+        assert_eq!(error.detail, "undefined_variable", "{query}");
     }
     // The projected form and an unwindowed WITH keep working.
     assert_eq!(

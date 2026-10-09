@@ -147,8 +147,8 @@ lists every category.
 | Any other category | 400 | `INVALID_ARGUMENT` |
 
 Rust transports reuse this contract from `helix_cypher::api` (`ErrorClass`,
-`ErrorBody`, `ErrorCode` and the route paths) and decode requests with
-`helix_cypher::request::Request`, which needs no database.
+`ErrorBody`, the `category` and `detail` code constants, and the route paths) and
+decode requests with `helix_cypher::request::Request`, which needs no database.
 
 From a linked local Helix project:
 
@@ -188,8 +188,9 @@ profile. Unsupported syntax receives a specific `unsupported_feature` error. A
 statement that is also invalid openCypher reports the standard compile error
 instead, such as `variable_already_bound` for a CREATE that redeclares a variable
 or `undefined_variable` for a pattern predicate that introduces one. Other
-openCypher built-in functions, such as `sqrt` or `date`, are unsupported, while
-an unrecognized function name is a `syntax_error` with `unknown_function`. A
+openCypher built-in functions, such as `sqrt` or `date`, are an
+`unsupported_feature` with detail `function`, and the message names the function.
+An unrecognized function name is a `syntax_error` with `unknown_function`. A
 parameter map in a MATCH pattern, such as `(n $props)`, is an
 `invalid_parameter_use` syntax error; in CREATE it is unsupported. Use the
 existing native index-management API to create indexes; Cypher planning can

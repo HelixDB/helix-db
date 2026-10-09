@@ -89,7 +89,7 @@ async fn range_comparisons_read_range_indexes_with_cypher_semantics() {
             names(&["big-int"]),
         ]
     );
-    assert!(error.contains("DivisionByZero"), "{error}");
+    assert!(error.contains("division_by_zero"), "{error}");
 
     create_index(&db, index::IndexSpec::node_range("R", "v")).await;
     for ((text, parameters), expected) in cases.iter().zip(&reference) {

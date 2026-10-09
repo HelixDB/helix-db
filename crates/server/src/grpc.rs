@@ -389,17 +389,21 @@ mod tests {
     #[test]
     fn cypher_statuses_follow_the_shared_error_classes() {
         let query = |category| {
-            db::cypher::Error::Query(helix_cypher::QueryError::compile(category, "Detail", "msg"))
+            db::cypher::Error::Query(helix_cypher::QueryError::compile(category, "detail", "msg"))
         };
         let cases = [
-            (query("SyntaxError"), tonic::Code::InvalidArgument, None),
-            (query("ResourceLimit"), tonic::Code::ResourceExhausted, None),
+            (query("syntax_error"), tonic::Code::InvalidArgument, None),
             (
-                query("AccessModeError"),
+                query("resource_limit"),
+                tonic::Code::ResourceExhausted,
+                None,
+            ),
+            (
+                query("access_mode_error"),
                 tonic::Code::FailedPrecondition,
                 None,
             ),
-            (query("InternalPlannerError"), tonic::Code::Internal, None),
+            (query("internal_planner_error"), tonic::Code::Internal, None),
             (
                 db::cypher::Error::Storage(db::error::HelixDbError::TransactionConflict(
                     "retry".to_string(),

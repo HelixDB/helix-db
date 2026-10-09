@@ -3,6 +3,7 @@ use super::{
     check_memory, push_row, row_bytes, ExecutionContext, GraphBatch, Limits, Result, RowBuffer,
 };
 use helix_planner::relational as r;
+use helix_planner::relational::detail;
 use std::{cmp::Ordering, collections::BTreeMap};
 
 pub(super) struct Projection<'a> {
@@ -126,7 +127,9 @@ impl KeyedRows {
         if capacity > self.entries.capacity() {
             self.entries
                 .try_reserve_exact(capacity - self.entries.len())
-                .map_err(|_| super::resource("MemoryLimit", "sort buffer allocation failed"))?;
+                .map_err(|_| {
+                    super::resource(detail::MEMORY_LIMIT, "sort buffer allocation failed")
+                })?;
         }
         self.entries.push(KeyedRow {
             keys,

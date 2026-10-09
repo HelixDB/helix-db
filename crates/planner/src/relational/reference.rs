@@ -4,6 +4,7 @@ use super::{
     GraphPatternOrder, MatchPlan, Operator, PatternExpansion, PatternSource, PlannedNode, Query,
     QueryError, Result,
 };
+use crate::relational::{category, detail};
 use crate::{cost, exec, ir, properties, trace};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,8 +47,8 @@ pub(super) fn matches(query: &Query) -> Result<BTreeMap<usize, MatchPlan>> {
             )
             .map_err(|error| {
                 QueryError::compile(
-                    "InternalPlannerError",
-                    "PhysicalPlanning",
+                    category::INTERNAL_PLANNER_ERROR,
+                    detail::PHYSICAL_PLANNING,
                     error.to_string(),
                 )
             })?;

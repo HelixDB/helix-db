@@ -5,6 +5,7 @@ use super::{
     row_bytes, ExecutionContext, GraphBatch, Limits, Result, RowBuffer,
 };
 use helix_planner::relational as r;
+use helix_planner::relational::detail;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BinaryHeap},
@@ -135,7 +136,7 @@ impl<'a> TopK<'a> {
         if capacity > self.heap.capacity() {
             self.heap
                 .try_reserve_exact(capacity - self.heap.len())
-                .map_err(|_| super::resource("MemoryLimit", "top-k allocation failed"))?;
+                .map_err(|_| super::resource(detail::MEMORY_LIMIT, "top-k allocation failed"))?;
         }
         self.heap.push(candidate);
         self.retained_bytes = retained_bytes;

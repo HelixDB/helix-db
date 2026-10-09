@@ -12,6 +12,7 @@ mod parser;
 pub mod request;
 pub mod syntax;
 
+use helix_planner::relational::{category, detail};
 pub use helix_planner::relational::{QueryError, Span};
 
 /// Parse a single statement without assigning meaning to variable names.
@@ -28,8 +29,8 @@ pub use helix_planner::relational::{QueryError, Span};
 pub fn parse(text: &str) -> Result<syntax::Statement, QueryError> {
     if text.len() > 16 * 1024 * 1024 {
         return Err(QueryError::compile(
-            "ResourceLimit",
-            "QueryTooLarge",
+            category::RESOURCE_LIMIT,
+            detail::QUERY_TOO_LARGE,
             "query text exceeds 16 MiB",
         ));
     }
