@@ -460,11 +460,6 @@ async fn run_hydration_contracts() {
         "vector:memory:bounded".to_string(),
         DataScope::LegacyUnscoped,
     );
-    let first_key = bounded_keyspace.key(VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(
-        bounded_keyspace.index_id(),
-        1,
-        7,
-    )));
     let txn = bounded_db.begin(IsolationLevel::Snapshot).await.unwrap();
     put_row(
         &txn,
@@ -487,7 +482,7 @@ async fn run_hydration_contracts() {
         Bytes::from_static(b"second"),
     );
     txn.commit().await.unwrap();
-    let first_row_bytes = estimated_entry_bytes(first_key.len(), b"first".len()).unwrap();
+    let first_row_bytes = isolated_upper_row_admission_bytes(b"first".len() as u64);
     let bounded = VectorMemoryStore::new(bounded_keyspace.scope(), bounded_keyspace.index_id(), 1);
     let summary = bounded
         .load_descriptor_bound_with_budget(
@@ -679,8 +674,210 @@ async fn run_hydration_contracts() {
         )
         .await
         .is_err());
+}
 
-    assert!(estimated_entry_bytes(usize::MAX, usize::MAX).is_err());
+/// Verifies the slab layout: inline and spilled neighbor layers, open and
+/// sealed chunk reads, bounded chunk sizing, released ids, and exact charges.
+async fn run_slab_layout_contracts() {
+    let row = |chunk| SlabRow {
+        chunk,
+        offset: 0,
+        len: 1,
+    };
+    let mut layers = UpperNeighborRows::Empty;
+    assert_eq!(layers.get(1), None);
+    assert_eq!(layers.growth_bytes(1), 0);
+    layers.remove(1);
+    layers.upsert(3, row(3));
+    assert_eq!(layers.growth_bytes(3), 0);
+    assert_eq!(layers.growth_bytes(1), 2 * UPPER_LAYER_SLOT_BYTES);
+    layers.upsert(3, row(30));
+    layers.remove(1);
+    assert_eq!(layers.get(3), Some(row(30)));
+    layers.upsert(1, row(1));
+    layers.upsert(5, row(5));
+    layers.upsert(5, row(50));
+    assert_eq!(layers.growth_bytes(5), 0);
+    assert_eq!(layers.growth_bytes(2), UPPER_LAYER_SLOT_BYTES);
+    assert_eq!(layers.get(5), Some(row(50)));
+    assert_eq!(layers.get(2), None);
+    layers.remove(2);
+    layers.remove(5);
+    assert!(matches!(layers, UpperNeighborRows::Many(ref rows) if rows.len() == 2));
+    layers.remove(3);
+    assert!(matches!(layers, UpperNeighborRows::One(1, _)));
+    layers.remove(1);
+    assert!(layers.is_empty());
+    let node = UpperNodeRows {
+        vector: None,
+        neighbors: UpperNeighborRows::One(1, row(1)),
+    };
+    assert_eq!(node.index_growth_bytes(UpperRowKind::Vector), 0);
+    assert_eq!(
+        node.index_growth_bytes(UpperRowKind::Neighbors(2)),
+        2 * UPPER_LAYER_SLOT_BYTES
+    );
+
+    let slab = VectorMemorySlab::default();
+    slab.seal();
+    let empty = slab
+        .append(&[], VectorMemoryAdmissionBudget::Bounded(0))
+        .unwrap();
+    assert_eq!(empty.charged, 0);
+    assert_eq!(slab.read(empty.row), Some(Bytes::new()));
+    let handle = SLAB_CHUNK_HANDLE_BYTES;
+    assert_eq!(
+        slab.append(b"row", VectorMemoryAdmissionBudget::Bounded(handle + 2)),
+        None
+    );
+    let first = slab
+        .append(b"row", VectorMemoryAdmissionBudget::Bounded(handle + 3))
+        .unwrap();
+    assert_eq!(first.charged, handle + 3);
+    assert_eq!(
+        slab.append(b"fits", VectorMemoryAdmissionBudget::Bounded(3)),
+        None
+    );
+    let fits = slab
+        .append(b"fits", VectorMemoryAdmissionBudget::Bounded(4))
+        .unwrap();
+    assert_eq!(fits.charged, 4);
+    assert_eq!(slab.read(fits.row), Some(Bytes::from_static(b"fits")));
+    let fill = vec![5; VECTOR_MEMORY_SLAB_CHUNK_BYTES - 7];
+    let filled = slab
+        .append(&fill, VectorMemoryAdmissionBudget::Unbounded)
+        .unwrap();
+    assert_eq!(filled.row.chunk, first.row.chunk);
+    // A full chunk seals without a copy; the partly filled ones are copied.
+    let open = slab
+        .append(b"open", VectorMemoryAdmissionBudget::Unbounded)
+        .unwrap();
+    assert_eq!(open.charged, handle + 4);
+    assert_eq!(open.row.chunk, first.row.chunk + 1);
+    assert_eq!(slab.read(first.row), Some(Bytes::from_static(b"row")));
+    assert_eq!(slab.read(filled.row), Some(Bytes::from(fill)));
+    assert_eq!(slab.read(open.row), Some(Bytes::from_static(b"open")));
+    slab.seal();
+    assert_eq!(slab.read(open.row), Some(Bytes::from_static(b"open")));
+    let released = slab
+        .append(b"released", VectorMemoryAdmissionBudget::Unbounded)
+        .unwrap();
+    let past_open = SlabRow {
+        chunk: released.row.chunk + 1,
+        ..released.row
+    };
+    assert_eq!(slab.read(past_open), None);
+    slab.clear();
+    slab.clear();
+    assert_eq!(slab.read(released.row), None);
+    assert_eq!(slab.read(first.row), Some(Bytes::from_static(b"row")));
+    let after = slab
+        .append(b"after", VectorMemoryAdmissionBudget::Unbounded)
+        .unwrap();
+    assert!(after.row.chunk > released.row.chunk);
+    assert_eq!(slab.read(after.row), Some(Bytes::from_static(b"after")));
+
+    // Exact load charges, including rows that update fixture entries and
+    // budgets that refuse an index entry or a SimHash.
+    let db = test_db("production_vector_memory_slab_charges").await;
+    let keyspace = VectorRowKeyspace::new(
+        "vector:memory:slab-charges".to_string(),
+        DataScope::LegacyUnscoped,
+    );
+    let index_id = keyspace.index_id();
+    let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    put_row(
+        &txn,
+        &keyspace,
+        VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(index_id, 1, 5)),
+        Bytes::from_static(&[1; 10]),
+    );
+    put_row(
+        &txn,
+        &keyspace,
+        VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(index_id, 2, 5)),
+        Bytes::from_static(&[2; 20]),
+    );
+    put_row(
+        &txn,
+        &keyspace,
+        VectorKey::SimHash(VectorSimHashKey::new(index_id, 5)),
+        Bytes::copy_from_slice(&encode_simhash(5)),
+    );
+    put_row(
+        &txn,
+        &keyspace,
+        VectorKey::UpperVector(VectorUpperVectorKey::new(index_id, 5)),
+        Bytes::from_static(&[3; 30]),
+    );
+    txn.commit().await.unwrap();
+
+    let unbounded = VectorMemoryStore::new(keyspace.scope(), index_id, 1);
+    let summary = unbounded
+        .load_descriptor_bound_with_budget(
+            db.as_ref(),
+            VectorMemoryAdmissionBudget::Unbounded,
+            None,
+        )
+        .await
+        .unwrap();
+    let full_charge = UPPER_NODE_INDEX_ENTRY_BYTES
+        + 2 * UPPER_LAYER_SLOT_BYTES
+        + SIMHASH_INDEX_ENTRY_BYTES
+        + handle
+        + 60;
+    assert_eq!(summary.estimated_bytes, full_charge);
+
+    let refreshed = VectorMemoryStore::new(keyspace.scope(), index_id, 1);
+    refreshed.insert_upper_neighbors_bytes(1, 5, Bytes::from_static(b"stale-1"));
+    refreshed.insert_upper_neighbors_bytes(2, 5, Bytes::from_static(b"stale-2"));
+    refreshed.insert_simhash(5, SimHash::from_bits(0));
+    let summary = refreshed
+        .load_descriptor_bound_with_budget(
+            db.as_ref(),
+            VectorMemoryAdmissionBudget::Unbounded,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        summary.estimated_bytes,
+        handle + 60,
+        "updated entries charge only their chunk"
+    );
+    assert_eq!(refreshed.get_simhash(5), Some(SimHash::from_bits(5)));
+    assert_eq!(
+        refreshed.get_upper_neighbors_bytes(2, 5),
+        Some(Bytes::from_static(&[2; 20]))
+    );
+
+    // Each budget admits the longest prefix whose charge fits: the first
+    // neighbor row opens the chunk, the second layer spills the inline row.
+    let first_row = UPPER_NODE_INDEX_ENTRY_BYTES + handle + 10;
+    let second_row = first_row + 2 * UPPER_LAYER_SLOT_BYTES + 20;
+    let third_row = second_row + SIMHASH_INDEX_ENTRY_BYTES;
+    for (budget, loaded, charged) in [
+        (UPPER_NODE_INDEX_ENTRY_BYTES - 1, 0, 0),
+        (first_row - 1, 0, 0),
+        (first_row, 1, first_row),
+        (second_row - 1, 1, first_row),
+        (second_row, 2, second_row),
+        (third_row, 3, third_row),
+        (full_charge - 1, 3, third_row),
+        (full_charge, 4, full_charge),
+    ] {
+        let bounded = VectorMemoryStore::new(keyspace.scope(), index_id, 1);
+        let summary = bounded
+            .load_descriptor_bound_with_budget(
+                db.as_ref(),
+                VectorMemoryAdmissionBudget::Bounded(budget),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.loaded_entries, loaded, "budget {budget}");
+        assert_eq!(summary.estimated_bytes, charged, "budget {budget}");
+    }
 }
 
 /// Exercises resident-cache ownership, reads, hydration, and fail-closed edges.
@@ -688,4 +885,5 @@ pub(crate) async fn run() {
     run_capability_and_fence_contracts().await;
     run_managed_lookup_contracts().await;
     run_hydration_contracts().await;
+    run_slab_layout_contracts().await;
 }
