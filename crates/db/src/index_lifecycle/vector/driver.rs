@@ -33,7 +33,6 @@ use sha2::{Digest, Sha256};
 use slatedb::{Db, DbTransaction, IsolationLevel};
 
 use crate::config::{IndexLifecycleScanTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits};
-use crate::encoding::property::decode_properties;
 use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorKey, VectorStorageLane,
 };
@@ -43,6 +42,7 @@ use crate::encoding::v2::keys::{DataKey, DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{
     GlobalKey, IndexEntity, IndexEntityStateKey, RecordKind, ScopedKey,
 };
+use crate::encoding::v2::values::property::view;
 use crate::encoding::v2::values::{
     decode_applied_state, decode_build_delta, decode_index_record, decode_partition_mapping,
     encode_applied_state, encode_metadata_value, encode_partition_mapping,
@@ -56,7 +56,9 @@ use crate::search::vector::{
     VectorWriteRecorder,
 };
 
-use super::{vector_document, VectorIndexedDocument};
+#[cfg(any(test, feature = "production-coverage"))]
+use super::vector_document;
+use super::{stored_vector_document, VectorIndexedDocument};
 use crate::index_lifecycle::outbox::{
     CommittedOperationStep, CommittedStepState, IndexOperationDriver, IndexOperationStepExecution,
     IndexOperationStepPermit, IndexOperationStepResult, PreparedIndexOperationStep,
@@ -2813,6 +2815,7 @@ async fn scan_source<D: Distance>(
     let mut accounting = VectorBatchAccounting::new(progress.counters, limits);
     let mut cursor = progress.cursor.clone();
     let mut exhausted = true;
+    let mut scratch = view::Scratch::new();
     while accounting.can_read_another() {
         let Some(row) = rows.next().await? else {
             break;
@@ -2841,10 +2844,7 @@ async fn scan_source<D: Distance>(
             cursor = Some(complete_cursor);
             continue;
         };
-        let Some(document) = decode_properties(&row.value)
-            .ok()
-            .and_then(|properties| vector_document(definition, &properties).ok())
-        else {
+        let Ok(document) = stored_vector_document(definition, &row.value, &mut scratch) else {
             if !accounting.is_empty() {
                 exhausted = false;
                 break;

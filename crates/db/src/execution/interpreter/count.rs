@@ -655,6 +655,7 @@ impl<'db> ExecutionContext<'db> {
             )
             .await?;
         let mut accepted = 0usize;
+        let mut buffers = crate::encoding::v2::values::property::view::Buffers::default();
         while !threshold.is_some_and(|threshold| accepted >= threshold) {
             self.check_execution_deadline()?;
             let Some(entry) = iter.next().await? else {
@@ -669,7 +670,15 @@ impl<'db> ExecutionContext<'db> {
                 continue;
             };
             let row = ExecutionRow::current(ElementRef::Node(id));
-            let read = self.eval_predicate_plan(&row, predicate);
+            // Nothing writes between the scan and this read, so the scanned
+            // record is the one storage would return. The predicate accounts
+            // for it as the storage read it replaces, only if it reads it.
+            let record = storage::ScannedRecord {
+                key: entry.key,
+                value: entry.value,
+            };
+            let read =
+                self.eval_predicate_plan_on_record(&row, predicate, Some(record), &mut buffers);
             if read.await? {
                 accepted = accepted.saturating_add(1);
             }
@@ -5791,5 +5800,368 @@ mod tests {
         unique_count_performs_one_owner_read_and_one_authoritative_verification().await;
         authoritative_null_count_applies_its_normalized_window_after_matches().await;
         terminal_cursor_counts_avoid_row_output_and_stop_at_the_encoded_threshold().await;
+    }
+
+    /// Direct and single-cursor stream authoritative counts select exactly
+    /// the stored matches, read a corrupt row only when the predicate needs
+    /// it, and report it like the full-row decoder.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_counts_match_stored_rows_and_fail_on_read_corruption() {
+        use crate::encoding::property::{
+            encode_properties, property_value::PropertyValue as V, Property,
+        };
+        let db = test_support::open_db("count-scan-predicate-golden").await;
+        let key = |id: u64| {
+            keys::DataKey::Data {
+                scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+            }
+            .to_bytes()
+        };
+        let rows = [
+            vec![
+                Property::string("status", "active"),
+                Property::i64("score", 5),
+                Property::new("meta", V::Object([("score".into(), V::I64(9))].into())),
+            ],
+            vec![
+                Property::string("status", "inactive"),
+                Property::f64("score", 7.5),
+            ],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+                Property::i64("score", 11),
+                Property::string("status", "inactive"),
+            ],
+            Vec::new(),
+            vec![
+                Property::string("status", "inactive"),
+                Property::string("status", "active"),
+            ],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.inner_db()
+                .put(key(id), encode_properties(properties))
+                .await
+                .unwrap();
+        }
+        let cases = [
+            (Predicate::eq("status", "active"), 2),
+            (Predicate::gt("score", 6_i64), 2),
+            (Predicate::eq("meta.score", 9_i64), 1),
+            (Predicate::is_null("status"), 1),
+            (
+                Predicate::and(vec![
+                    Predicate::eq("status", "active"),
+                    Predicate::gt("score", 6_i64),
+                ]),
+                1,
+            ),
+            (Predicate::eq("$id", 4_i64), 1),
+        ];
+        let count = |predicate: Predicate| {
+            let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                ir::PredicatePlan::new(predicate).unwrap(),
+            );
+            [
+                exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                    predicate: predicate.clone(),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+                exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                    cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+            ]
+        };
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        for (predicate, expected) in cases.clone() {
+            for plan in count(predicate.clone()) {
+                assert_eq!(
+                    execution
+                        .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                        .await
+                        .unwrap(),
+                    ExecutionValue::Count(expected),
+                    "{predicate:?}"
+                );
+            }
+        }
+        db.inner_db()
+            .put(key(4), bytes::Bytes::from_static(b"corrupt node row"))
+            .await
+            .unwrap();
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        for plan in count(Predicate::eq("$id", 4_i64)) {
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(1)
+            );
+        }
+        for plan in count(Predicate::eq("status", "active")) {
+            assert!(matches!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                    .await,
+                Err(HelixDbError::Encoding(
+                    crate::encoding::error::EncodingError::Rkyv(_)
+                ))
+            ));
+        }
+        db.close().await.unwrap();
+    }
+
+    /// Direct and single-cursor stream scan counts evaluate predicates on the
+    /// records the scan returned instead of reading each one again.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_counts_do_not_read_scanned_records_again() {
+        let db = test_support::open_db("count-scan-predicate-record-reuse").await;
+        for (n, status) in ["active", "inactive", "active"].into_iter().enumerate() {
+            db.inner_db()
+                .put(
+                    keys::DataKey::Data {
+                        scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                        kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                            n as u64 + 1,
+                        )),
+                    }
+                    .to_bytes(),
+                    crate::encoding::property::encode_properties(&[
+                        crate::encoding::property::Property::string("status", status),
+                    ]),
+                )
+                .await
+                .unwrap();
+        }
+        let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+            ir::PredicatePlan::new(Predicate::eq("status", "active")).unwrap(),
+        );
+        for plan in [
+            exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                predicate: predicate.clone(),
+                window: exec::ExecCountWindowPlan::identity(),
+            }),
+            exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                window: exec::ExecCountWindowPlan::identity(),
+            }),
+        ] {
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(2)
+            );
+            assert_eq!(execution.pull_work.snapshot().raw_gets, 0);
+        }
+        db.close().await.unwrap();
+    }
+
+    /// Direct and single-cursor stream scan counts charge every row their
+    /// predicate reads to the request's row-memory budget, as the storage
+    /// reads they once made did: a row larger than the budget fails the count
+    /// only when read, every charge is released after it, and each read row is
+    /// reported as the point read it replaces.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_counts_charge_evaluated_rows_to_the_row_memory_budget() {
+        use crate::encoding::property::{encode_properties, Property};
+        let db = test_support::open_db("count-scan-predicate-budget").await;
+        let rows = [
+            vec![Property::string("status", "active")],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+            ],
+            vec![Property::string("status", "inactive")],
+            Vec::new(),
+            vec![Property::bytes("blob", vec![1; 4096])],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.inner_db()
+                .put(
+                    keys::DataKey::Data {
+                        scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                        kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+                    }
+                    .to_bytes(),
+                    encode_properties(properties),
+                )
+                .await
+                .unwrap();
+        }
+        let plans = |predicate: Predicate| {
+            let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                ir::PredicatePlan::new(predicate).unwrap(),
+            );
+            [
+                exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                    predicate: predicate.clone(),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+                exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                    cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+            ]
+        };
+        // A predicate that reads no record charges none, as before.
+        for plan in &plans(Predicate::eq("$id", 2_i64)) {
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(crate::query_resources::Budget::new(2048));
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(1)
+            );
+        }
+        for plan in &plans(Predicate::eq("status", "active")) {
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(crate::query_resources::Budget::new(2048));
+            assert!(matches!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), plan)
+                    .await,
+                Err(HelixDbError::QueryMemoryLimitExceeded)
+            ));
+            let limit = 1 << 20;
+            let budget = crate::query_resources::Budget::new(limit);
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(budget.clone());
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(2)
+            );
+            assert!(
+                budget.peak() >= 1536 * size_of::<f32>(),
+                "{}",
+                budget.peak()
+            );
+            assert_eq!(budget.available(), limit);
+            let reads = budget.reads();
+            assert_eq!(
+                (reads.scan_rows, reads.point_gets, reads.multi_get_keys),
+                (0, 5, 0)
+            );
+        }
+        db.close().await.unwrap();
+    }
+
+    /// The row cursor of an authoritative node scan, which compound counts
+    /// consume, selects exactly the stored matches, reads a corrupt row only
+    /// when its predicate needs it, and charges the rows it collects to the
+    /// row-memory budget.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_row_cursor_selects_stored_matches_within_its_budget() {
+        use crate::encoding::property::{encode_properties, Property};
+        let db = test_support::open_db("count-scan-row-cursor").await;
+        let key = |id: u64| {
+            keys::DataKey::Data {
+                scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+            }
+            .to_bytes()
+        };
+        let rows = [
+            vec![Property::string("status", "active")],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+            ],
+            vec![Property::string("status", "inactive")],
+            Vec::new(),
+            vec![Property::bytes("blob", vec![1; 4096])],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.inner_db()
+                .put(key(id), encode_properties(properties))
+                .await
+                .unwrap();
+        }
+        let cursor = |predicate: Predicate| {
+            exec::ExecCountCursorPlan::NodeAuthoritativeScan(
+                exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                    ir::PredicatePlan::new(predicate).unwrap(),
+                ),
+            )
+        };
+        let ids = |rows: Vec<ExecutionRow>| {
+            rows.into_iter()
+                .map(|row| row.current.unwrap().id())
+                .collect::<Vec<_>>()
+        };
+        let cases = [
+            (Predicate::eq("status", "active"), vec![1, 2]),
+            (Predicate::eq("$id", 3_i64), vec![3]),
+            (Predicate::is_null("status"), vec![4, 5]),
+            (Predicate::is_not_null("embedding"), vec![2]),
+        ];
+        for (predicate, expected) in cases {
+            let limit = 1 << 20;
+            let budget = crate::query_resources::Budget::new(limit);
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(budget.clone());
+            let rows = execution
+                .count_cursor(&cursor(predicate.clone()), &mut None)
+                .await
+                .unwrap();
+            assert_eq!(ids(rows), expected, "{predicate:?}");
+            // Every row is collected before any is evaluated.
+            assert!(budget.peak() >= (1536 + 1024) * size_of::<f32>());
+            assert_eq!(budget.available(), limit);
+            assert_eq!(budget.reads().scan_rows, 5);
+        }
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        execution.row_memory = Some(crate::query_resources::Budget::new(2048));
+        assert!(matches!(
+            execution
+                .count_cursor(&cursor(Predicate::eq("status", "active")), &mut None)
+                .await,
+            Err(HelixDbError::QueryMemoryLimitExceeded)
+        ));
+        db.inner_db()
+            .put(key(6), bytes::Bytes::from_static(b"corrupt node row"))
+            .await
+            .unwrap();
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        assert_eq!(
+            ids(execution
+                .count_cursor(&cursor(Predicate::eq("$id", 6_i64)), &mut None)
+                .await
+                .unwrap()),
+            vec![6]
+        );
+        assert!(matches!(
+            execution
+                .count_cursor(&cursor(Predicate::eq("status", "active")), &mut None)
+                .await,
+            Err(HelixDbError::Encoding(
+                crate::encoding::error::EncodingError::Rkyv(_)
+            ))
+        ));
+        db.close().await.unwrap();
     }
 }

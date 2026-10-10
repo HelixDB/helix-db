@@ -20,17 +20,52 @@ impl<'db> ExecutionContext<'db> {
         row: &ExecutionRow,
         plan: &ir::PredicatePlan,
     ) -> Result<bool> {
-        self.eval_resolved_predicate(row, plan.resolved()).await
+        self.eval_resolved_predicate(row, plan.resolved(), &mut RowValueResolver::new(self))
+            .await
+    }
+
+    /// [`Self::eval_predicate_plan`] for a scanned row: given `record`, the
+    /// stored record of the row's current element that the caller already
+    /// read from this request's view, the predicate reads it instead of
+    /// storage. Only a caller that cannot have written the element since
+    /// reading it may pass its record. The record is accounted for as the
+    /// storage read it replaces, and only if the predicate reads it.
+    ///
+    /// `buffers` holds aligned record copies the caller reuses across rows.
+    ///
+    /// # Panics
+    ///
+    /// If `record` is given for a row without a current element.
+    pub(in crate::execution::interpreter) async fn eval_predicate_plan_on_record(
+        &self,
+        row: &ExecutionRow,
+        plan: &ir::PredicatePlan,
+        record: Option<storage::ScannedRecord>,
+        buffers: &mut crate::encoding::v2::values::property::view::Buffers,
+    ) -> Result<bool> {
+        let record = record.map(|record| {
+            let element = row
+                .current
+                .clone()
+                .expect("a scanned record belongs to its row's current element");
+            (element, record)
+        });
+        let mut resolver = RowValueResolver::with_record(self, record, std::mem::take(buffers));
+        let accepted = self
+            .eval_resolved_predicate(row, plan.resolved(), &mut resolver)
+            .await;
+        *buffers = resolver.into_buffers();
+        accepted
     }
 
     async fn eval_resolved_predicate(
         &self,
         row: &ExecutionRow,
         expression: &native::Expression,
+        resolver: &mut RowValueResolver<'_, 'db>,
     ) -> Result<bool> {
-        let mut resolver = RowValueResolver::new(self);
         let DbPropertyValue::Bool(value) =
-            Box::pin(self.eval_resolved(row, expression, &mut resolver)).await?
+            Box::pin(self.eval_resolved(row, expression, resolver)).await?
         else {
             return Err(HelixDbError::InvariantViolation(
                 "native predicate resolved to a non-boolean".into(),

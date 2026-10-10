@@ -1,8 +1,9 @@
 //! Row-property lookup contracts.
 
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::BTreeMap;
 
 use super::*;
+use crate::encoding::v2::values::property::view;
 
 /// Lazy stored-value resolver owned by one input row's evaluation, or by one
 /// record batch of rows whose records it prefetched.
@@ -19,10 +20,15 @@ use super::*;
 ///
 /// A batch operator prefetches with [`Self::prefetch_rows`], so rows sharing an element
 /// read it once.
+///
+/// Records are validated once when loaded and then read in place: a lookup
+/// deserializes only the value it returns. Aligned copies of unaligned records
+/// return to the resolver's buffers when their record leaves the cache.
 pub(in crate::execution::interpreter::stream) struct RowValueResolver<'ctx, 'db> {
     context: &'ctx ExecutionContext<'db>,
     property_blobs: BTreeMap<ElementRef, CachedPropertyBlob>,
     edge_endpoints: BTreeMap<u64, Option<(u64, u64)>>,
+    buffers: view::Buffers,
 }
 
 impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
@@ -33,7 +39,52 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
             context,
             property_blobs: BTreeMap::new(),
             edge_endpoints: BTreeMap::new(),
+            buffers: view::Buffers::default(),
         }
+    }
+
+    /// A resolver that borrows aligned copies from `buffers`, given back by
+    /// [`Self::into_buffers`], and, given `record`, holds an element's record
+    /// the caller already read from this request's view, as a storage scan
+    /// does.
+    ///
+    /// The record is cached in place of a storage read. Evaluation reads it
+    /// through [`ExecutionContext::read_scanned`], which accounts for it as
+    /// that read, and validates it, only when it first needs it, exactly where
+    /// that read would have happened, so errors, their timing, budget use and
+    /// read usage are unchanged.
+    pub(in crate::execution::interpreter::stream) fn with_record(
+        context: &'ctx ExecutionContext<'db>,
+        record: Option<(ElementRef, storage::ScannedRecord)>,
+        buffers: view::Buffers,
+    ) -> Self {
+        let mut resolver = Self {
+            buffers,
+            ..Self::new(context)
+        };
+        let Some((element, record)) = record else {
+            return resolver;
+        };
+        debug_assert_eq!(
+            record.key,
+            context.property_blob_key(&element),
+            "a scanned record is the stored record of its element"
+        );
+        resolver
+            .property_blobs
+            .insert(element, CachedPropertyBlob::Scanned(record));
+        resolver
+    }
+
+    /// Release every cached record and return the aligned copies for reuse.
+    pub(in crate::execution::interpreter::stream) fn into_buffers(mut self) -> view::Buffers {
+        for blob in std::mem::take(&mut self.property_blobs).into_values() {
+            let CachedPropertyBlob::Row(row) = blob else {
+                continue;
+            };
+            row.recycle(&mut self.buffers);
+        }
+        self.buffers
     }
 
     pub(in crate::execution::interpreter::stream) async fn row_property(
@@ -71,23 +122,25 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
                         endpoint_id.try_into().unwrap_or(i64::MAX),
                     )));
                 };
-                let properties = self
-                    .element_properties(&ElementRef::Node(endpoint_id))
-                    .await?;
-                Ok(property_value(properties, path))
+                let Some(row) = self.element_row(&ElementRef::Node(endpoint_id)).await? else {
+                    return Ok(None);
+                };
+                property_value(row, path)
             }
             PropertySource::Known(value) => Ok(value),
             PropertySource::Record(element) => {
-                let properties = self.element_properties(element).await?;
-                Ok(property_value(properties, property.as_ref()))
+                let Some(row) = self.element_row(element).await? else {
+                    return Ok(None);
+                };
+                property_value(row, property.as_ref())
             }
         }
     }
 
     /// All stored properties of the row element, read through the cache.
     ///
-    /// The `last_use` of an element moves its record out of the cache instead
-    /// of copying it; a later use reads the record again.
+    /// The `last_use` of an element releases its record from the cache; a
+    /// later use reads the record again.
     pub(in crate::execution::interpreter::stream) async fn row_properties(
         &mut self,
         row: &ExecutionRow,
@@ -97,25 +150,51 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
             return Ok(Vec::new());
         };
         if !last_use {
-            return Ok(self.element_properties(element).await?.to_vec());
+            let Some(row) = self.element_row(element).await? else {
+                return Ok(Vec::new());
+            };
+            return Ok(row.decode()?);
         }
         let blob = match self.property_blobs.remove(element) {
+            Some(CachedPropertyBlob::Scanned(record)) => {
+                decode_scanned(self.context, &mut self.buffers, &record)?
+            }
             Some(blob) => blob,
-            None => self.context.load_property_blob(element).await?,
+            None => self.load_blob(element).await?,
         };
-        Ok(blob.into_properties())
+        let CachedPropertyBlob::Row(row) = blob else {
+            return Ok(Vec::new());
+        };
+        let properties = row.decode()?;
+        row.recycle(&mut self.buffers);
+        Ok(properties)
     }
 
-    async fn element_properties(&mut self, element: &ElementRef) -> Result<&[Property]> {
-        if let Entry::Vacant(entry) = self.property_blobs.entry(element.clone()) {
-            let blob = self.context.load_property_blob(element).await?;
-            entry.insert(blob);
+    /// The element's validated record, loaded through the cache; `None` when
+    /// the element has no record.
+    async fn element_row(&mut self, element: &ElementRef) -> Result<Option<&view::Row>> {
+        // The load borrows the whole resolver, so the cache is probed before
+        // it rather than through a held entry.
+        if !self.property_blobs.contains_key(element) {
+            let blob = self.load_blob(element).await?;
+            self.property_blobs.insert(element.clone(), blob);
         }
-        Ok(self
+        let blob = self
             .property_blobs
-            .get(element)
-            .expect("visited element has a cached property blob")
-            .properties())
+            .get_mut(element)
+            .expect("visited element has a cached property blob");
+        let CachedPropertyBlob::Scanned(record) = blob else {
+            return Ok(blob.row());
+        };
+        // A rejected record stays cached unvalidated, so every read of it
+        // fails as a repeated storage read would.
+        *blob = decode_scanned(self.context, &mut self.buffers, record)?;
+        Ok(blob.row())
+    }
+
+    async fn load_blob(&mut self, element: &ElementRef) -> Result<CachedPropertyBlob> {
+        let value = self.context.property_bytes(element).await?;
+        decode_blob(self.context, &mut self.buffers, value)
     }
 
     /// Load the stored records of `elements` with one multi-get.
@@ -142,7 +221,7 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
         for (element, value) in missing.into_iter().zip(values) {
             #[cfg(test)]
             self.context.record_property_get();
-            let blob = self.context.decode_property_blob(value)?;
+            let blob = decode_blob(self.context, &mut self.buffers, value)?;
             self.property_blobs.insert(element, blob);
         }
         Ok(())
@@ -235,10 +314,6 @@ impl<'db> ExecutionContext<'db> {
             .await
     }
 
-    async fn load_property_blob(&self, element: &ElementRef) -> Result<CachedPropertyBlob> {
-        self.decode_property_blob(self.property_bytes(element).await?)
-    }
-
     /// Inspect a fixed native field set without letting decoded ownership escape
     /// its admission guard. Missing rows retain the native empty-property contract.
     pub(in crate::execution::interpreter) async fn row_properties_match(
@@ -284,15 +359,6 @@ impl<'db> ExecutionContext<'db> {
             kind,
         }
         .to_bytes()
-    }
-
-    fn decode_property_blob(&self, value: Option<bytes::Bytes>) -> Result<CachedPropertyBlob> {
-        let Some(value) = value else {
-            return Ok(CachedPropertyBlob::Missing);
-        };
-        #[cfg(test)]
-        self.record_property_decode();
-        Ok(CachedPropertyBlob::Decoded(decode_properties(&value)?))
     }
 }
 
@@ -369,23 +435,69 @@ pub(in crate::execution::interpreter::stream) fn record_read<'r>(
 
 enum CachedPropertyBlob {
     Missing,
-    Decoded(Vec<Property>),
+    /// A record the caller already read, accounted for and validated when
+    /// first read.
+    Scanned(storage::ScannedRecord),
+    Row(view::Row),
 }
 
 impl CachedPropertyBlob {
-    fn properties(&self) -> &[Property] {
+    /// The validated record. Callers validate a [`Self::Scanned`] record,
+    /// replacing it, before reading it.
+    fn row(&self) -> Option<&view::Row> {
         match self {
-            Self::Missing => &[],
-            Self::Decoded(properties) => properties,
+            Self::Missing => None,
+            Self::Row(row) => Some(row),
+            Self::Scanned(_) => unreachable!("a scanned record is validated before it is read"),
         }
     }
+}
 
-    fn into_properties(self) -> Vec<Property> {
-        match self {
-            Self::Missing => Vec::new(),
-            Self::Decoded(properties) => properties,
-        }
-    }
+/// Validates a stored record, borrowing aligned copies from `buffers`.
+///
+/// Under a row-memory budget the record is copied, so its charged read is
+/// released right after validation, where the full decoder released it, and
+/// cached rows never hold budget the decoded rows did not. Otherwise an
+/// aligned record is read in place.
+fn decode_blob(
+    context: &ExecutionContext<'_>,
+    buffers: &mut view::Buffers,
+    value: Option<bytes::Bytes>,
+) -> Result<CachedPropertyBlob> {
+    let Some(value) = value else {
+        return Ok(CachedPropertyBlob::Missing);
+    };
+    #[cfg(test)]
+    context.record_property_decode();
+    let row = match context.row_memory {
+        Some(_) => view::Row::copy(&value, buffers)?,
+        None => view::Row::new(value, buffers)?,
+    };
+    Ok(CachedPropertyBlob::Row(row))
+}
+
+/// Validates a scanned record where the storage read it replaces happened,
+/// accounted for as that read.
+///
+/// The charged value of that read is held only while the record is
+/// validated, as the full decoder held it while decoding. The row keeps the
+/// scanned bytes, which the read view returned and which carry no charge, so
+/// an aligned record is still read in place under a row-memory budget. A
+/// cached read holds the same stored value as the scan.
+fn decode_scanned(
+    context: &ExecutionContext<'_>,
+    buffers: &mut view::Buffers,
+    record: &storage::ScannedRecord,
+) -> Result<CachedPropertyBlob> {
+    let Some(_charged) = context.read_scanned(record)? else {
+        return Ok(CachedPropertyBlob::Missing);
+    };
+    #[cfg(test)]
+    context.record_property_decode();
+    Ok(CachedPropertyBlob::Row(view::Row::new(
+        record.value.clone(),
+        buffers,
+    )?))
 }
 
 #[derive(Clone, Copy)]
@@ -412,39 +524,38 @@ fn edge_endpoint_property(path: &str) -> Option<(EdgeEndpoint, &str)> {
         })
 }
 
-fn property_value(properties: &[Property], path: &str) -> Option<DbPropertyValue> {
-    properties
-        .iter()
-        .find(|item| item.name == path)
-        .map(|item| item.value.clone())
-        .or_else(|| nested_property_value(properties, path))
+/// The value at `path`: the first property named exactly `path`, otherwise
+/// a dotted walk from the first property named by its first segment through
+/// nested objects. Only the value read is deserialized.
+fn property_value(row: &view::Row, path: &str) -> Result<Option<DbPropertyValue>> {
+    match row.value(path)? {
+        Some(value) => Ok(Some(value)),
+        None => nested_property_value(row, path),
+    }
 }
 
-fn nested_property_value(properties: &[Property], path: &str) -> Option<DbPropertyValue> {
+fn nested_property_value(row: &view::Row, path: &str) -> Result<Option<DbPropertyValue>> {
     if !path.contains('.') {
-        return None;
+        return Ok(None);
     }
-
     let mut segments = path.split('.');
-    let first = segments.next()?;
-    if first.is_empty() {
-        return None;
-    }
-
-    let mut value = properties
-        .iter()
-        .find(|property| property.name == first)
-        .map(|property| property.value.clone())?;
-
+    let Some(first) = segments.next().filter(|first| !first.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(mut value) = row.value(first)? else {
+        return Ok(None);
+    };
     for segment in segments {
         if segment.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let DbPropertyValue::Object(values) = value else {
-            return None;
+        let DbPropertyValue::Object(mut values) = value else {
+            return Ok(None);
         };
-        value = values.get(segment)?.clone();
+        let Some(next) = values.remove(segment) else {
+            return Ok(None);
+        };
+        value = next;
     }
-
-    Some(value)
+    Ok(Some(value))
 }
