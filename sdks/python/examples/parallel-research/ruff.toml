@@ -1,0 +1,2 @@
+extend = "../../pyproject.toml"
+target-version = "py311"

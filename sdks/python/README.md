@@ -5,6 +5,11 @@ asynchronous clients for sending HelixDB queries to `POST /v2/query` or
 executing them against an embedded database. The async client uses HTTPX; the
 sync API remains unchanged.
 
+## Examples
+
+For a runnable example that stores web excerpts and source URLs through the embedded
+client, see [Store web research in HelixDB](examples/parallel-research/README.md).
+
 ## License
 
 The HelixDB Python SDK is licensed under the Apache License 2.0. See
