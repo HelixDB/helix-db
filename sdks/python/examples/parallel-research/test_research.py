@@ -1,10 +1,13 @@
 """Exercise real MCP dispatch and embedded storage without external web requests."""
 
 import asyncio
+import contextlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 from mcp import types
@@ -148,6 +151,51 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(research.tool_data(result), data)
         with self.assertRaisesRegex(RuntimeError, "unexpected result shape"):
             research.tool_data(types.CallToolResult(content=[], structuredContent={}))
+
+    def test_warning_is_visible(self):
+        result = types.CallToolResult(
+            content=[],
+            structuredContent={
+                "results": [SOURCE],
+                "warnings": [{"message": "Partial coverage"}],
+            },
+        )
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(research.tool_data(result)["results"], [SOURCE])
+        self.assertIn("Partial coverage", stderr.getvalue())
+
+    def test_cli_and_failed_search_do_not_write(self):
+        original_client = httpx.AsyncClient
+        for failed in (False, True):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "research-data"
+                fixture = MCPFixture(tool_error=failed)
+                stdout = io.StringIO()
+                with (
+                    patch.object(
+                        research.httpx,
+                        "AsyncClient",
+                        side_effect=lambda **kwargs: original_client(
+                            **kwargs, transport=httpx.MockTransport(fixture)
+                        ),
+                    ),
+                    patch(
+                        "sys.argv",
+                        ["research.py", "graph vector search", "--database-dir", str(path)],
+                    ),
+                    contextlib.redirect_stdout(stdout),
+                ):
+                    if failed:
+                        with self.assertRaises(ExceptionGroup) as raised:
+                            research.main()
+                        self.assertIn("Parallel tool failed", repr(raised.exception))
+                        self.assertFalse(path.exists())
+                    else:
+                        research.main()
+                        rows = json.loads(stdout.getvalue())["sources"]
+                        self.assertEqual(rows[0]["url"], SOURCE["url"])
+                        self.assertEqual(rows[0]["excerpt"], "Search excerpt")
 
 
 if __name__ == "__main__":
