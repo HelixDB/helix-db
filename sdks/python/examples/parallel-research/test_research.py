@@ -177,7 +177,7 @@ class ResearchTests(unittest.TestCase):
                         research.httpx,
                         "AsyncClient",
                         side_effect=lambda **kwargs: original_client(
-                            **kwargs, transport=httpx.MockTransport(fixture)
+                            **{**kwargs, "transport": httpx.MockTransport(fixture)}
                         ),
                     ),
                     patch(
