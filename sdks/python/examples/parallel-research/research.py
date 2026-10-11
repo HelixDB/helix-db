@@ -89,6 +89,7 @@ async def search_sources(
 
 def store_sources(directory: Path, objective: str, run_id: str, sources: list[dict]) -> dict:
     """Append one research run, then read only that run back from the embedded database."""
+    directory.mkdir(parents=True, exist_ok=True)
     client = Client.embedded(Disk(str(directory.resolve()), "parallel-research"))
     try:
         batch = write_batch()

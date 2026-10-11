@@ -89,7 +89,7 @@ class ResearchTests(unittest.TestCase):
             self.assertEqual(request.headers["user-agent"], research.USER_AGENT)
             self.assertNotIn("authorization", request.headers)
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
+            path = Path(directory) / "new" / "research-data"
             first = research.store_sources(path, "graph vector search", "test-run", sources)
             self.assertEqual(len(first["sources"]), 1)
             self.assertEqual(first["sources"][0]["excerpt"], "Fetched detail")
