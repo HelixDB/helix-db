@@ -833,8 +833,9 @@ the multigraph case, where several `FOLLOWS` edges between the same pair would o
 yield the same node more than once.
 
 A label scan reads every `User`. Add a
-[secondary index](/database/helix-db/query-guides/secondary-indexes) on `name` and use
-`nWhere` instead, so the lookup is pushed down to the index.
+[secondary index](/database/helix-db/query-guides/secondary-indexes) on `User.name` and
+the same `nWithLabel("User")` source with a `name` filter, or `nWithLabelWhere`, reads the
+index instead.
 
 ## Next steps
 
