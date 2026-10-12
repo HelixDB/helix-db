@@ -341,7 +341,7 @@ camel case.
 ## Cypher
 
 Clients built from this checkout run one Cypher statement per request over HTTP
-or against an embedded database. See the [Cypher reference](../../docs/cypher.md)
+or against an embedded database. See the [Cypher guide](https://docs.helix-db.com/database/helix-db/query-guides/cypher)
 for the language profile, parameters, lossless values, and transaction behavior.
 Native DSL query methods keep their existing contract.
 

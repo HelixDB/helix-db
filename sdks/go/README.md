@@ -277,7 +277,7 @@ bindings and native libraries.
 ## Cypher
 
 Clients built from this checkout expose additive Cypher methods for HTTP and
-embedded connections. See the [Cypher reference](../../docs/cypher.md) for the
+embedded connections. See the [Cypher guide](https://docs.helix-db.com/database/helix-db/query-guides/cypher) for the
 language profile, parameters, lossless values, and transaction behavior. Native
 DSL query methods keep their existing contract.
 
