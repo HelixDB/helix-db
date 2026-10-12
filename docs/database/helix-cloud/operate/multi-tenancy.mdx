@@ -135,12 +135,22 @@ helix.ReadQuery("tenant_docs").
 }
 ```
 
+```cypher Cypher
+// parameters: {"tenant_id": "acme"}
+MATCH (doc:Doc {tenant_id: $tenant_id})
+RETURN id(doc) AS `$id`, doc.title AS title
+```
+
 </CodeGroup>
 
 When the tenant predicate sits mid-traversal — for example after walking edges from a known
 starting node — use `.where_(Predicate::eq("tenant_id", "acme"))`. The same scope rule applies
 at every hop: edges that fan out across the graph remain tenant-scoped as long as every step
 filters on the tenant property.
+
+Cypher statements follow the same rule, since request headers select only the database: match
+`tenant_id` on every node and relationship in the pattern, as in
+`MATCH (a:Doc {tenant_id: $tenant_id})-[:CITES {tenant_id: $tenant_id}]->(b:Doc {tenant_id: $tenant_id})`.
 
 ## What this provides
 

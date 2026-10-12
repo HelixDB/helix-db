@@ -143,6 +143,13 @@ helix.WriteQuery("connect_users").
 }
 ```
 
+```cypher Cypher
+CREATE (alice:User {name: 'Alice'})
+CREATE (bob:User {name: 'Bob'})
+CREATE (alice)-[follows:FOLLOWS {since: '2026-07-24'}]->(bob)
+RETURN id(alice) AS alice, id(bob) AS bob, count(follows) AS linked
+```
+
 </CodeGroup>
 
 ## Other mutations
@@ -161,6 +168,10 @@ helix.WriteQuery("connect_users").
 All entries in the write batch commit or roll back together. Reads inside the batch can
 refer to earlier mutations through named variables. Do not retry a write automatically
 unless the full request is safe to replay.
+
+Cypher has no batch type: the server detects that a statement writes and runs it in one
+transaction, so the Cypher tab's three `CREATE` clauses also commit or roll back
+together.
 
 ## Next steps
 

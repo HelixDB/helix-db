@@ -1535,8 +1535,11 @@ shows what an operation contributes, what it becomes on the wire, and what the s
 sends back. To run it, start a local instance as described in
 [Get started](/database/helix-db/start-here/quickstart).
 
-  Every tab builds the same request. The JSON tab is the body sent to `POST /v2/query`,
-  and the v3 SDKs are typed builders for exactly that body.
+  The Rust, TypeScript, Go, Python, and JSON tabs build the same request. The JSON tab is
+  the body sent to `POST /v2/query`, and the v3 SDKs are typed builders for exactly that
+  body. The Cypher tab is the equivalent statement for
+  [`POST /v2/cypher`](/database/helix-db/query-guides/cypher), and the steps below show
+  the clauses of that statement that do the same work.
 
 ## The whole query
 
@@ -1723,6 +1726,16 @@ query = (
 }
 ```
 
+```cypher Cypher
+CREATE (alice:User {name: 'Alice'})
+CREATE (bob:User {name: 'Bob'})
+CREATE (alice)-[:FOLLOWS {since: '2026-07-24'}]->(bob)
+WITH alice, bob
+MATCH (alice)-[:FOLLOWS]->(friend)
+WITH alice, bob, collect({id: id(friend), name: friend.name}) AS friends
+RETURN id(alice) AS alice, id(bob) AS bob, friends
+```
+
 Four named entries run in order, and later entries reuse earlier results by name:
 
 ```mermaid
@@ -1766,7 +1779,9 @@ batch at compile time, and Go and Python reject it while the request is being bu
 a stray write in a read path never reaches the server.
 
 All entries in one batch commit or roll back together, which is what lets entry 4 read
-the edge that entry 3 has only just created.
+the edge that entry 3 has only just created. Cypher has no batch type: the server works
+out whether a statement reads or writes, and runs a statement that writes in one
+transaction.
 
 ## 2. Create the two nodes
 
@@ -1800,6 +1815,10 @@ VarAs("alice", helix.G().AddN("User", helix.Props{helix.Prop("name", "Alice")}))
     }
   }
 }
+```
+
+```cypher Cypher
+CREATE (alice:User {name: 'Alice'})
 ```
 
 `varAs` adds one entry and gives it a name. `g()` starts an empty traversal, so `addN`
@@ -1874,6 +1893,10 @@ VarAs(
 }
 ```
 
+```cypher Cypher
+CREATE (alice)-[:FOLLOWS {since: '2026-07-24'}]->(bob)
+```
+
 Unlike `addN`, `addE` needs an input stream: the nodes in that stream become the edge
 sources, and `to` is the target. `n(NodeRef.var("alice"))` turns entry 1's result back
 into a stream, which is why `add_e` carries an `input` of
@@ -1941,6 +1964,12 @@ VarAs(
 }
 ```
 
+```cypher Cypher
+WITH alice, bob
+MATCH (alice)-[:FOLLOWS]->(friend)
+WITH alice, bob, collect({id: id(friend), name: friend.name}) AS friends
+```
+
 This entry is a read inside a write batch. It starts at Alice again, walks out along
 `FOLLOWS`, and projects two fields from whatever it lands on. The edge from entry 3 is
 uncommitted at this point but still visible, because the batch is one transaction.
@@ -1995,6 +2024,10 @@ Returning("alice", "bob", "friends")
 
 ```json JSON
 { "returns": ["alice", "bob", "friends"] }
+```
+
+```cypher Cypher
+RETURN id(alice) AS alice, id(bob) AS bob, friends
 ```
 
 `returning` picks which named entries appear in the response body. Names it omits still
@@ -2261,6 +2294,13 @@ helix.ReadQuery("alice_friends").
 }
 ```
 
+```cypher Cypher
+MATCH (alice:User {name: 'Alice'})
+WITH alice LIMIT 1
+MATCH (alice)-[:FOLLOWS]->(friend)
+RETURN DISTINCT id(friend) AS id, friend.name AS name
+```
+
 It returns the same rows the write batch already reported:
 
 ```json
@@ -2425,6 +2465,13 @@ helix.WriteQuery("connect_users").
 }
 ```
 
+```cypher Cypher
+CREATE (alice:User {name: 'Alice'})
+CREATE (bob:User {name: 'Bob'})
+CREATE (alice)-[follows:FOLLOWS {since: '2026-07-24'}]->(bob)
+RETURN id(alice) AS alice, id(bob) AS bob, count(follows) AS linked
+```
+
 ## Other mutations
 
 | Intent | Operation |
@@ -2441,6 +2488,10 @@ helix.WriteQuery("connect_users").
 All entries in the write batch commit or roll back together. Reads inside the batch can
 refer to earlier mutations through named variables. Do not retry a write automatically
 unless the full request is safe to replay.
+
+Cypher has no batch type: the server detects that a statement writes and runs it in one
+transaction, so the Cypher tab's three `CREATE` clauses also commit or roll back
+together.
 
 ## Next steps
 
@@ -2572,6 +2623,13 @@ helix.ReadQuery("active_users").
 }
 ```
 
+```cypher Cypher
+MATCH (u:User)
+WHERE u.status = 'active'
+WITH u LIMIT 25
+RETURN id(u) AS id, u.name AS name
+```
+
 ## Read by indexed property
 
 Use a source predicate when the property has a compatible index:
@@ -2619,6 +2677,11 @@ g().n_where(SourcePredicate.eq("email", "alice@example.com"))
     }
   }
 }
+```
+
+```cypher Cypher
+MATCH (user {email: 'alice@example.com'})
+RETURN id(user) AS user
 ```
 
 ## Read an earlier result
@@ -2773,6 +2836,12 @@ helix.ReadQuery("friends").
 }
 ```
 
+```cypher Cypher
+MATCH (user {username: 'alice'})-[:FOLLOWS]->(friend)
+WITH DISTINCT friend LIMIT 25
+RETURN id(friend) AS id, friend.username AS username
+```
+
 ## Preserve correlated values
 
 A traversal normally forgets where it has been: after `out(...)`, each row holds only
@@ -2906,8 +2975,15 @@ helix.ReadQuery("service_routes").
 }
 ```
 
+```cypher Cypher
+MATCH (s:Service)-[:ROUTES_TO]->(w)
+RETURN s.name AS service, w.name AS workload
+```
+
 Bindings are row-local, so each row pairs a workload with the service that reached it
-rather than joining unrelated paths. Branches can bind optional values and coalesce
+rather than joining unrelated paths. Cypher pattern variables, such as `s` in the
+Cypher tab, stay bound for the whole row in the same way, so the statement needs no
+`bind` step. Branches can bind optional values and coalesce
 them during projection; see [Project correlated bindings](/database/helix-db/query-guides/projections#project-correlated-bindings).
 
 ## Avoid accidental path growth
@@ -3028,6 +3104,12 @@ helix.G().
 }
 ```
 
+```cypher Cypher
+MATCH (u:User)
+WHERE u.score >= 100
+RETURN id(u) AS id, u.name AS name, u.score AS score
+```
+
 ## Filter search candidates
 
 To restrict vector or full-text search to a candidate set, build the traversal that
@@ -3144,6 +3226,11 @@ g().n_with_label("User").project([
     }
   }
 }
+```
+
+```cypher Cypher
+MATCH (u:User)
+RETURN id(u) AS user_id, u.name AS name
 ```
 
 ## Project correlated bindings
@@ -3414,6 +3501,23 @@ helix.ReadQuery("service_workloads").
 }
 ```
 
+```cypher Cypher
+MATCH (service:Service)-[:ROUTES_TO]->(pod)
+OPTIONAL MATCH (deployment)-[:CREATES]->(pod)
+WITH service, deployment, coalesce(deployment, pod) AS current
+UNWIND ['MANAGES', 'ROUTES_TO'] AS branch
+OPTIONAL MATCH (owner)-[:MANAGES]->(current) WHERE branch = 'MANAGES'
+OPTIONAL MATCH (current)-[:ROUTES_TO]->(workload) WHERE branch = 'ROUTES_TO'
+WITH service, deployment, owner, workload
+WHERE owner IS NOT NULL OR workload IS NOT NULL
+RETURN DISTINCT id(service) AS service_id, id(coalesce(deployment, owner, workload)) AS workload_id
+```
+
+Cypher has no `UNION` (see the
+[Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported)), so the
+Cypher tab gives each `union` branch its own row through `UNWIND`, runs that branch as
+an `OPTIONAL MATCH`, and drops rows where the branch found nothing.
+
 ## Aggregate
 
 Append `count()` to a filtered traversal and return that named entry; aggregation runs
@@ -3584,6 +3688,18 @@ request = query.to_query_request(
   }
 }
 ```
+
+```cypher Cypher
+// parameters: {"tenant_id": "acme", "limit": 25}
+MATCH (u:User)
+WHERE u.tenantId = $tenant_id
+WITH u LIMIT $limit
+RETURN id(u) AS id, u.name AS name, u.tenantId AS tenantId
+```
+
+The Cypher statement reads the same values as `$tenant_id` and `$limit`. A Cypher
+request has no `parameter_types`; each value's type comes from its
+[JSON encoding](/database/helix-db/query-guides/cypher#values-and-parameters).
 
 ## Supported parameter families
 
@@ -3759,10 +3875,21 @@ helix.ReadQuery("user_posts").
 }
 ```
 
+```cypher Cypher
+MATCH (user:User)
+WHERE user.username = 'alice'
+MATCH (user)-[:AUTHORED]->(post)
+RETURN id(post) AS id, post.title AS title
+```
+
 The condition serializes inside the named entry, not as a separate step. Other
 conditions test for an empty result (`varEmpty`), a minimum size (`varMinSize`), or
 the previous entry (`prevNotEmpty`). The first entry in a batch cannot depend on a
 previous result.
+
+Cypher has no batch conditions. In the Cypher tab, the second `MATCH` runs once for
+each user the first one finds, so the statement returns no rows when the user does
+not exist.
 
 ## Bound recursive work
 
@@ -4301,6 +4428,20 @@ snake_case builder) for index push-down, then project the required fields. A gen
 `.where(...)` remains useful after traversal but may filter a larger intermediate
 stream.
 
+Cypher statements use these indexes automatically, without naming them. An
+equality or `IN` match on a labeled node reads an equality index, and range
+comparisons and ordered `LIMIT` reads use a range index:
+
+```cypher
+// parameters: {"status": "active"}
+MATCH (u:User {status: $status})
+RETURN u.name AS name
+```
+
+Explain the statement to see which index the plan reads. See
+[Cypher indexes and performance](/database/helix-db/query-guides/cypher#indexes-and-performance)
+for the conditions that keep an index in use.
+
 ## Unique indexes
 
 A unique equality backfill becomes blocked if existing data contains duplicates. Fix
@@ -4326,6 +4467,10 @@ the declared dimension.
 
 For background, see [What is vector search?](/learn/vector-search/what-is-vector-search)
 and [vector distance metrics](/learn/vector-search/vector-distance-metrics).
+
+Vector search and vector index management are native-only: Cypher has no syntax for
+them. The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported)
+lists what Cypher covers.
 
 ## Create a vector index
 
@@ -4563,6 +4708,10 @@ keyword relevance.
 For background, see [What is full-text search?](/learn/full-text-search/what-is-full-text-search)
 and [What is BM25?](/learn/full-text-search/what-is-bm25).
 
+Full-text search and text index management are native-only: Cypher has no syntax for
+them. The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported)
+lists what Cypher covers.
+
 ## Create a text index
 
 ```rust Rust
@@ -4765,6 +4914,10 @@ vector and full-text search.
 
 For why filtering before ranking matters, see
 [Filtered vector search](/learn/vector-search/filtered-vector-search).
+
+Prefiltered search is native-only: Cypher has no vector or full-text search syntax.
+The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists
+what Cypher covers.
 
 ## How it works
 
@@ -5255,6 +5408,11 @@ prefiltered, can return a node or edge that has since moved to another tenant, c
 label, or lost the indexed property, until the index worker publishes that change. A
 `strong` search never returns one. Search `strong` when every result must match the
 search's current tenant, label, and property.
+
+Vector and text search are native-only: Cypher has no search syntax, so search
+consistency applies only to native queries. The
+[Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists what
+Cypher covers.
 
 ## Request eventual search
 
@@ -5847,6 +6005,9 @@ envelope and the codes below.
 | `access_mode_error` | A modifying statement reached a reader or a warm-only request (`writer_required`). | 503 | On the writer |
 | `internal_planner_error` | The planner broke one of its own invariants. | 500 | No automatic retry |
 
+The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists
+the `details.detail` code for each construct outside the supported profile.
+
 ## Access the code in an SDK
 
 ```rust Rust
@@ -6315,6 +6476,18 @@ curl --fail-with-body \
   }'
 ```
 
+To test the Cypher route, send the equivalent statement to `/v2/cypher` with the
+same headers; an empty database returns `{"columns":["node_count"],"rows":[[0]]}`.
+
+```bash
+curl --fail-with-body \
+  "$HELIX_ENDPOINT/v2/cypher" \
+  --header "Authorization: Bearer $HELIX_API_KEY" \
+  --header "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  --header "Content-Type: application/json" \
+  --data '{"query":"MATCH (n) RETURN count(n) AS node_count"}'
+```
+
 Keep API keys in a secrets manager or environment variable. Do not commit them
 to source control.
 
@@ -6418,7 +6591,13 @@ Each client sends the same operation-tree request body:
 ```
 
 Keep API keys in secrets management, not source control. The JSON example is the request
-body sent to `POST /v2/query`.
+body sent to `POST /v2/query`. The same lookup as a Cypher statement goes in the `query`
+field of a `POST /v2/cypher` body:
+
+```cypher
+MATCH (user {username: 'Alice'})
+RETURN id(user) AS `$id`
+```
 
 `query_name` is optional diagnostic metadata. The query itself remains entirely inside
 the request; there is no route deployment step.
@@ -6927,10 +7106,20 @@ helix.ReadQuery("tenant_docs").
 }
 ```
 
+```cypher Cypher
+// parameters: {"tenant_id": "acme"}
+MATCH (doc:Doc {tenant_id: $tenant_id})
+RETURN id(doc) AS `$id`, doc.title AS title
+```
+
 When the tenant predicate sits mid-traversal — for example after walking edges from a known
 starting node — use `.where_(Predicate::eq("tenant_id", "acme"))`. The same scope rule applies
 at every hop: edges that fan out across the graph remain tenant-scoped as long as every step
 filters on the tenant property.
+
+Cypher statements follow the same rule, since request headers select only the database: match
+`tenant_id` on every node and relationship in the pattern, as in
+`MATCH (a:Doc {tenant_id: $tenant_id})-[:CITES {tenant_id: $tenant_id}]->(b:Doc {tenant_id: $tenant_id})`.
 
 ## What this provides
 
@@ -7588,6 +7777,12 @@ Use the manual flow below when you want to scaffold and run each step yourself.
     `--warm` to populate the standalone process caches while returning the normal
     response.
 
+    The same count in Cypher:
+
+    ```bash
+    helix cypher dev -e 'MATCH (u:User) RETURN count(u) AS users'
+    ```
+
 Default local storage is in-memory. `helix stop` or `helix restart` wipes in-memory data — keep your seed data in JSON request files so you can replay it, or use `--disk` for persistent local storage.
 
 ## Persistent local storage
@@ -7654,6 +7849,9 @@ $EDITOR examples/request.json
 
 # Send the request
 helix query dev --file examples/request.json
+
+# Or run a Cypher statement from a file you write
+helix cypher dev --file examples/users.cypher
 
 # Tail container logs in another shell
 helix logs dev --follow
@@ -7910,6 +8108,7 @@ They never accept or store application database keys or service credentials.
 | [`helix status`](/cli/command-reference/status) | Local, Cloud | Inspect runtime or database status |
 | [`helix logs`](/cli/command-reference/logs) | Local, Cloud | Follow local logs or list Cloud query errors |
 | [`helix query`](/cli/command-reference/query) | Local, Cloud | Execute one v3 JSON/SDK query |
+| [`helix cypher`](/cli/command-reference/cypher) | Local | Execute or explain one Cypher statement |
 | [`helix shell`](/cli/command-reference/shell) | Local, Cloud | Execute line-oriented v3 JSON queries |
 | [`helix explorer`](/cli/command-reference/explorer) | Local | Browse a running local instance in the graph Explorer |
 | [`helix prune`](/cli/command-reference/prune) | Local | Remove Helix-owned local containers, volumes, and state |
@@ -8340,6 +8539,109 @@ helix cluster indexes
 - [`helix database`](/cli/command-reference/database) — manage databases and application keys.
 - [`helix project`](/cli/command-reference/project) — find and link the owning project.
 - [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.
+
+# helix cypher
+
+Page type: Reference
+
+Send one Cypher statement to a local instance and print the JSON response, or plan it
+without running it. Local only.
+
+## Usage
+
+```bash
+helix cypher [INSTANCE] -e '<statement>' [--parameters '<json-object>']
+helix cypher [INSTANCE] --file <statement.cypher> [--parameters '<json-object>']
+helix cypher [INSTANCE] -e '<statement>' --explain
+```
+
+Exactly one of `-e` and `--file` is required. See the [Cypher guide](/database/helix-db/query-guides/cypher)
+for the supported language profile.
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Local instance name from `helix.toml`. See [Target resolution](#target-resolution) for the default. |
+
+## Options
+
+### Input (pick one)
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-e`, `--query <QUERY>` | The Cypher statement. | — |
+| `-f`, `--file <FILE>` | Read one Cypher statement from a UTF-8 file. | — |
+
+### Statement
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--parameters <JSON>` | A JSON object of parameter values, such as `'{"name":"Ada"}'`. Lossless tagged values such as `{"$type":"integer","value":"9223372036854775807"}` pass through unchanged. | `{}` |
+| `--explain` | Plan the statement with `POST /v2/cypher/explain` instead of running it. Explaining a write changes nothing. | Off |
+
+### Connection
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--host <HOST>` | Override the host. | `localhost` |
+| `--port <PORT>` | Override the port. | The instance's port in `helix.toml` |
+
+### Output
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print the response as compact JSON. | Off (highlighted, pretty-printed) |
+
+## Behavior
+
+### Target resolution
+
+- With no `INSTANCE`, the CLI uses the `dev` instance, then the only instance, then a picker in
+  a terminal.
+- The instance must be local. A Cloud instance fails with
+  `Cypher CLI requests currently require a local instance`; send Cypher to Helix Cloud through an
+  SDK or `POST /v2/cypher`.
+
+### Requests
+
+- The statement posts to the local, auth-disabled `/v2/cypher`, or `/v2/cypher/explain` with
+  `--explain`.
+- `--parameters` must be a JSON object; any other JSON value fails before the request is sent.
+- A `404` means the server predates Cypher, and the error asks you to upgrade it. Cypher needs
+  the `ghcr.io/helixdb/helixdb:v0.0.12` image or later.
+
+### Output
+
+- A successful response goes to stdout as syntax-highlighted, pretty-printed JSON with
+  `columns` and `rows`, or the plan under `--explain`. `--json` prints compact JSON instead.
+- A non-2xx response fails with the HTTP status and the error body, including the Cypher error
+  `error`, `msg`, and `details`.
+
+## Examples
+
+```bash
+# Run a statement against the default local instance
+helix cypher -e 'MATCH (u:User) RETURN u.name AS name ORDER BY name LIMIT 10'
+
+# Pass parameters
+helix cypher -e 'MATCH (u:User {email: $email}) RETURN u.name AS name' --parameters '{"email":"ada@example.com"}'
+
+# Run a statement from a file against a named instance
+helix cypher dev --file queries/active-users.cypher --parameters '{"status":"active"}'
+
+# Show the selected plan without running the statement
+helix cypher --explain -e 'MATCH (u:User {email: $email}) RETURN u' --parameters '{"email":"ada@example.com"}'
+
+# Print one line of JSON for scripts
+helix cypher -e 'MATCH (n) RETURN count(n) AS nodes' --json
+```
+
+## Related
+
+- [Cypher guide](/database/helix-db/query-guides/cypher): supported clauses, functions, and limits.
+- [`helix query`](/cli/command-reference/query): send a native v3 JSON or TypeScript DSL query.
+- [`helix start`](/cli/command-reference/start): start the local instance you query.
 
 # helix database
 

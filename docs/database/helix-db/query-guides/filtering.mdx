@@ -109,6 +109,12 @@ helix.G().
 }
 ```
 
+```cypher Cypher
+MATCH (u:User)
+WHERE u.score >= 100
+RETURN id(u) AS id, u.name AS name, u.score AS score
+```
+
 </CodeGroup>
 
 ## Filter search candidates

@@ -23,6 +23,11 @@ label, or lost the indexed property, until the index worker publishes that chang
 `strong` search never returns one. Search `strong` when every result must match the
 search's current tenant, label, and property.
 
+Vector and text search are native-only: Cypher has no search syntax, so search
+consistency applies only to native queries. The
+[Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists what
+Cypher covers.
+
 ## Request eventual search
 
 <Note>

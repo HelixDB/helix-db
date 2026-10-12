@@ -108,6 +108,20 @@ snake_case builder) for index push-down, then project the required fields. A gen
 `.where(...)` remains useful after traversal but may filter a larger intermediate
 stream.
 
+Cypher statements use these indexes automatically, without naming them. An
+equality or `IN` match on a labeled node reads an equality index, and range
+comparisons and ordered `LIMIT` reads use a range index:
+
+```cypher
+// parameters: {"status": "active"}
+MATCH (u:User {status: $status})
+RETURN u.name AS name
+```
+
+Explain the statement to see which index the plan reads. See
+[Cypher indexes and performance](/database/helix-db/query-guides/cypher#indexes-and-performance)
+for the conditions that keep an index in use.
+
 ## Unique indexes
 
 A unique equality backfill becomes blocked if existing data contains duplicates. Fix
