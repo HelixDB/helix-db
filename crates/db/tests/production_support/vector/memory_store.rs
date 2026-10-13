@@ -777,6 +777,15 @@ async fn run_slab_layout_contracts() {
     assert!(after.row.chunk > released.row.chunk);
     assert_eq!(slab.read(after.row), Some(Bytes::from_static(b"after")));
 
+    // The index-entry charges are compile-time constants, so evaluate their
+    // formula at run time too: a `(u8, ())` bucket and its control byte take
+    // two bytes, and 16/7 of that rounds up to five.
+    assert_eq!(hash_index_entry_bytes::<u8, ()>(), 5);
+    assert_eq!(
+        hash_index_entry_bytes::<NodeId, SimHash>(),
+        SIMHASH_INDEX_ENTRY_BYTES
+    );
+
     // Exact load charges, including rows that update fixture entries and
     // budgets that refuse an index entry or a SimHash.
     let db = test_db("production_vector_memory_slab_charges").await;
