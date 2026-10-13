@@ -15,6 +15,7 @@
 mod benchmark {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+    use std::sync::Barrier;
     use std::time::Instant;
 
     use db::production_coverage::{
@@ -122,28 +123,40 @@ mod benchmark {
 
     /// Wall nanoseconds per node lookup with `threads` threads sweeping
     /// concurrently, each from a different starting offset.
+    ///
+    /// The rotated node lists and the workers are set up before the clock
+    /// starts, and a barrier releases every sweep together with it, so the
+    /// time covers only fully contended lookups.
     fn parallel_lookup(
         store: &VectorMemoryBenchmarkStore,
         nodes: &[u64],
         passes: usize,
         threads: usize,
     ) -> f64 {
-        let started = Instant::now();
-        std::thread::scope(|scope| {
-            for thread in 0..threads {
-                let rotated: Vec<u64> = nodes
+        let rotations: Vec<Vec<u64>> = (0..threads)
+            .map(|thread| {
+                nodes
                     .iter()
                     .cycle()
                     .skip(thread * nodes.len() / threads)
                     .take(nodes.len())
                     .copied()
-                    .collect();
+                    .collect()
+            })
+            .collect();
+        let barrier = Barrier::new(threads + 1);
+        let started = std::thread::scope(|scope| {
+            for rotated in &rotations {
+                let barrier = &barrier;
                 scope.spawn(move || {
+                    barrier.wait();
                     for _ in 0..passes {
-                        std::hint::black_box(store.lookup(&rotated));
+                        std::hint::black_box(store.lookup(rotated));
                     }
                 });
             }
+            barrier.wait();
+            Instant::now()
         });
         started.elapsed().as_nanos() as f64 / (passes * nodes.len() * threads) as f64
     }
