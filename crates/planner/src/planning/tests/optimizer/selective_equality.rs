@@ -28,7 +28,8 @@ fn unique_membership_keeps_bounded_index_access_without_statistics() {
                     );
                     let predicate = if parameterized {
                         context.params = ParamBindings::default()
-                            .with_value(NonEmptyString::new("keys").unwrap(), values);
+                            .with_value(NonEmptyString::new("keys").unwrap(), values)
+                            .into();
                         Predicate::is_in_param("external_key", "keys")
                     } else {
                         Predicate::is_in("external_key", values)
@@ -168,7 +169,7 @@ fn selective_equality_type_union_keeps_the_tenant_intersection() {
                 })
                 .collect::<Vec<_>>();
             let mut context = PlannerContext {
-                params,
+                params: params.into(),
                 ..ctx(indexes.clone())
             };
             context.storage.default_equality_index_rows = crate::cost::EstimatedRows::rows(200);
@@ -262,10 +263,12 @@ fn selective_equality_intersects_every_index_with_absent_or_stale_statistics() {
                 };
                 let context = PlannerContext {
                     stats: stats.clone(),
-                    params: ParamBindings::default().with_value(
-                        NonEmptyString::new("deleted").unwrap(),
-                        PropertyValue::Bool(true),
-                    ),
+                    params: ParamBindings::default()
+                        .with_value(
+                            NonEmptyString::new("deleted").unwrap(),
+                            PropertyValue::Bool(true),
+                        )
+                        .into(),
                     ..ctx(indexes.clone())
                 };
                 for traversal in [
@@ -381,10 +384,13 @@ fn indexed_conjunction_avoids_the_scan_cliff() {
                         .iter()
                         .take(count)
                         .map(|property| {
-                            context.params = context.params.clone().with_value(
-                                NonEmptyString::new(*property).unwrap(),
-                                PropertyValue::from("fixture-value"),
-                            );
+                            context.params = (*context.params)
+                                .clone()
+                                .with_value(
+                                    NonEmptyString::new(*property).unwrap(),
+                                    PropertyValue::from("fixture-value"),
+                                )
+                                .into();
                             if parameterized {
                                 Predicate::eq_param(*property, *property)
                             } else {
@@ -464,10 +470,13 @@ fn indexed_conjunctions_are_permutation_invariant_full_intersections() {
                     let terms = permutation
                         .iter()
                         .map(|property| {
-                            context.params = context.params.clone().with_value(
-                                NonEmptyString::new(*property).unwrap(),
-                                PropertyValue::from(7),
-                            );
+                            context.params = (*context.params)
+                                .clone()
+                                .with_value(
+                                    NonEmptyString::new(*property).unwrap(),
+                                    PropertyValue::from(7),
+                                )
+                                .into();
                             if parameterized {
                                 Predicate::eq_param(*property, *property)
                             } else {
@@ -608,4 +617,48 @@ fn null_equality_intersects_with_the_selective_index_before_sorting() {
         ) if key.property.as_ref() == "nullable"
     )));
     assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
+}
+
+/// A unique lookup yields each owner at most once whatever its value, so a
+/// dedup over it adds no distinct operator, even where the lookup is not
+/// bounded to one row: null, a parameter, a wide literal set or an
+/// intersection of sets. A non-unique lookup of several values keeps it.
+#[test]
+fn dedup_over_unique_lookups_adds_no_distinct_for_any_value() {
+    let context = |uniqueness| {
+        let mut context = PlannerContext::default();
+        context.indexes.node_eq.insert(
+            ScopedPropertyKey::try_new("User", "uid").unwrap(),
+            crate::catalog::NodeEqualityIndexMeta::try_new("node_eq:User:uid")
+                .unwrap()
+                .with_uniqueness(uniqueness),
+        );
+        context
+    };
+    let uids = |range: std::ops::Range<i64>| PropertyValue::I64Array(range.collect());
+    for predicate in [
+        Predicate::eq("uid", 7),
+        Predicate::eq("uid", PropertyValue::Null),
+        Predicate::eq_param("uid", "uid"),
+        Predicate::is_in("uid", uids(0..1_024)),
+        Predicate::and(vec![
+            Predicate::is_in("uid", uids(0..512)),
+            Predicate::is_in("uid", uids(256..768)),
+        ]),
+    ] {
+        let plan = executable_traversal(
+            g().n_with_label_where("User", predicate.clone()).dedup(),
+            context(crate::catalog::IndexUniqueness::Unique),
+        );
+        assert!(
+            !has_exec_op_family(&plan, ExecOpFamily::Distinct),
+            "{predicate:?}"
+        );
+    }
+    let non_unique = executable_traversal(
+        g().n_with_label_where("User", Predicate::is_in("uid", uids(0..3)))
+            .dedup(),
+        context(crate::catalog::IndexUniqueness::NonUnique),
+    );
+    assert!(has_exec_op_family(&non_unique, ExecOpFamily::Distinct));
 }

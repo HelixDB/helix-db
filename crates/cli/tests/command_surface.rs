@@ -25,6 +25,7 @@ fn every_retained_command_renders_help() {
         &["logs", "--help"],
         &["query", "--help"],
         &["shell", "--help"],
+        &["explorer", "--help"],
         &["auth", "login", "--help"],
         &["auth", "status", "--help"],
         &["auth", "logout", "--help"],

@@ -40,7 +40,7 @@
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
-use slatedb::{Db, DbTransaction, IsolationLevel};
+use slatedb::{Db, DbReadOps, DbTransaction, IsolationLevel};
 
 use crate::config::SearchIndexBatchLimits;
 use crate::encoding::v2::keys::indexes::vector::{

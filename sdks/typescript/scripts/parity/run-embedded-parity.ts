@@ -4,9 +4,12 @@ import { basename, delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { canonicalizeJson, parseJsonStructural, structuralJsonEqual } from "../../src/index.js";
-import { workspaceRoot } from "./paths.js";
+import { cargoTarget, workspaceRoot } from "./paths.js";
+import { cypherFixturePath, readCypherCases, verifyCypherResults } from "./cypher-results.js";
+import { parityProgress } from "./progress.js";
 
 const EXPECTED_RUNTIME = 234;
+const cypherCases = await readCypherCases();
 const typescriptRoot = join(workspaceRoot, "sdks", "typescript");
 const pythonRoot = join(workspaceRoot, "sdks", "python");
 const goRoot = join(workspaceRoot, "sdks", "go");
@@ -15,7 +18,6 @@ const rustManifest = join(workspaceRoot, "sdks", "rust", "Cargo.toml");
 const bindingManifest = join(workspaceRoot, "bindings", "uniffi", "Cargo.toml");
 const bindingConfig = join(workspaceRoot, "bindings", "uniffi", "uniffi.toml");
 const generatorManifest = join(workspaceRoot, "bindings", "uniffi-bindgen", "Cargo.toml");
-const cargoTarget = process.env.CARGO_TARGET_DIR ?? join(workspaceRoot, "target");
 const nativeLibrary = join(cargoTarget, "debug", nativeLibraryName());
 const temp = await mkdtemp(join(tmpdir(), "helixdb-embedded-parity-"));
 const sdks = ["rust", "typescript", "go", "python", "python-async"] as const;
@@ -211,12 +213,19 @@ try {
   for (const storage of storageModes) {
     const baseline = await jsonFiles(results[storage].rust);
     assertFixtureCount(`Rust ${storage}`, baseline);
+    for (const sdk of sdks) {
+      try {
+        await verifyCypherResults(join(results[storage][sdk], "cypher"), cypherCases);
+      } catch (error) {
+        throw new Error(`${sdk} ${storage} Cypher runtime mismatch`, { cause: error });
+      }
+    }
     for (const candidate of ["typescript", "go", "python", "python-async"] as const) {
       await compareResults(results[storage].rust, results[storage][candidate], baseline, `${candidate} ${storage}`);
     }
   }
   console.log(
-    `embedded memory and disk runtime parity passed for ${EXPECTED_RUNTIME} fixtures across Rust, TypeScript, Go, synchronous Python, and asynchronous Python`,
+    `embedded memory and disk runtime parity passed for ${EXPECTED_RUNTIME} DSL and ${cypherCases.length} Cypher fixtures across Rust, TypeScript, Go, synchronous Python, and asynchronous Python`,
   );
 } finally {
   await rm(temp, { recursive: true, force: true });
@@ -246,6 +255,7 @@ function embeddedEnv(
     HELIX_EMBEDDED_PARITY_RESULTS: results,
     HELIX_EMBEDDED_PARITY_DATABASE: database,
     HELIX_EMBEDDED_PARITY_STORAGE: storage,
+    HELIX_CYPHER_PARITY_FIXTURES: cypherFixturePath,
   };
   if (storage === "disk") env.HELIX_EMBEDDED_PARITY_DISK_ROOT = diskRoot;
   if (process.platform === "darwin") env.DYLD_LIBRARY_PATH = appendPath(libraryDir, process.env.DYLD_LIBRARY_PATH);
@@ -289,7 +299,15 @@ async function jsonFiles(root: string): Promise<string[]> {
 }
 
 function run(command: string, args: string[], cwd: string, timeout: number, env: NodeJS.ProcessEnv = process.env) {
-  const result = spawnSync(command, args, { cwd, env, encoding: "utf8", timeout, maxBuffer: 1024 * 1024 * 20, stdio: "pipe" });
+  parityProgress(`running ${command} ${args.join(" ")}`);
+  const result = spawnSync(command, args, {
+    cwd,
+    env,
+    encoding: "utf8",
+    timeout,
+    maxBuffer: 1024 * 1024 * 20,
+    stdio: process.env.HELIX_PARITY_PROGRESS === "1" ? ["pipe", "pipe", "inherit"] : "pipe",
+  });
   if (result.error === undefined && result.status === 0) return;
   throw new Error(
     [

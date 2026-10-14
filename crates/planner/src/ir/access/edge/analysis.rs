@@ -107,12 +107,17 @@ pub(super) fn set_canonicalization_candidate(source: &EdgeAccessPlan) -> bool {
 
 pub(super) fn set_subsumption_candidate(source: &EdgeAccessPlan) -> bool {
     match source {
-        EdgeAccessPlan::Union(sources) => {
-            super::super::union_has_subsumption_candidate(sources, EdgeAccessSourcePlan::subsumes)
-        }
+        EdgeAccessPlan::Union(sources) => super::super::union_has_subsumption_candidate(
+            sources,
+            |superset: &EdgeAccessSourcePlan, subset: &EdgeAccessSourcePlan| {
+                structurally_subsumes(superset.as_ref(), subset.as_ref())
+            },
+        ),
         EdgeAccessPlan::Intersect(sources) => super::super::intersection_has_subsumption_candidate(
             sources,
-            EdgeAccessSourcePlan::subsumes,
+            |superset: &EdgeAccessSourcePlan, subset: &EdgeAccessSourcePlan| {
+                structurally_subsumes(superset.as_ref(), subset.as_ref())
+            },
         ),
         EdgeAccessPlan::Empty
         | EdgeAccessPlan::PointIds { .. }
@@ -130,9 +135,12 @@ pub(super) fn set_subsumption_candidate(source: &EdgeAccessPlan) -> bool {
 }
 
 pub(super) fn subsumes(superset: &EdgeAccessPlan, subset: &EdgeAccessPlan) -> bool {
-    if superset == subset {
-        return true;
-    }
+    superset == subset || structurally_subsumes(superset, subset)
+}
+
+/// [`subsumes`] apart from equality, which callers comparing many pairs can
+/// test more cheaply themselves.
+fn structurally_subsumes(superset: &EdgeAccessPlan, subset: &EdgeAccessPlan) -> bool {
     match (superset, subset) {
         (_, EdgeAccessPlan::Empty) => true,
         (EdgeAccessPlan::AllScan, _) => true,

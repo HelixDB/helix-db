@@ -13,17 +13,26 @@ impl<'db> ExecutionContext<'db> {
         let mut rows = self.stream_rows(input, "order")?;
         match plan {
             ir::OrderPlan::ExplicitSort(keys) => {
-                let mut keyed = Vec::with_capacity(rows.len());
-                for row in rows {
-                    self.check_execution_deadline()?;
+                let properties = keys
+                    .as_ref()
+                    .iter()
+                    .map(|key| &key.property)
+                    .collect::<Vec<_>>();
+                let mut values = Vec::with_capacity(rows.len());
+                for batch in rows.chunks(RECORD_BATCH_ROWS) {
                     let mut resolver = eval::RowValueResolver::new(self);
-                    let mut values = Vec::new();
-                    for key in keys.as_ref() {
+                    resolver.prefetch_rows(batch, &properties).await?;
+                    for row in batch {
                         self.check_execution_deadline()?;
-                        values.push(resolver.row_property(&row, &key.property).await?);
+                        let mut row_values = Vec::with_capacity(keys.as_ref().len());
+                        for key in keys.as_ref() {
+                            self.check_execution_deadline()?;
+                            row_values.push(resolver.row_property(row, &key.property).await?);
+                        }
+                        values.push(row_values);
                     }
-                    keyed.push((values, row));
                 }
+                let mut keyed = values.into_iter().zip(rows).collect::<Vec<_>>();
                 keyed.sort_by(|left, right| compare_order_keys(left, right, keys.as_ref()));
                 rows = keyed.into_iter().map(|(_, row)| row).collect();
                 Ok(ExecutionValue::Stream(rows))

@@ -9,6 +9,8 @@ pub(in crate::execution::interpreter) struct WorkCounters {
     pub source_visits: AtomicUsize,
     pub expansion_parents: AtomicUsize,
     pub pair_reads: AtomicUsize,
+    /// Vector searches that ranked an index ID set without its access rows.
+    pub fused_vector_searches: AtomicUsize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -18,6 +20,7 @@ pub(in crate::execution::interpreter) struct WorkSnapshot {
     pub source_visits: usize,
     pub expansion_parents: usize,
     pub pair_reads: usize,
+    pub fused_vector_searches: usize,
 }
 
 impl WorkCounters {
@@ -28,6 +31,7 @@ impl WorkCounters {
             source_visits: self.source_visits.load(Ordering::Relaxed),
             expansion_parents: self.expansion_parents.load(Ordering::Relaxed),
             pair_reads: self.pair_reads.load(Ordering::Relaxed),
+            fused_vector_searches: self.fused_vector_searches.load(Ordering::Relaxed),
         }
     }
 }

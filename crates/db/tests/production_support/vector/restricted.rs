@@ -627,6 +627,70 @@ fn candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit() {
     assert!(error.to_string().contains("at most 1000000"));
 }
 
+#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+fn empty_candidates_accept_any_result_count_and_absorb_exclusions() {
+    let empty = RestrictedVectorCandidates::from_ids([]).unwrap();
+    empty.validate_result_count(1).unwrap();
+    empty
+        .validate_result_count(MAX_RESTRICTED_RESULT_COUNT + 1)
+        .expect("an empty set yields no results, so no count exceeds the cap");
+    assert!(matches!(
+        empty.without(&RoaringTreemap::from_iter([1])),
+        RestrictedVectorCandidates::Empty
+    ));
+
+    let candidates = RestrictedVectorCandidates::from_ids([2, 4, 9]).unwrap();
+    assert!(matches!(
+        candidates.without(&RoaringTreemap::from_iter([2, 4, 9, 11])),
+        RestrictedVectorCandidates::Empty
+    ));
+    let remaining = candidates.without(&RoaringTreemap::from_iter([4]));
+    assert!(remaining.contains(2));
+    assert!(!remaining.contains(4));
+    assert!(remaining.contains(9));
+    assert!(
+        candidates.contains(4),
+        "exclusion leaves the original set intact"
+    );
+}
+
+/// An exact bitmap becomes the same candidate set as its IDs would, and is
+/// held to the same unique-candidate limit.
+#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+fn bitmap_candidates_match_id_candidates_and_their_limit() {
+    assert!(matches!(
+        RestrictedVectorCandidates::from_bitmap(RoaringTreemap::new()),
+        Ok(RestrictedVectorCandidates::Empty)
+    ));
+
+    let ids = [2, 4, 9, u64::MAX];
+    let from_bitmap =
+        RestrictedVectorCandidates::from_bitmap(RoaringTreemap::from_iter(ids)).unwrap();
+    let from_ids = RestrictedVectorCandidates::from_ids(ids).unwrap();
+    assert_eq!(
+        from_bitmap.iter().collect::<Vec<_>>(),
+        from_ids.iter().collect::<Vec<_>>()
+    );
+    assert!(!from_bitmap.contains(3));
+
+    let mut at_limit = RoaringTreemap::new();
+    at_limit.insert_range(0..MAX_RESTRICTED_CANDIDATES);
+    let RestrictedVectorCandidates::NonEmpty(candidates) =
+        RestrictedVectorCandidates::from_bitmap(at_limit.clone()).unwrap()
+    else {
+        panic!("a set at the limit is accepted");
+    };
+    assert_eq!(candidates.len(), MAX_RESTRICTED_CANDIDATES);
+
+    at_limit.insert(MAX_RESTRICTED_CANDIDATES);
+    let over_limit = RestrictedVectorCandidates::from_bitmap(at_limit.clone())
+        .expect_err("one candidate past the limit fails");
+    let id_error = RestrictedVectorCandidates::from_ids(at_limit)
+        .expect_err("the ID path rejects the same set");
+    assert!(matches!(&over_limit, HelixDbError::Query(_)));
+    assert_eq!(over_limit.to_string(), id_error.to_string());
+}
+
 #[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
 async fn oversized_result_count_rejects_before_index_metadata_io() {
     let db = Arc::new(
@@ -2221,6 +2285,8 @@ pub(crate) async fn run() {
     admission_scans_exactly_by_candidate_cardinality_and_bytes();
     restricted_result_count_clamps_before_enforcing_the_payload_limit();
     candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit();
+    empty_candidates_accept_any_result_count_and_absorb_exclusions();
+    bitmap_candidates_match_id_candidates_and_their_limit();
     oversized_result_count_rejects_before_index_metadata_io().await;
     empty_candidates_short_circuit_before_index_metadata_io().await;
     unbound_metric_rejects_after_metadata_without_vector_reads().await;

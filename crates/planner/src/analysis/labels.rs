@@ -69,7 +69,7 @@ pub(crate) fn label_scope(predicate: &Predicate) -> Result<LabelScope, PlannerEr
             op: CompareOp::Eq,
             right,
         } => match property_literal_string(left, right)
-            .filter(|(property, _value)| property == "$label")
+            .filter(|(property, _value)| *property == "$label")
         {
             Some((_property, value)) => NonEmptyString::new(value)
                 .map(|label| LabelScope::Feasible(FeasibleLabelScope::Scoped(label)))
@@ -116,7 +116,9 @@ pub(crate) fn label_scope(predicate: &Predicate) -> Result<LabelScope, PlannerEr
     }
 }
 
-pub(crate) fn label_equality_atom(predicate: &Predicate) -> Option<String> {
+/// Borrow an exact label literal without copying either string.
+/// The predicate owns the returned slice.
+pub(crate) fn label_equality_atom(predicate: &Predicate) -> Option<&str> {
     match predicate {
         Predicate::Eq { left, right }
         | Predicate::Compare {
@@ -124,7 +126,7 @@ pub(crate) fn label_equality_atom(predicate: &Predicate) -> Option<String> {
             op: CompareOp::Eq,
             right,
         } => property_literal_string(left, right)
-            .filter(|(property, _value)| property == "$label")
+            .filter(|(property, _value)| *property == "$label")
             .map(|(_property, value)| value),
         Predicate::Neq { .. }
         | Predicate::Gt { .. }
@@ -149,13 +151,13 @@ pub(crate) fn label_equality_atom(predicate: &Predicate) -> Option<String> {
     }
 }
 
-fn property_literal_string(left: &Expr, right: &Expr) -> Option<(String, String)> {
+fn property_literal_string<'a>(left: &'a Expr, right: &'a Expr) -> Option<(&'a str, &'a str)> {
     match (left, right) {
         (Expr::Property(property), Expr::Constant(PropertyValue::String(value))) => {
-            Some((property.clone(), value.clone()))
+            Some((property.as_str(), value.as_str()))
         }
         (Expr::Constant(PropertyValue::String(value)), Expr::Property(property)) => {
-            Some((property.clone(), value.clone()))
+            Some((property.as_str(), value.as_str()))
         }
         (Expr::Property(_), Expr::Constant(PropertyValue::Null))
         | (Expr::Property(_), Expr::Constant(PropertyValue::Bool(_)))
@@ -331,15 +333,15 @@ fn label_membership(value: &Expr, values: &Expr) -> Option<FiniteLabelDomain> {
 }
 
 fn domain_from_labels(labels: impl IntoIterator<Item = String>) -> FiniteLabelDomain {
-    let mut labels = labels.into_iter().fold(Vec::new(), |mut unique, label| {
-        let Some(label) = ir::NonEmptyString::new(label) else {
-            return unique;
-        };
-        if !unique.contains(&label) {
-            unique.push(label);
-        }
-        unique
-    });
+    let labels = labels
+        .into_iter()
+        .filter_map(ir::NonEmptyString::new)
+        .collect();
+    let mut labels = super::literal_set::dedup_by(
+        labels,
+        |left: &ir::NonEmptyString, right: &ir::NonEmptyString| left.as_ref().cmp(right.as_ref()),
+        PartialEq::eq,
+    );
     match labels.len() {
         0 => FiniteLabelDomain::Empty,
         1 => FiniteLabelDomain::One(
@@ -355,10 +357,21 @@ fn domain_from_labels(labels: impl IntoIterator<Item = String>) -> FiniteLabelDo
 }
 
 fn intersect_domains(left: FiniteLabelDomain, right: FiniteLabelDomain) -> FiniteLabelDomain {
+    let left = domain_labels(left);
+    let right: &[ir::NonEmptyString] = match &right {
+        FiniteLabelDomain::Empty => &[],
+        FiniteLabelDomain::One(label) => std::slice::from_ref(label),
+        FiniteLabelDomain::Many(labels) => labels.as_ref(),
+    };
+    let contains = super::literal_set::membership_by(
+        right,
+        left.len(),
+        |left: &ir::NonEmptyString, right: &ir::NonEmptyString| left.as_ref().cmp(right.as_ref()),
+        PartialEq::eq,
+    );
     domain_from_labels(
-        domain_labels(left)
-            .into_iter()
-            .filter(|label| domain_contains(&right, label))
+        left.into_iter()
+            .filter(contains)
             .map(ir::NonEmptyString::into_string),
     )
 }
@@ -393,6 +406,64 @@ pub(crate) fn domain_contains(domain: &FiniteLabelDomain, label: &ir::NonEmptySt
 #[cfg(test)]
 mod label_domain_tests {
     use super::*;
+
+    #[test]
+    fn label_intersections_preserve_order_and_empty_single_many_states() {
+        for (left_size, right_size) in [
+            (0, 0),
+            (0, 32),
+            (32, 0),
+            (1, 32),
+            (32, 1),
+            (16, 17),
+            (17, 16),
+            (17, 17),
+            (4096, 4096),
+        ] {
+            for offset in [0, 1, 16, 4096] {
+                let left: Vec<_> = (0..left_size)
+                    .rev()
+                    .map(|index| format!("L{index}"))
+                    .collect();
+                let right: Vec<_> = (0..right_size)
+                    .map(|index| format!("L{}", index + offset))
+                    .collect();
+                let model: std::collections::BTreeSet<_> = right.iter().collect();
+                let expected =
+                    domain_from_labels(left.iter().filter(|label| model.contains(label)).cloned());
+                assert_eq!(
+                    intersect_domains(domain_from_labels(left), domain_from_labels(right)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wide_label_domains_preserve_first_order_and_ignore_empty_names() {
+        for size in [0, 1, 16, 17, 4096] {
+            let labels: Vec<_> = (0..size)
+                .map(|index| {
+                    if index % 3 == 0 {
+                        String::new()
+                    } else {
+                        format!("Label-{}", (size - index) % 23)
+                    }
+                })
+                .collect();
+            let mut expected = Vec::new();
+            for label in &labels {
+                if !label.is_empty() && !expected.contains(label) {
+                    expected.push(label.clone());
+                }
+            }
+            let actual: Vec<_> = domain_labels(domain_from_labels(labels))
+                .into_iter()
+                .map(ir::NonEmptyString::into_string)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn pure_label_domains_normalize_intersections_unions_and_non_strings() {

@@ -21,6 +21,9 @@ pub use crate::search::vector::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
 };
+pub use crate::search::vector::{
+    VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape, VectorMemoryBenchmarkStore,
+};
 
 /// Current managed-index storage version exposed to production fixtures.
 pub const CURRENT_INDEX_STORAGE_VERSION: u16 =
@@ -548,6 +551,12 @@ pub async fn interpreter_scheduler_and_projection_contracts() {
         .await;
 }
 
+/// Proves filtered node vector searches fuse each index-set access into its
+/// search, and that every other shape runs unfused.
+pub async fn interpreter_fused_vector_search_contracts() {
+    crate::execution::interpreter::production_contracts::run_fused_vector_search_contracts().await;
+}
+
 #[cfg(feature = "index-lifecycle-testing")]
 pub use crate::execution::interpreter::production_contracts::{
     run_text_transaction_batch_benchmark_sample, TextTransactionBatchBenchmarkCase,
@@ -667,6 +676,8 @@ pub async fn vector_migration_scale_10m() {
     crate::migrations::run_vector_migration_scale_contract(10_000_000).await;
 }
 
+mod mixed_aggregation;
+pub use mixed_aggregation::mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values;
 /// Verifies unique batched reads validate inputs and owners and propagate storage errors.
 pub async fn secondary_unique_batch_contracts() {
     crate::index_lifecycle::secondary::run_unique_batch_production_contracts().await;

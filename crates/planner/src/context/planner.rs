@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 use crate::{catalog, cost, feedback};
 
-use super::{OptimizerLimits, ParamBindings, PlannerLimits, StatsSnapshot};
+use super::{OptimizerLimits, PlannerLimits, SharedParamBindings, StatsSnapshot};
 
 /// Planner input snapshot.
 ///
@@ -12,8 +12,9 @@ use super::{OptimizerLimits, ParamBindings, PlannerLimits, StatsSnapshot};
 /// the context is the reproducible planning input.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlannerContext {
-    /// Runtime parameters available during planning.
-    pub params: ParamBindings,
+    /// Runtime parameters available during planning, shared with the
+    /// optimizer rather than copied into it.
+    pub params: SharedParamBindings,
     /// Active runtime parameter scopes, such as enclosing `foreach` containers.
     /// A non-empty set means object fields may shadow parameter names in the
     /// enclosed query and therefore cannot be specialized.

@@ -17,7 +17,7 @@ pub(super) use crate::encoding::property::property_value::PropertyValue as DbPro
 
 pub(super) use helix_planner::catalog;
 
-use super::super::filter::RECORD_BATCH_ROWS;
+use super::super::RECORD_BATCH_ROWS;
 
 pub(super) fn name(value: &str) -> ir::NonEmptyString {
     ir::NonEmptyString::new(value).expect("valid test name")

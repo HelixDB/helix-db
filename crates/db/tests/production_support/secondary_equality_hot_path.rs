@@ -309,27 +309,31 @@ impl SecondaryEqualityHotPathFixture {
     /// Checks all 50 indexes against the exact decoded ID set and records the
     /// complete equality-serving I/O contract.
     pub async fn inspect_all_lookups(&self) -> Result<SecondaryEqualityLookupInspection> {
-        let rows = self.decoded_bitmap_rows().await?;
-        let Some((_, expected)) = rows.first() else {
-            return Err(crate::HelixDbError::InvariantViolation(
-                "hot-path correctness fixture contains no bitmap rows".to_string(),
-            ));
-        };
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        for plan in &self.lookup_plans {
-            let mut actual = lookup_node_ids(&self.db, plan).await?;
-            actual.sort_unstable();
-            assert_eq!(&actual, expected);
-        }
-        let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
-        Ok(SecondaryEqualityLookupInspection {
-            lookups: self.lookup_plans.len(),
-            result_count: expected.len(),
-            point_reads: metrics.point_reads,
-            multi_get_calls: metrics.multi_get_calls,
-            scans: metrics.scans,
-            graph_reads: metrics.graph_reads,
-        })
+        crate::index_lifecycle::secondary::EqualityReadObserver::default()
+            .scope(async {
+                let rows = self.decoded_bitmap_rows().await?;
+                let Some((_, expected)) = rows.first() else {
+                    return Err(crate::HelixDbError::InvariantViolation(
+                        "hot-path correctness fixture contains no bitmap rows".to_string(),
+                    ));
+                };
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                for plan in &self.lookup_plans {
+                    let mut actual = lookup_node_ids(&self.db, plan).await?;
+                    actual.sort_unstable();
+                    assert_eq!(&actual, expected);
+                }
+                let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+                Ok(SecondaryEqualityLookupInspection {
+                    lookups: self.lookup_plans.len(),
+                    result_count: expected.len(),
+                    point_reads: metrics.point_reads,
+                    multi_get_calls: metrics.multi_get_calls,
+                    scans: metrics.scans,
+                    graph_reads: metrics.graph_reads,
+                })
+            })
+            .await
     }
 
     /// Measures repeated full-cardinality equality lookups after warmup.
@@ -346,69 +350,75 @@ impl SecondaryEqualityHotPathFixture {
         mode: SecondaryEqualityReadMode,
         operations: NonZeroUsize,
     ) -> Result<SecondaryEqualityReadSample> {
-        let operations = operations.get();
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        let started = Instant::now();
-        let mut latencies = match mode {
-            SecondaryEqualityReadMode::Sequential => {
-                let mut latencies = Vec::with_capacity(operations);
-                for _ in 0..operations {
-                    let operation_started = Instant::now();
-                    let _ = self.lookup_result_count().await?;
-                    latencies.push(duration_nanos(operation_started.elapsed()));
-                }
-                latencies
-            }
-            SecondaryEqualityReadMode::Concurrent => {
-                let mut tasks = tokio::task::JoinSet::new();
-                for reader in 0..CONCURRENT_READERS {
-                    let db = Arc::clone(&self.db);
-                    let plan = Arc::clone(&self.lookup_plans[0]);
-                    tasks.spawn(async move {
-                        let mut latencies =
-                            Vec::with_capacity(operations.div_ceil(CONCURRENT_READERS));
-                        for _ in (reader..operations).step_by(CONCURRENT_READERS) {
+        crate::index_lifecycle::secondary::EqualityReadObserver::default()
+            .scope(async {
+                let operations = operations.get();
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                let started = Instant::now();
+                let mut latencies = match mode {
+                    SecondaryEqualityReadMode::Sequential => {
+                        let mut latencies = Vec::with_capacity(operations);
+                        for _ in 0..operations {
                             let operation_started = Instant::now();
-                            let _ = lookup_result_count(&db, &plan).await?;
+                            let _ = self.lookup_result_count().await?;
                             latencies.push(duration_nanos(operation_started.elapsed()));
                         }
-                        Result::<_>::Ok(latencies)
-                    });
-                }
-                let mut latencies = Vec::with_capacity(operations);
-                while let Some(result) = tasks.join_next().await {
-                    latencies.append(&mut result.map_err(|error| {
-                        crate::HelixDbError::InvariantViolation(format!(
-                            "hot-path benchmark reader task failed: {error}"
-                        ))
-                    })??);
-                }
-                latencies
-            }
-        };
-        let elapsed = started.elapsed();
-        assert_eq!(latencies.len(), operations, "every timed lookup completed");
-        latencies.sort_unstable();
-        let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
-        Ok(SecondaryEqualityReadSample {
-            mode,
-            operations,
-            readers: match mode {
-                SecondaryEqualityReadMode::Sequential => 1,
-                SecondaryEqualityReadMode::Concurrent => CONCURRENT_READERS,
-            },
-            result_count: self.entity_count,
-            elapsed_nanos: elapsed.as_nanos(),
-            throughput_per_second: f64::from(operations as u32) / elapsed.as_secs_f64(),
-            median_latency_nanos: percentile(&latencies, 50),
-            p95_latency_nanos: percentile(&latencies, 95),
-            point_reads: metrics.point_reads,
-            multi_get_calls: metrics.multi_get_calls,
-            scans: metrics.scans,
-            graph_reads: metrics.graph_reads,
-            allocations: 0,
-            allocated_bytes: 0,
-        })
+                        latencies
+                    }
+                    SecondaryEqualityReadMode::Concurrent => {
+                        let mut tasks = tokio::task::JoinSet::new();
+                        for reader in 0..CONCURRENT_READERS {
+                            let db = Arc::clone(&self.db);
+                            let plan = Arc::clone(&self.lookup_plans[0]);
+                            let observer =
+                                crate::index_lifecycle::secondary::EqualityReadObserver::current();
+                            tasks.spawn(observer.scope(async move {
+                                let mut latencies =
+                                    Vec::with_capacity(operations.div_ceil(CONCURRENT_READERS));
+                                for _ in (reader..operations).step_by(CONCURRENT_READERS) {
+                                    let operation_started = Instant::now();
+                                    let _ = lookup_result_count(&db, &plan).await?;
+                                    latencies.push(duration_nanos(operation_started.elapsed()));
+                                }
+                                Result::<_>::Ok(latencies)
+                            }));
+                        }
+                        let mut latencies = Vec::with_capacity(operations);
+                        while let Some(result) = tasks.join_next().await {
+                            latencies.append(&mut result.map_err(|error| {
+                                crate::HelixDbError::InvariantViolation(format!(
+                                    "hot-path benchmark reader task failed: {error}"
+                                ))
+                            })??);
+                        }
+                        latencies
+                    }
+                };
+                let elapsed = started.elapsed();
+                assert_eq!(latencies.len(), operations, "every timed lookup completed");
+                latencies.sort_unstable();
+                let metrics = crate::index_lifecycle::secondary::equality_read_metrics();
+                Ok(SecondaryEqualityReadSample {
+                    mode,
+                    operations,
+                    readers: match mode {
+                        SecondaryEqualityReadMode::Sequential => 1,
+                        SecondaryEqualityReadMode::Concurrent => CONCURRENT_READERS,
+                    },
+                    result_count: self.entity_count,
+                    elapsed_nanos: elapsed.as_nanos(),
+                    throughput_per_second: f64::from(operations as u32) / elapsed.as_secs_f64(),
+                    median_latency_nanos: percentile(&latencies, 50),
+                    p95_latency_nanos: percentile(&latencies, 95),
+                    point_reads: metrics.point_reads,
+                    multi_get_calls: metrics.multi_get_calls,
+                    scans: metrics.scans,
+                    graph_reads: metrics.graph_reads,
+                    allocations: 0,
+                    allocated_bytes: 0,
+                })
+            })
+            .await
     }
 
     /// Closes this fixture and its background workers.

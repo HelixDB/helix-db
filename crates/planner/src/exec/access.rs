@@ -17,7 +17,9 @@ pub(in crate::exec) use edge::exact_edge_equality;
 pub use edge::{ExecEdgeAccessPlan, ExecEdgeSecondaryRangePlan, ExecEdgeSecondarySetPlan};
 pub use limited::{ExecAccessLimit, ExecAccessPlan, ExecAccessReadLimit, ExecLimitedAccessPlan};
 pub(in crate::exec) use node::exact_node_equality;
-pub use node::{ExecNodeAccessPlan, ExecNodeSecondaryRangePlan, ExecNodeSecondarySetPlan};
+pub use node::{
+    ExecNodeAccessPlan, ExecNodeCursor, ExecNodeSecondaryRangePlan, ExecNodeSecondarySetPlan,
+};
 
 #[cfg(test)]
 mod tests;

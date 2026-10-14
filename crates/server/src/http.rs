@@ -38,10 +38,14 @@ pub async fn serve(
 }
 
 pub(crate) fn router(state: ServerState) -> Router {
+    // Paths stay literal: docs/scripts/check-openapi.mjs reads them from this
+    // file. The Cypher paths equal `helix_cypher::api::{HTTP_PATH, HTTP_EXPLAIN_PATH}`.
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v2/query", post(execute_query))
+        .route("/v2/cypher", post(execute_cypher))
+        .route("/v2/cypher/explain", post(explain_cypher))
         .with_state(state)
 }
 
@@ -83,7 +87,14 @@ async fn execute_query(
         Ok(bytes) => bytes,
         Err(response) => return *response,
     };
-    let request = match sonic_rs::from_slice::<QueryRequest>(&bytes) {
+    // simd-json parses a uniquely owned body in place and copies a shared
+    // one. The request owns everything it needs, so the body is freed here
+    // rather than held through planning and execution.
+    let parsed = match bytes.try_into_mut() {
+        Ok(mut body) => QueryRequest::from_json_slice_mut(&mut body),
+        Err(shared) => QueryRequest::from_json_slice(&shared),
+    };
+    let request = match parsed {
         Ok(request) => request,
         Err(error) => {
             return error_response(
@@ -126,6 +137,109 @@ async fn read_body(body: Body) -> Result<Bytes, Box<Response>> {
             format!("failed to read request body: {error}"),
         ))
     })
+}
+
+async fn read_cypher_request(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<(RequestOptions, db::cypher::Request), Box<Response>> {
+    let options =
+        RequestOptions::from_headers(headers).map_err(|error| Box::new(error.into_response()))?;
+    let bytes = read_body(body).await?;
+    let request = serde_json::from_slice::<db::cypher::Request>(&bytes).map_err(|error| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            error_code::QueryErrorCode::InvalidQueryJson,
+            error.to_string(),
+        ))
+    })?;
+    Ok((options, request))
+}
+
+async fn explain_cypher(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (options, request) = match read_cypher_request(&headers, body).await {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    if let Err(error) = options.validate_for_request_type(QueryRequestType::Read, state.db_mode()) {
+        return error.into_response();
+    }
+    match state
+        .query_service()
+        .explain_cypher_scoped_controlled(
+            request,
+            db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
+            db::cypher::Limits::default(),
+        )
+        .await
+    {
+        Ok(explanation) => json_response(StatusCode::OK, &explanation),
+        Err(error) => cypher_error_response(error),
+    }
+}
+
+async fn execute_cypher(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (options, request) = match read_cypher_request(&headers, body).await {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    let request = match request.compile() {
+        Ok(request) => request,
+        Err(error) => return cypher_error_response(error.into()),
+    };
+    if let Err(error) = options.validate_for_request_type(request.request_type(), state.db_mode()) {
+        return error.into_response();
+    }
+    let result = state
+        .query_service()
+        .execute_compiled_cypher_json_scoped_controlled(
+            request,
+            options.query_mode(),
+            db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
+            db::cypher::Limits::default(),
+            options.metrics_tenant_id.clone(),
+        )
+        .await;
+    match result {
+        Ok(response) => {
+            if options.await_durable == Some(true)
+                && let Err(error) = state.flush_writer().await
+            {
+                return service_error_response(error.into());
+            }
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                response.into_bytes(),
+            )
+                .into_response()
+        }
+        Err(error) => cypher_error_response(error),
+    }
+}
+
+fn cypher_error_response(error: db::cypher::Error) -> Response {
+    match error {
+        db::cypher::Error::Query(error) => json_response(
+            StatusCode::from_u16(helix_cypher::api::ErrorClass::of(&error).http_status())
+                .expect("Cypher error classes use valid HTTP statuses"),
+            &helix_cypher::api::ErrorBody::from(&error),
+        ),
+        db::cypher::Error::Storage(error) => service_error_response(QueryServiceError::Db(error)),
+        db::cypher::Error::Json(error) => {
+            service_error_response(QueryServiceError::JsonSerialize(error))
+        }
+    }
 }
 
 fn query_response(response: QueryResponse) -> Response {
@@ -391,6 +505,69 @@ mod tests {
             .contains("Index operation not found"));
         assert_eq!(json.get("code"), None);
         assert_eq!(json.get("retryable"), None);
+    }
+
+    #[tokio::test]
+    async fn cypher_errors_follow_the_shared_error_contract() {
+        let query = |category| {
+            db::cypher::Error::Query(
+                helix_cypher::QueryError::runtime(category, "detail", "msg")
+                    .at(helix_cypher::Span { start: 1, end: 2 }),
+            )
+        };
+        let cases = [
+            (
+                query("syntax_error"),
+                StatusCode::BAD_REQUEST,
+                "syntax_error",
+            ),
+            (
+                query("resource_limit"),
+                StatusCode::TOO_MANY_REQUESTS,
+                "resource_limit",
+            ),
+            (
+                query("access_mode_error"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "access_mode_error",
+            ),
+            (
+                query("internal_planner_error"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_planner_error",
+            ),
+            (
+                db::cypher::Error::Storage(db::error::HelixDbError::TransactionConflict(
+                    "retry".to_string(),
+                )),
+                StatusCode::CONFLICT,
+                "transaction_conflict",
+            ),
+            (
+                db::cypher::Error::Json(serde_json::from_str::<u8>("x").expect_err("invalid JSON")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response_serialization_error",
+            ),
+        ];
+        for (error, expected_status, expected_error) in cases {
+            let is_query = matches!(error, db::cypher::Error::Query(_));
+            let response = cypher_error_response(error);
+            assert_eq!(response.status(), expected_status);
+            let body = to_bytes(response.into_body(), 4_096)
+                .await
+                .expect("Cypher error body is bounded");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("Cypher error body is JSON");
+            assert_eq!(json["error"], expected_error);
+            if is_query {
+                assert_eq!(
+                    json["details"],
+                    serde_json::json!({"detail":"detail","phase":"runtime","span":{"start":1,"end":2}})
+                );
+            } else {
+                assert_eq!(json.get("details"), None);
+            }
+        }
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ use crate::index_lifecycle::queue::producer::{QueuedMutationCollector, StagedQue
 /// Index state that is valid for exactly one graph mutation transaction.
 #[derive(Debug)]
 pub(crate) struct MutationIndexContext {
+    pub(super) property_writes: super::property_writes::Pending,
     _scope_permit: Option<crate::index_lifecycle::IndexScopeMutationPermit>,
     active: crate::index_lifecycle::mutation_catalog::ActiveMutationCatalog,
     secondary: crate::index_lifecycle::secondary::SecondaryMutationSet,
@@ -29,6 +30,7 @@ pub(crate) struct MutationIndexContext {
 
 /// Commit-owned index state after every transaction-local runtime is sealed.
 pub(crate) struct PreparedMutationIndexContext {
+    _property_writes: super::property_writes::Pending,
     _scope_permit: Option<crate::index_lifecycle::IndexScopeMutationPermit>,
     active_generations: Vec<crate::index_lifecycle::ActiveIndexHandle>,
     _secondary: crate::index_lifecycle::secondary::SecondaryMutationSet,
@@ -42,9 +44,11 @@ impl MutationIndexContext {
         scope_permit: crate::index_lifecycle::IndexScopeMutationPermit,
         loaded: crate::index_lifecycle::mutation_catalog::MutationIndexCatalog,
         scope: crate::encoding::v2::keys::scope::DataScope,
+        budget: Option<&crate::query_resources::Budget>,
     ) -> Self {
         let (active, secondary, vector, text, routes) = loaded.into_components();
         Self {
+            property_writes: super::property_writes::Pending::default(),
             _scope_permit: Some(scope_permit),
             active,
             secondary,
@@ -53,7 +57,7 @@ impl MutationIndexContext {
             vector,
             text,
             routes,
-            topology_runtime: super::topology::TopologyMutationRuntime::default(),
+            topology_runtime: super::topology::TopologyMutationRuntime::new(budget),
             queued: QueuedMutationCollector::new(scope),
             node_index_writes: super::NodeIndexWrites::default(),
         }
@@ -63,6 +67,7 @@ impl MutationIndexContext {
     #[cfg(test)]
     pub(crate) fn for_configured_index_test() -> Self {
         Self {
+            property_writes: super::property_writes::Pending::default(),
             _scope_permit: None,
             active: crate::index_lifecycle::mutation_catalog::ActiveMutationCatalog::default(),
             secondary: crate::index_lifecycle::secondary::SecondaryMutationSet::empty(),
@@ -103,9 +108,10 @@ impl MutationIndexContext {
     pub(crate) fn maintain_graph_indexes(
         &mut self,
         graph: crate::index_lifecycle::graph_mutation::GraphMutationTransition,
+        budget: Option<&crate::query_resources::Budget>,
     ) -> Result<(), crate::HelixDbError> {
         self.node_index_writes.record(&graph);
-        let routes = self.routes.targets_for(&graph);
+        let routes = self.routes.targets_for_with_budget(&graph, budget)?;
         self.secondary_runtime
             .collect(graph.scope(), &self.secondary, &routes, &graph)?;
         self.queued
@@ -141,7 +147,7 @@ impl MutationIndexContext {
     /// Flushes one topology epoch before topology-dependent reads.
     pub(crate) async fn flush_topology(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.topology_runtime.flush(transaction).await
     }
@@ -149,7 +155,7 @@ impl MutationIndexContext {
     /// Reads current topology rows through the runtime's staged overlay.
     pub(crate) async fn observe_topology(
         &self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         keys: &[bytes::Bytes],
     ) -> Result<Vec<Option<bytes::Bytes>>, crate::HelixDbError> {
         self.topology_runtime.observe(transaction, keys).await
@@ -158,7 +164,7 @@ impl MutationIndexContext {
     /// Flushes and seals topology state at the commit boundary.
     pub(crate) async fn prepare_topology(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.topology_runtime.prepare(transaction).await
     }
@@ -166,7 +172,7 @@ impl MutationIndexContext {
     /// Flushes routed secondary mutations through one ordered observation batch.
     pub(crate) async fn flush_secondary(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.secondary_runtime
             .flush(transaction, &self.secondary)
@@ -176,7 +182,7 @@ impl MutationIndexContext {
     /// Flushes and seals the final secondary mutation epoch.
     pub(crate) async fn prepare_secondary(
         &mut self,
-        transaction: &slatedb::DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
         self.secondary_runtime
             .prepare(transaction, &self.secondary)
@@ -186,6 +192,7 @@ impl MutationIndexContext {
     /// Consumes the sealed runtime and transfers all state to the commit boundary.
     pub(crate) fn into_prepared(self) -> Result<PreparedMutationIndexContext, crate::HelixDbError> {
         let Self {
+            property_writes,
             _scope_permit,
             active,
             secondary,
@@ -200,6 +207,7 @@ impl MutationIndexContext {
         topology_runtime.consume_prepared()?;
         secondary_runtime.consume_prepared()?;
         Ok(PreparedMutationIndexContext {
+            _property_writes: property_writes,
             _scope_permit,
             active_generations: active.into_generations(),
             _secondary: secondary,

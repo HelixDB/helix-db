@@ -17,9 +17,10 @@ enum ReadFault {
     MultiGet,
     ShortMultiGet,
     /// Every multi-get after the first, which reads the owners' records,
-    /// fails or comes back short.
+    /// fails, comes back short, or never completes.
     RecordMultiGet,
     ShortRecordMultiGet,
+    PendingRecordMultiGet,
 }
 
 #[derive(Default)]
@@ -47,6 +48,9 @@ impl DbReadOps for Reader {
         _: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Vec<Option<Bytes>>, slatedb::Error> {
         let records = self.batches.fetch_add(1, Ordering::Relaxed) > 0;
+        if records && matches!(self.fault, ReadFault::PendingRecordMultiGet) {
+            std::future::pending::<()>().await;
+        }
         match self.fault {
             ReadFault::MultiGet => Err(slatedb::Error::unavailable(
                 "injected owner read failure".into(),
@@ -56,12 +60,13 @@ impl DbReadOps for Reader {
             )),
             ReadFault::ShortMultiGet => Ok(Vec::new()),
             ReadFault::ShortRecordMultiGet if records => Ok(Vec::new()),
-            ReadFault::None | ReadFault::RecordMultiGet | ReadFault::ShortRecordMultiGet => {
-                Ok(keys
-                    .iter()
-                    .map(|key| self.rows.get(key.as_ref()).cloned())
-                    .collect())
-            }
+            ReadFault::None
+            | ReadFault::RecordMultiGet
+            | ReadFault::ShortRecordMultiGet
+            | ReadFault::PendingRecordMultiGet => Ok(keys
+                .iter()
+                .map(|key| self.rows.get(key.as_ref()).cloned())
+                .collect()),
         }
     }
 
@@ -150,6 +155,7 @@ fn seed(
 }
 
 pub(crate) async fn run() {
+    admission_contracts().await;
     let unique = handle(
         config::SecondaryIndexDefinition::node_unique_equality("Fixture", "value").unwrap(),
         DataScope::LegacyUnscoped,
@@ -277,7 +283,9 @@ pub(crate) async fn run() {
             ReadFault::MultiGet | ReadFault::RecordMultiGet => {
                 assert!(error.to_string().contains("injected"))
             }
-            ReadFault::None => unreachable!("only injected faults are tested here"),
+            ReadFault::None | ReadFault::PendingRecordMultiGet => {
+                unreachable!("only injected faults are tested here")
+            }
         }
     }
     reader.fault = ReadFault::None;
@@ -339,4 +347,129 @@ pub(crate) async fn run() {
         lookup_active_unique_equality_batch(&reader, &unique, &values).await,
         Err(HelixDbError::IndexCatalogCorruption(_))
     ));
+}
+
+/// Every byte limit through the successful high-water mark must either return
+/// the exact owners or fail atomically and release all temporary reservations.
+async fn admission_contracts() {
+    use crate::query_resources as resources;
+    let unique = handle(
+        config::SecondaryIndexDefinition::node_unique_equality("Fixture", "value").unwrap(),
+        DataScope::LegacyUnscoped,
+        IndexGenerationId::initial(),
+    );
+    let values = [PropertyValue::I64(7), PropertyValue::I64(8)];
+    let mut reader = Reader::default();
+    seed(&mut reader, &unique, values[0].clone(), 11);
+    seed(&mut reader, &unique, values[1].clone(), 12);
+    let budget = resources::Budget::new(1024 * 1024);
+    let owners =
+        lookup_active_unique_equality_batch_admitted(&reader, &unique, &values, Some(&budget))
+            .await
+            .unwrap();
+    let peak = budget.peak();
+    assert_eq!(owners.iter().collect::<Vec<_>>(), [11, 12]);
+    assert!(budget.available() < 1024 * 1024);
+    let retained = budget.available();
+    let mut cursor = owners.into_iter();
+    assert_eq!(cursor.next(), Some(11));
+    assert_eq!(
+        budget.available(),
+        retained,
+        "consuming cursor retains admission"
+    );
+    drop(cursor);
+    assert_eq!(budget.available(), 1024 * 1024);
+    // One multi-get reads the owners and one verifies their records.
+    let reads = budget.reads();
+    assert_eq!(reads.multi_get_batches, 2);
+    assert_eq!(reads.multi_get_keys, 4);
+    assert_eq!(reads.point_gets, 0);
+    assert_eq!(reads.scans, 0);
+    let mut boundaries = std::collections::BTreeSet::new();
+    for limit in 0..=peak {
+        reader.batches.store(0, Ordering::Relaxed);
+        reader.gets.store(0, Ordering::Relaxed);
+        let budget = resources::Budget::new(limit);
+        match lookup_active_unique_equality_batch_admitted(&reader, &unique, &values, Some(&budget))
+            .await
+        {
+            Ok(owners) => {
+                assert_eq!(limit, peak, "successful high-water mark is the boundary");
+                assert_eq!(owners.iter().collect::<Vec<_>>(), [11, 12]);
+            }
+            Err(error) => assert!(
+                matches!(error, HelixDbError::QueryMemoryLimitExceeded),
+                "{error}"
+            ),
+        }
+        assert_eq!(
+            budget.available(),
+            limit,
+            "all owners release at limit {limit}"
+        );
+        boundaries.insert((
+            reader.batches.load(Ordering::Relaxed),
+            reader.gets.load(Ordering::Relaxed),
+        ));
+    }
+    assert!(
+        boundaries.contains(&(0, 0)),
+        "headers/keys are rejected before I/O"
+    );
+    assert!(
+        boundaries.contains(&(1, 0)),
+        "raw owner rows are admitted before verification"
+    );
+    assert!(
+        boundaries.contains(&(2, 0)),
+        "verified records and owners can be rejected atomically"
+    );
+    assert!(
+        boundaries.iter().all(|(_, gets)| *gets == 0),
+        "owners are never read one at a time"
+    );
+
+    for fault in [
+        ReadFault::MultiGet,
+        ReadFault::ShortMultiGet,
+        ReadFault::RecordMultiGet,
+        ReadFault::ShortRecordMultiGet,
+    ] {
+        reader.fault = fault;
+        reader.batches.store(0, Ordering::Relaxed);
+        let budget = resources::Budget::new(1024 * 1024);
+        assert!(lookup_active_unique_equality_batch_admitted(
+            &reader,
+            &unique,
+            &values,
+            Some(&budget),
+        )
+        .await
+        .is_err());
+        assert_eq!(budget.available(), 1024 * 1024);
+    }
+    reader.fault = ReadFault::PendingRecordMultiGet;
+    reader.batches.store(0, Ordering::Relaxed);
+    let budget = resources::Budget::new(1024 * 1024);
+    let mut pending = Box::pin(lookup_active_unique_equality_batch_admitted(
+        &reader,
+        &unique,
+        &values,
+        Some(&budget),
+    ));
+    assert!(futures::poll!(&mut pending).is_pending());
+    assert!(budget.available() < 1024 * 1024);
+    drop(pending);
+    assert_eq!(
+        budget.available(),
+        1024 * 1024,
+        "cancellation releases pending owners"
+    );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn unique_batch_contracts_cover_faults_scope_and_admission() {
+    run().await;
 }

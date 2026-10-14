@@ -10,6 +10,23 @@ pageType: "Reference"
 <Update
   label="October 2026"
   rss={{
+    title: "Docker v0.0.11 and CLI 3.4.4: faster, bounded index queues",
+    description: "Strong searches decode pending index work once per request, strong text search keeps working during ingest, writers reopen faster, and queue admission tracks real memory"
+  }}
+>
+- **Strong text search keeps working during ingest.** A `strong` text search now has its own bound, 512 MiB of unpublished text per partition by default (it was one publication's 64 MiB), and reuses analyses of pending text across searches. Ingest bursts of 20K–40K documents that made v0.0.10's strong text searches fail with `index_backpressure` now complete with no rejections, and a strong text search behind 5,000 pending documents dropped from about 200 ms to 30 ms. Set `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` to change the bound; past it the search fails with retryable `index_backpressure` (`pending_text_analysis_bytes`).
+- **Strong searches decode pending index work once per request.** Several searches in one request share one decoded copy of the pending queue, decoding and exact scoring run off the async workers so they no longer stall other requests, and four strong vector searches in one request behind 160K pending 768-dimension changes went from about 5.0 s to 2.2 s.
+- **Strong vector searches are bounded.** A `strong` vector search decodes and scores at most the index's retained-byte limit of unpublished work by default (1 GB, so writes reach backpressure first). Set `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` to lower it; past it the search fails with retryable `index_backpressure` (`pending_vector_bytes`).
+- **Queue admission tracks real memory.** Each queued index operation now counts its encoded size plus 576 bytes against the 1 GB per-index limit, so a backlog of many small operations, such as deletes, can no longer use several times the limit in memory. Such backlogs reach `index_backpressure` sooner; the 250,000 pending-entity limit is unchanged.
+- **Writers reopen faster with a large backlog.** Opening a writer loads its queued index work one queue at a time instead of decoding every queue at once: a 2.26 GB backlog opened in about 5 s instead of 25 s, with peak memory bounded by the largest queue instead of the whole backlog.
+- **Publication drains in linear time.** Selecting work to publish no longer rescans the whole queue each time, which was 9.4 s of bookkeeping per 250K-operation drain and is now 0.16 s, and a queue retired by an index drop is discarded without being re-read.
+- No storage changes since v0.0.10: upgrading from v0.0.10 needs no migration. Upgrading from v0.0.9 or earlier follows the v0.0.10 notes below.
+- **CLI 3.4.4** defaults to image v0.0.11. Projects that saved a `tag` in `helix.toml` keep using it until you change it.
+</Update>
+
+<Update
+  label="October 2026"
+  rss={{
     title: "Docker v0.0.10 and CLI 3.4.3: asynchronous vector and text indexing",
     description: "Vector and text index work moves off the write path, searches choose strong or eventual consistency, and counts over range indexes with other filters are fixed"
   }}

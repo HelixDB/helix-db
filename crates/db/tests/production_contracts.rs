@@ -35,6 +35,9 @@ use helix_ast::value::{PropertyInput, PropertyValue};
 use helix_planner::{catalog, context, cost, exec, ir, planning, properties, trace};
 use slatedb::object_store::memory::InMemory;
 
+#[path = "production_contracts/pull_paths.rs"]
+mod pull_paths;
+
 fn run_high_stack_contract<F, Fut>(name: &'static str, contract: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -439,8 +442,21 @@ async fn server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget_contrac
     })
     .await
     .expect("a split searched twice reaches the disk tier");
-    let admitted = db.fts_cache_state().await.unwrap().disk_artifact_count;
+    let hydrated = db.fts_cache_state().await.unwrap();
+    let admitted = hydrated.disk_artifact_count;
     assert_eq!(admitted, 1);
+    // The split retained since the first search reads the object store;
+    // the next search reopens it from the published artifact instead.
+    assert_eq!(
+        db.query(search.clone()).await.unwrap(),
+        serde_json::json!({ "ids": [0] })
+    );
+    let state = db.fts_cache_state().await.unwrap();
+    assert_eq!(
+        (state.remote_opens, state.disk_hits),
+        (hydrated.remote_opens, hydrated.disk_hits + 1),
+        "the search after hydration opens the split from disk"
+    );
     db.close().await.expect("server writer closes");
     // Past the one-second grace that protects recently used splits.
     tokio::time::sleep(Duration::from_millis(1100)).await;
@@ -682,24 +698,102 @@ async fn public_execute_boundary_logs_every_executed_step() {
     let logs = QUERY_STEP_LOGS.take().expect("this thread records");
 
     assert_eq!(result.last, Some(ExecutionValue::Count(1)));
-    let steps = logs
-        .iter()
-        .map(|record| {
-            let field = |name: &str| {
-                record
-                    .split(' ')
-                    .find_map(|token| token.strip_prefix(name))
-                    .unwrap_or_else(|| panic!("`{record}` has no `{name}` field"))
-            };
-            field("elapsed_us=")
-                .parse::<u64>()
-                .expect("latency is whole microseconds");
-            (field("op="), field("rows="))
-        })
-        .collect::<Vec<_>>();
+    let steps = |logs: &[String]| {
+        logs.iter()
+            .map(|record| {
+                let field = |name: &str| {
+                    record
+                        .split(' ')
+                        .find_map(|token| token.strip_prefix(name))
+                        .unwrap_or_else(|| panic!("`{record}` has no `{name}` field"))
+                        .to_owned()
+                };
+                field("elapsed_us=")
+                    .parse::<u64>()
+                    .expect("latency is whole microseconds");
+                (field("op="), field("rows="))
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        steps,
-        [("\"mutation()\"", "1"), ("\"count()\"", "0")],
+        steps(&logs),
+        [
+            ("\"mutation()\"".to_owned(), "1".to_owned()),
+            ("\"count()\"".to_owned(), "0".to_owned())
+        ],
+        "{logs:?}"
+    );
+
+    // A label-filtered vector search runs its access and its search as one
+    // step pair: the search ranks the label's ID set, the access builds no
+    // rows, and both steps still log.
+    let operation = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_index_if_not_exists(index::IndexSpec::node_vector(
+                        "Logged",
+                        "embedding",
+                        NonZeroUsize::new(2).expect("dimension is positive"),
+                        index::VectorDistanceMetric::Euclidean,
+                        None::<String>,
+                    )),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .expect("vector index DDL is accepted");
+    await_index_operation_success(
+        &db,
+        operation["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted vector-index operation has an ID"),
+        "logged vector index",
+    )
+    .await;
+    db.query(QueryRequest::write(
+        [[1.0_f32, 0.0], [2.0, 0.0]].into_iter().enumerate().fold(
+            batch::write_batch(),
+            |write, (index, embedding)| {
+                write.var_as(
+                    &format!("embedded{index}"),
+                    traversal::g().add_n(
+                        "Logged",
+                        vec![("embedding", PropertyInput::from(embedding.to_vec()))],
+                    ),
+                )
+            },
+        ),
+    ))
+    .await
+    .expect("embedded nodes commit");
+    QUERY_STEP_LOGS.set(Some(Vec::new()));
+    let searched = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "hits",
+                    traversal::g().n_with_label("Logged").vector_search(
+                        "Logged",
+                        "embedding",
+                        vec![0.0, 0.0],
+                        2,
+                        None,
+                    ),
+                )
+                .returning(["hits"]),
+        ))
+        .await
+        .expect("logged search executes");
+    let logs = QUERY_STEP_LOGS.take().expect("this thread records");
+    assert_eq!(searched["hits"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        steps(&logs),
+        [
+            ("\"source()\"".to_owned(), "0".to_owned()),
+            ("\"vector_search()\"".to_owned(), "2".to_owned())
+        ],
         "{logs:?}"
     );
     db.close().await.unwrap();
@@ -6630,6 +6724,179 @@ async fn ordered_multi_range_intersections_match_explicit_sort_prefixes() {
         assert_eq!(actual, expected);
     }
 
+    db.close().await.unwrap();
+}
+
+#[test]
+fn public_query_boundary_keeps_limits_for_multi_owner_unique_lookups() {
+    run_high_stack_contract(
+        "public-unique-multi-owner-limits",
+        public_query_boundary_keeps_limits_for_multi_owner_unique_lookups_contract,
+    );
+}
+
+/// A unique index bounds only an indexed lookup value. Null equality scans for
+/// owners lacking the property and runtime parameters can bind null or a set,
+/// so limits over those lookups must survive planning. Results before the index
+/// exists are the independent reference.
+async fn public_query_boundary_keeps_limits_for_multi_owner_unique_lookups_contract() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-unique-multi-owner-limits".to_owned(),
+    })
+    .await
+    .expect("unique lookup limit fixture opens");
+    let mut fixture = batch::write_batch();
+    for (name, email, age) in [
+        ("a", Some("a"), 30_i64),
+        ("b", Some("b"), 10),
+        ("c", Some("c"), 20),
+        ("x", None, 50),
+        ("y", None, 51),
+        ("z", None, 52),
+    ] {
+        let mut properties = vec![("age", PropertyInput::from(age))];
+        properties.extend(email.map(|email| ("email", PropertyInput::from(email))));
+        fixture = fixture.var_as(name, traversal::g().add_n("User", properties));
+    }
+    db.query(QueryRequest::write(fixture.returning(Vec::<String>::new())))
+        .await
+        .unwrap();
+
+    let null = || Predicate::eq("email", PropertyValue::Null);
+    let users = |predicate| traversal::g().n_with_label_where("User", predicate);
+    let read = batch::read_batch()
+        .var_as(
+            "null_limited",
+            users(null())
+                .limit(StreamBound::literal(1))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "null_window",
+            users(null())
+                .range(StreamBound::literal(1), StreamBound::literal(3))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "null_ordered",
+            users(null())
+                .order_by("age", traversal::Order::Desc)
+                .values(vec!["age"]),
+        )
+        .var_as("null_count", users(null()).count())
+        .var_as(
+            "param_limited",
+            users(Predicate::eq_param("email", "missing"))
+                .limit(StreamBound::literal(2))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "set_limited",
+            users(Predicate::is_in_param("email", "emails"))
+                .limit(StreamBound::literal(2))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "set_ordered",
+            users(Predicate::is_in_param("email", "emails"))
+                .order_by("age", traversal::Order::Asc)
+                .values(vec!["age"]),
+        )
+        .returning([
+            "null_limited",
+            "null_window",
+            "null_ordered",
+            "null_count",
+            "param_limited",
+            "set_limited",
+            "set_ordered",
+        ]);
+    let request = || {
+        QueryRequest::read(read.clone())
+            .with_parameter_value("missing", QueryValue::Null)
+            .with_parameter_value(
+                "emails",
+                QueryValue::Array(vec![QueryValue::String("a".to_owned()), QueryValue::Null]),
+            )
+    };
+    let ages = |value: &serde_json::Value| {
+        value
+            .as_array()
+            .expect("projected rows are a list")
+            .iter()
+            .map(|row| row["age"].as_i64().expect("age is an integer"))
+            .collect::<Vec<_>>()
+    };
+    let check = |result: &serde_json::Value| {
+        let nulls = [50, 51, 52];
+        let null_limited = ages(&result["null_limited"]);
+        assert_eq!(null_limited.len(), 1, "{result}");
+        assert!(null_limited.iter().all(|age| nulls.contains(age)));
+        assert_eq!(ages(&result["null_window"]).len(), 2, "{result}");
+        assert_eq!(ages(&result["null_ordered"]), vec![52, 51, 50]);
+        assert_eq!(result["null_count"], 3);
+        let param_limited = ages(&result["param_limited"]);
+        assert_eq!(param_limited.len(), 2, "{result}");
+        assert!(param_limited.iter().all(|age| nulls.contains(age)));
+        let set_limited = ages(&result["set_limited"]);
+        assert_eq!(set_limited.len(), 2, "{result}");
+        assert!(set_limited
+            .iter()
+            .all(|age| *age == 30 || nulls.contains(age)));
+        assert_eq!(ages(&result["set_ordered"]), vec![30, 50, 51, 52]);
+    };
+    let reference = db.query(request()).await.unwrap();
+    check(&reference);
+
+    let receipt = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_index_if_not_exists(
+                        index::IndexSpec::node_unique_equality("User", "email"),
+                    ),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .unwrap();
+    await_index_operation_success(
+        &db,
+        receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted unique index operation has an ID"),
+        "unique node equality index",
+    )
+    .await;
+
+    let plan = planning::plan_read_batch(&read, &db.planner_context(Default::default()))
+        .expect("unique lookup batch plans");
+    let unique_lookup = |plan: &exec::ExecAccessPlan| match plan {
+        exec::ExecAccessPlan::Node(node) => matches!(
+            node,
+            exec::ExecNodeAccessPlan::AuthoritativeScan { .. }
+                | exec::ExecNodeAccessPlan::DynamicEquality { .. }
+                | exec::ExecNodeAccessPlan::DynamicMembership { .. }
+        ),
+        exec::ExecAccessPlan::Edge(_) | exec::ExecAccessPlan::Limited(_) => false,
+    };
+    let limited_lookups = plan
+        .steps()
+        .iter()
+        .filter(|step| {
+            matches!(&step.op, exec::ExecOp::Access { plan: access }
+                if matches!(access.as_ref(), exec::ExecAccessPlan::Limited(limited)
+                    if unique_lookup(limited.source())))
+        })
+        .count();
+    // Limit, window end, parameter limit and set limit each keep a read bound.
+    assert_eq!(limited_lookups, 4, "{:?}", plan.steps());
+
+    let indexed = db.query(request()).await.unwrap();
+    check(&indexed);
+    assert_eq!(indexed["null_ordered"], reference["null_ordered"]);
+    assert_eq!(indexed["set_ordered"], reference["set_ordered"]);
     db.close().await.unwrap();
 }
 

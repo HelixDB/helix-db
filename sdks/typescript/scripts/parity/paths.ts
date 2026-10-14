@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 export const packageRoot = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 export const repoRoot = resolve(packageRoot, "..");
 export const workspaceRoot = resolve(repoRoot, "..");
+export const cargoTarget = resolve(workspaceRoot, process.env.CARGO_TARGET_DIR ?? "target");
 export const parityRoot = resolve(repoRoot, "tests/parity");
 export const generatedRoot = resolve(parityRoot, "generated");
 export const rustGeneratedRoot = resolve(generatedRoot, "rust");

@@ -102,6 +102,22 @@ impl StreamBoundExprPlan {
     pub fn expr(&self) -> &Expr {
         self.expr.expr()
     }
+
+    /// Borrow the resolved expression contract for planning and execution.
+    /// Native stream windows accept integer parameters; exposing the common
+    /// expression does not broaden that runtime language profile.
+    ///
+    /// ```
+    /// use helix_ast::expr::Expr;
+    /// use helix_planner::ir::{native, StreamBoundExprPlan};
+    ///
+    /// let bound = StreamBoundExprPlan::new(Expr::param("limit")).unwrap();
+    /// assert!(matches!(bound.expression_plan().resolved(),
+    ///     native::Expression::Parameter(name) if name == "limit"));
+    /// ```
+    pub fn expression_plan(&self) -> &ExprPlan {
+        &self.expr
+    }
 }
 
 impl<'de> Deserialize<'de> for StreamBoundExprPlan {

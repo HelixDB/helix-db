@@ -6,7 +6,6 @@
 use std::ops::Bound;
 
 use bytes::Bytes;
-use slatedb::DbTransaction;
 
 use crate::config::SearchIndexBatchLimits;
 use crate::encoding::v2::keys as index_keys;
@@ -22,7 +21,7 @@ use crate::index_lifecycle::{
 
 /// Runs one bounded metadata cleanup transition.
 pub(super) async fn step_cleanup(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     progress: &TextCleanupProgress,
@@ -89,7 +88,7 @@ impl CleanupLane {
 }
 
 async fn delete_metadata(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     progress: &PrefixScanProgress,

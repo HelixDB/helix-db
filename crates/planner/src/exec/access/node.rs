@@ -2,6 +2,93 @@ use serde::{Deserialize, Serialize};
 
 use crate::{catalog, exec, ir};
 
+/// Closed capability for node access with an owned row cursor. Borrowed fields
+/// keep catalog metadata attached to the selected executable plan.
+#[derive(Debug, Clone, Copy)]
+pub enum ExecNodeCursor<'a> {
+    Empty,
+    AllScan,
+    LabelScan {
+        label: &'a ir::NonEmptyString,
+    },
+    Bitmap {
+        bitmap: &'a exec::ExecNodeBitmapExpr,
+    },
+    Unique {
+        lookup: &'a exec::ExecNodeUniqueOwnerReadPlan,
+        verification: &'a exec::ExecNodeAuthoritativeVerificationPlan,
+    },
+    /// Verified secondary-index ID set, such as an equality-literal union.
+    SecondarySet {
+        set: &'a exec::ExecNodeSecondarySetPlan,
+    },
+    /// Verified node IDs within one range-index range.
+    Range {
+        index: &'a catalog::NodeRangeIndexMeta,
+        key: &'a catalog::ScopedPropertyDirectionKey,
+        range: &'a ir::IndexRange,
+        iteration: ir::RangeScanIteration,
+    },
+}
+
+impl exec::ExecOp {
+    /// Node primitives with an owned, resumable row cursor. This is a physical
+    /// capability proof only: opening the cursor still requires the request's
+    /// snapshot and deferred-mutation visibility barrier.
+    ///
+    /// ```
+    /// use helix_planner::exec;
+    /// let operation = exec::ExecOp::Access {
+    ///     plan: Box::new(exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::AllScan)),
+    /// };
+    /// assert!(matches!(operation.node_cursor_access(), Some(exec::ExecNodeCursor::AllScan)));
+    /// assert!(exec::ExecOp::Noop.node_cursor_access().is_none());
+    /// ```
+    pub fn node_cursor_access(&self) -> Option<ExecNodeCursor<'_>> {
+        let source = match self {
+            Self::KvRead(exec::KvReadPlan::RangeScan {
+                keyspace: exec::ElementKeyspace::NodeProperty,
+                start: exec::KvKeyBound::Unbounded,
+                end: exec::KvKeyBound::Unbounded,
+                limit: None,
+            }) => return Some(ExecNodeCursor::AllScan),
+            Self::Access { plan } => {
+                let exec::ExecAccessPlan::Node(source) = plan.as_ref() else {
+                    return None;
+                };
+                source
+            }
+            _ => return None,
+        };
+        Some(match source {
+            ExecNodeAccessPlan::Empty => ExecNodeCursor::Empty,
+            ExecNodeAccessPlan::AllScan => ExecNodeCursor::AllScan,
+            ExecNodeAccessPlan::LabelScan { label } => ExecNodeCursor::LabelScan { label },
+            ExecNodeAccessPlan::Bitmap { bitmap } => ExecNodeCursor::Bitmap { bitmap },
+            ExecNodeAccessPlan::Unique {
+                lookup,
+                verification,
+            } => ExecNodeCursor::Unique {
+                lookup,
+                verification,
+            },
+            ExecNodeAccessPlan::SecondarySet { set } => ExecNodeCursor::SecondarySet { set },
+            ExecNodeAccessPlan::RangeIndex {
+                index,
+                key,
+                range,
+                iteration,
+            } => ExecNodeCursor::Range {
+                index,
+                key,
+                range,
+                iteration: *iteration,
+            },
+            _ => return None,
+        })
+    }
+}
+
 /// Native executable node access.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

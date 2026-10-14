@@ -229,7 +229,7 @@ pub enum SecondaryIndexValueError {
 pub enum HelixDbError {
     /// Error from the underlying SlateDB storage
     #[error("Storage error: {0}")]
-    Storage(#[from] slatedb::Error),
+    Storage(#[source] slatedb::Error),
 
     /// Error encoding/decoding graph data
     #[error("Encoding error: {0}")]
@@ -246,6 +246,10 @@ pub enum HelixDbError {
     /// A transport-owned monotonic query deadline elapsed.
     #[error("Query execution deadline exceeded")]
     QueryDeadlineExceeded,
+
+    /// Retaining an interpreter buffer would exceed the request's memory budget.
+    #[error("Query memory budget exceeded")]
+    QueryMemoryLimitExceeded,
 
     /// Reader retirement cancelled an admitted read before completion.
     #[error("Query was cancelled because its reader is retiring")]
@@ -626,10 +630,23 @@ impl From<ConfigError> for HelixDbError {
     }
 }
 
+impl From<slatedb::Error> for HelixDbError {
+    fn from(error: slatedb::Error) -> Self {
+        if crate::transaction::is_admission_failure(&error) {
+            Self::QueryMemoryLimitExceeded
+        } else {
+            Self::Storage(error)
+        }
+    }
+}
+
 impl HelixDbError {
     /// Stable machine-readable code for this database failure.
     pub fn error_code(&self) -> error_code::QueryErrorCode {
         match self {
+            Self::Storage(error) if crate::transaction::is_admission_failure(error) => {
+                error_code::QueryErrorCode::QueryMemoryLimitExceeded
+            }
             Self::Storage(error) if error.kind() == ErrorKind::Transaction => {
                 error_code::QueryErrorCode::TransactionConflict
             }
@@ -643,6 +660,7 @@ impl HelixDbError {
             Self::TransactionConflict(_) => error_code::QueryErrorCode::TransactionConflict,
             Self::RequestReadViewChanged => error_code::QueryErrorCode::RequestReadViewChanged,
             Self::QueryDeadlineExceeded => error_code::QueryErrorCode::QueryDeadlineExceeded,
+            Self::QueryMemoryLimitExceeded => error_code::QueryErrorCode::QueryMemoryLimitExceeded,
             Self::QueryCancelledByReaderRetirement => {
                 error_code::QueryErrorCode::QueryCancelledByReaderRetirement
             }
@@ -995,6 +1013,10 @@ mod tests {
             (
                 HelixDbError::QueryDeadlineExceeded,
                 Code::QueryDeadlineExceeded,
+            ),
+            (
+                HelixDbError::QueryMemoryLimitExceeded,
+                Code::QueryMemoryLimitExceeded,
             ),
             (
                 HelixDbError::QueryCancelledByReaderRetirement,

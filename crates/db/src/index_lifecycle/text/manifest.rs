@@ -13,7 +13,6 @@ use std::num::NonZeroU32;
 use std::ops::Bound;
 
 use bytes::Bytes;
-use slatedb::DbTransaction;
 
 use crate::config::{SearchIndexBatchLimits, TextBackfillCompactionLimits};
 use crate::encoding::v2::keys as index_keys;
@@ -49,7 +48,10 @@ impl PreparedArtifactRange {
     /// Comparing the full ordered row sequence prevents an artifact inserted
     /// before the prepared cursor from being skipped. The transaction retains
     /// the range read so a later concurrent insertion conflicts at commit.
-    pub(super) async fn is_current(&self, transaction: &DbTransaction) -> Result<bool> {
+    pub(super) async fn is_current(
+        &self,
+        transaction: &impl crate::transaction::Mutation,
+    ) -> Result<bool> {
         let mut current = transaction
             .scan_prefix(&self.prefix, (self.start.clone(), self.end.clone()))
             .await?;
@@ -127,7 +129,10 @@ impl PreparedManifestPage {
     }
 
     /// Revalidates every source/destination row before staging the closed write set.
-    pub(super) async fn stage(&self, transaction: &DbTransaction) -> Result<bool> {
+    pub(super) async fn stage(
+        &self,
+        transaction: &impl crate::transaction::Mutation,
+    ) -> Result<bool> {
         if !self.range.is_current(transaction).await? {
             return Ok(false);
         }
@@ -148,7 +153,7 @@ impl PreparedManifestPage {
 
 /// Selects and prepares one non-empty contiguous manifest page.
 pub(super) async fn select_page(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     progress: &PrefixScanProgress,

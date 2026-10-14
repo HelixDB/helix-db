@@ -272,6 +272,54 @@ async fn drop_node_removes_storage_indexes_and_incident_edges() {
     assert_eq!(dropped_edge.last, Some(ExecutionValue::Scalars(Vec::new())));
 }
 
+/// A deadline that expires while a row DELETE examines a node's relationships
+/// aborts the statement, whether it is only checking for attached
+/// relationships or detaching them, and the request rollback keeps both.
+#[tokio::test]
+async fn row_delete_deadlines_abort_while_examining_incident_relationships() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "mutation-row-delete-deadline".to_string(),
+    })
+    .await
+    .expect("db opens");
+    let mut seed = ExecutionContext::new(&db, helix_planner::context::ParamBindings::default());
+    let node = seed.row_create_node("N", Vec::new()).await.unwrap();
+    seed.row_create_edge(node, node, "R", Vec::new())
+        .await
+        .unwrap();
+    for detach in [false, true] {
+        let budget = crate::query_resources::Budget::new(1024 * 1024);
+        let mut ctx = ExecutionContext::new(&db, helix_planner::context::ParamBindings::default());
+        ctx.row_memory = Some(budget.clone());
+        ctx.enable_request_write_scope().await.unwrap();
+        let mut targets = DeletionTargets::new(&budget).unwrap();
+        targets
+            .insert(helix_planner::relational::Entity::Node(node))
+            .unwrap();
+        // The per-target check passes; the first per-relationship check fails.
+        ctx.fail_deadline_after(1);
+        let error = ctx.row_delete_entities(targets, detach).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::cypher::Error::Storage(HelixDbError::QueryDeadlineExceeded)
+            ),
+            "detach={detach}: {error:?}"
+        );
+        ctx.abort_request_write_scope();
+        assert_eq!(budget.available(), 1024 * 1024);
+    }
+    assert_eq!(
+        db.cypher(crate::cypher::Request::new(
+            "MATCH (n:N)-[r:R]->(n) RETURN count(r)"
+        ))
+        .await
+        .unwrap()
+        .rows,
+        vec![vec![serde_json::json!(1)]]
+    );
+}
+
 #[tokio::test]
 async fn drop_edge_labeled_preserves_other_labels_between_same_pair() {
     let db = HelixDB::open(HelixDbSource::InMemory {

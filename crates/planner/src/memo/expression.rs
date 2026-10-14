@@ -1,7 +1,7 @@
 //! Validated memo-expression contracts.
 
 use super::children::MemoChildGroups;
-use crate::logical;
+use crate::{digest, logical};
 
 /// Logical expression paired with the ordered memo child groups it references.
 ///
@@ -21,10 +21,21 @@ use crate::logical;
 ///
 /// assert!(memo_expr.children().is_empty());
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct MemoExpression {
     expr: logical::LogicalExpr,
     children: MemoChildGroups,
+    /// The identity digest once computed, since lookup and insertion both
+    /// ask for it (see [`super::expression_digest`]).
+    identity: std::sync::OnceLock<digest::PlanDigest>,
+}
+
+/// The identity digest is a function of the expression and its children, so
+/// it takes no part in equality whether or not it has been computed.
+impl PartialEq for MemoExpression {
+    fn eq(&self, other: &Self) -> bool {
+        self.expr == other.expr && self.children == other.children
+    }
 }
 
 impl MemoExpression {
@@ -36,7 +47,11 @@ impl MemoExpression {
         let expected = expr.memo_children().len();
         let actual = children.len();
         if expected == actual {
-            Ok(Self { expr, children })
+            Ok(Self {
+                expr,
+                children,
+                identity: const { std::sync::OnceLock::new() },
+            })
         } else {
             Err(MemoExpressionArityError { expected, actual })
         }
@@ -88,6 +103,7 @@ impl MemoExpression {
         Self {
             expr,
             children: MemoChildGroups::new(children),
+            identity: const { std::sync::OnceLock::new() },
         }
     }
 
@@ -111,6 +127,7 @@ impl MemoExpression {
         Ok(Self {
             expr,
             children: MemoChildGroups::new(children),
+            identity: const { std::sync::OnceLock::new() },
         })
     }
 
@@ -122,6 +139,17 @@ impl MemoExpression {
     /// Borrow ordered child groups.
     pub const fn children(&self) -> &MemoChildGroups {
         &self.children
+    }
+
+    /// The identity digest, computed by `compute` the first time it is asked
+    /// for.
+    pub(super) fn identity_digest(
+        &self,
+        compute: impl FnOnce(&logical::LogicalExpr, &MemoChildGroups) -> digest::PlanDigest,
+    ) -> digest::PlanDigest {
+        *self
+            .identity
+            .get_or_init(|| compute(&self.expr, &self.children))
     }
 
     /// Consume into the validated expression and child groups.

@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+    Copyright (c) 2015-2023 "Neo Technology,"
+    Network Engine for Objects in Lund AB [http://neotechnology.com]
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+    Attribution Notice under the terms of the Apache License 2.0
+
+    This work was created by the collective efforts of the openCypher community.
+    Without limiting the terms of Section 6, any Derivative Work that is not
+    approved by the public consensus process of the openCypher Implementers Group
+    should not be described as “Cypher” (and Cypher® is a registered trademark of
+    Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+    proposals for change that have been documented or implemented should only be
+    described as "implementation extensions to Cypher" or as "proposed changes to
+    Cypher that are not yet approved by the openCypher community".
+
+-->
+<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+	targetNamespace="http://opencypher.org/grammar"
+	xmlns="http://opencypher.org/grammar"
+	xmlns:rr="http://opencypher.org/railroad"
+	xmlns:oc="http://opencypher.org/opencypher"
+	xmlns:scope="http://opencypher.org/scope"
+	xmlns:ast="http://opencypher.org/syntaxtree"
+	elementFormDefault="qualified">
+
+	<!-- the separately defined attributes are in different namespaces so have 
+		to be in their own xsd files -->
+	<xsd:import namespace="http://opencypher.org/railroad"
+		schemaLocation="ocRailRoad.xsd" />
+
+	<xsd:import namespace="http://opencypher.org/opencypher"
+		schemaLocation="ocLegacy.xsd" />
+
+	<xsd:import namespace="http://opencypher.org/scope"
+		schemaLocation="ocScope.xsd" />
+
+	<xsd:import namespace="http://opencypher.org/syntaxtree"
+		schemaLocation="ocSyntaxTree.xsd" />
+
+	<!-- the global element -->
+	<xsd:element name="grammar" type="Grammar" />
+
+	<!--  the types -->
+	<xsd:complexType name="Grammar">
+		<xsd:sequence>
+			<xsd:choice maxOccurs="unbounded">
+				<xsd:element name="vocabulary" type="Vocabulary" />
+				<xsd:element name="production" type="Production" />
+			</xsd:choice>
+		</xsd:sequence>
+		<xsd:attribute name="language" type="xsd:string"/>
+	</xsd:complexType>
+
+	<xsd:complexType name="Vocabulary">
+		<xsd:attribute name="file" type="xsd:string"/>
+	</xsd:complexType>
+
+	<!-- Production is like Sequence but has an extra element at the beginning, so
+		copy-and-paste rather than extend  -->
+	<xsd:complexType name="Production" mixed="true">
+		<xsd:sequence>
+			<xsd:element name="description" type="xsd:string"
+				minOccurs="0" />
+			<xsd:choice minOccurs="0" maxOccurs="unbounded">
+				<xsd:element name="alt" type="Sequence"/>
+				<xsd:element name="seq" type="Sequence"/>
+				<xsd:element name="literal" type="Literal"/>
+				<xsd:element name="character" type="Character"/>
+				<xsd:element name="non-terminal" type="Non-terminal"/>
+				<xsd:element name="opt" type="Sequence"/>
+				<xsd:element name="repeat" type="Repeat"/>
+			</xsd:choice>
+		</xsd:sequence>
+
+		<xsd:attribute name="name" type="xsd:string"/>
+		<xsd:attribute ref="rr:inline"/>
+		<xsd:attribute ref="rr:skip"/>
+		<xsd:attribute ref="oc:legacy"/>
+		<xsd:attribute ref="scope:rule"/>
+		<xsd:attribute ref="oc:lexer"/>
+
+	</xsd:complexType>
+
+	<xsd:complexType name="Sequence" mixed="true">
+		<xsd:sequence>
+			<xsd:choice minOccurs="0" maxOccurs="unbounded">
+				<xsd:element name="alt" type="Sequence"/>
+				<xsd:element name="seq" type="Sequence"/>
+				<xsd:element name="literal" type="Literal"/>
+				<xsd:element name="character" type="Character"/>
+				<xsd:element name="non-terminal" type="Non-terminal"/>
+				<xsd:element name="opt" type="Sequence"/>
+				<xsd:element name="repeat" type="Repeat"/>
+			</xsd:choice>
+		</xsd:sequence>
+	</xsd:complexType>
+
+	<xsd:complexType name="Repeat">
+		<xsd:complexContent>
+			<xsd:extension base="Sequence">
+				<xsd:attribute name="min" type="xsd:int" default="0"/>
+				<xsd:attribute name="max" type="xsd:int"/>
+			</xsd:extension>
+		</xsd:complexContent>
+	</xsd:complexType>
+
+	<xsd:complexType name="Non-terminal">
+		<xsd:attribute name="ref" type="xsd:string"/>
+		<xsd:attribute ref="rr:title"/>
+		<xsd:attribute ref="ast:entry"/>
+	</xsd:complexType>
+
+	<xsd:complexType name="Literal">
+		<xsd:attribute name="case-sensitive" type="xsd:boolean"
+			default="true"/>
+		<xsd:attribute name="value" type="xsd:string"/>
+	</xsd:complexType>
+
+	<xsd:complexType name="Character">
+		<xsd:sequence>
+			<xsd:element name="except" type="Except"
+				maxOccurs="unbounded" minOccurs="0"/>
+		</xsd:sequence>
+		<xsd:attribute name="set" type="xsd:string"/>
+	</xsd:complexType>
+
+
+	<xsd:complexType name="Except">
+		<xsd:attribute name="literal" type="xsd:string"/>
+		<xsd:attribute name="codePoint" type="xsd:int"/>
+		<xsd:attribute name="set" type="xsd:string"/>
+	</xsd:complexType>
+
+
+
+
+</xsd:schema>

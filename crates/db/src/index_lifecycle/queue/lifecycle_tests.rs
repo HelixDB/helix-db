@@ -2628,14 +2628,16 @@ async fn a_retry_or_abort_committed_after_a_blocker_repair_reserves_fails_the_re
             .unwrap()
             .into_components();
         let entity = crate::index_lifecycle::graph_mutation::GraphEntity::node(invalid);
-        let before = crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::decode(
-            transaction
-                .get(entity.property_key(scope))
-                .await
-                .unwrap()
-                .expect("the blocker's row exists"),
-        )
-        .unwrap();
+        let before =
+            crate::index_lifecycle::graph_mutation::CanonicalPropertyRow::decode_with_budget(
+                transaction
+                    .get(entity.property_key(scope))
+                    .await
+                    .unwrap()
+                    .expect("the blocker's row exists"),
+                None,
+            )
+            .unwrap();
         let crate::index_lifecycle::graph_mutation::PropertyEditOutcome::Changed(transition) =
             crate::index_lifecycle::graph_mutation::GraphMutationTransition::edit(
                 scope,

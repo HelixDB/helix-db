@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.opencypher</groupId>
+    <artifactId>openCypher</artifactId>
+    <version>1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>tck</artifactId>
+  <name>openCypher TCK Features and Graphs</name>
+  <url>http://opencypher.org</url>
+  <description>
+    openCypher Technology Compatibility Kit (TCK)
+
+    A test suite to verify conformance to the openCypher standard graph query language.
+    The tests are written in Gherkin and compatible with Cucumber.
+  </description>
+
+  <properties>
+    <project.rootdir>${project.basedir}/..</project.rootdir>
+  </properties>
+
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>http://www.apache.org/licenses/LICENSE-2.0</url>
+    </license>
+  </licenses>
+
+  <build>
+    <resources>
+      <resource>
+        <directory>features</directory>
+        <includes>
+          <include>**/*.feature</include>
+        </includes>
+        <targetPath>features</targetPath>
+      </resource>
+      <resource>
+        <directory>graphs</directory>
+        <includes>
+          <include>**/*.cypher</include>
+          <include>**/*.json</include>
+        </includes>
+        <targetPath>graphs</targetPath>
+      </resource>
+    </resources>
+  </build>
+
+</project>

@@ -33,7 +33,7 @@ pub(super) fn aggregate_payload_from_ast(
         } => NativeTerminalRoot::Terminal(NativeTerminalOp::new(
             input.as_ref(),
             NativeTerminalPayload::Aggregate(ir::AggregatePlan::AggregateBy {
-                function: function.clone(),
+                function: *function,
                 property: super::super::super::names::non_empty(
                     property.as_str(),
                     ir::NameField::Property,

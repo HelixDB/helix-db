@@ -269,7 +269,8 @@ fn predicate_literals_and_parameter_values_never_reach_diagnostics() {
             .with_query_value(
                 name("payload_parameter"),
                 QueryValue::String(QUERY_SECRET.to_string()),
-            ),
+            )
+            .into(),
         ..context::PlannerContext::default()
     };
     let batch = read_batch()

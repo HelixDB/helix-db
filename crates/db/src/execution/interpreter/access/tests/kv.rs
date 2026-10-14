@@ -216,3 +216,5 @@ fn search_limits_tighten_search_k() {
     assert_eq!(limited_search_k(3, properties::PositiveUsize::new(4)), 3);
     assert_eq!(limited_search_k(7, None), 7);
 }
+
+mod cursor_views;

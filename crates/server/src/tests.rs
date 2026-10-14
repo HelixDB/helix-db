@@ -442,7 +442,7 @@ async fn post_query(router: axum::Router, request: &query::QueryRequest) -> serd
             Request::post("/v2/query")
                 .header("content-type", "application/json")
                 .header("x-helix-await-durable", is_write.to_string())
-                .body(Body::from(sonic_rs::to_vec(request).unwrap()))
+                .body(Body::from(simd_json::to_vec(request).unwrap()))
                 .unwrap(),
         )
         .await

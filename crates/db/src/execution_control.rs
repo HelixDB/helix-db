@@ -142,6 +142,9 @@ impl ExecutionControl {
         F: Future<Output = Result<T>>,
     {
         self.check()?;
+        // Wrapping layers move a pointer rather than staging copies of the
+        // work's state on the stack.
+        let future = Box::pin(future);
         let execution = async {
             let Some(deadline) = self.deadline else {
                 return future.await;

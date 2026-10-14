@@ -574,6 +574,21 @@ impl RestrictedVectorCandidates {
         }
     }
 
+    /// Takes an already exact ID set, such as an index bitmap, under the same
+    /// unique-candidate limit as [`Self::from_ids`], without rebuilding it.
+    pub(crate) fn from_bitmap(ids: RoaringTreemap) -> Result<Self, HelixDbError> {
+        if ids.len() > MAX_RESTRICTED_CANDIDATES {
+            return Err(HelixDbError::Query(format!(
+                "restricted vector search accepts at most {MAX_RESTRICTED_CANDIDATES} unique candidates"
+            )));
+        }
+        if ids.is_empty() {
+            Ok(Self::Empty)
+        } else {
+            Ok(Self::NonEmpty(NonEmptyCandidateSet { ids }))
+        }
+    }
+
     /// Tests authoritative membership.
     pub(crate) fn contains(&self, node_id: NodeId) -> bool {
         match self {

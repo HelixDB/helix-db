@@ -1,8 +1,10 @@
+use helix_ast_arena_derive::ArenaMirror;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::traversal::{AstNode, MutationMode, ReadOnly, Traversal, TraversalState};
+use crate::arena::ArenaDeserialize;
+use crate::traversal::{ArenaAstNode, AstNode, MutationMode, ReadOnly, Traversal, TraversalState};
 /// Condition for conditional batch entries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchCondition {
     /// Variable is not empty.
@@ -16,7 +18,7 @@ pub enum BatchCondition {
 }
 
 /// A named batch query.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 pub struct NamedQuery {
     /// Variable name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29,7 +31,7 @@ pub struct NamedQuery {
 }
 
 /// Batch entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchEntry {
     /// Single query.
@@ -44,7 +46,8 @@ pub enum BatchEntry {
 }
 
 /// Read-only query batch.
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, ArenaMirror)]
+#[arena(manual_deserialize)]
 pub struct ReadBatch {
     /// Batch entries in execution order.
     entries: Vec<BatchEntry>,
@@ -77,7 +80,7 @@ impl std::fmt::Display for ReadBatchError {
 
 impl std::error::Error for ReadBatchError {}
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ArenaMirror)]
 struct RawReadBatch {
     entries: Vec<BatchEntry>,
     #[serde(default)]
@@ -193,8 +196,60 @@ fn validate_read_entries(entries: &[BatchEntry], path: &str) -> Result<(), ReadB
         })
 }
 
+impl<'a> ArenaReadBatch<'a> {
+    /// [`ReadBatch::try_from_parts`] for arena parts: every query root,
+    /// including nested `for_each` bodies and branch traversals, is checked
+    /// before the batch becomes representable.
+    fn try_from_parts(
+        entries: &'a [ArenaBatchEntry<'a>],
+        returns: &'a [&'a str],
+    ) -> Result<Self, ReadBatchError> {
+        validate_arena_read_entries(entries, "entries")?;
+        Ok(Self { entries, returns })
+    }
+
+    /// Batch entries in execution order.
+    pub fn entries(&self) -> &'a [ArenaBatchEntry<'a>] {
+        self.entries
+    }
+
+    /// Variables returned by this batch.
+    pub fn returns(&self) -> &'a [&'a str] {
+        self.returns
+    }
+}
+
+/// [`validate_read_entries`] over arena entries, with the same paths.
+fn validate_arena_read_entries(
+    entries: &[ArenaBatchEntry<'_>],
+    path: &str,
+) -> Result<(), ReadBatchError> {
+    entries
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, entry)| match entry {
+            ArenaBatchEntry::Query(query) if query.root.is_read_only() => Ok(()),
+            ArenaBatchEntry::Query(_) => Err(ReadBatchError::mutation(format!("{path}[{index}]"))),
+            ArenaBatchEntry::ForEach { body, .. } => {
+                validate_arena_read_entries(body, &format!("{path}[{index}].for_each"))
+            }
+        })
+}
+
+/// The arena counterpart of `ReadBatch`'s `Deserialize`: the raw batch, then
+/// the read-only check.
+impl<'a> ArenaDeserialize<'a> for ArenaReadBatch<'a> {
+    fn deserialize_in<'de, D: Deserializer<'de>>(
+        bump: &'a crate::arena::Bump,
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        let raw = ArenaRawReadBatch::deserialize_in(bump, deserializer)?;
+        Self::try_from_parts(raw.entries, raw.returns).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Write-capable query batch.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, ArenaMirror)]
 pub struct WriteBatch {
     /// Batch entries in execution order.
     pub entries: Vec<BatchEntry>,
@@ -259,7 +314,7 @@ impl WriteBatch {
 }
 
 /// Batch query payload.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchQuery {
     /// Read-only batch.

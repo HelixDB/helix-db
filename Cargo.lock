@@ -1270,6 +1270,7 @@ dependencies = [
  "foyer",
  "futures",
  "helix-ast",
+ "helix-cypher",
  "helix-db-testkit",
  "helix-metrics",
  "helix-planner",
@@ -1281,6 +1282,7 @@ dependencies = [
  "object_store 0.12.5",
  "parking_lot",
  "parquet",
+ "pin-project-lite",
  "proptest",
  "rand 0.10.2",
  "range-cache",
@@ -1291,10 +1293,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "simd-json",
  "siphasher",
  "slatedb",
  "slatedb-common",
- "sonic-rs",
  "stable_deref_trait",
  "tantivy",
  "tempfile",
@@ -1562,18 +1564,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "faststr"
-version = "0.2.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ca7d44d22004409a61c393afb3369c8f7bb74abcae49fe249ee01dcc3002113"
-dependencies = [
- "bytes",
- "rkyv",
- "serde",
- "simdutf8",
-]
-
-[[package]]
 name = "figment"
 version = "0.10.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1619,6 +1609,15 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "miniz_oxide",
  "zlib-rs",
+]
+
+[[package]]
+name = "float-cmp"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b09cf3155332e944990140d967ff5eceb70df778b34f77d8075db46e4704e6d8"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -1946,6 +1945,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gherkin"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e2c0d8c632f8a251ce9a8198079b1022adc586ff4e3d33e18debd40eb463b31"
+dependencies = [
+ "heck 0.5.0",
+ "peg",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+ "textwrap",
+ "thiserror 2.0.19",
+ "typed-builder",
+]
+
+[[package]]
 name = "gimli"
 version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2012,6 +2028,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "halfbrown"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c7ed2f2edad8a14c8186b847909a41fbb9c3eafa44f88bd891114ed5019da09"
+dependencies = [
+ "hashbrown 0.16.1",
+ "serde",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2064,14 +2090,40 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "helix-ast"
 version = "0.1.0"
 dependencies = [
+ "bumpalo",
  "chrono",
+ "helix-ast-arena-derive",
  "serde",
- "sonic-rs",
+ "serde_json",
+ "simd-json",
+]
+
+[[package]]
+name = "helix-ast-arena-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "helix-ast-bench"
+version = "0.1.0"
+dependencies = [
+ "backtrace",
+ "divan",
+ "helix-ast",
+ "helix-planner",
+ "libc",
+ "mimalloc",
+ "serde",
+ "simd-json",
 ]
 
 [[package]]
 name = "helix-cli"
-version = "3.4.3"
+version = "3.5.1"
 dependencies = [
  "assert_cmd",
  "base64",
@@ -2105,6 +2157,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "helix-cypher"
+version = "0.1.0"
+dependencies = [
+ "helix-ast",
+ "helix-planner",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "helix-db"
 version = "3.0.0"
 dependencies = [
@@ -2116,7 +2180,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
- "sonic-rs",
+ "simd-json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -2180,6 +2244,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "helix-opencypher-tck"
+version = "0.1.0"
+dependencies = [
+ "db",
+ "futures",
+ "gherkin",
+ "helix-ast",
+ "helix-cypher",
+ "helix-planner",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "helix-planner"
 version = "0.1.0"
 dependencies = [
@@ -2204,7 +2285,7 @@ dependencies = [
  "helix-ast",
  "helix-graph-algorithms",
  "serde_json",
- "sonic-rs",
+ "simd-json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -2753,6 +2834,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2915,6 +3005,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -3393,6 +3492,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "peg"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f76678828272f177ac33b7e2ac2e3e73cc6c1cd1e3e387928aa69562fa51367"
+dependencies = [
+ "peg-macros",
+ "peg-runtime",
+]
+
+[[package]]
+name = "peg-macros"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "636d60acf97633e48d266d7415a9355d4389cea327a193f87df395d88cd2b14d"
+dependencies = [
+ "peg-runtime",
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "peg-runtime"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9555b1514d2d99d78150d3c799d4c357a3e2c2a8062cd108e93a06d9057629c5"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3600,7 +3726,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -3621,7 +3747,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4567,11 +4693,13 @@ dependencies = [
  "axum",
  "db",
  "helix-ast",
+ "helix-cypher",
  "helix-db",
  "helix-db-testkit",
  "helix-metrics",
  "helix-planner",
  "libc",
+ "mimalloc",
  "object_store 0.14.1",
  "prost",
  "prost-build",
@@ -4579,8 +4707,8 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "simd-json",
  "slatedb",
- "sonic-rs",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -4649,6 +4777,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
+name = "simd-json"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ebe141eb4a23ecc4d5de93fa5b139ac65dc07c38037a2fe9a8fb7c9d36bd832"
+dependencies = [
+ "halfbrown",
+ "ref-cast",
+ "serde",
+ "serde_json",
+ "simdutf8",
+ "value-trait",
+]
+
+[[package]]
 name = "simd_cesu8"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4694,7 +4836,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 [[package]]
 name = "slatedb"
 version = "0.16.0"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=50c063327b826c2c018c664171fc1ada5dc3096d#50c063327b826c2c018c664171fc1ada5dc3096d"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd#2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd"
 dependencies = [
  "ahash",
  "async-channel",
@@ -4740,7 +4882,7 @@ dependencies = [
 [[package]]
 name = "slatedb-common"
 version = "0.16.0"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=50c063327b826c2c018c664171fc1ada5dc3096d#50c063327b826c2c018c664171fc1ada5dc3096d"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd#2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd"
 dependencies = [
  "chrono",
  "log",
@@ -4755,7 +4897,7 @@ dependencies = [
 [[package]]
 name = "slatedb-txn-obj"
 version = "0.16.0"
-source = "git+https://github.com/HelixDB/slatedb.git?rev=50c063327b826c2c018c664171fc1ada5dc3096d#50c063327b826c2c018c664171fc1ada5dc3096d"
+source = "git+https://github.com/HelixDB/slatedb.git?rev=2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd#2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4800,45 +4942,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "sonic-number"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3775c3390edf958191f1ab1e8c5c188907feebd0f3ce1604cb621f72961dbf32"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
-name = "sonic-rs"
-version = "0.5.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d971cc77a245ccf1756dbd1a87c3e7f709c0191464096510d43eec056d0f2c4f"
-dependencies = [
- "ahash",
- "bumpalo",
- "bytes",
- "cfg-if",
- "faststr",
- "itoa",
- "ref-cast",
- "serde",
- "simdutf8",
- "sonic-number",
- "sonic-simd",
- "thiserror 2.0.19",
- "zmij",
-]
-
-[[package]]
-name = "sonic-simd"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f99e664ecd2d85a68c87e3c7a3cfe691f647ea9e835de984aba4d54a41f817d4"
-dependencies = [
- "cfg-if",
 ]
 
 [[package]]
@@ -5637,6 +5740,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-builder"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31aa81521b70f94402501d848ccc0ecaa8f93c8eb6999eb9747e72287757ffda"
+dependencies = [
+ "typed-builder-macro",
+]
+
+[[package]]
+name = "typed-builder-macro"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "076a02dc54dd46795c2e9c8282ed40bcfb1e22747e955de9389a1de28190fb26"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5916,6 +6039,18 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "value-trait"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3f4b4a98dfe54bc9ed3641af7ffcb837240269627dbd5cb047d13daa39736cc"
+dependencies = [
+ "float-cmp",
+ "halfbrown",
+ "itoa",
+ "ryu",
+]
 
 [[package]]
 name = "version_check"

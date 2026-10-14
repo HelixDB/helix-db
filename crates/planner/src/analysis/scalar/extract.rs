@@ -3,7 +3,7 @@
 use helix_ast::expr::{CompareOp, Expr, Predicate};
 use helix_ast::value::PropertyValue;
 
-use super::values::literal_collection_values;
+use super::values::LiteralCollection;
 use crate::ir::{BoundInclusivity, RangeIndexLiteral};
 
 /// Extract a finite, reflexive literal collection from a property `IN` predicate.
@@ -11,7 +11,15 @@ use crate::ir::{BoundInclusivity, RangeIndexLiteral};
 /// The returned values are deduplicated and preserve first-seen order. Dynamic
 /// collections, non-collection literals, and collections containing non-reflexive
 /// float values return `None`.
+#[cfg(test)]
 pub(super) fn literal_in_values(predicate: &Predicate) -> Option<(String, Vec<PropertyValue>)> {
+    let (property, values) = literal_in_collection(predicate)?;
+    Some((property.to_owned(), values.owned_values()))
+}
+
+pub(super) fn literal_in_collection(
+    predicate: &Predicate,
+) -> Option<(&str, LiteralCollection<'_>)> {
     let Predicate::IsIn {
         value: Expr::Property(property),
         values: Expr::Constant(values),
@@ -19,24 +27,20 @@ pub(super) fn literal_in_values(predicate: &Predicate) -> Option<(String, Vec<Pr
     else {
         return None;
     };
-    literal_collection_values(values).map(|values| (property.clone(), values))
+    LiteralCollection::new(values).map(|values| (property.as_str(), values))
 }
 
 pub(super) fn nullability_constraint(
     predicate: &Predicate,
-) -> Option<(String, NullabilityConstraint)> {
+) -> Option<(&str, NullabilityConstraint)> {
     match predicate {
-        Predicate::IsNull { property } => {
-            Some((property.clone(), NullabilityConstraint::NullOrMissing))
-        }
-        Predicate::IsNotNull { property } => {
-            Some((property.clone(), NullabilityConstraint::NonNull))
-        }
+        Predicate::IsNull { property } => Some((property, NullabilityConstraint::NullOrMissing)),
+        Predicate::IsNotNull { property } => Some((property, NullabilityConstraint::NonNull)),
         _ => None,
     }
 }
 
-pub(super) fn equality_literal(predicate: &Predicate) -> Option<(String, PropertyValue)> {
+pub(super) fn equality_literal(predicate: &Predicate) -> Option<(&str, PropertyValue)> {
     match predicate {
         Predicate::Eq { left, right }
         | Predicate::Compare {
@@ -48,7 +52,7 @@ pub(super) fn equality_literal(predicate: &Predicate) -> Option<(String, Propert
     }
 }
 
-pub(super) fn inequality_literal(predicate: &Predicate) -> Option<(String, PropertyValue)> {
+pub(super) fn inequality_literal(predicate: &Predicate) -> Option<(&str, PropertyValue)> {
     match predicate {
         Predicate::Neq { left, right }
         | Predicate::Compare {
@@ -62,7 +66,7 @@ pub(super) fn inequality_literal(predicate: &Predicate) -> Option<(String, Prope
 
 pub(super) fn range_bound_literal(
     predicate: &Predicate,
-) -> Option<(String, BoundKind, LiteralBound)> {
+) -> Option<(&str, BoundKind, LiteralBound)> {
     match predicate {
         Predicate::Gt { left, right }
         | Predicate::Compare {
@@ -146,7 +150,7 @@ pub(super) fn incomparable_range_literal(predicate: &Predicate) -> bool {
 
 pub(super) fn between_literal_bounds(
     predicate: &Predicate,
-) -> Option<(String, LiteralBound, LiteralBound)> {
+) -> Option<(&str, LiteralBound, LiteralBound)> {
     let Predicate::Between { value, min, max } = predicate else {
         return None;
     };
@@ -155,32 +159,30 @@ pub(super) fn between_literal_bounds(
         return None;
     };
     Some((
-        property.clone(),
+        property,
         LiteralBound::new(min.clone(), BoundInclusivity::Inclusive)?,
         LiteralBound::new(max.clone(), BoundInclusivity::Inclusive)?,
     ))
 }
 
-fn property_literal_value(left: &Expr, right: &Expr) -> Option<(String, PropertyValue)> {
+fn property_literal_value<'p>(left: &'p Expr, right: &'p Expr) -> Option<(&'p str, PropertyValue)> {
     match (left, right) {
         (Expr::Property(property), Expr::Constant(value))
-        | (Expr::Constant(value), Expr::Property(property)) => {
-            Some((property.clone(), value.clone()))
-        }
+        | (Expr::Constant(value), Expr::Property(property)) => Some((property, value.clone())),
         _ => None,
     }
 }
 
-fn range_bound_from_compare(
-    left: &Expr,
-    right: &Expr,
+fn range_bound_from_compare<'p>(
+    left: &'p Expr,
+    right: &'p Expr,
     left_property_bound: PropertyBoundSide,
     inclusivity: BoundInclusivity,
-) -> Option<(String, BoundKind, LiteralBound)> {
+) -> Option<(&'p str, BoundKind, LiteralBound)> {
     if let (Expr::Property(property), Expr::Constant(value)) = (left, right) {
         let bound = LiteralBound::new(value.clone(), inclusivity)?;
         return Some((
-            property.clone(),
+            property,
             match left_property_bound {
                 PropertyBoundSide::LowerWhenLeft => BoundKind::Lower,
                 PropertyBoundSide::UpperWhenLeft => BoundKind::Upper,
@@ -191,7 +193,7 @@ fn range_bound_from_compare(
     if let (Expr::Constant(value), Expr::Property(property)) = (left, right) {
         let bound = LiteralBound::new(value.clone(), inclusivity)?;
         return Some((
-            property.clone(),
+            property,
             match left_property_bound {
                 PropertyBoundSide::LowerWhenLeft => BoundKind::Upper,
                 PropertyBoundSide::UpperWhenLeft => BoundKind::Lower,

@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { workspaceRoot } from "./paths.js";
 
-const command = process.platform === "win32" ? "python" : "python3";
+const command = process.env.HELIX_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
 const script = join(workspaceRoot, "sdks", "python", "scripts", "generate_parity_fixtures.py");
 const result = spawnSync(command, [script], {
   cwd: join(workspaceRoot, "sdks", "python"),

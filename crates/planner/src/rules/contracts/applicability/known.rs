@@ -7,6 +7,10 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
     use logical::LogicalExprKind as Kind;
     use logical::PureLogicalOpKind as PureKind;
     match id {
+        KnownRuleId::SeedRows => RuleApplicability::only(Kind::Rows),
+        KnownRuleId::SeedGraphPattern | KnownRuleId::GraphPatternOrder => {
+            RuleApplicability::only(Kind::GraphPattern)
+        }
         KnownRuleId::FilterPushdown => RuleApplicability::only(Kind::FilterPushdown),
         KnownRuleId::PurePipelineSimplification => {
             RuleApplicability::pure_pipeline_local_simplification()

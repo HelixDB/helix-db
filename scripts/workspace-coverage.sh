@@ -6,7 +6,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHARD="${1:-}"
 case "$SHARD" in
     planner)
-        COVERAGE_ARGS=(-p helix-planner --all-targets)
+        # The relational planner is tested through the Cypher frontend that
+        # drives it, so that crate's tests count toward planner coverage.
+        COVERAGE_ARGS=(-p helix-planner -p helix-cypher --all-targets)
         SCOPE_CONFIG='{
             "planner": {
                 "needle": "/crates/planner/src/",

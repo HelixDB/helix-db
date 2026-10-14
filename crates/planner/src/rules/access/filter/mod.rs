@@ -14,6 +14,7 @@ pub use rules::{
 };
 
 pub(crate) use self::diagnostics::{missing_index_candidates, CandidateIndexKind};
+pub(crate) use index::with_run_cache as with_index_rewrite_cache;
 pub(in crate::rules) use index::{
     index_access_filter, index_membership_filter, label_domain_has_candidate,
     required_index_access_filter,

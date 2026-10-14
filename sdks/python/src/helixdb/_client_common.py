@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Mapping
 from urllib.parse import urljoin, urlparse
 
@@ -11,6 +12,68 @@ from .dsl import QueryRequest
 
 DEFAULT_URL = "http://localhost:6969"
 QUERY_PATH = "/v2/query"
+DATABASE_ID_HEADER = "x-helix-database-id"
+
+
+class CypherRoute(Enum):
+    """One Cypher operation: its HTTP path and the matching embedded binding.
+
+    >>> CypherRoute.EXPLAIN.path, CypherRoute.EXPLAIN.native_method
+    ('/v2/cypher/explain', 'explain_cypher_json')
+    """
+
+    EXECUTE = ("/v2/cypher", "cypher_json", "rebuild native bindings with Cypher support")
+    EXPLAIN = (
+        "/v2/cypher/explain",
+        "explain_cypher_json",
+        "rebuild native bindings with Cypher explain support",
+    )
+
+    def __init__(self, path: str, native_method: str, unavailable: str) -> None:
+        self.path = path
+        self.native_method = native_method
+        self.unavailable = unavailable
+
+    def decode(self, status: int, response_body: bytes) -> Any:
+        """Decode a successful server response for this operation.
+
+        A successful warm request is answered with 204 No Content: execution
+        then yields an empty rectangular result and explain yields ``None``.
+
+        >>> CypherRoute.EXECUTE.decode(204, b"")
+        {'columns': [], 'rows': []}
+        >>> CypherRoute.EXPLAIN.decode(204, b"") is None
+        True
+        >>> CypherRoute.EXPLAIN.decode(200, b'{"plan": {}}')
+        {'plan': {}}
+        """
+
+        if status == 204:
+            return {"columns": [], "rows": []} if self is CypherRoute.EXECUTE else None
+        return decode_response(response_body)
+
+
+def serialize_cypher(
+    query: str, parameters: dict[str, Any] | None, query_name: str | None
+) -> bytes:
+    """Serialize the additive Cypher request; lossless envelopes remain explicit."""
+    if not isinstance(query, str):
+        raise HelixError.invalid_request("Cypher query must be a string")
+    if parameters is not None and not isinstance(parameters, dict):
+        raise HelixError.invalid_request("Cypher parameters must be a dictionary")
+    if query_name is not None and not isinstance(query_name, str):
+        raise HelixError.invalid_request("Cypher query_name must be a string")
+    try:
+        return json.dumps(
+            {
+                "query": query,
+                "parameters": {} if parameters is None else parameters,
+                "query_name": query_name,
+            },
+            allow_nan=False,
+        ).encode("utf-8")
+    except (ValueError, TypeError) as exc:
+        raise HelixError.serialization(str(exc), cause=exc) from exc
 
 
 class HelixError(Exception):
@@ -28,6 +91,7 @@ class HelixError(Exception):
         cause: BaseException | None = None,
     ) -> None:
         super().__init__(message)
+        self.server_details: Any = None
         self.kind = kind
         self.details = details
         self.code = code
@@ -207,18 +271,68 @@ def prepare_request(
     api_key: str | None,
     headers: Mapping[str, str],
     query: QueryRequest,
+    database_id: str | None = None,
 ) -> PreparedRequest:
     """Serialize a query and resolve the common HelixDB HTTP request."""
 
-    body = serialize_query(query)
+    return _prepare(base_url, QUERY_PATH, api_key, database_id, headers, serialize_query(query))
+
+
+def prepare_cypher_request(
+    base_url: str,
+    api_key: str | None,
+    database_id: str | None,
+    route: CypherRoute,
+    body: bytes,
+    options: ExecuteOptions,
+) -> PreparedRequest:
+    """Resolve one serialized Cypher body into its server request.
+
+    Execute and explain share the body, routing options, and client headers;
+    only the path differs.
+
+    >>> prepared = prepare_cypher_request(
+    ...     "http://localhost:6969/base",
+    ...     "key",
+    ...     "db-1",
+    ...     CypherRoute.EXPLAIN,
+    ...     serialize_cypher("RETURN 1", None, None),
+    ...     ExecuteOptions(warm_only=True),
+    ... )
+    >>> prepared.url
+    'http://localhost:6969/v2/cypher/explain'
+    >>> prepared.header_map()["x-helix-database-id"], prepared.header_map()["x-helix-warm"]
+    ('db-1', 'true')
+    """
+
+    return _prepare(
+        base_url,
+        route.path,
+        api_key,
+        database_id,
+        options.apply({"Content-Type": "application/json"}),
+        body,
+    )
+
+
+def _prepare(
+    base_url: str,
+    path: str,
+    api_key: str | None,
+    database_id: str | None,
+    headers: Mapping[str, str],
+    body: bytes,
+) -> PreparedRequest:
     try:
-        url = urljoin(base_url.rstrip("/") + "/", QUERY_PATH)
+        url = urljoin(base_url.rstrip("/") + "/", path)
     except Exception as exc:
         raise HelixError.invalid_url(str(exc), cause=exc) from exc
 
     prepared_headers = dict(headers)
     if api_key is not None:
         prepared_headers["Authorization"] = f"Bearer {api_key}"
+    if database_id is not None:
+        prepared_headers[DATABASE_ID_HEADER] = database_id
     return PreparedRequest(url, tuple(prepared_headers.items()), body)
 
 
@@ -262,12 +376,14 @@ def remote_error(
         retryable = payload.get("retryable")
         explicit_retryable = retryable if isinstance(retryable, bool) else None
         if isinstance(error, str) and isinstance(msg, str):
-            return HelixError.remote(
+            result = HelixError.remote(
                 msg,
                 code=error,
                 status_code=status_code,
                 retryable=explicit_retryable,
             )
+            result.server_details = payload.get("details")
+            return result
         if isinstance(error, str):
             return HelixError.remote(
                 error,
@@ -279,7 +395,7 @@ def remote_error(
 
 
 def parse_execute_options(options: Mapping[str, Any], *, embedded: bool) -> ExecuteOptions:
-    """Validate ``execute`` keyword options without changing caller-owned state."""
+    """Validate ``execute`` and Cypher keyword options without changing caller-owned state."""
 
     if embedded and options:
         unknown = ", ".join(sorted(options))

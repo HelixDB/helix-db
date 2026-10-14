@@ -864,8 +864,6 @@ mod tests {
 
     #[tokio::test]
     async fn hydration_sorts_targets_before_dividing_the_budget() {
-        const ENTRY_OVERHEAD_BYTES: u64 = 64;
-
         let db = raw_db("vector-cache-fair-hydration").await;
         let scope = DataScope::LegacyUnscoped;
         let low_physical_id = 101;
@@ -890,7 +888,9 @@ mod tests {
         .to_bytes();
         let value = Bytes::from_static(b"equal-size");
         assert_eq!(low_key.len(), high_key.len());
-        let row_bytes = u64::try_from(low_key.len() + value.len()).unwrap() + ENTRY_OVERHEAD_BYTES;
+        let row_bytes = super::super::store::isolated_upper_row_admission_bytes(
+            u64::try_from(value.len()).unwrap(),
+        );
         let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
         transaction.put(low_key, value.clone()).unwrap();
         transaction.put(high_key, value.clone()).unwrap();

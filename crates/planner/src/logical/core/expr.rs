@@ -22,6 +22,10 @@ use crate::properties;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogicalExpr {
+    /// Validated common graph-and-row pipeline.
+    Rows(std::sync::Arc<crate::relational::Query>),
+    /// Resolved graph conjunction with bounded traversal-order alternatives.
+    GraphPattern(crate::relational::GraphPatternOrder),
     /// Side-effect-free expression.
     Pure(PureLogicalOp),
     /// Variable source injection with executable payload.
@@ -79,6 +83,10 @@ pub enum LogicalExpr {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogicalExprKind {
+    /// Common row pipeline.
+    Rows,
+    /// Common graph pattern.
+    GraphPattern,
     /// `LogicalExpr::Pure`.
     Pure,
     /// `LogicalExpr::VariableSource`.
@@ -129,7 +137,9 @@ pub enum LogicalExprKind {
 
 impl LogicalExprKind {
     /// All top-level logical expression families.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 25] = [
+        Self::Rows,
+        Self::GraphPattern,
         Self::Pure,
         Self::VariableSource,
         Self::PurePipeline,
@@ -160,6 +170,8 @@ impl LogicalExpr {
     /// Return the top-level expression family.
     pub const fn kind(&self) -> LogicalExprKind {
         match self {
+            Self::Rows(_) => LogicalExprKind::Rows,
+            Self::GraphPattern(_) => LogicalExprKind::GraphPattern,
             Self::Pure(_) => LogicalExprKind::Pure,
             Self::VariableSource(_) => LogicalExprKind::VariableSource,
             Self::PurePipeline(_) => LogicalExprKind::PurePipeline,
@@ -189,7 +201,12 @@ impl LogicalExpr {
     /// Return the expression effect kind.
     pub fn effect(&self) -> properties::EffectKind {
         match self {
-            Self::Pure(_)
+            Self::Rows(query) => match query.effect() {
+                crate::relational::Effect::Read => properties::EffectKind::Pure,
+                crate::relational::Effect::Write => properties::EffectKind::Barrier,
+            },
+            Self::GraphPattern(_)
+            | Self::Pure(_)
             | Self::VariableSource(_)
             | Self::PurePipeline(_)
             | Self::FilterChain(_)

@@ -13,99 +13,135 @@ use futures::future;
 
 use super::*;
 
+pub(super) mod fusion;
+
 impl<'db> ExecutionContext<'db> {
-    pub(super) async fn execute_steps(
-        &mut self,
-        steps: &[exec::ExecStep],
+    /// Nested plans recurse through here, so the stage loop's state is boxed
+    /// and each level holds only pointers to its stages and steps. Each level
+    /// pairs its own fused vector searches (see [`fusion`]).
+    pub(super) fn execute_steps<'a>(
+        &'a mut self,
+        steps: &'a [exec::ExecStep],
         order: exec::ExecExecutionOrder,
         root: exec::ExecStepId,
-        program: &exec::ExecProgram,
-    ) -> Result<()> {
-        self.initialize_step_output_uses(steps, root)?;
-        let by_id = steps
-            .iter()
-            .map(|step| (step.id, step))
-            .collect::<BTreeMap<_, _>>();
-
-        for stage in order.stages() {
-            self.check_execution_deadline()?;
-            if stage
+        program: &'a exec::ExecProgram,
+    ) -> futures::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.initialize_step_output_uses(steps, root)?;
+            let by_id = steps
                 .iter()
-                .any(|id| program.is_absorbed(id) || program.region(id).is_some())
-            {
-                if let exec::ExecExecutionStage::Parallel(parallel) = stage {
-                    let isolated = stage
-                        .iter()
-                        .filter(|id| !program.is_absorbed(*id))
-                        .all(|id| {
-                            program.region(id).map_or_else(
-                                || is_parallel_isolated_step(by_id[&id]),
-                                |region| {
-                                    region
-                                        .steps()
-                                        .iter()
-                                        .all(|member| is_parallel_isolated_step(by_id[member]))
-                                },
-                            )
-                        });
-                    if isolated
-                        && !self.has_active_write_tx()
-                        && !self.request_read_view_requires_serial_stages()
-                    {
-                        self.execute_parallel_pull_stage(stage, &by_id, program, parallel.policy())
-                            .await?;
-                        continue;
-                    }
-                }
-                for id in stage.iter() {
-                    if program.is_absorbed(id) {
-                        continue;
-                    }
-                    let step = step_by_id(&by_id, id)?;
-                    let value = match program.region(id) {
-                        Some(region) => {
-                            let control = self.execution_control.clone();
-                            control
-                                .run(Box::pin(self.execute_pull_region(region, &by_id)))
-                                .await?
-                        }
-                        None => Box::pin(self.execute_step(step)).await?,
-                    };
-                    self.record_step_output(step, value);
-                }
-                continue;
+                .map(|step| (step.id, step))
+                .collect::<BTreeMap<_, _>>();
+            let fused = fusion::plan(&by_id, &self.step_output_uses, program);
+
+            for stage in order.stages() {
+                self.check_execution_deadline()?;
+                self.execute_stage(stage, &by_id, program, &fused).await?;
             }
-            match StageExecutionMode::for_stage(stage, &by_id)? {
-                StageExecutionMode::Serial => {
-                    Box::pin(self.execute_serial_stage(stage, &by_id)).await?;
-                }
-                StageExecutionMode::ParallelIsolated(policy) => {
-                    if self.has_active_write_tx() || self.request_read_view_requires_serial_stages()
-                    {
-                        Box::pin(self.execute_serial_stage(stage, &by_id)).await?;
-                    } else {
-                        self.execute_parallel_isolated_stage(stage, &by_id, policy)
-                            .await?;
-                    }
-                }
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
-    async fn execute_serial_stage(
-        &mut self,
-        stage: &exec::ExecExecutionStage,
-        by_id: &BTreeMap<exec::ExecStepId, &exec::ExecStep>,
-    ) -> Result<()> {
-        for id in stage.iter() {
-            self.check_execution_deadline()?;
-            let step = step_by_id(by_id, id)?;
-            let value = Box::pin(self.execute_step(step)).await?;
-            self.check_execution_deadline()?;
-            self.record_step_output(step, value);
+    /// Choose how one stage runs. Only the chosen kind's future polls below
+    /// the stage loop, so a nested plan's level never carries the others.
+    fn execute_stage<'a>(
+        &'a mut self,
+        stage: &'a exec::ExecExecutionStage,
+        by_id: &'a BTreeMap<exec::ExecStepId, &'a exec::ExecStep>,
+        program: &'a exec::ExecProgram,
+        fused: &'a BTreeMap<exec::ExecStepId, fusion::Role<'a>>,
+    ) -> futures::future::BoxFuture<'a, Result<()>> {
+        let serial_only =
+            self.has_active_write_tx() || self.request_read_view_requires_serial_stages();
+        if stage
+            .iter()
+            .any(|id| program.is_absorbed(id) || program.region(id).is_some())
+        {
+            return match stage {
+                exec::ExecExecutionStage::Parallel(parallel)
+                    if !serial_only
+                        && stage
+                            .iter()
+                            .filter(|id| !program.is_absorbed(*id))
+                            .all(|id| {
+                                program.region(id).map_or_else(
+                                    || is_parallel_isolated_step(by_id[&id]),
+                                    |region| {
+                                        region
+                                            .steps()
+                                            .iter()
+                                            .all(|member| is_parallel_isolated_step(by_id[member]))
+                                    },
+                                )
+                            }) =>
+                {
+                    Box::pin(self.execute_parallel_pull_stage(
+                        stage,
+                        by_id,
+                        program,
+                        parallel.policy(),
+                        fused,
+                    ))
+                }
+                exec::ExecExecutionStage::Parallel(_) | exec::ExecExecutionStage::Single(_) => {
+                    self.execute_region_stage(stage, by_id, program, fused)
+                }
+            };
         }
-        Ok(())
+        match StageExecutionMode::for_stage(stage, by_id) {
+            Err(error) => Box::pin(std::future::ready(Err(error))),
+            Ok(StageExecutionMode::ParallelIsolated(policy)) if !serial_only => {
+                Box::pin(self.execute_parallel_isolated_stage(stage, by_id, policy, fused))
+            }
+            Ok(StageExecutionMode::Serial | StageExecutionMode::ParallelIsolated(_)) => {
+                self.execute_serial_stage(stage, by_id, fused)
+            }
+        }
+    }
+
+    /// A stage holding pull regions or steps they absorbed, run in order.
+    fn execute_region_stage<'a>(
+        &'a mut self,
+        stage: &'a exec::ExecExecutionStage,
+        by_id: &'a BTreeMap<exec::ExecStepId, &'a exec::ExecStep>,
+        program: &'a exec::ExecProgram,
+        fused: &'a BTreeMap<exec::ExecStepId, fusion::Role<'a>>,
+    ) -> futures::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            for id in stage.iter() {
+                if program.is_absorbed(id) {
+                    continue;
+                }
+                let step = step_by_id(by_id, id)?;
+                let value = match program.region(id) {
+                    Some(region) => {
+                        let control = self.execution_control.clone();
+                        control.run(self.execute_pull_region(region, by_id)).await?
+                    }
+                    None => self.execute_step(step, fused.get(&id).copied()).await?,
+                };
+                self.record_step_output(step, value);
+            }
+            Ok(())
+        })
+    }
+
+    fn execute_serial_stage<'a>(
+        &'a mut self,
+        stage: &'a exec::ExecExecutionStage,
+        by_id: &'a BTreeMap<exec::ExecStepId, &'a exec::ExecStep>,
+        fused: &'a BTreeMap<exec::ExecStepId, fusion::Role<'a>>,
+    ) -> futures::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            for id in stage.iter() {
+                self.check_execution_deadline()?;
+                let step = step_by_id(by_id, id)?;
+                let value = self.execute_step(step, fused.get(&id).copied()).await?;
+                self.check_execution_deadline()?;
+                self.record_step_output(step, value);
+            }
+            Ok(())
+        })
     }
 
     async fn execute_parallel_isolated_stage(
@@ -113,6 +149,7 @@ impl<'db> ExecutionContext<'db> {
         stage: &exec::ExecExecutionStage,
         by_id: &BTreeMap<exec::ExecStepId, &exec::ExecStep>,
         policy: exec::ExecParallelStagePolicy,
+        fused: &BTreeMap<exec::ExecStepId, fusion::Role<'_>>,
     ) -> Result<()> {
         let ids = stage.iter().collect::<Vec<_>>();
         for chunk in ids.chunks(policy.max_concurrency().get()) {
@@ -120,10 +157,11 @@ impl<'db> ExecutionContext<'db> {
                 .iter()
                 .map(|id| {
                     let step = step_by_id(by_id, *id)?;
+                    let role = fused.get(id).copied();
                     let mut context = self.parallel_step_context(step)?;
                     Ok(async move {
                         context
-                            .execute_step(step)
+                            .execute_step(step, role)
                             .await
                             .map(|value| CompletedStep::new(step, value))
                     })
@@ -143,6 +181,7 @@ impl<'db> ExecutionContext<'db> {
         by_id: &BTreeMap<exec::ExecStepId, &exec::ExecStep>,
         program: &exec::ExecProgram,
         policy: exec::ExecParallelStagePolicy,
+        fused: &BTreeMap<exec::ExecStepId, fusion::Role<'_>>,
     ) -> Result<()> {
         let ids = stage
             .iter()
@@ -159,16 +198,17 @@ impl<'db> ExecutionContext<'db> {
                         add_output_uses(&mut uses, *dependency, *count)?;
                     }
                 }
+                let role = fused.get(id).copied();
                 let mut context = self.parallel_context(step, uses)?;
                 futures.push(async move {
                     let control = context.execution_control.clone();
                     let value = match region {
                         Some(region) => {
                             control
-                                .run(Box::pin(context.execute_pull_region(region, by_id)))
+                                .run(context.execute_pull_region(region, by_id))
                                 .await?
                         }
-                        None => Box::pin(context.execute_step(step)).await?,
+                        None => context.execute_step(step, role).await?,
                     };
                     Ok::<_, HelixDbError>(CompletedStep::new(step, value))
                 });
@@ -223,6 +263,9 @@ impl<'db> ExecutionContext<'db> {
         }
         Ok(Self {
             db: self.db,
+            row_memory: self.row_memory.clone(),
+            // Isolated native DAG steps cannot own a Cypher mutation boundary.
+            row_relationship_types: BTreeMap::new(),
             tenant_scope: self.tenant_scope,
             params: self.params.shallow_snapshot(),
             variables: self.variables.shallow_snapshot(),
@@ -269,14 +312,25 @@ impl<'db> ExecutionContext<'db> {
                 "step-output use plan was not isolated from its enclosing plan".to_string(),
             ));
         }
-        for step in steps {
-            let references = step_output_references(step)?;
-            for (dependency, count) in references.iter() {
-                add_output_uses(&mut self.step_output_uses, *dependency, *count)?;
-            }
-        }
-        increment_output_use(&mut self.step_output_uses, root)
+        self.step_output_uses = output_uses(steps, root)?;
+        Ok(())
     }
+}
+
+/// Every use of each step's output in a DAG: each dependency and condition
+/// that reads it, and the DAG's own use of its `root`.
+pub(in crate::execution::interpreter) fn output_uses(
+    steps: &[exec::ExecStep],
+    root: exec::ExecStepId,
+) -> Result<runtime_context::StepOutputUsePlan> {
+    let mut uses = runtime_context::StepOutputUsePlan::default();
+    for step in steps {
+        for (dependency, count) in step_output_references(step)?.iter() {
+            add_output_uses(&mut uses, *dependency, *count)?;
+        }
+    }
+    increment_output_use(&mut uses, root)?;
+    Ok(uses)
 }
 
 fn step_output_references(step: &exec::ExecStep) -> Result<runtime_context::StepOutputUsePlan> {
@@ -392,8 +446,10 @@ fn is_parallel_isolated_step(step: &exec::ExecStep) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod fused_vector_search;
+    mod pull_regions;
+
     use helix_planner::{context, exec, ir, properties, trace};
-    use slatedb::IsolationLevel;
 
     use super::super::runtime_context;
     use super::super::test_support;
@@ -464,7 +520,7 @@ mod tests {
             Some(3)
         );
         assert_eq!(
-            parallel.execute_step(&step).await.unwrap(),
+            parallel.execute_step(&step, None).await.unwrap(),
             ExecutionValue::Stream(Vec::new())
         );
         assert!(!parallel.step_output_uses.contains_key(&dependency));
@@ -595,11 +651,9 @@ mod tests {
             exec::ExecExecutionStage::Parallel(_)
         ));
 
-        let txn = db
-            .inner_db()
-            .begin(IsolationLevel::Snapshot)
+        let txn = crate::transaction::Owned::begin(&db.inner_db(), None)
             .await
-            .expect("snapshot transaction begins");
+            .expect("request transaction begins");
         let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
         context.request_write_scope = runtime_context::RequestWriteScopeState::Active(Box::new(
             runtime_context::ActiveWriteTx {
@@ -775,8 +829,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn missing_stage_step_is_reported_as_invariant_violation() {
+    /// A stage naming a step the plan lacks is an invariant violation, and
+    /// stage dispatch reports it before running any of the stage's steps.
+    #[tokio::test]
+    async fn missing_stage_step_is_reported_as_invariant_violation() {
         let stage = exec::ExecExecutionStage::Parallel(exec::ExecParallelStage::new(
             ir::AtLeast::<_, 2>::from_pair(id(1), id(2)),
             exec::ExecParallelStagePolicy::for_ready_width(2),
@@ -788,5 +844,20 @@ mod tests {
             Err(HelixDbError::InvariantViolation(message))
                 if message.contains("missing step 2")
         ));
+
+        let db = test_support::open_db("scheduler-missing-stage-step").await;
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        assert!(matches!(
+            ctx.execute_stage(
+                &stage,
+                &by_id(&steps),
+                &exec::ExecProgram::default(),
+                &BTreeMap::new()
+            )
+            .await,
+            Err(HelixDbError::InvariantViolation(message))
+                if message.contains("missing step 2")
+        ));
+        assert!(ctx.step_outputs.is_empty());
     }
 }

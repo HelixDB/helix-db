@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     DeepTraversalInsight, MissingIndexInsight, PlannerDiagnostics, PlannerInsight,
@@ -66,82 +66,67 @@ impl<'a> Analyzer<'a> {
                 exec::ExecPullCapability::Incremental | exec::ExecPullCapability::Prepared => {}
             }
         }
-        let steps_by_id = steps
-            .iter()
-            .map(|step| (step.id, step))
-            .collect::<HashMap<_, _>>();
-        let mut operator_depths = HashMap::new();
-        let mut traversal_depths = HashMap::new();
-        let mut lineage_memo = HashMap::new();
-        let mut unbounded_sites = steps
-            .iter()
-            .filter_map(|step| {
-                unbounded_scan_scope(&step.op).map(|scope| {
-                    (
-                        step.id,
-                        UnboundedScanSite {
-                            scope,
-                            predicate_properties: BTreeSet::new(),
-                        },
-                    )
-                })
-            })
-            .collect::<HashMap<_, _>>();
+        let mut lineages = StepLineages::new(steps);
+        // A dependency that is not one of these steps, or comes later, adds no
+        // depth.
+        let mut operator_depths = vec![None; steps.len()];
+        let mut traversal_depths = vec![None; steps.len()];
 
         for step in steps {
+            let position = lineages
+                .positions
+                .position(step.id)
+                .expect("every step has a position");
             let parent_operator_depth = step
                 .dependencies
                 .iter()
-                .filter_map(|dependency| operator_depths.get(dependency))
-                .copied()
+                .filter_map(|dependency| {
+                    operator_depths[lineages.positions.position(*dependency)?]
+                })
                 .max()
                 .unwrap_or(base_operator_depth);
             let operator_depth = parent_operator_depth.saturating_add(1);
-            operator_depths.insert(step.id, operator_depth);
+            operator_depths[position] = Some(operator_depth);
             self.statistics.maximum_operator_depth =
                 self.statistics.maximum_operator_depth.max(operator_depth);
 
             let parent_traversal_depth = step
                 .dependencies
                 .iter()
-                .filter_map(|dependency| traversal_depths.get(dependency))
-                .copied()
+                .filter_map(|dependency| {
+                    traversal_depths[lineages.positions.position(*dependency)?]
+                })
                 .max()
                 .unwrap_or(base_traversal_depth);
             let traversal_depth = traversal_depth_for_op(&step.op, parent_traversal_depth);
-            traversal_depths.insert(step.id, traversal_depth);
+            traversal_depths[position] = Some(traversal_depth);
             self.maximum_traversal_depth = self.maximum_traversal_depth.max(traversal_depth);
 
             self.statistics.total_operators = self.statistics.total_operators.saturating_add(1);
-            self.analyze_op(
-                step,
-                &steps_by_id,
-                &mut lineage_memo,
-                &mut unbounded_sites,
-                operator_depth,
-                parent_traversal_depth,
-            );
+            self.analyze_op(step, &mut lineages, operator_depth, parent_traversal_depth);
         }
 
-        unbounded_sites.into_values().for_each(|site| {
-            let key = UnboundedScanKey {
-                element: site.scope.element.into(),
-                label: site.scope.label,
-                predicate_properties: PredicatePropertySet::new(site.predicate_properties),
-            };
-            self.unbounded_scans
-                .entry(key)
-                .and_modify(|occurrences| *occurrences = occurrences.saturating_add(1))
-                .or_insert(1);
-        });
+        lineages
+            .unbounded_sites
+            .into_iter()
+            .flatten()
+            .for_each(|site| {
+                let key = UnboundedScanKey {
+                    element: site.scope.element.into(),
+                    label: site.scope.label,
+                    predicate_properties: PredicatePropertySet::new(site.predicate_properties),
+                };
+                self.unbounded_scans
+                    .entry(key)
+                    .and_modify(|occurrences| *occurrences = occurrences.saturating_add(1))
+                    .or_insert(1);
+            });
     }
 
     fn analyze_op(
         &mut self,
         step: &exec::ExecStep,
-        steps_by_id: &HashMap<exec::ExecStepId, &exec::ExecStep>,
-        lineage_memo: &mut HashMap<exec::ExecStepId, Option<AccessLineage>>,
-        unbounded_sites: &mut HashMap<exec::ExecStepId, UnboundedScanSite>,
+        lineages: &mut StepLineages<'_>,
         operator_depth: usize,
         parent_traversal_depth: usize,
     ) {
@@ -155,7 +140,7 @@ impl<'a> Analyzer<'a> {
             exec::ExecOp::Filter { predicate } => {
                 self.statistics.residual_filters =
                     self.statistics.residual_filters.saturating_add(1);
-                self.analyze_filter(step, predicate, steps_by_id, lineage_memo, unbounded_sites);
+                self.analyze_filter(step, predicate, lineages);
             }
             exec::ExecOp::Limit { .. } => {
                 self.statistics.limits = self.statistics.limits.saturating_add(1);
@@ -623,28 +608,21 @@ impl<'a> Analyzer<'a> {
         &mut self,
         step: &exec::ExecStep,
         predicate: &ir::PredicatePlan,
-        steps_by_id: &HashMap<exec::ExecStepId, &exec::ExecStep>,
-        lineage_memo: &mut HashMap<exec::ExecStepId, Option<AccessLineage>>,
-        unbounded_sites: &mut HashMap<exec::ExecStepId, UnboundedScanSite>,
+        lineages: &mut StepLineages<'_>,
     ) {
         let [dependency] = step.dependencies.as_slice() else {
             return;
         };
-        let mut visiting = HashSet::new();
-        let Some(lineage) = resolve_lineage(
-            *dependency,
-            steps_by_id,
-            lineage_memo,
-            &mut visiting,
-            unbounded_sites,
-        ) else {
+        let Some(lineage) = lineages.resolve(*dependency) else {
             return;
         };
         let mut predicate_properties = BTreeSet::new();
         collect_predicate_properties(predicate.predicate(), &mut predicate_properties);
         lineage.unbounded_sources.iter().for_each(|source| {
-            unbounded_sites
-                .get_mut(source)
+            lineages
+                .positions
+                .position(*source)
+                .and_then(|position| lineages.unbounded_sites[position].as_mut())
                 .expect("resolved unbounded source is pre-registered")
                 .predicate_properties
                 .extend(predicate_properties.iter().cloned());
@@ -745,18 +723,21 @@ fn traversal_depth_for_op(op: &exec::ExecOp, parent_depth: usize) -> usize {
 }
 
 fn subplan_maximum_traversal_increment(steps: &[exec::ExecStep]) -> usize {
-    let mut depths = HashMap::new();
+    let positions = exec::StepPositions::new(steps.iter().map(|step| step.id))
+        .expect("executable subplans have unique step IDs");
+    let mut depths = vec![None; steps.len()];
     let mut maximum = 0usize;
     for step in steps {
         let parent_depth = step
             .dependencies
             .iter()
-            .filter_map(|dependency| depths.get(dependency))
-            .copied()
+            .filter_map(|dependency| depths[positions.position(*dependency)?])
             .max()
             .unwrap_or(0);
         let depth = traversal_depth_for_op(&step.op, parent_depth);
-        depths.insert(step.id, depth);
+        depths[positions
+            .position(step.id)
+            .expect("every step has a position")] = Some(depth);
         maximum = maximum.max(depth);
     }
     maximum
@@ -826,103 +807,132 @@ struct UnboundedScanSite {
     predicate_properties: BTreeSet<ir::NonEmptyString>,
 }
 
-fn resolve_lineage(
-    id: exec::ExecStepId,
-    steps: &HashMap<exec::ExecStepId, &exec::ExecStep>,
-    memo: &mut HashMap<exec::ExecStepId, Option<AccessLineage>>,
-    visiting: &mut HashSet<exec::ExecStepId>,
-    unbounded_sites: &HashMap<exec::ExecStepId, UnboundedScanSite>,
-) -> Option<AccessLineage> {
-    if let Some(lineage) = memo.get(&id) {
-        return lineage.clone();
-    }
-    if !visiting.insert(id) {
-        return None;
-    }
-    let lineage = steps
-        .get(&id)
-        .and_then(|step| lineage_for_step(step, steps, memo, visiting, unbounded_sites));
-    visiting.remove(&id);
-    memo.insert(id, lineage.clone());
-    lineage
+/// One plan's or subplan's steps for lineage resolution, with per-step state
+/// indexed by step position rather than keyed by step ID.
+struct StepLineages<'s> {
+    positions: exec::StepPositions,
+    /// Steps by position.
+    steps: Vec<&'s exec::ExecStep>,
+    /// Resolved lineages by position, `None` until resolved.
+    memo: Vec<Option<Option<AccessLineage>>>,
+    /// Steps whose lineage is being resolved, to stop at cycles.
+    visiting: Vec<bool>,
+    /// The unbounded scan, if any, each step selects.
+    unbounded_sites: Vec<Option<UnboundedScanSite>>,
 }
 
-fn lineage_for_step(
-    step: &exec::ExecStep,
-    steps: &HashMap<exec::ExecStepId, &exec::ExecStep>,
-    memo: &mut HashMap<exec::ExecStepId, Option<AccessLineage>>,
-    visiting: &mut HashSet<exec::ExecStepId>,
-    unbounded_sites: &HashMap<exec::ExecStepId, UnboundedScanSite>,
-) -> Option<AccessLineage> {
-    match &step.op {
-        exec::ExecOp::Access { plan } => scope_for_access(plan).map(|scope| AccessLineage {
-            scope: AccessLineageScope::Uniform(scope),
-            unbounded_sources: unbounded_sites
-                .contains_key(&step.id)
-                .then_some(step.id)
-                .into_iter()
-                .collect(),
-        }),
-        exec::ExecOp::KvRead(exec::KvReadPlan::RangeScan { keyspace, .. }) => Some(AccessLineage {
-            scope: AccessLineageScope::Uniform(AccessScope {
-                element: element_for_keyspace(*keyspace),
-                label: None,
-            }),
-            unbounded_sources: unbounded_sites
-                .contains_key(&step.id)
-                .then_some(step.id)
-                .into_iter()
-                .collect(),
-        }),
-        exec::ExecOp::Merge {
-            mode:
-                exec::ExecMergeMode::Union
-                | exec::ExecMergeMode::OrderedUnion
-                | exec::ExecMergeMode::Intersect,
-        } => combine_lineages(
-            step.dependencies
-                .iter()
-                .map(|dependency| {
-                    resolve_lineage(*dependency, steps, memo, visiting, unbounded_sites)
+impl<'s> StepLineages<'s> {
+    fn new(steps: &'s [exec::ExecStep]) -> Self {
+        let positions = exec::StepPositions::new(steps.iter().map(|step| step.id))
+            .expect("executable subplans have unique step IDs");
+        let mut by_position = steps.iter().collect::<Vec<_>>();
+        by_position.sort_unstable_by_key(|step| step.id);
+        let unbounded_sites = by_position
+            .iter()
+            .map(|step| {
+                unbounded_scan_scope(&step.op).map(|scope| UnboundedScanSite {
+                    scope,
+                    predicate_properties: BTreeSet::new(),
                 })
-                .collect(),
-        ),
-        exec::ExecOp::Filter { .. }
-        | exec::ExecOp::IndexMembership { .. }
-        | exec::ExecOp::VectorSearch { .. }
-        | exec::ExecOp::TextSearch { .. }
-        | exec::ExecOp::Limit { .. }
-        | exec::ExecOp::Skip { .. }
-        | exec::ExecOp::Range { .. }
-        | exec::ExecOp::Distinct
-        | exec::ExecOp::Order { .. }
-        | exec::ExecOp::Reserved { .. }
-        | exec::ExecOp::Barrier { .. }
-        | exec::ExecOp::Noop => {
-            let [dependency] = step.dependencies.as_slice() else {
-                return None;
-            };
-            resolve_lineage(*dependency, steps, memo, visiting, unbounded_sites)
+            })
+            .collect();
+        Self {
+            positions,
+            memo: vec![None; steps.len()],
+            visiting: vec![false; steps.len()],
+            steps: by_position,
+            unbounded_sites,
         }
-        exec::ExecOp::KvRead(
-            exec::KvReadPlan::Get { .. }
-            | exec::KvReadPlan::MultiGet(_)
-            | exec::KvReadPlan::PrefixScan { .. },
-        )
-        | exec::ExecOp::Expand { .. }
-        | exec::ExecOp::Count { .. }
-        | exec::ExecOp::Project { .. }
-        | exec::ExecOp::Aggregate { .. }
-        | exec::ExecOp::Variable { .. }
-        | exec::ExecOp::Branch { .. }
-        | exec::ExecOp::Repeat { .. }
-        | exec::ExecOp::ShortestPath { .. }
-        | exec::ExecOp::Mutation { .. }
-        | exec::ExecOp::IndexDdl { .. }
-        | exec::ExecOp::Merge {
-            mode: exec::ExecMergeMode::Concat,
+    }
+
+    /// The lineage of step `id`; `None` when it has none, is not one of these
+    /// steps, or is already being resolved.
+    fn resolve(&mut self, id: exec::ExecStepId) -> Option<AccessLineage> {
+        let position = self.positions.position(id)?;
+        if let Some(lineage) = &self.memo[position] {
+            return lineage.clone();
         }
-        | exec::ExecOp::ForEach { .. } => None,
+        if std::mem::replace(&mut self.visiting[position], true) {
+            return None;
+        }
+        let lineage = self.lineage_for_step(position);
+        self.visiting[position] = false;
+        self.memo[position] = Some(lineage.clone());
+        lineage
+    }
+
+    fn lineage_for_step(&mut self, position: usize) -> Option<AccessLineage> {
+        let step = self.steps[position];
+        match &step.op {
+            exec::ExecOp::Access { plan } => scope_for_access(plan).map(|scope| AccessLineage {
+                scope: AccessLineageScope::Uniform(scope),
+                unbounded_sources: self.unbounded_sites[position]
+                    .is_some()
+                    .then_some(step.id)
+                    .into_iter()
+                    .collect(),
+            }),
+            exec::ExecOp::KvRead(exec::KvReadPlan::RangeScan { keyspace, .. }) => {
+                Some(AccessLineage {
+                    scope: AccessLineageScope::Uniform(AccessScope {
+                        element: element_for_keyspace(*keyspace),
+                        label: None,
+                    }),
+                    unbounded_sources: self.unbounded_sites[position]
+                        .is_some()
+                        .then_some(step.id)
+                        .into_iter()
+                        .collect(),
+                })
+            }
+            exec::ExecOp::Merge {
+                mode:
+                    exec::ExecMergeMode::Union
+                    | exec::ExecMergeMode::OrderedUnion
+                    | exec::ExecMergeMode::Intersect,
+            } => combine_lineages(
+                step.dependencies
+                    .iter()
+                    .map(|dependency| self.resolve(*dependency))
+                    .collect(),
+            ),
+            exec::ExecOp::Filter { .. }
+            | exec::ExecOp::IndexMembership { .. }
+            | exec::ExecOp::VectorSearch { .. }
+            | exec::ExecOp::TextSearch { .. }
+            | exec::ExecOp::Limit { .. }
+            | exec::ExecOp::Skip { .. }
+            | exec::ExecOp::Range { .. }
+            | exec::ExecOp::Distinct
+            | exec::ExecOp::Order { .. }
+            | exec::ExecOp::Reserved { .. }
+            | exec::ExecOp::Barrier { .. }
+            | exec::ExecOp::Noop => {
+                let [dependency] = step.dependencies.as_slice() else {
+                    return None;
+                };
+                self.resolve(*dependency)
+            }
+            exec::ExecOp::KvRead(
+                exec::KvReadPlan::Get { .. }
+                | exec::KvReadPlan::MultiGet(_)
+                | exec::KvReadPlan::PrefixScan { .. },
+            )
+            | exec::ExecOp::Expand { .. }
+            | exec::ExecOp::Count { .. }
+            | exec::ExecOp::Project { .. }
+            | exec::ExecOp::Aggregate { .. }
+            | exec::ExecOp::Variable { .. }
+            | exec::ExecOp::Branch { .. }
+            | exec::ExecOp::Repeat { .. }
+            | exec::ExecOp::ShortestPath { .. }
+            | exec::ExecOp::Mutation { .. }
+            | exec::ExecOp::IndexDdl { .. }
+            | exec::ExecOp::Merge {
+                mode: exec::ExecMergeMode::Concat,
+            }
+            | exec::ExecOp::ForEach { .. } => None,
+        }
     }
 }
 

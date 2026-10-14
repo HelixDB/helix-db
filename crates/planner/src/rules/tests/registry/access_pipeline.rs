@@ -9,9 +9,9 @@ fn seed_rule_set_explores_access_windows_before_access_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let expr = node_access_window_expr(
         ir::NodeAccessPlan::PointIds {
@@ -44,9 +44,9 @@ fn seed_rule_set_explores_access_order_before_access_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let expr = node_access_order_expr(
         ir::NodeAccessPlan::from(node_range_source("User", "age", lower_range(18))),
@@ -77,12 +77,10 @@ fn seed_rule_set_rewrites_access_order_to_catalog_direction_before_implementatio
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default().with_node_range(range_key(
-            "User",
-            "age",
-            helix_ast::index::RangeIndexDirection::Desc,
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default().with_node_range(
+            range_key("User", "age", helix_ast::index::RangeIndexDirection::Desc),
         )),
     };
     let expr = node_access_order_expr(
@@ -118,9 +116,9 @@ fn seed_rule_set_explores_access_distinct_before_access_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let expr = node_access_distinct_expr(ir::NodeAccessPlan::PointIds {
         ids: element_ids(vec![7]),
@@ -150,9 +148,9 @@ fn seed_rule_set_simplifies_empty_access_pipeline_before_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let expr = logical::LogicalExpr::AccessPipeline(
         logical::AccessPipeline::new(

@@ -1,0 +1,22 @@
+[package]
+name = "helix-opencypher-tck"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+db = { path = "../../crates/db" }
+helix-ast = { path = "../../crates/ast" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-std", "io-util", "sync"] }
+futures = "0.3"
+helix-cypher = { path = "../../crates/cypher" }
+helix-planner = { path = "../../crates/planner" }
+gherkin = { version = "0.16", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

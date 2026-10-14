@@ -178,82 +178,96 @@ fn merge_literal_equality_branches(
     branches: Vec<AccessFilterIndexAtoms>,
     max_branches: usize,
 ) -> Vec<AccessFilterIndexAtoms> {
-    let literals = |branch: &AccessFilterIndexAtoms| match branch.as_ref() {
-        [AccessFilterIndexAtom::Equality { property, domain }] => match domain {
-            AccessEqualityDomain::One(ir::IndexValue::Literal(literal)) => {
-                Some((property.clone(), vec![literal.clone()]))
-            }
-            AccessEqualityDomain::Many(values) => values
-                .iter()
-                .map(|value| match value {
-                    ir::IndexValue::Literal(literal) => Some(literal.clone()),
-                    ir::IndexValue::Param(_)
-                    | ir::IndexValue::ParamSet(_)
-                    | ir::IndexValue::LiteralSet(_) => None,
-                })
-                .collect::<Option<Vec<_>>>()
-                .map(|literals| (property.clone(), literals)),
-            AccessEqualityDomain::Batch(values) => {
-                Some((property.clone(), values.iter().cloned().collect()))
-            }
-            AccessEqualityDomain::One(_) | AccessEqualityDomain::Runtime(_) => None,
-        },
-        _ => None,
-    };
-    // Literal branches per property, in order of first appearance.
-    let mut properties: Vec<(ir::NonEmptyString, Vec<ir::SecondaryIndexLiteral>, usize)> =
-        Vec::new();
-    for branch in &branches {
-        let Some((property, literals)) = literals(branch) else {
-            continue;
-        };
-        match properties.iter_mut().find(|(known, ..)| *known == property) {
-            Some((_, merged, count)) => {
-                merged.extend(literals);
-                *count += 1;
-            }
-            None => properties.push((property, literals, 1)),
+    // A function rather than a closure, so the literal borrows from the value.
+    fn literal(value: &ir::IndexValue) -> Option<&ir::SecondaryIndexLiteral> {
+        match value {
+            ir::IndexValue::Literal(literal) => Some(literal),
+            ir::IndexValue::Param(_)
+            | ir::IndexValue::ParamSet(_)
+            | ir::IndexValue::LiteralSet(_) => None,
         }
     }
-    let mut merged = properties
-        .into_iter()
-        .filter(|(_, _, count)| *count > 1)
-        .map(|(property, literals, _)| {
-            let mut literals = analysis::distinct_equality_literals(literals);
-            let domain = match literals.len() {
-                1 => AccessEqualityDomain::One(ir::IndexValue::Literal(
-                    literals.pop().expect("one distinct literal"),
-                )),
-                values if values <= max_branches => AccessEqualityDomain::Many(
-                    ir::AtLeast::try_from_vec(
-                        literals.into_iter().map(ir::IndexValue::Literal).collect(),
-                    )
-                    .expect("several distinct literals"),
-                ),
-                _ => AccessEqualityDomain::Batch(
-                    ir::AtLeast::try_from_vec(literals).expect("several distinct literals"),
-                ),
+    // Literal equality branches, grouped by property and then in order, by
+    // sorting rather than by searching per branch.
+    let mut literal_branches = branches
+        .iter()
+        .enumerate()
+        .filter_map(|(index, branch)| {
+            let [AccessFilterIndexAtom::Equality { property, domain }] = branch.as_ref() else {
+                return None;
             };
-            (property, Some(domain))
+            let literals_only = match domain {
+                AccessEqualityDomain::One(value) => literal(value).is_some(),
+                AccessEqualityDomain::Many(values) => {
+                    values.iter().all(|value| literal(value).is_some())
+                }
+                AccessEqualityDomain::Batch(_) => true,
+                AccessEqualityDomain::Runtime(_) => false,
+            };
+            literals_only.then_some((property.as_ref(), index, domain))
         })
         .collect::<Vec<_>>();
+    literal_branches.sort_unstable_by_key(|(property, index, _)| (*property, *index));
+    // Each merged property's domain, keyed by the index of its first branch;
+    // its other branches are absorbed.
+    let mut absorbed = vec![false; branches.len()];
+    let mut merged = Vec::new();
+    for run in literal_branches
+        .chunk_by(|(left, ..), (right, ..)| left == right)
+        .filter(|run| run.len() > 1)
+    {
+        let mut literals = Vec::new();
+        for (_, index, domain) in run {
+            absorbed[*index] = true;
+            match domain {
+                AccessEqualityDomain::One(value) => literals.extend(literal(value).cloned()),
+                AccessEqualityDomain::Many(values) => {
+                    literals.extend(values.iter().filter_map(literal).cloned());
+                }
+                AccessEqualityDomain::Batch(values) => literals.extend(values.iter().cloned()),
+                AccessEqualityDomain::Runtime(_) => {}
+            }
+        }
+        let mut literals = analysis::distinct_equality_literals(literals);
+        let domain = match literals.len() {
+            1 => AccessEqualityDomain::One(ir::IndexValue::Literal(
+                literals.pop().expect("one distinct literal"),
+            )),
+            values if values <= max_branches => AccessEqualityDomain::Many(
+                ir::AtLeast::try_from_vec(
+                    literals.into_iter().map(ir::IndexValue::Literal).collect(),
+                )
+                .expect("several distinct literals"),
+            ),
+            _ => AccessEqualityDomain::Batch(
+                ir::AtLeast::try_from_vec(literals).expect("several distinct literals"),
+            ),
+        };
+        let (_, first, _) = run[0];
+        absorbed[first] = false;
+        merged.push((first, domain));
+    }
+    if merged.is_empty() {
+        return branches;
+    }
+    merged.sort_unstable_by_key(|(first, _)| *first);
+    let mut merged = merged.into_iter().peekable();
     branches
         .into_iter()
-        .filter_map(|branch| {
-            let Some((property, _)) = literals(&branch) else {
-                return Some(branch);
+        .enumerate()
+        .filter(|(index, _)| !absorbed[*index])
+        .map(|(index, branch)| {
+            let Some((_, domain)) = merged.next_if(|(first, _)| *first == index) else {
+                return branch;
             };
-            let Some((_, domain)) = merged.iter_mut().find(|(known, _)| *known == property) else {
-                return Some(branch);
+            let [AccessFilterIndexAtom::Equality { property, .. }] = branch.as_ref() else {
+                unreachable!("a merged branch is one equality");
             };
-            // The merged branch replaces the first; the rest are absorbed.
-            domain.take().map(|domain| {
-                AccessFilterIndexAtoms::new(vec![AccessFilterIndexAtom::Equality {
-                    property,
-                    domain,
-                }])
-                .expect("a merged branch holds one atom")
-            })
+            AccessFilterIndexAtoms::new(vec![AccessFilterIndexAtom::Equality {
+                property: property.clone(),
+                domain,
+            }])
+            .expect("a merged branch holds one atom")
         })
         .collect()
 }

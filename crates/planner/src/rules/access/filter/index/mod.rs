@@ -3,6 +3,7 @@
 //! Static predicate pruning is shared here, while node and edge modules own
 //! typed catalog lookup and source-combination contracts.
 
+mod cache;
 mod contracts;
 mod edge;
 mod label_domain;
@@ -19,6 +20,7 @@ use super::atoms::{access_filter_index_plan, AccessFilterIndexPlanMatch};
 use super::AccessFilterRewrite;
 use crate::{analysis, catalog, context, ir, logical};
 
+pub(crate) use cache::with_run_cache;
 pub(in crate::rules) use label_domain::has_candidate as label_domain_has_candidate;
 pub(in crate::rules) use membership::index_membership_filter;
 
@@ -39,7 +41,7 @@ pub(in crate::rules) fn index_access_filter(
             return AccessFilterRewrite::NotApplicable;
         }
         let Ok(analysis::PrunedPredicate::Feasible { predicate, .. }) =
-            analysis::prune_statically_impossible_branches(filter.predicate().as_ref())
+            analysis::prune_borrowed(filter.predicate().as_ref())
         else {
             return AccessFilterRewrite::NotApplicable;
         };
@@ -66,7 +68,20 @@ pub(in crate::rules) fn index_access_filter(
 /// A source that may repeat elements is never rewritten, since intersecting
 /// it with an index set would collapse its repeats. Index membership decides
 /// such node filters instead, row by row from the set, keeping every repeat.
+///
+/// Within an optimization run each distinct filter is derived once; see
+/// [`with_run_cache`].
 pub(in crate::rules) fn required_index_access_filter(
+    filter: &logical::AccessFilter,
+    indexes: &catalog::IndexCatalogSnapshot,
+    planner_limits: &context::PlannerLimits,
+) -> AccessFilterRewrite {
+    cache::cached(filter, indexes, planner_limits, || {
+        derive_required_index_access_filter(filter, indexes, planner_limits)
+    })
+}
+
+fn derive_required_index_access_filter(
     filter: &logical::AccessFilter,
     indexes: &catalog::IndexCatalogSnapshot,
     planner_limits: &context::PlannerLimits,
@@ -74,7 +89,7 @@ pub(in crate::rules) fn required_index_access_filter(
     if filter.access().may_repeat_elements() {
         return AccessFilterRewrite::NotApplicable;
     }
-    let pruned = match analysis::prune_statically_impossible_branches(filter.predicate().as_ref()) {
+    let pruned = match analysis::prune_borrowed(filter.predicate().as_ref()) {
         Ok(predicate) => predicate,
         Err(_) => return AccessFilterRewrite::NotApplicable,
     };

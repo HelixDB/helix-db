@@ -9,13 +9,14 @@ pageType: "Guide"
 
 Helix Cloud runs a dedicated writer and horizontally scalable readers behind a routing
 gateway. Applications send the same dynamic operation-tree request used in local and
-embedded modes.
+embedded modes, or a Cypher statement to `POST /v2/cypher`, which the gateway routes
+by whether the statement writes.
 
 ## Request flow
 
 ```text
 application
-   │ POST /v2/query
+   │ POST /v2/query or POST /v2/cypher
    ▼
 gateway
    ├── read request ──► reader

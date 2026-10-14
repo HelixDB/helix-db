@@ -100,8 +100,8 @@ struct HttpAdapter {
 impl QueryCorpusAdapter for HttpAdapter {
     async fn execute_query(&mut self, request: QueryRequest) -> TestkitResult<serde_json::Value> {
         let is_write = request.request_type() == QueryRequestType::Write;
-        let body =
-            sonic_rs::to_vec(&request).map_err(|error| TestkitError::Adapter(error.to_string()))?;
+        let body = simd_json::to_vec(&request)
+            .map_err(|error| TestkitError::Adapter(error.to_string()))?;
         let request = HttpRequest::post("/v2/query")
             .header("content-type", "application/json")
             .header("x-helix-await-durable", is_write.to_string())
@@ -186,8 +186,8 @@ impl GrpcAdapter {
 impl QueryCorpusAdapter for GrpcAdapter {
     async fn execute_query(&mut self, request: QueryRequest) -> TestkitResult<serde_json::Value> {
         let is_write = request.request_type() == QueryRequestType::Write;
-        let body =
-            sonic_rs::to_vec(&request).map_err(|error| TestkitError::Adapter(error.to_string()))?;
+        let body = simd_json::to_vec(&request)
+            .map_err(|error| TestkitError::Adapter(error.to_string()))?;
         let response = self
             .raw_query(QueryJsonRequest {
                 body: body.into(),
@@ -762,7 +762,8 @@ async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
             class: QueryFailureClass::Internal,
             error: || {
                 QueryServiceError::Serialize(
-                    sonic_rs::from_str::<u8>("not-json").expect_err("invalid JSON should fail"),
+                    simd_json::from_reader::<_, u8>("not-json".as_bytes())
+                        .expect_err("invalid JSON should fail"),
                 )
             },
             http_status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -846,7 +847,7 @@ async fn missing_text_index_preserves_the_public_error_code() {
         .oneshot(
             HttpRequest::post("/v2/query")
                 .header("content-type", "application/json")
-                .body(Body::from(sonic_rs::to_vec(&request()).unwrap()))
+                .body(Body::from(simd_json::to_vec(&request()).unwrap()))
                 .unwrap(),
         )
         .await
@@ -863,7 +864,7 @@ async fn missing_text_index_preserves_the_public_error_code() {
     let mut grpc = GrpcAdapter::start(db).await;
     let status = grpc
         .raw_query(QueryJsonRequest {
-            body: sonic_rs::to_vec(&request()).unwrap().into(),
+            body: simd_json::to_vec(&request()).unwrap().into(),
             warm_only: false,
             require_writer: false,
             await_durable: false,
@@ -876,6 +877,55 @@ async fn missing_text_index_preserves_the_public_error_code() {
         "index_not_found"
     );
     assert_eq!(status.message(), expected_message);
+    grpc.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grpc_routes_native_and_cypher_rpcs_on_one_service() {
+    let db = fresh_database("transport-cypher-grpc").await;
+    let mut grpc = GrpcAdapter::start(db).await;
+    let cypher = |query: &str| QueryJsonRequest {
+        body: serde_json::json!({ "query": query })
+            .to_string()
+            .into_bytes()
+            .into(),
+        warm_only: false,
+        require_writer: false,
+        await_durable: false,
+    };
+    let body = |response: QueryJsonResponse| {
+        serde_json::from_slice::<serde_json::Value>(&response.body).expect("response body is JSON")
+    };
+
+    let created = grpc
+        .client
+        .execute_cypher(cypher("CREATE (n:Routed) RETURN count(n) AS created"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(body(created)["rows"], serde_json::json!([[1]]));
+    let plan = grpc
+        .client
+        .explain_cypher(cypher("MATCH (n:Routed) RETURN n"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(body(plan)["operators"].is_array());
+    let count = QueryRequest::read(
+        batch::read_batch()
+            .var_as("count", traversal::g().n_with_label("Routed").count())
+            .returning(["count"]),
+    );
+    let native = grpc
+        .raw_query(QueryJsonRequest {
+            body: simd_json::to_vec(&count).unwrap().into(),
+            warm_only: false,
+            require_writer: false,
+            await_durable: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(body(native)["count"], 1);
     grpc.close().await.unwrap();
 }
 
@@ -953,6 +1003,27 @@ async fn http_rejects_malformed_oversized_and_incompatible_options() {
         .starts_with("invalid query JSON:"));
     assert_eq!(malformed_json.get("code"), None);
 
+    // A deeply nested value under an unknown key is rejected before parsing
+    // rather than skipped recursively on the handler's stack.
+    let nested = router
+        .clone()
+        .oneshot(
+            HttpRequest::post("/v2/query")
+                .body(Body::from(format!("{{\"x\":{}", "[".repeat(100_000))))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(nested.status(), StatusCode::BAD_REQUEST);
+    let nested_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(nested.into_body(), 4_096).await.unwrap())
+            .expect("nesting error is JSON");
+    assert_eq!(nested_json["error"], "invalid_query_json");
+    assert!(nested_json["msg"]
+        .as_str()
+        .expect("error message is a string")
+        .contains("nesting"));
+
     let oversized = router
         .clone()
         .oneshot(
@@ -978,7 +1049,7 @@ async fn http_rejects_malformed_oversized_and_incompatible_options() {
         .oneshot(
             HttpRequest::post("/v2/query")
                 .header("x-helix-warm", "true")
-                .body(Body::from(sonic_rs::to_vec(&write).unwrap()))
+                .body(Body::from(simd_json::to_vec(&write).unwrap()))
                 .unwrap(),
         )
         .await
@@ -1041,7 +1112,7 @@ async fn transport_readiness_reports_direct_text_storage_as_ready() {
         .oneshot(
             HttpRequest::post("/v2/query")
                 .header("content-type", "application/json")
-                .body(Body::from(sonic_rs::to_vec(&create).unwrap()))
+                .body(Body::from(simd_json::to_vec(&create).unwrap()))
                 .unwrap(),
         )
         .await
@@ -1134,7 +1205,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
             )
             .returning(["count"]),
     );
-    let body = sonic_rs::to_vec(&count).unwrap();
+    let body = simd_json::to_vec(&count).unwrap();
     let require_writer = read_transport
         .raw_query(QueryJsonRequest {
             body: body.into(),
@@ -1157,7 +1228,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
 
     let write_on_reader = read_transport
         .raw_query(QueryJsonRequest {
-            body: sonic_rs::to_vec(&QueryRequest::write(batch::write_batch()))
+            body: simd_json::to_vec(&QueryRequest::write(batch::write_batch()))
                 .unwrap()
                 .into(),
             warm_only: false,

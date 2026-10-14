@@ -39,6 +39,7 @@ use roaring::RoaringTreemap;
 use super::super::ExecutionContext;
 use crate::encoding::v2::values::property::{equality_index_value, property_value::PropertyValue};
 use crate::error::Result;
+use crate::query_resources::{self, bitmap};
 
 /// Concurrent child reads one secondary-index set keeps in flight.
 ///
@@ -94,31 +95,36 @@ impl Drop for ExtraIndexReads<'_> {
 /// The first error ends the fold and is returned. No children intersect to
 /// the empty set.
 pub(in crate::execution::interpreter) async fn intersection(
-    children: impl Stream<Item = Result<RoaringTreemap>>,
-) -> Result<RoaringTreemap> {
-    children
-        .try_fold(None, |ids: Option<RoaringTreemap>, child| {
-            future::ready(Ok(Some(match ids {
-                None => child,
-                Some(ids) => ids & child,
-            })))
+    children: impl Stream<Item = Result<bitmap::Bitmap>>,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap> {
+    let ids = children
+        .try_fold(None, |ids: Option<bitmap::Bitmap>, child| {
+            future::ready(match ids {
+                None => Ok(Some(child)),
+                Some(ids) => ids.intersect(child).map(Some),
+            })
         })
-        .await
-        .map(Option::unwrap_or_default)
+        .await?;
+    ids.map_or_else(|| bitmap::Bitmap::empty(budget), Ok)
 }
 
 /// Unite `children` in the order they arrive.
 ///
 /// The first error ends the fold and is returned.
 pub(in crate::execution::interpreter) async fn union(
-    children: impl Stream<Item = Result<RoaringTreemap>>,
-) -> Result<RoaringTreemap> {
-    children
-        .try_fold(RoaringTreemap::new(), |mut ids, child| {
-            ids |= child;
-            future::ready(Ok(ids))
+    children: impl Stream<Item = Result<bitmap::Bitmap>>,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap> {
+    let ids = children
+        .try_fold(None, |ids: Option<bitmap::Bitmap>, child| {
+            future::ready(match ids {
+                None => Ok(Some(child)),
+                Some(ids) => ids.union(child).map(Some),
+            })
         })
-        .await
+        .await?;
+    ids.map_or_else(|| bitmap::Bitmap::empty(budget), Ok)
 }
 
 /// One set child counted in the database's in-flight test counters from its
@@ -149,7 +155,7 @@ impl Drop for InFlightChild<'_> {
 }
 
 enum SecondaryIds {
-    Unordered(RoaringTreemap),
+    Unordered(bitmap::Bitmap),
     Ordered(Vec<u64>),
 }
 
@@ -170,10 +176,12 @@ pub(in crate::execution::interpreter) enum LabelVerifiedLeaf<'a> {
 }
 
 impl SecondaryIds {
-    fn into_bitmap(self) -> RoaringTreemap {
+    fn into_bitmap(self, budget: Option<&query_resources::Budget>) -> Result<bitmap::Bitmap> {
         match self {
-            Self::Unordered(ids) => ids,
-            Self::Ordered(ids) => RoaringTreemap::from_iter(ids),
+            Self::Unordered(ids) => Ok(ids),
+            Self::Ordered(ids) => {
+                bitmap::Bitmap::retain_legacy(RoaringTreemap::from_iter(ids), budget)
+            }
         }
     }
 
@@ -198,12 +206,15 @@ impl<'db> ExecutionContext<'db> {
     /// time. Results, and so the first error, arrive in plan order. Later
     /// children may already be in flight, and they are dropped when an
     /// earlier child fails.
-    pub(in crate::execution::interpreter) fn read_children<'a, C: ?Sized + 'a, T: 'a>(
+    pub(in crate::execution::interpreter) fn read_children<'a, C: ?Sized + 'a, T: 'a, F>(
         &'a self,
         children: Vec<&'a C>,
         reads: NonZeroUsize,
-        read: impl Fn(&'a C, NonZeroUsize) -> BoxFuture<'a, Result<T>> + 'a,
-    ) -> impl Stream<Item = Result<T>> + 'a {
+        read: impl Fn(&'a C, NonZeroUsize) -> F + 'a,
+    ) -> impl Stream<Item = Result<T>> + 'a
+    where
+        F: core::future::Future<Output = Result<T>> + Send + 'a,
+    {
         // `buffered(0)` would never poll a child, so an empty list keeps width 1.
         let extra = self
             .shared_index_reads
@@ -275,14 +286,14 @@ impl<'db> ExecutionContext<'db> {
         &self,
         kind: crate::index_lifecycle::IndexElementKind,
         leaves: Vec<LabelVerifiedLeaf<'_>>,
-        mut ids: Option<RoaringTreemap>,
+        mut ids: Option<bitmap::Bitmap>,
         reads: NonZeroUsize,
-    ) -> Result<RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         for leaf in leaves {
-            if ids.as_ref().is_some_and(RoaringTreemap::is_empty) {
+            if ids.as_deref().is_some_and(RoaringTreemap::is_empty) {
                 break;
             }
-            let within = ids.as_ref();
+            let within = ids.as_deref();
             ids = Some(match leaf {
                 LabelVerifiedLeaf::Null(key) => self.null_equality_rows(kind, key, within).await?,
                 LabelVerifiedLeaf::Equality(key, value) => {
@@ -300,7 +311,7 @@ impl<'db> ExecutionContext<'db> {
                 }
             });
         }
-        Ok(ids.unwrap_or_default())
+        ids.map_or_else(|| bitmap::Bitmap::empty(self.row_memory.as_ref()), Ok)
     }
 
     fn node_label_verified_leaf<'a>(
@@ -368,12 +379,13 @@ impl<'db> ExecutionContext<'db> {
         &self,
         filters: &[exec::ExecNodeSecondarySetPlan],
         reads: NonZeroUsize,
-    ) -> Result<RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         intersection(
             self.read_children(filters.iter().collect(), reads, |filter, reads| {
                 self.node_secondary_ids(filter, None, reads)
             })
-            .map_ok(SecondaryIds::into_bitmap),
+            .and_then(|ids| future::ready(ids.into_bitmap(self.row_memory.as_ref()))),
+            self.row_memory.as_ref(),
         )
         .await
     }
@@ -389,12 +401,13 @@ impl<'db> ExecutionContext<'db> {
         &self,
         filters: &[exec::ExecEdgeSecondarySetPlan],
         reads: NonZeroUsize,
-    ) -> Result<RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         intersection(
             self.read_children(filters.iter().collect(), reads, |filter, reads| {
                 self.edge_secondary_ids(filter, None, reads)
             })
-            .map_ok(SecondaryIds::into_bitmap),
+            .and_then(|ids| future::ready(ids.into_bitmap(self.row_memory.as_ref()))),
+            self.row_memory.as_ref(),
         )
         .await
     }
@@ -409,14 +422,15 @@ impl<'db> ExecutionContext<'db> {
             .map(|ids| ids.into_vec(limit))
     }
 
-    /// Resolve a node secondary set to an unordered ID bitmap.
+    /// Resolve a node secondary set to an unordered ID bitmap for native
+    /// operators, which run without a row budget.
     pub(in crate::execution::interpreter) async fn node_secondary_set_bitmap(
         &self,
         set: &exec::ExecNodeSecondarySetPlan,
     ) -> Result<RoaringTreemap> {
-        self.node_secondary_ids(set, None, PARALLEL_INDEX_READS)
+        self.node_secondary_bitmap(set)
             .await
-            .map(SecondaryIds::into_bitmap)
+            .map(bitmap::Bitmap::into_unbudgeted)
     }
 
     /// Whether `set` resolves from index reads alone in this request.
@@ -484,6 +498,15 @@ impl<'db> ExecutionContext<'db> {
             .map(|ids| ids.into_vec(limit))
     }
 
+    pub(in crate::execution::interpreter) async fn node_secondary_bitmap(
+        &self,
+        set: &exec::ExecNodeSecondarySetPlan,
+    ) -> Result<bitmap::Bitmap> {
+        self.node_secondary_ids(set, None, PARALLEL_INDEX_READS)
+            .await?
+            .into_bitmap(self.row_memory.as_ref())
+    }
+
     fn node_secondary_ids<'a>(
         &'a self,
         set: &'a exec::ExecNodeSecondarySetPlan,
@@ -493,9 +516,9 @@ impl<'db> ExecutionContext<'db> {
         async move {
             self.check_execution_deadline()?;
             match set {
-                exec::ExecNodeSecondarySetPlan::Empty => {
-                    Ok(SecondaryIds::Unordered(RoaringTreemap::new()))
-                }
+                exec::ExecNodeSecondarySetPlan::Empty => Ok(SecondaryIds::Unordered(
+                    bitmap::Bitmap::empty(self.row_memory.as_ref())?,
+                )),
                 exec::ExecNodeSecondarySetPlan::Bitmap(bitmap) => self
                     .node_bitmap(bitmap, reads)
                     .await
@@ -505,10 +528,10 @@ impl<'db> ExecutionContext<'db> {
                         &index.metadata().index_id,
                         key,
                     )?;
-                    let values = values
-                        .iter()
-                        .map(super::super::count::indexed_value)
-                        .collect::<Vec<_>>();
+                    let values = super::super::count::literal::Batch::new(
+                        values.as_ref(),
+                        self.row_memory.as_ref(),
+                    )?;
                     let ids = self
                         .lookup_managed_equality_batch(
                             crate::index_lifecycle::IndexElementKind::Node,
@@ -525,7 +548,10 @@ impl<'db> ExecutionContext<'db> {
                     verification,
                 } => {
                     let read = self.verified_node_unique_owner(lookup, verification);
-                    Ok(SecondaryIds::Unordered(read.await?.into_iter().collect()))
+                    Ok(SecondaryIds::Unordered(match read.await? {
+                        Some(id) => bitmap::Bitmap::singleton(id, self.row_memory.as_ref())?,
+                        None => bitmap::Bitmap::empty(self.row_memory.as_ref())?,
+                    }))
                 }
                 exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
                     exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
@@ -538,15 +564,15 @@ impl<'db> ExecutionContext<'db> {
                 ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
                     let ids = read.await?;
-                    let mut matches = RoaringTreemap::new();
+                    let mut matches = bitmap::Builder::new(self.row_memory.as_ref())?;
                     for id in ids {
                         let row =
                             super::super::ExecutionRow::current(super::super::ElementRef::Node(id));
-                        if self.eval_predicate(&row, predicate.predicate()).await? {
-                            matches.insert(id);
+                        if self.eval_predicate_plan(&row, predicate).await? {
+                            matches.insert(id)?;
                         }
                     }
-                    Ok(SecondaryIds::Unordered(matches))
+                    Ok(SecondaryIds::Unordered(matches.finish()))
                 }
                 exec::ExecNodeSecondarySetPlan::DynamicEquality { index, key, param } => {
                     super::super::count::validate_node_equality_index(&index.index_id, key)?;
@@ -599,7 +625,10 @@ impl<'db> ExecutionContext<'db> {
                                     reads,
                                     |child, reads| self.node_secondary_ids(child, None, reads),
                                 )
-                                .map_ok(SecondaryIds::into_bitmap),
+                                .and_then(|ids| {
+                                    future::ready(ids.into_bitmap(self.row_memory.as_ref()))
+                                }),
+                                self.row_memory.as_ref(),
                             )
                             .await?,
                         ),
@@ -621,7 +650,8 @@ impl<'db> ExecutionContext<'db> {
                         reads,
                         |child, reads| self.node_secondary_ids(child, None, reads),
                     )
-                    .map_ok(SecondaryIds::into_bitmap),
+                    .and_then(|ids| future::ready(ids.into_bitmap(self.row_memory.as_ref()))),
+                    self.row_memory.as_ref(),
                 )
                 .await
                 .map(SecondaryIds::Unordered),
@@ -634,7 +664,7 @@ impl<'db> ExecutionContext<'db> {
                         &driver.key,
                         &driver.range,
                         driver.iteration,
-                        core::slice::from_ref(&allowed),
+                        &[&allowed],
                         range_limit,
                     )
                     .await
@@ -654,9 +684,9 @@ impl<'db> ExecutionContext<'db> {
         async move {
             self.check_execution_deadline()?;
             match set {
-                exec::ExecEdgeSecondarySetPlan::Empty => {
-                    Ok(SecondaryIds::Unordered(RoaringTreemap::new()))
-                }
+                exec::ExecEdgeSecondarySetPlan::Empty => Ok(SecondaryIds::Unordered(
+                    bitmap::Bitmap::empty(self.row_memory.as_ref())?,
+                )),
                 exec::ExecEdgeSecondarySetPlan::Bitmap(bitmap) => self
                     .edge_bitmap(bitmap, reads)
                     .await
@@ -672,15 +702,15 @@ impl<'db> ExecutionContext<'db> {
                 ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, None);
                     let ids = read.await?;
-                    let mut matches = RoaringTreemap::new();
+                    let mut matches = bitmap::Builder::new(self.row_memory.as_ref())?;
                     for id in ids {
                         let row =
                             super::super::ExecutionRow::current(super::super::ElementRef::Edge(id));
-                        if self.eval_predicate(&row, predicate.predicate()).await? {
-                            matches.insert(id);
+                        if self.eval_predicate_plan(&row, predicate).await? {
+                            matches.insert(id)?;
                         }
                     }
-                    Ok(SecondaryIds::Unordered(matches))
+                    Ok(SecondaryIds::Unordered(matches.finish()))
                 }
                 exec::ExecEdgeSecondarySetPlan::DynamicEquality { index, key, param } => {
                     super::super::count::validate_edge_equality_index(&index.index_id, key)?;
@@ -733,7 +763,10 @@ impl<'db> ExecutionContext<'db> {
                                     reads,
                                     |child, reads| self.edge_secondary_ids(child, None, reads),
                                 )
-                                .map_ok(SecondaryIds::into_bitmap),
+                                .and_then(|ids| {
+                                    future::ready(ids.into_bitmap(self.row_memory.as_ref()))
+                                }),
+                                self.row_memory.as_ref(),
                             )
                             .await?,
                         ),
@@ -755,7 +788,8 @@ impl<'db> ExecutionContext<'db> {
                         reads,
                         |child, reads| self.edge_secondary_ids(child, None, reads),
                     )
-                    .map_ok(SecondaryIds::into_bitmap),
+                    .and_then(|ids| future::ready(ids.into_bitmap(self.row_memory.as_ref()))),
+                    self.row_memory.as_ref(),
                 )
                 .await
                 .map(SecondaryIds::Unordered),
@@ -768,7 +802,7 @@ impl<'db> ExecutionContext<'db> {
                         &driver.key,
                         &driver.range,
                         driver.iteration,
-                        core::slice::from_ref(&allowed),
+                        &[&allowed],
                         range_limit,
                     )
                     .await

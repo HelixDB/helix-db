@@ -259,7 +259,7 @@ pub(super) fn alternative_with_element(
     )
 }
 
-pub(super) fn config() -> optimizer::OptimizerConfig {
+pub(super) fn config() -> optimizer::OptimizerConfig<'static> {
     optimizer::OptimizerConfig {
         params: Default::default(),
         late_bound_params: Default::default(),
@@ -271,8 +271,8 @@ pub(super) fn config() -> optimizer::OptimizerConfig {
             exploration_rule_fires: properties::PositiveUsize::new(16).unwrap(),
         },
         planner_limits: context::PlannerLimits::default(),
-        stats: context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     }
 }

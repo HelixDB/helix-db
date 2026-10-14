@@ -104,6 +104,8 @@ pub enum QueryErrorCode {
     RequestReadViewChanged,
     /// The query exceeded its execution deadline.
     QueryDeadlineExceeded,
+    /// Retaining a query buffer would exceed the request's memory budget.
+    QueryMemoryLimitExceeded,
     /// Reader retirement cancelled an admitted read before completion.
     QueryCancelledByReaderRetirement,
     /// A supplied node ID is invalid.
@@ -291,6 +293,7 @@ impl QueryErrorCode {
         Self::TransactionConflict,
         Self::RequestReadViewChanged,
         Self::QueryDeadlineExceeded,
+        Self::QueryMemoryLimitExceeded,
         Self::QueryCancelledByReaderRetirement,
         Self::InvalidNodeId,
         Self::NodeNotFound,
@@ -384,6 +387,7 @@ impl QueryErrorCode {
             Self::TransactionConflict => "transaction_conflict",
             Self::RequestReadViewChanged => "request_read_view_changed",
             Self::QueryDeadlineExceeded => "query_deadline_exceeded",
+            Self::QueryMemoryLimitExceeded => "query_memory_limit_exceeded",
             Self::QueryCancelledByReaderRetirement => "query_cancelled_by_reader_retirement",
             Self::InvalidNodeId => "invalid_node_id",
             Self::NodeNotFound => "node_not_found",
@@ -486,9 +490,10 @@ mod tests {
             assert!(strings.insert(code.as_str()), "duplicate code {code}");
             assert_eq!(code.to_string(), code.as_str());
             assert_eq!(code.as_str().parse(), Ok(*code));
-            assert_eq!(sonic_rs::to_string(code).unwrap(), format!("\"{code}\""));
+            assert_eq!(simd_json::to_string(code).unwrap(), format!("\"{code}\""));
             assert_eq!(
-                sonic_rs::from_str::<QueryErrorCode>(&format!("\"{code}\"")).unwrap(),
+                simd_json::from_reader::<_, QueryErrorCode>(format!("\"{code}\"").as_bytes())
+                    .unwrap(),
                 *code
             );
         }

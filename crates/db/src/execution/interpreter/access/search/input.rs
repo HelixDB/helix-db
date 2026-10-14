@@ -16,9 +16,10 @@ impl<'db> ExecutionContext<'db> {
                 .iter()
                 .map(|component| component.get())
                 .collect(),
-            ir::VectorQueryInputPlan::Expr(expr) => {
-                db_value_to_query_vector(self.eval_expr(&search_eval_row(), expr.expr()).await?)?
-            }
+            ir::VectorQueryInputPlan::Expr(expr) => db_value_to_query_vector(
+                self.eval_expr_plan(&search_eval_row(), expr.expression_plan())
+                    .await?,
+            )?,
         };
         validate_query_vector(vector)
     }
@@ -30,7 +31,9 @@ impl<'db> ExecutionContext<'db> {
         match input {
             ir::TextQueryInputPlan::Text(text) => Ok(text.as_ref().to_string()),
             ir::TextQueryInputPlan::Expr(expr) => {
-                let value = self.eval_expr(&search_eval_row(), expr.expr()).await?;
+                let value = self
+                    .eval_expr_plan(&search_eval_row(), expr.expression_plan())
+                    .await?;
                 let Some(text) = value.as_str() else {
                     return Err(HelixDbError::Query(
                         "text search query expression must evaluate to a string".to_string(),
@@ -54,7 +57,7 @@ impl<'db> ExecutionContext<'db> {
             ir::SearchLimitPlan::Literal(limit) => Ok(limit.get()),
             ir::SearchLimitPlan::Expr(expr) => {
                 let value = self
-                    .eval_expr(&search_eval_row(), expr.expr())
+                    .eval_expr_plan(&search_eval_row(), expr.expression_plan())
                     .await?
                     .as_i64()
                     .ok_or_else(|| {
@@ -256,6 +259,23 @@ mod tests {
         assert!(matches!(
             context.search_limit(&limit_zero).await,
             Err(HelixDbError::Query(message)) if message.contains("non-positive value 0")
+        ));
+
+        // An expression that cannot be evaluated fails the query input with
+        // its own error, before any shape check runs.
+        let vector_unbound = ir::VectorQueryInputPlan::Expr(
+            ir::SearchQueryExprPlan::new(Expr::param("unbound")).unwrap(),
+        );
+        assert!(matches!(
+            context.search_query_vector(&vector_unbound).await,
+            Err(HelixDbError::Query(message)) if message == "parameter `unbound` is not bound"
+        ));
+        let text_unbound = ir::TextQueryInputPlan::Expr(
+            ir::SearchQueryExprPlan::new(Expr::param("unbound")).unwrap(),
+        );
+        assert!(matches!(
+            context.search_query_text(&text_unbound).await,
+            Err(HelixDbError::Query(message)) if message == "parameter `unbound` is not bound"
         ));
     }
 }

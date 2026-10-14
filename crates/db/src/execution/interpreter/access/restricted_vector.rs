@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use helix_planner::ir;
+use helix_planner::{catalog, exec, ir};
 
 use super::super::{ElementRef, ExecutionContext, ExecutionValue};
 use super::search::{RestrictedVectorSearchRead, SearchReadLimit};
@@ -122,6 +122,135 @@ impl<'db> ExecutionContext<'db> {
         Ok(ExecutionValue::Stream(materialize_restricted_results(
             rows_by_id, results,
         )?))
+    }
+
+    /// Ranks an index-served node ID set directly, with the same result as
+    /// running its access and passing every row to
+    /// [`Self::restricted_vector_search`]: those rows carry only their node,
+    /// so here the `k` result rows are the only rows built. The set keeps its
+    /// memory reservation until the search ends.
+    pub(in crate::execution::interpreter) async fn id_set_vector_search(
+        &self,
+        search: IdSetVectorSearch<'_>,
+    ) -> Result<ExecutionValue> {
+        let ids = match search.set {
+            NodeIdSet::Bitmap(bitmap) => {
+                self.node_bitmap(bitmap, super::PARALLEL_INDEX_READS)
+                    .await?
+            }
+            NodeIdSet::Label(label) => {
+                self.lookup_equality_index_set(
+                    "$label",
+                    &DbPropertyValue::String(label.to_string()),
+                )
+                .await?
+            }
+            NodeIdSet::Secondary(set) => self.node_secondary_bitmap(set).await?,
+        };
+        #[cfg(test)]
+        self.pull_work
+            .fused_vector_searches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (ids, _admitted) = ids.into_parts();
+        if ids.is_empty() {
+            return Ok(ExecutionValue::Stream(Vec::new()));
+        }
+        let candidates = RestrictedVectorCandidates::from_bitmap(ids)?;
+        let results = self
+            .restricted_vector_search_results(
+                VectorElementType::Node,
+                &search.key.label,
+                &search.key.property,
+                search.index,
+                search.query_vector,
+                RestrictedVectorSearchRead::new(SearchReadLimit::new(search.k, None), &candidates),
+            )
+            .await?;
+        let rows_by_id = results
+            .iter()
+            .filter_map(|result| {
+                let (VectorEntityId::Node(id) | VectorEntityId::Edge(id)) = result.entity_id();
+                candidates.contains(id).then(|| {
+                    (
+                        id,
+                        super::super::ExecutionRow::current(ElementRef::Node(id)),
+                    )
+                })
+            })
+            .collect();
+        Ok(ExecutionValue::Stream(materialize_restricted_results(
+            rows_by_id, results,
+        )?))
+    }
+}
+
+/// A node vector search over an access that reads an index-served node ID
+/// set, which the search can rank without the access's rows.
+///
+/// Only node searches over node ID sets are representable: edge searches and
+/// every other access kind run as separate steps.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::execution::interpreter) struct IdSetVectorSearch<'a> {
+    set: NodeIdSet<'a>,
+    key: &'a catalog::NodeSearchIndexKey,
+    index: &'a ir::SearchIndexPlan,
+    query_vector: &'a ir::VectorQueryInputPlan,
+    k: &'a ir::SearchLimitPlan,
+}
+
+/// The index-served node ID sets whose access rows carry nothing but their
+/// node, and which verify their own members, so the set alone is the input.
+#[derive(Debug, Clone, Copy)]
+enum NodeIdSet<'a> {
+    Bitmap(&'a exec::ExecNodeBitmapExpr),
+    Label(&'a ir::NonEmptyString),
+    Secondary(&'a exec::ExecNodeSecondarySetPlan),
+}
+
+impl<'a> IdSetVectorSearch<'a> {
+    /// Pairs `access` with `search`, or `None` unless `access` reads an
+    /// index-served node ID set and `search` ranks nodes.
+    pub(in crate::execution::interpreter) fn new(
+        access: &'a exec::ExecAccessPlan,
+        search: &'a ir::RestrictedVectorSearchPlan,
+    ) -> Option<Self> {
+        let ir::RestrictedVectorSearchPlan::Nodes {
+            key,
+            index,
+            query_vector,
+            k,
+        } = search
+        else {
+            return None;
+        };
+        let exec::ExecAccessPlan::Node(access) = access else {
+            return None;
+        };
+        let set = match access {
+            exec::ExecNodeAccessPlan::Bitmap { bitmap } => NodeIdSet::Bitmap(bitmap),
+            exec::ExecNodeAccessPlan::LabelScan { label } => NodeIdSet::Label(label),
+            exec::ExecNodeAccessPlan::SecondarySet { set } => NodeIdSet::Secondary(set),
+            // Not index ID sets, or read with per-ID checks or in an order
+            // that ranking the set alone would skip.
+            exec::ExecNodeAccessPlan::Empty
+            | exec::ExecNodeAccessPlan::FromParam { .. }
+            | exec::ExecNodeAccessPlan::FromVar { .. }
+            | exec::ExecNodeAccessPlan::AllScan
+            | exec::ExecNodeAccessPlan::Unique { .. }
+            | exec::ExecNodeAccessPlan::AuthoritativeScan { .. }
+            | exec::ExecNodeAccessPlan::DynamicEquality { .. }
+            | exec::ExecNodeAccessPlan::DynamicMembership { .. }
+            | exec::ExecNodeAccessPlan::RangeIndex { .. }
+            | exec::ExecNodeAccessPlan::VectorSearch { .. }
+            | exec::ExecNodeAccessPlan::TextSearch { .. } => return None,
+        };
+        Some(Self {
+            set,
+            key,
+            index,
+            query_vector,
+            k,
+        })
     }
 }
 

@@ -115,10 +115,7 @@ impl<'a> Repeat<'a> {
                             self.after_index += 1;
                             let accepted = {
                                 let scope = scope::Scope::new(ctx, &mut self.frame_context);
-                                scope
-                                    .context
-                                    .eval_predicate(row, predicate.predicate())
-                                    .await
+                                scope.context.eval_predicate_plan(row, predicate).await
                             };
                             if accepted? {
                                 return Ok(Some(ExecutionValue::Stream(vec![row.clone()])));

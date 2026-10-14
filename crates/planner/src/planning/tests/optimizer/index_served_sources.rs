@@ -58,7 +58,7 @@ fn contexts() -> Vec<(&'static str, PlannerContext)> {
         )
     };
     let base = PlannerContext {
-        params,
+        params: params.into(),
         ..ctx(indexes())
     };
     [

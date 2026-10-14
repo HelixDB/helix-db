@@ -5,11 +5,16 @@
 #[cfg(test)]
 extern crate self as db;
 
+#[cfg(test)]
+mod allocation_testing;
+
 mod batch_reads;
 #[cfg(feature = "async-index-benchmark")]
 #[doc(hidden)]
 pub mod benchmark;
+mod commit_completion;
 pub mod config;
+pub mod cypher;
 pub mod encoding;
 pub mod error;
 pub mod execution;
@@ -25,10 +30,12 @@ mod merge_operator;
 #[cfg(feature = "production-coverage")]
 pub mod migration_parity;
 pub mod migrations;
+mod query_resources;
 pub mod query_service;
 mod runtime_dependencies;
 pub mod search;
 mod slate_cache;
+mod transaction;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
 
@@ -826,6 +833,7 @@ struct HelixDBInner {
     lifecycle_metrics: Arc<index_lifecycle_testing::AutomaticLifecycleMetrics>,
     query_metrics: RwLock<Option<OssQueryMetrics>>,
     query_metrics_runtime: Mutex<Option<telemetry::Runtime>>,
+    commit_completions: commit_completion::Tracker,
     close_state: Mutex<CloseState>,
     /// Index membership sets resolved from secondary indexes by any request.
     ///
@@ -886,8 +894,18 @@ impl PreparedPlannerContext {
         &self.context
     }
 
+    /// The catalog proof alone, for test plans built without the request's
+    /// parameters; request execution takes [`Self::into_execution_inputs`].
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) fn into_catalog_proof(self) -> CatalogRefreshProof {
         self.proof
+    }
+
+    /// Transfer the request's original parameters together with its catalog
+    /// proof. Planning only borrows the shared bindings, so once it is done
+    /// they move out without a copy.
+    pub(crate) fn into_execution_inputs(self) -> (ParamBindings, CatalogRefreshProof) {
+        (self.context.params.into_inner(), self.proof)
     }
 }
 
@@ -1802,6 +1820,7 @@ impl HelixDB {
                 lifecycle_metrics,
                 query_metrics: RwLock::new(None),
                 query_metrics_runtime: Mutex::new(None),
+                commit_completions: commit_completion::Tracker::default(),
                 close_state: Mutex::new(CloseState::Open),
                 #[cfg(test)]
                 resolved_index_memberships: std::sync::atomic::AtomicUsize::new(0),
@@ -2180,7 +2199,7 @@ impl HelixDB {
     pub fn planner_context(&self, params: ParamBindings) -> PlannerContext {
         let indexes = self.runtime_catalog_snapshot();
         PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -2199,7 +2218,7 @@ impl HelixDB {
     ) -> Result<PlannerContext> {
         let indexes = self.runtime_catalog_snapshot_scoped(tenant_scope).await?;
         Ok(PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -2248,7 +2267,7 @@ impl HelixDB {
         };
         Ok(PreparedPlannerContext {
             context: PlannerContext {
-                params,
+                params: params.into(),
                 late_bound_params: Default::default(),
                 indexes,
                 stats: Default::default(),
@@ -2376,7 +2395,7 @@ impl HelixDB {
         request_json: &[u8],
         tenant_scope: DataScope,
     ) -> Result<Vec<u8>> {
-        let request = sonic_rs::from_slice::<QueryRequest>(request_json)
+        let request = QueryRequest::from_json_slice(request_json)
             .map_err(|error| HelixDbError::InvalidQueryJson(error.to_string()))?;
         let query_metrics = self.embedded_query_metrics();
         query_service::execute_query_on_scoped_observed(
@@ -2396,11 +2415,12 @@ impl HelixDB {
 
     /// Cancels owned tasks and idempotently closes the underlying storage.
     ///
-    /// Concurrent callers either perform the close or wait for the current
-    /// attempt. Migration and outbox workers are always joined before SlateDB
-    /// closes, preserving their acyclic ownership contracts. A memory cache
-    /// closes with SlateDB; a hybrid cache, shared by every handle on its disk
-    /// root, writes its memory tier to disk and stays open.
+    /// Concurrent callers elect one owned close task or wait for that attempt.
+    /// Dropping a caller does not interrupt shutdown. Started commits finish
+    /// before migration/outbox workers are joined and storage or caches close.
+    /// The finite close task retains no handle in the runtime it owns. A
+    /// memory cache closes with storage; a hybrid cache, shared by every
+    /// handle on its disk root, writes its memory tier to disk and stays open.
     pub async fn close(&self) -> Result<()> {
         loop {
             let wait = {
@@ -2426,7 +2446,25 @@ impl HelixDB {
             let _ = wait.await;
         }
 
+        self.inner.commit_completions.seal();
+        let db = Self {
+            inner: Arc::clone(&self.inner),
+        };
+        tokio::spawn(async move { db.finish_close().await })
+            .await
+            .map_err(|error| {
+                HelixDbError::InvariantViolation(format!(
+                    "database shutdown task terminated: {error}"
+                ))
+            })?
+    }
+
+    /// Complete the elected shutdown even when its original waiter is dropped.
+    async fn finish_close(&self) -> Result<()> {
         let result = async {
+            // Started commits own mutation permits and cache fences even if their
+            // request was dropped. Finish them before closing shared resources.
+            self.inner.commit_completions.seal_and_wait().await;
             let _secondary_step = self.inner.secondary_lifecycle_step.lock().await;
             self.inner
                 .query_metrics
@@ -2505,7 +2543,9 @@ impl HelixDB {
     }
 
     async fn with_embedded_query_metrics(self) -> Self {
-        if cfg!(test) {
+        if cfg!(test)
+            || self.inner.config.db().query_telemetry() == config::QueryTelemetry::Disabled
+        {
             return self;
         }
         match helix_metrics::query::transport::start_oss_from_env(telemetry::Source::Embedded) {
@@ -4263,7 +4303,7 @@ mod tests {
         db.query_scoped(request.clone(), DataScope::LegacyUnscoped)
             .await
             .expect("scoped query");
-        let encoded = sonic_rs::to_vec(&request).expect("encode request");
+        let encoded = simd_json::to_vec(&request).expect("encode request");
         db.query_json(&encoded).await.expect("JSON query");
         db.query_json_scoped(&encoded, DataScope::LegacyUnscoped)
             .await
@@ -6014,20 +6054,20 @@ mod tests {
             .await
             .expect("tenant b second write succeeds");
 
-        let tenant_a_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_a_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_a)
                 .await
-                .expect("tenant a read succeeds"),
+                .expect("tenant a read succeeds")[..],
         )
         .expect("tenant a response decodes");
-        let tenant_b_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_b_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_b)
                 .await
-                .expect("tenant b read succeeds"),
+                .expect("tenant b read succeeds")[..],
         )
         .expect("tenant b response decodes");
         let legacy_json: serde_json::Value =
-            sonic_rs::from_slice(&db.query_json(&read).await.expect("legacy read succeeds"))
+            simd_json::from_reader(&db.query_json(&read).await.expect("legacy read succeeds")[..])
                 .expect("legacy response decodes");
 
         assert_eq!(tenant_a_json.get("users"), Some(&serde_json::json!(1)));

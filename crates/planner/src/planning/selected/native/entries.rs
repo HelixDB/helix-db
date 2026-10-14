@@ -4,28 +4,23 @@
 //! IR entries and prepares native query roots for batched Cascades selection.
 
 use helix_ast::batch::NamedQuery;
-use std::collections::BTreeSet;
 
 use super::super::{cache, SelectedCascadesPlanner};
 use super::rejection::{self, NativeUnsupportedReason};
 use super::scope::NativeAstScope;
 use super::{conditions, context_usage, names, scoped};
-use crate::{error, exec, ir};
+use crate::{context, error, exec, ir};
 
 impl SelectedCascadesPlanner<'_> {
     pub(super) fn prepare_selected_ast_query_root(
         &self,
         query: &NamedQuery,
-        late_bound_params: &BTreeSet<ir::NonEmptyString>,
+        ctx: &context::PlannerContext,
         pending: &mut cache::PendingSelectedRunRoots,
     ) -> Result<cache::SelectedRunRootUse, error::PlannerError> {
         context_usage::validate_query_root_context(&query.root)?;
-        let mut scoped_ctx = self.ctx().clone();
-        scoped_ctx
-            .late_bound_params
-            .extend(late_bound_params.iter().cloned());
         let logical_root = match scoped::scoped_selectable_root_from_ast(
-            &scoped_ctx,
+            ctx,
             &query.root,
             NativeAstScope::QueryRoot,
         )? {

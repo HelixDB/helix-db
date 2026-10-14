@@ -1,0 +1,31 @@
+= The Cypher Grammar
+
+This directory contains the Cypher grammar, in xml source format.
+
+== Generating artifacts
+
+On the top level of this project, run `mvn clean install` to generate the necessary JARs.
+
+These four commands may then be used for generating the currently available artifacts, and output them to the directory `grammar/generated`:
+----
+./tools/grammar/src/main/shell/launch.sh RailRoadDiagramPages -outputDir=grammar/generated/railroad cypher.xml
+./tools/grammar/src/main/shell/launch.sh RailRoadDiagrams -DRailRoadDiagrams.inlineNone=true -outputDir=grammar/generated/railroad/raw cypher.xml
+./tools/grammar/src/main/shell/launch.sh ISO14977 cypher.xml > grammar/generated/cypher.ebnf
+./tools/grammar/src/main/shell/launch.sh Antlr4 cypher.xml > grammar/generated/Cypher.g4
+----
+
+What the `launch.sh` shell script will do is to invoke the `main` method in the class with the same name as the first argument.
+If preferred, the main method could be invoked manually from the code (in an IDE or similar).
+
+== Legacy grammar
+
+Not all grammar rules of the Cypher language will be standardised in their current form, meaning that they will not be part of openCypher as-is.
+Therefore, the openCypher grammar will not include some well-known Cypher constructs; these are called 'legacy'.
+To still enable tool authors or others interested in developing support for Cypher in its full current shape, these legacy rules are still present in the grammar specification.
+The artifacts that can be generated from the specification will by default ignore all legacy rules, but may optionally be instructed to include them.
+To use the legacy rules, supply the command `--INCLUDE_LEGACY=true` to the `launch.sh` script, the command line, or set the Java system property directly.
+
+For example, this command will generate the legacy version of the railroad diagram pages:
+----
+./tools/grammar/src/main/shell/launch.sh RailRoadDiagramPages --INCLUDE_LEGACY=true -outputDir=grammar/generated/railroad cypher.xml
+----

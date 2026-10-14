@@ -934,9 +934,15 @@ fn singleton_sources_skip_distinct_plans() {
         run_op(&unique_index),
         PhysicalOp::NodeAccess(NodeAccessPlan::EqualityIndex { .. })
     ));
+    // Null equality scans every owner lacking the property, so the unique
+    // index does not make it a singleton source.
     assert!(matches!(
         run_op(&unique_null),
-        PhysicalOp::NodeAccess(NodeAccessPlan::EqualityIndex { .. })
+        PhysicalOp::Distinct { input }
+            if matches!(
+                input.as_ref(),
+                PhysicalOp::NodeAccess(NodeAccessPlan::EqualityIndex { .. })
+            )
     ));
     assert!(matches!(
         run_op(&search),
@@ -948,7 +954,6 @@ fn singleton_sources_skip_distinct_plans() {
         &edge_point,
         &stored_singleton,
         &unique_index,
-        &unique_null,
         &search,
     ] {
         assert!(

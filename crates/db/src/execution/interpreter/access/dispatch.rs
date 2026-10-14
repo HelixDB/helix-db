@@ -603,6 +603,36 @@ pub(super) mod tests {
             );
         }
 
+        // A unique set member whose value has no owner contributes no rows.
+        let exec::ExecNodeAccessPlan::Unique {
+            lookup,
+            verification,
+        } = exec::ExecNodeAccessPlan::exact_equality(
+            catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:email"))
+                .with_uniqueness(catalog::IndexUniqueness::Unique),
+            catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
+            ir::IndexValue::Literal(
+                ir::SecondaryIndexLiteral::new(PropertyValue::from("missing@example.com")).unwrap(),
+            ),
+        )
+        else {
+            panic!("unique fixture selects exact unique access")
+        };
+        assert_eq!(
+            execution
+                .execute_access(&exec::ExecAccessPlan::Node(
+                    exec::ExecNodeAccessPlan::SecondarySet {
+                        set: exec::ExecNodeSecondarySetPlan::Unique {
+                            lookup,
+                            verification,
+                        },
+                    }
+                ))
+                .await
+                .unwrap(),
+            ExecutionValue::Stream(Vec::new())
+        );
+
         for (plan, expected) in [
             (
                 exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::AuthoritativeScan {

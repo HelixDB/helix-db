@@ -69,6 +69,16 @@ builds a working app, frontend included.
 helix chef
 ```
 
+## Cypher
+
+Source builds also support Cypher reads and CRUD through `POST /v2/cypher`,
+embedded clients, and `helix cypher`. See the [Cypher reference](docs/cypher.md)
+for the supported language profile, SDK calls, parameters, lossless results,
+and transaction rules. Use SDK and server builds from this checkout for Cypher.
+
+For implementation work, the [codebase map](docs/codebase-map.md) covers package
+dependencies, query execution, storage ownership and correctness gates.
+
 ## Query from your app
 
 Write queries with an SDK and send them to a running instance through `POST /v2/query`. There is

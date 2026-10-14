@@ -8,8 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use slatedb::DbTransaction;
-
 use super::contracts::{label_of, EdgeMutationTarget};
 use super::MutationIndexContext;
 use super::*;
@@ -24,9 +22,25 @@ pub(super) struct ObservedEdgeRow {
     properties: Option<CanonicalPropertyRow>,
 }
 
+impl ObservedEdgeRow {
+    pub(super) fn require_properties(self, edge_id: u64) -> Result<CanonicalPropertyRow> {
+        let Some(_) = self.endpoints else {
+            return Err(HelixDbError::Query(format!(
+                "edge {edge_id} does not exist"
+            )));
+        };
+        self.properties.ok_or_else(|| {
+            HelixDbError::InvariantViolation(
+                "Active text graph source disagrees with its supplied before state".to_string(),
+            )
+        })
+    }
+}
+
 /// Sorted, deduplicated edge observations with an ordered property overlay.
 pub(super) struct ObservedEdgeRows {
     rows: BTreeMap<u64, ObservedEdgeRow>,
+    _memory: Option<crate::query_resources::Reservation>,
 }
 
 struct ObservedPairState {
@@ -127,7 +141,7 @@ impl ObservedEdgeDeletions {
 impl<'db> ExecutionContext<'db> {
     pub(super) async fn store_edge(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge: EdgeMutationTarget,
         label: &ir::NonEmptyString,
         property_row: &CanonicalPropertyRow,
@@ -138,7 +152,7 @@ impl<'db> ExecutionContext<'db> {
             GraphEntity::edge(edge.edge_id),
             property_row.clone(),
         );
-        crate::search::store_edge_endpoints_scoped(
+        crate::search::stage_edge_endpoints_scoped(
             txn,
             edge.edge_id,
             edge.from,
@@ -171,17 +185,22 @@ impl<'db> ExecutionContext<'db> {
             label.as_ref(),
             edge.edge_id,
         )?;
-        let key = transition.graph_key();
-        let encoded = property_row.encoded().clone();
-        index_context.maintain_graph_indexes(transition)?;
-        txn.put(key, encoded)?;
+        let encoded = property_row.write_payload();
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::edge(edge.edge_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
+        )?;
         Ok(())
     }
 
     #[cfg(test)]
     pub(super) async fn set_edge_property(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         property: Property,
         index_context: &mut MutationIndexContext,
@@ -203,28 +222,20 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn set_edge_property_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         property: Property,
         observed: ObservedEdgeRow,
         index_context: &mut MutationIndexContext,
     ) -> Result<CanonicalPropertyRow> {
-        let Some(_) = observed.endpoints else {
-            return Err(HelixDbError::Query(format!(
-                "edge {edge_id} does not exist"
-            )));
-        };
-        let Some(before) = observed.properties else {
-            return Err(HelixDbError::InvariantViolation(
-                "Active text graph source disagrees with its supplied before state".to_string(),
-            ));
-        };
-        let outcome = GraphMutationTransition::edit(
+        let before = observed.require_properties(edge_id)?;
+        let outcome = GraphMutationTransition::edit_with_budget(
             self.tenant_scope,
             GraphEntity::edge(edge_id),
             before,
             PropertyEdit::set(property),
-        );
+            self.row_memory.as_ref(),
+        )?;
         let PropertyEditOutcome::Changed(transition) = outcome else {
             let PropertyEditOutcome::Unchanged(row) = outcome else {
                 unreachable!("property edit outcomes are closed")
@@ -234,18 +245,18 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a replacement transition has an after row")
-            .encoded()
-            .clone();
+            .write_payload();
         let final_row = transition
             .after()
             .expect("a replacement transition has an after row")
             .clone();
-        index_context.maintain_graph_indexes(transition)?;
-        txn.put(
-            self.storage_key(keys::DataKeyKind::EdgePropertyById(
-                keys::EdgePropertyByIdKey::new(edge_id),
-            )),
-            encoded,
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::edge(edge_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
         )?;
         Ok(final_row)
     }
@@ -253,7 +264,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn remove_edge_property(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         name: &ir::NonEmptyString,
         index_context: &mut MutationIndexContext,
@@ -270,7 +281,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn remove_edge_property_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         name: &ir::NonEmptyString,
         observed: ObservedEdgeRow,
@@ -282,12 +293,13 @@ impl<'db> ExecutionContext<'db> {
         let Some(before) = observed.properties else {
             return Ok(None);
         };
-        let outcome = GraphMutationTransition::edit(
+        let outcome = GraphMutationTransition::edit_with_budget(
             self.tenant_scope,
             GraphEntity::edge(edge_id),
             before,
             PropertyEdit::remove(name.as_ref()),
-        );
+            self.row_memory.as_ref(),
+        )?;
         let PropertyEditOutcome::Changed(transition) = outcome else {
             let PropertyEditOutcome::Unchanged(row) = outcome else {
                 unreachable!("property edit outcomes are closed")
@@ -297,57 +309,79 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a replacement transition has an after row")
-            .encoded()
-            .clone();
+            .write_payload();
         let final_row = transition
             .after()
             .expect("a replacement transition has an after row")
             .clone();
-        index_context.maintain_graph_indexes(transition)?;
-        txn.put(
-            self.storage_key(keys::DataKeyKind::EdgePropertyById(
-                keys::EdgePropertyByIdKey::new(edge_id),
-            )),
-            encoded,
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::edge(edge_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
         )?;
         Ok(Some(final_row))
     }
 
     pub(super) async fn observe_edge_rows(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedEdgeRows> {
-        let edge_ids = edge_ids.into_iter().collect::<BTreeSet<_>>();
-        let mut keys = Vec::with_capacity(edge_ids.len().saturating_mul(2));
-        for edge_id in &edge_ids {
-            keys.push(self.storage_key(keys::DataKeyKind::EdgeEndpoints(
-                keys::EdgeEndpointsKey::new(*edge_id),
-            )));
-            keys.push(self.storage_key(keys::DataKeyKind::EdgePropertyById(
-                keys::EdgePropertyByIdKey::new(*edge_id),
-            )));
+        let requested = super::observations::RowKeys::new(
+            edge_ids,
+            super::observations::Kind::Edges,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+        )?;
+        if requested.ids.is_empty() {
+            return Ok(ObservedEdgeRows {
+                rows: BTreeMap::new(),
+                _memory: None,
+            });
         }
-        let values = if keys.is_empty() {
-            Vec::new()
-        } else {
-            txn.multi_get(&keys).await?
-        };
-        let mut values = values.into_iter();
+        let memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| {
+                budget.reserve(helix_planner::relational::allocation::btree_bytes::<
+                    u64,
+                    ObservedEdgeRow,
+                >(requested.ids.len()))
+            })
+            .transpose()?;
+        let keys = &requested.keys;
+        let request = crate::query_resources::properties::ReadRequest::new(
+            keys.len(),
+            self.row_memory.as_ref(),
+        )?;
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: keys.len(),
+                ..Default::default()
+            })
+        });
+        let values = txn.multi_get(keys).await?;
+        let mut values = request.attach(values)?;
         let mut rows = BTreeMap::new();
-        for edge_id in edge_ids {
+        for edge_id in requested.ids.iter().copied() {
             let endpoints = values
                 .next()
                 .expect("each observed edge has one endpoint result")
                 .map(|value| {
-                    crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue::decode(&value)
-                        .map(|endpoints| (endpoints.source(), endpoints.target()))
+                    crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue::decode(
+                        value.bytes(),
+                    )
+                    .map(|endpoints| (endpoints.source(), endpoints.target()))
                 })
                 .transpose()?;
             let properties = values
                 .next()
                 .expect("each observed edge has one property result")
-                .map(CanonicalPropertyRow::decode)
+                .map(CanonicalPropertyRow::decode_read)
                 .transpose()?;
             rows.insert(
                 edge_id,
@@ -358,12 +392,15 @@ impl<'db> ExecutionContext<'db> {
             );
         }
         assert!(values.next().is_none());
-        Ok(ObservedEdgeRows { rows })
+        Ok(ObservedEdgeRows {
+            rows,
+            _memory: memory,
+        })
     }
 
     pub(super) async fn observe_edge_deletions(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_ids: impl IntoIterator<Item = u64>,
         index_context: &MutationIndexContext,
     ) -> Result<ObservedEdgeDeletions> {
@@ -460,7 +497,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn delete_edge(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         index_context: &mut MutationIndexContext,
     ) -> Result<()> {
@@ -475,7 +512,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn delete_edge_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         observed: ObservedEdgeDeletion,
         index_context: &mut MutationIndexContext,
@@ -483,9 +520,6 @@ impl<'db> ExecutionContext<'db> {
         let Some((from, to)) = observed.row.endpoints else {
             return Ok(());
         };
-        let property_key = self.storage_key(keys::DataKeyKind::EdgePropertyById(
-            keys::EdgePropertyByIdKey::new(edge_id),
-        ));
         let Some(properties) = observed.row.properties else {
             return Err(HelixDbError::InvariantViolation(
                 "Active text graph source disagrees with its supplied before state".to_string(),
@@ -500,17 +534,19 @@ impl<'db> ExecutionContext<'db> {
             .before()
             .expect("a delete transition has a before row")
             .properties();
-        let label = label_of(properties).map(str::to_string);
-        if let Some(label) = label.as_deref() {
-            index_context
-                .topology_mutations()
-                .remove_global_edge_label(self.tenant_scope, label, edge_id)?;
-            if !observed.label_remains {
+        label_of(properties)
+            .map(|label| -> Result<()> {
                 index_context
                     .topology_mutations()
-                    .remove_edge_label_neighbors(self.tenant_scope, from, to, label)?;
-            }
-        }
+                    .remove_global_edge_label(self.tenant_scope, label, edge_id)?;
+                if !observed.label_remains {
+                    index_context
+                        .topology_mutations()
+                        .remove_edge_label_neighbors(self.tenant_scope, from, to, label)?;
+                }
+                Ok(())
+            })
+            .transpose()?;
         index_context.topology_mutations().remove_edge_pair(
             self.tenant_scope,
             from,
@@ -531,16 +567,22 @@ impl<'db> ExecutionContext<'db> {
                 ir::ExpandDirection::In,
             )?;
         }
-        crate::search::delete_edge_endpoints_scoped(txn, edge_id, self.tenant_scope).await?;
-        index_context.maintain_graph_indexes(transition)?;
-        txn.delete(property_key)?;
+        crate::search::stage_delete_edge_endpoints_scoped(txn, edge_id, self.tenant_scope).await?;
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::edge(edge_id),
+            None,
+            self.row_memory.as_ref(),
+        )?;
         Ok(())
     }
 
     #[cfg(test)]
     pub(super) async fn edge_matches_label(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         edge_id: u64,
         expected: Option<&ir::NonEmptyString>,
     ) -> Result<bool> {
@@ -601,6 +643,40 @@ mod tests {
             .delete_edge(&txn, 99, &mut index_context)
             .await
             .expect("deleting a missing edge is idempotent");
+    }
+
+    /// An edge whose endpoints survive without its property row is corrupt:
+    /// setting a property reports an invariant violation rather than writing
+    /// a label-less row rebuilt from nothing.
+    #[tokio::test]
+    async fn edges_missing_their_property_row_reject_property_sets() {
+        let db = test_support::open_db("mutation-edge-without-properties").await;
+        let from = test_support::add_user(&db, "alice").await;
+        let to = test_support::add_user(&db, "bob").await;
+        let edge_id = test_support::add_edge(&db, from, to, "FOLLOWS").await;
+        let context = ExecutionContext::new(&db, context::ParamBindings::default());
+        let mut index_context = MutationIndexContext::for_configured_index_test();
+        let txn = db
+            .inner_db()
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("snapshot transaction begins");
+        txn.delete(GraphEntity::edge(edge_id).property_key(context.tenant_scope))
+            .expect("the property row delete is staged");
+
+        let error = context
+            .set_edge_property(
+                &txn,
+                edge_id,
+                Property::new("weight", DbPropertyValue::I64(1)),
+                &mut index_context,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, HelixDbError::InvariantViolation(_)),
+            "{error:?}"
+        );
     }
 
     #[tokio::test]

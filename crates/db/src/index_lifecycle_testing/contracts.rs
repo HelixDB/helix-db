@@ -2721,7 +2721,7 @@ async fn enqueue_search_mutation(
         collector.collect(
             &vector,
             &text,
-            &routes.targets_for(&transition),
+            &routes.targets_for_with_budget(&transition, None)?,
             &transition,
         )?;
     }

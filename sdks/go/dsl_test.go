@@ -992,6 +992,28 @@ func TestRemoteRetryabilityRequiresExplicitBooleanTrue(t *testing.T) {
 	}
 }
 
+// Structured server details are kept as raw JSON text, so HelixError stays
+// comparable and equal errors compare equal.
+func TestRemoteErrorsKeepServerDetailsAndStayComparable(t *testing.T) {
+	for _, testCase := range []struct {
+		body    string
+		details string
+	}{
+		{`{"error":"cypher_error","msg":"failed","details":{"line":1}}`, `{"line":1}`},
+		{`{"error":"legacy","details":[1]}`, `[1]`},
+		{`{"error":"cypher_error","msg":"failed"}`, ""},
+	} {
+		first := decodeRemoteError([]byte(testCase.body), "fallback", http.StatusBadRequest)
+		second := decodeRemoteError([]byte(testCase.body), "fallback", http.StatusBadRequest)
+		if first.ServerDetails != testCase.details {
+			t.Fatalf("body %s details = %q, want %q", testCase.body, first.ServerDetails, testCase.details)
+		}
+		if *first != *second {
+			t.Fatalf("body %s decoded to unequal errors", testCase.body)
+		}
+	}
+}
+
 func TestClientExecParsesNewLegacyFutureMissingAndMalformedErrors(t *testing.T) {
 	cases := []struct {
 		body    string

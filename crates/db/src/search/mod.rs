@@ -6,18 +6,10 @@
 //! - Vector indexes: ANN (Approximate Nearest Neighbor) search on vector properties
 //! - Text indexes: BM25 full-text search on string properties
 //!
-//! # Index Storage
-//!
-//! ## Equality Index
-//! Key: `[0x03][0x00][prop_hash:4][value_hash:8]`
-//! Value: RoaringTreemap of NodeIds
-//!
-//! ## Range Index
-//! Key: `[0x03][0x01][prop_hash:4][value:var][node_id:8]`
-//! Value: empty (presence = membership)
-//!
-//! ## Vector Index
-//! See the `hnsw` module for details on vector index storage layout
+//! Persistence is defined by [`crate::encoding::v2::keys`] and
+//! [`crate::encoding::v2::values`], including tenant scopes and index generations.
+//! Use those typed codecs rather than constructing keys from layout sketches.
+//! [`crate::index_lifecycle`] owns catalog and generation validity.
 
 pub mod text;
 pub mod vector;
@@ -60,6 +52,7 @@ use crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue;
 use crate::encoding::v2::values::indexes::{BitmapMembershipDelta, SecondaryEqualityValue};
 use crate::encoding::{EdgeId, NodeId};
 use crate::error::HelixDbError;
+use crate::query_resources::{self, bitmap};
 use slatedb::DbReadOps;
 
 fn bounded_prefix_end(prefix: &Bytes) -> Bytes {
@@ -571,6 +564,18 @@ pub async fn lookup_equality_index_set_scoped(
     value: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
+    lookup_equality_index_set_admitted(txn, property, value, tenant_scope, None)
+        .await
+        .map(bitmap::Bitmap::into_unbudgeted)
+}
+
+pub(crate) async fn lookup_equality_index_set_admitted(
+    txn: &(impl DbReadOps + Send + Sync),
+    property: &str,
+    value: &str,
+    tenant_scope: DataScope,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap, HelixDbError> {
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
@@ -580,10 +585,7 @@ pub async fn lookup_equality_index_set_scoped(
     }
     .to_bytes();
 
-    match txn.get(&key).await? {
-        Some(data) => decode_roaring_treemap(&data),
-        None => Ok(RoaringTreemap::new()),
-    }
+    bitmap::Bitmap::read(txn, &key, budget).await
 }
 
 /// Scan all equality-index values for a property, returning up to `limit` nodes.
@@ -1511,6 +1513,18 @@ pub async fn lookup_out_neighbors_by_label_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
+    lookup_out_neighbors_by_label_admitted(txn, source, label, tenant_scope, None)
+        .await
+        .map(bitmap::Bitmap::into_unbudgeted)
+}
+
+pub(crate) async fn lookup_out_neighbors_by_label_admitted(
+    txn: &(impl DbReadOps + Send + Sync),
+    source: NodeId,
+    label: &str,
+    tenant_scope: DataScope,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap, HelixDbError> {
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
@@ -1518,10 +1532,7 @@ pub async fn lookup_out_neighbors_by_label_scoped(
         )),
     }
     .to_bytes();
-    match txn.get(&key).await? {
-        Some(data) => decode_roaring_treemap(&data),
-        None => Ok(RoaringTreemap::new()),
-    }
+    bitmap::Bitmap::read(txn, &key, budget).await
 }
 
 /// Look up incoming neighbors by edge label
@@ -1541,6 +1552,18 @@ pub async fn lookup_in_neighbors_by_label_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
+    lookup_in_neighbors_by_label_admitted(txn, target, label, tenant_scope, None)
+        .await
+        .map(bitmap::Bitmap::into_unbudgeted)
+}
+
+pub(crate) async fn lookup_in_neighbors_by_label_admitted(
+    txn: &(impl DbReadOps + Send + Sync),
+    target: NodeId,
+    label: &str,
+    tenant_scope: DataScope,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap, HelixDbError> {
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
@@ -1548,10 +1571,7 @@ pub async fn lookup_in_neighbors_by_label_scoped(
         )),
     }
     .to_bytes();
-    match txn.get(&key).await? {
-        Some(data) => decode_roaring_treemap(&data),
-        None => Ok(RoaringTreemap::new()),
-    }
+    bitmap::Bitmap::read(txn, &key, budget).await
 }
 
 // =============================================================================
@@ -1857,6 +1877,17 @@ pub async fn lookup_global_edge_label_index_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
+    lookup_global_edge_label_index_admitted(txn, label, tenant_scope, None)
+        .await
+        .map(bitmap::Bitmap::into_unbudgeted)
+}
+
+pub(crate) async fn lookup_global_edge_label_index_admitted(
+    txn: &(impl DbReadOps + Send + Sync),
+    label: &str,
+    tenant_scope: DataScope,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap, HelixDbError> {
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
@@ -1864,10 +1895,7 @@ pub async fn lookup_global_edge_label_index_scoped(
         ))),
     }
     .to_bytes();
-    match txn.get(&key).await? {
-        Some(data) => decode_roaring_treemap(&data),
-        None => Ok(RoaringTreemap::new()),
-    }
+    bitmap::Bitmap::read(txn, &key, budget).await
 }
 
 /// Look up all edge IDs for a globally indexed edge property/value pair.
@@ -1916,15 +1944,24 @@ pub async fn lookup_edge_pair_index_scoped(
     to: NodeId,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
+    lookup_edge_pair_index_admitted(txn, from, to, tenant_scope, None)
+        .await
+        .map(bitmap::Bitmap::into_unbudgeted)
+}
+
+pub(crate) async fn lookup_edge_pair_index_admitted(
+    txn: &(impl DbReadOps + Send + Sync),
+    from: NodeId,
+    to: NodeId,
+    tenant_scope: DataScope,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap, HelixDbError> {
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::EdgePairIndex(crate::encoding::keys::EdgePairIndexKey::new(from, to)),
     }
     .to_bytes();
-    match txn.get(&key).await? {
-        Some(data) => decode_roaring_treemap(&data),
-        None => Ok(RoaringTreemap::new()),
-    }
+    bitmap::Bitmap::read(txn, &key, budget).await
 }
 
 /// Add an edge id to the exact `(from, to)` multigraph pair index.
@@ -2795,6 +2832,17 @@ pub async fn store_edge_endpoints_scoped(
     to: NodeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
+    stage_edge_endpoints_scoped(txn, edge_id, from, to, tenant_scope).await
+}
+
+/// Stages canonical endpoint bytes through borrowed native mutation authority.
+pub(crate) async fn stage_edge_endpoints_scoped(
+    txn: &impl crate::transaction::Mutation,
+    edge_id: EdgeId,
+    from: NodeId,
+    to: NodeId,
+    tenant_scope: DataScope,
+) -> Result<(), HelixDbError> {
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::EdgeEndpoints(EdgeEndpointsKey::new(edge_id)),
@@ -2841,6 +2889,15 @@ pub async fn delete_edge_endpoints(
 
 pub async fn delete_edge_endpoints_scoped(
     txn: &DbTransaction,
+    edge_id: EdgeId,
+    tenant_scope: DataScope,
+) -> Result<(), HelixDbError> {
+    stage_delete_edge_endpoints_scoped(txn, edge_id, tenant_scope).await
+}
+
+/// Stages endpoint removal without exposing request transaction ownership.
+pub(crate) async fn stage_delete_edge_endpoints_scoped(
+    txn: &impl crate::transaction::Mutation,
     edge_id: EdgeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {

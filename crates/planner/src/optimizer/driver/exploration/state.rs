@@ -262,8 +262,8 @@ mod tests {
         )
     }
 
-    fn config() -> optimizer::OptimizerConfig {
-        optimizer::OptimizerConfig::from_context(&context::PlannerContext::default())
+    fn config() -> optimizer::OptimizerConfig<'static> {
+        optimizer::OptimizerConfig::from_context(&context::PlannerContext::default()).into_owned()
     }
 
     fn alternative(latency: u64) -> physical::PhysicalAlternative {

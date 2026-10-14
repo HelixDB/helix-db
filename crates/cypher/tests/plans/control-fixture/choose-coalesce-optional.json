@@ -1,0 +1,128 @@
+{
+  "request_type": "read",
+  "query_name": null,
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "branched",
+            "root": {
+              "value_map": {
+                "input": {
+                  "dedup": {
+                    "input": {
+                      "optional": {
+                        "input": {
+                          "coalesce": {
+                            "input": {
+                              "choose": {
+                                "input": {
+                                  "where": {
+                                    "input": {
+                                      "nodes_where": {
+                                        "predicate": {
+                                          "eq": {
+                                            "left": {
+                                              "property": "$label"
+                                            },
+                                            "right": {
+                                              "constant": {
+                                                "string": "ParityUser"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "predicate": {
+                                      "eq": {
+                                        "left": {
+                                          "property": "externalId"
+                                        },
+                                        "right": {
+                                          "constant": {
+                                            "string": "user-alice"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
+                                "condition": {
+                                  "eq": {
+                                    "left": {
+                                      "property": "status"
+                                    },
+                                    "right": {
+                                      "constant": {
+                                        "string": "active"
+                                      }
+                                    }
+                                  }
+                                },
+                                "then_traversal": {
+                                  "root": {
+                                    "out": {
+                                      "input": "context",
+                                      "label": "FOLLOWS"
+                                    }
+                                  }
+                                },
+                                "else_traversal": {
+                                  "root": {
+                                    "in": {
+                                      "input": "context",
+                                      "label": "FOLLOWS"
+                                    }
+                                  }
+                                }
+                              }
+                            },
+                            "traversals": [
+                              {
+                                "root": {
+                                  "out": {
+                                    "input": "context",
+                                    "label": "FOLLOWS"
+                                  }
+                                }
+                              },
+                              {
+                                "root": {
+                                  "in": {
+                                    "input": "context",
+                                    "label": "FOLLOWS"
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        },
+                        "traversal": {
+                          "root": {
+                            "out": {
+                              "input": "context",
+                              "label": "FOLLOWS"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "properties": [
+                  "externalId",
+                  "name"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "returns": [
+        "branched"
+      ]
+    }
+  }
+}

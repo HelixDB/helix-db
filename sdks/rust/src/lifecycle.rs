@@ -3,13 +3,13 @@
 //! ```
 //! use helix_db::{IndexDdlReceipt, IndexOperationStatus};
 //!
-//! let receipt: IndexDdlReceipt = sonic_rs::from_str(
-//!     r#"{"kind":"accepted","operation_id":"07070707-0707-0707-0707-070707070707","index_id":"42","generation":"3"}"#,
+//! let receipt: IndexDdlReceipt = simd_json::from_reader(
+//!     r#"{"kind":"accepted","operation_id":"07070707-0707-0707-0707-070707070707","index_id":"42","generation":"3"}"#.as_bytes(),
 //! ).unwrap();
 //! assert!(matches!(receipt, IndexDdlReceipt::Accepted { index_id: 42, .. }));
 //!
-//! let status: IndexOperationStatus = sonic_rs::from_str(
-//!     r#"{"status":"queued","operation_id":"07070707-0707-0707-0707-070707070707","index_id":"42","generation":"3","operation_kind":"build","family":"secondary","stage":"scan","attempt":0,"progress":{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"},"future":true}"#,
+//! let status: IndexOperationStatus = simd_json::from_reader(
+//!     r#"{"status":"queued","operation_id":"07070707-0707-0707-0707-070707070707","index_id":"42","generation":"3","operation_kind":"build","family":"secondary","stage":"scan","attempt":0,"progress":{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"},"future":true}"#.as_bytes(),
 //! ).unwrap();
 //! assert!(matches!(status, IndexOperationStatus::Queued { .. }));
 //! ```
@@ -407,18 +407,14 @@ mod tests {
 
     #[test]
     fn response_decoders_accept_additive_fields_and_reject_invalid_required_fields() {
-        let receipt: IndexDdlReceipt = sonic_rs::from_str(
-            r#"{"kind":"accepted","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","future":true}"#,
-        )
+        let receipt: IndexDdlReceipt = simd_json::from_reader(r#"{"kind":"accepted","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","future":true}"#.as_bytes())
         .unwrap();
         assert!(matches!(
             receipt,
             IndexDdlReceipt::Accepted { index_id: 42, .. }
         ));
 
-        let status: IndexOperationStatus = sonic_rs::from_str(
-            r#"{"status":"blocked","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"build","family":"secondary","stage":"scan","attempt":2,"progress":{"entities":"9","input_bytes":"10","output_operations":"11","output_bytes":"12","future":true},"blocker_code":"uniqueness_violation","future":true}"#,
-        )
+        let status: IndexOperationStatus = simd_json::from_reader(r#"{"status":"blocked","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"build","family":"secondary","stage":"scan","attempt":2,"progress":{"entities":"9","input_bytes":"10","output_operations":"11","output_bytes":"12","future":true},"blocker_code":"uniqueness_violation","future":true}"#.as_bytes())
         .unwrap();
         assert!(matches!(status, IndexOperationStatus::Blocked { .. }));
         for (stage, expected) in [
@@ -428,37 +424,32 @@ mod tests {
             ),
             ("validate_manifests", IndexOperationStage::ValidateManifests),
         ] {
-            let status: IndexOperationStatus = sonic_rs::from_str(&format!(
+            let status: IndexOperationStatus = simd_json::from_reader(format!(
                 r#"{{"status":"queued","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"build","family":"text","stage":"{stage}","attempt":0,"progress":{{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"}}}}"#,
-            ))
+            ).as_bytes())
             .unwrap();
             let IndexOperationStatus::Queued { common } = status else {
                 panic!("valid text build stage must decode as queued");
             };
             assert_eq!(common.stage, expected);
         }
-        let aborted: IndexOperationStatus = sonic_rs::from_str(
-            r#"{"status":"aborted","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"build","family":"secondary","stage":"aborting_finalize","attempt":2,"progress":{"entities":"9","input_bytes":"10","output_operations":"11","output_bytes":"12"}}"#,
-        )
+        let aborted: IndexOperationStatus = simd_json::from_reader(r#"{"status":"aborted","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"build","family":"secondary","stage":"aborting_finalize","attempt":2,"progress":{"entities":"9","input_bytes":"10","output_operations":"11","output_bytes":"12"}}"#.as_bytes())
         .unwrap();
         assert!(matches!(aborted, IndexOperationStatus::Aborted { .. }));
 
-        assert!(sonic_rs::from_str::<IndexDdlReceipt>(
-            r#"{"kind":"accepted","operation_id":"018F0C58-6BC7-7C56-8D3D-9C5F18A0F001","index_id":"42","generation":"3"}"#,
+        assert!(simd_json::from_reader::<_, IndexDdlReceipt>(r#"{"kind":"accepted","operation_id":"018F0C58-6BC7-7C56-8D3D-9C5F18A0F001","index_id":"42","generation":"3"}"#.as_bytes())
+        .is_err());
+        assert!(simd_json::from_reader::<_, IndexDdlReceipt>(
+            r#"{"kind":"already_active","index_id":"0","generation":"03"}"#.as_bytes()
         )
         .is_err());
-        assert!(sonic_rs::from_str::<IndexDdlReceipt>(
-            r#"{"kind":"already_active","index_id":"0","generation":"03"}"#,
+        assert!(simd_json::from_reader::<_, IndexOperationStatus>(
+            r#"{"status":"future"}"#.as_bytes()
         )
         .is_err());
-        assert!(sonic_rs::from_str::<IndexOperationStatus>(r#"{"status":"future"}"#).is_err());
-        assert!(sonic_rs::from_str::<IndexOperationStatus>(
-            r#"{"status":"queued","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"build","family":"secondary","stage":"future","attempt":0,"progress":{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"}}"#,
-        )
+        assert!(simd_json::from_reader::<_, IndexOperationStatus>(r#"{"status":"queued","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"build","family":"secondary","stage":"future","attempt":0,"progress":{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"}}"#.as_bytes())
         .is_err());
-        assert!(sonic_rs::from_str::<IndexOperationStatus>(
-            r#"{"status":"aborted","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"drop","family":"secondary","stage":"finalize","attempt":0,"progress":{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"}}"#,
-        )
+        assert!(simd_json::from_reader::<_, IndexOperationStatus>(r#"{"status":"aborted","operation_id":"018f0c58-6bc7-7c56-8d3d-9c5f18a0f001","index_id":"42","generation":"3","operation_kind":"drop","family":"secondary","stage":"finalize","attempt":0,"progress":{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"}}"#.as_bytes())
         .is_err());
     }
 }

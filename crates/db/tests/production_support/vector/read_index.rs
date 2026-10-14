@@ -19,6 +19,46 @@ use crate::search::vector::{
     VectorDimension, VectorGenerationIdentity, VectorMemoryStore, VectorReadView,
 };
 
+/// Asserts each option-taking read returns the rows its convenience form does.
+///
+/// Vector storage reads only through the convenience methods, so these
+/// SlateDB-required delegations are reached only here.
+async fn assert_option_reads(read: &(impl DbReadOps + Sync)) {
+    let options = slatedb::config::ReadOptions::default();
+    let scan_options = slatedb::config::ScanOptions::default();
+    assert_eq!(
+        read.get_with_options(b"alpha", &options)
+            .await
+            .unwrap()
+            .unwrap(),
+        b"one"[..]
+    );
+    assert_eq!(
+        read.get_key_value_with_options(b"beta", &options)
+            .await
+            .unwrap()
+            .unwrap()
+            .value,
+        b"two"[..]
+    );
+    let values = read
+        .multi_get_with_options(&[&b"alpha"[..], &b"missing"[..]], &options)
+        .await
+        .unwrap();
+    assert_eq!(values[0].as_deref(), Some(&b"one"[..]));
+    assert!(values[1].is_none());
+    let mut scan = read.scan_with_options(.., &scan_options).await.unwrap();
+    assert_eq!(scan.next().await.unwrap().unwrap().key, b"alpha"[..]);
+    assert_eq!(scan.next().await.unwrap().unwrap().key, b"beta"[..]);
+    assert!(scan.next().await.unwrap().is_none());
+    let mut prefix = read
+        .scan_prefix_with_options(b"b", .., &scan_options)
+        .await
+        .unwrap();
+    assert_eq!(prefix.next().await.unwrap().unwrap().value, b"two"[..]);
+    assert!(prefix.next().await.unwrap().is_none());
+}
+
 /// Exercises transaction/snapshot delegation and exact-generation cache guards.
 pub(crate) async fn run() {
     let db = Db::open("production-vector-read-boundary", Arc::new(InMemory::new()))
@@ -42,6 +82,7 @@ pub(crate) async fn run() {
         assert!(scan.next().await.unwrap().is_some());
         let mut prefix = read.scan_prefix(b"a", ..).await.unwrap();
         assert!(prefix.next().await.unwrap().is_some());
+        assert_option_reads(&read).await;
     }
     txn.commit().await.unwrap();
 
@@ -59,6 +100,7 @@ pub(crate) async fn run() {
     assert!(scan.next().await.unwrap().is_some());
     let mut prefix = read.scan_prefix(b"a", ..).await.unwrap();
     assert!(prefix.next().await.unwrap().is_some());
+    assert_option_reads(&read).await;
 
     let handle = ValidatedVectorGenerationHandle::create_current::<Cosine>(
         VectorGenerationIdentity::try_new(

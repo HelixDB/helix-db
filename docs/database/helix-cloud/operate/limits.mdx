@@ -49,9 +49,10 @@ contract. HTTP 429 rate limiting below is a separate mechanism.
 
 ## Helix Cloud request rate limits
 
-Helix Cloud applies a distributed token bucket to `POST /v2/query`. The bucket is
-scoped to the authenticated Cloud database, so reads and writes from every API
-key, application instance, and gateway replica draw from the same allowance.
+Helix Cloud applies a distributed token bucket to `POST /v2/query`,
+`POST /v2/cypher` and `POST /v2/cypher/explain`. The bucket is scoped to the
+authenticated Cloud database, so reads and writes from every API key, application
+instance, and gateway replica draw from the same allowance.
 
 | Plan | Sustained rate | Burst capacity |
 | --- | ---: | ---: |

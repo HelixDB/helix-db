@@ -9,9 +9,9 @@ fn seed_rule_set_explores_access_set_simplification_before_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let point = ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::PointIds {
         ids: element_ids(vec![7]),
@@ -46,9 +46,9 @@ fn seed_rule_set_explores_range_intersection_before_access_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let expr = node_access_expr(ir::NodeAccessPlan::Intersect(
         ir::AtLeast::<_, 2>::from_pair(
@@ -81,9 +81,9 @@ fn seed_rule_set_explores_equality_range_intersection_before_access_implementati
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let union =
         ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::Union(ir::AtLeast::<_, 2>::from_pair(
@@ -119,9 +119,9 @@ fn seed_rule_set_explores_equality_range_union_before_access_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let expr = node_access_expr(ir::NodeAccessPlan::Union(
         ir::AtLeast::<_, 2>::try_from_vec(vec![
@@ -156,9 +156,9 @@ fn seed_rule_set_explores_access_contradiction_before_access_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let expr = node_access_expr(ir::NodeAccessPlan::Intersect(
         ir::AtLeast::<_, 2>::from_pair(
@@ -191,9 +191,9 @@ fn seed_rule_set_explores_access_subsumption_before_access_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let label = ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::LabelScan {
         label: name("User"),
