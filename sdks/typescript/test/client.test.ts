@@ -351,6 +351,8 @@ for (const [body, expectedCode] of [
     '{"error":"writer_fenced_commit_outcome_unknown","msg":"write outcome is unknown","retryable":false}',
     "writer_fenced_commit_outcome_unknown",
   ],
+  ['{"error":"write_outcome_unknown","msg":"write outcome is unknown; the operation was not replayed","retryable":false}', "write_outcome_unknown"],
+  // Helix Cloud gateways before the shared envelope.
   ['{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}', "WRITE_OUTCOME_UNKNOWN"],
 ] as const) {
   const server = await spawnCaptureServer({ status: 503, body });

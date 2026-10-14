@@ -18,7 +18,7 @@ if (baseUrl !== undefined) {
   } catch (error) {
     assert.ok(error instanceof HelixError);
     assert.equal(error.statusCode, 503);
-    assert.equal(error.code, "WRITE_OUTCOME_UNKNOWN");
+    assert.equal(error.code, "write_outcome_unknown");
     assert.equal(error.retryable, false);
     assert.equal(error.isConflict(), false);
     assert.equal(error.isRetryable(), false);

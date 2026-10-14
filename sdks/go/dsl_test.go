@@ -851,6 +851,11 @@ func TestClientUnknownWriteOutcomeIsTerminalAndSentOnce(t *testing.T) {
 		},
 		{
 			name: "hosted gateway",
+			body: `{"error":"write_outcome_unknown","msg":"write outcome is unknown; the operation was not replayed","retryable":false}`,
+			code: QueryErrorCode("write_outcome_unknown"),
+		},
+		{
+			name: "hosted gateway before the shared envelope",
 			body: `{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}`,
 			code: QueryErrorCode("WRITE_OUTCOME_UNKNOWN"),
 		},
@@ -919,8 +924,8 @@ func TestLostResponseGatewayProbe(t *testing.T) {
 	if helixErr.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", helixErr.StatusCode)
 	}
-	if helixErr.Code != QueryErrorCode("WRITE_OUTCOME_UNKNOWN") {
-		t.Fatalf("code = %q, want WRITE_OUTCOME_UNKNOWN", helixErr.Code)
+	if helixErr.Code != QueryErrorCode("write_outcome_unknown") {
+		t.Fatalf("code = %q, want write_outcome_unknown", helixErr.Code)
 	}
 	if helixErr.Retryable == nil || *helixErr.Retryable {
 		t.Fatalf("retryable = %v, want explicit false", helixErr.Retryable)
