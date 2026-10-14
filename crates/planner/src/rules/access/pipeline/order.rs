@@ -44,24 +44,21 @@ impl optimizer::OptimizerRule for AccessPipelineOrderRule {
                 _ => break,
             }
         }
-        let Some((order_index, ordering)) = order else {
+        let Some((_order_index, ordering)) = order else {
             return optimizer::RuleResult::NotApplicable;
         };
-        let prefix = pipeline.ops()[..order_index].to_vec();
-        let rest = pipeline.ops()[order_index + 1..].to_vec();
         let order = logical::AccessOrder::new(pipeline.access().clone(), ordering.clone());
-        if let AccessOrderRangeDirectionRewrite::Rewritten(access) =
-            rewrite_access_order_range_direction(&order, input.indexes)
-        {
-            let mut ops = prefix;
-            ops.extend(rest);
-            return support::access_pipeline_result(access, ops);
+        match rewrite_access_order_range_direction(&order, input.indexes) {
+            AccessOrderRangeDirectionRewrite::Rewritten(access) if &access != pipeline.access() => {
+                return support::access_pipeline_result(access, pipeline.ops().to_vec());
+            }
+            _ => {}
         }
-        if let AccessOrderSatisfaction::Satisfied(access) = access_order_satisfaction(&order) {
-            let mut ops = prefix;
-            ops.extend(rest);
-            return support::access_pipeline_result(access, ops);
+        match access_order_satisfaction(&order) {
+            AccessOrderSatisfaction::Satisfied(access) if &access != pipeline.access() => {
+                support::access_pipeline_result(access, pipeline.ops().to_vec())
+            }
+            _ => optimizer::RuleResult::NotApplicable,
         }
-        optimizer::RuleResult::NotApplicable
     }
 }

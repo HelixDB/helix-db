@@ -125,7 +125,7 @@ impl<'db> ExecutionContext<'db> {
     }
 }
 
-fn physical_element_key(
+pub(in crate::execution::interpreter) fn physical_element_key(
     scope: crate::encoding::keys::scope::DataScope,
     key: &exec::KvKey,
 ) -> (exec::ElementKeyspace, u64, Bytes) {
@@ -143,21 +143,25 @@ fn physical_element_key(
     (keyspace, id, physical)
 }
 
-fn element_prefix(keyspace: exec::ElementKeyspace) -> Vec<u8> {
+pub(in crate::execution::interpreter) fn element_prefix(
+    keyspace: exec::ElementKeyspace,
+) -> Vec<u8> {
     match keyspace {
         exec::ElementKeyspace::NodeProperty => vec![keys::KeyPrefix::NodeProperty.as_u8()],
         exec::ElementKeyspace::EdgeEndpoints => vec![keys::KeyPrefix::EdgeEndpoints.as_u8()],
     }
 }
 
-fn element_prefix_end(keyspace: exec::ElementKeyspace) -> Vec<u8> {
+pub(in crate::execution::interpreter) fn element_prefix_end(
+    keyspace: exec::ElementKeyspace,
+) -> Vec<u8> {
     match keyspace {
         exec::ElementKeyspace::NodeProperty => vec![keys::KeyPrefix::PropertyIndex.as_u8()],
         exec::ElementKeyspace::EdgeEndpoints => vec![keys::KeyPrefix::EdgePairIndex.as_u8()],
     }
 }
 
-fn element_range_bounds(
+pub(in crate::execution::interpreter) fn element_range_bounds(
     keyspace: exec::ElementKeyspace,
     start: &exec::KvKeyBound,
     end: &exec::KvKeyBound,
@@ -187,7 +191,10 @@ fn element_bound_key_after(keyspace: exec::ElementKeyspace, key: &exec::KvBoundK
     bytes
 }
 
-fn parse_element_id(keyspace: exec::ElementKeyspace, key: &[u8]) -> Option<u64> {
+pub(in crate::execution::interpreter) fn parse_element_id(
+    keyspace: exec::ElementKeyspace,
+    key: &[u8],
+) -> Option<u64> {
     match keys::DataKeyKind::parse_from_slice(key).ok()? {
         keys::DataKeyKind::NodeProperty(key) if keyspace == exec::ElementKeyspace::NodeProperty => {
             Some(key.node_id())
@@ -209,7 +216,10 @@ fn parse_element_id(keyspace: exec::ElementKeyspace, key: &[u8]) -> Option<u64> 
     }
 }
 
-fn element_ref(keyspace: exec::ElementKeyspace, id: u64) -> ElementRef {
+pub(in crate::execution::interpreter) fn element_ref(
+    keyspace: exec::ElementKeyspace,
+    id: u64,
+) -> ElementRef {
     match keyspace {
         exec::ElementKeyspace::NodeProperty => ElementRef::Node(id),
         exec::ElementKeyspace::EdgeEndpoints => ElementRef::Edge(id),

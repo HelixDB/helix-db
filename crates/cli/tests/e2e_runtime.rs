@@ -63,6 +63,10 @@ fn stdout(assert: Assert) -> String {
     String::from_utf8(assert.get_output().stdout.clone()).expect("stdout should be utf8")
 }
 
+fn stderr(assert: Assert) -> String {
+    String::from_utf8(assert.get_output().stderr.clone()).expect("stderr should be utf8")
+}
+
 struct RuntimeCleanup<'a> {
     fixture: &'a CliFixture,
     project: PathBuf,
@@ -87,6 +91,25 @@ fn cleanup_runtime(fixture: &CliFixture, project: &Path) {
         .output();
 }
 
+// Allows the same lifecycle suite to validate a freshly built, unpublished image.
+fn select_test_image(project: &Path) {
+    let Ok(reference) = std::env::var("HELIX_E2E_IMAGE") else {
+        return;
+    };
+    let (repository, version) = reference
+        .split_once('@')
+        .or_else(|| reference.rsplit_once(':'))
+        .expect("HELIX_E2E_IMAGE must include an explicit tag or digest");
+    let path = project.join("helix.toml");
+    let mut config: helix_cli::config::HelixConfig =
+        toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let instance = config.local.get_mut("dev").unwrap();
+    instance.image = repository.to_owned();
+    instance.tag = version.parse().unwrap();
+    instance.pull = Some(helix_cli::image::PullPolicy::Never);
+    config.save_to_file(&path).unwrap();
+}
+
 fn assert_e2e_count_is_one(output: &str) {
     let count_idx = output
         .find("e2e_count")
@@ -99,7 +122,7 @@ fn assert_e2e_count_is_one(output: &str) {
 }
 
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.4"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.12"]
 fn local_runtime_lifecycle_and_query_smoke() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -117,6 +140,7 @@ fn local_runtime_lifecycle_and_query_smoke() {
         .assert()
         .success();
 
+    select_test_image(&project);
     cleanup_runtime(&fixture, &project);
     let _cleanup = RuntimeCleanup {
         fixture: &fixture,
@@ -138,20 +162,18 @@ fn local_runtime_lifecycle_and_query_smoke() {
             .assert()
             .success(),
     );
-    assert!(status.contains("dev (local)"));
+    let dev = status
+        .lines()
+        .find(|line| line.starts_with("dev "))
+        .unwrap_or_default();
+    assert!(dev.contains("local"), "{status}");
     assert!(status.contains(&format!("localhost:{port}")));
 
     let initial_query = stdout(
         fixture
             .command()
             .current_dir(&project)
-            .args([
-                "query",
-                "dev",
-                "--file",
-                "examples/request.json",
-                "--compact",
-            ])
+            .args(["query", "dev", "--file", "examples/request.json", "--json"])
             .assert()
             .success(),
     );
@@ -165,7 +187,7 @@ fn local_runtime_lifecycle_and_query_smoke() {
         .current_dir(&project)
         .args(["query", "dev", "--file"])
         .arg(&write_request)
-        .arg("--compact")
+        .arg("--json")
         .assert()
         .success();
 
@@ -178,7 +200,7 @@ fn local_runtime_lifecycle_and_query_smoke() {
             .current_dir(&project)
             .args(["query", "dev", "--file"])
             .arg(&read_request)
-            .arg("--compact")
+            .arg("--json")
             .assert()
             .success(),
     );
@@ -221,7 +243,7 @@ fn local_runtime_lifecycle_and_query_smoke() {
 }
 
 #[test]
-#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.4 plus MinIO"]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.12 plus SeaweedFS"]
 fn disk_runtime_persists_data_across_stop_and_start() {
     let fixture = CliFixture::new();
     let port = free_port();
@@ -240,6 +262,7 @@ fn disk_runtime_persists_data_across_stop_and_start() {
         .assert()
         .success();
 
+    select_test_image(&project);
     cleanup_runtime(&fixture, &project);
     let _cleanup = RuntimeCleanup {
         fixture: &fixture,
@@ -262,15 +285,50 @@ fn disk_runtime_persists_data_across_stop_and_start() {
         .current_dir(&project)
         .args(["query", "dev", "--file"])
         .arg(&write_request)
-        .arg("--compact")
+        .arg("--json")
         .assert()
         .success();
+    // A restart must retain the image even when project settings now name an
+    // unavailable version. It must also retain persistent data.
+    let config_path = project.join("helix.toml");
+    let original = fs::read_to_string(&config_path).unwrap();
+    let mut changed: helix_cli::config::HelixConfig = toml::from_str(&original).unwrap();
+    changed.local.get_mut("dev").unwrap().tag = "unpublished-restart-test".parse().unwrap();
+    changed.save_to_file(&config_path).unwrap();
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["restart", "dev"])
+        .assert()
+        .success();
+    let after_restart = stdout(
+        fixture
+            .command()
+            .current_dir(&project)
+            .args(["query", "dev", "--file"])
+            .arg(&read_request)
+            .arg("--json")
+            .assert()
+            .success(),
+    );
+    assert_e2e_count_is_one(&after_restart);
+    fs::write(&config_path, original).unwrap();
+
     fixture
         .command()
         .current_dir(&project)
         .args(["stop", "dev"])
         .assert()
         .success();
+    // The server caches disk mode's SeaweedFS on disk too, on a volume that
+    // stop keeps and prune removes.
+    let cache_volume = format!(
+        "helix-{}-dev-cache",
+        project.file_name().unwrap().to_str().unwrap()
+    );
+    assert!(docker(&["volume", "inspect", &cache_volume])
+        .status
+        .success());
 
     fixture
         .command()
@@ -284,7 +342,7 @@ fn disk_runtime_persists_data_across_stop_and_start() {
             .current_dir(&project)
             .args(["query", "dev", "--file"])
             .arg(&read_request)
-            .arg("--compact")
+            .arg("--json")
             .assert()
             .success(),
     );
@@ -296,4 +354,147 @@ fn disk_runtime_persists_data_across_stop_and_start() {
         .args(["prune", "dev", "--yes"])
         .assert()
         .success();
+    assert!(!docker(&["volume", "inspect", &cache_volume])
+        .status
+        .success());
+}
+
+fn docker(args: &[&str]) -> std::process::Output {
+    std::process::Command::new("docker")
+        .args(args)
+        .output()
+        .expect("run docker")
+}
+
+/// Upgrading from a MinIO-based CLI leaves its sidecar attached to the
+/// instance network and its data volume behind. Start must detach the old
+/// sidecar so stop can still remove the network, and prune must delete both.
+#[test]
+#[ignore = "requires Docker and pulls ghcr.io/helixdb/helixdb:v0.0.12 plus SeaweedFS"]
+fn disk_runtime_replaces_a_legacy_minio_sidecar() {
+    let fixture = CliFixture::new();
+    let port = free_port();
+    let name = format!("legacy-minio-{}-{port}", std::process::id());
+    let project = fixture.root().join(&name);
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--name", "dev", "--port"])
+        .arg(port.to_string())
+        .args(["--disk", "--no-skills"])
+        .assert()
+        .success();
+    select_test_image(&project);
+    cleanup_runtime(&fixture, &project);
+    let _cleanup = RuntimeCleanup {
+        fixture: &fixture,
+        project: project.clone(),
+    };
+
+    // Stand-in for the old sidecar: any long-running container on the network.
+    let base = format!("helix-{name}-dev");
+    let (legacy_container, legacy_volume) = (format!("{base}-minio"), format!("{base}-minio-data"));
+    for args in [
+        vec!["network", "create", &format!("{base}-net")],
+        vec!["volume", "create", &legacy_volume],
+        vec![
+            "run", "-d", "--name", &legacy_container, "--network", &format!("{base}-net"),
+            "-v", &format!("{legacy_volume}:/data"), "--entrypoint", "sleep",
+            "ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882",
+            "600",
+        ],
+    ] {
+        let output = docker(&args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    }
+
+    let started = stderr(
+        fixture
+            .command()
+            .current_dir(&project)
+            .args(["start", "dev"])
+            .assert()
+            .success(),
+    );
+    assert!(
+        started.contains(&format!("Volume {legacy_volume} holds data")),
+        "{started}"
+    );
+    assert!(!docker(&["container", "inspect", &legacy_container])
+        .status
+        .success());
+    assert!(docker(&["volume", "inspect", &legacy_volume])
+        .status
+        .success());
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["stop", "dev"])
+        .assert()
+        .success();
+    assert!(!docker(&["network", "inspect", &format!("{base}-net")])
+        .status
+        .success());
+    assert!(docker(&["volume", "inspect", &legacy_volume])
+        .status
+        .success());
+
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["prune", "dev", "--yes"])
+        .assert()
+        .success();
+    for volume in [
+        legacy_volume,
+        format!("{base}-seaweedfs-data"),
+        format!("{base}-cache"),
+    ] {
+        assert!(
+            !docker(&["volume", "inspect", &volume]).status.success(),
+            "{volume}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires Docker and a Helix server image"]
+fn restart_keeps_non_persisted_port_override() {
+    let fixture = CliFixture::new();
+    let port = free_port();
+    let project = fixture
+        .root()
+        .join(format!("restart-port-{}-{port}", std::process::id()));
+    fixture
+        .command()
+        .args(["init", "--path"])
+        .arg(&project)
+        .args(["local", "--no-skills"])
+        .assert()
+        .success();
+    select_test_image(&project);
+    let _cleanup = RuntimeCleanup {
+        fixture: &fixture,
+        project: project.clone(),
+    };
+    let original = fs::read_to_string(project.join("helix.toml")).unwrap();
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["start", "dev", "--port"])
+        .arg(port.to_string())
+        .assert()
+        .success();
+    fixture
+        .command()
+        .current_dir(&project)
+        .args(["restart", "dev"])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(project.join("helix.toml")).unwrap(),
+        original
+    );
 }

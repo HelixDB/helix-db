@@ -37,7 +37,9 @@ impl LogicalExpr {
             Self::RootMutation(mutation) => mutation::children(mutation),
             Self::RootBranch(branch) => control::branch_children(branch),
             Self::RootRepeat(repeat) => control::repeat_children(repeat),
-            Self::Pure(_)
+            Self::Rows(_)
+            | Self::GraphPattern(_)
+            | Self::Pure(_)
             | Self::VariableSource(_)
             | Self::PurePipeline(_)
             | Self::FilterChain(_)

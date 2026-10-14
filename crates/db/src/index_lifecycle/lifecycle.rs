@@ -21,6 +21,7 @@ use crate::encoding::v2::values::{
     encode_metadata_value, encode_operation_record,
 };
 use crate::error::{HelixDbError, Result};
+use crate::execution_control;
 
 use super::failpoints::{self, IndexOutboxFailpoint};
 use super::outbox::{self, ExpectedCanonicalRevision};
@@ -98,8 +99,16 @@ pub(crate) async fn create_index_operation(
 ) -> Result<IndexDdlReceipt> {
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
-    create_index_operation_in_transaction(transaction, scope, definition, mode, initial_progress)
-        .await
+    let execution_control = execution_control::ExecutionControl::unlimited();
+    create_index_operation_in_transaction(
+        transaction,
+        scope,
+        definition,
+        mode,
+        initial_progress,
+        &execution_control,
+    )
+    .await
 }
 
 /// Captures the graph source cut and enqueues BUILD in one transaction.
@@ -113,6 +122,25 @@ pub(crate) async fn create_index_operation_from_current_source(
     definition: ValidatedDynamicIndexDefinition,
     mode: helix_planner::ir::IndexCreateMode,
 ) -> Result<IndexDdlReceipt> {
+    let execution_control = execution_control::ExecutionControl::unlimited();
+    create_index_operation_from_current_source_with_control(
+        db,
+        scope,
+        definition,
+        mode,
+        &execution_control,
+    )
+    .await
+}
+
+/// Captures and enqueues one request-owned BUILD at its durable boundary.
+pub(crate) async fn create_index_operation_from_current_source_with_control(
+    db: &Db,
+    scope: DataScope,
+    definition: ValidatedDynamicIndexDefinition,
+    mode: helix_planner::ir::IndexCreateMode,
+    execution_control: &execution_control::ExecutionControl,
+) -> Result<IndexDdlReceipt> {
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     let initial_progress =
@@ -124,6 +152,7 @@ pub(crate) async fn create_index_operation_from_current_source(
         mode,
         initial_progress,
         VectorPhysicalSelection::Allocate,
+        execution_control,
     )
     .await
 }
@@ -137,6 +166,7 @@ pub(crate) async fn create_legacy_vector_adoption_operation(
 ) -> Result<IndexDdlReceipt> {
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    let execution_control = execution_control::ExecutionControl::unlimited();
     create_index_operation_in_transaction_with_physical(
         transaction,
         scope,
@@ -144,6 +174,7 @@ pub(crate) async fn create_legacy_vector_adoption_operation(
         helix_planner::ir::IndexCreateMode::IfNotExists,
         InitialBuildProgress::legacy_vector(),
         VectorPhysicalSelection::AdoptLegacy(physical_index_id),
+        &execution_control,
     )
     .await
 }
@@ -156,6 +187,7 @@ async fn create_index_operation_in_transaction(
     definition: ValidatedDynamicIndexDefinition,
     mode: helix_planner::ir::IndexCreateMode,
     initial_progress: InitialBuildProgress,
+    execution_control: &execution_control::ExecutionControl,
 ) -> Result<IndexDdlReceipt> {
     create_index_operation_in_transaction_with_physical(
         transaction,
@@ -164,6 +196,7 @@ async fn create_index_operation_in_transaction(
         mode,
         initial_progress,
         VectorPhysicalSelection::Allocate,
+        execution_control,
     )
     .await
 }
@@ -181,7 +214,9 @@ async fn create_index_operation_in_transaction_with_physical(
     mode: helix_planner::ir::IndexCreateMode,
     initial_progress: InitialBuildProgress,
     vector_physical: VectorPhysicalSelection,
+    execution_control: &execution_control::ExecutionControl,
 ) -> Result<IndexDdlReceipt> {
+    execution_control.check()?;
     let family = operation_family(definition.family());
     if initial_progress.family() != family {
         return Err(HelixDbError::InvariantViolation(
@@ -310,7 +345,10 @@ async fn create_index_operation_in_transaction_with_physical(
     .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
     outbox::stage_operation(&transaction, scope, expected, &next_index, &operation).await?;
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
-    transaction.commit().await?;
+    transaction
+        .commit()
+        .await
+        .map_err(HelixDbError::from_storage_commit)?;
     Ok(IndexDdlReceipt::Accepted {
         operation_id,
         index_id,
@@ -376,6 +414,18 @@ pub(crate) async fn drop_index_operation(
     scope: DataScope,
     expected_definition: &ValidatedDynamicIndexDefinition,
 ) -> Result<IndexDdlReceipt> {
+    let execution_control = execution_control::ExecutionControl::unlimited();
+    drop_index_operation_with_control(db, scope, expected_definition, &execution_control).await
+}
+
+/// Drops one request-owned family at its exact durable commit boundary.
+pub(crate) async fn drop_index_operation_with_control(
+    db: &Db,
+    scope: DataScope,
+    expected_definition: &ValidatedDynamicIndexDefinition,
+    execution_control: &execution_control::ExecutionControl,
+) -> Result<IndexDdlReceipt> {
+    execution_control.check()?;
     let identity = expected_definition.identity();
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -412,7 +462,10 @@ pub(crate) async fn drop_index_operation(
                 encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
             )?;
             failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
-            transaction.commit().await?;
+            transaction
+                .commit()
+                .await
+                .map_err(HelixDbError::from_storage_commit)?;
             Ok(IndexDdlReceipt::ExistingOperation {
                 operation_id: *build_operation_id,
             })
@@ -450,7 +503,10 @@ pub(crate) async fn drop_index_operation(
             )
             .await?;
             failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
-            transaction.commit().await?;
+            transaction
+                .commit()
+                .await
+                .map_err(HelixDbError::from_storage_commit)?;
             Ok(IndexDdlReceipt::Accepted {
                 operation_id,
                 index_id: index.index_id(),

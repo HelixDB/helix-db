@@ -2,6 +2,8 @@
 
 pub mod adjacency;
 mod codec;
+#[cfg(test)]
+mod delta_encoding_tests;
 pub(crate) mod edge_endpoints;
 mod global;
 pub(crate) mod id_allocation;
@@ -20,7 +22,8 @@ pub(crate) use indexes::text::{
 };
 pub(crate) use indexes::vector::{decode_partition_mapping, encode_partition_mapping};
 pub(crate) use indexes::{
-    decode_secondary_entry, encode_secondary_entry, SecondaryEqualityBitmapValue,
+    decode_secondary_entry, encode_secondary_entry, BitmapMembershipDelta,
+    SecondaryEqualityBitmapValue,
 };
 pub(crate) use lifecycle::{
     decode_applied_state, decode_build_delta, decode_index_record, decode_operation_record,

@@ -107,6 +107,23 @@ fn db_config_rejects_invalid_raw_values() {
 }
 
 #[test]
+fn slate_hybrid_disk_layout_scales_embedded_and_managed_caches() {
+    const MIB: usize = 1024 * 1024;
+    for (disk_bytes, block_bytes, partitions) in [
+        (16 * MIB, 64 * 1024, 256),
+        (24 * MIB, 64 * 1024, 384),
+        (12 * 1024 * MIB, 512 * 1024, 24_576),
+        (352 * 1024 * MIB, 16 * MIB, 22_528),
+        (1024 * 1024 * MIB, 16 * MIB, 65_536),
+    ] {
+        let cache = SlateHybridCacheConfig::try_new(1, "/tmp/slate", disk_bytes)
+            .expect("valid Slate hybrid cache");
+        assert_eq!(cache.disk_block_bytes(), block_bytes, "{disk_bytes}");
+        assert_eq!(cache.disk_partitions(), partitions, "{disk_bytes}");
+    }
+}
+
+#[test]
 fn db_config_uses_typed_edge_settings() {
     let config = DbConfig::new()
         .with_encoding_type(EdgeEncoding::Efp)
@@ -146,6 +163,7 @@ fn db_config_builders_preserve_checked_runtime_contracts() {
         .expect("legacy adaptive policy byte is valid")
         .try_with_id_lease_size(42)
         .expect("positive lease size is valid")
+        .with_id_lease_refill_threshold(21)
         .with_wal(false)
         .with_adaptive_updates(2048)
         .with_cache(cache.clone())
@@ -170,6 +188,7 @@ fn db_config_builders_preserve_checked_runtime_contracts() {
         EdgeUpdatePolicy::Adaptive.as_u8()
     );
     assert_eq!(config.id_lease_size(), 42);
+    assert_eq!(config.id_lease_refill_threshold(), 21);
     assert!(!config.enable_wal);
     assert_eq!(config.high_degree_threshold, 2048);
     assert_eq!(config.cache(), &cache);
@@ -204,6 +223,12 @@ fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
         DbConfig::default().id_lease_size(),
         crate::id_allocator::DEFAULT_LEASE_SIZE
     );
+    assert_eq!(DbConfig::default().id_lease_size(), 10_000);
+    assert_eq!(
+        DbConfig::default().id_lease_refill_threshold(),
+        crate::id_allocator::DEFAULT_LEASE_REFILL_THRESHOLD
+    );
+    assert_eq!(DbConfig::default().id_lease_refill_threshold(), 5_000);
     assert_eq!(
         super::SlateRuntimeConfig::default()
             .to_reader_options(None)
@@ -228,6 +253,10 @@ fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
         default.id_lease_size(),
         crate::id_allocator::DEFAULT_LEASE_SIZE
     );
+    assert_eq!(
+        default.id_lease_refill_threshold(),
+        crate::id_allocator::DEFAULT_LEASE_REFILL_THRESHOLD
+    );
     assert!(matches!(default.cache().mode(), CacheMode::Memory { .. }));
     assert_eq!(
         default
@@ -240,6 +269,10 @@ fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
 
     let slate = slatedb::Settings {
         flush_interval: Some(std::time::Duration::from_secs(7)),
+        wal_replay: slatedb::config::WalReplaySettings {
+            max_concurrent_objects: 17,
+            max_inflight_bytes: 23 * 1024 * 1024,
+        },
         ..Default::default()
     };
     let cache = CacheConfig::new(VectorMemorySettings::default(), CacheMode::VectorMemoryOnly);
@@ -254,6 +287,17 @@ fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
     assert_eq!(
         helix.db().slate().to_writer_settings(None).flush_interval,
         Some(std::time::Duration::from_secs(7))
+    );
+    assert_eq!(
+        helix.db().slate().to_reader_options(None).wal_replay,
+        slatedb::config::WalReplaySettings {
+            max_concurrent_objects: 17,
+            max_inflight_bytes: 23 * 1024 * 1024,
+        }
+    );
+    assert_eq!(
+        helix.db().slate().to_reader_options(None).wal_poll_interval,
+        std::time::Duration::from_secs(1)
     );
 }
 

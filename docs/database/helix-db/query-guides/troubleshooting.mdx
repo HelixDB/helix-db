@@ -1,0 +1,156 @@
+---
+title: "Troubleshoot HelixDB"
+description: "Diagnose query, index, vector, embedded, and local runtime failures"
+sidebarTitle: "Troubleshooting"
+pageType: "Troubleshooting"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Troubleshooting</Badge></div>
+
+Start with the first error returned by the SDK or server. HelixDB rejects invalid
+requests and transactions instead of partially applying them.
+
+Look up the stable `error` code in the [query error reference](/database/helix-db/query-guides/error-handling),
+or in [Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling) for
+codes returned by a Cloud gateway.
+
+## Request uses the wrong AST shape
+
+**Symptoms:** unknown variant errors, missing `query`, or a request containing
+top-level step arrays.
+
+**Fix:**
+
+1. Prefer a current SDK builder.
+2. Confirm the request uses `request_type`, `query_name`, and a `query.read` or
+   `query.write` batch.
+3. Confirm every nested operation uses `root` or `input` and snake_case wire tags.
+
+## Response is missing expected data
+
+Only names listed in `returns` are present in the response. Confirm the traversal was
+assigned with `varAs` or `var_as`, then add that name to `returning`.
+
+If a ranked field such as `$distance` is needed after another traversal, project it
+before leaving the hit stream.
+
+## Index operation is blocked
+
+Poll the receipt's `operation_id` and inspect `blocker_code`. Correct the source data
+or coordination issue, then retry the same operation. Abort a constructing build when
+you want cleanup instead of activation.
+
+Do not create repeated definitions to work around a blocker:
+`existing_operation` deliberately points callers at the durable in-flight operation.
+
+## Vector dimension mismatch
+
+The stored vector and query vector must have exactly the dimension declared by the
+index. Check all three values:
+
+- Index definition dimension
+- Existing property arrays included by the backfill
+- Runtime query vector
+
+Malformed existing values block index activation; malformed query vectors fail the
+request.
+
+## Embedded runtime is unavailable
+
+An `EmbeddedUnavailable` error means the embedded runtime package could not load for
+the current environment. Reinstall the matching package or switch to
+`Client.server(...)`.
+
+Review the [embedded installation guide](/database/helix-db/start-here/local-development/embedded-database#install).
+
+## Embedded reader rejects a request
+
+A reader handle is read-only. Open a writer handle for mutations. Server-only request
+options are also rejected in embedded mode because no routing gateway is present.
+
+## Request returns HTTP 409
+
+A conflict means the request could not commit against current transactional state.
+Retry the entire idempotent transaction with bounded backoff. Do not retry only part of
+a multi-mutation request.
+
+For non-idempotent business actions, attach an application-level idempotency key or
+read the latest state before deciding whether to resubmit.
+
+## Request returns `index_backpressure`
+
+An HTTP 429 with `index_backpressure` comes from the database engine, not a rate limit.
+Either a vector or text index already holds its maximum unpublished work, so the write
+was rejected before commit, or a whole-index `strong` search's answer lies behind more
+than 800 unpublished changes, or a `strong` text search would analyze more unpublished
+text in its partition than its bound allows (`pending_text_analysis_bytes`; 512 MiB of
+analysis by default, about 44,000 unpublished 40-word documents), or a `strong` vector
+search would score more unpublished vector work than its bound allows
+(`pending_vector_bytes`; by default the index's retained-byte limit, which writes reach
+first). Nothing from the request took effect.
+
+Retry the unchanged request with bounded backoff and jitter; it succeeds once the index
+worker publishes the backlog, or, while the index is building, once it activates. Reads
+that can tolerate lag can use `eventual` search.
+See [Search consistency](/database/helix-db/query-guides/search-consistency).
+
+`strong` text searches that return `pending_text_analysis_bytes` while text is ingested
+mean the ingest is outpacing the index worker, as during a bulk import; the server logs a
+warning at most once a minute when this happens. Search `eventual` during the import. A
+self-hosted server can also raise the bound with
+`HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES`. If they keep failing after the worker has
+caught up, the text limits were probably lowered below documents already admitted. The
+worker holds those documents back and never publishes them. Health responses
+(`GET /healthz`) count them under `blocked_index_entity_count`, and the server logs an
+error naming each one when it is held back. Raise the limits again. Rewriting or
+deleting a document also clears it once replacing or removing its published version fits
+the lowered limits.
+
+The worker also holds back a single vector or text entry whose update fails the same
+way every time it is applied, for example on damaged index data, and keeps publishing
+the rest of the index. It counts under `blocked_index_entity_count` too, and the logged
+error names the entry and the failure. The worker retries the entry about once a
+minute, so it publishes on its own once the cause is fixed. Until then, every write to
+that entry stays queued and counts toward the index's limit on unpublished work, so
+writing it over and over can fill the limit and return `index_backpressure` for writes
+to the whole index. Stop writing the entry until it publishes.
+
+## Request returns HTTP 429 (Helix Cloud)
+
+`rate_limited` means the shared request bucket for the Cloud database has no
+token available. The rejected query did not reach database execution.
+
+Wait for the response's `Retry-After` interval before retrying. Add jitter when
+many workers can wake together, and inspect aggregate traffic across every API
+key and application instance that uses the database. All of them share the same
+bucket.
+
+See [Helix Cloud request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+for the current plan limits and token-bucket behavior.
+
+## Request returns `rate_limit_unavailable` (Helix Cloud)
+
+An HTTP `503` with `rate_limit_unavailable` means the gateway could not make a
+safe distributed admission decision. It fails closed, so the query did not
+reach database execution.
+
+Retry with bounded exponential backoff and jitter. If the response persists,
+check [HelixDB status](https://status.helix-db.com) and include the response code,
+timestamp, and database identifier when contacting support.
+
+## Local server cannot reach storage
+
+For S3-compatible local storage:
+
+1. Confirm the container can resolve the configured endpoint.
+2. Confirm bucket, region, credentials, and HTTP allowance match the service.
+3. Use the service name visible inside the container network, not a host-only alias.
+4. Restart the local instance after changing storage environment variables.
+
+See [local development](/database/helix-db/start-here/local-development/local-server).
+
+## Still blocked?
+
+Capture the SDK version, request JSON with secrets removed, complete error, operation
+ID for lifecycle failures, and deployment mode. Include them when contacting
+[founders@helix-db.com](mailto:founders@helix-db.com).

@@ -1,149 +1,36 @@
-//! Executable graph-access dispatch.
-//!
-//! This module owns the element-specific interpretation of planner
-//! `ExecAccessPlan` values. Storage row materialization, runtime parameter
-//! extraction, index lookups, range scans, and search reads stay in sibling
-//! access modules so the planner-facing dispatch remains small.
-
-use helix_planner::{exec, ir, properties};
-
+//! Planner-selected access dispatch. Incremental sources share the pull reader;
+//! ranking and unordered set preparation retain their existing native primitives.
 use super::super::{ExecutionContext, ExecutionValue};
-use super::indexes::limited_index_ids;
 use super::search::SearchReadLimit;
 use crate::config::{TextElementType, VectorElementType};
-use crate::error::Result;
+use crate::error::{HelixDbError, Result};
+use helix_planner::{exec, properties};
 
-impl<'db> ExecutionContext<'db> {
+impl ExecutionContext<'_> {
     pub(in crate::execution::interpreter) async fn execute_access(
         &mut self,
         plan: &exec::ExecAccessPlan,
     ) -> Result<ExecutionValue> {
-        self.execute_limited_access(plan, None).await
+        self.check_execution_deadline()?;
+        self.execute_access_cursor(plan).await
     }
 
-    async fn execute_limited_access(
+    pub(in crate::execution::interpreter) async fn execute_prepared_access(
         &mut self,
         plan: &exec::ExecAccessPlan,
         limit: Option<properties::PositiveUsize>,
     ) -> Result<ExecutionValue> {
-        let mut plan = plan;
-        let mut limit = limit;
-        loop {
-            self.check_execution_deadline()?;
-            match plan {
-                exec::ExecAccessPlan::Limited(limited) => {
-                    limit = Some(tightest_access_limit(limit, limited.limit()));
-                    plan = limited.source();
-                }
-                exec::ExecAccessPlan::Node(plan) => {
-                    return self.execute_node_access(plan, limit).await;
-                }
-                exec::ExecAccessPlan::Edge(plan) => {
-                    return self.execute_edge_access(plan, limit).await;
-                }
-            }
-        }
-    }
-
-    async fn execute_node_access(
-        &mut self,
-        plan: &exec::ExecNodeAccessPlan,
-        limit: Option<properties::PositiveUsize>,
-    ) -> Result<ExecutionValue> {
-        let mut ids = match plan {
-            exec::ExecNodeAccessPlan::Empty => Vec::new(),
-            exec::ExecNodeAccessPlan::FromParam { param } => self.param_ids(param)?,
-            exec::ExecNodeAccessPlan::FromVar { variable } => {
-                self.access_variable_nodes(variable)?
-            }
-            exec::ExecNodeAccessPlan::AllScan => {
-                let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, limit);
-                read.await?
-            }
-            exec::ExecNodeAccessPlan::LabelScan { label } => limited_index_ids(
-                self.lookup_equality_index_set(
-                    "$label",
-                    &crate::encoding::property::property_value::PropertyValue::String(
-                        label.as_ref().to_string(),
-                    ),
-                )
-                .await?,
-                limit,
-            ),
-            exec::ExecNodeAccessPlan::Bitmap { bitmap } => {
-                let ids = limited_index_ids(self.node_bitmap(bitmap).await?, limit);
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::Unique {
-                lookup,
-                verification,
-            } => {
-                let ids = self
-                    .verified_node_unique_owner(lookup, verification)
-                    .await?
-                    .into_iter()
-                    .collect();
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::AuthoritativeScan { predicate } => {
-                let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
-                let ids = read.await?;
-                let mut rows = Vec::new();
-                for id in ids {
-                    let row =
-                        super::super::ExecutionRow::current(super::super::ElementRef::Node(id));
-                    let matches = match predicate {
-                        exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                            self.scoped_null_matches(&row, key).await?
-                        }
-                        exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                            self.eval_predicate(&row, predicate.predicate()).await?
-                        }
-                    };
-                    if matches {
-                        rows.push(row);
-                        if limit.is_some_and(|limit| rows.len() >= limit.get()) {
-                            break;
-                        }
-                    }
-                }
-                return Ok(ExecutionValue::Stream(rows));
-            }
-            exec::ExecNodeAccessPlan::DynamicEquality { index, key, param } => {
-                super::super::count::validate_node_equality_index(&index.index_id, key)?;
-                let value = self.index_value(&ir::IndexValue::Param(param.clone()))?;
-                let read = self.lookup_managed_equality_union(
-                    crate::index_lifecycle::IndexElementKind::Node,
-                    key,
-                    core::slice::from_ref(&value),
-                );
-                let ids = limited_index_ids(read.await?, limit);
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::DynamicMembership { index, key, values } => {
-                super::super::count::validate_node_equality_index(&index.index_id, key)?;
-                let read = self.dynamic_membership_ids(
-                    crate::index_lifecycle::IndexElementKind::Node,
-                    key,
-                    values,
-                );
-                let ids = limited_index_ids(read.await?, limit);
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::RangeIndex { key, range, .. } => {
-                let ids = self.node_range_index_ids(key, range, limit).await?;
-                return self.verified_node_rows(ids);
-            }
-            exec::ExecNodeAccessPlan::SecondarySet { set } => {
+        match plan {
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::SecondarySet { set }) => {
                 let ids = self.node_secondary_set_ids(set, limit).await?;
-                return self.verified_node_rows(ids);
+                self.verified_node_rows(ids)
             }
-            exec::ExecNodeAccessPlan::VectorSearch {
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::VectorSearch {
                 key,
                 index,
                 query_vector,
                 k,
-            } => {
+            }) => {
                 let mut results = self
                     .vector_search_results(
                         VectorElementType::Node,
@@ -155,14 +42,14 @@ impl<'db> ExecutionContext<'db> {
                     )
                     .await?;
                 truncate_search_results(&mut results, limit);
-                return self.node_search_rows(results).await;
+                self.node_search_rows(results).await
             }
-            exec::ExecNodeAccessPlan::TextSearch {
+            exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::TextSearch {
                 key,
                 index,
                 query_text,
                 k,
-            } => {
+            }) => {
                 let results = self
                     .text_search_hits(
                         TextElementType::Node,
@@ -173,95 +60,18 @@ impl<'db> ExecutionContext<'db> {
                         SearchReadLimit::new(k, limit),
                     )
                     .await?;
-                return self.node_text_search_rows(results).await;
+                self.node_text_search_rows(results).await
             }
-        };
-        truncate_ids(&mut ids, limit);
-        self.node_rows(ids).await
-    }
-
-    async fn execute_edge_access(
-        &mut self,
-        plan: &exec::ExecEdgeAccessPlan,
-        limit: Option<properties::PositiveUsize>,
-    ) -> Result<ExecutionValue> {
-        let mut ids = match plan {
-            exec::ExecEdgeAccessPlan::Empty => Vec::new(),
-            exec::ExecEdgeAccessPlan::FromParam { param } => self.param_ids(param)?,
-            exec::ExecEdgeAccessPlan::FromVar { variable } => {
-                self.access_variable_edges(variable)?
-            }
-            exec::ExecEdgeAccessPlan::AllScan => {
-                let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, limit);
-                read.await?
-            }
-            exec::ExecEdgeAccessPlan::LabelScan { label } => limited_index_ids(
-                self.lookup_global_edge_label_index(label.as_ref()).await?,
-                limit,
-            ),
-            exec::ExecEdgeAccessPlan::Bitmap { bitmap } => {
-                let ids = limited_index_ids(self.edge_bitmap(bitmap).await?, limit);
-                return self.verified_edge_rows(ids);
-            }
-            exec::ExecEdgeAccessPlan::AuthoritativeScan { predicate } => {
-                let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, None);
-                let ids = read.await?;
-                let mut rows = Vec::new();
-                for id in ids {
-                    let row =
-                        super::super::ExecutionRow::current(super::super::ElementRef::Edge(id));
-                    let matches = match predicate {
-                        exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                            self.scoped_null_matches(&row, key).await?
-                        }
-                        exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                            self.eval_predicate(&row, predicate.predicate()).await?
-                        }
-                    };
-                    if matches {
-                        rows.push(row);
-                        if limit.is_some_and(|limit| rows.len() >= limit.get()) {
-                            break;
-                        }
-                    }
-                }
-                return Ok(ExecutionValue::Stream(rows));
-            }
-            exec::ExecEdgeAccessPlan::DynamicEquality { index, key, param } => {
-                super::super::count::validate_edge_equality_index(&index.index_id, key)?;
-                let value = self.index_value(&ir::IndexValue::Param(param.clone()))?;
-                let read = self.lookup_managed_equality_union(
-                    crate::index_lifecycle::IndexElementKind::Edge,
-                    key,
-                    core::slice::from_ref(&value),
-                );
-                let ids = limited_index_ids(read.await?, limit);
-                return self.verified_edge_rows(ids);
-            }
-            exec::ExecEdgeAccessPlan::DynamicMembership { index, key, values } => {
-                super::super::count::validate_edge_equality_index(&index.index_id, key)?;
-                let read = self.dynamic_membership_ids(
-                    crate::index_lifecycle::IndexElementKind::Edge,
-                    key,
-                    values,
-                );
-                let ids = limited_index_ids(read.await?, limit);
-                return self.verified_edge_rows(ids);
-            }
-            exec::ExecEdgeAccessPlan::RangeIndex { key, range, .. } => {
-                let ids = self.edge_range_index_ids(key, range, limit).await?;
-                return self.verified_edge_rows(ids);
-            }
-            exec::ExecEdgeAccessPlan::SecondarySet { set } => {
+            exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::SecondarySet { set }) => {
                 let ids = self.edge_secondary_set_ids(set, limit).await?;
-                return self.verified_edge_rows(ids);
+                self.verified_edge_rows(ids)
             }
-            exec::ExecEdgeAccessPlan::VectorSearch {
+            exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::VectorSearch {
                 key,
                 index,
                 query_vector,
                 k,
-            } => {
+            }) => {
                 let read = self.vector_search_results(
                     VectorElementType::Edge,
                     &key.label,
@@ -272,14 +82,14 @@ impl<'db> ExecutionContext<'db> {
                 );
                 let mut results = read.await?;
                 truncate_search_results(&mut results, limit);
-                return self.edge_search_rows(results).await;
+                self.edge_search_rows(results).await
             }
-            exec::ExecEdgeAccessPlan::TextSearch {
+            exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::TextSearch {
                 key,
                 index,
                 query_text,
                 k,
-            } => {
+            }) => {
                 let read = self.text_search_hits(
                     TextElementType::Edge,
                     &key.label,
@@ -289,17 +99,14 @@ impl<'db> ExecutionContext<'db> {
                     SearchReadLimit::new(k, limit),
                 );
                 let results = read.await?;
-                return self.edge_text_search_rows(results).await;
+                self.edge_text_search_rows(results).await
             }
-        };
-        truncate_ids(&mut ids, limit);
-        self.edge_rows(ids).await
-    }
-}
-
-fn truncate_ids(ids: &mut Vec<u64>, limit: Option<properties::PositiveUsize>) {
-    if let Some(limit) = limit {
-        ids.truncate(limit.get());
+            exec::ExecAccessPlan::Node(_)
+            | exec::ExecAccessPlan::Edge(_)
+            | exec::ExecAccessPlan::Limited(_) => Err(HelixDbError::InvariantViolation(
+                "incremental source reached prepared access".into(),
+            )),
+        }
     }
 }
 
@@ -312,13 +119,6 @@ fn truncate_search_results(
     }
 }
 
-fn tightest_access_limit(
-    current: Option<properties::PositiveUsize>,
-    next: properties::PositiveUsize,
-) -> properties::PositiveUsize {
-    current.filter(|current| current <= &next).unwrap_or(next)
-}
-
 #[cfg(any(test, feature = "production-coverage"))]
 #[cfg_attr(all(feature = "production-coverage", not(test)), allow(dead_code))]
 pub(super) mod tests {
@@ -329,22 +129,106 @@ pub(super) mod tests {
     use super::super::super::{test_support, ElementRef, ExecutionRow};
     use super::*;
 
+    #[cfg(test)]
+    #[tokio::test]
+    async fn dynamic_access_limits_validate_inner_first_and_zero_skips_catalog() {
+        use crate::error::HelixDbError;
+        let db = test_support::open_db_with_config(test_support::in_memory_config(
+            "dynamic-access-bounds",
+        ))
+        .await;
+        let base = exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::RangeIndex {
+            index: catalog::NodeRangeIndexMeta::try_new("missing-range").unwrap(),
+            key: catalog::ScopedPropertyDirectionKey::try_new(
+                "User",
+                "age",
+                helix_ast::index::RangeIndexDirection::Asc,
+            )
+            .unwrap(),
+            range: ir::IndexRange::All,
+            iteration: ir::RangeScanIteration::Reverse,
+        });
+        let dynamic = |name: &str| {
+            exec::ExecAccessLimit::Dynamic(
+                ir::StreamBoundExprPlan::new(helix_ast::expr::Expr::param(name)).unwrap(),
+            )
+        };
+        for (value, expected) in [
+            (PropertyValue::I64(0), "zero"),
+            (
+                PropertyValue::I64(-1),
+                "stream bound expression returned -1",
+            ),
+            (PropertyValue::String("bad".into()), "not an i64"),
+            (PropertyValue::I64(1), "catalog"),
+        ] {
+            let params =
+                context::ParamBindings::default().with_value(test_support::name("limit"), value);
+            let mut execution = ExecutionContext::new(&db, params);
+            execution.enable_request_read_view().await.unwrap();
+            let result = execution
+                .execute_access(&base.clone().limited_by(dynamic("limit")))
+                .await;
+            match expected {
+                "zero" => assert_eq!(result.unwrap(), ExecutionValue::Stream(Vec::new())),
+                "catalog" => assert!(matches!(
+                    result,
+                    Err(HelixDbError::IndexLifecycleUnavailable { .. })
+                )),
+                message => assert!(result.unwrap_err().to_string().contains(message)),
+            }
+            execution.close_request_read_view().unwrap();
+        }
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        // Outer zero must not suppress validation of an inner runtime bound.
+        let plan = base
+            .clone()
+            .limited_by(dynamic("inner"))
+            .limited_by(exec::ExecAccessLimit::Zero);
+        assert!(execution
+            .execute_access(&plan)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("inner"));
+        let plan = base
+            .clone()
+            .limited_by(dynamic("inner"))
+            .limited_by(dynamic("outer"));
+        assert!(execution
+            .execute_access(&plan)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("inner"));
+        // Inner zero still validates an outer runtime bound.
+        let plan = base
+            .clone()
+            .limited_by(exec::ExecAccessLimit::Zero)
+            .limited_by(dynamic("outer"));
+        assert!(execution
+            .execute_access(&plan)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("outer"));
+        execution.fail_deadline_after(0);
+        assert!(matches!(
+            execution
+                .execute_access(&base.limited_by(dynamic("missing")))
+                .await,
+            Err(HelixDbError::QueryDeadlineExceeded)
+        ));
+        execution.close_request_read_view().unwrap();
+    }
+
     fn positive(value: usize) -> properties::PositiveUsize {
         properties::PositiveUsize::new(value).expect("positive test limit")
     }
 
     #[cfg_attr(test, test)]
-    fn truncate_ids_applies_optional_positive_limit() {
-        let mut ids = vec![1, 2, 3, 4];
-        truncate_ids(&mut ids, Some(positive(2)));
-        assert_eq!(ids, vec![1, 2]);
-
-        truncate_ids(&mut ids, None);
-        assert_eq!(ids, vec![1, 2]);
-
-        truncate_ids(&mut ids, Some(positive(10)));
-        assert_eq!(ids, vec![1, 2]);
-
+    fn truncate_search_results_applies_optional_positive_limit() {
         let mut results = vec![
             crate::search::vector::TypedVectorSearchResult::from_physical(
                 crate::encoding::v2::values::indexes::vector::VectorEntityKind::Node,
@@ -368,23 +252,6 @@ pub(super) mod tests {
         assert_eq!(
             results[0].entity_id(),
             crate::search::vector::VectorEntityId::Node(1)
-        );
-    }
-
-    #[cfg_attr(test, test)]
-    fn tightest_access_limit_keeps_the_smallest_nested_limit() {
-        assert_eq!(tightest_access_limit(None, positive(5)).get(), 5);
-        assert_eq!(
-            tightest_access_limit(Some(positive(3)), positive(5)).get(),
-            3
-        );
-        assert_eq!(
-            tightest_access_limit(Some(positive(8)), positive(5)).get(),
-            5
-        );
-        assert_eq!(
-            tightest_access_limit(Some(positive(5)), positive(5)).get(),
-            5
         );
     }
 
@@ -592,6 +459,7 @@ pub(super) mod tests {
         }
 
         let node_range = exec::ExecNodeSecondaryRangePlan {
+            iteration: helix_planner::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::new(test_support::name("node_range:User:rank:Asc")),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "User",
@@ -602,6 +470,7 @@ pub(super) mod tests {
             range: ir::IndexRange::All,
         };
         let edge_range = exec::ExecEdgeSecondaryRangePlan {
+            iteration: helix_planner::ir::RangeScanIteration::Forward,
             index: catalog::EdgeRangeIndexMeta::new(test_support::name(
                 "edge_range:FOLLOWS:rank:Asc",
             )),
@@ -734,6 +603,36 @@ pub(super) mod tests {
             );
         }
 
+        // A unique set member whose value has no owner contributes no rows.
+        let exec::ExecNodeAccessPlan::Unique {
+            lookup,
+            verification,
+        } = exec::ExecNodeAccessPlan::exact_equality(
+            catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:email"))
+                .with_uniqueness(catalog::IndexUniqueness::Unique),
+            catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
+            ir::IndexValue::Literal(
+                ir::SecondaryIndexLiteral::new(PropertyValue::from("missing@example.com")).unwrap(),
+            ),
+        )
+        else {
+            panic!("unique fixture selects exact unique access")
+        };
+        assert_eq!(
+            execution
+                .execute_access(&exec::ExecAccessPlan::Node(
+                    exec::ExecNodeAccessPlan::SecondarySet {
+                        set: exec::ExecNodeSecondarySetPlan::Unique {
+                            lookup,
+                            verification,
+                        },
+                    }
+                ))
+                .await
+                .unwrap(),
+            ExecutionValue::Stream(Vec::new())
+        );
+
         for (plan, expected) in [
             (
                 exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::AuthoritativeScan {
@@ -861,6 +760,7 @@ pub(super) mod tests {
             exec::ExecNodeAccessPlan::SecondarySet {
                 set: exec::ExecNodeSecondarySetPlan::OrderedIntersect {
                     driver: exec::ExecNodeSecondaryRangePlan {
+                        iteration: helix_planner::ir::RangeScanIteration::Forward,
                         index: catalog::NodeRangeIndexMeta::new(test_support::name(
                             "node_range:User:rank:Asc",
                         )),
@@ -914,6 +814,7 @@ pub(super) mod tests {
             exec::ExecEdgeAccessPlan::SecondarySet {
                 set: exec::ExecEdgeSecondarySetPlan::OrderedIntersect {
                     driver: exec::ExecEdgeSecondaryRangePlan {
+                        iteration: helix_planner::ir::RangeScanIteration::Forward,
                         index: catalog::EdgeRangeIndexMeta::new(test_support::name(
                             "edge_range:FOLLOWS:rank:Asc",
                         )),
@@ -1127,8 +1028,7 @@ pub(super) mod tests {
 
     #[cfg(all(feature = "production-coverage", not(test)))]
     pub(in crate::execution::interpreter::access) async fn run_production_contracts() {
-        truncate_ids_applies_optional_positive_limit();
-        tightest_access_limit_keeps_the_smallest_nested_limit();
+        truncate_search_results_applies_optional_positive_limit();
         access_dispatch_covers_node_equality_and_edge_source_variants().await;
         exact_access_dispatch_covers_bitmap_unique_scan_and_dynamic_families().await;
         exact_access_dispatch_rejects_each_invalid_dynamic_and_set_driver_contract().await;

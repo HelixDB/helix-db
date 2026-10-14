@@ -15,8 +15,8 @@ mod window;
 
 pub(in crate::rules) use self::{
     cardinality::{
-        estimated_pipeline_rows, estimated_rows_bounded_by, stream_bound_upper, stream_range_upper,
-        with_cardinality,
+        estimated_pipeline_rows, estimated_rows_after_op, estimated_rows_bounded_by,
+        stream_bound_upper, stream_range_upper, with_cardinality,
     },
     delivered::{
         access_delivered, aggregate_output_delivered, barrier_delivered, bounded_delivered,
@@ -26,8 +26,8 @@ pub(in crate::rules) use self::{
         stream_variable_write_delivered_properties,
     },
     pipeline::{
-        access_pipeline_op, physical_pipeline_from_first_and_rest,
-        physical_pipeline_from_prefix_and_required_suffix,
+        access_pipeline_op, membership_label_domain_cost, membership_labels_cost,
+        physical_pipeline_from_first_and_rest, physical_pipeline_from_prefix_and_required_suffix,
         physical_pipeline_from_prefix_and_required_tail, stream_pipeline_op_contract,
     },
     window::access_window_stream_contract,

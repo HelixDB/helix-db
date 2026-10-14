@@ -31,6 +31,7 @@ pub struct StorageCostProfileOverrides {
     multi_get_per_key: Option<LatencyEstimate>,
     range_seek: Option<LatencyEstimate>,
     range_next: Option<LatencyEstimate>,
+    reverse_range_per_1000: Option<LatencyEstimate>,
     cpu_predicate_eval: Option<LatencyEstimate>,
     stream_operator_eval: Option<LatencyEstimate>,
     bitmap_decode_per_id: Option<LatencyEstimate>,
@@ -80,6 +81,9 @@ impl StorageCostProfileOverrides {
         }
         if let Some(value) = self.range_next {
             profile.range_next = value;
+        }
+        if let Some(value) = self.reverse_range_per_1000 {
+            profile.reverse_range_per_1000 = value;
         }
         if let Some(value) = self.cpu_predicate_eval {
             profile.cpu_predicate_eval = value;

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use super::{RootPipeline, RootStream};
-use crate::logical::{AccessStream, StreamVariableWriteOp};
+use crate::logical::{AccessPipeline, AccessStream, StreamVariableWriteOp};
 use crate::properties;
 use crate::{context, ir};
 
@@ -18,20 +18,50 @@ use crate::{context, ir};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamCardinality {
     input: RootStream,
-    params: context::ParamBindings,
+    /// The request's bindings, which every expression of one planning
+    /// session shares. They are not part of the expression's identity: memo
+    /// and selected-root digests serialize every explored expression, so
+    /// serializing megabytes of parameters per expression dominated planning
+    /// for parameter-heavy requests. A deserialized expression carries no
+    /// bindings and plans with none.
+    #[serde(skip)]
+    params: context::SharedParamBindings,
     late_bound_params: BTreeSet<ir::NonEmptyString>,
 }
 
 impl StreamCardinality {
     /// Build a cardinality terminal.
+    ///
+    /// A counted access pipeline that saves its stream (`.as()`, `.store()`)
+    /// splits at the first variable write: the operators before it stay with
+    /// the access, so its filters are still index-served, and the write and
+    /// everything after it run over that stream.
     pub fn new(input: RootStream) -> Self {
         let input = match input {
             RootStream::Access(AccessStream::Pipeline(pipeline))
                 if pipeline.effect() == properties::EffectKind::Barrier =>
             {
-                let input = RootStream::Access(AccessStream::Path(pipeline.access().clone()));
+                let barrier = pipeline
+                    .ops()
+                    .iter()
+                    .position(|op| op.effect() == properties::EffectKind::Barrier)
+                    .expect("a barrier pipeline holds a barrier operator");
+                let (prefix, rest) = pipeline.ops().split_at(barrier);
+                let prefix = ir::AtLeast::<_, 1>::try_from_vec(prefix.to_vec())
+                    .and_then(|prefix| AccessPipeline::new(pipeline.access().clone(), prefix));
+                let (input, ops) = match prefix {
+                    Some(prefix) => (
+                        RootStream::Access(AccessStream::Pipeline(prefix)),
+                        ir::AtLeast::try_from_vec(rest.to_vec())
+                            .expect("the barrier operator starts the rest"),
+                    ),
+                    None => (
+                        RootStream::Access(AccessStream::Path(pipeline.access().clone())),
+                        pipeline.ops_at_least().clone(),
+                    ),
+                };
                 RootStream::Pipeline(Box::new(
-                    RootPipeline::new(input, pipeline.ops_at_least().clone())
+                    RootPipeline::new(input, ops)
                         .expect("a validated access pipeline is a valid root pipeline"),
                 ))
             }
@@ -39,7 +69,7 @@ impl StreamCardinality {
         };
         Self {
             input,
-            params: context::ParamBindings::default(),
+            params: context::SharedParamBindings::default(),
             late_bound_params: BTreeSet::new(),
         }
     }
@@ -48,10 +78,10 @@ impl StreamCardinality {
     /// bindings while this cardinality terminal executes.
     pub fn with_planning_bindings(
         mut self,
-        params: context::ParamBindings,
+        params: impl Into<context::SharedParamBindings>,
         late_bound_params: BTreeSet<ir::NonEmptyString>,
     ) -> Self {
-        self.params = params;
+        self.params = params.into();
         self.late_bound_params = late_bound_params;
         self
     }
@@ -62,7 +92,13 @@ impl StreamCardinality {
     }
 
     /// Immutable request bindings available for planning-time specialization.
-    pub const fn params(&self) -> &context::ParamBindings {
+    pub fn params(&self) -> &context::ParamBindings {
+        &self.params
+    }
+
+    /// The same bindings as [`Self::params`], for rewrites that carry them
+    /// to a new expression without copying them.
+    pub const fn shared_params(&self) -> &context::SharedParamBindings {
         &self.params
     }
 

@@ -16,13 +16,17 @@ import {
   PropertyValue,
   QueryParamType,
   QueryRequest,
+  SearchConsistency,
   RepeatConfig,
   ShortestPathDirection,
   SourcePredicate,
+  StreamBound,
   VectorDistanceMetric,
   WhenThen,
+  bytes,
   defineParams,
   g,
+  i64,
   param,
   parseIndexDdlReceipt,
   parseIndexOperationStatus,
@@ -107,9 +111,22 @@ assert.deepEqual(parseJson('{"n":9223372036854775807,"nested":[-9223372036854775
 });
 
 assert.deepEqual(parsed(PropertyValue.null()), "null");
-assert.deepEqual(parsed(PropertyValue.bytes(new Uint8Array([1, 2]))), { bytes: [1, 2] });
+assert.deepEqual(parsed(PropertyValue.bytes(new Uint8Array([0, 255]))), { bytes: [0, 255] });
+assert.deepEqual(parsed(PropertyValue.from(bytes([0, 255]))), { bytes: [0, 255] });
+for (const value of [-1, 1.5, 256, "7", true]) {
+  assert.throws(() => PropertyValue.bytes([value] as never), /byte at index 0 must be an integer from 0 to 255/);
+  assert.throws(() => PropertyValue.from(bytes([value] as never)), /byte at index 0 must be an integer from 0 to 255/);
+}
 assert.deepEqual(parsed(PropertyInput.param("limit")), { expr: { param: "limit" } });
 assert.deepEqual(parsed(NodeRef.param("node_ids")), { param: "node_ids" });
+assert.deepEqual(parsed(StreamBound.literal(0)), { literal: 0 });
+assert.deepEqual(parsed(StreamBound.literal(BigInt(Number.MAX_SAFE_INTEGER))), {
+  literal: Number.MAX_SAFE_INTEGER,
+});
+for (const value of [-1, -1n, -9_007_199_254_740_993n]) {
+  assert.throws(() => StreamBound.literal(value), TypeError);
+}
+assert.throws(() => StreamBound.literal(BigInt(Number.MAX_SAFE_INTEGER) + 1n), TypeError);
 assert.deepEqual(parsed(QueryParamType.array(QueryParamType.array(QueryParamType.f64()))), { array: { array: "f64" } });
 assert.equal(Object.isFrozen(param.array(param.string())), true);
 assert.equal(Object.isFrozen(QueryParamType.array(QueryParamType.string())), true);
@@ -118,6 +135,23 @@ assert.equal(Object.isFrozen(writeBatch()), true);
 assert.equal(PropertyValue.string("x").asStr(), "x");
 assert.equal(PropertyValue.i64(1n).asI64(), 1n);
 assert.equal(DateTime.parseRfc3339("1969-12-31T23:59:59.999-00:00").toRfc3339(), "1969-12-31T23:59:59.999Z");
+assert.equal(DateTime.parseRfc3339("2026-04-05t12:34:56z").toRfc3339(), "2026-04-05T12:34:56.000Z");
+for (const value of ["2026-04-05", "2026-04-05T12:34:56", "2026-02-30T12:00:00Z", "2026-01-01T24:00:00Z"]) {
+  assert.throws(() => DateTime.parseRfc3339(value), TypeError);
+}
+assert.equal(DateTime.fromMillis(8_640_000_000_000_000n).toRfc3339(), "+275760-09-13T00:00:00.000Z");
+for (const millis of [8_640_000_000_000_001n, -8_640_000_000_000_001n]) {
+  assert.throws(
+    () => DateTime.fromMillis(millis).toRfc3339(),
+    (error: unknown) => {
+      assert.ok(error instanceof QueryError);
+      assert.equal(error.kind, "InvalidDateTimeParameter");
+      assert.equal(error.path, "datetime");
+      assert.equal(error.millis, millis);
+      return true;
+    },
+  );
+}
 
 assert.deepEqual(parsed(Expr.prop("a").add(Expr.val(1)).neg()), {
   neg: { expr: { add: { left: { property: "a" }, right: { constant: { i64: 1 } } } } },
@@ -401,6 +435,31 @@ const atomicTyped = QueryRequest.read(readBatch())
 assert.deepEqual(parsed(atomicTyped).parameters, { flag: true, score: Math.fround(1.1) });
 assert.deepEqual(parsed(atomicTyped).parameter_types, { flag: "bool", score: "f32" });
 assert.throws(() => atomicTyped.withTypedParameter("flag", QueryParamType.bool(), false), /duplicate parameter/);
+assert.equal(QueryRequest.read(readBatch()).searchConsistency, SearchConsistency.Strong);
+assert.equal(QueryRequest.read(readBatch()).toJsonString().includes("search_consistency"), false);
+assert.equal(parsed(QueryRequest.read(readBatch()).withSearchConsistency(SearchConsistency.Eventual)).search_consistency, "eventual");
+assert.equal(
+  QueryRequest.read(readBatch()).withSearchConsistency(SearchConsistency.Strong).toJsonString().includes("search_consistency"),
+  false,
+);
+assert.equal(
+  JSON.parse(
+    readQuery(params).toQueryJson(
+      params,
+      { tenant_id: "acme", limit: 1n, created_after: DateTime.fromMillis(0), labels: {} },
+      {
+        searchConsistency: SearchConsistency.Eventual,
+      },
+    ),
+  ).search_consistency,
+  "eventual",
+);
+assert.throws(() => QueryRequest.write(writeBatch()).withSearchConsistency(SearchConsistency.Eventual), /only valid for read requests/);
+assert.throws(
+  () => writeQuery(writeParams).toQueryJson(writeParams, { data: [] }, { searchConsistency: SearchConsistency.Eventual }),
+  /only valid for read requests/,
+);
+assert.throws(() => QueryRequest.read(readBatch()).withSearchConsistency("sometimes" as SearchConsistency), /unknown search consistency/);
 assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("flag", QueryParamType.bool(), 1), /must be boolean/);
 assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("bytes", QueryParamType.bytes(), "AQID"), QueryError);
 assert.throws(
@@ -434,6 +493,20 @@ assert.throws(() => readBatch().toQueryJson(bytesParams, { payload: new Uint8Arr
 
 assert.equal(stringifyJson(PropertyValue.i64(9223372036854775807n)), '{"i64":9223372036854775807}');
 assert.equal(stringifyJson(QueryValue.i64(9223372036854775807n)), "9223372036854775807");
+const i64Params = defineParams({ value: param.i64() });
+for (const value of [-(1n << 63n), (1n << 63n) - 1n]) {
+  assert.doesNotThrow(() => PropertyValue.i64(value));
+  assert.doesNotThrow(() => PropertyValue.from(i64(value)));
+  assert.doesNotThrow(() => QueryValue.i64(value));
+}
+for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
+  assert.throws(() => i64(value), /signed 64-bit range/);
+  assert.throws(() => PropertyValue.i64(value), /signed 64-bit range/);
+  assert.throws(() => PropertyValue.i64Array([value]), /signed 64-bit range/);
+  assert.throws(() => QueryValue.i64(value), /signed 64-bit range/);
+  assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("value", QueryParamType.i64(), value), /signed 64-bit range/);
+  assert.throws(() => readBatch().toQueryJson(i64Params, { value }), /signed 64-bit range/);
+}
 
 assert.deepEqual(parsed(Expr.case([WhenThen(Predicate.isNotNull("email"), Expr.prop("email"))], Expr.val("missing"))), {
   case: {
@@ -461,3 +534,11 @@ assert.deepEqual(
     },
   },
 );
+
+const droppedEdges = g().e([1, 2]).drop();
+const droppedEdgeState: "edges" = droppedEdges.state;
+const droppedEdgeMode: "write" = droppedEdges.mode;
+assert.equal(droppedEdgeState, "edges");
+assert.equal(droppedEdgeMode, "write");
+assert.deepEqual(parsed(droppedEdges.intoAst()), { drop: { input: parsed(g().e([1, 2]).intoAst()) } });
+assert.equal(g().n(1).drop().state, "nodes");

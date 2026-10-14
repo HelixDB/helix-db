@@ -4,7 +4,8 @@
 //! and the smaller error vocabulary exposed to foreign-language callers.
 //! Configuration and request mistakes remain actionable to the caller, while
 //! corrupt persisted vector rows and fail-closed lifecycle cutover states are
-//! reported as internal failures.
+//! reported as internal failures. Query planning failures surface as `Planner`
+//! and keep the planner's own error code.
 
 use db::encoding::error::EncodingError;
 use db::error::HelixDbError;
@@ -39,19 +40,48 @@ pub enum HelixError {
     Internal { error: String, msg: String },
 }
 
+impl From<db::cypher::Error> for HelixError {
+    /// A Cypher diagnostic keeps its category, phase and detail in the error
+    /// code, as `category:phase:detail` in lower snake case; storage failures
+    /// classify exactly as native query failures do.
+    fn from(error: db::cypher::Error) -> Self {
+        match error {
+            db::cypher::Error::Storage(error) => Self::from(error),
+            db::cypher::Error::Query(error) => Self::InvalidRequest {
+                error: error.code(),
+                msg: error.message,
+            },
+            db::cypher::Error::Json(error) => Self::Internal {
+                error: "response_serialization_error".into(),
+                msg: error.to_string(),
+            },
+        }
+    }
+}
+
+impl HelixError {
+    /// A Cypher request body that is not the `POST /v2/cypher` JSON contract.
+    pub(crate) fn invalid_cypher_json(error: serde_json::Error) -> Self {
+        Self::InvalidRequest {
+            error: "invalid_cypher_json".into(),
+            msg: error.to_string(),
+        }
+    }
+}
+
 impl From<HelixDbError> for HelixError {
     /// Classifies a detailed database error without exposing Rust-only payload types.
     ///
     /// The original display message is retained for diagnostics. The category
-    /// distinguishes caller-correctable vector configuration/input failures
-    /// from invalid stored vector rows, which indicate an internal invariant
+    /// distinguishes caller-correctable vector configuration/input and active-text
+    /// admission failures from invalid stored vector rows, which indicate an internal invariant
     /// violation rather than malformed foreign-language API usage. Retryable
     /// request-view changes remain transaction failures so foreign callers can
     /// apply the same retry policy as a storage transaction conflict.
     fn from(error: HelixDbError) -> Self {
         let error_code = error.error_code().to_string();
         let msg = error.to_string();
-        if error.is_invalid_vector_input() {
+        if error.is_invalid_input() {
             return Self::InvalidRequest {
                 error: error_code,
                 msg,
@@ -64,22 +94,27 @@ impl From<HelixDbError> for HelixError {
                 error: error_code,
                 msg,
             },
+            HelixDbError::Planner(_) => Self::Planner {
+                error: error_code,
+                msg,
+            },
             HelixDbError::Query(_)
             | HelixDbError::InvalidQueryJson(_)
             | HelixDbError::Encoding(EncodingError::InvalidTenantId(_))
             | HelixDbError::IndexBusy { .. }
+            | HelixDbError::IndexBuildBlocked { .. }
             | HelixDbError::IndexOperationNotFound { .. }
             | HelixDbError::IndexOperationNotAbortable { .. }
             | HelixDbError::ActiveTextMutationLimitExceeded { .. }
+            | HelixDbError::QueryMemoryLimitExceeded
             | HelixDbError::InvalidIndexSourceData { .. }
             | HelixDbError::SecondaryIndexValue(_)
             | HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode
-            | HelixDbError::MigrationSteppingRequiresDisabledMode => {
-                Self::InvalidRequest {
-                    error: error_code,
-                    msg,
-                }
-            }
+            | HelixDbError::MigrationSteppingRequiresDisabledMode
+            | HelixDbError::IndexOperationBatchTooLarge { .. } => Self::InvalidRequest {
+                error: error_code,
+                msg,
+            },
             HelixDbError::WriterModeRequired { .. } | HelixDbError::ReaderModeRequired { .. } => {
                 Self::InvalidRequest {
                     error: error_code,
@@ -89,7 +124,7 @@ impl From<HelixDbError> for HelixError {
             HelixDbError::TransactionConflict(_)
             | HelixDbError::RequestReadViewChanged
             | HelixDbError::StaleIndexGeneration { .. }
-            | HelixDbError::WriterFencedCommitOutcomeUnknown => Self::Transaction {
+            | HelixDbError::IndexBackpressure { .. } => Self::Transaction {
                 error: error_code,
                 msg,
             },
@@ -114,6 +149,7 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::InvalidVectorItem(_)
             | HelixDbError::IndexLifecycleUnavailable { .. }
             | HelixDbError::InvalidIndexV2Model(_)
+            | HelixDbError::WriterFencedCommitOutcomeUnknown
             | HelixDbError::MigrationRequired { .. }
             | HelixDbError::WriterMigrationRequired { .. }
             | HelixDbError::UnsupportedIndexStorageVersion { .. }
@@ -122,6 +158,7 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::IndexCatalogCorruption(_)
             | HelixDbError::LegacyZeroNormCosineVector { .. }
             | HelixDbError::QueryDeadlineExceeded
+            | HelixDbError::QueryCancelledByReaderRetirement
             | HelixDbError::InvariantViolation(_) => Self::Internal {
                 error: error_code,
                 msg,
@@ -194,6 +231,33 @@ mod tests {
             HelixError::from(HelixDbError::RequestReadViewChanged),
             HelixError::Transaction { .. }
         ));
+        assert!(matches!(
+            HelixError::from(HelixDbError::IndexBackpressure {
+                scope: db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                index_id: 7,
+                resource: db::error::IndexBackpressureResource::PendingMembers,
+                requested: 2,
+                limit: 1,
+            }),
+            HelixError::Transaction { error, .. } if error == "index_backpressure"
+        ));
+    }
+
+    #[test]
+    fn a_blocked_build_refusal_is_an_invalid_request_naming_its_operation() {
+        let operation_id = "0b6f4c1e-5d0a-4a43-9e57-3f2d1c0b9a87";
+        assert!(matches!(
+            HelixError::from(HelixDbError::IndexBuildBlocked {
+                scope: db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                index_id: 7,
+                operation_id: operation_id.to_string(),
+                resource: db::error::IndexBackpressureResource::PendingMembers,
+                requested: 2,
+                limit: 1,
+            }),
+            HelixError::InvalidRequest { error, msg }
+                if error == "index_build_blocked" && msg.contains(operation_id)
+        ));
     }
 
     #[test]
@@ -206,15 +270,41 @@ mod tests {
     }
 
     #[test]
-    fn active_text_resource_limits_are_invalid_requests() {
+    fn reader_retirement_does_not_expand_the_stable_binding_error_contract() {
         assert!(matches!(
-            HelixError::from(HelixDbError::ActiveTextMutationLimitExceeded {
-                resource: db::error::ActiveTextMutationResource::OutputOperations,
-                observed: 2,
-                limit: 1,
-            }),
-            HelixError::InvalidRequest { .. }
+            HelixError::from(HelixDbError::QueryCancelledByReaderRetirement),
+            HelixError::Internal { error, msg }
+                if error == "query_cancelled_by_reader_retirement"
+                    && msg.contains("reader is retiring")
         ));
+    }
+
+    #[test]
+    fn active_text_resource_limits_are_invalid_requests() {
+        use db::error::ActiveTextMutationResource;
+        for resource in [
+            ActiveTextMutationResource::Entities,
+            ActiveTextMutationResource::AnalysisBytes,
+            ActiveTextMutationResource::InputBytes,
+            ActiveTextMutationResource::OutputOperations,
+            ActiveTextMutationResource::OutputBytes,
+            ActiveTextMutationResource::SplitBytes,
+            ActiveTextMutationResource::RetainedSplitBytes,
+            ActiveTextMutationResource::ManifestPageBytes,
+        ] {
+            let db_error = HelixDbError::ActiveTextMutationLimitExceeded {
+                resource,
+                observed: 513,
+                limit: 512,
+            };
+            let expected_message = db_error.to_string();
+            let HelixError::InvalidRequest { error, msg } = HelixError::from(db_error) else {
+                panic!("a text admission failure is caller-correctable");
+            };
+            assert_eq!(error, "active_text_mutation_limit_exceeded");
+            assert_eq!(msg, expected_message);
+            assert!(msg.contains("hard per-document limit"));
+        }
     }
 
     #[test]
@@ -242,10 +332,10 @@ mod tests {
     }
 
     #[test]
-    fn fenced_commit_outcomes_are_retryable_transaction_failures() {
+    fn fenced_commit_outcomes_are_terminal_internal_failures() {
         assert!(matches!(
             HelixError::from(HelixDbError::WriterFencedCommitOutcomeUnknown),
-            HelixError::Transaction { .. }
+            HelixError::Internal { .. }
         ));
     }
 

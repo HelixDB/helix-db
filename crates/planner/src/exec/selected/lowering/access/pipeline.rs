@@ -20,7 +20,58 @@ impl ExecutableDagBuilder<'_> {
                 },
                 schedule: ExecSchedule::Pipeline,
                 delivered: filtered_delivered_properties(delivered),
-                cost: self.profile.predicate_eval(rows),
+                cost: self.profile.stored_predicate_filter(rows),
+            },
+            logical::StreamPipelineOp::IndexMembership { plan } => StepDraft {
+                dependencies: vec![input_id],
+                output,
+                condition,
+                op: ExecOp::IndexMembership {
+                    plan: Box::new(crate::exec::ExecNodeIndexMembershipPlan::from(
+                        plan.as_ref(),
+                    )),
+                },
+                schedule: ExecSchedule::Pipeline,
+                delivered: filtered_delivered_properties(delivered),
+                // Lowering has no statistics; selection already priced the set.
+                cost: self.profile.index_membership_filter(
+                    match plan.set() {
+                        ir::NodeMembershipSet::Index { .. } => self
+                            .profile
+                            .bitmap_equality_lookup(self.profile.default_equality_index_rows),
+                        ir::NodeMembershipSet::Labels(labels) => self.profile.parallel(
+                            &labels
+                                .iter()
+                                .map(|_| {
+                                    self.profile.bitmap_equality_lookup(
+                                        self.profile.default_unknown_scan_rows,
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                            self.profile.max_parallel_kv_reads,
+                        ),
+                    },
+                    match plan.set() {
+                        ir::NodeMembershipSet::Index {
+                            outside_label: ir::NodeMembershipOutsideLabel::Evaluate,
+                            ..
+                        } => Some(crate::cost::MembershipLabelDomain {
+                            read: self
+                                .profile
+                                .bitmap_equality_lookup(self.profile.default_unknown_scan_rows),
+                            label_rows: self.profile.default_unknown_scan_rows,
+                            predicate: plan.predicate().as_ref(),
+                        }),
+                        ir::NodeMembershipSet::Index {
+                            outside_label: ir::NodeMembershipOutsideLabel::Reject,
+                            ..
+                        }
+                        | ir::NodeMembershipSet::Labels(_) => None,
+                    },
+                    plan.residual().map(AsRef::as_ref),
+                    rows,
+                    self.profile.default_equality_index_rows,
+                ),
             },
             logical::StreamPipelineOp::Window { window } => selected_access_window_step_draft(
                 *window,

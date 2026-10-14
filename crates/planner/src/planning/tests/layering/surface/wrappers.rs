@@ -135,10 +135,12 @@ fn filter_wrappers_emit_residual_filter_contracts() {
         let executable = executable_ast(
             root,
             PlannerContext {
-                params: ParamBindings::default().with_value(
-                    NonEmptyString::new("wanted_weight").unwrap(),
-                    PropertyValue::I64(7),
-                ),
+                params: ParamBindings::default()
+                    .with_value(
+                        NonEmptyString::new("wanted_weight").unwrap(),
+                        PropertyValue::I64(7),
+                    )
+                    .into(),
                 ..PlannerContext::default()
             },
         );

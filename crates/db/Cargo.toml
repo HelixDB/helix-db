@@ -4,27 +4,36 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "30d9f28cfeb93cf95652aac2b7724811c5c49630" }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd" }
+slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd", optional = true }
+http-body = { version = "1", optional = true }
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
+helix-cypher = { path = "../cypher" }
 helix-value-semantics = { path = "../value-semantics" }
 helix-metrics = { path = "../metrics" }
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "fs", "time"] }
 futures = "0.3"
 async-trait = "0.1"
+pin-project-lite = "0.2"
 arc-swap = "1"
 foyer = { version = "0.22.0", features = ["serde"] }
 
 # Data structures
 bytes = { version = "1", features = ["serde"] }
+foldhash = "0.2"
 range-cache = { version = "0.1.1", features = ["async"] }
 roaring = { version = "0.11", features = ["serde"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sonic-rs = "0.5.8"
+simd-json = { version = "0.18.1", default-features = false, features = [
+    "runtime-detection",
+    "serde_impl",
+    "swar-number-parsing",
+] }
 rkyv = "0.8"
 
 # Error handling
@@ -63,16 +72,18 @@ bincode = "^1.3.3"
 parquet = "59"
 arrow-array = "59"
 helix-db-testkit = { path = "../db-testkit" }
+reqwest = "0.13.3"
 
 [features]
 default = []
-migration-parity = []
 index-lifecycle-testing = []
 test-util = ["tokio/test-util"]
 future-vector-codecs = []
-production-coverage = []
+production-coverage = ["slatedb/wal_disable"]
 production-scale = ["production-coverage", "dep:memmap2"]
 fuzzing = []
+# Benchmark images only: object-store connector counters and SlateDB metrics.
+async-index-benchmark = ["dep:http-body", "dep:slatedb-common"]
 force-vector-scalar-kernel = []
 
 [lints]
@@ -80,6 +91,10 @@ workspace = true
 
 [[bench]]
 name = "projection_materialization"
+harness = false
+
+[[bench]]
+name = "property_row_reads"
 harness = false
 
 [[bench]]
@@ -106,6 +121,11 @@ harness = false
 required-features = ["production-coverage"]
 
 [[bench]]
+name = "vector_memory_store"
+harness = false
+required-features = ["production-coverage"]
+
+[[bench]]
 name = "text_transaction_batching"
 harness = false
 required-features = [
@@ -127,10 +147,20 @@ name = "production_index_lifecycle_contracts"
 required-features = ["production-coverage"]
 
 [[test]]
+name = "production_secondary_equality_hot_path_contracts"
+required-features = ["production-coverage"]
+
+[[test]]
 name = "production_migration_contracts"
 required-features = [
     "production-coverage",
-    "migration-parity",
+    "index-lifecycle-testing",
+]
+
+[[test]]
+name = "production_queue_publication"
+required-features = [
+    "production-coverage",
     "index-lifecycle-testing",
 ]
 
@@ -139,15 +169,40 @@ name = "production_text_lifecycle"
 required-features = ["production-coverage"]
 
 [[test]]
+name = "production_index_operation_queue"
+required-features = [
+    "production-coverage",
+    "index-lifecycle-testing",
+]
+
+[[test]]
+name = "production_queue_admission_memory"
+required-features = ["production-coverage"]
+
+[[test]]
 name = "production_text_correctness_regressions"
 required-features = [
     "production-coverage",
-    "migration-parity",
+    "index-lifecycle-testing",
+]
+
+[[test]]
+name = "production_text_queue_contracts"
+required-features = [
+    "production-coverage",
     "index-lifecycle-testing",
 ]
 
 [[test]]
 name = "production_index_lifecycle_scale"
+required-features = ["production-scale"]
+
+[[test]]
+name = "production_vector_migration_scale"
+required-features = ["production-scale"]
+
+[[test]]
+name = "scoped_search_gate"
 required-features = ["production-scale"]
 
 [[test]]

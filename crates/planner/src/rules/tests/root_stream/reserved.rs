@@ -48,7 +48,7 @@ fn stream_reserved_implementation_rule_appends_payload_terminal_pipeline() {
     assert_eq!(
         alternative.cost,
         storage
-            .range_scan(rows)
+            .element_scan(rows)
             .serial(storage.stream_operator(rows))
     );
 }

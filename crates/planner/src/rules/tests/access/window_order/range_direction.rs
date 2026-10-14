@@ -24,14 +24,14 @@ fn access_order_range_direction_rule_rewrites_catalog_backed_node_and_edge_range
         desc_weight_order_keys(),
     );
 
-    let node = logical_access_path(rule.apply(optimizer::RuleInput {
+    let node = ordered_logical_access_path(rule.apply(optimizer::RuleInput {
         expr: &node_expr,
         storage: &storage,
         indexes: &indexes,
         planner_limits: default_planner_limits(),
         stats: default_stats(),
     }));
-    let edge = logical_access_path(rule.apply(optimizer::RuleInput {
+    let edge = ordered_logical_access_path(rule.apply(optimizer::RuleInput {
         expr: &edge_expr,
         storage: &storage,
         indexes: &indexes,
@@ -45,7 +45,7 @@ fn access_order_range_direction_rule_rewrites_catalog_backed_node_and_edge_range
         logical::AccessPath::Node(path)
             if matches!(
                 path.source().as_ref(),
-                ir::NodeAccessPlan::RangeIndex { key, index, range }
+                ir::NodeAccessPlan::RangeIndex { key, index, range, .. }
                     if key == &node_key
                         && index == &indexes.node_range[&node_key]
                         && range == &node_range
@@ -56,7 +56,7 @@ fn access_order_range_direction_rule_rewrites_catalog_backed_node_and_edge_range
         logical::AccessPath::Edge(path)
             if matches!(
                 path.source().as_ref(),
-                ir::EdgeAccessPlan::RangeIndex { key, index, range }
+                ir::EdgeAccessPlan::RangeIndex { key, index, range, .. }
                     if key == &edge_key
                         && index == &indexes.edge_range[&edge_key]
                         && range == &edge_range

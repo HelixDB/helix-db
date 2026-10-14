@@ -133,7 +133,7 @@ mod tests {
                 .await
                 .expect("migration worker test database opens"),
         );
-        let writer = Arc::new(HelixWriter::new(Arc::clone(&db), 64));
+        let writer = Arc::new(HelixWriter::new(Arc::clone(&db), 64, 32));
         (db, writer)
     }
 

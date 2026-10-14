@@ -45,12 +45,11 @@ async fn headless_chef_runs_setup_and_surfaces_external_tool_errors() {
     fs::create_dir_all(project.join("web")).unwrap();
     fs::write(project.join("web/package.json"), "{}").unwrap();
 
-    let chef = stdout(
+    let chef = stderr(
         fixture
             .command()
             .current_dir(fixture.root())
             .arg("chef")
-            .env("HELIX_SKIP_CLOUD_AUTH", "1")
             .env("HELIX_TEST_CHEF_PERMISSION_MODE", "full_auto")
             .env(
                 "HELIX_TEST_TOOL_STDOUT",
@@ -59,7 +58,6 @@ async fn headless_chef_runs_setup_and_surfaces_external_tool_errors() {
             .assert()
             .success(),
     );
-    assert!(chef.contains("without Helix Cloud auth"));
     assert!(chef.contains("Built successfully"));
     assert!(project.join("HELIX_CHEF_PROMPT.md").exists());
     assert!(project.join("DESIGN.md").exists());

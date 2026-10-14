@@ -5,6 +5,8 @@ use std::arch::x86_64::*;
 use std::ptr::read_unaligned;
 
 use crate::search::vector::dimension::SameDimensionPair;
+#[cfg(target_arch = "x86_64")]
+use crate::search::vector::unaligned_vector;
 
 #[target_feature(enable = "sse")]
 unsafe fn hsum128_ps_sse(x: __m128) -> f32 {
@@ -122,6 +124,45 @@ pub(crate) unsafe fn dot_similarity_sse(pair: SameDimensionPair<'_>) -> f32 {
     }
 }
 
+/// Sum of squares in f64 with SSE2: each f32 pair widens to one f64x2, eight
+/// accumulators, sixteen components per step.
+///
+/// Compiled for x86_64 only, where SSE2 is part of the baseline; 32-bit x86
+/// dispatch only proves SSE and uses the scalar reference instead.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+pub(crate) unsafe fn squared_norm_sse2(vector: &unaligned_vector::UnalignedVector<f32>) -> f64 {
+    // SAFETY: The view holds exactly `n` f32 values. SSE2 is baseline on x86_64, the
+    // loads accept unaligned data, and every offset read stays below `n`.
+    unsafe {
+        let n = vector.len();
+        let m = n - (n % 16);
+        let ptr = vector.as_ptr() as *const f32;
+        let mut sums = [_mm_setzero_pd(); 8];
+        let mut i: usize = 0;
+        while i < m {
+            for quad in 0..4 {
+                let values = _mm_loadu_ps(ptr.add(i + 4 * quad));
+                let low = _mm_cvtps_pd(values);
+                let high = _mm_cvtps_pd(_mm_movehl_ps(values, values));
+                sums[2 * quad] = _mm_add_pd(_mm_mul_pd(low, low), sums[2 * quad]);
+                sums[2 * quad + 1] = _mm_add_pd(_mm_mul_pd(high, high), sums[2 * quad + 1]);
+            }
+            i += 16;
+        }
+        let sum = _mm_add_pd(
+            _mm_add_pd(_mm_add_pd(sums[0], sums[1]), _mm_add_pd(sums[2], sums[3])),
+            _mm_add_pd(_mm_add_pd(sums[4], sums[5]), _mm_add_pd(sums[6], sums[7])),
+        );
+        let mut result = _mm_cvtsd_f64(_mm_add_sd(sum, _mm_unpackhi_pd(sum, sum)));
+        for i in m..n {
+            let value = f64::from(read_unaligned(ptr.add(i)));
+            result += value * value;
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::search::vector::spaces::simple::{
@@ -165,5 +206,62 @@ mod tests {
         } else {
             println!("sse test skipped");
         }
+    }
+
+    /// The fixed vectors above are small integers, so every intermediate is
+    /// exactly representable and the kernel cannot disagree with the scalar
+    /// reference no matter how it rounds. This covers the inputs that can.
+    ///
+    /// Seeded identically to the NEON and AVX agreement tests, so a divergence
+    /// on one architecture and not another is a real difference in the kernel
+    /// rather than a different input.
+    #[test]
+    fn sse_kernels_agree_with_scalar_on_rounding_sensitive_input() {
+        use super::*;
+        use crate::search::vector::spaces::kernel_agreement::{
+            assert_agrees, dot_scale, TestRng, AGREEMENT_DIMENSIONS,
+        };
+
+        if !is_x86_feature_detected!("sse") {
+            return;
+        }
+
+        let mut rng = TestRng(0x2026_0904);
+        for dimension in AGREEMENT_DIMENSIONS {
+            let left_values = rng.vector(dimension);
+            let right_values = rng.vector(dimension);
+            let left = UnalignedVector::from_slice(&left_values[..]);
+            let right = UnalignedVector::from_slice(&right_values[..]);
+            let pair = SameDimensionPair::try_new(&left, &right).unwrap();
+
+            let euclid_scalar = euclidean_distance_non_optimized(&left, &right);
+            assert_agrees(
+                unsafe { euclid_similarity_sse(pair) },
+                euclid_scalar,
+                euclid_scalar,
+                "euclidean sse",
+                dimension,
+            );
+
+            let dot_scalar = dot_product_non_optimized(&left, &right);
+            assert_agrees(
+                unsafe { dot_similarity_sse(pair) },
+                dot_scalar,
+                dot_scale(&left_values, &right_values),
+                "dot sse",
+                dimension,
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn sse2_squared_norm_agrees_with_scalar_reference() {
+        use crate::search::vector::spaces::kernel_agreement::assert_squared_norm_kernel;
+
+        assert_squared_norm_kernel(
+            |vector| unsafe { super::squared_norm_sse2(vector) },
+            "sse2 squared norm",
+        );
     }
 }

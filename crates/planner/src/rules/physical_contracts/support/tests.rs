@@ -132,6 +132,7 @@ fn stream_pipeline_contract_tracks_limit_sort_and_variable_write_effects() {
         delivered.clone(),
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(limited.cardinality.upper(), Some(4));
 
@@ -146,6 +147,7 @@ fn stream_pipeline_contract_tracks_limit_sort_and_variable_write_effects() {
         delivered.clone(),
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert!(matches!(
         ordered.ordering,
@@ -163,6 +165,7 @@ fn stream_pipeline_contract_tracks_limit_sort_and_variable_write_effects() {
         delivered,
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(write.effect, properties::EffectKind::Barrier);
 }
@@ -191,6 +194,7 @@ fn restricted_vector_contract_is_pure_order_sensitive_materialized_and_distance_
         },
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
 
     assert_eq!(vector.cardinality.upper(), Some(10));
@@ -230,6 +234,7 @@ fn restricted_text_contract_is_order_sensitive_materialized_and_score_ordered() 
         },
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
 
     assert_eq!(text.cardinality.upper(), Some(10));
@@ -262,6 +267,7 @@ fn stream_pipeline_contract_preserves_literal_window_lower_bounds() {
         delivered.clone(),
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(
         limited.cardinality,
@@ -275,6 +281,7 @@ fn stream_pipeline_contract_preserves_literal_window_lower_bounds() {
         delivered.clone(),
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(
         skipped.cardinality,
@@ -288,9 +295,225 @@ fn stream_pipeline_contract_preserves_literal_window_lower_bounds() {
         delivered,
         cost::EstimatedRows::rows(100),
         &storage,
+        &crate::context::StatsSnapshot::default(),
     );
     assert_eq!(
         ranged.cardinality,
         properties::CardinalityBounds::new(1, Some(3)).unwrap()
     );
+}
+
+fn membership_op(predicate: helix_ast::expr::Predicate) -> logical::StreamPipelineOp {
+    let key = crate::catalog::ScopedPropertyKey::try_new("Attribute", "kind").unwrap();
+    logical::StreamPipelineOp::IndexMembership {
+        plan: Box::new(
+            ir::NodeIndexMembershipPlan::new(
+                ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::EqualityIndex {
+                    index: crate::catalog::IndexCatalogSnapshot::default()
+                        .with_node_eq(key.clone())
+                        .node_eq[&key]
+                        .clone(),
+                    key,
+                    value: ir::IndexValue::Literal(
+                        ir::SecondaryIndexLiteral::new("B".into()).unwrap(),
+                    ),
+                })
+                .unwrap(),
+                ir::PredicatePlan::new(predicate).unwrap(),
+                None,
+            )
+            .unwrap(),
+        ),
+    }
+}
+
+#[test]
+fn membership_contract_prices_what_the_runtime_reads() {
+    let storage = cost::StorageCostProfile::default();
+    let stats = crate::context::StatsSnapshot::default();
+    let unbounded = access_delivered(properties::ElementKind::Node);
+    let unscoped = membership_op(helix_ast::expr::Predicate::eq("kind", "B"));
+    let scoped = membership_op(helix_ast::expr::Predicate::and(vec![
+        helix_ast::expr::Predicate::eq("$label", "Attribute"),
+        helix_ast::expr::Predicate::eq("kind", "B"),
+    ]));
+    let filter = logical::StreamPipelineOp::Filter {
+        predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B")).unwrap(),
+    };
+    let price = |op: &logical::StreamPipelineOp,
+                 delivered: &properties::DeliveredProperties,
+                 rows: u64,
+                 stats: &crate::context::StatsSnapshot| {
+        stream_pipeline_op_contract(
+            op,
+            delivered.clone(),
+            cost::EstimatedRows::rows(rows),
+            &storage,
+            stats,
+        )
+    };
+
+    // An unscoped predicate reads the label bitmap alongside the set, and
+    // neither policy reads a record.
+    let (op, _, evaluate) = price(&unscoped, &unbounded, 1_000, &stats);
+    let (_, _, reject) = price(&scoped, &unbounded, 1_000, &stats);
+    let (_, _, per_row) = price(&filter, &unbounded, 1_000, &stats);
+    assert_eq!(
+        op,
+        crate::physical::PhysicalPipelineOp::Stream(
+            crate::physical::PhysicalStreamOp::IndexMembership
+        )
+    );
+    assert_eq!(evaluate.object_reads, 2);
+    assert_eq!(evaluate.authoritative_graph_reads, 0);
+    assert_eq!(reject.object_reads, 1);
+    assert_eq!(reject.authoritative_graph_reads, 0);
+    assert_eq!(per_row.authoritative_graph_reads, 1_000);
+
+    // Short and proven-bounded streams read the set and no record either.
+    let bounded = with_cardinality(unbounded.clone(), Some(40));
+    for (delivered, rows) in [(&unbounded, 10), (&bounded, 40)] {
+        for membership in [&unscoped, &scoped] {
+            let (_, membership_delivered, cost) = price(membership, delivered, rows, &stats);
+            assert_eq!(cost.authoritative_graph_reads, 0, "rows {rows}");
+            assert_eq!(membership_delivered.cardinality, delivered.cardinality);
+        }
+    }
+
+    // A huge label bitmap only raises the unscoped membership's latency.
+    let huge_label = crate::context::StatsSnapshot::default()
+        .with_node_label_cardinality(ir::NonEmptyString::new("Attribute").unwrap(), 10_000_000);
+    let (_, _, huge) = price(&unscoped, &unbounded, 1_000, &huge_label);
+    assert!(huge.latency > evaluate.latency);
+    assert_eq!(huge.object_reads, evaluate.object_reads);
+    assert_eq!(huge.authoritative_graph_reads, 0);
+    let (_, _, huge_reject) = price(&scoped, &unbounded, 1_000, &huge_label);
+    assert_eq!(huge_reject, reject);
+
+    // A stream longer than the label carries other-label nodes, and under the
+    // `Evaluate` policy each of them reads its record for the predicate.
+    let small_label = crate::context::StatsSnapshot::default()
+        .with_node_label_cardinality(ir::NonEmptyString::new("Attribute").unwrap(), 100);
+    let (_, _, small) = price(&unscoped, &unbounded, 1_000, &small_label);
+    assert_eq!(small.authoritative_graph_reads, 900);
+    let (_, _, small_reject) = price(&scoped, &unbounded, 1_000, &small_label);
+    assert_eq!(small_reject.authoritative_graph_reads, 0);
+}
+
+#[test]
+fn membership_pricing_leaves_the_filter_and_delivered_rows_alone() {
+    let storage = cost::StorageCostProfile::default();
+    let stats = crate::context::StatsSnapshot::default();
+    let rows = cost::EstimatedRows::rows(1_000);
+    let filter = logical::StreamPipelineOp::Filter {
+        predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B")).unwrap(),
+    };
+    let membership = membership_op(helix_ast::expr::Predicate::eq("kind", "B"));
+    for upper in [None, Some(40)] {
+        let delivered = with_cardinality(access_delivered(properties::ElementKind::Node), upper);
+        let (_, _, per_row) =
+            stream_pipeline_op_contract(&filter, delivered.clone(), rows, &storage, &stats);
+        assert_eq!(per_row, storage.stored_predicate_filter(rows));
+        let (_, membership_delivered, _) =
+            stream_pipeline_op_contract(&membership, delivered.clone(), rows, &storage, &stats);
+        assert_eq!(membership_delivered.cardinality, delivered.cardinality);
+    }
+}
+
+#[test]
+fn row_estimates_carry_through_expansion_and_shrink_after_membership() {
+    let storage = cost::StorageCostProfile::default();
+    let stats = crate::context::StatsSnapshot::default();
+    let unknown = access_delivered(properties::ElementKind::Node);
+    let expand = logical::StreamPipelineOp::Expand {
+        plan: ir::ExpandPlan {
+            direction: ir::ExpandDirection::Out,
+            output: ir::ExpandOutput::Nodes,
+            label: ir::ExpandLabelPlan::Any,
+        },
+    };
+    let after =
+        |op: &logical::StreamPipelineOp, delivered: &properties::DeliveredProperties, rows: u64| {
+            estimated_rows_after_op(
+                op,
+                delivered,
+                cost::EstimatedRows::rows(rows),
+                &storage,
+                &stats,
+            )
+        };
+
+    // An unknown fan-out never inflates row estimates.
+    assert_eq!(after(&expand, &unknown, 1), cost::EstimatedRows::rows(1));
+    assert_eq!(
+        after(&expand, &unknown, 50_000),
+        cost::EstimatedRows::rows(50_000)
+    );
+    assert_eq!(
+        after(&expand, &with_cardinality(unknown.clone(), Some(3)), 1),
+        cost::EstimatedRows::rows(3)
+    );
+    let membership = membership_op(helix_ast::expr::Predicate::eq("kind", "B"));
+    assert_eq!(
+        after(&membership, &unknown, 1_000),
+        storage.default_equality_index_rows
+    );
+    assert_eq!(
+        after(&membership, &unknown, 2),
+        cost::EstimatedRows::rows(2)
+    );
+    assert_eq!(
+        after(&logical::StreamPipelineOp::Distinct, &unknown, 7),
+        cost::EstimatedRows::rows(7)
+    );
+}
+
+#[test]
+fn label_set_memberships_price_their_label_bitmaps() {
+    let storage = cost::StorageCostProfile::default();
+    let stats = crate::context::StatsSnapshot::default()
+        .with_node_label_cardinality(ir::NonEmptyString::new("Attribute").unwrap(), 30)
+        .with_node_label_cardinality(ir::NonEmptyString::new("Note").unwrap(), 20);
+    let unknown = access_delivered(properties::ElementKind::Node);
+    let rows = cost::EstimatedRows::rows(1_000);
+    for (predicate, estimate, labels) in [
+        (helix_ast::expr::Predicate::eq("$label", "Attribute"), 30, 1),
+        (
+            helix_ast::expr::Predicate::is_in(
+                "$label",
+                helix_ast::value::PropertyValue::StringArray(vec![
+                    "Attribute".to_owned(),
+                    "Note".to_owned(),
+                ]),
+            ),
+            50,
+            2,
+        ),
+    ] {
+        let op = logical::StreamPipelineOp::IndexMembership {
+            plan: Box::new(
+                ir::NodeIndexMembershipPlan::labels(
+                    ir::PredicatePlan::new(predicate).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            ),
+        };
+        let (physical, delivered, cost) =
+            stream_pipeline_op_contract(&op, unknown.clone(), rows, &storage, &stats);
+        // One concurrent bitmap read per label, and no record read.
+        assert_eq!(cost.authoritative_graph_reads, 0);
+        assert_eq!(cost.object_reads, labels);
+        assert_eq!(
+            physical,
+            crate::physical::PhysicalPipelineOp::Stream(
+                crate::physical::PhysicalStreamOp::IndexMembership
+            )
+        );
+        assert_eq!(delivered.cardinality, unknown.cardinality);
+        assert_eq!(
+            estimated_rows_after_op(&op, &unknown, rows, &storage, &stats),
+            cost::EstimatedRows::rows(estimate)
+        );
+    }
 }

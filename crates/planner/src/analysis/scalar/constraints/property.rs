@@ -2,10 +2,17 @@
 
 use helix_ast::value::PropertyValue;
 
+use crate::analysis::literal_set;
+
 use super::super::extract::{LiteralBound, NullabilityConstraint};
+use super::super::values::property_values_equal;
 use super::bounds::{
     lower_bound_allows_value, range_bounds_are_disjoint, upper_bound_allows_value,
 };
+
+#[cfg(test)]
+#[path = "../../tests/scalar/intersection.rs"]
+mod intersection_tests;
 
 #[derive(Debug, Default)]
 pub(super) struct ScalarPropertyConstraint {
@@ -22,12 +29,16 @@ impl ScalarPropertyConstraint {
         if self
             .equality
             .as_ref()
-            .is_some_and(|existing| existing != &value)
-            || self.inequalities.iter().any(|excluded| excluded == &value)
+            .is_some_and(|existing| !property_values_equal(existing, &value))
             || self
-                .allowed_values
-                .as_ref()
-                .is_some_and(|values| !values.contains(&value))
+                .inequalities
+                .iter()
+                .any(|excluded| property_values_equal(excluded, &value))
+            || self.allowed_values.as_ref().is_some_and(|values| {
+                !values
+                    .iter()
+                    .any(|allowed| property_values_equal(allowed, &value))
+            })
             || self
                 .lower_bounds
                 .iter()
@@ -55,7 +66,7 @@ impl ScalarPropertyConstraint {
         if self
             .equality
             .as_ref()
-            .is_some_and(|existing| existing == &value)
+            .is_some_and(|existing| property_values_equal(existing, &value))
         {
             return true;
         }
@@ -142,8 +153,11 @@ impl ScalarPropertyConstraint {
     fn value_satisfies_constraints(&self, value: &PropertyValue) -> bool {
         self.equality
             .as_ref()
-            .is_none_or(|existing| existing == value)
-            && self.inequalities.iter().all(|excluded| excluded != value)
+            .is_none_or(|existing| property_values_equal(existing, value))
+            && self
+                .inequalities
+                .iter()
+                .all(|excluded| !property_values_equal(excluded, value))
             && self
                 .lower_bounds
                 .iter()
@@ -162,8 +176,14 @@ fn intersect_property_values(
     left: &[PropertyValue],
     right: &[PropertyValue],
 ) -> Vec<PropertyValue> {
+    let contains = literal_set::membership_by(
+        right,
+        left.len(),
+        |left, right| literal_set::LiteralOrder::ScalarNumeric.compare(left, right),
+        property_values_equal,
+    );
     left.iter()
-        .filter(|value| right.contains(value))
+        .filter(|value| contains(value))
         .cloned()
         .collect()
 }

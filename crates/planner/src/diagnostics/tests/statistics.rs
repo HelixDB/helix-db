@@ -118,6 +118,8 @@ fn selected_access_statistics_cover_every_node_and_edge_access_family() {
         point_lookups: 2,
         equality_index_lookups: 1,
         range_index_scans: 1,
+        reverse_range_index_scans: 0,
+        dynamic_bounded_accesses: 0,
         vector_searches: 1,
         text_searches: 1,
         bounded_accesses: 0,
@@ -202,10 +204,10 @@ fn native_all_scans_and_nested_serialized_limits_keep_exact_bounds() {
             "source": {
                 "limited": {
                     "source": { "node": "all_scan" },
-                    "limit": 2
+                    "limit": { "static": 2 }
                 }
             },
-            "limit": 3
+            "limit": { "static": 3 }
         }
     }))
     .unwrap();
@@ -288,13 +290,14 @@ fn residual_filter_and_index_set_plans_count_selected_operators_exactly() {
     );
     assert_eq!(union.diagnostics().statistics.residual_filters, 0);
 
-    let intersect_ctx = context::PlannerContext {
+    let mut intersect_ctx = context::PlannerContext {
         indexes: union_ctx.indexes.clone().with_node_range(
             catalog::ScopedPropertyDirectionKey::try_new("User", "age", RangeIndexDirection::Asc)
                 .unwrap(),
         ),
         ..context::PlannerContext::default()
     };
+    intersect_ctx.storage.default_equality_index_rows = crate::cost::EstimatedRows::rows(2_000);
     let intersection = plan(
         g().n_with_label_where(
             "User",

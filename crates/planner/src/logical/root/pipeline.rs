@@ -61,6 +61,11 @@ impl RootPipeline {
         self.ops.as_at_least()
     }
 
+    /// The input stream and operators, moved out.
+    pub fn into_parts(self) -> (RootStream, ir::AtLeast<StreamPipelineOp, 1>) {
+        (self.input, self.ops.into_at_least())
+    }
+
     /// Effect introduced by the whole root pipeline.
     pub fn effect(&self) -> properties::EffectKind {
         combine_effect(self.input.effect(), pipeline_ops_effect(self.ops()))

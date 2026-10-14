@@ -78,6 +78,7 @@ impl ExecutableDagBuilder<'_> {
             | physical::PhysicalAccess::TextSearch
             | physical::PhysicalAccess::SetIntersection
             | physical::PhysicalAccess::SetUnion
+            | physical::PhysicalAccess::BranchResidualUnion
             | physical::PhysicalAccess::Expand
             | physical::PhysicalAccess::EdgeExact(_) => self
                 .push_selected_node_access_plan_with_read_limit(
@@ -166,6 +167,7 @@ impl ExecutableDagBuilder<'_> {
             | physical::PhysicalAccess::TextSearch
             | physical::PhysicalAccess::SetIntersection
             | physical::PhysicalAccess::SetUnion
+            | physical::PhysicalAccess::BranchResidualUnion
             | physical::PhysicalAccess::Expand
             | physical::PhysicalAccess::NodeExact(_) => self
                 .push_selected_edge_access_plan_with_read_limit(

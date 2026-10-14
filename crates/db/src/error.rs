@@ -75,6 +75,72 @@ impl core::fmt::Display for WriterMigrationRequirement {
     }
 }
 
+/// Retained queued-operation resource whose admission limit would be exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexBackpressureResource {
+    /// Charged bytes of every retained operation, including deletions: each
+    /// counts its encoded size plus
+    /// [`crate::config::IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES`].
+    RetainedBytes,
+    /// Distinct entity/generation members with one or more outstanding operations.
+    PendingMembers,
+    /// Superseded physical results one search would have to skip.
+    SuppressedSearchResults,
+    /// Analysis charge of the committed but unpublished documents one strong
+    /// text search would analyze in its partition: the conservative charge,
+    /// text bytes plus a fixed overhead per token, that one text publication
+    /// also charges, bounded by
+    /// [`crate::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`].
+    PendingTextAnalysisBytes,
+    /// Retained bytes of the latest committed but unpublished operations one
+    /// strong vector search would decode and score exactly, bounded by
+    /// [`crate::config::IndexOperationQueueTuning::strong_vector_search_max_pending_bytes`].
+    PendingVectorBytes,
+}
+
+impl core::fmt::Display for IndexBackpressureResource {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::RetainedBytes => "retained_bytes",
+            Self::PendingMembers => "pending_members",
+            Self::SuppressedSearchResults => "suppressed_search_results",
+            Self::PendingTextAnalysisBytes => "pending_text_analysis_bytes",
+            Self::PendingVectorBytes => "pending_vector_bytes",
+        })
+    }
+}
+
+/// Per-transaction ceiling that one write's queued index work exceeds on its
+/// own, so retrying it unchanged can never succeed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexOperationBatchResource {
+    /// Encoded bytes of one queue key's operand, bounded by the
+    /// write-ahead-log entry limit.
+    OperandBytes,
+    /// Charged bytes of every staged operation, bounded by the per-index
+    /// retained-byte limit: each counts its encoded size plus
+    /// [`crate::config::IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES`].
+    RetainedBytes,
+    /// Distinct entity/generation members staged, bounded by the per-index
+    /// pending-member limit.
+    PendingMembers,
+    /// Analysis charge of the transaction's own unpublished documents that a
+    /// text search in it would analyze in one partition, bounded by
+    /// [`crate::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`].
+    PendingTextAnalysisBytes,
+}
+
+impl core::fmt::Display for IndexOperationBatchResource {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::OperandBytes => "operand_bytes",
+            Self::RetainedBytes => "retained_bytes",
+            Self::PendingMembers => "pending_members",
+            Self::PendingTextAnalysisBytes => "pending_text_analysis_bytes",
+        })
+    }
+}
+
 /// Serialized resource whose Active text-mutation preflight exceeded policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTextMutationResource {
@@ -163,7 +229,7 @@ pub enum SecondaryIndexValueError {
 pub enum HelixDbError {
     /// Error from the underlying SlateDB storage
     #[error("Storage error: {0}")]
-    Storage(#[from] slatedb::Error),
+    Storage(#[source] slatedb::Error),
 
     /// Error encoding/decoding graph data
     #[error("Encoding error: {0}")]
@@ -180,6 +246,14 @@ pub enum HelixDbError {
     /// A transport-owned monotonic query deadline elapsed.
     #[error("Query execution deadline exceeded")]
     QueryDeadlineExceeded,
+
+    /// Retaining an interpreter buffer would exceed the request's memory budget.
+    #[error("Query memory budget exceeded")]
+    QueryMemoryLimitExceeded,
+
+    /// Reader retirement cancelled an admitted read before completion.
+    #[error("Query was cancelled because its reader is retiring")]
+    QueryCancelledByReaderRetirement,
 
     /// Invalid node ID
     #[error("Invalid node ID: {0}")]
@@ -223,14 +297,89 @@ pub enum HelixDbError {
     #[error("Explicit migration stepping requires Disabled worker mode")]
     MigrationSteppingRequiresDisabledMode,
 
-    /// A request-owned Active text mutation exceeded exact serialized admission.
-    #[error("Active text mutation exceeds {resource}: observed {observed}, limit {limit}")]
+    /// An indexed text document exceeds its per-document admission allowance.
+    ///
+    /// Writes report it before commit. The queue publisher also raises it
+    /// internally when one publication exceeds its budget, and trims instead.
+    #[error("Active text mutation exceeds {resource}: observed {observed}, limit {limit}. This is a hard per-document limit; shorten the indexed text.")]
     ActiveTextMutationLimitExceeded {
         /// Resource rejected before intent creation or object I/O.
         resource: ActiveTextMutationResource,
         /// Exact serialized or operation count measured by preflight.
         observed: u64,
         /// Positive configured ceiling.
+        limit: u64,
+    },
+
+    /// Committed but unpublished vector/text work for one index is saturated.
+    ///
+    /// Either a write transaction was rejected before commit, or a strong
+    /// search found more results superseded by committed but unpublished work
+    /// ahead of its answer than it may skip, or a strong text search found
+    /// more committed but unpublished text to analyze than its bound
+    /// ([`crate::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`]),
+    /// or a strong vector search found more committed but unpublished vector
+    /// work to score than its bound
+    /// ([`crate::config::IndexOperationQueueTuning::strong_vector_search_max_pending_bytes`]);
+    /// a write's own changes alone never cause it. Eventual searches never
+    /// fail this way. The whole request may be retried unchanged once the
+    /// index worker publishes outstanding work. Work the worker holds back
+    /// ([`crate::BlockedIndexEntity`], only after limits were lowered) is
+    /// never published, so text it alone keeps past the bound fails strong
+    /// text searches until a later write to it publishes or the bound is
+    /// raised. A write that exceeds a limit on its own fails with
+    /// [`Self::IndexOperationBatchTooLarge`] instead.
+    #[error("index backpressure on {scope:?} index {index_id}: {resource} would reach {requested}, limit {limit}. Retry after outstanding index work is published.")]
+    IndexBackpressure {
+        /// Data scope owning the logical index.
+        scope: crate::encoding::v2::keys::scope::DataScope,
+        /// Logical index whose retained work would exceed its limit.
+        index_id: u64,
+        /// Saturated resource.
+        resource: IndexBackpressureResource,
+        /// Resource total the rejected transaction would have produced, or
+        /// the amount a rejected search reached when it stopped.
+        requested: u64,
+        /// Configured ceiling.
+        limit: u64,
+    },
+
+    /// A write would saturate the queued work of a blocked index build.
+    ///
+    /// A hidden build's generation publishes its queued work only once the
+    /// build activates, so waiting cannot clear this: the write may succeed
+    /// once the blocked build operation is retried or aborted. A repair of
+    /// the entity its blocker names, as that entity's first queued write or
+    /// as its removal from the index, is admitted beyond the limits instead.
+    #[error("index build {operation_id} of {scope:?} index {index_id} is blocked: {resource} would reach {requested}, limit {limit}. Repair what the blocker names and retry the operation, or abort it.")]
+    IndexBuildBlocked {
+        /// Data scope owning the logical index.
+        scope: crate::encoding::v2::keys::scope::DataScope,
+        /// Logical index whose retained work would exceed its limit.
+        index_id: u64,
+        /// Canonical lowercase UUID of the blocked build operation.
+        operation_id: String,
+        /// Saturated resource.
+        resource: IndexBackpressureResource,
+        /// Resource total the rejected transaction would have produced.
+        requested: u64,
+        /// Configured ceiling.
+        limit: u64,
+    },
+
+    /// One transaction staged more queued index work than any single
+    /// transaction may carry: an operand too large to commit, more than a
+    /// per-index backlog limit even with no outstanding work, or more text of
+    /// its own than one of its text searches may analyze.
+    #[error("queued index operations for index {index_id} in one transaction need {resource} {observed}, limit {limit}. This is a hard write-batch limit; split the write into smaller transactions.")]
+    IndexOperationBatchTooLarge {
+        /// Logical index whose ceiling the transaction exceeded.
+        index_id: u64,
+        /// Exceeded per-transaction ceiling.
+        resource: IndexOperationBatchResource,
+        /// Exact amount the transaction alone requires.
+        observed: u64,
+        /// Configured ceiling.
         limit: u64,
     },
 
@@ -321,6 +470,10 @@ pub enum HelixDbError {
     /// Query/traversal error
     #[error("Query error: {0}")]
     Query(String),
+
+    /// Query planning failed before execution started.
+    #[error("planner error: {0}")]
+    Planner(#[from] helix_planner::error::PlannerError),
 
     /// Query JSON could not be decoded at the embedded boundary.
     #[error("Query error: invalid query JSON: {0}")]
@@ -477,10 +630,23 @@ impl From<ConfigError> for HelixDbError {
     }
 }
 
+impl From<slatedb::Error> for HelixDbError {
+    fn from(error: slatedb::Error) -> Self {
+        if crate::transaction::is_admission_failure(&error) {
+            Self::QueryMemoryLimitExceeded
+        } else {
+            Self::Storage(error)
+        }
+    }
+}
+
 impl HelixDbError {
     /// Stable machine-readable code for this database failure.
     pub fn error_code(&self) -> error_code::QueryErrorCode {
         match self {
+            Self::Storage(error) if crate::transaction::is_admission_failure(error) => {
+                error_code::QueryErrorCode::QueryMemoryLimitExceeded
+            }
             Self::Storage(error) if error.kind() == ErrorKind::Transaction => {
                 error_code::QueryErrorCode::TransactionConflict
             }
@@ -494,6 +660,10 @@ impl HelixDbError {
             Self::TransactionConflict(_) => error_code::QueryErrorCode::TransactionConflict,
             Self::RequestReadViewChanged => error_code::QueryErrorCode::RequestReadViewChanged,
             Self::QueryDeadlineExceeded => error_code::QueryErrorCode::QueryDeadlineExceeded,
+            Self::QueryMemoryLimitExceeded => error_code::QueryErrorCode::QueryMemoryLimitExceeded,
+            Self::QueryCancelledByReaderRetirement => {
+                error_code::QueryErrorCode::QueryCancelledByReaderRetirement
+            }
             Self::InvalidNodeId(_) => error_code::QueryErrorCode::InvalidNodeId,
             Self::NodeNotFound(_) => error_code::QueryErrorCode::NodeNotFound,
             Self::EdgeNotFound { .. } => error_code::QueryErrorCode::EdgeNotFound,
@@ -507,6 +677,11 @@ impl HelixDbError {
             }
             Self::MigrationSteppingRequiresDisabledMode => {
                 error_code::QueryErrorCode::MigrationSteppingRequiresDisabledMode
+            }
+            Self::IndexBackpressure { .. } => error_code::QueryErrorCode::IndexBackpressure,
+            Self::IndexBuildBlocked { .. } => error_code::QueryErrorCode::IndexBuildBlocked,
+            Self::IndexOperationBatchTooLarge { .. } => {
+                error_code::QueryErrorCode::IndexOperationBatchTooLarge
             }
             Self::ActiveTextMutationLimitExceeded { .. } => {
                 error_code::QueryErrorCode::ActiveTextMutationLimitExceeded
@@ -551,6 +726,7 @@ impl HelixDbError {
             }
             Self::InvalidVectorConfig(_) => error_code::QueryErrorCode::InvalidVectorConfiguration,
             Self::Query(_) => error_code::QueryErrorCode::InvalidQuery,
+            Self::Planner(error) => error.error_code(),
             Self::InvalidQueryJson(_) => error_code::QueryErrorCode::InvalidQueryJson,
             Self::WriterModeRequired { .. } => error_code::QueryErrorCode::WriterModeRequired,
             Self::ReaderModeRequired { .. } => error_code::QueryErrorCode::ReaderModeRequired,
@@ -592,6 +768,9 @@ impl HelixDbError {
             error_code::QueryErrorCode::IndexLifecycleUnavailable
                 | error_code::QueryErrorCode::SecondaryLifecycleSteppingRequiresDisabledMode
                 | error_code::QueryErrorCode::ActiveTextMutationLimitExceeded
+                | error_code::QueryErrorCode::IndexBackpressure
+                | error_code::QueryErrorCode::IndexBuildBlocked
+                | error_code::QueryErrorCode::IndexOperationBatchTooLarge
                 | error_code::QueryErrorCode::InvalidIndexSourceData
                 | error_code::QueryErrorCode::IndexAlreadyExists
                 | error_code::QueryErrorCode::IndexDefinitionConflict
@@ -605,18 +784,57 @@ impl HelixDbError {
                 | error_code::QueryErrorCode::IndexRevisionExhausted
                 | error_code::QueryErrorCode::IndexOperationRevisionExhausted
                 | error_code::QueryErrorCode::StaleIndexGeneration
-                | error_code::QueryErrorCode::WriterFencedCommitOutcomeUnknown
         )
         .then_some(code.as_str())
+    }
+
+    /// Classifies a failure returned by an invoked durable storage commit.
+    ///
+    /// Once SlateDB reports that the committing writer was fenced, neither a
+    /// retryable conflict nor a definite abort can be proven. Callers must
+    /// therefore preserve the request as a terminal unknown outcome.
+    pub fn from_storage_commit(error: slatedb::Error) -> Self {
+        if error.kind() == ErrorKind::Closed(slatedb::CloseReason::Fenced) {
+            Self::WriterFencedCommitOutcomeUnknown
+        } else {
+            Self::Storage(error)
+        }
+    }
+
+    /// Returns true when asynchronous index work rejected the whole request
+    /// (a write before commit, or a strong search) and an unchanged retry may
+    /// later succeed.
+    #[must_use]
+    pub fn is_index_backpressure(&self) -> bool {
+        self.error_code().is_retryable_backpressure()
     }
 
     /// Returns true when the error represents a retryable transaction conflict.
     #[must_use]
     pub fn is_transaction_conflict(&self) -> bool {
-        matches!(
-            self,
-            Self::TransactionConflict(_) | Self::WriterFencedCommitOutcomeUnknown
-        ) || matches!(self, Self::Storage(storage_err) if storage_err.kind() == ErrorKind::Transaction)
+        matches!(self, Self::TransactionConflict(_))
+            || matches!(self, Self::Storage(storage_err) if storage_err.kind() == ErrorKind::Transaction)
+    }
+
+    /// Returns true for caller-controlled vector input or active-text admission failures.
+    ///
+    /// Query transports and telemetry share this classification. Storage failures,
+    /// invalid persisted rows, and unknown commit outcomes are deliberately excluded.
+    /// This does not classify arbitrary string-based `Query` errors as caller mistakes.
+    ///
+    /// ```
+    /// use db::error::{ActiveTextMutationResource, HelixDbError};
+    /// let error = HelixDbError::ActiveTextMutationLimitExceeded {
+    ///     resource: ActiveTextMutationResource::Entities,
+    ///     observed: 513,
+    ///     limit: 512,
+    /// };
+    /// assert!(error.is_invalid_input());
+    /// assert!(!error.is_transaction_conflict());
+    /// ```
+    #[must_use]
+    pub fn is_invalid_input(&self) -> bool {
+        self.error_code().is_invalid_database_input()
     }
 
     /// Returns true when a public vector failed caller-controlled validation.
@@ -675,6 +893,18 @@ pub type Result<T> = std::result::Result<T, HelixDbError>;
 mod tests {
     use super::*;
     use helix_ast::error_code::QueryErrorCode as Code;
+    use helix_planner::catalog::{ElementKind, SearchIndexKind};
+    use helix_planner::error::PlannerError;
+    use helix_planner::ir::NonEmptyString;
+
+    fn missing_text_index() -> PlannerError {
+        PlannerError::MissingSearchIndex {
+            element: ElementKind::Node,
+            kind: SearchIndexKind::Text,
+            label: NonEmptyString::new("Document").expect("label is non-empty"),
+            property: NonEmptyString::new("body").expect("property is non-empty"),
+        }
+    }
 
     #[test]
     fn config_errors_convert_to_database_errors_with_display_context() {
@@ -685,7 +915,7 @@ mod tests {
     #[test]
     fn retryable_conflict_classification_is_explicit() {
         assert!(HelixDbError::TransactionConflict("retry".to_string()).is_transaction_conflict());
-        assert!(HelixDbError::WriterFencedCommitOutcomeUnknown.is_transaction_conflict());
+        assert!(!HelixDbError::WriterFencedCommitOutcomeUnknown.is_transaction_conflict());
         assert!(
             HelixDbError::Storage(slatedb::Error::transaction("retry".to_string()))
                 .is_transaction_conflict()
@@ -695,6 +925,20 @@ mod tests {
                 .is_transaction_conflict()
         );
         assert!(!HelixDbError::Query("not retryable".to_string()).is_transaction_conflict());
+    }
+
+    #[test]
+    fn invalid_input_classification_does_not_hide_internal_or_ambiguous_failures() {
+        for error in [
+            HelixDbError::WriterFencedCommitOutcomeUnknown,
+            HelixDbError::InvariantViolation("corrupt row".to_string()),
+            HelixDbError::Storage(slatedb::Error::invalid("storage failure".to_string())),
+            HelixDbError::InvalidVectorItem(VectorItemDecodeError::HeaderMismatch),
+            HelixDbError::Query("execution failure".to_string()),
+            HelixDbError::IndexBusy { state: "building" },
+        ] {
+            assert!(!error.is_invalid_input());
+        }
     }
 
     #[test]
@@ -717,6 +961,7 @@ mod tests {
         assert!(invalid_inputs
             .iter()
             .all(HelixDbError::is_invalid_vector_input));
+        assert!(invalid_inputs.iter().all(HelixDbError::is_invalid_input));
 
         assert!(
             !HelixDbError::InvalidVectorItem(VectorItemDecodeError::HeaderMismatch)
@@ -768,6 +1013,14 @@ mod tests {
             (
                 HelixDbError::QueryDeadlineExceeded,
                 Code::QueryDeadlineExceeded,
+            ),
+            (
+                HelixDbError::QueryMemoryLimitExceeded,
+                Code::QueryMemoryLimitExceeded,
+            ),
+            (
+                HelixDbError::QueryCancelledByReaderRetirement,
+                Code::QueryCancelledByReaderRetirement,
             ),
             (HelixDbError::InvalidNodeId(0), Code::InvalidNodeId),
             (HelixDbError::NodeNotFound(1), Code::NodeNotFound),
@@ -923,6 +1176,14 @@ mod tests {
                 Code::IndexNotFound,
             ),
             (
+                HelixDbError::Planner(PlannerError::UnsupportedEdgeAllTarget),
+                Code::UnsupportedEdgeAllTarget,
+            ),
+            (
+                HelixDbError::Planner(missing_text_index()),
+                Code::IndexNotFound,
+            ),
+            (
                 HelixDbError::UniqueConstraintViolation {
                     label: "User".to_string(),
                     property: "email".to_string(),
@@ -984,6 +1245,22 @@ mod tests {
         for (error, expected) in cases {
             assert_eq!(error.error_code(), expected, "{error}");
         }
+    }
+
+    #[test]
+    fn planner_failures_keep_planner_codes_and_message() {
+        let unsupported = HelixDbError::Planner(PlannerError::UnsupportedEdgeAllTarget);
+        assert_eq!(unsupported.index_error_code(), None);
+        assert!(!unsupported.is_invalid_input());
+        assert_eq!(
+            unsupported.to_string(),
+            format!("planner error: {}", PlannerError::UnsupportedEdgeAllTarget)
+        );
+
+        let missing_index = HelixDbError::from(missing_text_index());
+        assert_eq!(missing_index.index_error_code(), Some("index_not_found"));
+        assert!(!missing_index.is_invalid_input());
+        assert!(!missing_index.is_transaction_conflict());
     }
 
     #[test]
@@ -1069,7 +1346,7 @@ mod tests {
         assert_eq!(HelixDbError::NodeNotFound(1).index_error_code(), None);
         assert_eq!(
             HelixDbError::WriterFencedCommitOutcomeUnknown.index_error_code(),
-            Some("writer_fenced_commit_outcome_unknown")
+            None
         );
     }
 
@@ -1096,6 +1373,14 @@ mod tests {
         ];
         for (resource, expected) in resources {
             assert_eq!(resource.to_string(), expected);
+            let error = HelixDbError::ActiveTextMutationLimitExceeded {
+                resource,
+                observed: 513,
+                limit: 512,
+            };
+            assert!(error.is_invalid_input());
+            assert!(!error.is_transaction_conflict());
+            assert_eq!(error.error_code(), Code::ActiveTextMutationLimitExceeded);
         }
 
         let error = HelixDbError::ActiveTextMutationLimitExceeded {
@@ -1105,7 +1390,7 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "Active text mutation exceeds output_bytes: observed 11, limit 10"
+            "Active text mutation exceeds output_bytes: observed 11, limit 10. This is a hard per-document limit; shorten the indexed text."
         );
         assert_eq!(
             error.index_error_code(),

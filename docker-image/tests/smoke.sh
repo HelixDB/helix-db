@@ -134,6 +134,19 @@ assert_nonzero_exit() {
   fi
 }
 
+# Startup errors print their message, which names the variable to fix.
+assert_error_names() {
+  local container=$1
+  local variable=$2
+  local logs
+  logs=$(docker logs "$container" 2>&1)
+  if ! grep -Eq "^Error: .*$variable" <<<"$logs"; then
+    printf '%s\n' "$logs" >&2
+    printf 'expected %s to report an error naming %s\n' "$container" "$variable" >&2
+    exit 1
+  fi
+}
+
 post_json() {
   local port=$1
   local fixture=$2
@@ -161,8 +174,9 @@ if isinstance(value, dict) and "properties" in value:
 if not isinstance(value, (list, dict)):
     raise SystemExit("users response is not a collection")
 is_empty = len(value) == 0
-expected_empty = sys.argv[1] == "empty"
-if is_empty != expected_empty:
+expected = sys.argv[1]
+valid = (is_empty if expected == "empty" else not is_empty) if expected in ("empty", "nonempty") else len(value) == int(expected)
+if not valid:
     raise SystemExit(f"expected users to be {sys.argv[1]}, got {value!r}")
 PY
 }
@@ -179,6 +193,7 @@ run_memory_test() {
   wait_for_http "http://127.0.0.1:${first_port}/readyz" "$first"
   post_json "$first_port" dynamic-write.json true >/dev/null
   assert_users_state nonempty "$(post_json "$first_port" dynamic-read.json)"
+  python3 "$script_dir/early_termination_contracts.py" "$first_port"
   docker rm -f "$first" >/dev/null
 
   start_container "$second" "$second_port"
@@ -191,6 +206,7 @@ run_native_disk_test() {
   local second_port=$((base_port + 3))
   local first="helixdb-image-disk-a-$resource_suffix"
   local second="helixdb-image-disk-b-$resource_suffix"
+  local third="helixdb-image-disk-c-$resource_suffix"
   local volume="helixdb-image-data-$resource_suffix"
   local mount="type=volume,source=$volume,target=/var/lib/helix"
 
@@ -201,17 +217,84 @@ run_native_disk_test() {
   wait_for_http "http://127.0.0.1:${first_port}/readyz" "$first"
   post_json "$first_port" dynamic-write.json true >/dev/null
   assert_users_state nonempty "$(post_json "$first_port" dynamic-read.json)"
+  python3 "$script_dir/early_termination_contracts.py" "$first_port"
   docker stop "$first" >/dev/null
   docker rm "$first" >/dev/null
 
   start_container "$second" "$second_port" -e HELIX_DATA_DIR=/var/lib/helix --mount "$mount"
   wait_for_http "http://127.0.0.1:${second_port}/readyz" "$second"
   assert_users_state nonempty "$(post_json "$second_port" dynamic-read.json)"
+  python3 "$script_dir/early_termination_contracts.py" "$second_port"
+
+  log "Testing membership deletion, cold restart, and reinsertion"
+  post_json "$second_port" dynamic-write.json true >/dev/null
+  assert_users_state 2 "$(post_json "$second_port" dynamic-read.json)"
+  post_json "$second_port" dynamic-delete.json true >/dev/null
+  assert_users_state empty "$(post_json "$second_port" dynamic-read.json)"
+  docker stop "$second" >/dev/null
+  docker rm "$second" >/dev/null
+
+  start_container "$third" "$first_port" -e HELIX_DATA_DIR=/var/lib/helix --mount "$mount"
+  wait_for_http "http://127.0.0.1:${first_port}/readyz" "$third"
+  assert_users_state empty "$(post_json "$first_port" dynamic-read.json)"
+  post_json "$first_port" dynamic-write.json true >/dev/null
+  assert_users_state 1 "$(post_json "$first_port" dynamic-read.json)"
+  docker restart "$third" >/dev/null
+  wait_for_http "http://127.0.0.1:${first_port}/readyz" "$third"
+  assert_users_state 1 "$(post_json "$first_port" dynamic-read.json)"
+}
+
+assert_cache_file() {
+  local container=$1
+  local pattern=$2
+  local entries
+  entries=$(docker cp "$container:/var/cache/helix" - | tar -tf -)
+  if ! grep -Eq "$pattern" <<<"$entries"; then
+    docker logs "$container" >&2 || true
+    printf 'expected a cache file matching %s in %s\n' "$pattern" "$container" >&2
+    exit 1
+  fi
+}
+
+run_disk_cache_test() {
+  local port=$((base_port + 8))
+  local container="helixdb-image-disk-cache-$resource_suffix"
+  local data_volume="helixdb-image-cache-data-$resource_suffix"
+  local cache_volume="helixdb-image-cache-$resource_suffix"
+
+  log "Testing hybrid disk cache on a named volume"
+  docker volume create "$data_volume" >/dev/null
+  docker volume create "$cache_volume" >/dev/null
+  volumes+=("$data_volume" "$cache_volume")
+  start_container "$container" "$port" \
+    -e HELIX_DATA_DIR=/var/lib/helix \
+    -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
+    -e HELIX_DISK_CACHE_BYTES=67108864 \
+    --mount "type=volume,source=$data_volume,target=/var/lib/helix" \
+    --mount "type=volume,source=$cache_volume,target=/var/cache/helix"
+  wait_for_http "http://127.0.0.1:${port}/readyz" "$container"
+  post_json "$port" dynamic-write.json true >/dev/null
+  assert_users_state nonempty "$(post_json "$port" dynamic-read.json)"
+  docker stop "$container" >/dev/null
+  assert_cache_file "$container" '/slate/foyer-storage-direct-fs-'
+
+  docker start "$container" >/dev/null
+  wait_for_http "http://127.0.0.1:${port}/readyz" "$container"
+  assert_users_state nonempty "$(post_json "$port" dynamic-read.json)"
+  # SSTs written to HELIX_DATA_DIR are already local, so only reading one
+  # back caches it.
+  assert_cache_file "$container" '/object-store/.+[^/]$'
 }
 
 run_invalid_configuration_tests() {
   local bad_address="helixdb-image-bad-address-$resource_suffix"
   local conflicting_storage="helixdb-image-conflicting-storage-$resource_suffix"
+  local memory_cache="helixdb-image-memory-cache-$resource_suffix"
+  local bad_cache_size="helixdb-image-bad-cache-size-$resource_suffix"
+  local s3_bad_cache_size="helixdb-image-s3-bad-cache-size-$resource_suffix"
+  local s3_unwritable_cache="helixdb-image-s3-unwritable-cache-$resource_suffix"
+  local s3_read_only_root="helixdb-image-s3-read-only-root-$resource_suffix"
+  local s3_default_budget="helixdb-image-s3-default-budget-$resource_suffix"
 
   log "Testing invalid startup configuration"
   start_container "$bad_address" "$((base_port + 4))" -e HELIX_HTTP_ADDR=not-an-address
@@ -223,6 +306,59 @@ run_invalid_configuration_tests() {
     -e S3_BUCKET=conflict
   wait_for_exit "$conflicting_storage"
   assert_nonzero_exit "$conflicting_storage"
+
+  start_container "$memory_cache" "$((base_port + 9))" -e HELIX_DISK_CACHE_DIR=/var/cache/helix
+  wait_for_exit "$memory_cache"
+  assert_nonzero_exit "$memory_cache"
+  assert_error_names "$memory_cache" HELIX_DISK_CACHE_DIR
+
+  start_container "$bad_cache_size" "$((base_port + 10))" \
+    -e HELIX_DATA_DIR=/var/lib/helix \
+    -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
+    -e HELIX_DISK_CACHE_BYTES=not-a-number
+  wait_for_exit "$bad_cache_size"
+  assert_nonzero_exit "$bad_cache_size"
+  assert_error_names "$bad_cache_size" HELIX_DISK_CACHE_BYTES
+
+  # S3 always caches on disk, so its size variables need no cache directory.
+  # Configuration fails before the server contacts the bucket.
+  start_container "$s3_bad_cache_size" "$((base_port + 11))" \
+    -e S3_BUCKET=unreachable \
+    -e HELIX_DISK_CACHE_BYTES=not-a-number
+  wait_for_exit "$s3_bad_cache_size"
+  assert_nonzero_exit "$s3_bad_cache_size"
+  assert_error_names "$s3_bad_cache_size" 'invalid HELIX_DISK_CACHE_BYTES'
+
+  # Another user cannot write the image's default S3 cache directory, and the
+  # error says which variable moves it.
+  start_container "$s3_unwritable_cache" "$((base_port + 12))" \
+    --user 1000:1000 \
+    -e S3_BUCKET=unreachable
+  wait_for_exit "$s3_unwritable_cache"
+  assert_nonzero_exit "$s3_unwritable_cache"
+  assert_error_names "$s3_unwritable_cache" \
+    'HELIX_DISK_CACHE_DIR: `/var/cache/helix` is not a writable directory; mount a writable volume there or set HELIX_DISK_CACHE_DIR'
+
+  # A read-only root filesystem cannot hold the cache anywhere, so the error
+  # also names the volume remedy.
+  start_container "$s3_read_only_root" "$((base_port + 13))" \
+    --read-only \
+    -e S3_BUCKET=unreachable \
+    -e HELIX_DISK_CACHE_BYTES=67108864
+  wait_for_exit "$s3_read_only_root"
+  assert_nonzero_exit "$s3_read_only_root"
+  assert_error_names "$s3_read_only_root" \
+    'HELIX_DISK_CACHE_DIR: `/var/cache/helix` is not a writable directory; mount a writable volume there'
+
+  # The 8 GiB default must fit the cache's filesystem, here a 64 MiB tmpfs,
+  # rather than fill it; a budget that is set is only warned about.
+  start_container "$s3_default_budget" "$((base_port + 14))" \
+    --tmpfs /var/cache/helix:size=64m,mode=1777 \
+    -e S3_BUCKET=unreachable
+  wait_for_exit "$s3_default_budget"
+  assert_nonzero_exit "$s3_default_budget"
+  assert_error_names "$s3_default_budget" \
+    'HELIX_DISK_CACHE_BYTES is unset and its 8589934592-byte default exceeds the space free for the disk cache at `/var/cache/helix`'
 }
 
 run_signal_test() {
@@ -242,8 +378,20 @@ run_signal_test() {
   fi
 }
 
+run_concurrent_membership_test() {
+  local port=$((base_port + 7))
+  local container="helixdb-image-concurrent-membership-$resource_suffix"
+
+  log "Testing concurrent shared label, equality, adjacency, and cascade membership"
+  start_container "$container" "$port"
+  wait_for_http "http://127.0.0.1:${port}/readyz" "$container"
+  python3 "$script_dir/concurrent_membership.py" --url "http://127.0.0.1:${port}"
+}
+
 run_memory_test
 run_native_disk_test
+run_disk_cache_test
+run_concurrent_membership_test
 run_invalid_configuration_tests
 run_signal_test
 log "Docker image runtime smoke tests passed"

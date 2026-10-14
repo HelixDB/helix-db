@@ -5,9 +5,14 @@ mod batch_controls;
 mod chosen_plans;
 mod control_flow;
 mod empty_sources;
+mod index_membership;
+mod index_served_sources;
 mod mutation_ddl;
 mod parameter_specialization;
 mod predicate_limits;
 mod runtime_feedback;
 mod search_limits;
 mod terminal_roots;
+
+mod ordered_range;
+mod selective_equality;

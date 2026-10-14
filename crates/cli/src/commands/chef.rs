@@ -1,29 +1,27 @@
-use crate::commands::auth::{ensure_auth_or_login, Credentials};
 use crate::config::DEFAULT_LOCAL_PORT;
-use crate::enterprise_cloud::cloud_base_url;
 use crate::external_tools::{self, ExternalTool};
 use crate::metrics_sender::MetricsSender;
-use crate::output::{Step, Verbosity};
+use crate::output::{OutputMode, Step, Verbosity};
 use crate::prompts;
 use crate::InitTarget;
 use eyre::{eyre, Result};
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use helix_metrics::cli::{ChefEvent, ChefPhase, ChefSetupMode, EventOutcome};
 use serde_json::{json, Value};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_PROJECT_DIR: &str = "my-first-helix-project";
 const INSTANCE_NAME: &str = "dev";
-const CHEF_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+#[cfg(test)]
 const CHEF_SNAPSHOT_MAX_FILES: usize = 2_000;
+#[cfg(test)]
 const CHEF_SNAPSHOT_MAX_FILE_BYTES: u64 = 1024 * 1024;
+#[cfg(test)]
 const CHEF_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 25 * 1024 * 1024;
 
 const DEFAULT_PROJECT_SPEC: &str = r#"You are building a **Personal CRM** as your default MVP because the user did not specify their own intent. Build exactly this — no extra features.
@@ -539,7 +537,7 @@ The commands you should run while building:
 
 Do NOT run:
 - `helix init`, `helix chef`, `helix start dev` — already done. Re-running can fail or duplicate state.
-- `helix push`, `helix sync`, `helix deploy` — V2 Cloud commands; the user is on a local DB.
+- `helix push`, `helix sync`, `helix deploy` — removed commands; the user is on a local DB.
 - `helix prune`, `helix delete` — destructive. Only the user runs these.
 
 When `helix query` fails, the response body (or stderr) contains the error. Common causes are in `<antipatterns>`.
@@ -910,15 +908,6 @@ enum SetupMode {
     Manual,
 }
 
-impl SetupMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            SetupMode::Automatic => "automatic",
-            SetupMode::Manual => "manual",
-        }
-    }
-}
-
 #[derive(Debug)]
 struct ChefOptions {
     build_intent: Option<String>,
@@ -990,40 +979,14 @@ pub async fn run(metrics_sender: &MetricsSender) -> Result<()> {
     let run_id = new_chef_run_id();
     let started_at = Instant::now();
 
-    // The only thing chef needs Cloud credentials for is the optional, best-effort
-    // snapshot upload. Device-flow login can't complete without a TTY anyway, so
-    // skip it when running non-interactively (agents, CI, sandboxes) or when the
-    // user explicitly opts out — otherwise every headless `helix chef` blocks on a
-    // GitHub login it can never finish. The build itself proceeds without auth.
-    let skip_cloud_auth =
-        std::env::var_os("HELIX_SKIP_CLOUD_AUTH").is_some() || !prompts::is_interactive();
-    let credentials = if skip_cloud_auth {
-        crate::output::info(
-            "Running `helix chef` without Helix Cloud auth; snapshot upload will be skipped.",
-        );
-        None
-    } else {
-        match ensure_auth_or_login().await {
-            Ok(credentials) => Some(credentials),
-            Err(err) => {
-                metrics_sender.send_chef_event(chef_metric(
-                    &run_id,
-                    "auth_failed",
-                    false,
-                    Some(started_at.elapsed().as_secs() as u32),
-                    None,
-                    false,
-                    None,
-                    Some("auth"),
-                    Some(err.to_string()),
-                    None,
-                    None,
-                ));
-                return Ok(());
-            }
-        }
-    };
-
+    if crate::output::OutputMode::current().is_json() {
+        return Err(crate::errors::CliError::new(
+            "`helix chef` hands the terminal to a coding agent, so it has no JSON result",
+        )
+        .with_hint("run it without --json")
+        .into());
+    }
+    crate::output::intro("Helix chef");
     let options = collect_options()?;
     let has_custom_intent = has_custom_intent(options.build_intent.as_deref());
     metrics_sender.send_chef_event(chef_metric(
@@ -1083,34 +1046,6 @@ pub async fn run(metrics_sender: &MetricsSender) -> Result<()> {
         }
     };
 
-    // Snapshot upload requires Cloud credentials; when chef ran without auth
-    // (non-interactive / opted out) there's nothing to upload to.
-    let upload_sizes = match &credentials {
-        Some(credentials) => {
-            match upload_chef_snapshot(credentials, &run_id, &options, agent_report.as_ref()).await
-            {
-                Ok(sizes) => sizes,
-                Err(err) => {
-                    metrics_sender.send_chef_event(chef_metric(
-                        &run_id,
-                        "upload_failed",
-                        false,
-                        Some(started_at.elapsed().as_secs() as u32),
-                        Some(options.mode),
-                        has_custom_intent,
-                        agent_report.as_ref().map(|r| r.agent.display().to_string()),
-                        Some("upload"),
-                        Some(err.to_string()),
-                        None,
-                        None,
-                    ));
-                    None
-                }
-            }
-        }
-        None => None,
-    };
-
     let success = agent_report.as_ref().is_some_and(|report| report.success);
     metrics_sender.send_chef_event(chef_metric(
         &run_id,
@@ -1122,10 +1057,15 @@ pub async fn run(metrics_sender: &MetricsSender) -> Result<()> {
         agent_report.as_ref().map(|r| r.agent.display().to_string()),
         None,
         None,
-        upload_sizes.as_ref().map(|s| s.overview_size_bytes),
-        upload_sizes.as_ref().map(|s| s.project_snapshot_size_bytes),
+        None,
+        None,
     ));
 
+    crate::output::outro(if success {
+        "Chef is done"
+    } else {
+        "Chef set up the project; finish with your coding agent"
+    });
     Ok(())
 }
 
@@ -1270,6 +1210,7 @@ async fn run_database() -> Result<()> {
             None,
             false,
             Default::default(),
+            Default::default(),
             false,
         )
     })
@@ -1284,28 +1225,26 @@ async fn seed_starter_data() -> Result<()> {
             None,
             None,
             None,
-            false,
-            None,
-            None,
-            false,
+            Default::default(),
         )
     })
     .await
 }
 
-struct VerbosityReset(Option<Verbosity>);
+struct OutputModeReset(Option<OutputMode>);
 
-impl Drop for VerbosityReset {
+impl Drop for OutputModeReset {
     fn drop(&mut self) {
-        if let Some(original) = self.0 {
-            Verbosity::set(original);
-        }
+        let Some(original) = self.0 else {
+            return;
+        };
+        original.set();
     }
 }
 
 /// Run an async op behind a Step spinner with the inner command's output silenced.
 ///
-/// `init::run` and `start::run` write through the shared `Verbosity` knob (Operation
+/// `init::run` and `start::run` write through the shared output mode (Operation
 /// headers, info/warning lines, print_details summaries). We snapshot the current
 /// level, flip to Quiet for the duration of the op, then restore it — so chef can
 /// show a single clean spinner line per step. `-v` users keep the detailed output.
@@ -1314,16 +1253,16 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
-    let original = Verbosity::current();
-    let suppress = original != Verbosity::Verbose;
+    let original = OutputMode::current();
+    let suppress = original != OutputMode::Human(Verbosity::Verbose);
 
     let mut step = Step::with_messages(progress, completion);
     step.start();
 
     if suppress {
-        Verbosity::set(Verbosity::Silent);
+        OutputMode::Human(Verbosity::Silent).set();
     }
-    let _verbosity_reset = VerbosityReset(suppress.then_some(original));
+    let _mode_reset = OutputModeReset(suppress.then_some(original));
 
     let result = op().await;
 
@@ -1587,18 +1526,7 @@ const AGENT_USER_PROMPT: &str =
 #[derive(Debug, Clone)]
 struct AgentRunReport {
     agent: AgentKind,
-    permission_mode: PermissionMode,
     success: bool,
-    exit_code: Option<i32>,
-    final_stats: Option<String>,
-    final_summary: Option<String>,
-    transcript: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct SnapshotUploadSizes {
-    overview_size_bytes: u64,
-    project_snapshot_size_bytes: u64,
 }
 
 fn detect_agent() -> Option<AgentKind> {
@@ -1957,14 +1885,9 @@ async fn launch_agent(kind: AgentKind, mode: PermissionMode, project_dir: &Path)
         }
     }
 
-    run_result.unwrap_or_else(|error| AgentRunReport {
+    run_result.unwrap_or(AgentRunReport {
         agent: kind,
-        permission_mode: mode,
         success: false,
-        exit_code: None,
-        final_stats: None,
-        final_summary: None,
-        transcript: vec![format!("agent launch error: {error}")],
     })
 }
 
@@ -1984,12 +1907,7 @@ fn launch_other_interactive(
 
     Ok(AgentRunReport {
         agent: kind,
-        permission_mode: mode,
         success: status.success(),
-        exit_code: status.code(),
-        final_stats: None,
-        final_summary: None,
-        transcript: Vec::new(),
     })
 }
 
@@ -2015,22 +1933,9 @@ fn launch_other_captured(
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
     }
 
-    let transcript = vec![
-        String::from_utf8_lossy(&output.stdout).to_string(),
-        String::from_utf8_lossy(&output.stderr).to_string(),
-    ]
-    .into_iter()
-    .filter(|s| !s.is_empty())
-    .collect();
-
     Ok(AgentRunReport {
         agent: kind,
-        permission_mode: mode,
         success: output.status.success(),
-        exit_code: output.status.code(),
-        final_stats: None,
-        final_summary: None,
-        transcript,
     })
 }
 
@@ -2064,7 +1969,6 @@ async fn launch_claude_streaming(
     let dir_display = project_dir.display().to_string();
     let mut final_stats: Option<String> = None;
     let mut final_text: Option<String> = None;
-    let mut transcript = Vec::new();
     let mut aborted = false;
 
     let ctrl_c = tokio::signal::ctrl_c();
@@ -2083,7 +1987,6 @@ async fn launch_claude_streaming(
                         if trimmed.is_empty() {
                             continue;
                         }
-                        transcript.push(trimmed.to_string());
                         if let Some(stream_line) = parse_claude_stream_line(trimmed) {
                             match stream_line {
                                 ClaudeStreamLine::Event(event) => {
@@ -2152,12 +2055,7 @@ async fn launch_claude_streaming(
 
     Ok(AgentRunReport {
         agent: AgentKind::ClaudeCode,
-        permission_mode: mode,
         success: status.success(),
-        exit_code: status.code(),
-        final_stats,
-        final_summary: final_text,
-        transcript,
     })
 }
 
@@ -2218,26 +2116,7 @@ fn try_open_frontend(project_dir: &Path) {
     }
 }
 
-#[derive(Debug, serde::Serialize)]
-struct ChefSnapshotOverview {
-    schema_version: u32,
-    run_id: String,
-    created_at_unix_ms: u128,
-    project_dir: String,
-    original_prompt: Option<String>,
-    rendered_agent_prompt: Option<String>,
-    setup_mode: String,
-    agent: Option<String>,
-    permission_mode: Option<String>,
-    agent_success: Option<bool>,
-    agent_exit_code: Option<i32>,
-    final_stats: Option<String>,
-    final_summary: Option<String>,
-    transcript: Vec<String>,
-    files: Vec<ChefSnapshotFile>,
-    skipped_files: Vec<ChefSkippedFile>,
-}
-
+#[cfg(test)]
 #[derive(Debug, serde::Serialize)]
 struct ChefSnapshotFile {
     path: String,
@@ -2245,137 +2124,14 @@ struct ChefSnapshotFile {
     sha256: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, serde::Serialize)]
 struct ChefSkippedFile {
     path: String,
     reason: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct ChefUploadUrlsResponse {
-    overview: ChefUploadTarget,
-    project_snapshot: ChefUploadTarget,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ChefUploadTarget {
-    key: String,
-    url: String,
-    #[serde(default)]
-    headers: std::collections::HashMap<String, String>,
-}
-
-async fn upload_chef_snapshot(
-    credentials: &Credentials,
-    run_id: &str,
-    options: &ChefOptions,
-    agent_report: Option<&AgentRunReport>,
-) -> Result<Option<SnapshotUploadSizes>> {
-    let (overview, project_snapshot) = build_chef_snapshot(run_id, options, agent_report)?;
-    let overview_size_bytes = overview.len() as u64;
-    let project_snapshot_size_bytes = project_snapshot.len() as u64;
-    let project_name = options
-        .project_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(DEFAULT_PROJECT_DIR);
-
-    let client = reqwest::Client::new();
-    let response = client
-        .post(format!(
-            "{}/api/cli/chef-snapshots/upload-urls",
-            cloud_base_url()
-        ))
-        .header("x-api-key", &credentials.helix_admin_key)
-        .json(&json!({
-            "run_id": run_id,
-            "overview_size_bytes": overview.len(),
-            "project_snapshot_size_bytes": project_snapshot.len(),
-            "project_name": project_name,
-        }))
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(eyre!(
-            "Chef snapshot upload URL request failed ({status}): {body}"
-        ));
-    }
-
-    let targets: ChefUploadUrlsResponse = response.json().await?;
-    put_presigned_snapshot(&client, &targets.overview, overview).await?;
-    put_presigned_snapshot(&client, &targets.project_snapshot, project_snapshot).await?;
-
-    let _uploaded_keys = (&targets.overview.key, &targets.project_snapshot.key);
-    Ok(Some(SnapshotUploadSizes {
-        overview_size_bytes,
-        project_snapshot_size_bytes,
-    }))
-}
-
-async fn put_presigned_snapshot(
-    client: &reqwest::Client,
-    target: &ChefUploadTarget,
-    bytes: Vec<u8>,
-) -> Result<()> {
-    let mut request = client.put(&target.url);
-    for (name, value) in &target.headers {
-        request = request.header(name.as_str(), value.as_str());
-    }
-    let response = request.body(bytes).send().await?;
-    if !response.status().is_success() {
-        return Err(eyre!(
-            "Chef snapshot PUT failed for {} ({})",
-            target.key,
-            response.status()
-        ));
-    }
-    Ok(())
-}
-
-fn build_chef_snapshot(
-    run_id: &str,
-    options: &ChefOptions,
-    agent_report: Option<&AgentRunReport>,
-) -> Result<(Vec<u8>, Vec<u8>)> {
-    let (project_text, files, skipped_files) = collect_project_snapshot_text(&options.project_dir)?;
-    let rendered_agent_prompt = fs::read_to_string(options.project_dir.join(PROMPT_FILENAME)).ok();
-    let overview = ChefSnapshotOverview {
-        schema_version: CHEF_SNAPSHOT_SCHEMA_VERSION,
-        run_id: run_id.to_string(),
-        created_at_unix_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
-        project_dir: options.project_dir.display().to_string(),
-        original_prompt: options.build_intent.clone(),
-        rendered_agent_prompt,
-        setup_mode: options.mode.as_str().to_string(),
-        agent: agent_report.map(|report| report.agent.display().to_string()),
-        permission_mode: agent_report.map(|report| match report.permission_mode {
-            PermissionMode::FullAuto => "full_auto".to_string(),
-            PermissionMode::Scoped => "scoped".to_string(),
-        }),
-        agent_success: agent_report.map(|report| report.success),
-        agent_exit_code: agent_report.and_then(|report| report.exit_code),
-        final_stats: agent_report.and_then(|report| report.final_stats.clone()),
-        final_summary: agent_report.and_then(|report| report.final_summary.clone()),
-        transcript: agent_report
-            .map(|report| report.transcript.clone())
-            .unwrap_or_default(),
-        files,
-        skipped_files,
-    };
-
-    let overview_bytes = serde_json::to_vec_pretty(&overview)?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(project_text.as_bytes())?;
-    let project_snapshot = encoder.finish()?;
-    Ok((overview_bytes, project_snapshot))
-}
-
+#[cfg(test)]
 fn collect_project_snapshot_text(
     root: &Path,
 ) -> Result<(String, Vec<ChefSnapshotFile>, Vec<ChefSkippedFile>)> {
@@ -2513,6 +2269,7 @@ fn collect_project_snapshot_text(
     Ok((text, files, skipped))
 }
 
+#[cfg(test)]
 fn should_skip_snapshot_dir(name: &str) -> bool {
     matches!(
         name,
@@ -2529,6 +2286,7 @@ fn should_skip_snapshot_dir(name: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn should_skip_snapshot_file(normalized_path: &str, name: &str) -> bool {
     let path = normalized_path.to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
@@ -2545,6 +2303,7 @@ fn should_skip_snapshot_file(normalized_path: &str, name: &str) -> bool {
         || path.contains("secret")
 }
 
+#[cfg(test)]
 fn content_looks_sensitive(content: &str) -> bool {
     let lower = content.to_ascii_lowercase();
     lower.contains("-----begin ") && lower.contains(" private key-----")
@@ -2914,11 +2673,11 @@ mod tests {
 
     #[test]
     fn run_quietly_restores_verbosity_when_cancelled() {
-        let _lock = crate::output::VERBOSITY_TEST_LOCK
+        let _lock = crate::output::MODE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = Verbosity::Quiet;
-        Verbosity::set(original);
+        let original = OutputMode::Human(Verbosity::Quiet);
+        original.set();
         let mut future = Box::pin(run_quietly("pending", "never", || async {
             std::future::pending::<Result<()>>().await
         }));
@@ -2928,17 +2687,17 @@ mod tests {
         assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
         assert_eq!(Verbosity::current(), Verbosity::Silent);
         drop(future);
-        assert_eq!(Verbosity::current(), original);
+        assert_eq!(OutputMode::current(), original);
     }
 
     #[test]
     fn run_quietly_restores_verbosity_after_success_and_error() {
-        let _lock = crate::output::VERBOSITY_TEST_LOCK
+        let _lock = crate::output::MODE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
-        Verbosity::set(Verbosity::Normal);
+        OutputMode::Human(Verbosity::Normal).set();
         let mut success = Box::pin(run_quietly("success", "done", || async { Ok(()) }));
         assert!(matches!(
             success.as_mut().poll(&mut context),
@@ -2972,9 +2731,6 @@ mod tests {
             Some(20),
         );
         assert!(matches!(success.outcome, EventOutcome::Succeeded));
-        assert_eq!(SetupMode::Automatic.as_str(), "automatic");
-        assert_eq!(SetupMode::Manual.as_str(), "manual");
-
         let failure = chef_metric(
             "run",
             "completed",

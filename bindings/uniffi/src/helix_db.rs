@@ -207,6 +207,26 @@ impl HelixDB {
         Ok(runtime::run(async move { inner.query_json(&request).await }).await??)
     }
 
+    /// Execute the Cypher JSON contract without a network transport.
+    pub async fn cypher_json(&self, request: Vec<u8>) -> Result<Vec<u8>, HelixError> {
+        let request = serde_json::from_slice::<db::cypher::Request>(&request)
+            .map_err(HelixError::invalid_cypher_json)?;
+        let inner = Arc::clone(&self.inner);
+        let response = runtime::run(async move { inner.cypher_json(request).await }).await??;
+        Ok(response.into_vec())
+    }
+
+    /// Plan a Cypher statement without executing it, returning the same JSON
+    /// as `POST /v2/cypher/explain`. Planning a modifying statement writes nothing.
+    pub async fn explain_cypher_json(&self, request: Vec<u8>) -> Result<Vec<u8>, HelixError> {
+        let request = serde_json::from_slice::<db::cypher::Request>(&request)
+            .map_err(HelixError::invalid_cypher_json)?;
+        let inner = Arc::clone(&self.inner);
+        let explanation =
+            runtime::run(async move { inner.explain_cypher(request).await }).await??;
+        serde_json::to_vec(&explanation).map_err(|e| HelixError::from(db::cypher::Error::Json(e)))
+    }
+
     /// Execute one ordinary read request and construct a reusable native graph.
     pub async fn graph(
         &self,
@@ -393,6 +413,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cypher_json_executes_and_explains_without_writing() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "uniffi-cypher".to_string(),
+        })
+        .await
+        .expect("in-memory DB should open");
+
+        let plan = db
+            .explain_cypher_json(br#"{"query":"CREATE (:Planned)"}"#.to_vec())
+            .await
+            .expect("explain should plan a write");
+        let plan: serde_json::Value = serde_json::from_slice(&plan).expect("plan is JSON");
+        assert!(plan["operators"].is_array());
+
+        let count = db
+            .cypher_json(br#"{"query":"MATCH (n:Planned) RETURN count(n) AS n"}"#.to_vec())
+            .await
+            .expect("Cypher should execute");
+        let count: serde_json::Value = serde_json::from_slice(&count).expect("rows are JSON");
+        assert_eq!(count["rows"], serde_json::json!([[0]]));
+
+        for (request, expected) in [
+            (
+                br#"{"query":"RETURN 1","limit":1}"#.to_vec(),
+                "invalid_cypher_json",
+            ),
+            (
+                br#"{"query":"RETURN missing"}"#.to_vec(),
+                "syntax_error:compile:undefined_variable",
+            ),
+        ] {
+            let HelixError::InvalidRequest { error, .. } = db
+                .explain_cypher_json(request)
+                .await
+                .expect_err("invalid requests reject")
+            else {
+                panic!("expected an invalid request");
+            };
+            assert_eq!(error, expected);
+        }
+        db.close().await.expect("DB should close");
+    }
+
+    #[tokio::test]
     async fn direct_helixdb_object_opens_queries_and_closes() {
         let db = HelixDB::open(HelixDbSource::InMemory {
             database: "uniffi-direct-query".to_string(),
@@ -412,7 +476,7 @@ mod tests {
             .await
             .expect("query_json should execute");
         let json: BTreeMap<String, u64> =
-            sonic_rs::from_slice(&response).expect("response should decode");
+            simd_json::from_reader(&response[..]).expect("response should decode");
 
         assert_eq!(json.get("users"), Some(&0));
         db.close().await.expect("DB should close");
@@ -480,6 +544,35 @@ mod tests {
             HelixError::InvalidRequest { error, msg }
                 if error == "invalid_query_json"
                     && msg.starts_with("Query error: invalid query JSON:")
+        ));
+    }
+
+    #[tokio::test]
+    async fn direct_helixdb_query_json_maps_planner_errors() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "uniffi-planner-error".to_string(),
+        })
+        .await
+        .expect("in-memory DB should open");
+        let request = QueryRequest::read(
+            read_batch()
+                .var_as(
+                    "matches",
+                    g().text_search_nodes("Document", "body", "needle", 5, None),
+                )
+                .returning(["matches"]),
+        );
+        let body = simd_json::to_vec(&request).expect("query request should serialize");
+
+        let err = db
+            .query_json(body)
+            .await
+            .expect_err("missing text index should fail planning");
+
+        assert!(matches!(
+            err,
+            HelixError::Planner { error, msg }
+                if error == "index_not_found" && msg.starts_with("planner error: ")
         ));
     }
 }

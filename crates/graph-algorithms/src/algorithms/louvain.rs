@@ -56,6 +56,21 @@ pub(super) struct LevelEdge {
     pub(super) weight: f64,
 }
 
+/// A move the local phase accepted, carrying the gain it was decided on so a
+/// caller can check that gain against what the move actually did to modularity.
+///
+/// Only the test observer reads these fields, because the production closure
+/// ignores the record entirely. The allow is narrowed to non-test builds so a
+/// field that a test stops reading still shows up as dead.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct AcceptedMove {
+    pub(super) node: usize,
+    pub(super) from: usize,
+    pub(super) to: usize,
+    pub(super) gain: f64,
+}
+
 pub(super) struct LevelGraph {
     pub(super) node_members: Vec<Vec<usize>>,
     pub(super) edges: Vec<LevelEdge>,
@@ -129,6 +144,25 @@ impl LevelGraph {
         seed: &mut u64,
         max_iterations: usize,
     ) -> (Vec<usize>, bool) {
+        self.local_move_observed(initial, resolution, seed, max_iterations, |_| {})
+    }
+
+    /// `local_move`, reporting every accepted move to `observe`.
+    ///
+    /// The hook is here so a caller can compare the incremental gain this phase
+    /// decides each move on against a from-scratch `modularity` recomputation,
+    /// which is the only way to see a gain that disagrees with modularity: over
+    /// a whole phase a later move can cover for an earlier wrong one. The
+    /// production path passes a closure that does nothing, and it monomorphises
+    /// away.
+    pub(super) fn local_move_observed<F: FnMut(AcceptedMove)>(
+        &self,
+        initial: &[usize],
+        resolution: f64,
+        seed: &mut u64,
+        max_iterations: usize,
+        mut observe: F,
+    ) -> (Vec<usize>, bool) {
         let node_count = self.node_members.len();
         assert_eq!(initial.len(), node_count, "one community per level node");
         let mut communities = compress_communities(initial);
@@ -176,6 +210,12 @@ impl LevelGraph {
                 community_degrees[best_community] += degree;
                 if best_community != old_community {
                     communities[*node] = best_community;
+                    observe(AcceptedMove {
+                        node: *node,
+                        from: old_community,
+                        to: best_community,
+                        gain: best_gain,
+                    });
                     moved = true;
                     moved_any = true;
                 }
@@ -385,6 +425,125 @@ mod tests {
 
     use super::*;
     use crate::{Edge, GraphKind, Node};
+
+    /// The local move phase decides each move from an incremental gain formula,
+    /// and `modularity` computes the same quantity from scratch. The two are
+    /// written independently, so the property worth pinning is that they agree
+    /// on every accepted move, rather than only across the whole phase: a move
+    /// whose gain disagrees with the real delta can be masked by later gains,
+    /// and the phase still finishes higher than it started.
+    ///
+    /// Self loops are the shape most likely to break that agreement.
+    /// `modularity` counts a self loop as internal weight, because source and
+    /// target share a community by definition, while `LevelGraph::new` keeps it
+    /// out of `adjacency` so the gain formula never sees it and folds it into
+    /// `degrees` at double weight instead. Parallel edges are the other shape
+    /// worth covering. Both are injected on every trial rather than left to the
+    /// generator, which produced neither in several trials of its own.
+    #[test]
+    fn every_accepted_local_move_gain_matches_the_modularity_delta() {
+        let mut seed = 0x5eed_u64;
+        for trial in 0..48_usize {
+            let node_ids: Vec<String> = (0..7).map(|index| format!("n{index}")).collect();
+            let mut edges = Vec::new();
+            for index in 0..12_usize {
+                let source = (next_random(&mut seed) % 7) as usize;
+                let target = (next_random(&mut seed) % 7) as usize;
+                let weight = 1.0 + (next_random(&mut seed) % 4) as f64;
+                edges.push(
+                    Edge::new(
+                        format!("e{trial}_{index}"),
+                        node_ids[source].clone(),
+                        node_ids[target].clone(),
+                    )
+                    .with_weight(weight),
+                );
+            }
+
+            let looped = (next_random(&mut seed) % 7) as usize;
+            edges.push(
+                Edge::new(
+                    format!("e{trial}_loop"),
+                    node_ids[looped].clone(),
+                    node_ids[looped].clone(),
+                )
+                .with_weight(1.0 + (next_random(&mut seed) % 4) as f64),
+            );
+
+            let left = (next_random(&mut seed) % 7) as usize;
+            let right = (left + 1 + (next_random(&mut seed) % 6) as usize) % 7;
+            for copy in 0..2_usize {
+                edges.push(
+                    Edge::new(
+                        format!("e{trial}_parallel{copy}"),
+                        node_ids[left].clone(),
+                        node_ids[right].clone(),
+                    )
+                    .with_weight(1.0 + copy as f64),
+                );
+            }
+
+            let graph = Graph::new(
+                GraphKind::MultiGraph,
+                node_ids.iter().map(|id| Node::new(id.clone())),
+                edges,
+            )
+            .expect("random graph should build");
+
+            let level = LevelGraph::from_original(&graph);
+            let node_count = graph.node_count();
+            let initial: Vec<usize> = (0..node_count).collect();
+
+            let mut shadow = initial.clone();
+            let mut running = modularity(node_count, &level.edges, &shadow, 1.0);
+            let mut accepted = 0_usize;
+            let mut move_seed = seed;
+            let (assignment, moved_any) = level.local_move_observed(
+                &initial,
+                1.0,
+                &mut move_seed,
+                usize::MAX,
+                |accepted_move| {
+                    assert_eq!(
+                        shadow[accepted_move.node], accepted_move.from,
+                        "trial {trial}: move left node {} in a stale community",
+                        accepted_move.node
+                    );
+                    shadow[accepted_move.node] = accepted_move.to;
+                    let after = modularity(node_count, &level.edges, &shadow, 1.0);
+                    let delta = after - running;
+                    assert!(
+                        accepted_move.gain > 0.0,
+                        "trial {trial}: accepted node {} with gain {}",
+                        accepted_move.node,
+                        accepted_move.gain
+                    );
+                    assert!(
+                        (delta - accepted_move.gain).abs() < 1e-9,
+                        "trial {trial}: node {} moved {} -> {} on gain {} but modularity \
+                         moved by {delta}",
+                        accepted_move.node,
+                        accepted_move.from,
+                        accepted_move.to,
+                        accepted_move.gain
+                    );
+                    running = after;
+                    accepted += 1;
+                },
+            );
+
+            assert_eq!(
+                moved_any,
+                accepted > 0,
+                "trial {trial}: moved_any disagrees with the moves reported"
+            );
+            assert_eq!(
+                compress_communities(&shadow),
+                assignment,
+                "trial {trial}: replaying the reported moves did not reproduce the result"
+            );
+        }
+    }
 
     fn bridged_triangles() -> Graph {
         Graph::new(

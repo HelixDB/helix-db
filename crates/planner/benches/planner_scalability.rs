@@ -43,12 +43,94 @@ fn wide_boolean_predicates(c: &mut Criterion) {
     );
 }
 
+fn wide_literal_membership(c: &mut Criterion) {
+    use helix_ast::{batch, expr, traversal, value};
+    use helix_planner::{catalog, context, ir, planning};
+    let ctx = context::PlannerContext {
+        indexes: catalog::IndexCatalogSnapshot::default()
+            .with_node_eq(catalog::ScopedPropertyKey::try_new("User", "age").unwrap()),
+        stats: context::StatsSnapshot::default()
+            .with_node_label_cardinality(ir::NonEmptyString::new("User").unwrap(), 1_000_000),
+        ..Default::default()
+    };
+    let mut group = c.benchmark_group("planner_wide_literal_membership");
+    for size in [64, 1024, 16_384] {
+        for (shape, distinct) in [("distinct", size), ("duplicates", 8)] {
+            let query = batch::read_batch()
+                .var_as(
+                    "result",
+                    traversal::g().n_with_label_where(
+                        "User",
+                        expr::Predicate::is_in(
+                            "age",
+                            value::PropertyValue::I64Array(
+                                (0..size).map(|index| index % distinct).collect(),
+                            ),
+                        ),
+                    ),
+                )
+                .returning(["result"]);
+            group.bench_with_input(BenchmarkId::new(shape, size), &query, |bencher, query| {
+                bencher.iter(|| {
+                    planning::plan_read_batch(query, &ctx).expect("membership query plans")
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 fn many_available_indexes(c: &mut Criterion) {
     bench_shape(
         c,
         "planner_many_available_indexes",
         PlanningScalabilityShape::ManyAvailableIndexes,
     );
+}
+
+fn wide_literal_intersections(c: &mut Criterion) {
+    use helix_ast::{batch, expr, traversal, value};
+    use helix_planner::{catalog, context, ir, planning};
+    let ctx = context::PlannerContext {
+        indexes: catalog::IndexCatalogSnapshot::default()
+            .with_node_eq(catalog::ScopedPropertyKey::try_new("User", "age").unwrap()),
+        stats: context::StatsSnapshot::default()
+            .with_node_label_cardinality(ir::NonEmptyString::new("User").unwrap(), 1_000_000),
+        ..Default::default()
+    };
+    let mut group = c.benchmark_group("planner_wide_literal_intersections");
+    for size in [64, 1024, 16_384] {
+        for (shape, start) in [
+            ("overlap", size / 2),
+            ("disjoint", size),
+            ("singleton", size - 1),
+        ] {
+            let query = batch::read_batch()
+                .var_as(
+                    "result",
+                    traversal::g().n_with_label_where(
+                        "User",
+                        expr::Predicate::and(vec![
+                            expr::Predicate::is_in(
+                                "age",
+                                value::PropertyValue::I64Array((0..size).rev().collect()),
+                            ),
+                            expr::Predicate::is_in(
+                                "age",
+                                value::PropertyValue::I64Array((start..start + size).collect()),
+                            ),
+                        ]),
+                    ),
+                )
+                .returning(["result"]);
+            group.bench_with_input(BenchmarkId::new(shape, size), &query, |bencher, query| {
+                bencher.iter(|| {
+                    planning::plan_read_batch(query, &ctx).expect("intersection query plans")
+                });
+            });
+        }
+    }
+    group.finish();
 }
 
 fn batched_root_reuse(c: &mut Criterion) {
@@ -185,6 +267,8 @@ const fn cost_profile_variant_name(variant: CostProfileVariant) -> &'static str 
 criterion_group!(
     planner_benches,
     wide_boolean_predicates,
+    wide_literal_membership,
+    wide_literal_intersections,
     many_available_indexes,
     batched_root_reuse,
     foreach_body_root_reuse,

@@ -8,8 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use slatedb::DbTransaction;
-
 use super::contracts::{decode_stored_edges, label_of};
 use super::MutationIndexContext;
 use super::*;
@@ -20,6 +18,7 @@ use crate::index_lifecycle::graph_mutation::{
 /// Sorted, deduplicated node-row observations with an ordered mutation overlay.
 pub(super) struct ObservedNodeRows {
     rows: BTreeMap<u64, Option<CanonicalPropertyRow>>,
+    _memory: Option<crate::query_resources::Reservation>,
 }
 
 /// Distinct node-existence observations used by batched endpoint validation.
@@ -53,7 +52,7 @@ impl ObservedNodeRows {
 impl<'db> ExecutionContext<'db> {
     pub(super) async fn store_node(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         properties: Vec<Property>,
         index_context: &mut MutationIndexContext,
@@ -61,7 +60,7 @@ impl<'db> ExecutionContext<'db> {
         let transition = GraphMutationTransition::create(
             self.tenant_scope,
             GraphEntity::node(node_id),
-            CanonicalPropertyRow::new(properties),
+            CanonicalPropertyRow::new_with_budget(properties, self.row_memory.as_ref())?,
         );
         let properties = transition
             .after()
@@ -75,30 +74,22 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a create transition has an after row")
-            .encoded()
-            .clone();
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-            )
-            .await?;
-        let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-            node_id,
-        )));
-        txn.put(&key, encoded)?;
+            .write_payload();
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::node(node_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
+        )?;
         Ok(())
     }
 
     #[cfg(test)]
     pub(super) async fn set_node_property(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         property: Property,
         index_context: &mut MutationIndexContext,
@@ -114,7 +105,9 @@ impl<'db> ExecutionContext<'db> {
         let observed = txn
             .get(&key)
             .await?
-            .map(CanonicalPropertyRow::decode)
+            .map(|encoded| {
+                CanonicalPropertyRow::decode_with_budget(encoded, self.row_memory.as_ref())
+            })
             .transpose()?;
         let _ = self
             .set_node_property_observed(txn, node_id, property, observed, index_context)
@@ -125,7 +118,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn set_node_property_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         property: Property,
         observed: Option<CanonicalPropertyRow>,
@@ -141,12 +134,13 @@ impl<'db> ExecutionContext<'db> {
                 "Active text graph source disagrees with its supplied before state".to_string(),
             ));
         };
-        let outcome = GraphMutationTransition::edit(
+        let outcome = GraphMutationTransition::edit_with_budget(
             self.tenant_scope,
             GraphEntity::node(node_id),
             before,
             PropertyEdit::set(property),
-        );
+            self.row_memory.as_ref(),
+        )?;
         let PropertyEditOutcome::Changed(transition) = outcome else {
             let PropertyEditOutcome::Unchanged(row) = outcome else {
                 unreachable!("property edit outcomes are closed")
@@ -161,7 +155,7 @@ impl<'db> ExecutionContext<'db> {
             .after()
             .expect("a replacement transition has an after row")
             .properties();
-        let old_label = label_of(old_properties).map(str::to_string);
+        let old_label = label_of(old_properties);
         if transition
             .changed()
             .expect("a replacement transition has changed properties")
@@ -172,14 +166,16 @@ impl<'db> ExecutionContext<'db> {
                     "validated node label lost its string value".to_string(),
                 ));
             };
-            if old_label.as_deref() != Some(new_label) {
-                if let Some(old_label) = old_label.as_deref() {
-                    index_context.topology_mutations().remove_node_label(
-                        self.tenant_scope,
-                        old_label,
-                        node_id,
-                    )?;
-                }
+            if old_label != Some(new_label) {
+                old_label
+                    .map(|old_label| {
+                        index_context.topology_mutations().remove_node_label(
+                            self.tenant_scope,
+                            old_label,
+                            node_id,
+                        )
+                    })
+                    .transpose()?;
                 index_context.topology_mutations().add_node_label(
                     self.tenant_scope,
                     new_label,
@@ -190,28 +186,18 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a replacement transition has an after row")
-            .encoded()
-            .clone();
+            .write_payload();
         let final_row = transition
             .after()
             .expect("a replacement transition has an after row")
             .clone();
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-            )
-            .await?;
-        txn.put(
-            self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-                node_id,
-            ))),
-            encoded,
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::node(node_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
         )?;
         Ok(final_row)
     }
@@ -219,7 +205,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn remove_node_property(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         name: &ir::NonEmptyString,
         index_context: &mut MutationIndexContext,
@@ -235,7 +221,9 @@ impl<'db> ExecutionContext<'db> {
         let observed = txn
             .get(&key)
             .await?
-            .map(CanonicalPropertyRow::decode)
+            .map(|encoded| {
+                CanonicalPropertyRow::decode_with_budget(encoded, self.row_memory.as_ref())
+            })
             .transpose()?;
         let _ = self
             .remove_node_property_observed(txn, node_id, name, observed, index_context)
@@ -245,7 +233,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn remove_node_property_observed(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         name: &ir::NonEmptyString,
         observed: Option<CanonicalPropertyRow>,
@@ -259,12 +247,13 @@ impl<'db> ExecutionContext<'db> {
         let Some(before) = observed else {
             return Ok(None);
         };
-        let outcome = GraphMutationTransition::edit(
+        let outcome = GraphMutationTransition::edit_with_budget(
             self.tenant_scope,
             GraphEntity::node(node_id),
             before,
             PropertyEdit::remove(name.as_ref()),
-        );
+            self.row_memory.as_ref(),
+        )?;
         let PropertyEditOutcome::Changed(transition) = outcome else {
             let PropertyEditOutcome::Unchanged(row) = outcome else {
                 unreachable!("property edit outcomes are closed")
@@ -274,67 +263,93 @@ impl<'db> ExecutionContext<'db> {
         let encoded = transition
             .after()
             .expect("a replacement transition has an after row")
-            .encoded()
-            .clone();
+            .write_payload();
         let final_row = transition
             .after()
             .expect("a replacement transition has an after row")
             .clone();
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-            )
-            .await?;
-        txn.put(
-            self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-                node_id,
-            ))),
-            encoded,
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::node(node_id),
+            Some(encoded),
+            self.row_memory.as_ref(),
         )?;
         Ok(Some(final_row))
     }
 
     pub(super) async fn observe_node_rows(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedNodeRows> {
-        let node_ids = node_ids.into_iter().collect::<BTreeSet<_>>();
-        let keys = node_ids
-            .iter()
-            .map(|node_id| {
-                self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-                    *node_id,
-                )))
+        let requested = super::observations::RowKeys::new(
+            node_ids,
+            super::observations::Kind::Nodes,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+        )?;
+        if requested.ids.is_empty() {
+            return Ok(ObservedNodeRows {
+                rows: BTreeMap::new(),
+                _memory: None,
+            });
+        }
+        let memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| {
+                budget.reserve(helix_planner::relational::allocation::btree_bytes::<
+                    u64,
+                    Option<CanonicalPropertyRow>,
+                >(requested.ids.len()))
             })
-            .collect::<Vec<_>>();
-        let values = if keys.is_empty() {
-            Vec::new()
-        } else {
-            txn.multi_get(&keys).await?
-        };
-        let rows = node_ids
-            .into_iter()
-            .zip(values)
+            .transpose()?;
+        let keys = &requested.keys;
+        let request = crate::query_resources::properties::ReadRequest::new(
+            keys.len(),
+            self.row_memory.as_ref(),
+        )?;
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: keys.len(),
+                ..Default::default()
+            })
+        });
+        let values = txn.multi_get(keys).await?;
+        let mut decoded = requested
+            .ids
+            .iter()
+            .copied()
+            .zip(request.attach(values)?)
             .map(|(node_id, value)| {
                 value
-                    .map(CanonicalPropertyRow::decode)
+                    .map(CanonicalPropertyRow::decode_read)
                     .transpose()
                     .map(|row| (node_id, row))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        Ok(ObservedNodeRows { rows })
+            });
+        let rows = if self.row_memory.is_some() {
+            // Avoid FromIterator's extra sorting vector while all raw reads
+            // and already decoded snapshots are live.
+            decoded.try_fold(BTreeMap::new(), |mut rows, entry| {
+                let (id, row) = entry?;
+                rows.insert(id, row);
+                Ok::<_, HelixDbError>(rows)
+            })?
+        } else {
+            decoded.collect::<Result<BTreeMap<_, _>>>()?
+        };
+        Ok(ObservedNodeRows {
+            rows,
+            _memory: memory,
+        })
     }
 
     pub(super) async fn observe_node_existence(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedNodeExistence> {
         let node_ids = node_ids.into_iter().collect::<BTreeSet<_>>();
@@ -362,7 +377,7 @@ impl<'db> ExecutionContext<'db> {
 
     pub(super) async fn delete_node(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         index_context: &mut MutationIndexContext,
     ) -> Result<()> {
@@ -375,7 +390,7 @@ impl<'db> ExecutionContext<'db> {
         let transition = GraphMutationTransition::delete(
             self.tenant_scope,
             GraphEntity::node(node_id),
-            CanonicalPropertyRow::decode(stored)?,
+            CanonicalPropertyRow::decode_with_budget(stored, self.row_memory.as_ref())?,
         );
         let properties = transition
             .before()
@@ -399,18 +414,14 @@ impl<'db> ExecutionContext<'db> {
                 node_id,
             )?;
         }
-        index_context
-            .maintain_graph_indexes(
-                txn,
-                transition,
-                self.db
-                    .config()
-                    .db()
-                    .search_index_backfill()
-                    .active_text_mutation(),
-            )
-            .await?;
-        txn.delete(&key)?;
+        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+        index_context.property_writes.stage(
+            txn,
+            self.tenant_scope,
+            GraphEntity::node(node_id),
+            None,
+            self.row_memory.as_ref(),
+        )?;
         txn.delete(
             self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
                 node_id,
@@ -419,9 +430,9 @@ impl<'db> ExecutionContext<'db> {
         Ok(())
     }
 
-    async fn incident_edge_ids(
+    pub(super) async fn incident_edge_ids(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
         index_context: &MutationIndexContext,
     ) -> Result<BTreeSet<u64>> {
@@ -483,7 +494,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn ensure_node_exists_in_tx(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node_id: u64,
     ) -> Result<()> {
         let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
@@ -499,16 +510,212 @@ impl<'db> ExecutionContext<'db> {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use helix_ast::value::PropertyValue as AstPropertyValue;
     use helix_planner::context;
     use slatedb::IsolationLevel;
 
     use super::super::super::test_support;
     use super::*;
 
-    fn index_context(db: &HelixDB) -> MutationIndexContext {
-        MutationIndexContext::for_configured_index_test(std::sync::Arc::clone(
-            db.simhasher_registry(),
-        ))
+    async fn all_rows(db: &HelixDB) -> BTreeMap<Bytes, Bytes> {
+        let mut scan = db.inner_db().scan(..).await.unwrap();
+        let mut rows = BTreeMap::new();
+        while let Some(row) = scan.next().await.unwrap() {
+            rows.insert(row.key, row.value);
+        }
+        rows
+    }
+
+    #[tokio::test]
+    async fn rejected_cascade_delete_preserves_every_graph_and_index_row() {
+        let scope = keys::scope::DataScope::LegacyUnscoped;
+        let config = test_support::in_memory_config("mutation-corrupt-cascade-delete")
+            .with_equality_index("User", "status")
+            .with_edge_equality_index("FOLLOWS", "status");
+        let db = test_support::open_db_with_config(config).await;
+        let target = test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![("status", AstPropertyValue::from("shared"))],
+        )
+        .await;
+        let neighbor = test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![("status", AstPropertyValue::from("shared"))],
+        )
+        .await;
+        let outgoing = test_support::add_edge_with_properties(
+            &db,
+            target,
+            neighbor,
+            "FOLLOWS",
+            vec![("status", AstPropertyValue::from("shared"))],
+        )
+        .await;
+        let incoming = test_support::add_edge_with_properties(
+            &db,
+            neighbor,
+            target,
+            "FOLLOWS",
+            vec![("status", AstPropertyValue::from("shared"))],
+        )
+        .await;
+
+        let handles = db.active_index_handles_loaded(scope);
+        let node_equality = handles
+            .iter()
+            .find(|handle| {
+                handle.secondary_definition().is_some_and(|definition| {
+                    definition.element_kind() == crate::index_lifecycle::IndexElementKind::Node
+                })
+            })
+            .expect("the node equality generation is active");
+        let edge_equality = handles
+            .iter()
+            .find(|handle| {
+                handle.secondary_definition().is_some_and(|definition| {
+                    definition.element_kind() == crate::index_lifecycle::IndexElementKind::Edge
+                })
+            })
+            .expect("the edge equality generation is active");
+        let cases = [
+            (
+                "node-label",
+                super::super::topology::node_label_key(scope, "User"),
+            ),
+            (
+                "edge-pair",
+                super::super::topology::edge_pair_key(scope, target, neighbor),
+            ),
+            (
+                "edge-label-out",
+                super::super::topology::edge_label_neighbor_key(
+                    scope,
+                    crate::encoding::indexes::EdgeDirection::Out,
+                    target,
+                    "FOLLOWS",
+                ),
+            ),
+            (
+                "edge-label-in",
+                super::super::topology::edge_label_neighbor_key(
+                    scope,
+                    crate::encoding::indexes::EdgeDirection::In,
+                    target,
+                    "FOLLOWS",
+                ),
+            ),
+            (
+                "global-edge-label",
+                super::super::topology::global_edge_label_key(scope, "FOLLOWS"),
+            ),
+            (
+                "adjacency",
+                keys::DataKey::Data {
+                    scope,
+                    kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(target)),
+                }
+                .to_bytes(),
+            ),
+            (
+                "node-equality",
+                crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
+                    node_equality,
+                    "shared",
+                ),
+            ),
+            (
+                "edge-equality",
+                crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
+                    edge_equality,
+                    "shared",
+                ),
+            ),
+        ];
+        let node_key = keys::DataKey::Data {
+            scope,
+            kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(target)),
+        }
+        .to_bytes();
+        let outgoing_key = keys::DataKey::Data {
+            scope,
+            kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(outgoing)),
+        }
+        .to_bytes();
+        let incoming_key = keys::DataKey::Data {
+            scope,
+            kind: keys::DataKeyKind::EdgePropertyById(keys::EdgePropertyByIdKey::new(incoming)),
+        }
+        .to_bytes();
+        let node_param = test_support::name("node");
+        let access_id = exec::ExecStepId::new(1).unwrap();
+        let drop_node = test_support::executable(
+            ir::PlanKind::Write,
+            vec![
+                test_support::step(
+                    1,
+                    Vec::new(),
+                    exec::ExecOp::Access {
+                        plan: Box::new(exec::ExecAccessPlan::Node(
+                            exec::ExecNodeAccessPlan::FromParam {
+                                param: node_param.clone(),
+                            },
+                        )),
+                    },
+                ),
+                test_support::step(
+                    2,
+                    vec![access_id],
+                    exec::ExecOp::Mutation {
+                        plan: exec::ExecMutationPlan::Drop,
+                    },
+                ),
+            ],
+            2,
+        );
+
+        for (name, key) in cases {
+            let original = db
+                .inner_db()
+                .get(&key)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{name} fixture row exists"));
+            db.inner_db()
+                .put(&key, Bytes::from_static(b"corrupt-membership-row"))
+                .await
+                .unwrap();
+            let before = all_rows(&db).await;
+            db.execute(
+                &drop_node,
+                context::ParamBindings::default()
+                    .with_value(node_param.clone(), AstPropertyValue::I64(target as i64)),
+            )
+            .await
+            .expect_err("corrupt membership rows reject the cascade delete");
+            assert_eq!(all_rows(&db).await, before, "{name}");
+            for record_key in [&node_key, &outgoing_key, &incoming_key] {
+                assert!(
+                    db.inner_db().get(record_key).await.unwrap().is_some(),
+                    "{name} preserves node and edge records"
+                );
+            }
+            db.inner_db().put(&key, original).await.unwrap();
+        }
+
+        db.execute(
+            &drop_node,
+            context::ParamBindings::default()
+                .with_value(node_param, AstPropertyValue::I64(target as i64)),
+        )
+        .await
+        .expect("the repaired fixture still permits a complete cascade delete");
+        for record_key in [&node_key, &outgoing_key, &incoming_key] {
+            assert!(db.inner_db().get(record_key).await.unwrap().is_none());
+        }
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -516,7 +723,7 @@ mod tests {
         let db = test_support::open_db("mutation-node-label-updates").await;
         let node_id = test_support::add_user(&db, "alice").await;
         let context = ExecutionContext::new(&db, context::ParamBindings::default());
-        let mut index_context = index_context(&db);
+        let mut index_context = MutationIndexContext::for_configured_index_test();
         let txn = db
             .inner_db()
             .begin(IsolationLevel::Snapshot)
@@ -555,9 +762,14 @@ mod tests {
             Some(encoded_before),
             "a no-op set retains the exact canonical bytes"
         );
-        assert_eq!(
-            index_context.pending_active_text_entities(),
-            0,
+        assert!(
+            index_context
+                .finalize_queued(
+                    u64::MAX,
+                    crate::config::SearchIndexBackfillLimits::default().active_text_mutation(),
+                )
+                .unwrap()
+                .is_empty(),
             "a no-op set creates no downstream text work"
         );
         context
@@ -569,10 +781,15 @@ mod tests {
             )
             .await
             .expect("changing the label moves indexes");
-        assert_eq!(
-            index_context.pending_active_text_entities(),
-            0,
-            "an empty text catalog retains no graph transition"
+        assert!(
+            index_context
+                .finalize_queued(
+                    u64::MAX,
+                    crate::config::SearchIndexBackfillLimits::default().active_text_mutation(),
+                )
+                .unwrap()
+                .is_empty(),
+            "an empty text catalog queues no operation"
         );
 
         assert!(
@@ -606,7 +823,7 @@ mod tests {
         let to = test_support::add_user(&db, "bob").await;
         let edge_id = test_support::add_edge(&db, from, to, "FOLLOWS").await;
         let context = ExecutionContext::new(&db, context::ParamBindings::default());
-        let mut index_context = index_context(&db);
+        let mut index_context = MutationIndexContext::for_configured_index_test();
         let txn = db
             .inner_db()
             .begin(IsolationLevel::Snapshot)

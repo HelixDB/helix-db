@@ -13,7 +13,6 @@ const TEST_TOOL_DIR_ENV: &str = "HELIX_TEST_TOOL_DIR";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalTool {
-    Cargo,
     Node,
     Npm,
     Npx,
@@ -27,7 +26,6 @@ pub(crate) enum ExternalTool {
 impl ExternalTool {
     pub(crate) const fn binary(self) -> &'static str {
         match self {
-            Self::Cargo => "cargo",
             Self::Node => "node",
             Self::Npm => "npm",
             Self::Npx => "npx",
@@ -114,7 +112,6 @@ mod tests {
 
     #[test]
     fn production_binary_names_are_stable() {
-        assert_eq!(ExternalTool::Cargo.binary(), "cargo");
         assert_eq!(ExternalTool::Node.binary(), "node");
         assert_eq!(ExternalTool::Npm.binary(), "npm");
         assert_eq!(ExternalTool::Npx.binary(), "npx");

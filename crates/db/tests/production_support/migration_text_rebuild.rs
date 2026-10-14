@@ -127,6 +127,16 @@ fn one_row_config() -> DbConfig {
         )
 }
 
+fn oversized_fixture_slate_settings() -> slatedb::Settings {
+    slatedb::Settings {
+        // This fixture must exceed the 16 MiB tenant limit, but such a row
+        // cannot fit SlateDB's 32 MiB WAL decode partition. Seed it directly
+        // into an L0 table so production replay limits remain unchanged.
+        wal_enabled: false,
+        ..Default::default()
+    }
+}
+
 async fn raw(database: &str, store: Arc<dyn ObjectStore>) -> Db {
     Db::builder(database, store)
         .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
@@ -573,8 +583,32 @@ pub async fn seed_legacy_text_source_fixture(
     let validated: ValidatedDynamicIndexDefinition = case.definition.clone().try_into()?;
     let (catalog_key, catalog_value) =
         crate::migrations::migration_parity_legacy_catalog_row(&validated, false)?;
-    let source = raw(&migration.database, Arc::clone(&migration.store)).await;
-    source.put(&graph_key, &graph_value).await?;
+    let source = if kind == LegacyTextSourceFixtureKind::OversizedTenant {
+        Db::builder(migration.database.as_str(), Arc::clone(&migration.store))
+            .with_settings(oversized_fixture_slate_settings())
+            .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+            .build()
+            .await
+            .expect("legacy text fixture database opens")
+    } else {
+        raw(&migration.database, Arc::clone(&migration.store)).await
+    };
+    if kind == LegacyTextSourceFixtureKind::OversizedTenant {
+        source
+            .put_with_options(
+                &graph_key,
+                &graph_value,
+                &slatedb::config::PutOptions::default(),
+                &slatedb::config::WriteOptions {
+                    await_durable: false,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        source.flush().await?;
+    } else {
+        source.put(&graph_key, &graph_value).await?;
+    }
     source.close().await?;
     let compatibility_partition_bytes = tenant
         .as_ref()

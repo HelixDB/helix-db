@@ -1,19 +1,47 @@
 use crate::config::{ContainerRuntime, LocalInstanceConfig};
 use crate::errors::CliError;
+use crate::image;
 use crate::output::Step;
 use crate::project::ProjectContext;
 use crate::utils::command_exists;
 use eyre::{eyre, Result};
 use helix_metrics::cli::{load_metrics_config, MetricsConfig, MetricsLevel};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncBufReadExt as _;
 use tokio::process::Command as TokioCommand;
 
 pub const CONTAINER_PORT: u16 = 8080;
+/// Port the Explorer image serves its UI, `/api/query`, and `/healthz` on
+/// inside its container.
+pub const EXPLORER_CONTAINER_PORT: u16 = 3000;
+const IDENTITY_LABEL: &str = "helixdb.identity";
+/// Marks a container as an instance's Explorer rather than the instance
+/// itself, which carries the same identity label.
+const ROLE_LABEL: &str = "helixdb.role";
+const EXPLORER_ROLE: &str = "explorer";
+/// Appended to the instance's container name. Instance names never contain a
+/// `.`, and the hash suffix is hex, so no instance's container name ends with
+/// it.
+const EXPLORER_NAME_SUFFIX: &str = ".explorer";
+/// One line each for the container's identity and role labels, image ID, and
+/// image reference, then one `KEY=value` environment entry per line: enough
+/// to check that the container is the instance's Explorer and to compare it
+/// with the one requested. Raw-string keys keep double quotes out of the
+/// argument, and `println` keeps newlines out of it.
+const EXPLORER_INSPECT_FORMAT: &str = concat!(
+    "{{if .Config.Labels}}{{index .Config.Labels `helixdb.identity`}}{{end}}{{println}}",
+    "{{if .Config.Labels}}{{index .Config.Labels `helixdb.role`}}{{end}}{{println}}",
+    "{{println .Image}}{{println .Config.Image}}{{range .Config.Env}}{{println .}}{{end}}",
+);
+const CONTAINER_OWNER_FORMAT: &str =
+    r#"{{if .Config.Labels}}{{index .Config.Labels "helixdb.identity"}}{{end}}"#;
+const RESOURCE_OWNER_FORMAT: &str = r#"{{if .Labels}}{{index .Labels "helixdb.identity"}}{{end}}"#;
 /// How long to wait for a runtime daemon to become ready after we start it.
 /// Docker Desktop cold-boot can take 30–60s, so we allow generous headroom.
 const RUNTIME_START_TIMEOUT: Duration = Duration::from_secs(120);
@@ -23,13 +51,39 @@ const RUNTIME_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const RUNTIME_INFO_TIMEOUT: Duration = Duration::from_secs(1);
 /// Poll cadence for the bounded advisory daemon probe.
 const RUNTIME_INFO_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const MINIO_IMAGE: &str = "minio/minio:latest";
-const MINIO_MC_IMAGE: &str = "minio/mc:latest";
-const MINIO_ACCESS_KEY: &str = "minioadmin";
-const MINIO_SECRET_KEY: &str = "minioadmin";
+/// SeaweedFS 4.47, pinned to its multi-platform (amd64 + arm64) index digest in
+/// the project's official GHCR repository. SeaweedFS enforces the S3
+/// conditional writes SlateDB relies on from 4.09.
+const SEAWEEDFS_IMAGE: &str = "ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882";
+const SEAWEEDFS_S3_PORT: u16 = 8333;
+/// Host name Helix uses for the sidecar on the instance's private network.
+///
+/// The container name cannot serve as that host: it is one DNS label, and
+/// resolvers reject labels over 63 bytes, which long or hash-suffixed
+/// project and instance names exceed. Every instance has its own network, so
+/// this fixed alias is unique on it.
+const SEAWEEDFS_NETWORK_ALIAS: &str = "seaweedfs";
+/// Wall-clock budget for the sidecar's bucket to answer a signed HEAD. A
+/// gateway that stalls every request still releases `helix start` one retry
+/// delay and one 2 s attempt after it.
+const SEAWEEDFS_READY_TIMEOUT: Duration = Duration::from_secs(60);
+/// Static credentials for the sidecar's S3 admin identity. The sidecar only
+/// joins the instance's private network and never publishes a host port.
+const LOCAL_S3_ACCESS_KEY: &str = "helix";
+const LOCAL_S3_SECRET_KEY: &str = "helix-local-secret";
 const LOCAL_S3_BUCKET: &str = "helix-db";
 const LOCAL_S3_REGION: &str = "us-east-1";
 const LOCAL_DB_PATH: &str = "db/";
+/// Directory the Helix image keeps its disk cache in. The server always
+/// caches S3-compatible storage there, including disk mode's SeaweedFS.
+const CACHE_DIR: &str = "/var/cache/helix";
+/// Disk-cache budget in disk mode: the server's minimum, because SeaweedFS
+/// already keeps the data on this machine and a larger cache only copies it.
+const DISK_MODE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+/// Disk-cache budget for an S3 bucket: room for a development working set
+/// that needs about 8,200 open files, instead of the server's 8 GiB default,
+/// which needs 26,600 and fails startup where it does not fit.
+const S3_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 const TEST_CONTAINER_RUNTIME_BIN_ENV: &str = "HELIX_TEST_CONTAINER_RUNTIME_BIN";
 
 #[derive(Debug, Clone)]
@@ -46,17 +100,81 @@ pub struct LocalStatus {
     pub ports: String,
 }
 
+/// What `helix explorer` runs: the image, the loopback host port that serves
+/// its UI, and the instance's base URL as the container reaches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerLaunch {
+    pub image: String,
+    pub port: u16,
+    pub helix_url: String,
+}
+
+/// An instance's Explorer container that is running now. The other fields
+/// are `None` when the runtime does not report them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningExplorer {
+    pub port: u16,
+    /// The image reference it was started from.
+    pub image: Option<String>,
+    /// The ID of the image it runs.
+    pub image_id: Option<String>,
+    pub helix_url: Option<String>,
+}
+
+/// What the runtime reports about the container at an instance's Explorer
+/// name; see [`EXPLORER_INSPECT_FORMAT`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ExplorerInspection {
+    identity: String,
+    role: String,
+    image_id: Option<String>,
+    image: Option<String>,
+    helix_url: Option<String>,
+}
+
+/// A start configuration whose required images have all been resolved.
+/// Private fields keep image selection tied to the configuration used to resolve it.
+#[derive(Debug)]
+pub struct PreparedStart {
+    config: LocalInstanceConfig,
+    image: String,
+    /// Resolved SeaweedFS image ID, present exactly when the storage is disk.
+    seaweedfs_image: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct DiskRuntimeResources {
-    minio_container: String,
+    seaweedfs_container: String,
     network: String,
     volume: String,
+    /// Sidecar from MinIO-based CLI releases. It shares `network`, so it is
+    /// removed whenever the disk resources are started or removed.
+    legacy_minio_container: String,
+    /// MinIO data from earlier CLI releases. SeaweedFS cannot read MinIO's
+    /// on-disk format, so start and stop leave the volume for the user to
+    /// migrate and remove; prune deletes it together with `volume`.
+    legacy_minio_volume: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ContainerEnv {
     Literal(&'static str, String),
     Host(&'static str),
+}
+
+/// How the Helix container reaches its storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HelixStorage {
+    /// In-memory storage needs nothing.
+    Memory,
+    /// S3-compatible storage: disk mode's SeaweedFS sidecar, reached on its
+    /// `network`, or a bucket. The server caches it on disk in
+    /// `cache_volume`, which outlives the container until prune.
+    ObjectStore {
+        network: Option<String>,
+        cache_volume: String,
+        env: Vec<ContainerEnv>,
+    },
 }
 
 impl LocalRuntime {
@@ -88,16 +206,7 @@ impl LocalRuntime {
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(CliError::new(format!("{} is not running", runtime.label()))
-            .with_context(stderr.trim().to_string())
-            .with_hint(
-                "Start the daemon, then retry. macOS: `open -a Docker`, `colima start`, or \
-                 `podman machine start`. Linux/headless (CI, sandboxes): `sudo systemctl start \
-                 docker`, or run `sudo dockerd &` where there is no init system. Rootless Podman \
-                 needs newuidmap/subuid setup and often fails in restricted containers — install \
-                 Docker or use a privileged container there.",
-            )
-            .into())
+        Err(daemon_not_running_error(runtime, &stderr).into())
     }
 
     /// Returns `true` if the runtime daemon answers a bounded `info` probe.
@@ -115,7 +224,8 @@ impl LocalRuntime {
     /// ready (or we time out). Returns `Err` if there's no known launcher for this
     /// platform, the launch command fails, or the daemon never comes up.
     fn try_start_runtime(runtime: ContainerRuntime) -> Result<()> {
-        let Some(start) = runtime_start_command(std::env::consts::OS, runtime, command_exists)
+        let os = std::env::consts::OS;
+        let Some(start) = runtime_start_command(os, runtime, detected_docker_backend(os, runtime))
         else {
             return Err(eyre!(
                 "no known way to start {} on this platform",
@@ -175,62 +285,145 @@ impl LocalRuntime {
     }
 
     pub fn container_name(&self, instance_name: &str) -> String {
-        format!("helix-{}-{}", self.project_name, instance_name)
+        let name = format!("{}-{}", self.project_name, instance_name);
+        let identity = self.instance_identity(instance_name);
+        let sanitized = sanitize_docker_name(&name);
+        let adopts = sanitized == name
+            && ends_with_hash_suffix(&sanitized)
+            && self.adopts_legacy_name(&format!("helix-{name}"), &identity);
+        compose_resource_name(&name, &identity, adopts)
     }
 
-    pub fn pull_image(&self, config: &LocalInstanceConfig) -> Result<()> {
-        self.pull_image_ref(&config.image_ref())
+    fn instance_identity(&self, instance_name: &str) -> String {
+        format!(
+            "{}:{}/{}",
+            self.project_name.len(),
+            self.project_name,
+            instance_name
+        )
     }
 
-    fn pull_image_ref(&self, image: &str) -> Result<()> {
-        Step::verbose_substep(&format!("Pulling {image}"));
+    fn adopts_legacy_name(&self, legacy: &str, identity: &str) -> bool {
+        let seaweedfs = format!("{legacy}-seaweedfs");
+        let network = format!("{legacy}-net");
+        let volume = format!("{legacy}-seaweedfs-data");
+        // Resources left by MinIO-based CLI releases keep the name adopted too.
+        let minio = format!("{legacy}-minio");
+        let minio_volume = format!("{legacy}-minio-data");
+        let mut found = false;
+        for (kind, owner_format, resource) in [
+            ("container", CONTAINER_OWNER_FORMAT, legacy),
+            ("container", CONTAINER_OWNER_FORMAT, &seaweedfs),
+            ("container", CONTAINER_OWNER_FORMAT, &minio),
+            ("network", RESOURCE_OWNER_FORMAT, &network),
+            ("volume", RESOURCE_OWNER_FORMAT, &volume),
+            ("volume", RESOURCE_OWNER_FORMAT, &minio_volume),
+        ] {
+            let Some(owner) =
+                self.resource_label(&[kind, "inspect", "--format", owner_format, resource])
+            else {
+                continue;
+            };
+            if !owner.is_empty() && owner != identity {
+                return false;
+            }
+            found = true;
+        }
+        found
+    }
+
+    fn resource_label(&self, args: &[&str]) -> Option<String> {
+        let mut command = self.runtime_command();
+        command.args(args);
+        command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)
+    }
+
+    /// Resolve all required images before replacing any running containers.
+    /// Run Helix by immutable image ID so a concurrent tag update cannot change it.
+    pub fn prepare_start(&self, config: &LocalInstanceConfig) -> Result<PreparedStart> {
+        Self::check_available(self.runtime)?;
+        let reference = config.image_ref();
+        let policy = config
+            .pull
+            .unwrap_or_else(|| config.tag.default_pull_policy());
+        let id = self.pull_image_ref(&reference, policy)?;
+        let seaweedfs_image = if config.storage.is_disk() {
+            let dependency_policy = config.pull.unwrap_or(image::PullPolicy::Missing);
+            Some(self.pull_image_ref(SEAWEEDFS_IMAGE, dependency_policy)?)
+        } else {
+            None
+        };
+        // A short digest identifies the image without flooding the line.
+        let short_id = id
+            .get(..id.find(':').map_or(12, |colon| colon + 13))
+            .unwrap_or(&id);
+        crate::output::info(&format!("Image: {reference} ({short_id})"));
+        Ok(PreparedStart {
+            config: config.clone(),
+            image: id,
+            seaweedfs_image,
+        })
+    }
+
+    fn pull_image_ref(&self, image: &str, policy: image::PullPolicy) -> Result<String> {
+        if policy != image::PullPolicy::Always {
+            match self.inspect_image(image) {
+                Ok(id) => return Ok(id),
+                Err(error) if policy == image::PullPolicy::Never => {
+                    return Err(error.wrap_err(format!("Cannot use {image} with --pull never")));
+                }
+                Err(_) => {}
+            }
+        }
+        crate::output::verbose(&format!("Pulling {image}"));
         let output = self
             .runtime_command()
             .args(["pull", image])
             .output()
             .map_err(|e| eyre!("Failed to pull {image}: {e}"))?;
-
         if !output.status.success() {
-            if self.image_exists(image) {
-                Step::verbose_substep(&format!("Using local image {image}"));
-                return Ok(());
-            }
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(eyre!("Failed to pull {image}:\n{stderr}"));
         }
-
-        Ok(())
+        self.inspect_image(image)
     }
 
-    fn image_exists(&self, image: &str) -> bool {
-        self.runtime_command()
-            .args(["image", "inspect", image])
+    fn inspect_image(&self, image: &str) -> Result<String> {
+        let output = self
+            .runtime_command()
+            .args(["image", "inspect", "--format", "{{.Id}}", image])
             .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+            .map_err(|e| eyre!("Failed to inspect image {image}: {e}"))?;
+        let id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || id.is_empty() {
+            return Err(eyre!(
+                "Cannot inspect local image {image}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(id)
     }
 
-    pub fn run_detached(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
-        Self::check_available(self.runtime)?;
-        self.pull_image(config)?;
+    pub fn run_detached(&self, instance_name: &str, prepared: PreparedStart) -> Result<()> {
+        let PreparedStart {
+            config,
+            image,
+            seaweedfs_image,
+        } = prepared;
 
         let name = self.container_name(instance_name);
-        let image = config.image_ref();
         let _ = self.remove_container(&name);
-        let (network, mut env) = if config.storage.is_disk() {
-            let resources = self.start_disk_dependencies(instance_name)?;
-            let env = disk_env(&resources);
-            (Some(resources.network), env)
-        } else if config.storage.is_s3() {
-            let _ = self.remove_disk_resources(instance_name, false);
-            (None, s3_env(config)?)
-        } else {
-            let _ = self.remove_disk_resources(instance_name, false);
-            (None, Vec::new())
-        };
-        env.extend(telemetry_env());
+        let storage = self.prepare_storage(instance_name, &config, seaweedfs_image)?;
 
-        let args = helix_run_args(&name, &image, config.port, true, network.as_deref(), &env);
+        let args = helix_run_args(
+            &name,
+            &image,
+            config.port,
+            true,
+            &storage,
+            &telemetry_env(),
+            &self.instance_identity(instance_name),
+        );
         let output = self
             .runtime_command()
             .args(&args)
@@ -246,30 +439,25 @@ impl LocalRuntime {
         Ok(())
     }
 
-    pub async fn run_foreground(
-        &self,
-        instance_name: &str,
-        config: &LocalInstanceConfig,
-    ) -> Result<()> {
-        Self::check_available(self.runtime)?;
-        self.pull_image(config)?;
+    pub async fn run_foreground(&self, instance_name: &str, prepared: PreparedStart) -> Result<()> {
+        let PreparedStart {
+            config,
+            image,
+            seaweedfs_image,
+        } = prepared;
 
         let name = self.container_name(instance_name);
-        let image = config.image_ref();
         let _ = self.remove_container(&name);
-        let (network, mut env) = if config.storage.is_disk() {
-            let resources = self.start_disk_dependencies(instance_name)?;
-            let env = disk_env(&resources);
-            (Some(resources.network), env)
-        } else if config.storage.is_s3() {
-            let _ = self.remove_disk_resources(instance_name, false);
-            (None, s3_env(config)?)
-        } else {
-            let _ = self.remove_disk_resources(instance_name, false);
-            (None, Vec::new())
-        };
-        env.extend(telemetry_env());
-        let args = helix_run_args(&name, &image, config.port, false, network.as_deref(), &env);
+        let storage = self.prepare_storage(instance_name, &config, seaweedfs_image)?;
+        let args = helix_run_args(
+            &name,
+            &image,
+            config.port,
+            false,
+            &storage,
+            &telemetry_env(),
+            &self.instance_identity(instance_name),
+        );
 
         let mut child = self
             .runtime_tokio_command()
@@ -314,17 +502,15 @@ impl LocalRuntime {
     }
 
     pub fn stop(&self, instance_name: &str) -> Result<bool> {
+        Self::check_available(self.runtime)?;
         let name = self.container_name(instance_name);
         let removed_helix = self.remove_container(&name)?;
         let removed_disk_resources = self.remove_disk_resources(instance_name, false)?;
         Ok(removed_helix || removed_disk_resources)
     }
 
-    pub fn restart(&self, instance_name: &str, config: &LocalInstanceConfig) -> Result<()> {
-        if config.storage.is_disk() || config.storage.is_s3() {
-            return self.run_detached(instance_name, config);
-        }
-
+    pub fn restart(&self, instance_name: &str) -> Result<()> {
+        Self::check_available(self.runtime)?;
         let name = self.container_name(instance_name);
         let output = self
             .runtime_command()
@@ -333,13 +519,32 @@ impl LocalRuntime {
             .map_err(|e| eyre!("Failed to restart {name}: {e}"))?;
 
         if output.status.success() {
-            self.wait_ready(config.port)?;
+            let published = self
+                .runtime_command()
+                .args(["port", &name, "8080/tcp"])
+                .output()
+                .map_err(|e| eyre!("Failed to inspect published port for {name}: {e}"))?;
+            if !published.status.success() {
+                return Err(eyre!(
+                    "Failed to inspect published port for {name}: {}",
+                    String::from_utf8_lossy(&published.stderr)
+                ));
+            }
+            let port = parse_published_port(&String::from_utf8_lossy(&published.stdout))
+                .ok_or_else(|| eyre!("No valid published port for {name} on 8080/tcp"))?;
+            self.wait_ready(port)?;
             return Ok(());
         }
 
-        self.run_detached(instance_name, config)
+        Err(eyre!("Failed to restart {name}: {}\nUse 'helix start {instance_name}' to create a container.", String::from_utf8_lossy(&output.stderr)))
     }
 
+    // No upfront `is_installed`-style preflight here: `spawn_failed_because_runtime_missing`
+    // below already distinguishes a genuinely missing binary (NotFound and absent from
+    // PATH) from a present-but-unspawnable one, and preserves the real OS error as the
+    // cause in either case. A preflight based on PATH presence alone can't make that
+    // distinction and reports "not installed" for a binary that's present but, say, not
+    // executable.
     pub fn logs(&self, instance_name: &str, follow: bool) -> Result<()> {
         let name = self.container_name(instance_name);
         let mut command = self.runtime_command();
@@ -353,7 +558,13 @@ impl LocalRuntime {
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
-            .map_err(|e| eyre!("Failed to read logs for {name}: {e}"))?;
+            .map_err(|e| {
+                if spawn_failed_because_runtime_missing(self.runtime, &e) {
+                    not_installed_error(self.runtime, &e.to_string(), command_exists).into()
+                } else {
+                    eyre!("Failed to read logs for {name}: {e}")
+                }
+            })?;
 
         if !status.success() {
             return Err(eyre!(
@@ -377,7 +588,13 @@ impl LocalRuntime {
                 &format!("name=^{name}$"),
             ])
             .output()
-            .map_err(|e| eyre!("Failed to inspect {name}: {e}"))?;
+            .map_err(|e| {
+                if spawn_failed_because_runtime_missing(self.runtime, &e) {
+                    not_installed_error(self.runtime, &e.to_string(), command_exists).into()
+                } else {
+                    eyre!("Failed to inspect {name}: {e}")
+                }
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -403,9 +620,246 @@ impl LocalRuntime {
 
     pub fn prune_instance(&self, instance_name: &str) -> Result<bool> {
         let name = self.container_name(instance_name);
+        let removed_explorer = self.remove_explorer(instance_name)?;
         let removed_helix = self.remove_container(&name)?;
         let removed_disk_resources = self.remove_disk_resources(instance_name, true)?;
-        Ok(removed_helix || removed_disk_resources)
+        let removed_cache = self.remove_volume(&self.cache_volume(instance_name))?;
+        Ok(removed_explorer || removed_helix || removed_disk_resources || removed_cache)
+    }
+
+    /// Name of the Explorer container `helix explorer` runs for an instance.
+    /// It extends the instance's container name, so it is as unique as that,
+    /// with a suffix that no instance's own container name can end with.
+    pub fn explorer_container_name(&self, instance_name: &str) -> String {
+        format!(
+            "{}{EXPLORER_NAME_SUFFIX}",
+            self.container_name(instance_name)
+        )
+    }
+
+    /// The host port the instance's container publishes for the server, or
+    /// `None` when that container is missing or not running.
+    pub fn instance_port(&self, instance_name: &str) -> Option<u16> {
+        self.published_port(&self.container_name(instance_name), CONTAINER_PORT)
+    }
+
+    /// The instance's base URL as an Explorer container reaches the port the
+    /// instance publishes on the host.
+    pub fn explorer_helix_url(&self, instance_port: u16) -> String {
+        format!("http://{}:{instance_port}", explorer_host(self.runtime))
+    }
+
+    /// The host port an instance's running Explorer publishes, or `None` when
+    /// no Explorer runs for it.
+    pub fn explorer_port(&self, instance_name: &str) -> Option<u16> {
+        self.running_explorer(instance_name)
+            .map(|explorer| explorer.port)
+    }
+
+    /// The Explorer running for an instance, if any. A container that holds
+    /// the Explorer's name without the instance's identity and the Explorer
+    /// role belongs to something else, so it never counts.
+    pub fn running_explorer(&self, instance_name: &str) -> Option<RunningExplorer> {
+        let name = self.explorer_container_name(instance_name);
+        let identity = self.instance_identity(instance_name);
+        let inspection = self
+            .inspect_explorer(&name)
+            .ok()
+            .flatten()
+            .filter(|inspection| inspection.belongs_to(&identity))?;
+        let port = self.published_port(&name, EXPLORER_CONTAINER_PORT)?;
+        Some(RunningExplorer {
+            port,
+            image: inspection.image,
+            image_id: inspection.image_id,
+            helix_url: inspection.helix_url,
+        })
+    }
+
+    /// The ID of `image`, or `None` when it is not available locally.
+    pub fn image_id(&self, image: &str) -> Option<String> {
+        self.inspect_image(image).ok()
+    }
+
+    /// Start a detached Explorer for `instance_name`, replacing a stopped
+    /// Explorer of the same name. The container removes itself when it stops.
+    pub fn run_explorer(&self, instance_name: &str, launch: &ExplorerLaunch) -> Result<()> {
+        let name = self.explorer_container_name(instance_name);
+        let identity = self.instance_identity(instance_name);
+        match self.inspect_explorer(&name)? {
+            None => {}
+            Some(inspection) if inspection.belongs_to(&identity) => {
+                let _ = self.remove_container(&name);
+            }
+            Some(_) => {
+                return Err(CliError::new(format!(
+                    "the container name {name} is taken by a container Helix did not start"
+                ))
+                .with_hint(format!(
+                    "rename it with `{} rename {name} <new name>`, then run `helix explorer \
+                     {instance_name}` again",
+                    self.runtime.binary()
+                ))
+                .into());
+            }
+        }
+        let args = explorer_run_args(self.runtime, &name, launch, instance_name, &identity);
+        let output = self
+            .runtime_command()
+            .args(&args)
+            .output()
+            .map_err(|e| eyre!("Failed to start {name}: {e}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(
+            CliError::new(format!("failed to start the Explorer container {name}"))
+                .with_caused_by(String::from_utf8_lossy(&output.stderr).trim())
+                .with_hint(format!(
+                    "if port {} is taken, pass another with --port",
+                    launch.port
+                ))
+                .into(),
+        )
+    }
+
+    /// Stop and remove an instance's Explorer. Returns whether one existed. A
+    /// container that holds the Explorer's name without its labels is left
+    /// alone.
+    pub fn remove_explorer(&self, instance_name: &str) -> Result<bool> {
+        let name = self.explorer_container_name(instance_name);
+        let identity = self.instance_identity(instance_name);
+        match self.inspect_explorer(&name)? {
+            Some(inspection) if inspection.belongs_to(&identity) => self.remove_container(&name),
+            _ => Ok(false),
+        }
+    }
+
+    /// What the runtime reports about the container named `name`, or `None`
+    /// when no container has that name.
+    fn inspect_explorer(&self, name: &str) -> Result<Option<ExplorerInspection>> {
+        let output = self
+            .runtime_command()
+            .args([
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                EXPLORER_INSPECT_FORMAT,
+                name,
+            ])
+            .output()
+            .map_err(|e| eyre!("Failed to inspect {name}: {e}"))?;
+        if output.status.success() {
+            return Ok(Some(parse_explorer_inspection(&String::from_utf8_lossy(
+                &output.stdout,
+            ))));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if missing_resource(&stderr) {
+            return Ok(None);
+        }
+        Err(eyre!("Failed to inspect {name}: {}", stderr.trim()))
+    }
+
+    /// Make `image` available locally, pulling it when it is missing with the
+    /// pull's latest progress line on a spinner. Returns whether it pulled.
+    pub async fn ensure_image(&self, image: &str) -> Result<bool> {
+        if self.inspect_image(image).is_ok() {
+            return Ok(false);
+        }
+        // Every early return fails the step, so the success line is set last.
+        let mut step = Step::with_messages(
+            &format!("Pulling {image}"),
+            &format!("Could not pull {image}"),
+        );
+        step.start();
+        let spawned = self
+            .runtime_tokio_command()
+            .args(["pull", image])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                step.fail();
+                return Err(eyre!("Failed to pull {image}: {error}"));
+            }
+        };
+        // Docker reports progress on stdout and Podman on stderr, so both feed
+        // the spinner; stderr is also kept for the error.
+        let mut stdout =
+            tokio::io::BufReader::new(child.stdout.take().expect("piped stdout")).lines();
+        let mut stderr =
+            tokio::io::BufReader::new(child.stderr.take().expect("piped stderr")).lines();
+        let (mut stdout_open, mut stderr_open) = (true, true);
+        let mut errors = Vec::new();
+        loop {
+            let line = tokio::select! {
+                line = stdout.next_line(), if stdout_open => match line {
+                    Ok(Some(line)) => line,
+                    Ok(None) | Err(_) => {
+                        stdout_open = false;
+                        continue;
+                    }
+                },
+                line = stderr.next_line(), if stderr_open => match line {
+                    Ok(Some(line)) => {
+                        errors.push(line.clone());
+                        line
+                    }
+                    Ok(None) | Err(_) => {
+                        stderr_open = false;
+                        continue;
+                    }
+                },
+                else => break,
+            };
+            if !line.trim().is_empty() {
+                step.set_message(&format!(
+                    "Pulling {image}  {}",
+                    console::style(line.trim()).dim().for_stderr()
+                ));
+            }
+        }
+        let status = match child.wait().await {
+            Ok(status) => status,
+            Err(error) => {
+                step.fail();
+                return Err(eyre!("Failed to pull {image}: {error}"));
+            }
+        };
+        if !status.success() {
+            step.fail();
+            let error = CliError::new(format!("failed to pull {image}"));
+            let stderr = errors.join("\n");
+            return Err(match stderr.trim() {
+                "" => error,
+                stderr => error.with_caused_by(stderr),
+            }
+            .into());
+        }
+        let Err(error) = self.inspect_image(image) else {
+            step.set_completion(&format!("Pulled {image}"));
+            step.done();
+            return Ok(true);
+        };
+        step.fail();
+        Err(error)
+    }
+
+    /// The host port `container` publishes for `container_port`/tcp, or
+    /// `None` when the container is missing, stopped, or publishes nothing.
+    fn published_port(&self, container: &str, container_port: u16) -> Option<u16> {
+        let output = self
+            .runtime_command()
+            .args(["port", container, &format!("{container_port}/tcp")])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())?;
+        parse_published_port(&String::from_utf8_lossy(&output.stdout))
     }
 
     pub fn run_command(&self, args: &[&str]) -> Result<Output> {
@@ -418,50 +872,112 @@ impl LocalRuntime {
         })
     }
 
+    /// Volume holding the server's disk cache for S3-backed storage. Stop
+    /// keeps it, so the next start reads recently used data locally; prune
+    /// removes it.
+    fn cache_volume(&self, instance_name: &str) -> String {
+        format!("{}-cache", self.container_name(instance_name))
+    }
+
+    /// Starts what the Helix container's storage needs: disk mode's
+    /// SeaweedFS sidecar and, for any S3-backed storage, the disk-cache
+    /// volume. Any other storage removes disk mode's containers and network.
+    fn prepare_storage(
+        &self,
+        instance_name: &str,
+        config: &LocalInstanceConfig,
+        seaweedfs_image: Option<String>,
+    ) -> Result<HelixStorage> {
+        let (network, env) = match seaweedfs_image {
+            Some(seaweedfs_image) => {
+                let resources = self.start_disk_dependencies(instance_name, &seaweedfs_image)?;
+                (Some(resources.network), disk_env())
+            }
+            None => {
+                let _ = self.remove_disk_resources(instance_name, false);
+                if !config.storage.is_s3() {
+                    return Ok(HelixStorage::Memory);
+                }
+                (None, s3_env(config)?)
+            }
+        };
+        let cache_volume = self.cache_volume(instance_name);
+        self.ensure_volume(&cache_volume, &self.instance_identity(instance_name))?;
+        Ok(HelixStorage::ObjectStore {
+            network,
+            cache_volume,
+            env,
+        })
+    }
+
     fn disk_resources(&self, instance_name: &str) -> DiskRuntimeResources {
         let base = self.container_name(instance_name);
         DiskRuntimeResources {
-            minio_container: format!("{base}-minio"),
+            seaweedfs_container: format!("{base}-seaweedfs"),
             network: format!("{base}-net"),
-            volume: format!("{base}-minio-data"),
+            volume: format!("{base}-seaweedfs-data"),
+            legacy_minio_container: format!("{base}-minio"),
+            legacy_minio_volume: format!("{base}-minio-data"),
         }
     }
 
-    fn start_disk_dependencies(&self, instance_name: &str) -> Result<DiskRuntimeResources> {
+    fn start_disk_dependencies(
+        &self,
+        instance_name: &str,
+        seaweedfs_image: &str,
+    ) -> Result<DiskRuntimeResources> {
         let resources = self.disk_resources(instance_name);
-        self.pull_image_ref(MINIO_IMAGE)?;
-        self.pull_image_ref(MINIO_MC_IMAGE)?;
-        self.ensure_network(&resources.network)?;
-        self.ensure_volume(&resources.volume)?;
-        let _ = self.remove_container(&resources.minio_container);
+        let identity = self.instance_identity(instance_name);
+        let _ = self.remove_container(&resources.legacy_minio_container);
+        self.ensure_network(&resources.network, &identity)?;
+        self.ensure_volume(&resources.volume, &identity)?;
+        if self.resource_exists(&["volume", "inspect", &resources.legacy_minio_volume]) {
+            // Name the command that removes only the old volume: prune also
+            // deletes everything written to the new one since the upgrade.
+            crate::output::warning(&format!(
+                "Volume {legacy} holds data from a MinIO-based Helix CLI, which SeaweedFS \
+                 cannot read. This instance now stores data in {current}. To copy the old \
+                 data, see https://docs.helix-db.com/cli/workflows/local#migrate-minio-disk-data. \
+                 Once you no longer need it, delete only the old volume with \
+                 '{runtime} volume rm {legacy}'; 'helix prune {instance_name}' would also \
+                 delete {current}.",
+                legacy = resources.legacy_minio_volume,
+                current = resources.volume,
+                runtime = self.runtime.binary(),
+            ));
+        }
+        let _ = self.remove_container(&resources.seaweedfs_container);
 
-        let args = minio_run_args(&resources);
+        let args = seaweedfs_run_args(&resources, seaweedfs_image, &identity);
         let output = self
             .runtime_command()
             .args(&args)
             .output()
-            .map_err(|e| eyre!("Failed to start {}: {e}", resources.minio_container))?;
+            .map_err(|e| eyre!("Failed to start {}: {e}", resources.seaweedfs_container))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(eyre!(
                 "Failed to start {}:\n{stderr}",
-                resources.minio_container
+                resources.seaweedfs_container
             ));
         }
 
-        self.ensure_minio_bucket(&resources)?;
+        self.wait_for_seaweedfs_bucket(&resources)?;
         Ok(resources)
     }
 
-    fn ensure_network(&self, network: &str) -> Result<()> {
+    fn ensure_network(&self, network: &str, identity: &str) -> Result<()> {
         if self.resource_exists(&["network", "inspect", network]) {
             return Ok(());
         }
 
+        let label = format!("{IDENTITY_LABEL}={identity}");
         let output = self
             .runtime_command()
-            .args(["network", "create", network])
+            .args(["network", "create", "--label"])
+            .arg(&label)
+            .arg(network)
             .output()
             .map_err(|e| eyre!("Failed to create network {network}: {e}"))?;
 
@@ -475,14 +991,17 @@ impl LocalRuntime {
         Ok(())
     }
 
-    fn ensure_volume(&self, volume: &str) -> Result<()> {
+    fn ensure_volume(&self, volume: &str, identity: &str) -> Result<()> {
         if self.resource_exists(&["volume", "inspect", volume]) {
             return Ok(());
         }
 
+        let label = format!("{IDENTITY_LABEL}={identity}");
         let output = self
             .runtime_command()
-            .args(["volume", "create", volume])
+            .args(["volume", "create", "--label"])
+            .arg(&label)
+            .arg(volume)
             .output()
             .map_err(|e| eyre!("Failed to create volume {volume}: {e}"))?;
 
@@ -496,42 +1015,53 @@ impl LocalRuntime {
         Ok(())
     }
 
-    fn ensure_minio_bucket(&self, resources: &DiskRuntimeResources) -> Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let args = minio_bucket_init_args(resources);
-        let mut last_stderr = String::new();
-
-        while Instant::now() < deadline {
-            let output = self
-                .runtime_command()
-                .args(&args)
-                .output()
-                .map_err(|e| eyre!("Failed to initialize local MinIO bucket: {e}"))?;
-
-            if output.status.success() {
-                return Ok(());
-            }
-
-            last_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            thread::sleep(Duration::from_millis(500));
+    /// SeaweedFS creates the bucket itself once its S3 gateway is up, so one
+    /// probe inside the sidecar waits for both and fails without host polling.
+    fn wait_for_seaweedfs_bucket(&self, resources: &DiskRuntimeResources) -> Result<()> {
+        let output = self
+            .runtime_command()
+            .args(seaweedfs_ready_args(resources))
+            .output()
+            .map_err(|e| eyre!("Failed to probe {}: {e}", resources.seaweedfs_container))?;
+        if output.status.success() {
+            return Ok(());
         }
 
-        Err(eyre!(
-            "Timed out initializing local MinIO bucket {LOCAL_S3_BUCKET}:\n{last_stderr}"
+        // curl prints one error per failed attempt; the last says why it
+        // gave up, and a runtime failure prints only its own.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last_error = stderr
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .unwrap_or_default();
+        Err(CliError::new(format!(
+            "local SeaweedFS bucket {LOCAL_S3_BUCKET} did not become ready within {} s",
+            SEAWEEDFS_READY_TIMEOUT.as_secs()
         ))
+        .with_context(last_error.to_string())
+        .with_hint(format!(
+            "check its logs with '{} logs {}'",
+            self.runtime.binary(),
+            resources.seaweedfs_container
+        ))
+        .into())
     }
 
     fn remove_disk_resources(&self, instance_name: &str, include_volume: bool) -> Result<bool> {
         let resources = self.disk_resources(instance_name);
-        let removed_minio = self.remove_container(&resources.minio_container)?;
+        let removed_seaweedfs = self.remove_container(&resources.seaweedfs_container)?;
+        let removed_minio = self.remove_container(&resources.legacy_minio_container)?;
         let removed_network = self.remove_network(&resources.network)?;
-        let removed_volume = if include_volume {
-            self.remove_volume(&resources.volume)?
+        let removed_volumes = if include_volume {
+            let removed_volume = self.remove_volume(&resources.volume)?;
+            let removed_minio_volume = self.remove_volume(&resources.legacy_minio_volume)?;
+            removed_volume || removed_minio_volume
         } else {
             false
         };
 
-        Ok(removed_minio || removed_network || removed_volume)
+        Ok(removed_seaweedfs || removed_minio || removed_network || removed_volumes)
     }
 
     fn remove_network(&self, network: &str) -> Result<bool> {
@@ -669,6 +1199,37 @@ fn runtime_command(runtime: ContainerRuntime) -> Command {
     }
 }
 
+/// Runs one command inside the same wall-clock bound and returns its trimmed
+/// stdout, or `None` if it could not be spawned, exited non-zero, or had to be
+/// killed. Callers must keep the output to roughly one line: nothing drains the
+/// pipe until the child exits, so a chatty command would sit there until the
+/// deadline kills it.
+fn command_output_within(command: &mut Command, timeout: Duration) -> Option<String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let output = child.wait_with_output().ok()?;
+                return Some(String::from_utf8_lossy(&output.stdout).trim().to_string());
+            }
+            Ok(Some(_)) => return None,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(
+                    RUNTIME_INFO_POLL_INTERVAL
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 /// Runs one status-only command inside a hard wall-clock bound.
 fn command_succeeds_within(command: &mut Command, timeout: Duration) -> bool {
     command.stdout(Stdio::null()).stderr(Stdio::null());
@@ -701,8 +1262,27 @@ fn runtime_tokio_command(runtime: ContainerRuntime) -> TokioCommand {
     }
 }
 
+/// Whether a test runtime binary has to be launched through `cmd`.
+///
+/// `.cmd`/`.bat` fixtures are not executable images, so Windows can only run
+/// them via `cmd /C call`. Anything else is spawned directly, which keeps a
+/// missing path failing with `NotFound` instead of `cmd.exe` spawning fine and
+/// reporting exit code 1.
+#[cfg(windows)]
+fn test_runtime_bin_needs_shell(bin: &std::ffi::OsStr) -> bool {
+    std::path::Path::new(bin)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+}
+
 #[cfg(windows)]
 fn command_from_test_runtime_bin(bin: OsString) -> Command {
+    if !test_runtime_bin_needs_shell(&bin) {
+        return Command::new(bin);
+    }
     let mut command = Command::new("cmd");
     command.arg("/C").arg("call").arg(bin);
     command
@@ -715,6 +1295,9 @@ fn command_from_test_runtime_bin(bin: OsString) -> Command {
 
 #[cfg(windows)]
 fn tokio_command_from_test_runtime_bin(bin: OsString) -> TokioCommand {
+    if !test_runtime_bin_needs_shell(&bin) {
+        return TokioCommand::new(bin);
+    }
     let mut command = TokioCommand::new("cmd");
     command.arg("/C").arg("call").arg(bin);
     command
@@ -723,6 +1306,34 @@ fn tokio_command_from_test_runtime_bin(bin: OsString) -> TokioCommand {
 #[cfg(not(windows))]
 fn tokio_command_from_test_runtime_bin(bin: OsString) -> TokioCommand {
     TokioCommand::new(bin)
+}
+
+/// The executable `runtime_command` will actually spawn.
+///
+/// Mirrors the `HELIX_TEST_CONTAINER_RUNTIME_BIN` seam so the presence check and
+/// the spawned command always agree about which binary is in play.
+fn resolved_runtime_binary(runtime: ContainerRuntime) -> OsString {
+    std::env::var_os(TEST_CONTAINER_RUNTIME_BIN_ENV)
+        .unwrap_or_else(|| OsString::from(runtime.binary()))
+}
+
+fn runtime_binary_present(runtime: ContainerRuntime) -> bool {
+    match resolved_runtime_binary(runtime).to_str() {
+        Some(binary) => command_exists(binary),
+        // A path we cannot inspect is not evidence that the runtime is absent.
+        None => true,
+    }
+}
+
+/// Whether a spawn failure means the runtime executable is genuinely absent.
+///
+/// A present binary can still fail to spawn: a missing interpreter, an invalid
+/// executable format, a permission failure, or process resource exhaustion. Those
+/// keep their command-specific error rather than being reported as a missing
+/// installation, which would send the user off to install or switch runtimes for
+/// a runtime that is already there.
+fn spawn_failed_because_runtime_missing(runtime: ContainerRuntime, error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound && !runtime_binary_present(runtime)
 }
 
 /// Build the error for a container runtime whose binary is missing from PATH.
@@ -770,55 +1381,220 @@ fn not_installed_error(
 struct StartCommand {
     program: &'static str,
     args: Vec<&'static str>,
+    /// Whether a person running this by hand normally has to elevate. Advisory
+    /// text only; `try_start_runtime` still issues the command unelevated.
+    may_need_privileges: bool,
+}
+
+/// A Docker-compatible backend that the active endpoint is known to belong to.
+///
+/// There is deliberately no `Unknown` variant. Colima, Docker Desktop and
+/// OrbStack can all be installed on one machine, so an endpoint we cannot place
+/// is absent rather than guessed, and callers fall back to advice that names no
+/// launcher at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockerBackend {
+    Colima,
+    DockerDesktop,
+    OrbStack,
+}
+
+/// Classify a Docker endpoint by the socket it points at.
+///
+/// The socket path is the only trustworthy signal here. Context names are
+/// user-editable, and both `default` and `/var/run/docker.sock` are shared by
+/// every backend, so neither of those proves anything.
+fn classify_docker_endpoint(endpoint: &str) -> Option<DockerBackend> {
+    if endpoint.contains("/.colima/") {
+        Some(DockerBackend::Colima)
+    } else if endpoint.contains("/.orbstack/") {
+        Some(DockerBackend::OrbStack)
+    } else if endpoint.contains("/.docker/run/docker.sock") {
+        Some(DockerBackend::DockerDesktop)
+    } else {
+        None
+    }
+}
+
+/// The backend the Docker CLI would actually talk to right now.
+///
+/// Bounded by `RUNTIME_INFO_TIMEOUT` because this also runs on the advisory
+/// path, which must not stall `init`.
+fn active_docker_backend() -> Option<DockerBackend> {
+    if let Some(context) = nonempty_env("DOCKER_CONTEXT") {
+        let endpoint = docker_context_endpoint(Some(&context));
+        return select_docker_backend(Some(endpoint.as_deref()), None, None);
+    }
+
+    if let Some(host) = nonempty_env("DOCKER_HOST") {
+        return select_docker_backend(None, Some(&host), None);
+    }
+
+    let endpoint = docker_context_endpoint(None);
+    select_docker_backend(None, None, endpoint.as_deref())
+}
+
+fn nonempty_env(key: &str) -> Option<String> {
+    let value = std::env::var_os(key)?.to_string_lossy().into_owned();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn docker_context_endpoint(name: Option<&str>) -> Option<String> {
+    let mut command = Command::new("docker");
+    command.arg("context").arg("inspect");
+    if let Some(name) = name {
+        command.arg(name);
+    }
+    command.args(["--format", "{{.Endpoints.docker.Host}}"]);
+    command_output_within(&mut command, RUNTIME_INFO_TIMEOUT)
+}
+
+/// The outer Option says whether DOCKER_CONTEXT was set; the inner one is the
+/// inspect result, so a set-but-unresolved context stays authoritative instead
+/// of falling back to the host.
+fn select_docker_backend(
+    explicit_context_endpoint: Option<Option<&str>>,
+    docker_host_endpoint: Option<&str>,
+    configured_context_endpoint: Option<&str>,
+) -> Option<DockerBackend> {
+    if let Some(endpoint) = explicit_context_endpoint {
+        return endpoint.and_then(classify_docker_endpoint);
+    }
+    if let Some(endpoint) = docker_host_endpoint {
+        return classify_docker_endpoint(endpoint);
+    }
+    configured_context_endpoint.and_then(classify_docker_endpoint)
+}
+
+/// Resolve the active backend only where it can change the answer, so Podman
+/// and non-macOS runs never pay for a `docker context inspect`.
+fn detected_docker_backend(os: &str, runtime: ContainerRuntime) -> Option<DockerBackend> {
+    if os == "macos" && runtime == ContainerRuntime::Docker {
+        active_docker_backend()
+    } else {
+        None
+    }
 }
 
 /// Resolve the command to start the given runtime's daemon for the current OS.
 ///
-/// Pure helper — the OS string and an installed-probe are injected so it can be
-/// unit-tested deterministically. Returns `None` when there's no known launcher
-/// (e.g. Podman on Linux is daemonless, or an unsupported OS).
+/// Pure helper — the OS string and the resolved backend are injected so it
+/// can be unit-tested deterministically. Returns `None` when there is no known
+/// launcher: Podman on Linux is daemonless, the OS is unsupported, or the active
+/// Docker endpoint does not prove which backend is behind it.
 fn runtime_start_command(
     os: &str,
     runtime: ContainerRuntime,
-    is_installed: impl Fn(&str) -> bool,
+    docker_backend: Option<DockerBackend>,
 ) -> Option<StartCommand> {
     match (os, runtime) {
-        // macOS Docker: prefer Colima if it's installed, otherwise Docker Desktop.
-        ("macos", ContainerRuntime::Docker) => {
-            if is_installed("colima") {
-                Some(StartCommand {
-                    program: "colima",
-                    args: vec!["start"],
-                })
-            } else {
-                Some(StartCommand {
-                    program: "open",
-                    args: vec!["-a", "Docker"],
-                })
-            }
-        }
+        // macOS Docker: start only the backend the active endpoint proves. Going
+        // by executable presence starts a VM the user was not on and leaves the
+        // endpoint that actually failed down.
+        ("macos", ContainerRuntime::Docker) => match docker_backend? {
+            DockerBackend::Colima => Some(StartCommand {
+                program: "colima",
+                args: vec!["start"],
+                may_need_privileges: false,
+            }),
+            DockerBackend::DockerDesktop => Some(StartCommand {
+                program: "open",
+                args: vec!["-a", "Docker"],
+                may_need_privileges: false,
+            }),
+            DockerBackend::OrbStack => Some(StartCommand {
+                program: "open",
+                args: vec!["-a", "OrbStack"],
+                may_need_privileges: false,
+            }),
+        },
         ("macos", ContainerRuntime::Podman) => Some(StartCommand {
             program: "podman",
             args: vec!["machine", "start"],
+            may_need_privileges: false,
         }),
         // Linux Docker: best-effort via systemd (may need privileges; if it fails we
         // fall back to the manual-hint error).
         ("linux", ContainerRuntime::Docker) => Some(StartCommand {
             program: "systemctl",
             args: vec!["start", "docker"],
+            may_need_privileges: true,
         }),
         // Podman on Linux is daemonless; nothing to start. Other OSes: unknown launcher.
         _ => None,
     }
 }
 
+/// Advisory for a runtime that is installed but whose `info` probe did not
+/// succeed.
+///
+/// Reuses `runtime_start_command`, the same launcher table `try_start_runtime`
+/// drives, so the remedy always names the runtime that was actually detected.
+/// When that table has no launcher the runtime has nothing to start (Podman on
+/// Linux is daemonless), so the message says what to check instead of naming a
+/// daemon that does not exist.
+pub(crate) fn runtime_unavailable_hint(runtime: ContainerRuntime) -> String {
+    let os = std::env::consts::OS;
+    runtime_unavailable_hint_for(os, runtime, detected_docker_backend(os, runtime))
+}
+
+/// Pure form of [`runtime_unavailable_hint`], with the OS and the resolved
+/// backend injected so it can be unit-tested deterministically.
+fn runtime_unavailable_hint_for(
+    os: &str,
+    runtime: ContainerRuntime,
+    docker_backend: Option<DockerBackend>,
+) -> String {
+    match runtime_start_command(os, runtime, docker_backend) {
+        Some(start) => format!(
+            "{} is installed but not running. Start it before 'helix start' \u{2014} `{} {}`.{}",
+            runtime.label(),
+            start.program,
+            start.args.join(" "),
+            if start.may_need_privileges {
+                " It usually needs `sudo`."
+            } else {
+                ""
+            }
+        ),
+        None => format!(
+            "{} is installed but `{} info` did not succeed. Check it is configured before \
+             'helix start'.",
+            runtime.label(),
+            runtime.binary()
+        ),
+    }
+}
+
+fn daemon_not_running_error(runtime: ContainerRuntime, stderr: &str) -> CliError {
+    let os = std::env::consts::OS;
+    daemon_not_running_error_for(os, runtime, stderr, detected_docker_backend(os, runtime))
+}
+
+fn daemon_not_running_error_for(
+    os: &str,
+    runtime: ContainerRuntime,
+    stderr: &str,
+    docker_backend: Option<DockerBackend>,
+) -> CliError {
+    CliError::new(format!("{} is not running", runtime.label()))
+        .with_context(stderr.trim().to_string())
+        .with_hint(runtime_unavailable_hint_for(os, runtime, docker_backend))
+}
+
+/// `env` follows the storage's own environment.
 fn helix_run_args(
     name: &str,
     image: &str,
     port: u16,
     detached: bool,
-    network: Option<&str>,
+    storage: &HelixStorage,
     env: &[ContainerEnv],
+    identity: &str,
 ) -> Vec<String> {
     let mut args = vec!["run".to_string()];
     if detached {
@@ -836,10 +1612,23 @@ fn helix_run_args(
         name.to_string(),
         "-p".to_string(),
         format!("{port}:{CONTAINER_PORT}"),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
     ]);
 
-    if let Some(network) = network {
-        args.extend(["--network".to_string(), network.to_string()]);
+    if let HelixStorage::ObjectStore {
+        network,
+        cache_volume,
+        env: storage_env,
+    } = storage
+    {
+        if let Some(network) = network {
+            args.extend(["--network".to_string(), network.clone()]);
+        }
+        args.extend(["-v".to_string(), format!("{cache_volume}:{CACHE_DIR}")]);
+        for env in storage_env {
+            args.extend(["-e".to_string(), env.to_docker_arg()]);
+        }
     }
     for env in env {
         args.extend(["-e".to_string(), env.to_docker_arg()]);
@@ -849,65 +1638,200 @@ fn helix_run_args(
     args
 }
 
-fn minio_run_args(resources: &DiskRuntimeResources) -> Vec<String> {
+/// Host name an Explorer container uses for the host, where the instance
+/// publishes its port.
+///
+/// Docker needs `--add-host host.docker.internal:host-gateway` for the name
+/// on Linux engines (Docker Desktop and OrbStack also resolve it on their
+/// own). Podman resolves `host.containers.internal` itself: it writes the name
+/// into `/etc/hosts` on Linux, and `podman machine` answers it over DNS. Its
+/// `host-gateway` mapping fails inside `podman machine`, so Podman gets no
+/// `--add-host`.
+fn explorer_host(runtime: ContainerRuntime) -> &'static str {
+    match runtime {
+        ContainerRuntime::Docker => "host.docker.internal",
+        ContainerRuntime::Podman => "host.containers.internal",
+    }
+}
+
+/// `run` arguments for an Explorer: detached and removed when it stops,
+/// labelled with the instance's identity and the Explorer role, and published
+/// on loopback only.
+fn explorer_run_args(
+    runtime: ContainerRuntime,
+    name: &str,
+    launch: &ExplorerLaunch,
+    instance_name: &str,
+    identity: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--rm".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
+        "--label".to_string(),
+        format!("{ROLE_LABEL}={EXPLORER_ROLE}"),
+    ];
+    if runtime == ContainerRuntime::Docker {
+        args.extend([
+            "--add-host".to_string(),
+            format!("{}:host-gateway", explorer_host(runtime)),
+        ]);
+    }
+    args.extend([
+        "-e".to_string(),
+        format!("HELIX_URL={}", launch.helix_url),
+        "-e".to_string(),
+        format!("HELIX_INSTANCE_NAME={instance_name}"),
+        "-p".to_string(),
+        format!("127.0.0.1:{}:{EXPLORER_CONTAINER_PORT}", launch.port),
+        launch.image.clone(),
+    ]);
+    args
+}
+
+/// The host port on the first line of `docker port` / `podman port` output,
+/// such as `0.0.0.0:6969` or `[::]:6969`. `None` for no line or port 0.
+fn parse_published_port(output: &str) -> Option<u16> {
+    output
+        .lines()
+        .next()
+        .and_then(|line| line.rsplit_once(':'))
+        .and_then(|(_, port)| port.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+}
+
+/// Splits [`EXPLORER_INSPECT_FORMAT`] output into its fields. An empty line
+/// is a value the runtime did not report.
+fn parse_explorer_inspection(output: &str) -> ExplorerInspection {
+    let mut lines = output.lines().map(str::trim);
+    let mut field = || {
+        lines
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let identity = field().unwrap_or_default();
+    let role = field().unwrap_or_default();
+    let image_id = field();
+    let image = field();
+    let helix_url = lines
+        .find_map(|line| line.strip_prefix("HELIX_URL="))
+        .map(str::to_owned);
+    ExplorerInspection {
+        identity,
+        role,
+        image_id,
+        image,
+        helix_url,
+    }
+}
+
+impl ExplorerInspection {
+    /// Whether the container is the Explorer `helix explorer` started for the
+    /// instance with this identity, and so is safe to reuse or remove.
+    fn belongs_to(&self, identity: &str) -> bool {
+        self.identity == identity && self.role == EXPLORER_ROLE
+    }
+}
+
+/// Runs SeaweedFS's single-process `mini` mode (master, volume, filer, and S3)
+/// with its other gateways and admin UI turned off.
+///
+/// The `AWS_*` variables become SeaweedFS's static admin identity, `-bucket`
+/// creates the bucket on startup, and telemetry to seaweedfs.com is disabled.
+fn seaweedfs_run_args(
+    resources: &DiskRuntimeResources,
+    image: &str,
+    identity: &str,
+) -> Vec<String> {
     vec![
         "run".to_string(),
         "-d".to_string(),
         "--restart".to_string(),
         "unless-stopped".to_string(),
         "--name".to_string(),
-        resources.minio_container.clone(),
+        resources.seaweedfs_container.clone(),
+        "--label".to_string(),
+        format!("{IDENTITY_LABEL}={identity}"),
         "--network".to_string(),
         resources.network.clone(),
+        "--network-alias".to_string(),
+        SEAWEEDFS_NETWORK_ALIAS.to_string(),
         "-e".to_string(),
-        format!("MINIO_ROOT_USER={MINIO_ACCESS_KEY}"),
+        format!("AWS_ACCESS_KEY_ID={LOCAL_S3_ACCESS_KEY}"),
         "-e".to_string(),
-        format!("MINIO_ROOT_PASSWORD={MINIO_SECRET_KEY}"),
+        format!("AWS_SECRET_ACCESS_KEY={LOCAL_S3_SECRET_KEY}"),
         "-v".to_string(),
         format!("{}:/data", resources.volume),
-        MINIO_IMAGE.to_string(),
-        "server".to_string(),
-        "/data".to_string(),
-        "--console-address".to_string(),
-        ":9001".to_string(),
+        image.to_string(),
+        "mini".to_string(),
+        "-dir=/data".to_string(),
+        format!("-bucket={LOCAL_S3_BUCKET}"),
+        format!("-s3.port={SEAWEEDFS_S3_PORT}"),
+        "-master.telemetry=false".to_string(),
+        "-admin.ui=false".to_string(),
+        "-webdav=false".to_string(),
+        "-s3.port.iceberg=0".to_string(),
+        "-s3.port.lance=0".to_string(),
     ]
 }
 
-fn minio_bucket_init_args(resources: &DiskRuntimeResources) -> Vec<String> {
-    let endpoint = format!("http://{}:9000", resources.minio_container);
-    let command = format!(
-        "mc alias set local {} {} {} && mc mb --ignore-existing local/{}",
-        shell_quote(&endpoint),
-        shell_quote(MINIO_ACCESS_KEY),
-        shell_quote(MINIO_SECRET_KEY),
-        LOCAL_S3_BUCKET
-    );
-
+/// Waits inside the sidecar, which ships `curl`, until a signed HEAD of the
+/// bucket succeeds, and prints curl's error for every failed attempt.
+///
+/// curl does the waiting itself. `--retry-all-errors` also retries the
+/// refused connections and 403/404 answers of a gateway that is still
+/// starting, and `--retry-max-time` stops retrying once
+/// [`SEAWEEDFS_READY_TIMEOUT`] has elapsed, however long each attempt took.
+/// `--retry` allows one retry per second of that budget, which the 1 s delay
+/// cannot use up before the budget ends.
+fn seaweedfs_ready_args(resources: &DiskRuntimeResources) -> Vec<String> {
+    let budget_secs = SEAWEEDFS_READY_TIMEOUT.as_secs().to_string();
     vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "--network".to_string(),
-        resources.network.clone(),
-        "--entrypoint".to_string(),
-        "/bin/sh".to_string(),
-        MINIO_MC_IMAGE.to_string(),
-        "-c".to_string(),
-        command,
+        "exec".to_string(),
+        resources.seaweedfs_container.clone(),
+        "curl".to_string(),
+        "-fsS".to_string(),
+        "-o".to_string(),
+        "/dev/null".to_string(),
+        "-I".to_string(),
+        "--max-time".to_string(),
+        "2".to_string(),
+        "--retry".to_string(),
+        budget_secs.clone(),
+        "--retry-delay".to_string(),
+        "1".to_string(),
+        "--retry-max-time".to_string(),
+        budget_secs,
+        "--retry-all-errors".to_string(),
+        "--aws-sigv4".to_string(),
+        format!("aws:amz:{LOCAL_S3_REGION}:s3"),
+        "--user".to_string(),
+        format!("{LOCAL_S3_ACCESS_KEY}:{LOCAL_S3_SECRET_KEY}"),
+        format!("http://127.0.0.1:{SEAWEEDFS_S3_PORT}/{LOCAL_S3_BUCKET}"),
     ]
 }
 
-fn disk_env(resources: &DiskRuntimeResources) -> Vec<ContainerEnv> {
+fn disk_env() -> Vec<ContainerEnv> {
     vec![
         ContainerEnv::Literal("S3_BUCKET", LOCAL_S3_BUCKET.to_string()),
         ContainerEnv::Literal("S3_REGION", LOCAL_S3_REGION.to_string()),
         ContainerEnv::Literal("DB_PATH", LOCAL_DB_PATH.to_string()),
-        ContainerEnv::Literal("AWS_ACCESS_KEY_ID", MINIO_ACCESS_KEY.to_string()),
-        ContainerEnv::Literal("AWS_SECRET_ACCESS_KEY", MINIO_SECRET_KEY.to_string()),
+        ContainerEnv::Literal("AWS_ACCESS_KEY_ID", LOCAL_S3_ACCESS_KEY.to_string()),
+        ContainerEnv::Literal("AWS_SECRET_ACCESS_KEY", LOCAL_S3_SECRET_KEY.to_string()),
         ContainerEnv::Literal(
             "AWS_ENDPOINT",
-            format!("http://{}:9000", resources.minio_container),
+            format!("http://{SEAWEEDFS_NETWORK_ALIAS}:{SEAWEEDFS_S3_PORT}"),
         ),
         ContainerEnv::Literal("AWS_ALLOW_HTTP", "true".to_string()),
+        // The directory is the server's S3 default, but v0.0.8 and earlier
+        // cache on disk only when it is set and reject a budget without it.
+        ContainerEnv::Literal("HELIX_DISK_CACHE_DIR", CACHE_DIR.to_string()),
+        ContainerEnv::Literal("HELIX_DISK_CACHE_BYTES", DISK_MODE_CACHE_BYTES.to_string()),
     ]
 }
 
@@ -920,6 +1844,8 @@ fn s3_env(config: &LocalInstanceConfig) -> Result<Vec<ContainerEnv>> {
         ContainerEnv::Literal("S3_BUCKET", s3.bucket.clone()),
         ContainerEnv::Literal("S3_REGION", s3.region.clone()),
         ContainerEnv::Literal("DB_PATH", s3.normalized_prefix()),
+        ContainerEnv::Literal("HELIX_DISK_CACHE_DIR", CACHE_DIR.to_string()),
+        ContainerEnv::Literal("HELIX_DISK_CACHE_BYTES", S3_CACHE_BYTES.to_string()),
     ];
     if let Some(endpoint_url) = &s3.endpoint_url {
         env.push(ContainerEnv::Literal("AWS_ENDPOINT", endpoint_url.clone()));
@@ -1003,14 +1929,300 @@ fn missing_resource(stderr: &str) -> bool {
     stderr.contains("no such") || stderr.contains("not found") || stderr.contains("does not exist")
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+fn sanitize_docker_name(name: &str) -> String {
+    name.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn compose_resource_name(name: &str, identity: &str, adopts_legacy: bool) -> String {
+    let sanitized = sanitize_docker_name(name);
+    if sanitized == name && (!ends_with_hash_suffix(&sanitized) || adopts_legacy) {
+        return format!("helix-{name}");
+    }
+    format!("helix-{sanitized}-{}", identity_suffix(identity))
+}
+
+const HASH_SUFFIX_LEN: usize = 32;
+
+fn ends_with_hash_suffix(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    bytes.len() > HASH_SUFFIX_LEN + 1
+        && bytes[bytes.len() - HASH_SUFFIX_LEN - 1] == b'-'
+        && bytes[bytes.len() - HASH_SUFFIX_LEN..]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn identity_suffix(identity: &str) -> String {
+    Sha256::digest(identity.as_bytes())
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn runtime_for(project_name: &str) -> LocalRuntime {
+        LocalRuntime {
+            runtime: ContainerRuntime::Docker,
+            project_name: project_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn container_name_keeps_legacy_names_byte_identical() {
+        assert_eq!(runtime_for("demo").container_name("dev"), "helix-demo-dev");
+        assert_eq!(
+            compose_resource_name("demo-my-dev", "5:demo/my dev", false),
+            "helix-demo-my-dev"
+        );
+    }
+
+    #[test]
+    fn suffixed_names_carry_a_sha256_of_the_length_delimited_identity() {
+        assert_eq!(
+            runtime_for("My Project").container_name("dev"),
+            "helix-My-Project-dev-028ad0a3ea24fa42ed85d7f07ce24d71"
+        );
+        assert_eq!(
+            runtime_for("a b").container_name("dev"),
+            "helix-a-b-dev-14527b3cbdf37376ceb9eda41d2afac4"
+        );
+        assert_eq!(
+            runtime_for("hélix (wörld)!").container_name("dev"),
+            "helix-h-lix--w-rld---dev-9d350e8e981617b49c69ea2afed0cfcb"
+        );
+    }
+
+    #[test]
+    fn hash_suffixed_legacy_names_are_displaced_only_when_not_adopted() {
+        let identity = "4:demo/dev-14527b3cbdf37376ceb9eda41d2afac4";
+        assert_eq!(
+            compose_resource_name("demo-dev-14527b3cbdf37376ceb9eda41d2afac4", identity, false),
+            "helix-demo-dev-14527b3cbdf37376ceb9eda41d2afac4-9333c32b4742394d43c85929472329bf"
+        );
+        assert_eq!(
+            compose_resource_name("demo-dev-14527b3cbdf37376ceb9eda41d2afac4", identity, true),
+            "helix-demo-dev-14527b3cbdf37376ceb9eda41d2afac4"
+        );
+    }
+
+    #[test]
+    fn crafted_valid_names_do_not_collide_with_suffixed_names() {
+        let suffixed = compose_resource_name("a b-dev", "3:a b/dev", false);
+        let crafted = suffixed.strip_prefix("helix-a-b-").unwrap();
+        assert_ne!(
+            suffixed,
+            compose_resource_name(crafted, &format!("3:a-b/{crafted}"), false)
+        );
+    }
+
+    #[test]
+    fn container_name_stays_valid_when_every_character_is_rejected() {
+        assert!(runtime_for("!!!")
+            .container_name("dev")
+            .starts_with("helix-----dev-"));
+    }
+
+    #[test]
+    fn disk_resources_inherit_the_sanitized_base_name() {
+        let base = runtime_for("My Project").container_name("dev");
+        let resources = runtime_for("My Project").disk_resources("dev");
+        assert_eq!(resources.seaweedfs_container, format!("{base}-seaweedfs"));
+        assert_eq!(resources.network, format!("{base}-net"));
+        assert_eq!(resources.volume, format!("{base}-seaweedfs-data"));
+        assert_eq!(resources.legacy_minio_container, format!("{base}-minio"));
+        assert_eq!(resources.legacy_minio_volume, format!("{base}-minio-data"));
+    }
+
+    /// The launcher table and the advisory must never disagree about which
+    /// runtime is in play. Before this was wired to `runtime_start_command`, a
+    /// Podman user was told to run `open -a Docker` and `systemctl start docker`,
+    /// neither of which starts Podman.
+    #[test]
+    fn unavailable_hint_names_the_detected_runtime_not_another_one() {
+        let podman_macos = runtime_unavailable_hint_for("macos", ContainerRuntime::Podman, None);
+        assert!(podman_macos.contains("podman machine start"));
+        assert!(!podman_macos.to_lowercase().contains("docker"));
+        assert!(!podman_macos.to_lowercase().contains("colima"));
+
+        let docker_linux = runtime_unavailable_hint_for("linux", ContainerRuntime::Docker, None);
+        assert!(docker_linux.contains("systemctl start docker"));
+        assert!(!docker_linux.to_lowercase().contains("podman"));
+
+        let docker_macos_colima = runtime_unavailable_hint_for(
+            "macos",
+            ContainerRuntime::Docker,
+            Some(DockerBackend::Colima),
+        );
+        assert!(docker_macos_colima.contains("colima start"));
+    }
+
+    /// Colima, Docker Desktop and OrbStack can all be installed at once, so the
+    /// advisory has to follow the endpoint that actually failed. Picking by
+    /// executable presence names a backend the caller was never on.
+    #[test]
+    fn unavailable_hint_follows_the_active_backend_not_what_is_installed() {
+        let launchers = ["colima start", "open -a Docker", "open -a OrbStack"];
+        for (backend, launcher) in [
+            (DockerBackend::Colima, "colima start"),
+            (DockerBackend::DockerDesktop, "open -a Docker"),
+            (DockerBackend::OrbStack, "open -a OrbStack"),
+        ] {
+            let hint =
+                runtime_unavailable_hint_for("macos", ContainerRuntime::Docker, Some(backend));
+            assert!(hint.contains(launcher), "{backend:?} gave {hint}");
+            for other in launchers {
+                assert!(
+                    other == launcher || !hint.contains(other),
+                    "{backend:?} also named {other}"
+                );
+            }
+        }
+    }
+
+    /// An unknown or custom context proves nothing. The advisory then names no
+    /// launcher at all rather than guessing one of the three, so neither
+    /// auto-start nor `helix init` can switch the caller's backend.
+    #[test]
+    fn unavailable_hint_stays_neutral_when_the_backend_is_unproven() {
+        let hint = runtime_unavailable_hint_for("macos", ContainerRuntime::Docker, None);
+        assert!(hint.contains("docker info"));
+        assert!(!hint.contains("Start it"));
+        for named in ["colima", "Docker Desktop", "OrbStack", "open -a"] {
+            assert!(!hint.contains(named), "unproven hint named {named}: {hint}");
+        }
+    }
+
+    /// The message this replaced told Linux users to run `sudo systemctl start
+    /// docker`. Routing it through the launcher table must not quietly drop the
+    /// `sudo`, or the suggested command fails on a stock install.
+    #[test]
+    fn linux_docker_hint_keeps_the_sudo_the_old_message_had() {
+        let hint = runtime_unavailable_hint_for("linux", ContainerRuntime::Docker, None);
+        assert!(hint.contains("systemctl start docker"));
+        assert!(hint.contains("sudo"), "linux hint lost sudo: {hint}");
+    }
+
+    /// Context names are user-editable, and `default` and `/var/run/docker.sock`
+    /// are shared by every backend, so only a backend-specific socket counts as
+    /// proof. Anything else classifies as unknown and fails closed.
+    #[test]
+    fn docker_endpoints_classify_only_when_the_socket_proves_it() {
+        assert_eq!(
+            classify_docker_endpoint("unix:///Users/me/.colima/default/docker.sock"),
+            Some(DockerBackend::Colima)
+        );
+        assert_eq!(
+            classify_docker_endpoint("unix:///Users/me/.orbstack/run/docker.sock"),
+            Some(DockerBackend::OrbStack)
+        );
+        assert_eq!(
+            classify_docker_endpoint("unix:///Users/me/.docker/run/docker.sock"),
+            Some(DockerBackend::DockerDesktop)
+        );
+
+        for ambiguous in ["unix:///var/run/docker.sock", "tcp://192.168.1.10:2375", ""] {
+            assert_eq!(
+                classify_docker_endpoint(ambiguous),
+                None,
+                "{ambiguous} should not prove a backend"
+            );
+        }
+    }
+
+    /// Podman on Linux is daemonless, so there is nothing to start. The advisory
+    /// has to say what to check rather than name a daemon that does not exist.
+    #[test]
+    fn unavailable_hint_does_not_invent_a_daemon_when_there_is_none() {
+        let hint = runtime_unavailable_hint_for("linux", ContainerRuntime::Podman, None);
+        assert!(hint.contains("podman info"));
+        assert!(!hint.contains("Start it"));
+        assert!(!hint.to_lowercase().contains("docker"));
+    }
+
+    #[test]
+    fn explicit_docker_context_wins_over_docker_host() {
+        let desktop = "unix:///Users/me/.docker/run/docker.sock";
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(Some(Some(desktop)), Some(colima), None),
+            Some(DockerBackend::DockerDesktop)
+        );
+        assert_eq!(
+            select_docker_backend(Some(Some(colima)), Some(desktop), None),
+            Some(DockerBackend::Colima)
+        );
+    }
+
+    #[test]
+    fn docker_host_wins_over_configured_context_without_explicit_context() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        let desktop = "unix:///Users/me/.docker/run/docker.sock";
+        assert_eq!(
+            select_docker_backend(None, Some(colima), Some(desktop)),
+            Some(DockerBackend::Colima)
+        );
+        assert_eq!(
+            select_docker_backend(None, None, Some(desktop)),
+            Some(DockerBackend::DockerDesktop)
+        );
+    }
+
+    #[test]
+    fn unknown_explicit_context_stays_neutral_instead_of_using_host() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(
+                Some(Some("unix:///var/run/docker.sock")),
+                Some(colima),
+                None
+            ),
+            None
+        );
+    }
+
+    /// A context that fails inspection is still authoritative. Docker errors on
+    /// a missing context rather than falling back to DOCKER_HOST, so auto-start
+    /// must not launch the host's backend either.
+    #[test]
+    fn unresolved_explicit_context_stays_neutral_instead_of_using_host() {
+        let colima = "unix:///Users/me/.colima/default/docker.sock";
+        assert_eq!(
+            select_docker_backend(Some(None), Some(colima), Some(colima)),
+            None
+        );
+    }
+
+    #[test]
+    fn daemon_failure_path_uses_runtime_aware_hint_and_keeps_stderr() {
+        let unknown_docker =
+            daemon_not_running_error_for("macos", ContainerRuntime::Docker, "boom", None);
+        let hint = unknown_docker.hint.expect("hint should be set");
+        assert!(hint.contains("docker info"));
+        for named in ["colima", "open -a"] {
+            assert!(!hint.contains(named), "unproven hint named {named}: {hint}");
+        }
+        assert_eq!(unknown_docker.context.as_deref(), Some("boom"));
+
+        let linux_podman =
+            daemon_not_running_error_for("linux", ContainerRuntime::Podman, "boom", None);
+        let hint = linux_podman.hint.expect("hint should be set");
+        assert!(hint.contains("podman info"));
+        assert!(!hint.to_lowercase().contains("docker"));
+        assert!(!hint.contains("colima"));
+        assert_eq!(linux_podman.context.as_deref(), Some("boom"));
+    }
     #[cfg(unix)]
     #[test]
     fn status_command_timeout_kills_a_wedged_probe() {
@@ -1061,9 +2273,11 @@ mod tests {
 
     fn disk_resources() -> DiskRuntimeResources {
         DiskRuntimeResources {
-            minio_container: "helix-demo-dev-minio".to_string(),
+            seaweedfs_container: "helix-demo-dev-seaweedfs".to_string(),
             network: "helix-demo-dev-net".to_string(),
-            volume: "helix-demo-dev-minio-data".to_string(),
+            volume: "helix-demo-dev-seaweedfs-data".to_string(),
+            legacy_minio_container: "helix-demo-dev-minio".to_string(),
+            legacy_minio_volume: "helix-demo-dev-minio-data".to_string(),
         }
     }
 
@@ -1076,11 +2290,12 @@ mod tests {
     fn memory_helix_args_match_existing_run_shape() {
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.4",
+            "ghcr.io/helixdb/helixdb:v0.0.12",
             9090,
             true,
-            None,
+            &HelixStorage::Memory,
             &[],
+            "4:demo/dev",
         );
 
         assert_eq!(
@@ -1094,7 +2309,9 @@ mod tests {
                 "helix-demo-dev",
                 "-p",
                 "9090:8080",
-                "ghcr.io/helixdb/helixdb:v0.0.4",
+                "--label",
+                "helixdb.identity=4:demo/dev",
+                "ghcr.io/helixdb/helixdb:v0.0.12",
             ]
             .into_iter()
             .map(String::from)
@@ -1103,25 +2320,282 @@ mod tests {
     }
 
     #[test]
+    fn explorer_names_extend_the_instance_container_name() {
+        assert_eq!(
+            runtime_for("demo").explorer_container_name("dev"),
+            "helix-demo-dev.explorer"
+        );
+        let hashed = runtime_for("My Project");
+        assert_eq!(
+            hashed.explorer_container_name("dev"),
+            format!("{}.explorer", hashed.container_name("dev"))
+        );
+    }
+
+    /// An instance named after another's Explorer keeps its own container:
+    /// stopping or exploring `dev` must never touch `dev-explorer`.
+    #[test]
+    fn no_instance_container_is_named_like_an_explorer() {
+        for project in ["demo", "My Project"] {
+            let runtime = runtime_for(project);
+            for instance in ["dev-explorer", "dev_explorer", "explorer", "dev"] {
+                let container = runtime.container_name(instance);
+                assert!(
+                    !container.ends_with(EXPLORER_NAME_SUFFIX),
+                    "{project}/{instance}: {container}"
+                );
+            }
+            assert_ne!(
+                runtime.explorer_container_name("dev"),
+                runtime.container_name("dev-explorer")
+            );
+        }
+    }
+
+    #[test]
+    fn explorer_reaches_the_instance_through_each_runtimes_host_name() {
+        let podman = LocalRuntime {
+            runtime: ContainerRuntime::Podman,
+            project_name: "demo".to_string(),
+        };
+        assert_eq!(
+            runtime_for("demo").explorer_helix_url(6969),
+            "http://host.docker.internal:6969"
+        );
+        assert_eq!(
+            podman.explorer_helix_url(7000),
+            "http://host.containers.internal:7000"
+        );
+    }
+
+    #[test]
+    fn docker_explorer_args_map_the_host_gateway_and_publish_on_loopback() {
+        let launch = ExplorerLaunch {
+            image: "ghcr.io/helixdb/helix-explorer:latest".to_string(),
+            port: 6970,
+            helix_url: "http://host.docker.internal:6969".to_string(),
+        };
+        assert_eq!(
+            explorer_run_args(
+                ContainerRuntime::Docker,
+                "helix-demo-dev.explorer",
+                &launch,
+                "dev",
+                "4:demo/dev",
+            ),
+            vec![
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                "helix-demo-dev.explorer",
+                "--label",
+                "helixdb.identity=4:demo/dev",
+                "--label",
+                "helixdb.role=explorer",
+                "--add-host",
+                "host.docker.internal:host-gateway",
+                "-e",
+                "HELIX_URL=http://host.docker.internal:6969",
+                "-e",
+                "HELIX_INSTANCE_NAME=dev",
+                "-p",
+                "127.0.0.1:6970:3000",
+                "ghcr.io/helixdb/helix-explorer:latest",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    /// `podman machine` cannot resolve `host-gateway`, so Podman relies on
+    /// the `host.containers.internal` name it provides itself.
+    #[test]
+    fn podman_explorer_args_skip_the_host_gateway_mapping() {
+        let launch = ExplorerLaunch {
+            image: "helix-explorer:local".to_string(),
+            port: 7001,
+            helix_url: "http://host.containers.internal:6969".to_string(),
+        };
+        let args = explorer_run_args(
+            ContainerRuntime::Podman,
+            "helix-demo-qa.explorer",
+            &launch,
+            "qa",
+            "4:demo/qa",
+        );
+        assert!(!args.contains(&"--add-host".to_string()), "{args:?}");
+        assert!(has_pair(
+            &args,
+            "-e",
+            "HELIX_URL=http://host.containers.internal:6969"
+        ));
+        assert!(has_pair(&args, "-e", "HELIX_INSTANCE_NAME=qa"));
+        assert!(has_pair(&args, "--label", "helixdb.role=explorer"));
+        assert!(has_pair(&args, "-p", "127.0.0.1:7001:3000"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("helix-explorer:local")
+        );
+    }
+
+    #[test]
+    fn published_ports_parse_from_the_first_runtime_line() {
+        assert_eq!(
+            parse_published_port("0.0.0.0:6969\n[::]:6969\n"),
+            Some(6969)
+        );
+        assert_eq!(parse_published_port("[::]:7000"), Some(7000));
+        assert_eq!(parse_published_port("127.0.0.1:6970\r\n"), Some(6970));
+        for invalid in [
+            "",
+            "\n",
+            "garbage",
+            "127.0.0.1:0",
+            "127.0.0.1:65536",
+            "x:abc",
+        ] {
+            assert_eq!(parse_published_port(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn explorer_inspection_reads_labels_image_and_helix_url() {
+        let inspection = parse_explorer_inspection(
+            "4:demo/dev\nexplorer\nsha256:abc\nhelix-explorer:local\nPATH=/usr/bin\n\
+             HELIX_URL=http://host.docker.internal:6969\nHELIX_INSTANCE_NAME=dev\n",
+        );
+        assert_eq!(
+            inspection,
+            ExplorerInspection {
+                identity: "4:demo/dev".to_string(),
+                role: "explorer".to_string(),
+                image_id: Some("sha256:abc".to_string()),
+                image: Some("helix-explorer:local".to_string()),
+                helix_url: Some("http://host.docker.internal:6969".to_string()),
+            }
+        );
+        assert!(inspection.belongs_to("4:demo/dev"));
+        assert!(!inspection.belongs_to("4:demo/qa"));
+        assert_eq!(parse_explorer_inspection(""), ExplorerInspection::default());
+    }
+
+    /// The instance container carries the same identity label, and an
+    /// unlabelled container may hold the name, so neither is an Explorer.
+    #[test]
+    fn only_a_container_with_the_explorer_role_is_the_explorer() {
+        let instance = parse_explorer_inspection(
+            "4:demo/dev\n\nsha256:abc\nghcr.io/helixdb/helixdb:v0.0.12\nPATH=/bin\n",
+        );
+        assert_eq!(instance.role, "");
+        assert_eq!(
+            instance.image.as_deref(),
+            Some("ghcr.io/helixdb/helixdb:v0.0.12")
+        );
+        assert!(!instance.belongs_to("4:demo/dev"));
+        let unlabelled = parse_explorer_inspection("\n\nsha256:def\nnginx\n");
+        assert!(!unlabelled.belongs_to("4:demo/dev"));
+        assert!(!unlabelled.belongs_to(""));
+    }
+
+    #[test]
     fn disk_helix_args_include_network_and_s3_env() {
         let resources = disk_resources();
+        let storage = HelixStorage::ObjectStore {
+            network: Some(resources.network),
+            cache_volume: runtime_for("demo").cache_volume("dev"),
+            env: disk_env(),
+        };
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.4",
+            "ghcr.io/helixdb/helixdb:v0.0.12",
             8080,
             true,
-            Some(&resources.network),
-            &disk_env(&resources),
+            &storage,
+            &[ContainerEnv::Literal(
+                "HELIX_TELEMETRY_LEVEL",
+                "off".to_string(),
+            )],
+            "4:demo/dev",
         );
 
         assert!(has_pair(&args, "--network", "helix-demo-dev-net"));
         assert!(args.contains(&"S3_BUCKET=helix-db".to_string()));
         assert!(args.contains(&"S3_REGION=us-east-1".to_string()));
         assert!(args.contains(&"DB_PATH=db/".to_string()));
-        assert!(args.contains(&"AWS_ACCESS_KEY_ID=minioadmin".to_string()));
-        assert!(args.contains(&"AWS_SECRET_ACCESS_KEY=minioadmin".to_string()));
-        assert!(args.contains(&"AWS_ENDPOINT=http://helix-demo-dev-minio:9000".to_string()));
+        assert!(args.contains(&"AWS_ACCESS_KEY_ID=helix".to_string()));
+        assert!(args.contains(&"AWS_SECRET_ACCESS_KEY=helix-local-secret".to_string()));
+        assert!(args.contains(&"AWS_ENDPOINT=http://seaweedfs:8333".to_string()));
         assert!(args.contains(&"AWS_ALLOW_HTTP=true".to_string()));
+        // SeaweedFS keeps the data on this machine, so the disk cache in
+        // front of it gets the server's minimum budget, on its own volume.
+        assert!(has_pair(
+            &args,
+            "-v",
+            "helix-demo-dev-cache:/var/cache/helix"
+        ));
+        assert!(has_pair(
+            &args,
+            "-e",
+            "HELIX_DISK_CACHE_DIR=/var/cache/helix"
+        ));
+        assert!(has_pair(&args, "-e", "HELIX_DISK_CACHE_BYTES=67108864"));
+        assert!(has_pair(&args, "-e", "HELIX_TELEMETRY_LEVEL=off"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("ghcr.io/helixdb/helixdb:v0.0.12")
+        );
+    }
+
+    /// Helix resolves its S3 endpoint host as one DNS label, and resolvers
+    /// reject labels over 63 bytes before sending a query. This project and
+    /// instance get a hash-suffixed base name whose sidecar container name is
+    /// far past that limit, so the endpoint must name the sidecar's network
+    /// alias, which stays short whatever the project is called.
+    #[test]
+    fn seaweedfs_endpoint_is_a_short_alias_the_sidecar_answers_to() {
+        let resources = runtime_for("My Helix Project").disk_resources("production");
+        assert!(
+            resources.seaweedfs_container.len() > 63,
+            "{}",
+            resources.seaweedfs_container
+        );
+        let storage = HelixStorage::ObjectStore {
+            network: Some(resources.network.clone()),
+            cache_volume: runtime_for("My Helix Project").cache_volume("production"),
+            env: disk_env(),
+        };
+        let args = helix_run_args(
+            "helix-my-helix-project-production",
+            "ghcr.io/helixdb/helixdb:v0.0.12",
+            8080,
+            true,
+            &storage,
+            &[],
+            "16:My Helix Project/production",
+        );
+
+        let Some(endpoint) = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("AWS_ENDPOINT=http://"))
+        else {
+            panic!("disk mode must set an http AWS_ENDPOINT: {args:?}");
+        };
+        let Some((host, port)) = endpoint.split_once(':') else {
+            panic!("the endpoint must name a port: {endpoint}");
+        };
+        assert_eq!(port, "8333");
+        assert!(
+            (1..=63).contains(&host.len()) && !host.contains('.'),
+            "{host}"
+        );
+        let sidecar = seaweedfs_run_args(&resources, "sha256:seaweedfs", "id");
+        assert!(
+            has_pair(&sidecar, "--network", &resources.network)
+                && has_pair(&sidecar, "--network-alias", host),
+            "the sidecar must answer to {host} on the instance network: {sidecar:?}"
+        );
     }
 
     #[test]
@@ -1137,14 +2611,19 @@ mod tests {
             }),
             ..LocalInstanceConfig::default()
         };
-        let env = s3_env(&config).unwrap();
+        let storage = HelixStorage::ObjectStore {
+            network: None,
+            cache_volume: runtime_for("demo").cache_volume("dev"),
+            env: s3_env(&config).unwrap(),
+        };
         let args = helix_run_args(
             "helix-demo-dev",
-            "ghcr.io/helixdb/helixdb:v0.0.4",
+            "ghcr.io/helixdb/helixdb:v0.0.12",
             8080,
             true,
-            None,
-            &env,
+            &storage,
+            &[],
+            "4:demo/dev",
         );
 
         assert!(!args.contains(&"--network".to_string()));
@@ -1153,6 +2632,19 @@ mod tests {
         assert!(args.contains(&"DB_PATH=tenant-a/".to_string()));
         assert!(args.contains(&"AWS_ENDPOINT=https://s3.example.com".to_string()));
         assert!(!args.contains(&"AWS_ALLOW_HTTP=true".to_string()));
+        // A bucket gets a 1 GiB development cache instead of the server's
+        // 8 GiB default.
+        assert!(has_pair(
+            &args,
+            "-v",
+            "helix-demo-dev-cache:/var/cache/helix"
+        ));
+        assert!(has_pair(
+            &args,
+            "-e",
+            "HELIX_DISK_CACHE_DIR=/var/cache/helix"
+        ));
+        assert!(has_pair(&args, "-e", "HELIX_DISK_CACHE_BYTES=1073741824"));
     }
 
     #[test]
@@ -1205,32 +2697,177 @@ mod tests {
     }
 
     #[test]
-    fn minio_args_include_persistent_volume() {
+    fn seaweedfs_args_run_only_s3_on_the_persistent_volume() {
         let resources = disk_resources();
-        let args = minio_run_args(&resources);
+        let args = seaweedfs_run_args(&resources, "sha256:seaweedfs", "4:demo/dev");
 
-        assert!(has_pair(&args, "--network", "helix-demo-dev-net"));
-        assert!(args.contains(&"MINIO_ROOT_USER=minioadmin".to_string()));
-        assert!(args.contains(&"MINIO_ROOT_PASSWORD=minioadmin".to_string()));
-        assert!(args.contains(&"helix-demo-dev-minio-data:/data".to_string()));
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "-d",
+                "--restart",
+                "unless-stopped",
+                "--name",
+                "helix-demo-dev-seaweedfs",
+                "--label",
+                "helixdb.identity=4:demo/dev",
+                "--network",
+                "helix-demo-dev-net",
+                "--network-alias",
+                "seaweedfs",
+                "-e",
+                "AWS_ACCESS_KEY_ID=helix",
+                "-e",
+                "AWS_SECRET_ACCESS_KEY=helix-local-secret",
+                "-v",
+                "helix-demo-dev-seaweedfs-data:/data",
+                "sha256:seaweedfs",
+                "mini",
+                "-dir=/data",
+                "-bucket=helix-db",
+                "-s3.port=8333",
+                "-master.telemetry=false",
+                "-admin.ui=false",
+                "-webdav=false",
+                "-s3.port.iceberg=0",
+                "-s3.port.lance=0",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+        assert!(
+            !args.iter().any(|arg| arg.contains("minio")),
+            "legacy MinIO resources must never be mounted: {args:?}"
+        );
     }
 
     #[test]
-    fn minio_bucket_init_uses_shell_entrypoint() {
-        let resources = disk_resources();
-        let args = minio_bucket_init_args(&resources);
+    fn seaweedfs_ready_probe_is_one_signed_curl_inside_the_sidecar() {
+        let args = seaweedfs_ready_args(&disk_resources());
 
-        assert!(has_pair(&args, "--entrypoint", "/bin/sh"));
-        assert!(args.contains(&"minio/mc:latest".to_string()));
-        assert!(args.iter().any(|arg| arg.contains("mc alias set local")));
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "helix-demo-dev-seaweedfs",
+                "curl",
+                "-fsS",
+                "-o",
+                "/dev/null",
+                "-I",
+                "--max-time",
+                "2",
+                "--retry",
+                "60",
+                "--retry-delay",
+                "1",
+                "--retry-max-time",
+                "60",
+                "--retry-all-errors",
+                "--aws-sigv4",
+                "aws:amz:us-east-1:s3",
+                "--user",
+                "helix:helix-local-secret",
+                "http://127.0.0.1:8333/helix-db",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    /// A gateway that accepts connections but never answers makes every
+    /// attempt run to `--max-time`. Retries end once the budget has elapsed,
+    /// not after a number of attempts, so the wait still finishes one delay
+    /// and one attempt after the budget however long each attempt hangs.
+    #[test]
+    fn seaweedfs_ready_probe_is_bounded_by_elapsed_time_not_attempts() {
+        let args = seaweedfs_ready_args(&disk_resources());
+        let seconds = |flag: &str| -> u64 {
+            let Some(position) = args.iter().position(|arg| arg == flag) else {
+                panic!("{flag} is missing: {args:?}");
+            };
+            args[position + 1]
+                .parse()
+                .expect("a whole number of seconds")
+        };
+        let budget = SEAWEEDFS_READY_TIMEOUT.as_secs();
+
+        assert!(args.contains(&"--retry-all-errors".to_string()), "{args:?}");
+        assert_eq!(seconds("--retry-max-time"), budget);
+        assert!(
+            seconds("--retry") * seconds("--retry-delay") >= budget,
+            "the retry count must not end the wait before the budget: {args:?}"
+        );
+        assert!(
+            seconds("--retry-max-time") + seconds("--retry-delay") + seconds("--max-time")
+                <= budget + 5,
+            "{args:?}"
+        );
+    }
+
+    /// Runs the probe's curl arguments with the host's curl against a local
+    /// bucket that answers 404 once, as SeaweedFS does before `-bucket` has
+    /// created it, and then 200.
+    #[cfg(unix)]
+    #[test]
+    fn seaweedfs_ready_probe_retries_a_missing_bucket_with_signed_heads() {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            ["404 Not Found", "200 OK"].map(|status| {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                String::from_utf8(request).unwrap()
+            })
+        });
+
+        let args = seaweedfs_ready_args(&disk_resources());
+        assert_eq!(args[..3], ["exec", "helix-demo-dev-seaweedfs", "curl"]);
+        let output = Command::new("curl")
+            .arg("-q")
+            .args(&args[3..])
+            .args(["--noproxy", "*", "--connect-to"])
+            .arg(format!("127.0.0.1:8333:127.0.0.1:{port}"))
+            .output()
+            .expect("run the host's curl");
+
+        assert!(output.status.success(), "{output:?}");
+        for request in server.join().unwrap() {
+            assert!(
+                request.starts_with("HEAD /helix-db HTTP/1.1\r\n"),
+                "{request}"
+            );
+            assert!(
+                request.lines().any(|line| {
+                    line.starts_with("Authorization: AWS4-HMAC-SHA256 Credential=helix/")
+                        && line.contains("/us-east-1/s3/aws4_request")
+                }),
+                "{request}"
+            );
+        }
     }
 
     fn start_cmd(
         os: &str,
         runtime: ContainerRuntime,
-        colima: bool,
+        docker_backend: Option<DockerBackend>,
     ) -> Option<(String, Vec<String>)> {
-        runtime_start_command(os, runtime, |bin| colima && bin == "colima").map(|c| {
+        runtime_start_command(os, runtime, docker_backend).map(|c| {
             (
                 c.program.to_string(),
                 c.args.iter().map(|a| a.to_string()).collect(),
@@ -1238,29 +2875,51 @@ mod tests {
         })
     }
 
+    /// `try_start_runtime` runs whatever this returns, so a wrong answer here
+    /// boots a VM the caller was not using rather than merely misadvising them.
     #[test]
-    fn macos_docker_prefers_colima_when_installed() {
+    fn macos_docker_starts_only_the_backend_the_endpoint_proves() {
         assert_eq!(
-            start_cmd("macos", ContainerRuntime::Docker, true),
+            start_cmd(
+                "macos",
+                ContainerRuntime::Docker,
+                Some(DockerBackend::Colima)
+            ),
             Some(("colima".to_string(), vec!["start".to_string()]))
         );
-    }
-
-    #[test]
-    fn macos_docker_falls_back_to_docker_desktop() {
         assert_eq!(
-            start_cmd("macos", ContainerRuntime::Docker, false),
+            start_cmd(
+                "macos",
+                ContainerRuntime::Docker,
+                Some(DockerBackend::DockerDesktop)
+            ),
             Some((
                 "open".to_string(),
                 vec!["-a".to_string(), "Docker".to_string()]
             ))
         );
+        assert_eq!(
+            start_cmd(
+                "macos",
+                ContainerRuntime::Docker,
+                Some(DockerBackend::OrbStack)
+            ),
+            Some((
+                "open".to_string(),
+                vec!["-a".to_string(), "OrbStack".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn macos_docker_has_no_launcher_when_the_backend_is_unproven() {
+        assert_eq!(start_cmd("macos", ContainerRuntime::Docker, None), None);
     }
 
     #[test]
     fn macos_podman_starts_machine() {
         assert_eq!(
-            start_cmd("macos", ContainerRuntime::Podman, false),
+            start_cmd("macos", ContainerRuntime::Podman, None),
             Some((
                 "podman".to_string(),
                 vec!["machine".to_string(), "start".to_string()]
@@ -1271,7 +2930,7 @@ mod tests {
     #[test]
     fn linux_docker_uses_systemctl() {
         assert_eq!(
-            start_cmd("linux", ContainerRuntime::Docker, false),
+            start_cmd("linux", ContainerRuntime::Docker, None),
             Some((
                 "systemctl".to_string(),
                 vec!["start".to_string(), "docker".to_string()]
@@ -1281,8 +2940,8 @@ mod tests {
 
     #[test]
     fn no_launcher_for_linux_podman_or_unknown_os() {
-        assert_eq!(start_cmd("linux", ContainerRuntime::Podman, false), None);
-        assert_eq!(start_cmd("windows", ContainerRuntime::Docker, false), None);
+        assert_eq!(start_cmd("linux", ContainerRuntime::Podman, None), None);
+        assert_eq!(start_cmd("windows", ContainerRuntime::Docker, None), None);
     }
 
     #[test]

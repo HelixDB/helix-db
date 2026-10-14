@@ -355,6 +355,7 @@ fn node_cardinality_covers_known_unknown_and_nested_sources() {
         ..PlannerContext::default()
     };
     let range = NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: NodeRangeIndexMeta::new(NonEmptyString::new("node_range:User:age").unwrap()),
         key: ScopedPropertyDirectionKey::try_new("User", "age", RangeIndexDirection::Asc).unwrap(),
         range: IndexRange::Lower {
@@ -554,6 +555,7 @@ fn edge_cardinality_covers_stats_and_unknown_sources() {
         ..PlannerContext::default()
     };
     let range = EdgeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
         index: EdgeRangeIndexMeta::new(NonEmptyString::new("edge_range:FOLLOWS:since").unwrap()),
         key: ScopedPropertyDirectionKey::try_new("FOLLOWS", "since", RangeIndexDirection::Asc)
             .unwrap(),

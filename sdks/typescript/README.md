@@ -48,6 +48,11 @@ const client = Client.managed("https://cluster.helix-db.com", "db_your_database_
 const result = await client.query<MyResponse>(request).send();
 ```
 
+`withApiKey(...)` sends `Authorization: Bearer <key>` and `withDatabaseId(...)`
+sends `x-helix-database-id` on every native and Cypher request. Helix Cloud
+gateways can require the database ID on every query route, including both
+Cypher routes, and reject requests without it with `tenant_id_required`.
+
 Advanced server-only headers are available from `requestBuilder<R>()`:
 
 ```ts
@@ -127,6 +132,12 @@ async function sendReadWithRetry<T>(client: Client, readRequest: QueryRequest): 
 }
 ```
 
+Version **3.1.0** publishes these structured HTTP error fields; the npm **3.0.4**
+package does not expose them. Docker **v0.0.5** already returns confirmed
+transaction conflicts as HTTP **409** with `error: "transaction_conflict"` and
+a separate diagnostic in `msg`. This combination does not require a new server
+image or an embedded package upgrade.
+
 For write conflicts, reload the current state before rebuilding the mutation.
 Do not blindly retry writes after server errors because the commit may have
 succeeded before the response failed:
@@ -135,15 +146,50 @@ succeeded before the response failed:
 try {
   await client.query(writeRequest).send();
 } catch (error) {
-  if (error instanceof HelixError && error.isConflict()) {
+  if (error instanceof HelixError && error.statusCode === 409 && error.code === "transaction_conflict") {
     console.error("write conflict", error.serverMessage);
   }
+  throw error;
 }
 ```
+
+An explicit `writer_fenced_commit_outcome_unknown` or Cloud
+`write_outcome_unknown` (formerly `WRITE_OUTCOME_UNKNOWN`) response is distinct
+from a confirmed conflict and can carry `retryable: false`. A `Network` error after sending a write has no known
+commit outcome. Reconcile application state before retrying; the SDK does not
+automatically replay mutations. Unknown future codes are preserved. Legacy
+message-only responses retain their diagnostic without inventing a code.
 
 Validation and authentication failures should be handled directly rather than
 retried. `rawBody` retains the decoded response text before message fallbacks;
 `details` preserves the previous fallback behavior.
+
+## Release checks
+
+The TypeScript SDK workflow builds and tests the npm artifact independently of
+native bindings, PyPI, and crates.io. Run the installed-package checks locally:
+
+```sh
+npm ci
+npm run check
+npm run test:coverage
+npm run test:package
+node scripts/package-smoke.mjs --image ghcr.io/helixdb/helixdb:v0.0.5 --platform linux/arm64
+node scripts/package-smoke.mjs --image ghcr.io/helixdb/helixdb:v0.0.5 --platform linux/amd64
+```
+
+The image checks start and remove an isolated memory-only container. They check
+real conflicts through an installed tarball, successful writes, and atomicity.
+The package checks also compile its public declarations and verify legacy errors,
+future codes, explicit unknown outcomes, and a dropped response without replay.
+
+Publish the validated `helix-db-typescript-node-24` artifact from the TypeScript
+SDK workflow for the release commit using `npm publish <tarball> --access public`.
+Then verify a fresh registry install with:
+
+```sh
+node scripts/package-smoke.mjs --package @helix-db/helix-db@3.1.0
+```
 
 ## Parameter Schemas
 
@@ -291,3 +337,55 @@ The public entry point exports scalar helpers, AST types, traversal builders,
 batch builders, query request helpers, graph helpers, and the server/embedded
 client. The wire contract follows Rust serde names while TypeScript builders use
 camel case.
+
+## Cypher
+
+Clients built from this checkout run one Cypher statement per request over HTTP
+or against an embedded database. See the [Cypher reference](../../docs/cypher.md)
+for the language profile, parameters, lossless values, and transaction behavior.
+Native DSL query methods keep their existing contract.
+
+```ts
+const result = await client.cypher("MATCH (u:User) WHERE u.age >= $minimumAge RETURN u.name AS name", { minimumAge: 30 }, "adult_users");
+// { columns: ["name"], rows: [["Ada"], ...] }
+
+const plan = await client.explainCypher("CREATE (:User {name: $name})", { name: "Ada" });
+// plan.effect === "Write"; nothing was written
+```
+
+`cypher(query, parameters = {}, queryName?)` sends `POST /v2/cypher` and
+resolves to `{ columns, rows }`. `explainCypher(...)` takes the same arguments,
+sends `POST /v2/cypher/explain`, and resolves to the planner's
+`CypherExplanation` without executing the statement, including modifying
+statements. Only `effect` and `operators` are typed; the remaining planner
+diagnostics are returned as the server encoded them, with integers outside
+JavaScript's safe range as `bigint`. Pass `bigint` for integers
+outside JavaScript's safe range; `bigint` and non-finite numbers are sent as
+tagged lossless values. Graph IDs and large integers in results stay tagged.
+
+Both methods send the client's API key and database ID. For server request
+options, build the request with `requestBuilder()` and finish with `.send()` or
+`.explain()`:
+
+```ts
+await client.requestBuilder().writerOnly().cypher("CREATE (u:User {name: $name}) RETURN u", { name: "Ada" }).send();
+await client.requestBuilder().shouldAwaitDurability(false).cypher("MATCH (u:User) SET u.seen = true").send();
+await client.requestBuilder().warmOnly().cypher("MATCH (u:User) RETURN u.name AS name").send();
+await client.requestBuilder().writerOnly().cypher("MATCH (u:User) RETURN u").explain();
+```
+
+`warmOnly()` applies to reads and `shouldAwaitDurability(...)` to writes.
+Explain applies the options as a read. A warm-only Cypher read returns no rows:
+Helix Cloud answers it with `204 No Content` after warming, so `send()`
+resolves to `{ columns: [], rows: [] }` and the builder's `explain()` resolves
+to `undefined`. A standalone local warm read can return its normal payload
+instead. `explainCypher(...)` sends no options, so it always resolves to a
+`CypherExplanation`. Cypher failures raise `HelixError`; a
+query diagnostic carries its lower snake case category, such as `syntax_error`, in
+`code` and `{ detail, phase, span }` in `serverDetails`. Embedded clients carry the
+three parts in `code` as `category:phase:detail`, such as
+`syntax_error:compile:undefined_variable`.
+
+Embedded clients reject server request options with an `InvalidRequest` error,
+as for native queries. `explainCypher(...)` needs an embedded package with
+Cypher explain support; older packages raise `EmbeddedUnavailable`.

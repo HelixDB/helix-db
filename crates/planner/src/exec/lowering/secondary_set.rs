@@ -11,38 +11,21 @@ pub(crate) fn node_secondary_set(
     match plan {
         ir::NodeAccessPlan::Empty => Some(exec::ExecNodeSecondarySetPlan::Empty),
         ir::NodeAccessPlan::EqualityIndex { index, key, value } => {
-            match exec::exact_node_equality(index.clone(), key.clone(), value.clone()) {
-                exec::ExecNodeEqualityAccessPlan::Empty => {
-                    Some(exec::ExecNodeSecondarySetPlan::Empty)
-                }
-                exec::ExecNodeEqualityAccessPlan::Bitmap(bitmap) => {
-                    Some(exec::ExecNodeSecondarySetPlan::Bitmap(bitmap))
-                }
-                exec::ExecNodeEqualityAccessPlan::Unique {
-                    lookup,
-                    verification,
-                } => Some(exec::ExecNodeSecondarySetPlan::Unique {
-                    lookup,
-                    verification,
-                }),
-                exec::ExecNodeEqualityAccessPlan::AuthoritativeScan(predicate) => {
-                    Some(exec::ExecNodeSecondarySetPlan::AuthoritativeScan(predicate))
-                }
-                exec::ExecNodeEqualityAccessPlan::DynamicEquality { index, key, param } => {
-                    Some(exec::ExecNodeSecondarySetPlan::DynamicEquality { index, key, param })
-                }
-                exec::ExecNodeEqualityAccessPlan::DynamicMembership { index, key, values } => {
-                    Some(exec::ExecNodeSecondarySetPlan::DynamicMembership { index, key, values })
-                }
-            }
+            Some(exec::exact_node_equality(index.clone(), key.clone(), value.clone()).into())
         }
-        ir::NodeAccessPlan::RangeIndex { index, key, range } => Some(
-            exec::ExecNodeSecondarySetPlan::Range(exec::ExecNodeSecondaryRangePlan {
+        ir::NodeAccessPlan::RangeIndex {
+            index,
+            key,
+            range,
+            iteration,
+        } => Some(exec::ExecNodeSecondarySetPlan::Range(
+            exec::ExecNodeSecondaryRangePlan {
+                iteration: *iteration,
                 index: index.clone(),
                 key: key.clone(),
                 range: range.clone(),
-            }),
-        ),
+            },
+        )),
         ir::NodeAccessPlan::Union(children) => {
             let children = children
                 .iter()
@@ -64,7 +47,8 @@ pub(crate) fn node_secondary_set(
         | ir::NodeAccessPlan::LabelScan { .. }
         | ir::NodeAccessPlan::VectorSearch { .. }
         | ir::NodeAccessPlan::TextSearch { .. }
-        | ir::NodeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::NodeAccessPlan::ScanThenFilter { .. }
+        | ir::NodeAccessPlan::BranchResidualUnion(_) => None,
     }
 }
 
@@ -74,31 +58,21 @@ pub(crate) fn edge_secondary_set(
     match plan {
         ir::EdgeAccessPlan::Empty => Some(exec::ExecEdgeSecondarySetPlan::Empty),
         ir::EdgeAccessPlan::EqualityIndex { index, key, value } => {
-            match exec::exact_edge_equality(index.clone(), key.clone(), value.clone()) {
-                exec::ExecEdgeEqualityAccessPlan::Empty => {
-                    Some(exec::ExecEdgeSecondarySetPlan::Empty)
-                }
-                exec::ExecEdgeEqualityAccessPlan::Bitmap(bitmap) => {
-                    Some(exec::ExecEdgeSecondarySetPlan::Bitmap(bitmap))
-                }
-                exec::ExecEdgeEqualityAccessPlan::AuthoritativeScan(predicate) => {
-                    Some(exec::ExecEdgeSecondarySetPlan::AuthoritativeScan(predicate))
-                }
-                exec::ExecEdgeEqualityAccessPlan::DynamicEquality { index, key, param } => {
-                    Some(exec::ExecEdgeSecondarySetPlan::DynamicEquality { index, key, param })
-                }
-                exec::ExecEdgeEqualityAccessPlan::DynamicMembership { index, key, values } => {
-                    Some(exec::ExecEdgeSecondarySetPlan::DynamicMembership { index, key, values })
-                }
-            }
+            Some(exec::exact_edge_equality(index.clone(), key.clone(), value.clone()).into())
         }
-        ir::EdgeAccessPlan::RangeIndex { index, key, range } => Some(
-            exec::ExecEdgeSecondarySetPlan::Range(exec::ExecEdgeSecondaryRangePlan {
+        ir::EdgeAccessPlan::RangeIndex {
+            index,
+            key,
+            range,
+            iteration,
+        } => Some(exec::ExecEdgeSecondarySetPlan::Range(
+            exec::ExecEdgeSecondaryRangePlan {
+                iteration: *iteration,
                 index: index.clone(),
                 key: key.clone(),
                 range: range.clone(),
-            }),
-        ),
+            },
+        )),
         ir::EdgeAccessPlan::Union(children) => {
             let children = children
                 .iter()
@@ -120,7 +94,8 @@ pub(crate) fn edge_secondary_set(
         | ir::EdgeAccessPlan::LabelScan { .. }
         | ir::EdgeAccessPlan::VectorSearch { .. }
         | ir::EdgeAccessPlan::TextSearch { .. }
-        | ir::EdgeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::EdgeAccessPlan::ScanThenFilter { .. }
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => None,
     }
 }
 
@@ -141,6 +116,36 @@ fn node_union(
         0 => Some(exec::ExecNodeSecondarySetPlan::Empty),
         1 => flattened.pop(),
         _ => {
+            let unique = flattened
+                .iter()
+                .map(|child| match child {
+                    exec::ExecNodeSecondarySetPlan::Unique {
+                        lookup,
+                        verification,
+                    } if lookup.key == verification.key && lookup.value == verification.value => {
+                        Some(lookup)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            match unique {
+                Some(unique)
+                    if unique.iter().all(|lookup| {
+                        lookup.index == unique[0].index && lookup.key == unique[0].key
+                    }) =>
+                {
+                    let first = unique[0];
+                    return Some(exec::ExecNodeSecondarySetPlan::UniqueUnion {
+                        index: first.index.clone(),
+                        key: first.key.clone(),
+                        values: ir::AtLeast::try_from_vec(
+                            unique.iter().map(|lookup| lookup.value.clone()).collect(),
+                        )
+                        .expect("unique union has at least two indexed values"),
+                    });
+                }
+                Some(_) | None => {}
+            }
             let batch = flattened
                 .iter()
                 .map(|child| match child {
@@ -237,6 +242,32 @@ fn edge_union(
 fn node_intersection(
     mut children: Vec<exec::ExecNodeSecondarySetPlan>,
 ) -> Option<exec::ExecNodeSecondarySetPlan> {
+    fn flatten(
+        child: exec::ExecNodeSecondarySetPlan,
+        out: &mut Vec<exec::ExecNodeSecondarySetPlan>,
+    ) {
+        match child {
+            exec::ExecNodeSecondarySetPlan::Intersect { driver, rest } => {
+                flatten(*driver, out);
+                for child in rest {
+                    flatten(child, out);
+                }
+            }
+            exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver, filters } => {
+                out.push(exec::ExecNodeSecondarySetPlan::Range(driver));
+                for child in filters {
+                    flatten(child, out);
+                }
+            }
+            child => out.push(child),
+        }
+    }
+    let mut flattened = Vec::new();
+    for child in children {
+        flatten(child, &mut flattened);
+    }
+    children = flattened;
+
     if children
         .iter()
         .any(|child| matches!(child, exec::ExecNodeSecondarySetPlan::Empty))
@@ -273,6 +304,32 @@ fn node_intersection(
 fn edge_intersection(
     mut children: Vec<exec::ExecEdgeSecondarySetPlan>,
 ) -> Option<exec::ExecEdgeSecondarySetPlan> {
+    fn flatten(
+        child: exec::ExecEdgeSecondarySetPlan,
+        out: &mut Vec<exec::ExecEdgeSecondarySetPlan>,
+    ) {
+        match child {
+            exec::ExecEdgeSecondarySetPlan::Intersect { driver, rest } => {
+                flatten(*driver, out);
+                for child in rest {
+                    flatten(child, out);
+                }
+            }
+            exec::ExecEdgeSecondarySetPlan::OrderedIntersect { driver, filters } => {
+                out.push(exec::ExecEdgeSecondarySetPlan::Range(driver));
+                for child in filters {
+                    flatten(child, out);
+                }
+            }
+            child => out.push(child),
+        }
+    }
+    let mut flattened = Vec::new();
+    for child in children {
+        flatten(child, &mut flattened);
+    }
+    children = flattened;
+
     if children
         .iter()
         .any(|child| matches!(child, exec::ExecEdgeSecondarySetPlan::Empty))
@@ -349,6 +406,7 @@ mod tests {
 
     fn node_range(property: &str) -> ir::NodeAccessPlan {
         ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: crate::catalog::NodeRangeIndexMeta::try_new(format!("user_{property}"))
                 .expect("test index ID is non-empty"),
             key: crate::catalog::ScopedPropertyDirectionKey::try_new(
@@ -363,6 +421,7 @@ mod tests {
 
     fn edge_range(property: &str) -> ir::EdgeAccessPlan {
         ir::EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: crate::catalog::EdgeRangeIndexMeta::try_new(format!("follows_{property}"))
                 .expect("test index ID is non-empty"),
             key: crate::catalog::ScopedPropertyDirectionKey::try_new(
@@ -388,6 +447,55 @@ mod tests {
                 exec::ExecNodeBitmapExpr::BatchedUnionRead { key, values, .. }
             ))
                 if key.property == "name" && values.len() == 2
+        ));
+    }
+
+    #[test]
+    fn unique_batches_preserve_index_identity_and_typed_literal_contract() {
+        let leaf = |property: &str, value: PropertyValue| ir::NodeAccessPlan::EqualityIndex {
+            index: crate::catalog::NodeEqualityIndexMeta::try_new(format!("fixture_{property}"))
+                .unwrap()
+                .with_uniqueness(crate::catalog::IndexUniqueness::Unique),
+            key: crate::catalog::ScopedPropertyKey::try_new("Fixture", property).unwrap(),
+            value: ir::IndexValue::Literal(ir::SecondaryIndexLiteral::new(value).unwrap()),
+        };
+        let union = |left, right| {
+            ir::NodeAccessPlan::Union(ir::AtLeast::from_pair(
+                node_source(left),
+                node_source(right),
+            ))
+        };
+        let plan = node_secondary_set(&union(
+            leaf("key", PropertyValue::from(1_i64)),
+            leaf("key", PropertyValue::from(2_i64)),
+        ))
+        .unwrap();
+        assert!(
+            matches!(&plan, exec::ExecNodeSecondarySetPlan::UniqueUnion { values, .. } if values.len() == 2)
+        );
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(
+            serde_json::from_value::<exec::ExecNodeSecondarySetPlan>(json.clone()).unwrap(),
+            plan
+        );
+        let mut invalid = json.clone();
+        invalid["unique_union"]["values"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<exec::ExecNodeSecondarySetPlan>(invalid).is_err());
+        assert!(matches!(
+            node_secondary_set(&union(
+                leaf("key", PropertyValue::from(1_i64)),
+                leaf("other", PropertyValue::from(2_i64))
+            ))
+            .unwrap(),
+            exec::ExecNodeSecondarySetPlan::Union { .. }
+        ));
+        assert!(matches!(
+            node_secondary_set(&union(
+                leaf("key", PropertyValue::from(1_i64)),
+                leaf("key", PropertyValue::Null)
+            ))
+            .unwrap(),
+            exec::ExecNodeSecondarySetPlan::Union { .. }
         ));
     }
 
@@ -456,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_intersection_lowering_never_promotes_a_nested_range() {
+    fn ordered_intersection_lowering_flattens_before_selecting_the_driver() {
         let nested = ir::NodeAccessPlan::Intersect(ir::AtLeast::from_pair(
             node_source(node_range("score")),
             node_source(node_equality("status", PropertyValue::from("active"))),
@@ -469,11 +577,10 @@ mod tests {
         assert!(matches!(
             node_secondary_set(&outer),
             Some(exec::ExecNodeSecondarySetPlan::OrderedIntersect { driver, filters })
-                if driver.key.property == "age"
-                    && matches!(&filters[0], exec::ExecNodeSecondarySetPlan::OrderedIntersect {
-                        driver: nested_driver,
-                        ..
-                    } if nested_driver.key.property == "score")
+                if driver.key.property == "score"
+                    && filters.len() == 2
+                    && matches!(&filters[1], exec::ExecNodeSecondarySetPlan::Range(range)
+                        if range.key.property == "age")
         ));
     }
 
@@ -581,6 +688,7 @@ mod tests {
         ));
 
         let range = ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: crate::catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
             key: crate::catalog::ScopedPropertyDirectionKey::try_new(
                 "User",
@@ -646,6 +754,7 @@ mod tests {
         ));
 
         let range = ir::EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: crate::catalog::EdgeRangeIndexMeta::try_new("likes_weight").unwrap(),
             key: crate::catalog::ScopedPropertyDirectionKey::try_new(
                 "LIKES",
@@ -679,6 +788,7 @@ mod tests {
         ));
 
         let node_range = ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: crate::catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
             key: crate::catalog::ScopedPropertyDirectionKey::try_new(
                 "User",
@@ -714,6 +824,7 @@ mod tests {
             Some(exec::ExecEdgeSecondarySetPlan::Union { rest, .. }) if rest.len() == 2
         ));
         let edge_range = ir::EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: crate::catalog::EdgeRangeIndexMeta::try_new("likes_weight").unwrap(),
             key: crate::catalog::ScopedPropertyDirectionKey::try_new(
                 "LIKES",

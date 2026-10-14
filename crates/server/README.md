@@ -11,7 +11,9 @@ for the HTTP `error`/`msg` envelope, gRPC metadata contract, and complete catalo
 HTTP endpoints:
 
 - `POST /v2/query` executes a serialized `QueryRequest`.
-- `GET /healthz` reports process liveness and index readiness.
+- `GET /healthz` reports process liveness and index readiness, and counts the
+  index entities the writer's index worker holds back
+  (`blocked_index_entity_count`); the writer's logs name each one.
 - `GET /readyz` reports whether the configured database handle is ready.
 
 The `x-helix-warm`, `x-helix-require-writer`, and

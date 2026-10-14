@@ -8,11 +8,15 @@ pub(super) fn hard_cardinality_upper_bound(source: &NodeAccessPlan) -> Option<us
     match source {
         NodeAccessPlan::Empty => Some(0),
         NodeAccessPlan::PointIds { ids } => Some(ids.as_ref().len()),
-        NodeAccessPlan::EqualityIndex { index, .. }
-            if matches!(index.uniqueness, catalog::IndexUniqueness::Unique) =>
-        {
-            Some(1)
-        }
+        NodeAccessPlan::EqualityIndex {
+            index:
+                catalog::NodeEqualityIndexMeta {
+                    uniqueness: catalog::IndexUniqueness::Unique,
+                    ..
+                },
+            value,
+            ..
+        } => value.unique_hard_upper_bound(),
         NodeAccessPlan::VectorSearch { k, .. } | NodeAccessPlan::TextSearch { k, .. } => {
             super::super::search_limit_hard_cardinality_upper_bound(k)
         }
@@ -24,6 +28,14 @@ pub(super) fn hard_cardinality_upper_bound(source: &NodeAccessPlan) -> Option<us
             plan.hard_cardinality_upper_bound()
                 .map(|upper| sum.saturating_add(upper))
         }),
+        NodeAccessPlan::BranchResidualUnion(branches) => {
+            branches.as_ref().iter().try_fold(0usize, |sum, branch| {
+                branch
+                    .source()
+                    .hard_cardinality_upper_bound()
+                    .map(|upper| sum.saturating_add(upper))
+            })
+        }
         NodeAccessPlan::FromParam { .. }
         | NodeAccessPlan::FromVar { .. }
         | NodeAccessPlan::AllScan
@@ -39,6 +51,12 @@ pub(super) fn common_label(source: &NodeAccessPlan) -> Option<&ir::NonEmptyStrin
         NodeAccessPlan::Intersect(plans) | NodeAccessPlan::Union(plans) => {
             super::super::common_source_label(plans.iter().map(NodeAccessSourcePlan::common_label))
         }
+        NodeAccessPlan::BranchResidualUnion(branches) => super::super::common_source_label(
+            branches
+                .as_ref()
+                .iter()
+                .map(|branch| branch.source().common_label()),
+        ),
         plan => plan.direct_label(),
     }
 }
@@ -58,7 +76,8 @@ pub(super) fn secondary_set_eligible(source: &NodeAccessPlan) -> bool {
         | NodeAccessPlan::LabelScan { .. }
         | NodeAccessPlan::VectorSearch { .. }
         | NodeAccessPlan::TextSearch { .. }
-        | NodeAccessPlan::ScanThenFilter { .. } => false,
+        | NodeAccessPlan::ScanThenFilter { .. }
+        | NodeAccessPlan::BranchResidualUnion(_) => false,
     }
 }
 
@@ -90,18 +109,24 @@ pub(super) fn set_canonicalization_candidate(source: &NodeAccessPlan) -> bool {
         | NodeAccessPlan::RangeIndex { .. }
         | NodeAccessPlan::VectorSearch { .. }
         | NodeAccessPlan::TextSearch { .. }
-        | NodeAccessPlan::ScanThenFilter { .. } => false,
+        | NodeAccessPlan::ScanThenFilter { .. }
+        | NodeAccessPlan::BranchResidualUnion(_) => false,
     }
 }
 
 pub(super) fn set_subsumption_candidate(source: &NodeAccessPlan) -> bool {
     match source {
-        NodeAccessPlan::Union(sources) => {
-            super::super::union_has_subsumption_candidate(sources, NodeAccessSourcePlan::subsumes)
-        }
+        NodeAccessPlan::Union(sources) => super::super::union_has_subsumption_candidate(
+            sources,
+            |superset: &NodeAccessSourcePlan, subset: &NodeAccessSourcePlan| {
+                structurally_subsumes(superset.as_ref(), subset.as_ref())
+            },
+        ),
         NodeAccessPlan::Intersect(sources) => super::super::intersection_has_subsumption_candidate(
             sources,
-            NodeAccessSourcePlan::subsumes,
+            |superset: &NodeAccessSourcePlan, subset: &NodeAccessSourcePlan| {
+                structurally_subsumes(superset.as_ref(), subset.as_ref())
+            },
         ),
         NodeAccessPlan::Empty
         | NodeAccessPlan::PointIds { .. }
@@ -113,14 +138,18 @@ pub(super) fn set_subsumption_candidate(source: &NodeAccessPlan) -> bool {
         | NodeAccessPlan::RangeIndex { .. }
         | NodeAccessPlan::VectorSearch { .. }
         | NodeAccessPlan::TextSearch { .. }
-        | NodeAccessPlan::ScanThenFilter { .. } => false,
+        | NodeAccessPlan::ScanThenFilter { .. }
+        | NodeAccessPlan::BranchResidualUnion(_) => false,
     }
 }
 
 pub(super) fn subsumes(superset: &NodeAccessPlan, subset: &NodeAccessPlan) -> bool {
-    if superset == subset {
-        return true;
-    }
+    superset == subset || structurally_subsumes(superset, subset)
+}
+
+/// [`subsumes`] apart from equality, which callers comparing many pairs can
+/// test more cheaply themselves.
+fn structurally_subsumes(superset: &NodeAccessPlan, subset: &NodeAccessPlan) -> bool {
     match (superset, subset) {
         (_, NodeAccessPlan::Empty) => true,
         (NodeAccessPlan::AllScan, _) => true,

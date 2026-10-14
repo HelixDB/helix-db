@@ -31,47 +31,29 @@ fn cascades_index_union_branch_limit_selects_union_at_limit() {
 }
 
 #[test]
-fn cascades_index_union_branch_limit_keeps_residual_filter_above_limit() {
+fn cascades_index_union_branch_limit_still_reads_the_index_above_limit() {
+    // The branch limit caps distribution, not index use: three values over a
+    // limit of two are still one batched read of the username index.
     let predicate = literal_disjunction("username", &["alice", "bob", "carol"]);
     let plan = executable_traversal(
-        g().n_with_label_where("User", predicate.clone()),
+        g().n_with_label_where("User", predicate),
         branch_limited_ctx(disjunction_indexes(), 2),
     );
 
     assert_selected_root_family(&plan, "alternative");
-    assert_selected_rule(&plan, KnownRuleId::SeedAccessFilter);
-    assert_eq!(
-        plan.steps()
-            .iter()
-            .filter(
-                |step| matches!(&step.op, ExecOp::Merge { mode } if *mode == ExecMergeMode::Union)
-            )
-            .count(),
-        0,
-        "branch limit should reject index union: {:?}",
-        plan.steps()
-    );
+    assert_batched_node_equality_set(&plan, "User", "username", 3);
+    assert_no_exec_op_family(&plan, ExecOpFamily::Filter);
+    assert_no_exec_op_family(&plan, ExecOpFamily::Order);
+    assert_no_exec_window(&plan);
     assert_eq!(
         access_steps_matching(&plan, |access| matches!(
             access,
-            ExecAccessPlan::Node(ExecNodeAccessPlan::Bitmap { bitmap: crate::exec::ExecNodeBitmapExpr::PointRead { key, .. } })
-                if key.label == "User" && key.property == "username"
+            ExecAccessPlan::Node(ExecNodeAccessPlan::LabelScan { .. })
         )),
         0,
-        "branch limit should avoid a partial username index plan: {:?}",
+        "{:?}",
         plan.steps()
     );
-    assert!(matches!(
-        first_exec_access(&plan),
-        ExecAccessPlan::Node(ExecNodeAccessPlan::LabelScan { label }) if label.as_ref() == "User"
-    ));
-    assert!(matches!(
-        first_exec_op(&plan, |op| matches!(op, ExecOp::Filter { .. })),
-        ExecOp::Filter { predicate: actual }
-            if actual == &PredicatePlan::new(predicate).unwrap()
-    ));
-    assert_no_exec_op_family(&plan, ExecOpFamily::Order);
-    assert_no_exec_window(&plan);
 }
 
 #[test]

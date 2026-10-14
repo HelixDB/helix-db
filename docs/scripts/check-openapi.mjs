@@ -192,12 +192,75 @@ if (
   errors.push('openapi.json: QueryError must require only error and msg');
 }
 
+// Cypher is served by local servers and Helix Cloud gateways, like /v2/query.
+// Gateway failures use the native {error,msg} envelope, which CypherError admits.
+for (const [route, response, statuses] of [
+  ['/v2/cypher', 'CypherResponse', '200,204,400,401,402,403,408,409,413,429,500,503'],
+  ['/v2/cypher/explain', 'CypherExplanation', '200,204,400,401,402,403,408,413,429,500,503'],
+]) {
+  const operation = spec.paths?.[route]?.post;
+  if (JSON.stringify(operation?.servers) !== JSON.stringify(queryOperation?.servers)) {
+    errors.push(`openapi.json: ${route} must advertise the same servers as /v2/query`);
+  }
+  if (JSON.stringify(operation?.security) !== JSON.stringify(queryOperation?.security)) {
+    errors.push(`openapi.json: ${route} must accept the same authentication as /v2/query`);
+  }
+  if (operation?.parameters?.[0]?.$ref !== '#/components/parameters/DatabaseId') {
+    errors.push(`openapi.json: ${route} must accept the Helix Cloud database ID`);
+  }
+  const limits = operation?.['x-helix-request-body-limits'];
+  if (limits?.localBytes !== 16 * 1024 * 1024 || limits?.helixCloudBytes !== 2 * 1024 * 1024) {
+    errors.push(`openapi.json: ${route} must document the 16 MiB local and 2 MiB Helix Cloud body limits`);
+  }
+  if (Object.keys(operation?.responses ?? {}).sort().join(',') !== statuses) {
+    errors.push(`openapi.json: ${route} response codes must be ${statuses}`);
+  }
+  if (operation?.requestBody?.content?.['application/json']?.schema?.$ref !== '#/components/schemas/CypherRequest') {
+    errors.push(`openapi.json: ${route} must use CypherRequest`);
+  }
+  for (const [status, item] of Object.entries(operation?.responses ?? {})) {
+    if (status === '204') {
+      if (item.content) errors.push(`openapi.json: ${route} 204 must have no body`);
+      continue;
+    }
+    const expected = status === '200' ? response : 'CypherError';
+    if (item.content?.['application/json']?.schema?.$ref !== `#/components/schemas/${expected}`) {
+      errors.push(`openapi.json: ${route} ${status} must use ${expected}`);
+    }
+  }
+}
+const cypherResponse = spec.components?.schemas?.CypherResponse;
+if (cypherResponse?.additionalProperties !== false || cypherResponse?.required?.join(',') !== 'columns,rows') {
+  errors.push('openapi.json: CypherResponse must contain only ordered columns and rows');
+}
+const cypherRequest = spec.components?.schemas?.CypherRequest;
+if (cypherRequest?.additionalProperties !== false || cypherRequest?.required?.join(',') !== 'query') {
+  errors.push('openapi.json: CypherRequest must require query and close over its optional fields');
+}
+
+// Validate every local reference, including recursive lossless Cypher values.
+// Walk the document itself instead of following references, so cycles terminate.
+const pending = [spec];
+while (pending.length > 0) {
+  const value = pending.pop();
+  if (!value || typeof value !== 'object') continue;
+  if (typeof value.$ref === 'string' && value.$ref.startsWith('#/')) {
+    const resolved = value.$ref.slice(2).split('/').reduce(
+      (parent, key) => parent?.[key.replaceAll('~1', '/').replaceAll('~0', '~')], spec,
+    );
+    if (resolved === undefined) errors.push(`openapi.json: unresolved reference ${value.$ref}`);
+  }
+  pending.push(...Object.values(value));
+}
+
 const scalarParameterTypes = spec.components?.schemas?.QueryParameterType?.oneOf?.find(
   (variant) => Array.isArray(variant.enum),
 )?.enum;
 const expectedScalarParameterTypes = [
   'bool',
   'date_time',
+  'f32',
+  'f64',
   'i64',
   'object',
   'string',
@@ -208,7 +271,7 @@ if (
   scalarParameterTypes.toSorted().join(',') !== expectedScalarParameterTypes.join(',')
 ) {
   errors.push(
-    'openapi.json: typed JSON parameters must omit bytes, f32, and f64',
+    'openapi.json: typed JSON parameters must include f32 and f64 and omit bytes',
   );
 }
 
@@ -218,5 +281,5 @@ if (errors.length > 0) {
 }
 
 console.log(
-  `openapi.json matches ${routerOperations.size} local operations and validates the Helix Cloud query contract.`,
+  `openapi.json matches ${routerOperations.size} local operations and validates the local and Helix Cloud query and Cypher contracts.`,
 );

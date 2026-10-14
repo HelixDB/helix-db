@@ -51,6 +51,10 @@ We welcome contributions from the community! This guide will help you get starte
 - **Rust**: 1.97.1 (installed automatically from `rust-toolchain.toml` by [rustup](https://rustup.rs/))
 - **Cargo**: Comes with Rust
 - **Git**: For version control
+- **A C toolchain**: `ring` and `aws-lc-sys`, pulled in through rustls, compile C code, so
+  a working C compiler is needed. Most desktop machines already have one, but a clean
+  container, CI image, or WSL install may not. System OpenSSL headers are *not* required.
+  - Debian/Ubuntu: `sudo apt-get install -y build-essential`
 
 ### Optional Tools
 - **cargo-watch**: For development auto-reloading
@@ -123,23 +127,20 @@ crates/cli/
 │   ├── commands/           # CLI command implementations (one module per subcommand)
 │   │   ├── logs/          # Local + Helix Cloud log viewing
 │   │   ├── add.rs         # Add a local or Helix Cloud instance
-│   │   ├── auth.rs        # Helix Cloud auth (login/logout/create-key)
+│   │   ├── auth.rs        # WorkOS Cloud auth (login/status/logout)
 │   │   ├── chef.rs        # Bootstrap a first Helix app for a coding agent
 │   │   ├── config.rs      # workspace/project/cluster config (hidden parent)
 │   │   ├── delete.rs      # Delete an instance and its local state
-│   │   ├── enterprise_deploy.rs # Helix Cloud deploy helpers
 │   │   ├── feedback.rs    # Send feedback to the Helix team
 │   │   ├── init.rs        # Initialize a project
 │   │   ├── metrics.rs     # Metrics configuration
 │   │   ├── prune.rs       # Prune local containers/workspaces
-│   │   ├── push.rs        # Deploy a Helix Cloud instance
-│   │   ├── query.rs       # Send a query to POST /v2/query
+│   │   ├── query.rs       # Send a local or brokered Cloud query
 │   │   ├── restart.rs     # Restart a background local instance
 │   │   ├── skills.rs      # Install and manage Helix agent skills
 │   │   ├── start.rs       # Start a local instance (alias: run)
 │   │   ├── status.rs      # Instance status
 │   │   ├── stop.rs        # Stop a background local instance
-│   │   ├── sync.rs        # Sync Helix Cloud metadata into helix.toml
 │   │   └── update.rs      # Self-update the CLI
 │   ├── config.rs          # helix.toml + ~/.helix config management
 │   ├── enterprise_cloud.rs # Helix Cloud REST types and fetchers
@@ -169,12 +170,12 @@ crates/cli/
 - `helix status` - Show local and Helix Cloud instance status
 - `helix logs` - View logs for a local or Helix Cloud instance
 - `helix query` - Send a query to `POST /v2/query`
-- `helix push` - Deploy a Helix Cloud instance
-- `helix auth` - Helix Cloud authentication (login/logout/create-key)
-- `helix workspace` - Manage the active Helix Cloud workspace
+- `helix auth` - WorkOS Cloud authentication (login/status/logout)
+- `helix workspace` - Discover accessible Helix Cloud workspaces
 - `helix project` - Manage the linked Helix Cloud project
 - `helix cluster` - List and inspect Helix Cloud clusters
-- `helix sync` - Sync Helix Cloud metadata into `helix.toml`
+- `helix database` - Discover and manage Cloud databases and application keys
+- `helix service-credential` - Manage workspace-owned automation credentials
 - `helix prune` - Prune local containers/workspaces
 - `helix delete` - Delete an instance from `helix.toml` and local state
 - `helix skills` - Install, update, and list Helix agent skills
@@ -182,19 +183,19 @@ crates/cli/
 - `helix update` - Update the CLI to the latest version
 - `helix feedback` - Send feedback to the Helix team
 
-**Deployment Targets:**
-- Local Docker/Podman containers (`helix start`) — image `ghcr.io/helixdb/helixdb:v0.0.4`
-- Helix Cloud via `helix push`
+**Runtime Targets:**
+- Local Docker/Podman containers (`helix start`) — image `ghcr.io/helixdb/helixdb:v0.0.11`
+- Linked Helix Cloud databases for brokered `query`, `shell`, `status`, and `logs`
 
 **Build & Deploy Flow:**
 
 The v3 CLI is a runtime orchestrator — there is no `helix compile`/`helix check` step and no `.hx` query files.
 
 1. Scaffold a project with `helix init` (writes `helix.toml` and a `.helix/` workspace).
-2. Start a local instance with `helix start` — a Docker/Podman container running `ghcr.io/helixdb/helixdb:v0.0.4` (in-memory by default, on-disk with `--disk`). The CLI waits for `GET /healthz` before returning.
+2. Start a local instance with `helix start` — a Docker/Podman container running `ghcr.io/helixdb/helixdb:v0.0.11` (in-memory by default, on-disk with `--disk`). The CLI waits for `GET /healthz` before returning.
 3. Author queries with the Rust, TypeScript, Go, or Python DSL; they serialize to query JSON.
 4. Send queries to a running instance via `POST /v2/query` (`helix query`); validation happens server-side.
-5. For production, deploy a Helix Cloud instance with `helix push`, managing auth/metadata via `helix auth`, `helix sync`, and the `workspace`/`project`/`cluster` commands.
+5. For Cloud, sign in with `helix auth login`, link a project/database, and run queries through the authenticated backend broker.
 
 ### Supporting Components
 
@@ -252,10 +253,10 @@ QUERY addUser(name: String, age: I64) =>
 
 Run Clippy to check code quality:
 ```bash
-./clippy_check.sh
+cargo clippy --workspace -- -D warnings
 ```
 
-The `clippy_check.sh` script at the repository root runs `cargo clippy --workspace -- -D warnings`, treating all warnings as errors across every workspace crate.
+This treats all Clippy warnings as errors across every workspace crate.
 
 ### Testing
 
@@ -292,7 +293,7 @@ cd sdks/typescript && npm test
 cd sdks/go && go test ./...
 ```
 
-Format and lint before opening a PR: `cargo fmt` and `./clippy_check.sh`.
+Format and lint before opening a PR: `cargo fmt` and `cargo clippy --workspace -- -D warnings`.
 
 #### Testing Guidelines
 - Write tests for all new features

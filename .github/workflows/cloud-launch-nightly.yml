@@ -98,6 +98,36 @@ jobs:
       - name: Isolation and transport restart contracts
         run: cargo test -p helix-db-testkit --test isolation_histories && cargo test -p server
 
+  queue-soak:
+    name: Queued index publication soak
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Writers, readers, builds, and publication under compaction and restarts
+        env:
+          SOAK_SEEDS: "4"
+        run: >-
+          cargo test --release -p db --lib
+          index_lifecycle::queue::soak_tests::concurrent_writes_builds_and_publication_stay_exact_under_compaction
+          -- --ignored --exact --nocapture
+      # Debug PR runs use fewer seeds of these randomized tests and skip the
+      # ignored golden graph; this step runs them at full scale.
+      - name: Full-scale random vector write sequences and the pinned golden graph
+        env:
+          GRAPH_SEEDS: "4"
+          DIRECT_SEEDS: "24"
+          STRAY_SEEDS: "2"
+        run: >-
+          cargo test --release -p db --lib --
+          index_lifecycle::queue::vector_graph_tests::random_queued_vector_writes_keep_every_graph_valid
+          index_lifecycle::queue::vector_graph_tests::random_direct_vector_writes_keep_one_locator_per_link
+          search::vector::hnsw::mutation::locator_tests::stray_locators_never_survive_a_delete_or_upsert
+          index_lifecycle::queue::planning_session_tests::every_session_policy_publishes_the_pinned_golden_graph
+          --include-ignored --exact --nocapture
+
   vector-lifecycle:
     name: Bounded 8k vector lifecycle
     runs-on: ubuntu-24.04-arm

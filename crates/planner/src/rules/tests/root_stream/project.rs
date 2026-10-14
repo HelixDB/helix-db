@@ -48,8 +48,8 @@ fn stream_project_implementation_rule_appends_typed_terminal_pipeline() {
     assert_eq!(
         alternative.cost,
         storage
-            .range_scan(rows)
-            .serial(storage.predicate_eval(rows))
+            .element_scan(rows)
+            .serial(storage.stored_predicate_filter(rows))
             .serial(storage.stream_operator(rows))
     );
 }

@@ -3,9 +3,15 @@
 //! Equality, range, and range-value conversion contracts are split so index
 //! eligibility rules can evolve independently without widening the analysis API.
 
+mod candidate;
 mod equality;
 mod range;
 mod value;
 
-pub(crate) use equality::{equality_atom, EqualityIndexAtom, EqualityIndexDomain};
+pub(super) use candidate::has_candidate;
+
+pub(crate) use equality::{
+    distinct_equality_literals, equality_atom, literal_equality_domain, EqualityIndexAtom,
+    EqualityIndexDomain,
+};
 pub(crate) use range::{range_atom, RangeIndexAtom};

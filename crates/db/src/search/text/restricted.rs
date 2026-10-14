@@ -88,6 +88,21 @@ impl RestrictedTextCandidates {
             Self::NonEmpty(bitmap) => bitmap.contains(entity_id),
         }
     }
+
+    /// Removes `excluded` IDs, collapsing to `Empty` when none remain.
+    pub(crate) fn without(&self, excluded: &RoaringTreemap) -> Self {
+        match self {
+            Self::Empty => Self::Empty,
+            Self::NonEmpty(bitmap) => {
+                let bitmap = bitmap - excluded;
+                if bitmap.is_empty() {
+                    Self::Empty
+                } else {
+                    Self::NonEmpty(bitmap)
+                }
+            }
+        }
+    }
 }
 
 /// Explicit unrestricted or exact-candidate scope for every physical FTS read.
@@ -131,6 +146,23 @@ mod tests {
         assert!(candidates.contains(4));
         assert!(candidates.contains(9));
         assert!(!candidates.contains(5));
+    }
+
+    #[test]
+    fn without_removes_exactly_the_excluded_ids() {
+        let candidates = RestrictedTextCandidates::from_ids([2, 4, 9]).unwrap();
+        let remaining = candidates.without(&RoaringTreemap::from_iter([4, 7]));
+        assert!(remaining.contains(2));
+        assert!(!remaining.contains(4));
+        assert!(remaining.contains(9));
+        assert!(candidates.contains(4), "the original set is unchanged");
+
+        assert!(candidates
+            .without(&RoaringTreemap::from_iter([2, 4, 9]))
+            .is_empty());
+        assert!(RestrictedTextCandidates::Empty
+            .without(&RoaringTreemap::new())
+            .is_empty());
     }
 
     #[test]

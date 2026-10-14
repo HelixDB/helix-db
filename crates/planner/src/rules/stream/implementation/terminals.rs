@@ -32,6 +32,13 @@ impl optimizer::OptimizerRule for StreamReservedImplementationRule {
         let logical::LogicalExpr::StreamReserved(reserved) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
+        if crate::rules::required_filter_rewrite_pending(
+            input.expr,
+            input.indexes,
+            input.planner_limits,
+        ) {
+            return optimizer::RuleResult::NotApplicable;
+        }
         terminal_pipeline_result(stream_reserved_pipeline_contract(
             reserved,
             input.storage,
@@ -65,6 +72,13 @@ impl optimizer::OptimizerRule for StreamProjectImplementationRule {
         let logical::LogicalExpr::StreamProject(project) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
+        if crate::rules::required_filter_rewrite_pending(
+            input.expr,
+            input.indexes,
+            input.planner_limits,
+        ) {
+            return optimizer::RuleResult::NotApplicable;
+        }
         terminal_pipeline_result(stream_project_pipeline_contract(
             project,
             input.storage,
@@ -98,6 +112,13 @@ impl optimizer::OptimizerRule for StreamAggregateImplementationRule {
         let logical::LogicalExpr::StreamAggregate(aggregate) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
+        if crate::rules::required_filter_rewrite_pending(
+            input.expr,
+            input.indexes,
+            input.planner_limits,
+        ) {
+            return optimizer::RuleResult::NotApplicable;
+        }
         terminal_pipeline_result(stream_aggregate_pipeline_contract(
             aggregate,
             input.storage,
@@ -132,6 +153,13 @@ impl optimizer::OptimizerRule for StreamVariableWriteImplementationRule {
         let logical::LogicalExpr::StreamVariableWrite(write) = input.expr else {
             return optimizer::RuleResult::NotApplicable;
         };
+        if crate::rules::required_filter_rewrite_pending(
+            input.expr,
+            input.indexes,
+            input.planner_limits,
+        ) {
+            return optimizer::RuleResult::NotApplicable;
+        }
         terminal_pipeline_result(stream_variable_write_pipeline_contract(
             write,
             input.storage,

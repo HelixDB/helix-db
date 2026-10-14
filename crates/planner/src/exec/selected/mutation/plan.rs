@@ -43,7 +43,7 @@ pub enum SelectedMutationPlan {
         /// Name.
         name: ir::NonEmptyString,
     },
-    /// Drop nodes.
+    /// Delete current edges, or nodes and their incident edges.
     Drop {
         /// Selected input run.
         input: Box<SelectedExecutableRunRoot>,

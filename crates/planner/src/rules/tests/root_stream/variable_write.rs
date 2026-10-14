@@ -47,7 +47,7 @@ fn stream_variable_write_implementation_rule_appends_state_write_terminal_pipeli
     assert_eq!(
         alternative.cost,
         storage
-            .range_scan(rows)
+            .element_scan(rows)
             .serial(storage.stream_operator(rows))
     );
 }

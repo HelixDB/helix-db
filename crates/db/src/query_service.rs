@@ -32,6 +32,55 @@ pub struct HelixQueryService {
 }
 
 impl HelixQueryService {
+    /// Explain a Cypher statement without executing the query.
+    pub async fn explain_cypher_scoped_controlled(
+        &self,
+        request: crate::cypher::Request,
+        scope: DataScope,
+        control: ExecutionControl,
+        limits: crate::cypher::Limits,
+    ) -> crate::cypher::Result<crate::cypher::Explanation> {
+        crate::cypher::explain(&self.db, request, scope, control, limits).await
+    }
+
+    /// Execute an already compiled Cypher request after transport routing checks.
+    /// Catalog acquisition, planning, parameters and transactions use this attempt.
+    /// When anonymous telemetry is on, it records the statement's shape with every
+    /// literal redacted and `tenant_id`, which does not select the storage namespace.
+    pub async fn execute_compiled_cypher_json_scoped_controlled(
+        &self,
+        request: crate::cypher::CompiledRequest,
+        mode: QueryMode,
+        scope: DataScope,
+        control: ExecutionControl,
+        limits: crate::cypher::Limits,
+        tenant_id: Option<query::TenantId>,
+    ) -> crate::cypher::Result<crate::cypher::EncodedResponse> {
+        let observation = self
+            .query_metrics
+            .as_ref()
+            .and_then(|_| QueryObservation::capture_cypher(&request, tenant_id));
+        let started_at = std::time::Instant::now();
+        let result = crate::cypher::execute_with::<crate::cypher::output::Json>(
+            &self.db,
+            crate::cypher::Input::Compiled(request),
+            scope,
+            mode,
+            control,
+            limits,
+        )
+        .await;
+        if let (Some(query_metrics), Some(observation)) = (self.query_metrics.as_ref(), observation)
+        {
+            let _ = query_metrics.record(observation.event(
+                result.as_ref().err().map(cypher_failure_class),
+                None,
+                started_at.elapsed(),
+            ));
+        }
+        result
+    }
+
     /// Create a query service.
     pub fn new(db: Arc<HelixDB>) -> Self {
         Self {
@@ -181,6 +230,11 @@ pub(crate) async fn execute_query_on_scoped_observed(
     query_metrics: Option<&OssQueryMetrics>,
     execution_control: ExecutionControl,
 ) -> std::result::Result<QueryResponse, QueryServiceError> {
+    // Telemetry, planning and execution walk the request recursively. A JSON
+    // request is bounded by its text; one built in memory is bounded here.
+    request
+        .check_nesting()
+        .map_err(|error| QueryServiceError::InvalidRequest(error.to_string()))?;
     let observation = query_metrics.and_then(|_| QueryObservation::capture(&request, tenant_id));
     let started_at = std::time::Instant::now();
     let result = match execution_control.check() {
@@ -194,9 +248,37 @@ pub(crate) async fn execute_query_on_scoped_observed(
         Err(error) => Err(error.into()),
     };
     if let (Some(query_metrics), Some(observation)) = (query_metrics, observation) {
-        let _ = query_metrics.record(observation.event(&result, started_at.elapsed()));
+        let planner_diagnostics = result
+            .as_ref()
+            .ok()
+            .and_then(|response| serde_json::to_value(response.diagnostics()).ok());
+        let _ = query_metrics.record(observation.event(
+            result.as_ref().err().map(QueryServiceError::classify),
+            planner_diagnostics,
+            started_at.elapsed(),
+        ));
     }
     result
+}
+
+/// How telemetry and transports bucket a failed Cypher statement. Database
+/// failures classify exactly as they do for native queries.
+fn cypher_failure_class(error: &crate::cypher::Error) -> QueryFailureClass {
+    use helix_cypher::api::ErrorClass;
+    use helix_planner::relational::ErrorPhase;
+
+    match error {
+        crate::cypher::Error::Query(error) => match (ErrorClass::of(error), error.phase) {
+            (ErrorClass::InvalidQuery, ErrorPhase::Compile) => QueryFailureClass::InvalidRequest,
+            (ErrorClass::InvalidQuery, ErrorPhase::Runtime) | (ErrorClass::ResourceLimit, _) => {
+                QueryFailureClass::Execution
+            }
+            (ErrorClass::WriterRequired, _) => QueryFailureClass::WriterModeRequired,
+            (ErrorClass::Internal, _) => QueryFailureClass::Planning,
+        },
+        crate::cypher::Error::Storage(error) => QueryFailureClass::of_db(error),
+        crate::cypher::Error::Json(_) => QueryFailureClass::Internal,
+    }
 }
 
 struct QueryObservation {
@@ -221,36 +303,58 @@ impl QueryObservation {
         })
     }
 
+    /// Cypher statements record their shape with every literal replaced by `?`.
+    fn capture_cypher(
+        request: &crate::cypher::CompiledRequest,
+        tenant_id: Option<query::TenantId>,
+    ) -> Option<Self> {
+        let shape = helix_cypher::redact_literals(request.text()).ok()?;
+        Some(Self {
+            name: request
+                .query_name()
+                .and_then(|name| query::QueryName::new(name).ok()),
+            raw_query: query::CanonicalQuery::from_telemetry_serializable(
+                &serde_json::json!({ "cypher": shape }),
+            )
+            .ok()?,
+            query_type: match request.request_type() {
+                QueryRequestType::Read => query::QueryType::Read,
+                QueryRequestType::Write => query::QueryType::Write,
+            },
+            tenant_id,
+        })
+    }
+
     fn event(
         self,
-        result: &std::result::Result<QueryResponse, QueryServiceError>,
+        failure: Option<QueryFailureClass>,
+        planner_diagnostics: Option<JsonValue>,
         latency: std::time::Duration,
     ) -> query::QueryEvent {
-        let outcome = match result {
-            Ok(_) => query::QueryOutcome::Succeeded {
+        let outcome = match failure {
+            None => query::QueryOutcome::Succeeded {
                 warnings: Vec::new(),
             },
-            Err(error) => {
-                let error_type = query_error_type(error);
-                let message = match error_type {
-                    query::QueryErrorType::InvalidRequest => "query request was invalid",
-                    query::QueryErrorType::Planning => "query planning failed",
-                    query::QueryErrorType::Execution => "query execution failed",
-                    query::QueryErrorType::Conflict => "query conflicted with another transaction",
-                    query::QueryErrorType::Internal => "query response serialization failed",
+            Some(class) => {
+                // Backpressure shares the conflict bucket but not its cause.
+                let message = match class {
+                    QueryFailureClass::InvalidRequest => "query request was invalid",
+                    QueryFailureClass::Planning => "query planning failed",
+                    QueryFailureClass::CommitOutcomeUnknown
+                    | QueryFailureClass::WriterModeRequired
+                    | QueryFailureClass::Execution => "query execution failed",
+                    QueryFailureClass::Conflict => "query conflicted with another transaction",
+                    QueryFailureClass::Backpressure => "query was rejected by index backpressure",
+                    QueryFailureClass::Internal => "query response serialization failed",
                 };
                 query::QueryOutcome::Failed {
                     errors: vec![query::QueryError {
-                        error_type,
+                        error_type: class.into(),
                         message: message.to_owned(),
                     }],
                 }
             }
         };
-        let planner_diagnostics = result
-            .as_ref()
-            .ok()
-            .and_then(|response| serde_json::to_value(response.diagnostics()).ok());
         query::QueryEvent::now(
             self.name,
             self.raw_query,
@@ -263,23 +367,6 @@ impl QueryObservation {
     }
 }
 
-fn query_error_type(error: &QueryServiceError) -> query::QueryErrorType {
-    match error {
-        QueryServiceError::InvalidRequest(_) => query::QueryErrorType::InvalidRequest,
-        QueryServiceError::Planner(_) => query::QueryErrorType::Planning,
-        QueryServiceError::Db(error) if error.is_transaction_conflict() => {
-            query::QueryErrorType::Conflict
-        }
-        QueryServiceError::Db(error) if error.is_invalid_vector_input() => {
-            query::QueryErrorType::InvalidRequest
-        }
-        QueryServiceError::Db(_) => query::QueryErrorType::Execution,
-        QueryServiceError::JsonSerialize(_) | QueryServiceError::Serialize(_) => {
-            query::QueryErrorType::Internal
-        }
-    }
-}
-
 async fn execute_validated(
     db: &HelixDB,
     query: ValidatedQuery,
@@ -287,10 +374,16 @@ async fn execute_validated(
     execution_control: ExecutionControl,
 ) -> std::result::Result<QueryResponse, QueryServiceError> {
     execution_control.check()?;
-    let (batch, params) = match query {
-        ValidatedQuery::Read { batch, parameters } => {
-            (BatchQuery::Read(batch), query_param_bindings(parameters)?)
-        }
+    let (batch, params, search_consistency) = match query {
+        ValidatedQuery::Read {
+            batch,
+            parameters,
+            search_consistency,
+        } => (
+            BatchQuery::Read(batch),
+            query_param_bindings(parameters)?,
+            search_consistency,
+        ),
         ValidatedQuery::Write { batch, parameters } => {
             if db.is_reader_mode() {
                 return Err(HelixDbError::WriterModeRequired {
@@ -298,22 +391,32 @@ async fn execute_validated(
                 }
                 .into());
             }
-            (BatchQuery::Write(batch), query_param_bindings(parameters)?)
+            (
+                BatchQuery::Write(batch),
+                query_param_bindings(parameters)?,
+                helix_ast::query::SearchConsistency::Strong,
+            )
         }
     };
     let prepared = execution_control
-        .run(db.planner_context_scoped_prepared(params.clone(), tenant_scope))
+        .run(db.planner_context_scoped_prepared(params, tenant_scope))
         .await?;
     execution_control.check()?;
     let planning = helix_planner::planning::plan_with_diagnostics(&batch, prepared.context())?;
+    // The plan owns every AST fragment it executes, so the request tree is
+    // freed before execution rather than held until it ends.
+    drop(batch);
     execution_control.check()?;
+    // Planning and execution share the request's one parameter copy.
+    let (params, proof) = prepared.into_execution_inputs();
     let result = db
         .execute_prepared_scoped_controlled(
             planning.plan(),
             params,
             tenant_scope,
             execution_control,
-            prepared.into_catalog_proof(),
+            proof,
+            search_consistency,
         )
         .await?;
     let (_, diagnostics) = planning.into_parts();
@@ -324,7 +427,9 @@ enum ValidatedQuery {
     Read {
         batch: ReadBatch,
         parameters: BTreeMap<String, QueryValue>,
+        search_consistency: helix_ast::query::SearchConsistency,
     },
+    /// Write batches always search strongly; the type carries no choice.
     Write {
         batch: WriteBatch,
         parameters: BTreeMap<String, QueryValue>,
@@ -333,9 +438,14 @@ enum ValidatedQuery {
 
 impl ValidatedQuery {
     fn from_request(request: QueryRequest) -> std::result::Result<Self, QueryServiceError> {
+        let search_consistency = request.search_consistency();
         let (query, parameters) = request.into_query();
         match query {
-            BatchQuery::Read(batch) => Ok(Self::Read { batch, parameters }),
+            BatchQuery::Read(batch) => Ok(Self::Read {
+                batch,
+                parameters,
+                search_consistency,
+            }),
             BatchQuery::Write(batch) => Ok(Self::Write { batch, parameters }),
         }
     }
@@ -415,9 +525,10 @@ impl QueryResponse {
         })
     }
 
-    /// Serialize the response as JSON bytes.
+    /// Serialize the response as JSON bytes. The response is already a tree of
+    /// `serde_json` values, so `serde_json` writes it.
     pub fn to_json_bytes(&self) -> std::result::Result<Vec<u8>, QueryServiceError> {
-        sonic_rs::to_vec(self).map_err(QueryServiceError::Serialize)
+        serde_json::to_vec(self).map_err(QueryServiceError::JsonSerialize)
     }
 
     /// Borrow the returned values.
@@ -603,10 +714,86 @@ pub enum QueryServiceError {
 
     /// Response serialization failed.
     #[error("json serialization error: {0}")]
-    Serialize(sonic_rs::Error),
+    Serialize(simd_json::Error),
+}
+
+/// Transport- and telemetry-neutral failure class shared by HTTP, gRPC and metrics.
+///
+/// Every [`QueryServiceError`] maps to exactly one class through
+/// [`QueryServiceError::classify`]; transports and telemetry then map the class
+/// to their own status or bucket so the three cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryFailureClass {
+    /// The writer was fenced mid-commit and durability is unknown; never retry blindly.
+    CommitOutcomeUnknown,
+    /// A transaction conflict that is safe to retry.
+    Conflict,
+    /// Asynchronous index work is saturated: either a write was rejected
+    /// before commit, or a strong search, in a read or a write request, found
+    /// more superseded results ahead of its answer than it may skip. Nothing
+    /// was committed, and the unchanged request is safe to retry once
+    /// outstanding index work is published. Telemetry buckets it with
+    /// [`Self::Conflict`] as [`query::QueryErrorType::Conflict`]: both reject
+    /// the whole request, and a retry may succeed.
+    Backpressure,
+    /// The request itself or the data it carried was invalid.
+    InvalidRequest,
+    /// Query planning failed before execution started.
+    Planning,
+    /// The operation needs a writer handle but this handle is not one.
+    WriterModeRequired,
+    /// Execution failed inside the database.
+    Execution,
+    /// The response could not be serialized.
+    Internal,
+}
+
+impl From<QueryFailureClass> for query::QueryErrorType {
+    fn from(class: QueryFailureClass) -> Self {
+        match class {
+            QueryFailureClass::Conflict | QueryFailureClass::Backpressure => Self::Conflict,
+            QueryFailureClass::InvalidRequest => Self::InvalidRequest,
+            QueryFailureClass::Planning => Self::Planning,
+            QueryFailureClass::CommitOutcomeUnknown
+            | QueryFailureClass::WriterModeRequired
+            | QueryFailureClass::Execution => Self::Execution,
+            QueryFailureClass::Internal => Self::Internal,
+        }
+    }
+}
+
+impl QueryFailureClass {
+    /// Classify a database failure, whichever query language reached it.
+    fn of_db(error: &HelixDbError) -> Self {
+        if matches!(error, HelixDbError::WriterFencedCommitOutcomeUnknown) {
+            Self::CommitOutcomeUnknown
+        } else if error.is_transaction_conflict() {
+            Self::Conflict
+        } else if error.is_index_backpressure() {
+            Self::Backpressure
+        } else if matches!(error, HelixDbError::Planner(_)) {
+            Self::Planning
+        } else if error.is_invalid_input() {
+            Self::InvalidRequest
+        } else if matches!(error, HelixDbError::WriterModeRequired { .. }) {
+            Self::WriterModeRequired
+        } else {
+            Self::Execution
+        }
+    }
 }
 
 impl QueryServiceError {
+    /// Classify this failure for transports and telemetry.
+    pub fn classify(&self) -> QueryFailureClass {
+        match self {
+            Self::Db(error) => QueryFailureClass::of_db(error),
+            Self::InvalidRequest(_) => QueryFailureClass::InvalidRequest,
+            Self::Planner(_) => QueryFailureClass::Planning,
+            Self::JsonSerialize(_) | Self::Serialize(_) => QueryFailureClass::Internal,
+        }
+    }
+
     /// Returns true when the request can be retried after a transaction conflict.
     pub fn is_transaction_conflict(&self) -> bool {
         matches!(self, Self::Db(error) if error.is_transaction_conflict())
@@ -615,6 +802,22 @@ impl QueryServiceError {
     /// Returns true when cooperative execution observed its monotonic deadline.
     pub fn is_deadline_exceeded(&self) -> bool {
         matches!(self, Self::Db(HelixDbError::QueryDeadlineExceeded))
+    }
+
+    /// Returns true when reader retirement cancelled an admitted read.
+    pub fn is_cancelled_by_reader_retirement(&self) -> bool {
+        matches!(
+            self,
+            Self::Db(HelixDbError::QueryCancelledByReaderRetirement)
+        )
+    }
+
+    /// Returns true when fencing made a started commit's outcome unknowable.
+    pub fn is_commit_outcome_unknown(&self) -> bool {
+        matches!(
+            self,
+            Self::Db(HelixDbError::WriterFencedCommitOutcomeUnknown)
+        )
     }
 
     /// Stable machine-readable code for this public query failure.
@@ -644,13 +847,8 @@ impl From<QueryServiceError> for HelixDbError {
     fn from(value: QueryServiceError) -> Self {
         match value {
             QueryServiceError::Db(error) => error,
-            QueryServiceError::Planner(error)
-                if error.error_code() == helix_ast::error_code::QueryErrorCode::IndexNotFound =>
-            {
-                HelixDbError::IndexNotFound(error.to_string())
-            }
+            QueryServiceError::Planner(error) => HelixDbError::Planner(error),
             other @ (QueryServiceError::InvalidRequest(_)
-            | QueryServiceError::Planner(_)
             | QueryServiceError::JsonSerialize(_)
             | QueryServiceError::Serialize(_)) => HelixDbError::Query(other.to_string()),
         }
@@ -666,6 +864,15 @@ impl QueryResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod index_membership_retention_tests;
+#[cfg(test)]
+mod index_membership_tests;
+#[cfg(test)]
+mod index_served_sources_tests;
+#[cfg(test)]
+mod selective_equality_tests;
 
 #[cfg(test)]
 mod tests {
@@ -769,228 +976,250 @@ mod tests {
 
     #[tokio::test]
     async fn prepared_equality_lookup_uses_one_complete_point_read() {
-        const EMAIL: &str = "shared@example.com";
+        crate::index_lifecycle::secondary::EqualityReadObserver::default()
+            .scope(async {
+                const EMAIL: &str = "shared@example.com";
 
-        let db = Arc::new(
-            HelixDB::open(HelixDbSource::InMemory {
-                database: "query-service-one-read-equality".to_string(),
-            })
-            .await
-            .expect("writer should open"),
-        );
-        db.wait_for_startup_cache_warm().await;
-        db.install_index_for_tests(
-            crate::config::SecondaryIndexDefinition::node_equality("User", "email")
-                .expect("secondary index definition validates")
-                .try_into()
-                .expect("secondary index definition enters V2"),
-        )
-        .await
-        .expect("secondary index becomes active");
-        let service = HelixQueryService::new(Arc::clone(&db));
-        service
-            .execute_query(QueryRequest::write(write_batch().var_as(
-                "created",
-                g().add_n("User", vec![("email", PropertyInput::from(EMAIL))]),
-            )))
-            .await
-            .expect("indexed node insert succeeds");
-        let batch = read_batch()
-            .var_as(
-                "users",
-                g().n_with_label_where("User", Predicate::eq("email", EMAIL)),
-            )
-            .returning(["users"]);
-
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        service
-            .execute_query(QueryRequest::read(batch.clone()))
-            .await
-            .expect("prepared equality lookup succeeds");
-        assert_eq!(
-            crate::index_lifecycle::secondary::equality_read_metrics(),
-            crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
-                point_reads: 1,
-                multi_get_calls: 0,
-                scans: 0,
-                graph_reads: 0,
-            }
-        );
-
-        let parallel_batch = read_batch()
-            .var_as(
-                "first",
-                g().n_with_label_where("User", Predicate::eq("email", EMAIL)),
-            )
-            .var_as(
-                "second",
-                g().n_with_label_where("User", Predicate::eq("email", EMAIL)),
-            )
-            .returning(["first", "second"]);
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        service
-            .execute_query(QueryRequest::read(parallel_batch))
-            .await
-            .expect("parallel prepared equality lookups succeed");
-        assert_eq!(
-            crate::index_lifecycle::secondary::equality_read_metrics().point_reads,
-            2,
-            "parallel contexts must retain the prepared catalog"
-        );
-
-        let prepared = db
-            .planner_context_scoped_prepared(ParamBindings::default(), DataScope::LegacyUnscoped)
-            .await
-            .expect("read request captures one exact catalog view");
-        let prepared_plan = helix_planner::planning::plan_read_batch(&batch, prepared.context())
-            .expect("prepared equality lookup plans");
-        db.refresh_runtime_catalog(DataScope::LegacyUnscoped)
-            .await
-            .expect("a concurrent catalog publication succeeds");
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        db.execute_prepared_scoped_controlled(
-            &prepared_plan,
-            ParamBindings::default(),
-            DataScope::LegacyUnscoped,
-            ExecutionControl::unlimited(),
-            prepared.into_catalog_proof(),
-        )
-        .await
-        .expect("the exact prepared read view survives a newer catalog publication");
-        assert_eq!(
-            crate::index_lifecycle::secondary::equality_read_metrics().point_reads,
-            1
-        );
-
-        let plan = helix_planner::planning::plan_read_batch(
-            &batch,
-            &db.planner_context(ParamBindings::default()),
-        )
-        .expect("public equality lookup plans");
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        db.execute(&plan, ParamBindings::default())
-            .await
-            .expect("unprepared equality lookup retains its safe fallback");
-        assert_eq!(
-            crate::index_lifecycle::secondary::equality_read_metrics(),
-            crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
-                point_reads: 2,
-                multi_get_calls: 0,
-                scans: 0,
-                graph_reads: 0,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn prepared_reader_equality_lookup_reuses_its_exact_catalog_view() {
-        const EMAIL: &str = "reader@example.com";
-
-        let object_store: Arc<dyn slatedb::object_store::ObjectStore> = Arc::new(InMemory::new());
-        let writer = Arc::new(
-            HelixDB::open_with_object_store_for_tests(
-                "query-service-reader-one-read-equality",
-                Arc::clone(&object_store),
-            )
-            .await
-            .expect("writer should initialize storage"),
-        );
-        writer
-            .install_index_for_tests(
-                crate::config::SecondaryIndexDefinition::node_equality("User", "email")
-                    .expect("secondary index definition validates")
-                    .try_into()
-                    .expect("secondary index definition enters V2"),
-            )
-            .await
-            .expect("secondary index becomes active");
-        HelixQueryService::new(Arc::clone(&writer))
-            .execute_query(QueryRequest::write(write_batch().var_as(
-                "created",
-                g().add_n("User", vec![("email", PropertyInput::from(EMAIL))]),
-            )))
-            .await
-            .expect("indexed node insert succeeds");
-        writer
-            .flush_writer()
-            .await
-            .expect("writer state becomes reader-visible");
-
-        let reader = Arc::new(
-            HelixDB::open_reader_with_object_store_for_tests(
-                "query-service-reader-one-read-equality",
-                object_store,
-            )
-            .await
-            .expect("reader should open"),
-        );
-        let service = HelixQueryService::new(Arc::clone(&reader));
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        service
-            .execute_query(QueryRequest::read(
-                read_batch()
+                let db = Arc::new(
+                    HelixDB::open(HelixDbSource::InMemory {
+                        database: "query-service-one-read-equality".to_string(),
+                    })
+                    .await
+                    .expect("writer should open"),
+                );
+                db.wait_for_startup_cache_warm().await;
+                db.install_index_for_tests(
+                    crate::config::SecondaryIndexDefinition::node_equality("User", "email")
+                        .expect("secondary index definition validates")
+                        .try_into()
+                        .expect("secondary index definition enters V2"),
+                )
+                .await
+                .expect("secondary index becomes active");
+                let service = HelixQueryService::new(Arc::clone(&db));
+                service
+                    .execute_query(QueryRequest::write(write_batch().var_as(
+                        "created",
+                        g().add_n("User", vec![("email", PropertyInput::from(EMAIL))]),
+                    )))
+                    .await
+                    .expect("indexed node insert succeeds");
+                let batch = read_batch()
                     .var_as(
                         "users",
                         g().n_with_label_where("User", Predicate::eq("email", EMAIL)),
                     )
-                    .returning(["users"]),
-            ))
-            .await
-            .expect("reader equality lookup succeeds");
-        assert_eq!(
-            crate::index_lifecycle::secondary::equality_read_metrics(),
-            crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
-                point_reads: 1,
-                multi_get_calls: 0,
-                scans: 0,
-                graph_reads: 0,
-            }
-        );
+                    .returning(["users"]);
 
-        reader.close().await.expect("reader closes");
-        writer.close().await.expect("writer closes");
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                service
+                    .execute_query(QueryRequest::read(batch.clone()))
+                    .await
+                    .expect("prepared equality lookup succeeds");
+                assert_eq!(
+                    crate::index_lifecycle::secondary::equality_read_metrics(),
+                    crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
+                        point_reads: 1,
+                        multi_get_calls: 0,
+                        scans: 0,
+                        graph_reads: 0,
+                    }
+                );
+
+                let parallel_batch = read_batch()
+                    .var_as(
+                        "first",
+                        g().n_with_label_where("User", Predicate::eq("email", EMAIL)),
+                    )
+                    .var_as(
+                        "second",
+                        g().n_with_label_where("User", Predicate::eq("email", EMAIL)),
+                    )
+                    .returning(["first", "second"]);
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                service
+                    .execute_query(QueryRequest::read(parallel_batch))
+                    .await
+                    .expect("parallel prepared equality lookups succeed");
+                assert_eq!(
+                    crate::index_lifecycle::secondary::equality_read_metrics().point_reads,
+                    2,
+                    "parallel contexts must retain the prepared catalog"
+                );
+
+                let prepared = db
+                    .planner_context_scoped_prepared(
+                        ParamBindings::default(),
+                        DataScope::LegacyUnscoped,
+                    )
+                    .await
+                    .expect("read request captures one exact catalog view");
+                let prepared_plan =
+                    helix_planner::planning::plan_read_batch(&batch, prepared.context())
+                        .expect("prepared equality lookup plans");
+                db.refresh_runtime_catalog(DataScope::LegacyUnscoped)
+                    .await
+                    .expect("a concurrent catalog publication succeeds");
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                db.execute_prepared_scoped_controlled(
+                    &prepared_plan,
+                    ParamBindings::default(),
+                    DataScope::LegacyUnscoped,
+                    ExecutionControl::unlimited(),
+                    prepared.into_catalog_proof(),
+                    helix_ast::query::SearchConsistency::Strong,
+                )
+                .await
+                .expect("the exact prepared read view survives a newer catalog publication");
+                assert_eq!(
+                    crate::index_lifecycle::secondary::equality_read_metrics().point_reads,
+                    1
+                );
+
+                let plan = helix_planner::planning::plan_read_batch(
+                    &batch,
+                    &db.planner_context(ParamBindings::default()),
+                )
+                .expect("public equality lookup plans");
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                db.execute(&plan, ParamBindings::default())
+                    .await
+                    .expect("unprepared equality lookup retains its safe fallback");
+                assert_eq!(
+                    crate::index_lifecycle::secondary::equality_read_metrics(),
+                    crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
+                        point_reads: 2,
+                        multi_get_calls: 0,
+                        scans: 0,
+                        graph_reads: 0,
+                    }
+                );
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn prepared_reader_equality_lookup_reuses_its_exact_catalog_view() {
+        crate::index_lifecycle::secondary::EqualityReadObserver::default()
+            .scope(async {
+                const EMAIL: &str = "reader@example.com";
+
+                let object_store: Arc<dyn slatedb::object_store::ObjectStore> =
+                    Arc::new(InMemory::new());
+                let writer = Arc::new(
+                    HelixDB::open_with_object_store_for_tests(
+                        "query-service-reader-one-read-equality",
+                        Arc::clone(&object_store),
+                    )
+                    .await
+                    .expect("writer should initialize storage"),
+                );
+                writer
+                    .install_index_for_tests(
+                        crate::config::SecondaryIndexDefinition::node_equality("User", "email")
+                            .expect("secondary index definition validates")
+                            .try_into()
+                            .expect("secondary index definition enters V2"),
+                    )
+                    .await
+                    .expect("secondary index becomes active");
+                HelixQueryService::new(Arc::clone(&writer))
+                    .execute_query(QueryRequest::write(write_batch().var_as(
+                        "created",
+                        g().add_n("User", vec![("email", PropertyInput::from(EMAIL))]),
+                    )))
+                    .await
+                    .expect("indexed node insert succeeds");
+                writer
+                    .flush_writer()
+                    .await
+                    .expect("writer state becomes reader-visible");
+
+                let reader = Arc::new(
+                    HelixDB::open_reader_with_object_store_for_tests(
+                        "query-service-reader-one-read-equality",
+                        object_store,
+                    )
+                    .await
+                    .expect("reader should open"),
+                );
+                let service = HelixQueryService::new(Arc::clone(&reader));
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                service
+                    .execute_query(QueryRequest::read(
+                        read_batch()
+                            .var_as(
+                                "users",
+                                g().n_with_label_where("User", Predicate::eq("email", EMAIL)),
+                            )
+                            .returning(["users"]),
+                    ))
+                    .await
+                    .expect("reader equality lookup succeeds");
+                assert_eq!(
+                    crate::index_lifecycle::secondary::equality_read_metrics(),
+                    crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
+                        point_reads: 1,
+                        multi_get_calls: 0,
+                        scans: 0,
+                        graph_reads: 0,
+                    }
+                );
+
+                reader.close().await.expect("reader closes");
+                writer.close().await.expect("writer closes");
+            })
+            .await
     }
 
     #[tokio::test]
     async fn overlapping_runtime_refresh_preserves_guarded_graph_write_authority() {
-        let db = HelixDB::open(HelixDbSource::InMemory {
-            database: "query-service-guarded-prepared-catalog".to_string(),
-        })
-        .await
-        .expect("writer should open");
-        db.wait_for_startup_cache_warm().await;
-        let batch = write_batch().var_as(
-            "created",
-            g().add_n("User", Vec::<(&str, PropertyInput)>::new()),
-        );
-        let prepared = db
-            .planner_context_scoped_prepared(ParamBindings::default(), DataScope::LegacyUnscoped)
-            .await
-            .expect("planner captures a gated catalog and read snapshot");
-        let plan = helix_planner::planning::plan_write_batch(&batch, prepared.context())
-            .expect("write plans");
-        db.refresh_runtime_catalog(DataScope::LegacyUnscoped)
-            .await
-            .expect("an overlapping in-memory catalog refresh succeeds");
-        let observed_generation =
-            db.runtime_catalog_generation_for_tests(DataScope::LegacyUnscoped);
+        crate::index_lifecycle::secondary::EqualityReadObserver::default()
+            .scope(async {
+                let db = HelixDB::open(HelixDbSource::InMemory {
+                    database: "query-service-guarded-prepared-catalog".to_string(),
+                })
+                .await
+                .expect("writer should open");
+                db.wait_for_startup_cache_warm().await;
+                let batch = write_batch().var_as(
+                    "created",
+                    g().add_n("User", Vec::<(&str, PropertyInput)>::new()),
+                );
+                let prepared = db
+                    .planner_context_scoped_prepared(
+                        ParamBindings::default(),
+                        DataScope::LegacyUnscoped,
+                    )
+                    .await
+                    .expect("planner captures a gated catalog and read snapshot");
+                let plan = helix_planner::planning::plan_write_batch(&batch, prepared.context())
+                    .expect("write plans");
+                db.refresh_runtime_catalog(DataScope::LegacyUnscoped)
+                    .await
+                    .expect("an overlapping in-memory catalog refresh succeeds");
+                let observed_generation =
+                    db.runtime_catalog_generation_for_tests(DataScope::LegacyUnscoped);
 
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        db.execute_prepared_scoped_controlled(
-            &plan,
-            ParamBindings::default(),
-            DataScope::LegacyUnscoped,
-            ExecutionControl::unlimited(),
-            prepared.into_catalog_proof(),
-        )
-        .await
-        .expect("graph write opens under its prepared authority");
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                db.execute_prepared_scoped_controlled(
+                    &plan,
+                    ParamBindings::default(),
+                    DataScope::LegacyUnscoped,
+                    ExecutionControl::unlimited(),
+                    prepared.into_catalog_proof(),
+                    helix_ast::query::SearchConsistency::Strong,
+                )
+                .await
+                .expect("graph write opens under its prepared authority");
 
-        assert_eq!(
-            db.runtime_catalog_generation_for_tests(DataScope::LegacyUnscoped),
-            observed_generation,
-            "a valid gated proof must not trigger a fallback catalog refresh"
-        );
+                assert_eq!(
+                    db.runtime_catalog_generation_for_tests(DataScope::LegacyUnscoped),
+                    observed_generation,
+                    "a valid gated proof must not trigger a fallback catalog refresh"
+                );
+            })
+            .await
     }
 
     #[tokio::test]
@@ -1026,6 +1255,7 @@ mod tests {
                 DataScope::LegacyUnscoped,
                 ExecutionControl::unlimited(),
                 prepared.into_catalog_proof(),
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .expect("foreign proof safely falls back");
@@ -1038,6 +1268,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreign_prepared_read_proof_cannot_authorize_an_index() {
+        crate::index_lifecycle::secondary::EqualityReadObserver::default().scope(async {
         let source = HelixDB::open(HelixDbSource::InMemory {
             database: "query-service-foreign-read-proof-source".to_string(),
         })
@@ -1078,6 +1309,7 @@ mod tests {
                 DataScope::LegacyUnscoped,
                 ExecutionControl::unlimited(),
                 prepared.into_catalog_proof(),
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .expect_err("foreign catalog authority must be discarded");
@@ -1093,6 +1325,8 @@ mod tests {
             1,
             "foreign proof must fall back to the target catalog point read"
         );
+
+        }).await
     }
 
     #[tokio::test]
@@ -1131,6 +1365,7 @@ mod tests {
                 DataScope::LegacyUnscoped,
                 ExecutionControl::unlimited(),
                 proof,
+                helix_ast::query::SearchConsistency::Strong,
             )
             .await
             .expect("expired proof safely falls back");
@@ -1170,6 +1405,7 @@ mod tests {
             tenant_scope,
             ExecutionControl::unlimited(),
             prepared.into_catalog_proof(),
+            helix_ast::query::SearchConsistency::Strong,
         )
         .await
         .expect("cross-scope proof safely falls back");
@@ -1247,7 +1483,7 @@ mod tests {
         .to_json_string()
         .expect("write request should serialize");
         let disguised = write.replacen(r#""request_type":"write""#, r#""request_type":"read""#, 1);
-        sonic_rs::from_str::<QueryRequest>(&disguised)
+        simd_json::from_reader::<_, QueryRequest>(disguised.as_bytes())
             .expect_err("a read envelope must reject a write payload");
 
         let response = service
@@ -1283,7 +1519,7 @@ mod tests {
         let disguised = write
             .replacen(r#""request_type":"write""#, r#""request_type":"read""#, 1)
             .replacen(r#""write":{"#, r#""read":{"#, 1);
-        sonic_rs::from_str::<QueryRequest>(&disguised)
+        simd_json::from_reader::<_, QueryRequest>(disguised.as_bytes())
             .expect_err("a read batch must reject a mutation traversal");
 
         let response = service
@@ -1392,7 +1628,11 @@ mod tests {
         assert!(!public_json.contains("diagnostics"));
 
         let telemetry_event = observation
-            .event(&Ok(response), std::time::Duration::from_micros(42))
+            .event(
+                None,
+                serde_json::to_value(response.diagnostics()).ok(),
+                std::time::Duration::from_micros(42),
+            )
             .into_telemetry()
             .expect("telemetry event");
         assert!(telemetry_event
@@ -1904,8 +2144,26 @@ mod tests {
         assert_eq!(empty_returns.to_json_bytes().unwrap(), br#"{}"#);
     }
 
-    #[tokio::test]
-    async fn query_response_uses_the_shape_of_the_binding_that_executed() {
+    #[test]
+    fn query_response_uses_the_shape_of_the_binding_that_executed() {
+        std::thread::Builder::new()
+            .name("query-service-return-shape".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("query service test runtime builds")
+                    .block_on(
+                        query_response_uses_the_shape_of_the_binding_that_executed_contract(),
+                    );
+            })
+            .expect("query service test thread starts")
+            .join()
+            .expect("query service test thread completes");
+    }
+
+    async fn query_response_uses_the_shape_of_the_binding_that_executed_contract() {
         let db = Arc::new(
             HelixDB::open(HelixDbSource::InMemory {
                 database: "query-service-runtime-return-shape".to_string(),
@@ -2048,6 +2306,7 @@ mod tests {
         let query = ValidatedQuery::Read {
             batch: ReadBatch::new(),
             parameters: BTreeMap::new(),
+            search_consistency: helix_ast::query::SearchConsistency::Strong,
         };
 
         query
@@ -2227,10 +2486,17 @@ mod tests {
         let planner = QueryServiceError::Planner(
             helix_planner::error::PlannerError::UnsupportedEdgeAllTarget,
         );
+        let expected_message = planner.to_string();
+        let converted = HelixDbError::from(planner);
         assert!(matches!(
-            HelixDbError::from(planner),
-            HelixDbError::Query(_)
+            converted,
+            HelixDbError::Planner(helix_planner::error::PlannerError::UnsupportedEdgeAllTarget)
         ));
+        assert_eq!(
+            converted.error_code(),
+            helix_ast::error_code::QueryErrorCode::UnsupportedEdgeAllTarget
+        );
+        assert_eq!(converted.to_string(), expected_message);
 
         let json =
             execution_scalar_to_json(ExecutionScalar::Value(PropertyValue::DateTime(i64::MAX)))
@@ -2238,11 +2504,205 @@ mod tests {
         assert!(matches!(json, QueryServiceError::JsonSerialize(_)));
         assert!(matches!(HelixDbError::from(json), HelixDbError::Query(_)));
 
-        let sonic = sonic_rs::from_str::<u8>("not-json").expect_err("invalid JSON should fail");
+        let decode = simd_json::from_reader::<_, u8>("not-json".as_bytes())
+            .expect_err("invalid JSON should fail");
         assert!(matches!(
-            HelixDbError::from(QueryServiceError::Serialize(sonic)),
+            HelixDbError::from(QueryServiceError::Serialize(decode)),
             HelixDbError::Query(_)
         ));
+    }
+
+    #[test]
+    fn query_failure_classes_cover_every_service_error() {
+        let json_error =
+            execution_scalar_to_json(ExecutionScalar::Value(PropertyValue::DateTime(i64::MAX)))
+                .expect_err("invalid datetime should fail JSON conversion");
+        let QueryServiceError::JsonSerialize(json_error) = json_error else {
+            panic!("datetime overflow should be a JSON serialization failure");
+        };
+        let decode_error = simd_json::from_reader::<_, u8>("not-json".as_bytes())
+            .expect_err("invalid JSON should fail");
+        let cases = [
+            (
+                QueryServiceError::Db(HelixDbError::WriterFencedCommitOutcomeUnknown),
+                QueryFailureClass::CommitOutcomeUnknown,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::TransactionConflict("retry".to_owned())),
+                QueryFailureClass::Conflict,
+            ),
+            (
+                QueryServiceError::InvalidRequest("bad request".to_owned()),
+                QueryFailureClass::InvalidRequest,
+            ),
+            (
+                QueryServiceError::Planner(
+                    helix_planner::error::PlannerError::UnsupportedEdgeAllTarget,
+                ),
+                QueryFailureClass::Planning,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::Planner(
+                    helix_planner::error::PlannerError::UnsupportedEdgeAllTarget,
+                )),
+                QueryFailureClass::Planning,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::ActiveTextMutationLimitExceeded {
+                    resource: crate::error::ActiveTextMutationResource::Entities,
+                    observed: 513,
+                    limit: 512,
+                }),
+                QueryFailureClass::InvalidRequest,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::WriterModeRequired { actual: "reader" }),
+                QueryFailureClass::WriterModeRequired,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::Query("execution".to_owned())),
+                QueryFailureClass::Execution,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::IndexNotFound("documents".to_owned())),
+                QueryFailureClass::Execution,
+            ),
+            (
+                QueryServiceError::JsonSerialize(json_error),
+                QueryFailureClass::Internal,
+            ),
+            (
+                QueryServiceError::Serialize(decode_error),
+                QueryFailureClass::Internal,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.classify(), expected, "{error}");
+        }
+    }
+
+    #[test]
+    fn cypher_observations_record_a_redacted_shape() {
+        let mut request = crate::cypher::Request::new(
+            "CREATE (p:Person {name:'Ada', age:36}) RETURN p.name, $id",
+        );
+        request.query_name = Some("create_person".to_owned());
+        let observation =
+            QueryObservation::capture_cypher(&request.compile().unwrap(), None).unwrap();
+        assert_eq!(
+            observation.raw_query.as_str(),
+            r#"{"cypher":"CREATE ( p : Person { name : ? , age : ? } ) RETURN p . name , $id"}"#
+        );
+        assert_eq!(observation.query_type, query::QueryType::Write);
+        assert_eq!(
+            observation.name,
+            Some(query::QueryName::new("create_person").unwrap())
+        );
+    }
+
+    #[test]
+    fn cypher_failures_classify_like_their_transport_status() {
+        use crate::cypher::Error;
+        use helix_planner::relational::QueryError;
+
+        let cases = [
+            (
+                Error::Query(QueryError::compile("syntax_error", "unexpected", "bad")),
+                QueryFailureClass::InvalidRequest,
+            ),
+            (
+                Error::Query(QueryError::runtime(
+                    "arithmetic_error",
+                    "division_by_zero",
+                    "x",
+                )),
+                QueryFailureClass::Execution,
+            ),
+            (
+                Error::Query(QueryError::runtime("resource_limit", "memory_limit", "x")),
+                QueryFailureClass::Execution,
+            ),
+            (
+                Error::Query(QueryError::compile(
+                    "access_mode_error",
+                    "writer_required",
+                    "x",
+                )),
+                QueryFailureClass::WriterModeRequired,
+            ),
+            (
+                Error::Query(QueryError::compile(
+                    "internal_planner_error",
+                    "invariant",
+                    "x",
+                )),
+                QueryFailureClass::Planning,
+            ),
+            (
+                Error::Storage(HelixDbError::WriterFencedCommitOutcomeUnknown),
+                QueryFailureClass::CommitOutcomeUnknown,
+            ),
+            (
+                Error::Storage(HelixDbError::TransactionConflict("retry".to_owned())),
+                QueryFailureClass::Conflict,
+            ),
+            (
+                Error::Json(serde_json::from_str::<u8>("x").unwrap_err()),
+                QueryFailureClass::Internal,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(cypher_failure_class(&error), expected, "{error}");
+        }
+    }
+
+    #[test]
+    fn query_failure_classes_map_to_telemetry_error_types() {
+        let cases = [
+            (
+                QueryFailureClass::CommitOutcomeUnknown,
+                query::QueryErrorType::Execution,
+            ),
+            (QueryFailureClass::Conflict, query::QueryErrorType::Conflict),
+            (
+                QueryFailureClass::Backpressure,
+                query::QueryErrorType::Conflict,
+            ),
+            (
+                QueryFailureClass::InvalidRequest,
+                query::QueryErrorType::InvalidRequest,
+            ),
+            (QueryFailureClass::Planning, query::QueryErrorType::Planning),
+            (
+                QueryFailureClass::WriterModeRequired,
+                query::QueryErrorType::Execution,
+            ),
+            (
+                QueryFailureClass::Execution,
+                query::QueryErrorType::Execution,
+            ),
+            (QueryFailureClass::Internal, query::QueryErrorType::Internal),
+        ];
+
+        for (class, expected) in cases {
+            assert_eq!(query::QueryErrorType::from(class), expected, "{class:?}");
+        }
+    }
+
+    #[test]
+    fn active_text_limit_telemetry_is_invalid_request() {
+        let error = QueryServiceError::Db(HelixDbError::ActiveTextMutationLimitExceeded {
+            resource: crate::error::ActiveTextMutationResource::Entities,
+            observed: 513,
+            limit: 512,
+        });
+        assert_eq!(
+            query::QueryErrorType::from(error.classify()),
+            query::QueryErrorType::InvalidRequest
+        );
+        assert!(!error.is_commit_outcome_unknown());
+        assert!(!error.is_transaction_conflict());
     }
 
     #[test]
@@ -2266,13 +2726,16 @@ mod tests {
         assert_eq!(observation.query_type, query::QueryType::Read);
 
         assert_eq!(
-            query_error_type(&QueryServiceError::InvalidRequest("invalid".to_owned())),
+            query::QueryErrorType::from(
+                QueryServiceError::InvalidRequest("invalid".to_owned()).classify()
+            ),
             query::QueryErrorType::InvalidRequest
         );
         assert_eq!(
-            query_error_type(&QueryServiceError::Db(HelixDbError::TransactionConflict(
-                "conflict".to_owned()
-            ))),
+            query::QueryErrorType::from(
+                QueryServiceError::Db(HelixDbError::TransactionConflict("conflict".to_owned()))
+                    .classify()
+            ),
             query::QueryErrorType::Conflict
         );
         let invalid_vector_inputs = [
@@ -2292,33 +2755,38 @@ mod tests {
         ];
         for error in invalid_vector_inputs {
             assert_eq!(
-                query_error_type(&QueryServiceError::Db(error)),
+                query::QueryErrorType::from(QueryServiceError::Db(error).classify()),
                 query::QueryErrorType::InvalidRequest
             );
         }
         assert_eq!(
-            query_error_type(&QueryServiceError::Db(HelixDbError::InvalidVectorItem(
-                crate::search::vector::VectorItemDecodeError::HeaderMismatch
-            ))),
+            query::QueryErrorType::from(
+                QueryServiceError::Db(HelixDbError::InvalidVectorItem(
+                    crate::search::vector::VectorItemDecodeError::HeaderMismatch
+                ))
+                .classify()
+            ),
             query::QueryErrorType::Execution
         );
         assert_eq!(
-            query_error_type(&QueryServiceError::Db(HelixDbError::Query(
-                "execution".to_owned()
-            ))),
+            query::QueryErrorType::from(
+                QueryServiceError::Db(HelixDbError::Query("execution".to_owned())).classify()
+            ),
             query::QueryErrorType::Execution
         );
 
         let failed = observation.event(
-            &Err(QueryServiceError::Db(
-                HelixDbError::UniqueConstraintViolation {
+            Some(
+                QueryServiceError::Db(HelixDbError::UniqueConstraintViolation {
                     label: "User".to_owned(),
                     property: "email".to_owned(),
                     value: "\"secret@example.com\"".to_owned(),
                     existing_node_id: 1,
                     attempted_node_id: 2,
-                },
-            )),
+                })
+                .classify(),
+            ),
+            None,
             std::time::Duration::from_micros(1),
         );
         let encoded = serde_json::to_string(
@@ -2330,5 +2798,34 @@ mod tests {
         .expect("telemetry JSON");
         assert!(!encoded.contains("secret@example.com"));
         assert!(encoded.contains("query execution failed"));
+
+        // A strong read search rejected by backpressure is bucketed with
+        // conflicts but not described as one.
+        let rejected = QueryObservation::capture(&request, None)
+            .expect("canonical query")
+            .event(
+                Some(
+                    QueryServiceError::Db(HelixDbError::IndexBackpressure {
+                        scope: DataScope::LegacyUnscoped,
+                        index_id: 4,
+                        resource: crate::error::IndexBackpressureResource::SuppressedSearchResults,
+                        requested: 810,
+                        limit: 800,
+                    })
+                    .classify(),
+                ),
+                None,
+                std::time::Duration::from_micros(1),
+            );
+        let query::QueryOutcome::Failed { errors } = &rejected.outcome else {
+            panic!("a rejected query fails");
+        };
+        assert_eq!(
+            errors.as_slice(),
+            [query::QueryError {
+                error_type: query::QueryErrorType::Conflict,
+                message: "query was rejected by index backpressure".to_owned(),
+            }]
+        );
     }
 }

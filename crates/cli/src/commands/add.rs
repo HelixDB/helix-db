@@ -1,11 +1,13 @@
+use crate::cloud::model::Named as _;
+use crate::cloud::resolve::{Kind, Link, ResolvedDatabase, Scope};
 use crate::config::{
-    EnterpriseInstanceConfig, LocalInstanceConfig, LocalStorageMode, QueryAuthScheme,
-    S3StorageConfig, DEFAULT_QUERY_AUTH_ENV, DEFAULT_QUERY_AUTH_HEADER,
+    EnterpriseInstanceConfig, LocalInstanceConfig, LocalStorageMode, S3StorageConfig,
 };
-use crate::output::Operation;
+use crate::errors::CliError;
+use crate::output::{self, Operation};
 use crate::project::ProjectContext;
 use crate::prompts;
-use crate::AddTarget;
+use crate::{AddTarget, ScopeArgs};
 use eyre::{eyre, Result};
 use std::path::PathBuf;
 
@@ -30,6 +32,7 @@ pub async fn run(path: Option<String>, target: Option<AddTarget>) -> Result<()> 
             disk,
             s3,
         } => {
+            validate_name(&name)?;
             ensure_available(&project, &name)?;
             let op = Operation::new("Adding", &name);
             project
@@ -38,41 +41,95 @@ pub async fn run(path: Option<String>, target: Option<AddTarget>) -> Result<()> 
                 .insert(name.clone(), local_instance_config(port, disk, &s3)?);
             project.config.save_to_file(&config_path)?;
             op.success();
+            output::emit(&serde_json::json!({"instance": name}), |_| Ok(()))?;
         }
         AddTarget::Enterprise {
             name,
-            cluster_id,
-            gateway_url,
+            database,
+            project: target_project,
+            workspace,
         } => {
+            validate_name(&name)?;
             ensure_available(&project, &name)?;
-            let target = crate::commands::config::resolve_enterprise_target(
-                cluster_id,
-                gateway_url,
-                project.config.project.id.clone(),
-                project.config.project.workspace_id.clone(),
-            )
-            .await?;
             let op = Operation::new("Adding", &name);
+            let scope = Scope::new(Link::from_config(&project.config)).await?;
+            let args = ScopeArgs {
+                workspace,
+                project: target_project,
+            };
+            let database = match database {
+                Some(database) => scope.database(Some(&database), &args).await?,
+                // Adding means choosing a database that is not in helix.toml
+                // yet, from the linked (or chosen) project.
+                None => {
+                    let added: Vec<_> = project
+                        .config
+                        .enterprise
+                        .values()
+                        .map(|instance| instance.database.clone())
+                        .collect();
+                    let owner = scope.project(&args).await?;
+                    let (already_added, candidates): (Vec<_>, Vec<_>) = scope
+                        .resolved_databases_in(&owner)
+                        .await?
+                        .into_iter()
+                        .partition(|resolved| added.contains(&resolved.database.reference()));
+                    if candidates.is_empty() && !already_added.is_empty() {
+                        return Err(CliError::new(format!(
+                            "every database in {} is already in helix.toml",
+                            owner.label()
+                        ))
+                        .with_hint(
+                            "create another with `helix database create <name>`, or pass --database to add one again",
+                        )
+                        .into());
+                    }
+                    scope.choose(Kind::Database, candidates)?
+                }
+            };
+            let ResolvedDatabase { database, owner } = database;
+            let linked = project.config.project.id.as_deref();
+            if linked.is_some_and(|linked| linked != owner.project_id) {
+                return Err(CliError::new(format!(
+                    "{} belongs to project {}, but helix.toml is linked to {}",
+                    database.reference(),
+                    owner.project_id,
+                    linked.unwrap_or_default()
+                ))
+                .with_hint(
+                    "add a database from the linked project, or relink with `helix project link`",
+                )
+                .into());
+            }
+            project
+                .config
+                .project
+                .id
+                .get_or_insert_with(|| owner.project_id.clone());
+            project
+                .config
+                .project
+                .workspace_id
+                .get_or_insert_with(|| owner.workspace_id.clone());
             project.config.enterprise.insert(
                 name.clone(),
                 EnterpriseInstanceConfig {
-                    cluster_id: target.cluster_id,
-                    workspace_id: target.workspace_id,
-                    project_id: target.project_id,
-                    gateway_url: target.gateway_url,
-                    query_auth_header: DEFAULT_QUERY_AUTH_HEADER.to_string(),
-                    query_auth_env: DEFAULT_QUERY_AUTH_ENV.to_string(),
-                    query_auth_scheme: Some(QueryAuthScheme::Bearer),
-                    availability_mode: None,
-                    gateway_node_type: None,
-                    db_node_type: None,
-                    min_instances: 1,
-                    max_instances: 1,
-                    db_config: Default::default(),
+                    database: database.reference(),
+                    workspace_id: Some(owner.workspace_id),
+                    project_id: Some(owner.project_id),
                 },
             );
             project.config.save_to_file(&config_path)?;
+            output::step(&format!(
+                "Linked {} ({})",
+                database.label(),
+                database.reference()
+            ));
             op.success();
+            output::emit(
+                &serde_json::json!({"instance": name, "database": database.reference()}),
+                |_| Ok(()),
+            )?;
         }
     }
 
@@ -115,4 +172,32 @@ fn ensure_available(project: &ProjectContext, name: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Rejects a `--name` the interactive prompt (`prompts::input_name`) would never
+/// let through, before it's written to `helix.toml`. Without this, `helix add
+/// --name <bad>` would save the config successfully and then every subsequent
+/// `helix.toml` load would fail `HelixConfig::validate`, locking the project out
+/// until the name was fixed by hand.
+fn validate_name(name: &str) -> Result<()> {
+    crate::config::validate_instance_name(name).map_err(|message| eyre::eyre!(message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_name_rejects_disallowed_characters() {
+        assert!(validate_name("my.prod").is_err());
+        assert!(validate_name("../evil").is_err());
+        assert!(validate_name("").is_err());
+    }
+
+    #[test]
+    fn validate_name_accepts_the_normal_charset() {
+        assert!(validate_name("dev").is_ok());
+        assert!(validate_name("prod-1").is_ok());
+        assert!(validate_name("my_instance").is_ok());
+    }
 }

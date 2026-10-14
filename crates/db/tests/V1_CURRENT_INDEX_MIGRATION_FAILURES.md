@@ -4,7 +4,8 @@ This ledger records confirmed migration defects and their resolution state.
 
 ## H1: migration parity does not validate current typed secondary identity
 
-Status: resolved on this branch.
+Status: resolved. The standalone parity harness and `migration-parity` feature
+were later removed; the observer now builds under `production-coverage`.
 
 Pre-fix evidence:
 

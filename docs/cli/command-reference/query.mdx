@@ -1,201 +1,115 @@
 ---
 title: "helix query"
 sidebarTitle: "query"
+description: "Execute a direct Helix v3 query against a local instance or a Cloud database"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-Send a dynamic query to `POST /v2/query` on a local or Helix Cloud instance. You can supply the query as a raw JSON request (`--file`/`--json`) or write it in the TypeScript DSL (`-e`/`--ts`/`--ts-file`) and let the CLI build the request for you.
+Send one v3 query request to a local instance or a Helix Cloud database and print the JSON
+response. Local and Cloud.
 
 ## Usage
 
-```text
-helix query [INSTANCE] (--file <REQUEST.json> | --json '<JSON>' | -e '<TS>' | --ts-file <QUERY.ts>) [OPTIONS]
+```bash
+helix query [INSTANCE] --file <request.json>
+helix query [INSTANCE] --body '<v3-json>'
+helix query [INSTANCE] -e '<typescript-expression>'
+helix query [INSTANCE] --ts-file <query.ts>
 ```
 
-Provide **exactly one** input: a JSON request (`--file` or `--json`) or a TypeScript DSL expression (`-e`/`--ts` or `--ts-file`). The four input flags are mutually exclusive.
+Exactly one input is required. The envelope must include lowercase `request_type` (`read` or `write`)
+and `query`. Query bundles are not supported.
 
 ## Arguments
 
 | Argument | Description |
-|----------|-------------|
-| `INSTANCE` | Instance name from `helix.toml`. Defaults to `dev` if omitted. |
+| --- | --- |
+| `INSTANCE` | Instance name from `helix.toml`, or an explicit `tenant:<id>` / `cluster:<id>` Cloud database. See [Target resolution](#target-resolution) for the default. |
 
-## Available flags
+## Options
 
-Exactly one input flag is required (`--file`, `--json`, `-e`/`--ts`, or `--ts-file`).
+### Input (pick one)
 
-| Flag | Type | Required | Description | Default |
-|------|------|----------|-------------|---------|
-| `-f`, `--file` | Path | One input required | JSON request body file. | — |
-| `--json` | String | One input required | Inline JSON request body. | — |
-| `-e`, `--ts` | String | One input required | TypeScript DSL expression, evaluated locally to build the request (like `mysql -e`). See [TypeScript DSL input](#typescript-dsl-input). | — |
-| `--ts-file` | Path | One input required | Path to a `.ts` file containing a TypeScript DSL expression. | — |
-| `--warm` | Boolean | No | Send the read as a cache-warming call (`X-Helix-Warm: true`). Helix Cloud fans out and returns `204 No Content`; standalone local instances warm one process and may return the normal query body. Read requests only. | `false` |
-| `--host` | String | No | Override the host for local instances. | `localhost` |
-| `--port` | Number | No | Override the port for local instances. | `[local.<instance>] port` (default `6969`) |
-| `--compact` | Boolean | No | Print compact JSON instead of pretty-printed JSON. | `false` |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-f`, `--file <REQUEST.json>` | Read the request from a JSON file. | — |
+| `--body <JSON>` | Read the request from an inline JSON string. | — |
+| `-e`, `--ts <TS>` | Build the request from a TypeScript DSL expression, like `mysql -e`. | — |
+| `--ts-file <QUERY.ts>` | Build the request from a TypeScript DSL file. | — |
 
-## Request body
+### Connection (local only)
 
-The JSON request must include:
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--host <HOST>` | Override the host. | `localhost` |
+| `--port <PORT>` | Override the port. | The instance's port in `helix.toml` |
+| `--warm` | `read` requests only: pre-warm caches with the `X-Helix-Warm` header. | Off |
 
-- `request_type` — lowercase `"read"` or `"write"`. Anything else is rejected with `request_type must be lowercase 'read' or 'write'`.
-- `query_name` — optional top-level query name for gateway logs and query diagnostics. Use exactly `query_name`; `name` and `queryName` are not accepted aliases. Missing or `null` falls back to `__dynamic__`.
-- `query` — exactly one typed `read` or `write` batch containing `entries` and `returns`.
-  Missing `query` is rejected with `dynamic query request must include query`.
-- `parameters` and `parameter_types` — optional typed runtime values and their schemas.
+### Output
 
-`helix init local` scaffolds `examples/request.json` with a runnable read request:
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print the response as compact JSON only, with no footer. | Off (highlighted, pretty-printed) |
 
-```json
-{
-  "request_type": "read",
-  "query_name": "node_count",
-  "query": {
-    "read": {
-      "entries": [
-        {
-          "query": {
-            "name": "node_count",
-            "root": {
-              "count": {
-                "input": {
-                  "nodes_where": {
-                    "predicate": {
-                      "eq": {
-                        "left": { "property": "$label" },
-                        "right": { "constant": { "string": "User" } }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      ],
-      "returns": ["node_count"]
-    }
-  }
-}
-```
+## Behavior
 
-Every traversal root must contain a valid source before an operation such as `count`.
+### Target resolution
 
-Use `--file` for checked-in or reusable requests, and `--json` for quick one-off requests from a shell. Quote inline JSON so your shell passes it as one argument.
+- A typed `tenant:<id>` / `cluster:<id>` target works without a `helix.toml`.
+- With no target, the CLI uses the `dev` instance (local or Cloud), then the only instance, then a picker in a terminal.
+- Otherwise it fails and lists the instances you can pass.
 
-## Query warming
+### Local queries
 
-`--warm` sends the same read body with `X-Helix-Warm: true`. Helix Cloud fans the
-request out to every eligible database backend and discards their response bodies.
-The command succeeds silently on `204 No Content` after at least one backend
-succeeds; partial backend failure does not fail the warm-up. If every target fails,
-the gateway returns the normal deterministic error. A standalone local instance
-warms its single process; the `v0.0.4` runtime returns `200 OK` with the normal
-query body. A managed cluster with no eligible warming target returns
-`503 Service Unavailable`.
+- Local queries post to the auth-disabled local `/v2/query`.
+- `--host`, `--port`, and read-only `--warm` are local options; Cloud targets reject them.
+- If nothing is listening, the error suggests `helix start <instance>`.
 
-Warm writes are rejected with `400 Bad Request` before backend execution. At the
-HTTP/SDK layer, combine `X-Helix-Warm: true` with
-`X-Helix-Require-Writer: true` when only the authoritative writer should be warmed.
-Authentication, [request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits),
-retries, and normal query timeouts still apply.
+### Cloud queries
 
-## TypeScript DSL input
+Cloud queries use the WorkOS session and go through the broker — the Helix Cloud backend service
+that forwards CLI queries to your database. The CLI never calls the Cloud gateway (the database
+endpoint that applications reach with an application key) directly.
 
-Instead of hand-writing JSON, you can pass a TypeScript DSL expression and let the CLI build the request — the same way `mysql -e` runs SQL from the shell:
+- `read` uses the backend read-query RPC and requires `database.query.read`.
+- `write` uses the backend write-query RPC and requires `database.query.write`.
+- The backend rejects an operation/envelope mismatch before gateway dispatch.
+- No database key, custom auth header, or direct gateway URL is accepted.
+- A mutation is never retried after dispatch, timeout, or ambiguous transport failure.
+- Cloud query bodies, parameters, results, operational gateway authorization, and credentials are not logged by the broker.
 
-```bash
-# Inline expression with -e / --ts
-helix query dev -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
+### TypeScript input
 
-# Or from a .ts file
-helix query dev --ts-file queries/count_users.ts
-```
+- `-e` and `--ts-file` need Node.js 20+. The expression must evaluate to a `readBatch()` or `writeBatch()` builder.
+- On first use, the CLI installs the pinned `@helix-db/helix-db` SDK into the Helix cache directory (override with `HELIX_CACHE_DIR`). No running instance is needed to build the request.
 
-How it works:
+### Output
 
-- The expression must evaluate to a `readBatch()` or `writeBatch()` builder. `g`, `readBatch`, `writeBatch`, `defineParams`, and `param` are auto-imported and already in scope — you write only the expression, no imports.
-- The CLI evaluates it locally with Node using the published `@helix-db/helix-db` SDK, calls `.toQueryJson()`, and posts the resulting operation-tree request to `/v2/query`. The builders are pure (no I/O), so no instance needs to be running to *build* the request — only to run it. There is no separate compile step.
-- `request_type` is inferred automatically from whether you used `readBatch()` or `writeBatch()`.
-
-Requirements:
-
-- **Node.js 20+** on `PATH` (npm ships with it). On first use the CLI installs the SDK once into its cache directory; later runs reuse it.
-- For inline `-e` use, write a **single expression** with **no TypeScript type annotations** (it is evaluated as an expression, not compiled). Put more elaborate queries in a `--ts-file`.
-
-If Node is missing, the CLI tells you to install Node 20+ or fall back to `--json`/`--file`. For the full DSL surface, see the [`helix-query-typescript`](https://github.com/HelixDB/skills) skill.
-
-## Validation rules
-
-| Rule | Error |
-|------|-------|
-| `request_type` is missing | `dynamic query request must include request_type` |
-| `request_type` is not lowercase `read` or `write` | `request_type must be lowercase 'read' or 'write'` |
-| `query_name` is blank or whitespace-only | `query_name must be non-empty when provided` |
-| `name` or `queryName` is used instead of `query_name` | Invalid request body / unknown field |
-| `query` is missing | `dynamic query request must include query` |
-| `--warm` is used with a write request | `--warm is only valid for read requests` |
-| Neither `--file` nor `--json` is provided | Clap usage error |
-| Both `--file` and `--json` are provided | Clap conflict error |
-
-## Helix Cloud targets
-
-For a Helix Cloud instance, `helix query` reads `[enterprise.<instance>]` in `helix.toml` and:
-
-- Posts to `<gateway_url>/v2/query`.
-- Sends an auth header named by `query_auth_header` (default `Authorization`) using `query_auth_scheme` (`bearer` or `raw`). Bearer mode adds `Bearer` to the raw key read from `query_auth_env` (default `HELIX_API_KEY`); raw mode sends the value unchanged. The value is read from your shell environment or from a `.env` file in the project root.
-
-If `gateway_url` is missing, the CLI returns:
-
-```
-Enterprise gateway URL is not configured for '<instance>'. Run 'helix sync <instance>' or set gateway_url in helix.toml.
-```
-
-If the auth env var is missing, the CLI returns `Environment variable <NAME> is required for Enterprise query auth`.
-
-## Connection errors
-
-If the CLI cannot reach the instance, it reports `cannot reach Helix instance '<instance>' at <endpoint>` with a recovery hint tailored to the instance kind:
-
-- **Local** — `Start it with helix start <instance> and check it with helix status <instance>. If it runs on another host/port, pass --host/--port.`
-- **Enterprise** — `Check the gateway_url for '<instance>' in helix.toml and your network connection. helix sync <instance> refreshes the gateway metadata from Helix Cloud.`
-
-## Output
-
-- A non-empty JSON response is pretty-printed by default; pass `--compact` to print on a single line.
-- `204 No Content` (returned by Helix Cloud after at least one warm target succeeds) produces no output and exits successfully.
-- A standalone local warm read can return `200 OK`; its normal JSON body is printed.
-- Non-2xx responses produce `Query failed with HTTP <status>: <body>` and exit with a non-zero status.
+- The response goes to stdout as syntax-highlighted, pretty-printed JSON. A dim footer with the HTTP status, latency, and target (for example `200 OK · 12ms · dev`) goes to stderr, so stdout stays pipeable.
+- `--json` prints only the compact JSON response. `--quiet` still prints the response but drops the footer.
+- An empty response prints nothing. A non-2xx response fails with the HTTP status and body.
 
 ## Examples
 
 ```bash
-# Send the example request to the local 'dev' instance
-helix query dev --file examples/request.json
+# Send a request file to the default target
+helix query --file examples/request.json
 
-# Warm the local process; the standalone runtime prints its normal response
-helix query dev --file examples/request.json --warm
+# Target a named local instance and print one line of JSON
+helix query dev --file examples/request.json --json
 
-# Print compact JSON suitable for piping into jq
-helix query dev --file examples/request.json --compact | jq '.node_count'
+# Build the request from a TypeScript DSL expression
+helix query -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
 
-# Send an inline JSON request body
-helix query dev --json '{"request_type":"read","query_name":"ad_hoc_read","query":{"read":{"entries":[],"returns":[]}},"parameters":{}}'
-
-# Build the request from a TypeScript DSL expression instead of JSON
-helix query dev -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
-
-# Target Helix Cloud. Export the raw key; bearer mode adds the prefix.
-export HELIX_API_KEY="..."
-helix query production --file examples/request.json
+# Query an explicit Cloud database, no helix.toml needed
+helix query tenant:<id> --file request.json
 ```
 
 ## Related
 
-- [`helix start`](/cli/command-reference/start) — start a local instance to query against
-- [`helix sync`](/cli/command-reference/sync) — refresh Helix Cloud gateway/auth metadata
+- [`helix shell`](/cli/command-reference/shell) — send several requests interactively.
+- [`helix start`](/cli/command-reference/start) — start the local instance you query.
+- [Local workflow](/cli/workflows/local) — iterate on queries locally.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — query a Cloud database.

@@ -19,6 +19,7 @@ import {
   PropertyValue,
   QueryParamType,
   RepeatConfig,
+  SearchConsistency,
   ShortestPathDirection,
   SourcePredicate,
   Step,
@@ -515,6 +516,20 @@ export function runtimeFixtures(): Fixture[] {
       ),
     ),
     runtime(
+      "028a-read-eventual-search",
+      QueryRequest.read(
+        readBatch()
+          .varAs("text_hits", g().textSearchNodes("ParityUser", "bio", "graph", 5, null).valueMap(["externalId", "bio", "$distance"]))
+          .varAs(
+            "vector_hits",
+            g()
+              .vectorSearchNodes("ParityUser", "embedding", [1.0, 0.0, 0.0], 3, null)
+              .project([Projection.property("externalId", "externalId"), Projection.property("$distance", "distance")]),
+          )
+          .returning(["text_hits", "vector_hits"]),
+      ).withSearchConsistency(SearchConsistency.Eventual),
+    ),
+    runtime(
       "029-write-drop-temp-node",
       QueryRequest.write(
         writeBatch()
@@ -661,7 +676,7 @@ export function runtimeFixtures(): Fixture[] {
       QueryRequest.write(
         writeBatch()
           .varAs("edge_matches", g().eWithLabel("FOLLOWS").where(Predicate.eq("note", "dropitemedge")))
-          .varAs("edges", g().dropEdgeById(EdgeRef.var("edge_matches")).count())
+          .varAs("edges", g().e(EdgeRef.var("edge_matches")).drop().count())
           .varAs("source", g().nWithLabel("ParityUser").where(Predicate.eq("externalId", "drop-text-source")).drop().count())
           .varAs("target", g().nWithLabel("ParityUser").where(Predicate.eq("externalId", "drop-text-target")).drop().count())
           .varAs("active_source", g().nWithLabel("ParityUser").where(Predicate.eq("externalId", "active-text-source")).drop().count())

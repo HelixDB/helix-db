@@ -30,7 +30,9 @@ pub struct Cycle {
 pub struct CycleResult {
     /// Cycles in canonical deterministic order.
     pub cycles: Vec<Cycle>,
-    /// True only when `max_cycles` stopped enumeration.
+    /// True only when a cycle was found and left out because `max_cycles` was
+    /// already full. A cap filled exactly still returns every cycle, so this
+    /// stays false.
     pub truncated: bool,
 }
 
@@ -113,19 +115,23 @@ impl Graph {
                 if cycle_len <= options.length_bound.get() {
                     path_edges.push(arc.edge);
                     let (nodes, edges) = self.canonical_cycle(path_nodes, path_edges);
+                    path_edges.pop();
                     match canonical.get_mut(&nodes) {
                         Some(existing) if edges < *existing => *existing = edges,
                         Some(_) => {}
                         None => {
+                            // Truncation means a cycle existed that we did not
+                            // return. Filling the cap exactly is a complete
+                            // answer, so only a *further* distinct cycle stops
+                            // enumeration, and that one is left out.
+                            if options
+                                .max_cycles
+                                .is_some_and(|limit| canonical.len() >= limit.get())
+                            {
+                                return true;
+                            }
                             canonical.insert(nodes, edges);
                         }
-                    }
-                    path_edges.pop();
-                    if options
-                        .max_cycles
-                        .is_some_and(|limit| canonical.len() >= limit.get())
-                    {
-                        return true;
                     }
                 }
                 continue;
@@ -343,6 +349,44 @@ mod tests {
         });
         assert_eq!(result.cycles.len(), 1);
         assert!(result.truncated);
+    }
+
+    /// A cap that is filled exactly has cut nothing off, so the result is
+    /// complete and `truncated` must stay false. Only a further cycle that the
+    /// cap refused counts as truncation.
+    #[test]
+    fn a_cap_filled_exactly_is_not_truncated() {
+        let graph = Graph::new(
+            GraphKind::DiGraph,
+            [Node::new("a"), Node::new("b")],
+            [Edge::new("aa", "a", "a"), Edge::new("bb", "b", "b")],
+        )
+        .unwrap();
+
+        let uncapped = graph.simple_cycles(CycleOptions {
+            length_bound: NonZeroUsize::new(1).unwrap(),
+            max_cycles: None,
+        });
+        assert_eq!(uncapped.cycles.len(), 2);
+        assert!(!uncapped.truncated);
+
+        let exact = graph.simple_cycles(CycleOptions {
+            length_bound: NonZeroUsize::new(1).unwrap(),
+            max_cycles: NonZeroUsize::new(2),
+        });
+        assert_eq!(exact.cycles, uncapped.cycles);
+        assert!(
+            !exact.truncated,
+            "a cap of two over exactly two cycles returned everything"
+        );
+
+        // One under the true count still truncates, and returns one fewer.
+        let capped = graph.simple_cycles(CycleOptions {
+            length_bound: NonZeroUsize::new(1).unwrap(),
+            max_cycles: NonZeroUsize::new(1),
+        });
+        assert_eq!(capped.cycles.len(), 1);
+        assert!(capped.truncated);
     }
 
     #[test]

@@ -6,6 +6,9 @@
 mod aggregate;
 mod bounds_sets;
 mod dependencies;
+mod membership;
+mod membership_retention;
 mod projection_order;
+mod record_batches;
 mod support;
 mod terminals;

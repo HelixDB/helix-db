@@ -4,7 +4,7 @@ use crate::{catalog, ir, logical, optimizer, rules};
 
 /// Range-index direction rewrite outcome at the access-order rule boundary.
 #[derive(Debug, Clone, PartialEq)]
-pub(in crate::rules::access) enum AccessOrderRangeDirectionRewrite {
+pub(in crate::rules) enum AccessOrderRangeDirectionRewrite {
     /// No opposite-direction range index can satisfy the order request.
     NotApplicable,
     /// The order can be satisfied by switching to the returned access path.
@@ -12,14 +12,15 @@ pub(in crate::rules::access) enum AccessOrderRangeDirectionRewrite {
 }
 
 impl AccessOrderRangeDirectionRewrite {
-    pub(in crate::rules::access) const fn is_rewritten(&self) -> bool {
-        matches!(self, Self::Rewritten(_))
-    }
-
-    pub(in crate::rules::access) fn into_rule_result(self) -> optimizer::RuleResult {
+    pub(in crate::rules) fn into_rule_result(
+        self,
+        ordering: ir::OrderKeys,
+    ) -> optimizer::RuleResult {
         match self {
             Self::NotApplicable => optimizer::RuleResult::NotApplicable,
-            Self::Rewritten(access) => rules::access_path_result(access),
+            Self::Rewritten(access) => rules::logical_result(logical::LogicalExpr::AccessOrder(
+                logical::AccessOrder::new(access, ordering),
+            )),
         }
     }
 }

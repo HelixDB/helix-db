@@ -5,7 +5,10 @@
 //! metadata DTOs, and the direct HNSW facade are exercised by the feature-gated
 //! internal production-contract target instead of being kept public for tests.
 
-use std::{cmp::Ordering, collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    cmp::Ordering, collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc,
+    time::Duration,
+};
 
 use db::config::{self, VectorIndexDefinition};
 use db::encoding::v2::values::indexes::vector::{decode_layer0_neighbors, encode_layer0_neighbors};
@@ -21,16 +24,39 @@ use db::search::vector::{
     VectorParameterError, VectorRef,
 };
 use db::{HelixDB, HelixDbMode, HelixDbSource, ProcessLocalDatabaseToken};
-use helix_ast::batch;
+use helix_ast::batch::{self, BatchEntry, NamedQuery, ReadBatch};
 use helix_ast::expr::{CompareOp, Expr, Predicate, StreamBound};
 use helix_ast::graph::{EdgeRef, NodeRef};
 use helix_ast::index;
 use helix_ast::projection::{BindingProjection, BindingValueRef, Projection};
 use helix_ast::query::{QueryRequest, QueryValue};
-use helix_ast::traversal;
+use helix_ast::traversal::{self, AstNode};
 use helix_ast::value::{PropertyInput, PropertyValue};
 use helix_planner::{catalog, context, cost, exec, ir, planning, properties, trace};
 use slatedb::object_store::memory::InMemory;
+
+#[path = "production_contracts/pull_paths.rs"]
+mod pull_paths;
+
+fn run_high_stack_contract<F, Fut>(name: &'static str, contract: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("production contract runtime builds")
+                .block_on(contract());
+        })
+        .expect("production contract thread starts")
+        .join()
+        .expect("production contract thread completes");
+}
 
 #[test]
 fn current_layer0_neighbor_bytes_are_stable_through_the_public_codec() {
@@ -154,6 +180,304 @@ async fn public_hybrid_cache_opens_with_bounded_foyer_partitions() {
 }
 
 #[test]
+fn public_object_store_cache_settings_expose_their_validated_bounds() {
+    let root = std::path::Path::new("/var/cache/helix/object-store");
+    let settings = config::SlateObjectStoreCacheSettings::try_new(
+        root,
+        Some(1024 * 1024),
+        4096,
+        true,
+        config::ObjectStoreWarmLevel::L0,
+        None,
+        8,
+    )
+    .expect("valid object-store cache");
+
+    assert_eq!(settings.root(), root);
+    assert_eq!(settings.warm(), config::ObjectStoreWarmLevel::L0);
+    // A server sizes its open-file limit from this handle budget.
+    assert_eq!(settings.max_open_file_handles(), 8);
+    assert_eq!(settings.to_slate_options().max_open_file_handles, 8);
+    // A server whose SSTs are already on local disk stops caching its writes.
+    assert!(settings.to_slate_options().cache_puts);
+    let reads_only = settings.clone().with_cache_puts(false);
+    assert!(!reads_only.to_slate_options().cache_puts);
+    assert_eq!(reads_only.with_cache_puts(true), settings);
+}
+
+#[tokio::test]
+async fn server_open_prunes_foyer_partitions_a_smaller_hybrid_cache_no_longer_owns() {
+    let root = tempfile::tempdir().expect("temporary server root");
+    let data_root = root.path().join("data");
+    std::fs::create_dir_all(&data_root).expect("data directory");
+    let source = || HelixDbSource::Disk {
+        root: data_root.clone(),
+        database: "server-foyer-cleanup".to_owned(),
+    };
+    let hybrid = |foyer_root: &std::path::Path, disk_bytes| {
+        config::DbConfig::new().with_cache(config::CacheConfig::new(
+            config::VectorMemorySettings::default(),
+            config::CacheMode::Hybrid {
+                slate_db: config::SlateHybridCacheConfig::try_new(
+                    1024 * 1024,
+                    foyer_root,
+                    disk_bytes,
+                )
+                .expect("valid Slate hybrid cache"),
+                object_store: config::SlateObjectStoreCacheSettings::try_new(
+                    root.path().join("object-store"),
+                    Some(1024 * 1024),
+                    4096,
+                    false,
+                    config::ObjectStoreWarmLevel::Off,
+                    None,
+                    1,
+                )
+                .expect("valid object-store cache"),
+                slate_warm: config::SlateWarmConfig::Off,
+                fts: None,
+            },
+        ))
+    };
+    let foyer_root = root.path().join("foyer");
+    let entries = || {
+        let mut names = std::fs::read_dir(&foyer_root)
+            .expect("Foyer cache directory exists")
+            .map(|entry| {
+                entry
+                    .expect("readable cache entry")
+                    .file_name()
+                    .into_string()
+                    .expect("UTF-8 cache entry")
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    };
+    let partitions = |count: usize| {
+        (0..count)
+            .map(|index| format!("foyer-storage-direct-fs-{index:08}"))
+            .collect::<Vec<_>>()
+    };
+
+    // 16 MiB in 64 KiB blocks is 256 partitions.
+    HelixDB::open_for_server(source(), hybrid(&foyer_root, 16 * 1024 * 1024))
+        .await
+        .expect("server writer opens a fresh hybrid cache")
+        .close()
+        .await
+        .expect("server writer closes");
+    assert_eq!(entries(), partitions(256));
+
+    // Halving the budget keeps the block size, so partitions 0..128 are
+    // reused and 128..256 go. Names Foyer never numbers are left alone.
+    for name in ["foyer-storage-direct-fs-not-a-number", "unrelated"] {
+        std::fs::write(foyer_root.join(name), b"").expect("foreign cache entry");
+    }
+    HelixDB::open_for_server(source(), hybrid(&foyer_root, 8 * 1024 * 1024))
+        .await
+        .expect("server writer opens the smaller hybrid cache")
+        .close()
+        .await
+        .expect("server writer closes");
+    assert_eq!(
+        entries(),
+        [
+            partitions(128),
+            vec![
+                "foyer-storage-direct-fs-not-a-number".to_owned(),
+                "unrelated".to_owned(),
+            ],
+        ]
+        .concat()
+    );
+
+    // A stale partition that cannot be removed, and a cache root that is
+    // not a directory, fail the open instead of leaving stale blocks.
+    std::fs::create_dir(foyer_root.join("foyer-storage-direct-fs-00000999"))
+        .expect("irremovable stale partition");
+    let not_a_directory = root.path().join("not-a-directory");
+    std::fs::write(&not_a_directory, b"").expect("regular file");
+    for (foyer_root, reason) in [
+        (foyer_root.as_path(), "stale partition directory"),
+        (not_a_directory.as_path(), "regular file"),
+    ] {
+        let error = HelixDB::open_for_server(source(), hybrid(foyer_root, 8 * 1024 * 1024))
+            .await
+            .err()
+            .expect("the open fails");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to remove stale Slate hybrid cache partitions"),
+            "{reason}: {error}"
+        );
+    }
+}
+
+#[test]
+fn server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget() {
+    run_high_stack_contract(
+        "server-full-text-disk-trim",
+        server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget_contract,
+    );
+}
+
+async fn server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget_contract() {
+    let root = tempfile::tempdir().expect("temporary server root");
+    let data_root = root.path().join("data");
+    std::fs::create_dir_all(&data_root).expect("data directory");
+    let source = || HelixDbSource::Disk {
+        root: data_root.clone(),
+        database: "server-full-text-disk-trim".to_owned(),
+    };
+    let hybrid = |fts_disk_bytes| {
+        config::DbConfig::new().with_cache(config::CacheConfig::new(
+            config::VectorMemorySettings::default(),
+            config::CacheMode::Hybrid {
+                slate_db: config::SlateHybridCacheConfig::try_new(
+                    1024 * 1024,
+                    root.path().join("foyer"),
+                    16 * 1024 * 1024,
+                )
+                .expect("valid Slate hybrid cache"),
+                object_store: config::SlateObjectStoreCacheSettings::try_new(
+                    root.path().join("object-store"),
+                    Some(1024 * 1024),
+                    4096,
+                    false,
+                    config::ObjectStoreWarmLevel::Off,
+                    None,
+                    1,
+                )
+                .expect("valid object-store cache"),
+                slate_warm: config::SlateWarmConfig::Off,
+                fts: Some(
+                    config::FtsHybridCacheConfig::try_new(
+                        1024 * 1024,
+                        root.path().join("fts"),
+                        fts_disk_bytes,
+                        config::FtsWarmConfig::Off,
+                        1,
+                    )
+                    .expect("valid full-text hybrid cache"),
+                ),
+            },
+        ))
+    };
+    let search = QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "ids",
+                traversal::g()
+                    .text_search_nodes("Document", "body", "alpha", 8, None)
+                    .id(),
+            )
+            .returning(["ids"]),
+    );
+
+    let db = HelixDB::open_for_server(source(), hybrid(1024 * 1024))
+        .await
+        .expect("server writer opens with a full-text disk tier");
+    // The startup trim of the empty tier finishes before the searches.
+    db.wait_for_startup_cache_warm().await;
+    db.query(QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "document",
+                traversal::g().add_n("Document", vec![("body", PropertyInput::from("alpha"))]),
+            )
+            .returning(Vec::<String>::new()),
+    ))
+    .await
+    .unwrap();
+    let receipt = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_text_index_nodes("Document", "body", None::<String>),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .unwrap();
+    await_index_operation_success(
+        &db,
+        receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted text-index operation has an ID"),
+        "text index",
+    )
+    .await;
+    for _ in 0..2 {
+        assert_eq!(
+            db.query(search.clone()).await.unwrap(),
+            serde_json::json!({ "ids": [0] })
+        );
+    }
+    // A completion is counted after the admission's trim, so the whole
+    // hydration task has run before close could abort it.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while db.fts_cache_state().await.unwrap().hydration_completions == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a split searched twice reaches the disk tier");
+    let hydrated = db.fts_cache_state().await.unwrap();
+    let admitted = hydrated.disk_artifact_count;
+    assert_eq!(admitted, 1);
+    // The split retained since the first search reads the object store;
+    // the next search reopens it from the published artifact instead.
+    assert_eq!(
+        db.query(search.clone()).await.unwrap(),
+        serde_json::json!({ "ids": [0] })
+    );
+    let state = db.fts_cache_state().await.unwrap();
+    assert_eq!(
+        (state.remote_opens, state.disk_hits),
+        (hydrated.remote_opens, hydrated.disk_hits + 1),
+        "the search after hydration opens the split from disk"
+    );
+    db.close().await.expect("server writer closes");
+    // Past the one-second grace that protects recently used splits.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    // A one-byte budget holds no split, so the reopened writer evicts it at
+    // startup and never admits it again.
+    let db = HelixDB::open_for_server(source(), hybrid(1))
+        .await
+        .expect("server writer reopens with a smaller full-text disk tier");
+    db.wait_for_startup_cache_warm().await;
+    let state = db.fts_cache_state().await.unwrap();
+    assert_eq!(
+        (
+            state.disk_artifact_count,
+            state.disk_artifact_bytes,
+            state.disk_evictions
+        ),
+        (0, 0, admitted)
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            db.query(search.clone()).await.unwrap(),
+            serde_json::json!({ "ids": [0] })
+        );
+    }
+    // A hydration the second search spawned would count its attempt the
+    // first time this single-threaded runtime polls it.
+    tokio::task::yield_now().await;
+    let state = db.fts_cache_state().await.unwrap();
+    assert_eq!(
+        (state.hydration_attempts, state.disk_artifact_count),
+        (0, 0),
+        "a split larger than the whole tier is never admitted"
+    );
+    db.close().await.expect("server writer closes");
+}
+
+#[test]
 fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
     const SECRET_LITERAL: &str = "secret-query-value";
 
@@ -247,6 +571,215 @@ fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
         })
         .expect("default diagnostic response converts");
     assert!(default_response.diagnostics().insights.is_empty());
+}
+
+thread_local! {
+    /// `helix::query::step` records logged on this thread while it records;
+    /// `None` when the thread does not record.
+    static QUERY_STEP_LOGS: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `log` facade sink that keeps `helix::query::step` records for the thread
+/// that emitted them when that thread records.
+///
+/// The logger comes from `tracing::log`, the exact `log` crate that tracing's
+/// `log` feature forwards to while no tracing subscriber is installed.
+struct QueryStepLog;
+
+impl tracing::log::Log for QueryStepLog {
+    fn enabled(&self, metadata: &tracing::log::Metadata<'_>) -> bool {
+        metadata.target() == "helix::query::step"
+    }
+
+    fn log(&self, record: &tracing::log::Record<'_>) {
+        if record.target() != "helix::query::step" {
+            return;
+        }
+        QUERY_STEP_LOGS.with_borrow_mut(|logs| {
+            let Some(logs) = logs else {
+                return;
+            };
+            logs.push(record.args().to_string());
+        });
+    }
+
+    fn flush(&self) {}
+}
+
+/// Every executed step emits one `helix::query::step` debug event with its
+/// operator name, the rows it produced (zero for non-stream values), and its
+/// elapsed microseconds. Without a tracing subscriber the event reaches the
+/// `log` facade.
+#[tokio::test]
+async fn public_execute_boundary_logs_every_executed_step() {
+    static LOGGER: QueryStepLog = QueryStepLog;
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        tracing::log::set_logger(&LOGGER).expect("no other contract installs a logger");
+        tracing::log::set_max_level(tracing::log::LevelFilter::Debug);
+    });
+    assert!(
+        !tracing::dispatcher::has_been_set(),
+        "step events reach the log facade only without a tracing subscriber"
+    );
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-query-step-logging".to_owned(),
+    })
+    .await
+    .expect("query step logging fixture opens");
+    let step_id = |value| exec::ExecStepId::new(value).expect("step ID is positive");
+    let step = |id, dependencies, op| exec::ExecStep {
+        id: step_id(id),
+        dependencies,
+        output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
+        condition: exec::ExecCondition::Always,
+        op,
+        schedule: exec::ExecSchedule::Pipeline,
+        delivered: properties::DeliveredProperties::default(),
+        cost: cost::CostVector::ZERO,
+    };
+    // The mutation is an effect boundary, so the count runs as its own step
+    // rather than inside a pull region.
+    let plan = exec::ExecutablePlan::new(
+        ir::PlanKind::Write,
+        ir::ReturnPlan::None,
+        ir::AtLeast::<_, 1>::from_one_and_rest(
+            step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::AddNodeSource {
+                        label: ir::NonEmptyString::new("Logged").expect("label is non-empty"),
+                        properties: ir::PropertyAssignments::try_from_vec(Vec::new())
+                            .expect("empty assignments are valid"),
+                    },
+                },
+            ),
+            vec![step(
+                2,
+                vec![step_id(1)],
+                exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::InputRows {
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
+                },
+            )],
+        ),
+        step_id(2),
+        trace::PlanningTrace::default(),
+        exec::PlannerMetrics::default(),
+    )
+    .expect("logged plan validates");
+
+    QUERY_STEP_LOGS.set(Some(Vec::new()));
+    let result = db
+        .execute(&plan, context::ParamBindings::default())
+        .await
+        .expect("logged plan executes");
+    let logs = QUERY_STEP_LOGS.take().expect("this thread records");
+
+    assert_eq!(result.last, Some(ExecutionValue::Count(1)));
+    let steps = |logs: &[String]| {
+        logs.iter()
+            .map(|record| {
+                let field = |name: &str| {
+                    record
+                        .split(' ')
+                        .find_map(|token| token.strip_prefix(name))
+                        .unwrap_or_else(|| panic!("`{record}` has no `{name}` field"))
+                        .to_owned()
+                };
+                field("elapsed_us=")
+                    .parse::<u64>()
+                    .expect("latency is whole microseconds");
+                (field("op="), field("rows="))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        steps(&logs),
+        [
+            ("\"mutation()\"".to_owned(), "1".to_owned()),
+            ("\"count()\"".to_owned(), "0".to_owned())
+        ],
+        "{logs:?}"
+    );
+
+    // A label-filtered vector search runs its access and its search as one
+    // step pair: the search ranks the label's ID set, the access builds no
+    // rows, and both steps still log.
+    let operation = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_index_if_not_exists(index::IndexSpec::node_vector(
+                        "Logged",
+                        "embedding",
+                        NonZeroUsize::new(2).expect("dimension is positive"),
+                        index::VectorDistanceMetric::Euclidean,
+                        None::<String>,
+                    )),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .expect("vector index DDL is accepted");
+    await_index_operation_success(
+        &db,
+        operation["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted vector-index operation has an ID"),
+        "logged vector index",
+    )
+    .await;
+    db.query(QueryRequest::write(
+        [[1.0_f32, 0.0], [2.0, 0.0]].into_iter().enumerate().fold(
+            batch::write_batch(),
+            |write, (index, embedding)| {
+                write.var_as(
+                    &format!("embedded{index}"),
+                    traversal::g().add_n(
+                        "Logged",
+                        vec![("embedding", PropertyInput::from(embedding.to_vec()))],
+                    ),
+                )
+            },
+        ),
+    ))
+    .await
+    .expect("embedded nodes commit");
+    QUERY_STEP_LOGS.set(Some(Vec::new()));
+    let searched = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "hits",
+                    traversal::g().n_with_label("Logged").vector_search(
+                        "Logged",
+                        "embedding",
+                        vec![0.0, 0.0],
+                        2,
+                        None,
+                    ),
+                )
+                .returning(["hits"]),
+        ))
+        .await
+        .expect("logged search executes");
+    let logs = QUERY_STEP_LOGS.take().expect("this thread records");
+    assert_eq!(searched["hits"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        steps(&logs),
+        [
+            ("\"source()\"".to_owned(), "0".to_owned()),
+            ("\"vector_search()\"".to_owned(), "2".to_owned())
+        ],
+        "{logs:?}"
+    );
+    db.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -636,8 +1169,15 @@ async fn public_query_boundary_covers_source_fed_mutations() {
     db.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn public_query_boundary_covers_expand_predicate_and_branch_control() {
+#[test]
+fn public_query_boundary_covers_expand_predicate_and_branch_control() {
+    run_high_stack_contract(
+        "public-expand-predicate-branch-control",
+        public_query_boundary_covers_expand_predicate_and_branch_control_contract,
+    );
+}
+
+async fn public_query_boundary_covers_expand_predicate_and_branch_control_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-graph-control".to_owned(),
     })
@@ -1218,8 +1758,15 @@ async fn public_write_boundary_covers_topology_read_your_writes() {
     db.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn public_query_boundary_covers_branch_partition_edges() {
+#[test]
+fn public_query_boundary_covers_branch_partition_edges() {
+    run_high_stack_contract(
+        "public-branch-partition-edges",
+        public_query_boundary_covers_branch_partition_edges_contract,
+    );
+}
+
+async fn public_query_boundary_covers_branch_partition_edges_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-branch-partitions".to_owned(),
     })
@@ -2407,6 +2954,7 @@ async fn public_query_boundary_covers_active_range_index_access_and_mutation() {
         exec::ExecOp::Access {
             plan: Box::new(exec::ExecAccessPlan::Node(
                 exec::ExecNodeAccessPlan::RangeIndex {
+                    iteration: helix_planner::ir::RangeScanIteration::Forward,
                     index: catalog::NodeRangeIndexMeta::new(range_index_id.clone()),
                     key: catalog::ScopedPropertyDirectionKey::try_new(
                         "Document",
@@ -2563,8 +3111,15 @@ async fn public_query_boundary_covers_active_range_index_access_and_mutation() {
     db.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn public_query_boundary_covers_active_text_index_mutations() {
+#[test]
+fn public_query_boundary_covers_active_text_index_mutations() {
+    run_high_stack_contract(
+        "public-active-text-index-mutations",
+        public_query_boundary_covers_active_text_index_mutations_contract,
+    );
+}
+
+async fn public_query_boundary_covers_active_text_index_mutations_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-text-index".to_owned(),
     })
@@ -2668,30 +3223,50 @@ async fn public_query_boundary_covers_active_text_index_mutations() {
         serde_json::json!({ "ids": [0] })
     );
 
-    db.query(QueryRequest::write(
-        batch::write_batch()
-            .var_as(
-                "removed",
-                traversal::g().n(NodeRef::id(0)).remove_property("body"),
-            )
-            .var_as(
-                "newcomer",
-                traversal::g().add_n(
-                    "Document",
-                    vec![("body", PropertyInput::from("alpha newcomer"))],
-                ),
-            )
-            .returning(Vec::<String>::new()),
-    ))
-    .await
-    .unwrap();
+    // A conflicted attempt still consumes its leased node ID, so the newcomer's
+    // ID comes from the attempt that commits rather than the fixture order.
+    const MAX_TRANSACTION_CONFLICT_RETRIES: usize = 3;
+    let mut attempt = 0;
+    let newcomer = loop {
+        match db
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "removed",
+                        traversal::g().n(NodeRef::id(0)).remove_property("body"),
+                    )
+                    .var_as(
+                        "newcomer",
+                        traversal::g()
+                            .add_n(
+                                "Document",
+                                vec![("body", PropertyInput::from("alpha newcomer"))],
+                            )
+                            .id(),
+                    )
+                    .returning(["newcomer"]),
+            ))
+            .await
+        {
+            Ok(receipt) => break receipt["newcomer"][0].clone(),
+            Err(error)
+                if error.is_transaction_conflict()
+                    && attempt + 1 < MAX_TRANSACTION_CONFLICT_RETRIES =>
+            {
+                attempt += 1;
+                tokio::task::yield_now().await;
+            }
+            Err(error) => panic!("text-index mutation commits after maintenance: {error}"),
+        }
+    };
+    assert!(newcomer.is_u64(), "committed newcomer returns its node ID");
     assert_eq!(
         db.query(search("retired")).await.unwrap(),
         serde_json::json!({ "ids": [] })
     );
     assert_eq!(
         db.query(search("alpha")).await.unwrap(),
-        serde_json::json!({ "ids": [2, 3] })
+        serde_json::json!({ "ids": [2, newcomer] })
     );
 
     db.query(QueryRequest::write(
@@ -2703,7 +3278,7 @@ async fn public_query_boundary_covers_active_text_index_mutations() {
     .unwrap();
     assert_eq!(
         db.query(search("alpha")).await.unwrap(),
-        serde_json::json!({ "ids": [3] })
+        serde_json::json!({ "ids": [newcomer] })
     );
 
     let edge = db
@@ -3321,8 +3896,15 @@ async fn await_index_operation_success(db: &HelixDB, operation_id: &str, descrip
     .unwrap_or_else(|_| panic!("{description} activates within thirty seconds"));
 }
 
-#[tokio::test]
-async fn public_query_boundary_covers_dynamic_foreach_and_batch_conditions() {
+#[test]
+fn public_query_boundary_covers_dynamic_foreach_and_batch_conditions() {
+    run_high_stack_contract(
+        "public-dynamic-foreach-conditions",
+        public_query_boundary_covers_dynamic_foreach_and_batch_conditions_contract,
+    );
+}
+
+async fn public_query_boundary_covers_dynamic_foreach_and_batch_conditions_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-foreach".to_owned(),
     })
@@ -3629,8 +4211,15 @@ async fn public_query_boundary_covers_dynamic_foreach_and_batch_conditions() {
     db.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn public_execute_boundary_covers_typed_foreach_parameter_frames() {
+#[test]
+fn public_execute_boundary_covers_typed_foreach_parameter_frames() {
+    run_high_stack_contract(
+        "public-typed-foreach-parameter-frames",
+        public_execute_boundary_covers_typed_foreach_parameter_frames_contract,
+    );
+}
+
+async fn public_execute_boundary_covers_typed_foreach_parameter_frames_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-typed-foreach".to_owned(),
     })
@@ -3729,8 +4318,15 @@ async fn public_execute_boundary_covers_typed_foreach_parameter_frames() {
     db.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn public_query_boundary_covers_predicate_sets_and_stream_operators() {
+#[test]
+fn public_query_boundary_covers_predicate_sets_and_stream_operators() {
+    run_high_stack_contract(
+        "public-predicate-stream-operators",
+        public_query_boundary_covers_predicate_sets_and_stream_operators_contract,
+    );
+}
+
+async fn public_query_boundary_covers_predicate_sets_and_stream_operators_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-predicate-streams".to_owned(),
     })
@@ -4169,8 +4765,15 @@ async fn public_query_boundary_covers_predicate_sets_and_stream_operators() {
     db.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn public_query_boundary_covers_projection_expressions_and_row_bindings() {
+#[test]
+fn public_query_boundary_covers_projection_expressions_and_row_bindings() {
+    run_high_stack_contract(
+        "public-projection-expressions-row-bindings",
+        public_query_boundary_covers_projection_expressions_and_row_bindings_contract,
+    );
+}
+
+async fn public_query_boundary_covers_projection_expressions_and_row_bindings_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-projection-bindings".to_owned(),
     })
@@ -4388,6 +4991,221 @@ async fn public_query_boundary_covers_projection_expressions_and_row_bindings() 
             "descending": [0, 1],
             "all_missing": [0, 1],
             "reverse_input": [1, 0],
+        })
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn public_query_boundary_distinct_binding_projection_uses_storage_value_identity() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-distinct-value-identity".to_owned(),
+    })
+    .await
+    .expect("production distinct identity fixture opens");
+    db.query(QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "integer",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from(42_i64))]),
+            )
+            .var_as(
+                "double",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from(42.0_f64))]),
+            )
+            .var_as(
+                "single",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from(42.0_f32))]),
+            )
+            .var_as(
+                "text",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from("42"))]),
+            )
+            .var_as(
+                "other",
+                traversal::g().add_n("Metric", vec![("score", PropertyInput::from(7_i64))]),
+            )
+            .returning(Vec::<String>::new()),
+    ))
+    .await
+    .unwrap();
+    let read = batch::read_batch()
+        .var_as(
+            "all",
+            traversal::g()
+                .n(NodeRef::all())
+                .project_bindings(vec![BindingProjection::current("score", "score")]),
+        )
+        .var_as(
+            "distinct",
+            traversal::g()
+                .n(NodeRef::all())
+                .project_distinct_bindings(vec![BindingProjection::current("score", "score")]),
+        )
+        .returning(["all", "distinct"]);
+    assert_eq!(
+        db.query(QueryRequest::read(read)).await.unwrap(),
+        serde_json::json!({
+            "all": [
+                { "score": 42 },
+                { "score": 42.0 },
+                { "score": 42.0 },
+                { "score": "42" },
+                { "score": 7 },
+            ],
+            "distinct": [{ "score": 42 }, { "score": "42" }, { "score": 7 }],
+        })
+    );
+    // A terminal limit selects pull execution; canonical numeric identity must
+    // still determine which values count toward that limit.
+    let source = traversal::g().n(NodeRef::all());
+    for (root, expected) in [
+        (
+            AstNode::Dedup {
+                input: Box::new(source.clone().values(vec!["score"]).into_ast()),
+            },
+            serde_json::json!([{ "score": 42 }, { "score": "42" }, { "score": 7 }]),
+        ),
+        (
+            AstNode::Dedup {
+                input: Box::new(source.clone().value_map(Some(vec!["score"])).into_ast()),
+            },
+            serde_json::json!([{ "score": 42 }, { "score": "42" }, { "score": 7 }]),
+        ),
+        (
+            source
+                .project_distinct_bindings(vec![BindingProjection::current("score", "score")])
+                .into_ast(),
+            serde_json::json!([{ "score": 42 }, { "score": "42" }, { "score": 7 }]),
+        ),
+    ] {
+        for take in [0, 1, 2, 10] {
+            let request = ReadBatch::try_from_parts(
+                vec![BatchEntry::Query(Box::new(NamedQuery {
+                    name: Some("result".into()),
+                    root: AstNode::Limit {
+                        input: Box::new(root.clone()),
+                        count: StreamBound::Literal(take),
+                    },
+                    condition: None,
+                }))],
+                vec!["result".into()],
+            )
+            .unwrap();
+            let actual = db.query(QueryRequest::read(request)).await.unwrap();
+            let expected = serde_json::json!(expected
+                .as_array()
+                .unwrap()
+                .iter()
+                .take(take)
+                .collect::<Vec<_>>());
+            // Known-empty scalar plans serialize as null; drained ones use [].
+            let actual = if take == 0 && actual["result"].is_null() {
+                serde_json::json!([])
+            } else {
+                actual["result"].clone()
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn public_query_boundary_distinct_over_scalar_terminals_from_request_ast() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-distinct-scalar-terminals".to_owned(),
+    })
+    .await
+    .expect("production distinct scalar terminal fixture opens");
+    db.query(QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "alice",
+                traversal::g().add_n("Person", vec![("name", PropertyInput::from("alice"))]),
+            )
+            .var_as(
+                "bob",
+                traversal::g().add_n("Person", vec![("name", PropertyInput::from("bob"))]),
+            )
+            .var_as(
+                "acme",
+                traversal::g().add_n("Company", vec![("name", PropertyInput::from("acme"))]),
+            )
+            .var_as(
+                "knows",
+                traversal::g().n(NodeRef::id(0)).add_e(
+                    "KNOWS",
+                    NodeRef::id(1),
+                    Vec::<(&str, PropertyInput)>::new(),
+                ),
+            )
+            .var_as(
+                "works_at",
+                traversal::g().n(NodeRef::id(0)).add_e(
+                    "WORKS_AT",
+                    NodeRef::id(2),
+                    Vec::<(&str, PropertyInput)>::new(),
+                ),
+            )
+            .returning(Vec::<String>::new()),
+    ))
+    .await
+    .unwrap();
+    // The typed builder ends at a terminal, so `dedup` over `id()` or `label()` only
+    // arrives as a request AST, the shape the transports deserialize.
+    let distinct = |name: &str, terminal: AstNode| {
+        BatchEntry::Query(Box::new(NamedQuery {
+            name: Some(name.to_owned()),
+            root: AstNode::Dedup {
+                input: Box::new(terminal),
+            },
+            condition: None,
+        }))
+    };
+    let read = ReadBatch::try_from_parts(
+        vec![
+            distinct(
+                "node_ids",
+                traversal::g()
+                    .n(NodeRef::id(0))
+                    .union(vec![
+                        traversal::sub().out(None::<&str>),
+                        traversal::sub().out(None::<&str>),
+                    ])
+                    .id()
+                    .into_ast(),
+            ),
+            distinct(
+                "edge_ids",
+                traversal::g()
+                    .n(NodeRef::id(0))
+                    .union(vec![
+                        traversal::sub().out_e(None::<&str>),
+                        traversal::sub().out_e(None::<&str>),
+                    ])
+                    .id()
+                    .into_ast(),
+            ),
+            distinct(
+                "labels",
+                traversal::g().n(NodeRef::all()).label().into_ast(),
+            ),
+        ],
+        vec![
+            "node_ids".to_owned(),
+            "edge_ids".to_owned(),
+            "labels".to_owned(),
+        ],
+    )
+    .expect("dedup over scalar terminals is a read-only batch");
+    assert_eq!(
+        db.query(QueryRequest::read(read)).await.unwrap(),
+        serde_json::json!({
+            "node_ids": [1, 2],
+            "edge_ids": [0, 1],
+            "labels": ["Person", "Company"],
         })
     );
     db.close().await.unwrap();
@@ -4852,8 +5670,15 @@ async fn public_query_boundary_covers_mutation_rollback_and_graph_cleanup() {
     db.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn public_query_boundary_covers_active_secondary_index_families() {
+#[test]
+fn public_query_boundary_covers_active_secondary_index_families() {
+    run_high_stack_contract(
+        "public-secondary-index-families",
+        public_query_boundary_covers_active_secondary_index_families_contract,
+    );
+}
+
+async fn public_query_boundary_covers_active_secondary_index_families_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-secondary-indexes".to_owned(),
     })
@@ -5106,6 +5931,28 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
         .expect("already-active lifecycle value is observable")
         .last
         .expect("already-active lifecycle plan returns its receipt");
+    let passthrough = lifecycle_plan(exec::ExecOp::Noop, false);
+    let mut steps = passthrough.steps().to_vec();
+    let mut terminal = steps.last().unwrap().clone();
+    terminal.id = exec::ExecStepId::new(3).unwrap();
+    terminal.dependencies = vec![passthrough.root()];
+    steps.push(terminal);
+    let passthrough = exec::ExecutablePlan::new(
+        ir::PlanKind::Write,
+        ir::ReturnPlan::None,
+        ir::AtLeast::try_from_vec(steps).unwrap(),
+        exec::ExecStepId::new(3).unwrap(),
+        trace::PlanningTrace::default(),
+        exec::PlannerMetrics::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        db.execute(&passthrough, context::ParamBindings::default())
+            .await
+            .unwrap()
+            .last,
+        Some(lifecycle_value.clone())
+    );
     let error = db
         .execute(
             &lifecycle_plan(
@@ -5252,6 +6099,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
         )
     };
     let node_range = || exec::ExecNodeSecondaryRangePlan {
+        iteration: helix_planner::ir::RangeScanIteration::Forward,
         index: catalog::NodeRangeIndexMeta::try_new("node_range:Document:rank:asc")
             .expect("logical node range index name is non-empty"),
         key: catalog::ScopedPropertyDirectionKey::try_new(
@@ -5263,6 +6111,7 @@ async fn public_query_boundary_covers_active_secondary_index_families() {
         range: ir::IndexRange::All,
     };
     let edge_range = || exec::ExecEdgeSecondaryRangePlan {
+        iteration: helix_planner::ir::RangeScanIteration::Forward,
         index: catalog::EdgeRangeIndexMeta::try_new("edge_range:LINK:weight:desc")
             .expect("logical edge range index name is non-empty"),
         key: catalog::ScopedPropertyDirectionKey::try_new(
@@ -5764,9 +6613,35 @@ async fn ordered_multi_range_intersections_match_explicit_sort_prefixes() {
             .find_map(|step| match &step.op {
                 exec::ExecOp::Access { plan } => Some(match plan.as_ref() {
                     exec::ExecAccessPlan::Limited(limited) => limited.source(),
-                    access => access,
+                    access @ (exec::ExecAccessPlan::Node(_) | exec::ExecAccessPlan::Edge(_)) => {
+                        access
+                    }
                 }),
-                _ => None,
+                exec::ExecOp::Count { .. }
+                | exec::ExecOp::KvRead(_)
+                | exec::ExecOp::Expand { .. }
+                | exec::ExecOp::VectorSearch { .. }
+                | exec::ExecOp::TextSearch { .. }
+                | exec::ExecOp::Filter { .. }
+                | exec::ExecOp::IndexMembership { .. }
+                | exec::ExecOp::Limit { .. }
+                | exec::ExecOp::Skip { .. }
+                | exec::ExecOp::Range { .. }
+                | exec::ExecOp::Distinct
+                | exec::ExecOp::Order { .. }
+                | exec::ExecOp::Project { .. }
+                | exec::ExecOp::Aggregate { .. }
+                | exec::ExecOp::Variable { .. }
+                | exec::ExecOp::Branch { .. }
+                | exec::ExecOp::Repeat { .. }
+                | exec::ExecOp::ShortestPath { .. }
+                | exec::ExecOp::Mutation { .. }
+                | exec::ExecOp::IndexDdl { .. }
+                | exec::ExecOp::Merge { .. }
+                | exec::ExecOp::Reserved { .. }
+                | exec::ExecOp::ForEach { .. }
+                | exec::ExecOp::Barrier { .. }
+                | exec::ExecOp::Noop => None,
             })
             .expect("indexed plan has an access step");
         match (expected_driver, indexed_access) {
@@ -5833,6 +6708,1649 @@ async fn ordered_multi_range_intersections_match_explicit_sort_prefixes() {
     }
 
     db.close().await.unwrap();
+}
+
+#[test]
+fn public_query_boundary_keeps_limits_for_multi_owner_unique_lookups() {
+    run_high_stack_contract(
+        "public-unique-multi-owner-limits",
+        public_query_boundary_keeps_limits_for_multi_owner_unique_lookups_contract,
+    );
+}
+
+/// A unique index bounds only an indexed lookup value. Null equality scans for
+/// owners lacking the property and runtime parameters can bind null or a set,
+/// so limits over those lookups must survive planning. Results before the index
+/// exists are the independent reference.
+async fn public_query_boundary_keeps_limits_for_multi_owner_unique_lookups_contract() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-unique-multi-owner-limits".to_owned(),
+    })
+    .await
+    .expect("unique lookup limit fixture opens");
+    let mut fixture = batch::write_batch();
+    for (name, email, age) in [
+        ("a", Some("a"), 30_i64),
+        ("b", Some("b"), 10),
+        ("c", Some("c"), 20),
+        ("x", None, 50),
+        ("y", None, 51),
+        ("z", None, 52),
+    ] {
+        let mut properties = vec![("age", PropertyInput::from(age))];
+        properties.extend(email.map(|email| ("email", PropertyInput::from(email))));
+        fixture = fixture.var_as(name, traversal::g().add_n("User", properties));
+    }
+    db.query(QueryRequest::write(fixture.returning(Vec::<String>::new())))
+        .await
+        .unwrap();
+
+    let null = || Predicate::eq("email", PropertyValue::Null);
+    let users = |predicate| traversal::g().n_with_label_where("User", predicate);
+    let read = batch::read_batch()
+        .var_as(
+            "null_limited",
+            users(null())
+                .limit(StreamBound::literal(1))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "null_window",
+            users(null())
+                .range(StreamBound::literal(1), StreamBound::literal(3))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "null_ordered",
+            users(null())
+                .order_by("age", traversal::Order::Desc)
+                .values(vec!["age"]),
+        )
+        .var_as("null_count", users(null()).count())
+        .var_as(
+            "param_limited",
+            users(Predicate::eq_param("email", "missing"))
+                .limit(StreamBound::literal(2))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "set_limited",
+            users(Predicate::is_in_param("email", "emails"))
+                .limit(StreamBound::literal(2))
+                .values(vec!["age"]),
+        )
+        .var_as(
+            "set_ordered",
+            users(Predicate::is_in_param("email", "emails"))
+                .order_by("age", traversal::Order::Asc)
+                .values(vec!["age"]),
+        )
+        .returning([
+            "null_limited",
+            "null_window",
+            "null_ordered",
+            "null_count",
+            "param_limited",
+            "set_limited",
+            "set_ordered",
+        ]);
+    let request = || {
+        QueryRequest::read(read.clone())
+            .with_parameter_value("missing", QueryValue::Null)
+            .with_parameter_value(
+                "emails",
+                QueryValue::Array(vec![QueryValue::String("a".to_owned()), QueryValue::Null]),
+            )
+    };
+    let ages = |value: &serde_json::Value| {
+        value
+            .as_array()
+            .expect("projected rows are a list")
+            .iter()
+            .map(|row| row["age"].as_i64().expect("age is an integer"))
+            .collect::<Vec<_>>()
+    };
+    let check = |result: &serde_json::Value| {
+        let nulls = [50, 51, 52];
+        let null_limited = ages(&result["null_limited"]);
+        assert_eq!(null_limited.len(), 1, "{result}");
+        assert!(null_limited.iter().all(|age| nulls.contains(age)));
+        assert_eq!(ages(&result["null_window"]).len(), 2, "{result}");
+        assert_eq!(ages(&result["null_ordered"]), vec![52, 51, 50]);
+        assert_eq!(result["null_count"], 3);
+        let param_limited = ages(&result["param_limited"]);
+        assert_eq!(param_limited.len(), 2, "{result}");
+        assert!(param_limited.iter().all(|age| nulls.contains(age)));
+        let set_limited = ages(&result["set_limited"]);
+        assert_eq!(set_limited.len(), 2, "{result}");
+        assert!(set_limited
+            .iter()
+            .all(|age| *age == 30 || nulls.contains(age)));
+        assert_eq!(ages(&result["set_ordered"]), vec![30, 50, 51, 52]);
+    };
+    let reference = db.query(request()).await.unwrap();
+    check(&reference);
+
+    let receipt = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_index_if_not_exists(
+                        index::IndexSpec::node_unique_equality("User", "email"),
+                    ),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .unwrap();
+    await_index_operation_success(
+        &db,
+        receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted unique index operation has an ID"),
+        "unique node equality index",
+    )
+    .await;
+
+    let plan = planning::plan_read_batch(&read, &db.planner_context(Default::default()))
+        .expect("unique lookup batch plans");
+    let unique_lookup = |plan: &exec::ExecAccessPlan| match plan {
+        exec::ExecAccessPlan::Node(node) => matches!(
+            node,
+            exec::ExecNodeAccessPlan::AuthoritativeScan { .. }
+                | exec::ExecNodeAccessPlan::DynamicEquality { .. }
+                | exec::ExecNodeAccessPlan::DynamicMembership { .. }
+        ),
+        exec::ExecAccessPlan::Edge(_) | exec::ExecAccessPlan::Limited(_) => false,
+    };
+    let limited_lookups = plan
+        .steps()
+        .iter()
+        .filter(|step| {
+            matches!(&step.op, exec::ExecOp::Access { plan: access }
+                if matches!(access.as_ref(), exec::ExecAccessPlan::Limited(limited)
+                    if unique_lookup(limited.source())))
+        })
+        .count();
+    // Limit, window end, parameter limit and set limit each keep a read bound.
+    assert_eq!(limited_lookups, 4, "{:?}", plan.steps());
+
+    let indexed = db.query(request()).await.unwrap();
+    check(&indexed);
+    assert_eq!(indexed["null_ordered"], reference["null_ordered"]);
+    assert_eq!(indexed["set_ordered"], reference["set_ordered"]);
+    db.close().await.unwrap();
+}
+
+#[test]
+fn public_query_boundary_answers_post_expansion_filters_with_index_membership() {
+    run_high_stack_contract(
+        "public-post-expansion-index-membership",
+        public_query_boundary_answers_post_expansion_filters_with_index_membership_contract,
+    );
+}
+
+/// Post-expansion stored-property filters planned as node index membership
+/// return exactly the rows of the per-row filter they replace.
+///
+/// The reference for every shape is the same batch planned without the index
+/// catalog, which keeps the per-row filter, executed on the same database.
+/// Both agree row for row, in order and with duplicates, for literal,
+/// label-scoped, IN, intersected, and residual sets; for range predicates,
+/// literal or late-bound, that keep the per-row filter; for runtime
+/// parameters that the index serves or that fall back to per-row evaluation;
+/// through stream, windowed pull, and count execution; for empty streams and
+/// streams wider than one stored-record batch; and for same-request writes.
+/// Hand-built plans add edge rows, an index the catalog does not serve, a
+/// range child, and a corrupt index identity.
+async fn public_query_boundary_answers_post_expansion_filters_with_index_membership_contract() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-post-expansion-index-membership".to_owned(),
+    })
+    .await
+    .expect("index membership fixture opens");
+    for (spec, description) in [
+        (
+            index::IndexSpec::node_equality("Attribute", "kind"),
+            "membership equality index",
+        ),
+        (
+            index::IndexSpec::node_range("Attribute", "rank"),
+            "membership range index",
+        ),
+    ] {
+        let receipt = db
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as("operation", traversal::g().create_index_if_not_exists(spec))
+                    .returning(["operation"]),
+            ))
+            .await
+            .unwrap();
+        let operation_id = receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted membership index operation has an ID");
+        await_index_operation_success(&db, operation_id, description).await;
+    }
+
+    // `g` reaches `a1` through both items, `n1` and `n2` are same-valued nodes
+    // of another label, `a3` has no kind, and `empty` has no items. `wide`
+    // links 17 alternating Attribute and Note nodes, so bouncing out, in, and
+    // out again yields 289 rows, more than one 256-row record batch.
+    let node = |label: &str, uid: &str, kind: Option<&str>, rank: i64| {
+        let mut properties = vec![
+            ("uid", PropertyInput::from(uid)),
+            ("rank", PropertyInput::from(rank)),
+        ];
+        properties.extend(kind.map(|kind| ("kind", PropertyInput::from(kind))));
+        traversal::g().add_n(label, properties)
+    };
+    let edge = |from: &str, label: &str, to: &str, kind: Option<&str>| {
+        traversal::g().n(NodeRef::var(from)).add_e(
+            label,
+            NodeRef::var(to),
+            kind.map(|kind| ("kind", PropertyInput::from(kind)))
+                .into_iter()
+                .collect::<Vec<_>>(),
+        )
+    };
+    let seed = [
+        ("g", node("Group", "g", None, 0)),
+        ("empty", node("Group", "empty", None, 0)),
+        ("wide", node("Group", "wide", None, 0)),
+        ("i1", node("Item", "i1", None, 0)),
+        ("i2", node("Item", "i2", None, 0)),
+        ("a1", node("Attribute", "a1", Some("B"), 1)),
+        ("a2", node("Attribute", "a2", Some("A"), 5)),
+        ("a3", node("Attribute", "a3", None, 9)),
+        ("n1", node("Note", "n1", Some("B"), 1)),
+        ("n2", node("Note", "n2", Some("A"), 5)),
+        ("i1_in_g", edge("i1", "IN_GROUP", "g", None)),
+        ("i2_in_g", edge("i2", "IN_GROUP", "g", None)),
+        ("i1_a1", edge("i1", "HAS", "a1", Some("B"))),
+        ("i1_a2", edge("i1", "HAS", "a2", Some("A"))),
+        ("i1_n1", edge("i1", "HAS", "n1", None)),
+        ("i2_a1", edge("i2", "HAS", "a1", None)),
+        ("i2_a3", edge("i2", "HAS", "a3", None)),
+        ("i2_n2", edge("i2", "HAS", "n2", None)),
+    ]
+    .into_iter()
+    .fold(batch::write_batch(), |write, (name, entry)| {
+        write.var_as(name, entry)
+    });
+    let seed = (0..17_i64).fold(seed, |write, index| {
+        let uid = format!("w{index}");
+        write
+            .var_as(
+                &uid,
+                node(
+                    if index % 2 == 0 { "Attribute" } else { "Note" },
+                    &uid,
+                    Some(if index % 3 == 0 { "B" } else { "A" }),
+                    index,
+                ),
+            )
+            .var_as(&format!("wide_{uid}"), edge("wide", "HAS", &uid, None))
+    });
+    db.query(QueryRequest::write(seed.returning(Vec::<String>::new())))
+        .await
+        .expect("index membership graph seeds");
+
+    // Runtime parameters stay late-bound so membership classifies them per
+    // request, and a two-value domain bound makes a third value authoritative.
+    let late_bound = ["kind", "kinds", "min", "max"]
+        .map(|name| ir::NonEmptyString::new(name).expect("parameter name is non-empty"))
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let limits = context::PlannerLimits {
+        max_index_union_branches: context::IndexUnionBranchLimit::limited(2)
+            .expect("two-branch limit is positive"),
+    };
+    let with_catalog = context::PlannerContext {
+        late_bound_params: late_bound.clone(),
+        limits: limits.clone(),
+        ..db.planner_context(context::ParamBindings::default())
+    };
+    let without_catalog = context::PlannerContext {
+        late_bound_params: late_bound,
+        limits,
+        ..context::PlannerContext::default()
+    };
+    let is_membership =
+        |step: &exec::ExecStep| matches!(step.op, exec::ExecOp::IndexMembership { .. });
+    let bind = |name: &str, value: PropertyValue| {
+        context::ParamBindings::default().with_value(
+            ir::NonEmptyString::new(name).expect("parameter name is non-empty"),
+            value,
+        )
+    };
+    let strings = |values: &[&str]| {
+        PropertyValue::StringArray(values.iter().map(|value| (*value).to_owned()).collect())
+    };
+    let sorted_uids = |value: &Option<ExecutionValue>| {
+        let Some(ExecutionValue::Scalars(rows)) = value else {
+            panic!("uid projection returns scalars, got {value:?}");
+        };
+        let mut uids = rows
+            .iter()
+            .map(|row| {
+                let ExecutionScalar::Object(object) = row else {
+                    panic!("uid projection returns objects, got {row:?}");
+                };
+                object["uid"].as_str().expect("uid is a string").to_owned()
+            })
+            .collect::<Vec<_>>();
+        uids.sort();
+        uids
+    };
+    let default = context::ParamBindings::default;
+    for (unscoped, params, expected, indexed) in [
+        (
+            Predicate::eq("kind", "B"),
+            default(),
+            vec!["a1", "a1", "n1"],
+            true,
+        ),
+        (
+            Predicate::is_in("kind", strings(&["A", "B"])),
+            default(),
+            vec!["a1", "a1", "a2", "n1", "n2"],
+            true,
+        ),
+        (
+            Predicate::and(vec![
+                Predicate::eq("kind", "B"),
+                Predicate::starts_with("uid", "n"),
+            ]),
+            default(),
+            vec!["n1"],
+            true,
+        ),
+        // A range set would verify the label's whole range, so ranges keep
+        // the per-row filter.
+        (
+            Predicate::gte("rank", 5_i64),
+            default(),
+            vec!["a2", "a3", "n2"],
+            false,
+        ),
+        (
+            Predicate::and(vec![
+                Predicate::eq("kind", "A"),
+                Predicate::gte("rank", 5_i64),
+            ]),
+            default(),
+            vec!["a2", "n2"],
+            true,
+        ),
+        // Residual conjuncts keep the per-row filter behind the membership.
+        (
+            Predicate::and(vec![
+                Predicate::eq("kind", "B"),
+                Predicate::not(Predicate::starts_with("uid", "n")),
+            ]),
+            default(),
+            vec!["a1", "a1"],
+            true,
+        ),
+        (
+            Predicate::and(vec![
+                Predicate::eq("kind", "B"),
+                // `2 - rank % 2` is always positive, so only the arithmetic
+                // shape matters: each operator reaches the stored `rank`.
+                Predicate::compare(
+                    Expr::prop("rank")
+                        .modulo(Expr::val(2_i64))
+                        .div(Expr::val(1_i64))
+                        .mul(Expr::val(1_i64))
+                        .sub(Expr::val(0_i64))
+                        .neg()
+                        .add(Expr::val(2_i64)),
+                    CompareOp::Gt,
+                    Expr::val(0_i64),
+                ),
+            ]),
+            default(),
+            vec!["a1", "a1", "n1"],
+            true,
+        ),
+        // A missing property equals null, which only an authoritative scan
+        // can answer, so literal null equality keeps the per-row filter.
+        (
+            Predicate::eq("kind", PropertyValue::Null),
+            default(),
+            vec!["a3"],
+            false,
+        ),
+        (
+            Predicate::eq_param("kind", "kind"),
+            bind("kind", PropertyValue::from("B")),
+            vec!["a1", "a1", "n1"],
+            true,
+        ),
+        // Null falls back to per-row evaluation; NaN is served and matches
+        // nothing.
+        (
+            Predicate::eq_param("kind", "kind"),
+            bind("kind", PropertyValue::Null),
+            vec!["a3"],
+            true,
+        ),
+        (
+            Predicate::eq_param("kind", "kind"),
+            bind("kind", PropertyValue::F64(f64::NAN)),
+            Vec::new(),
+            true,
+        ),
+        (
+            Predicate::is_in_param("kind", "kinds"),
+            bind("kinds", strings(&["A", "B"])),
+            vec!["a1", "a1", "a2", "n1", "n2"],
+            true,
+        ),
+        // Three values exceed the planned domain bound and fall back.
+        (
+            Predicate::is_in_param("kind", "kinds"),
+            bind("kinds", strings(&["A", "B", "C"])),
+            vec!["a1", "a1", "a2", "n1", "n2"],
+            true,
+        ),
+        // Late-bound range bounds keep the per-row filter, so bounds without
+        // a range encoding match nothing instead of failing the request.
+        (
+            Predicate::gte_param("rank", "min"),
+            bind("min", PropertyValue::from(5_i64)),
+            vec!["a2", "a3", "n2"],
+            false,
+        ),
+        (
+            Predicate::gte_param("rank", "min"),
+            bind("min", PropertyValue::Null),
+            Vec::new(),
+            false,
+        ),
+        (
+            Predicate::gte_param("rank", "min"),
+            bind("min", PropertyValue::F64(f64::NAN)),
+            Vec::new(),
+            false,
+        ),
+        (
+            Predicate::gte_param("rank", "min"),
+            bind("min", PropertyValue::from(true)),
+            Vec::new(),
+            false,
+        ),
+        (
+            Predicate::between(
+                "rank",
+                PropertyInput::param("min"),
+                PropertyInput::param("max"),
+            ),
+            bind("min", PropertyValue::from(1_i64)).with_value(
+                ir::NonEmptyString::new("max").expect("parameter name is non-empty"),
+                PropertyValue::from("z"),
+            ),
+            Vec::new(),
+            false,
+        ),
+    ] {
+        // An unscoped predicate plans membership, evaluating rows of other
+        // labels, whenever an index answers one of its conjuncts. Scoped to
+        // `Attribute` it always plans membership and rejects other labels:
+        // a predicate no index answers reads the `Attribute` label bitmap
+        // and evaluates only that label's nodes.
+        // A nested conjunction would hide its conjuncts from the index split.
+        let conjuncts = if let Predicate::And { predicates } = &unscoped {
+            predicates.clone()
+        } else {
+            vec![unscoped.clone()]
+        };
+        let scoped = |label: Predicate| {
+            Predicate::and(core::iter::once(label).chain(conjuncts.clone()).collect())
+        };
+        // The per-row oracle states the label test as a negated inequality,
+        // which is not a finite `$label` domain, so without the catalog it
+        // plans a true per-row filter instead of a `$label` membership.
+        let scoped_per_row = scoped(Predicate::not(Predicate::neq("$label", "Attribute")));
+        let scoped = scoped(Predicate::eq("$label", "Attribute"));
+        let attributes = expected
+            .iter()
+            .copied()
+            .filter(|uid| uid.starts_with('a'))
+            .collect::<Vec<_>>();
+        for (predicate, oracle, expected, planned) in [
+            (unscoped.clone(), unscoped, expected, indexed),
+            (scoped, scoped_per_row, attributes, true),
+        ] {
+            let filtered = |group: &str, predicate: &Predicate| {
+                traversal::g()
+                    .n_with_label_where("Group", Predicate::eq("uid", group))
+                    .in_(Some("IN_GROUP"))
+                    .out(Some("HAS"))
+                    .where_(predicate.clone())
+            };
+            let wide = |predicate: &Predicate| {
+                traversal::g()
+                    .n_with_label_where("Group", Predicate::eq("uid", "wide"))
+                    .out(Some("HAS"))
+                    .in_(Some("HAS"))
+                    .out(Some("HAS"))
+                    .where_(predicate.clone())
+            };
+            let shapes = |predicate: &Predicate| {
+                [
+                    filtered("g", predicate).values(vec!["uid"]),
+                    filtered("g", predicate).limit(2_usize).values(vec!["uid"]),
+                    filtered("g", predicate).count(),
+                    filtered("empty", predicate).values(vec!["uid"]),
+                    filtered("empty", predicate)
+                        .limit(2_usize)
+                        .values(vec!["uid"]),
+                    wide(predicate).values(vec!["uid"]),
+                    wide(predicate).count(),
+                ]
+            };
+            for (index, (shape, oracle_shape)) in shapes(&predicate)
+                .into_iter()
+                .zip(shapes(&oracle))
+                .enumerate()
+            {
+                let checked = index == 0;
+                let read = batch::read_batch()
+                    .var_as("result", shape)
+                    .returning(["result"]);
+                let oracle_read = batch::read_batch()
+                    .var_as("result", oracle_shape)
+                    .returning(["result"]);
+                let membership =
+                    planning::plan_read_batch(&read, &with_catalog).unwrap_or_else(|error| {
+                        panic!("{predicate:?} plans with the catalog: {error}")
+                    });
+                let per_row = planning::plan_read_batch(&oracle_read, &without_catalog)
+                    .unwrap_or_else(|error| {
+                        panic!("{oracle:?} plans without the catalog: {error}")
+                    });
+                assert!(!per_row.steps().iter().any(is_membership), "{oracle:?}");
+                let membership_rows = db
+                    .execute(&membership, params.clone())
+                    .await
+                    .unwrap_or_else(|error| panic!("{predicate:?} membership executes: {error}"))
+                    .last;
+                let per_row_rows = db
+                    .execute(&per_row, params.clone())
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{predicate:?} per-row filter executes: {error}")
+                    })
+                    .last;
+                assert_eq!(membership_rows, per_row_rows, "{predicate:?}");
+                if checked {
+                    assert_eq!(
+                        membership.steps().iter().any(is_membership),
+                        planned,
+                        "{predicate:?}: {:?}",
+                        membership.steps()
+                    );
+                    assert_eq!(sorted_uids(&membership_rows), expected, "{predicate:?}");
+                }
+            }
+        }
+    }
+
+    // Six B-valued nodes, each reached 17 times, survive across both batches.
+    let wide_count = batch::read_batch()
+        .var_as(
+            "result",
+            traversal::g()
+                .n_with_label_where("Group", Predicate::eq("uid", "wide"))
+                .out(Some("HAS"))
+                .in_(Some("HAS"))
+                .out(Some("HAS"))
+                .where_(Predicate::eq("kind", "B"))
+                .count(),
+        )
+        .returning(["result"]);
+    assert_eq!(
+        db.execute(
+            &planning::plan_read_batch(&wide_count, &with_catalog)
+                .expect("wide membership count plans"),
+            default(),
+        )
+        .await
+        .expect("wide membership count executes")
+        .last,
+        Some(ExecutionValue::Count(102))
+    );
+
+    // An unbound runtime parameter fails the request on both plans.
+    let unbound = batch::read_batch()
+        .var_as(
+            "result",
+            traversal::g()
+                .n_with_label_where("Group", Predicate::eq("uid", "g"))
+                .in_(Some("IN_GROUP"))
+                .out(Some("HAS"))
+                .where_(Predicate::eq_param("kind", "kind"))
+                .values(vec!["uid"]),
+        )
+        .returning(["result"]);
+    for planning_context in [&with_catalog, &without_catalog] {
+        let plan = planning::plan_read_batch(&unbound, planning_context)
+            .expect("unbound parameter read plans");
+        let error = db.execute(&plan, default()).await.unwrap_err();
+        assert!(error.to_string().contains("`kind`"), "{error}");
+    }
+
+    // Hand-built plans feed edge rows before node rows. Edges always evaluate
+    // the predicate, and a stream without node rows never resolves the set.
+    let element_ids = |value: Option<ExecutionValue>| {
+        let Some(ExecutionValue::Stream(rows)) = value else {
+            panic!("element read returns rows");
+        };
+        PropertyValue::I64Array(
+            rows.into_iter()
+                .map(|row| match row.current {
+                    Some(ElementRef::Node(id) | ElementRef::Edge(id)) => {
+                        i64::try_from(id).expect("fixture IDs fit in i64")
+                    }
+                    None => panic!("element read rows carry an element"),
+                })
+                .collect(),
+        )
+    };
+    let nodes = element_ids(
+        db.execute(
+            &planning::plan_read_batch(
+                &batch::read_batch()
+                    .var_as(
+                        "rows",
+                        traversal::g()
+                            .n_with_label_where("Group", Predicate::eq("uid", "g"))
+                            .in_(Some("IN_GROUP"))
+                            .out(Some("HAS")),
+                    )
+                    .returning(["rows"]),
+                &without_catalog,
+            )
+            .expect("node rows plan"),
+            default(),
+        )
+        .await
+        .expect("node rows read")
+        .last,
+    );
+    let edges = element_ids(
+        db.execute(
+            &planning::plan_read_batch(
+                &batch::read_batch()
+                    .var_as(
+                        "rows",
+                        traversal::g()
+                            .n_with_label_where("Item", Predicate::eq("uid", "i1"))
+                            .out_e(Some("HAS")),
+                    )
+                    .returning(["rows"]),
+                &without_catalog,
+            )
+            .expect("edge rows plan"),
+            default(),
+        )
+        .await
+        .expect("edge rows read")
+        .last,
+    );
+    let step_id = |value| exec::ExecStepId::new(value).expect("step ID is positive");
+    let step = |id, dependencies, op| exec::ExecStep {
+        id: step_id(id),
+        dependencies,
+        output: ir::BatchOutputPlan::Discard,
+        semantic_return_shape: None,
+        condition: exec::ExecCondition::Always,
+        op,
+        schedule: exec::ExecSchedule::Pipeline,
+        delivered: properties::DeliveredProperties::default(),
+        cost: cost::CostVector::ZERO,
+    };
+    // Edge rows from `edges`, then node rows from `nodes`, into `filter`; a
+    // window runs the filter as a pull cursor.
+    let mixed = |filter: exec::ExecOp, window: bool| {
+        let param = |name: &str| ir::NonEmptyString::new(name).expect("parameter is non-empty");
+        let mut steps = vec![
+            step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Access {
+                    plan: Box::new(exec::ExecAccessPlan::Edge(
+                        exec::ExecEdgeAccessPlan::FromParam {
+                            param: param("edges"),
+                        },
+                    )),
+                },
+            ),
+            step(
+                2,
+                Vec::new(),
+                exec::ExecOp::Access {
+                    plan: Box::new(exec::ExecAccessPlan::Node(
+                        exec::ExecNodeAccessPlan::FromParam {
+                            param: param("nodes"),
+                        },
+                    )),
+                },
+            ),
+            step(
+                3,
+                vec![step_id(1), step_id(2)],
+                exec::ExecOp::Merge {
+                    mode: exec::ExecMergeMode::Concat,
+                },
+            ),
+            step(4, vec![step_id(3)], filter),
+        ];
+        if window {
+            steps.push(step(
+                5,
+                vec![step_id(4)],
+                exec::ExecOp::Limit {
+                    count: ir::StreamBoundPlan::Literal(200),
+                },
+            ));
+        }
+        let root = steps.last().expect("membership plan has steps").id;
+        exec::ExecutablePlan::new(
+            ir::PlanKind::Read,
+            ir::ReturnPlan::None,
+            ir::AtLeast::<_, 1>::try_from_vec(steps).expect("membership plan is non-empty"),
+            root,
+            trace::PlanningTrace::default(),
+            exec::PlannerMetrics::default(),
+        )
+        .expect("hand-built membership plan validates")
+    };
+    let membership =
+        |set: ir::NodeAccessPlan, predicate: &Predicate| exec::ExecOp::IndexMembership {
+            plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(
+                &ir::NodeIndexMembershipPlan::new(
+                    ir::NodeAccessSourcePlan::new(set).expect("membership set is a node source"),
+                    ir::PredicatePlan::new(predicate.clone())
+                        .expect("membership predicate validates"),
+                    None,
+                )
+                .expect("membership plan validates"),
+            )),
+        };
+    let equality = |index: catalog::NodeEqualityIndexMeta, property: &str, value: &str| {
+        ir::NodeAccessPlan::EqualityIndex {
+            index,
+            key: catalog::ScopedPropertyKey::try_new("Attribute", property)
+                .expect("membership key validates"),
+            value: ir::IndexValue::Literal(
+                ir::SecondaryIndexLiteral::new(PropertyValue::from(value))
+                    .expect("membership literal validates"),
+            ),
+        }
+    };
+    let filter = |predicate: Predicate| exec::ExecOp::Filter {
+        predicate: ir::PredicatePlan::new(predicate).expect("filter predicate validates"),
+    };
+    let kind_key =
+        catalog::ScopedPropertyKey::try_new("Attribute", "kind").expect("kind key validates");
+    let uid_key =
+        catalog::ScopedPropertyKey::try_new("Attribute", "uid").expect("uid key validates");
+    let rank_key = catalog::ScopedPropertyDirectionKey::try_new(
+        "Attribute",
+        "rank",
+        index::RangeIndexDirection::Asc,
+    )
+    .expect("rank key validates");
+    let served = with_catalog.indexes.node_eq[&kind_key].clone();
+    // No Active index serves `Attribute.uid`, so its identity is unavailable
+    // at runtime and membership evaluates every row instead.
+    let unserved = catalog::IndexCatalogSnapshot::default()
+        .with_node_eq(uid_key.clone())
+        .node_eq[&uid_key]
+        .clone();
+    let corrupt = catalog::NodeEqualityIndexMeta::try_new("not-a-planner-identity")
+        .expect("identity is non-empty");
+    // Validated plans never carry a range child, but the executable contract
+    // is serializable; a union with a range child still evaluates rows
+    // instead of scanning and verifying the label's range.
+    let kind_a_or_rank_9 = Predicate::or(vec![
+        Predicate::eq("kind", "A"),
+        Predicate::gte("rank", 9_i64),
+    ]);
+    let exec::ExecOp::IndexMembership { plan: kind_a } =
+        membership(equality(served.clone(), "kind", "A"), &kind_a_or_rank_9)
+    else {
+        unreachable!("the membership helper builds membership");
+    };
+    let exec::ExecNodeMembershipSet::Index {
+        set: kind_a_set,
+        label: kind_a_label,
+        outside_label: kind_a_outside,
+    } = &kind_a.set
+    else {
+        unreachable!("an equality membership has an index set");
+    };
+    let union = exec::ExecOp::IndexMembership {
+        plan: Box::new(exec::ExecNodeIndexMembershipPlan {
+            set: exec::ExecNodeMembershipSet::Index {
+                set: exec::ExecNodeSecondarySetPlan::Union {
+                    driver: Box::new(kind_a_set.clone()),
+                    rest: ir::AtLeast::<_, 1>::from_one(exec::ExecNodeSecondarySetPlan::Range(
+                        exec::ExecNodeSecondaryRangePlan {
+                            index: with_catalog.indexes.node_range[&rank_key].clone(),
+                            key: rank_key,
+                            range: ir::IndexRange::Lower {
+                                lower: ir::IndexBound::Inclusive(
+                                    ir::RangeIndexValue::literal(9_i64.into())
+                                        .expect("range literal validates"),
+                                ),
+                            },
+                            iteration: ir::RangeScanIteration::Forward,
+                        },
+                    )),
+                },
+                label: kind_a_label.clone(),
+                outside_label: *kind_a_outside,
+            },
+            predicate: kind_a.predicate.clone(),
+            residual: None,
+        }),
+    };
+    // Validated plans never carry an authoritative-scan set, but the
+    // executable contract is serializable; such a set still evaluates rows
+    // instead of scanning the keyspace.
+    let null_kind = Predicate::eq("kind", PropertyValue::Null);
+    let authoritative = exec::ExecOp::IndexMembership {
+        plan: Box::new(exec::ExecNodeIndexMembershipPlan {
+            set: exec::ExecNodeMembershipSet::Index {
+                set: exec::ExecNodeSecondarySetPlan::AuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key: kind_key },
+                ),
+                label: ir::NonEmptyString::new("Attribute").expect("label is non-empty"),
+                outside_label: ir::NodeMembershipOutsideLabel::Evaluate,
+            },
+            predicate: ir::PredicatePlan::new(null_kind.clone()).expect("null predicate validates"),
+            residual: None,
+        }),
+    };
+    let kind_b = Predicate::eq("kind", "B");
+    let uid_a1 = Predicate::eq("uid", "a1");
+    // Two equality children intersect without a range driver; the unserved
+    // child makes the whole set fall back to per-row evaluation.
+    let kind_b_and_uid_a1 = Predicate::and(vec![kind_b.clone(), uid_a1.clone()]);
+    let intersect = membership(
+        ir::NodeAccessPlan::Intersect(ir::AtLeast::<_, 2>::from_pair(
+            ir::NodeAccessSourcePlan::new(equality(served.clone(), "kind", "B"))
+                .expect("served child is a node source"),
+            ir::NodeAccessSourcePlan::new(equality(unserved.clone(), "uid", "a1"))
+                .expect("unserved child is a node source"),
+        )),
+        &kind_b_and_uid_a1,
+    );
+    // The hand-built node rows repeat the six traversal rows 50 times, so
+    // every shape decides rows across several record batches. A window of
+    // 200 still pulls every node row for each shape.
+    let with_nodes = |nodes: &PropertyValue, repeats: usize| {
+        let PropertyValue::I64Array(nodes) = nodes else {
+            panic!("element reads return an ID array");
+        };
+        context::ParamBindings::default()
+            .with_value(
+                ir::NonEmptyString::new("edges").expect("parameter is non-empty"),
+                edges.clone(),
+            )
+            .with_value(
+                ir::NonEmptyString::new("nodes").expect("parameter is non-empty"),
+                PropertyValue::I64Array(
+                    nodes
+                        .iter()
+                        .copied()
+                        .cycle()
+                        .take(nodes.len() * repeats)
+                        .collect(),
+                ),
+            )
+    };
+    let narrow_rows = with_nodes(&nodes, 1);
+    let mixed_rows = with_nodes(&nodes, 50);
+    let edge_rows = with_nodes(&nodes, 0);
+    for window in [false, true] {
+        for (membership, predicate, rows, kept) in [
+            (
+                membership(equality(served.clone(), "kind", "B"), &kind_b),
+                kind_b.clone(),
+                &mixed_rows,
+                1 + 3 * 50,
+            ),
+            (
+                membership(equality(served.clone(), "kind", "B"), &kind_b),
+                kind_b.clone(),
+                &narrow_rows,
+                4,
+            ),
+            (
+                membership(equality(unserved.clone(), "uid", "a1"), &uid_a1),
+                uid_a1.clone(),
+                &mixed_rows,
+                2 * 50,
+            ),
+            (
+                membership(equality(corrupt.clone(), "kind", "B"), &kind_b),
+                kind_b.clone(),
+                &edge_rows,
+                1,
+            ),
+            (
+                union.clone(),
+                kind_a_or_rank_9.clone(),
+                &mixed_rows,
+                1 + 3 * 50,
+            ),
+            (
+                intersect.clone(),
+                kind_b_and_uid_a1.clone(),
+                &mixed_rows,
+                2 * 50,
+            ),
+            (
+                authoritative.clone(),
+                null_kind.clone(),
+                &mixed_rows,
+                1 + 50,
+            ),
+        ] {
+            let expected = db
+                .execute(&mixed(filter(predicate.clone()), window), rows.clone())
+                .await
+                .expect("per-row filter executes")
+                .last;
+            let Some(ExecutionValue::Stream(expected_rows)) = &expected else {
+                panic!("per-row filter returns rows");
+            };
+            assert_eq!(expected_rows.len(), kept, "{predicate:?}");
+            assert_eq!(
+                db.execute(&mixed(membership, window), rows.clone())
+                    .await
+                    .expect("membership executes")
+                    .last,
+                expected,
+                "{predicate:?}, window {window}"
+            );
+        }
+        // Any node row resolves the set, so the corrupt identity fails
+        // closed however few node rows the stream has.
+        for rows in [&narrow_rows, &mixed_rows] {
+            let error = db
+                .execute(
+                    &mixed(
+                        membership(equality(corrupt.clone(), "kind", "B"), &kind_b),
+                        window,
+                    ),
+                    rows.clone(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, db::error::HelixDbError::IndexCatalogCorruption(_)),
+                "{error:?}"
+            );
+        }
+    }
+
+    // Membership in a write request flushes the request's pending secondary
+    // and topology writes first, so it sees a new node, its new edge, and an
+    // index move before the request commits. Only the label-scoped predicate
+    // plans membership without statistics.
+    let attribute_b = || {
+        Predicate::and(vec![
+            Predicate::eq("$label", "Attribute"),
+            Predicate::eq("kind", "B"),
+        ])
+    };
+    let write = batch::write_batch()
+        .var_as(
+            "item",
+            traversal::g().n_with_label_where("Item", Predicate::eq("uid", "i2")),
+        )
+        .var_as("fresh", node("Attribute", "a5", Some("B"), 3))
+        .var_as("link", edge("item", "HAS", "fresh", None))
+        .var_as(
+            "moved",
+            traversal::g()
+                .n_with_label_where("Attribute", Predicate::eq("uid", "a1"))
+                .set_property("kind", "A"),
+        )
+        .var_as(
+            "result",
+            traversal::g()
+                .n_with_label_where("Group", Predicate::eq("uid", "g"))
+                .in_(Some("IN_GROUP"))
+                .out(Some("HAS"))
+                .where_(attribute_b())
+                .values(vec!["uid"]),
+        )
+        .returning(["result"]);
+    assert!(planning::plan_write_batch(&write, &with_catalog)
+        .expect("membership write plans")
+        .steps()
+        .iter()
+        .any(is_membership));
+    let response = db
+        .query(QueryRequest::write(write))
+        .await
+        .expect("membership write executes");
+    let mut written = response["result"]
+        .as_array()
+        .expect("write returns result rows")
+        .iter()
+        .map(|row| row["uid"].as_str().expect("row has a uid").to_owned())
+        .collect::<Vec<_>>();
+    written.sort();
+    assert_eq!(written, ["a5"]);
+
+    // A wide stream of several hundred node rows resolves the same set, which
+    // must already hold the request's pending index move and new node.
+    let wide_write = batch::write_batch()
+        .var_as(
+            "hub",
+            traversal::g().n_with_label_where("Group", Predicate::eq("uid", "wide")),
+        )
+        .var_as("fresh", node("Attribute", "w-fresh", Some("B"), 0))
+        .var_as("link", edge("hub", "HAS", "fresh", None))
+        .var_as(
+            "moved",
+            traversal::g()
+                .n_with_label_where("Attribute", Predicate::eq("uid", "w0"))
+                .set_property("kind", "A"),
+        )
+        .var_as(
+            "result",
+            traversal::g()
+                .n_with_label_where("Group", Predicate::eq("uid", "wide"))
+                .out(Some("HAS"))
+                .in_(Some("HAS"))
+                .out(Some("HAS"))
+                .where_(attribute_b())
+                .values(vec!["uid"]),
+        )
+        .returning(["result"]);
+    assert!(planning::plan_write_batch(&wide_write, &with_catalog)
+        .expect("wide membership write plans")
+        .steps()
+        .iter()
+        .any(is_membership));
+    let response = db
+        .query(QueryRequest::write(wide_write))
+        .await
+        .expect("wide membership write executes");
+    let written = response["result"]
+        .as_array()
+        .expect("write returns result rows");
+    // The remaining B-valued attributes `w6` and `w12` and the new node, each
+    // reached through all 18 targets of `wide`.
+    assert_eq!(written.len(), 3 * 18);
+    assert!(written.iter().all(|row| row["uid"] != "w0"));
+    assert_eq!(
+        written.iter().filter(|row| row["uid"] == "w-fresh").count(),
+        18
+    );
+
+    // One request reuses a resolved set across executions of the same plan
+    // until a mutation or a `ForEach` frame changes what it was read from.
+    // `wide` now reaches the B-valued attributes `w6`, `w12`, and `w-fresh`
+    // through each of its 18 targets.
+    let wide_attributes = |kind: Predicate| {
+        traversal::g()
+            .n_with_label_where("Group", Predicate::eq("uid", "wide"))
+            .out(Some("HAS"))
+            .in_(Some("HAS"))
+            .out(Some("HAS"))
+            .where_(Predicate::and(vec![
+                Predicate::eq("$label", "Attribute"),
+                kind,
+            ]))
+    };
+    let rewrite = batch::write_batch()
+        .var_as(
+            "before",
+            wide_attributes(Predicate::eq("kind", "B")).values(vec!["uid"]),
+        )
+        .var_as(
+            "moved",
+            traversal::g()
+                .n_with_label_where("Attribute", Predicate::eq("uid", "w2"))
+                .set_property("kind", "B"),
+        )
+        .var_as(
+            "after",
+            wide_attributes(Predicate::eq("kind", "B")).values(vec!["uid", "kind"]),
+        )
+        .returning(["before", "after"]);
+    assert_eq!(
+        planning::plan_write_batch(&rewrite, &with_catalog)
+            .expect("rewrite plans")
+            .steps()
+            .iter()
+            .filter(|step| is_membership(step))
+            .count(),
+        2
+    );
+    let response = db
+        .query(QueryRequest::write(rewrite))
+        .await
+        .expect("rewrite executes");
+    let rows = |name: &str| {
+        response[name]
+            .as_array()
+            .expect("write returns result rows")
+            .len()
+    };
+    assert_eq!((rows("before"), rows("after")), (3 * 18, 4 * 18));
+
+    // Each frame binds another kind, so the last frame's B-valued attributes
+    // never come from the set the A frame resolved.
+    let frames = batch::read_batch()
+        .for_each_param(
+            "items",
+            batch::read_batch().var_as(
+                "result",
+                wide_attributes(Predicate::eq_param("kind", "kind")).values(vec!["uid"]),
+            ),
+        )
+        .returning(["result"]);
+    assert!(planning::plan_read_batch(&frames, &with_catalog)
+        .expect("frames plan")
+        .steps()
+        .iter()
+        .any(|step| matches!(
+            &step.op,
+            exec::ExecOp::ForEach { body, .. } if body.steps().iter().any(is_membership)
+        )));
+    let item = |kind: &str| {
+        QueryValue::Object(
+            [("kind".to_owned(), QueryValue::String(kind.to_owned()))]
+                .into_iter()
+                .collect(),
+        )
+    };
+    let response = db
+        .query(
+            QueryRequest::read(frames)
+                .with_parameter_value("items", QueryValue::Array(vec![item("A"), item("B")])),
+        )
+        .await
+        .expect("frames execute");
+    let uids = response["result"]
+        .as_array()
+        .expect("frames return result rows");
+    assert_eq!(uids.len(), 4 * 18);
+    assert!(uids
+        .iter()
+        .all(|row| ["w2", "w6", "w12", "w-fresh"].contains(&row["uid"].as_str().unwrap())));
+
+    db.close().await.unwrap();
+}
+
+#[test]
+fn public_write_batches_keep_index_memberships_exact_across_frames_and_writes() {
+    run_high_stack_contract(
+        "public-membership-retention",
+        public_write_batches_keep_index_memberships_exact_across_frames_and_writes_contract,
+    );
+}
+
+/// Index membership sets that a request keeps across `ForEach` frames and
+/// writes answer exactly like the per-row filter.
+///
+/// Every request runs on a database with equality indexes on `Attribute`
+/// kind and status, a unique index on code, and a range index on rank, and on
+/// one without indexes, which keeps every per-row filter; both must answer
+/// alike. Frames bind the parameters of runtime equality and IN sets, unions,
+/// intersections, and residuals, including a null binding, next to literal IN
+/// and unique sets, and between reads they create, link, relabel, update,
+/// strip, and drop nodes and edges. A failing batch leaves both databases
+/// unchanged.
+async fn public_write_batches_keep_index_memberships_exact_across_frames_and_writes_contract() {
+    let open = |database: &'static str| async move {
+        HelixDB::open(HelixDbSource::InMemory {
+            database: database.to_owned(),
+        })
+        .await
+        .expect("membership retention fixture opens")
+    };
+    let indexed = open("production-membership-retention-indexed").await;
+    let unindexed = open("production-membership-retention-unindexed").await;
+    for spec in [
+        index::IndexSpec::node_equality("Attribute", "kind"),
+        index::IndexSpec::node_equality("Attribute", "status"),
+        index::IndexSpec::node_unique_equality("Attribute", "code"),
+        index::IndexSpec::node_range("Attribute", "rank"),
+    ] {
+        let receipt = indexed
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as("operation", traversal::g().create_index_if_not_exists(spec))
+                    .returning(["operation"]),
+            ))
+            .await
+            .unwrap();
+        let operation_id = receipt["operation"]["operation_id"]
+            .as_str()
+            .expect("accepted retention index operation has an ID");
+        await_index_operation_success(&indexed, operation_id, "retention index").await;
+    }
+    let answer = |request: QueryRequest| {
+        let (indexed, unindexed) = (&indexed, &unindexed);
+        async move {
+            match (
+                indexed.query(request.clone()).await,
+                unindexed.query(request).await,
+            ) {
+                (Ok(indexed), Ok(unindexed)) => {
+                    assert_eq!(indexed, unindexed);
+                    Ok(indexed)
+                }
+                (Err(indexed), Err(unindexed)) => {
+                    assert_eq!(indexed.to_string(), unindexed.to_string());
+                    Err(indexed)
+                }
+                (indexed, unindexed) => panic!("{indexed:?} differs from {unindexed:?}"),
+            }
+        }
+    };
+
+    let node = |label: &str,
+                uid: &str,
+                kind: Option<&str>,
+                status: Option<&str>,
+                rank: i64,
+                title: &str| {
+        let mut properties = vec![
+            ("uid", PropertyInput::from(uid)),
+            ("rank", PropertyInput::from(rank)),
+            ("title", PropertyInput::from(title)),
+        ];
+        properties.extend(kind.map(|kind| ("kind", PropertyInput::from(kind))));
+        properties.extend(status.map(|status| ("status", PropertyInput::from(status))));
+        // Only seeded attributes carry a unique code: nodes the frames create
+        // or relabel have none.
+        properties.extend(
+            (label == "Attribute").then(|| ("code", PropertyInput::from(format!("c{uid}")))),
+        );
+        traversal::g().add_n(label, properties)
+    };
+    let edge = |from: &str, label: &str, to: &str| {
+        traversal::g().n(NodeRef::var(from)).add_e(
+            label,
+            NodeRef::var(to),
+            Vec::<(&str, PropertyInput)>::new(),
+        )
+    };
+    let seed = [
+        ("g", node("Group", "g", None, None, 0, "g")),
+        ("i1", node("Item", "i1", None, None, 0, "i1")),
+        ("i2", node("Item", "i2", None, None, 0, "i2")),
+        (
+            "a1",
+            node("Attribute", "a1", Some("B"), Some("on"), 1, "xa1"),
+        ),
+        (
+            "a2",
+            node("Attribute", "a2", Some("A"), Some("off"), 5, "xa2"),
+        ),
+        ("a3", node("Attribute", "a3", None, None, 9, "a3")),
+        (
+            "a4",
+            node("Attribute", "a4", Some("B"), Some("off"), 7, "a4"),
+        ),
+        ("n1", node("Note", "n1", Some("B"), None, 1, "xn1")),
+        ("n2", node("Note", "n2", Some("A"), None, 5, "n2")),
+        ("i1_g", edge("i1", "IN_GROUP", "g")),
+        ("i2_g", edge("i2", "IN_GROUP", "g")),
+        ("i1_a1", edge("i1", "HAS", "a1")),
+        ("i1_a2", edge("i1", "HAS", "a2")),
+        ("i1_n1", edge("i1", "HAS", "n1")),
+        ("i2_a1", edge("i2", "HAS", "a1")),
+        ("i2_a3", edge("i2", "HAS", "a3")),
+        ("i2_a4", edge("i2", "HAS", "a4")),
+        ("i2_n2", edge("i2", "HAS", "n2")),
+    ]
+    .into_iter()
+    .fold(batch::write_batch(), |write, (name, entry)| {
+        write.var_as(name, entry)
+    })
+    .returning(Vec::<String>::new());
+    answer(QueryRequest::write(seed))
+        .await
+        .expect("retention graph seeds");
+
+    // Post-expansion filters of every set shape: runtime equality and IN
+    // sets, a union and an intersection with a runtime leaf, a literal IN
+    // set, unique equality and IN sets, a `$label` set, a range filter that
+    // stays per-row, and a residual with its own parameter.
+    let shapes = [
+        ("equality", Predicate::eq_param("kind", "kind")),
+        ("domain", Predicate::is_in_param("kind", "kinds")),
+        (
+            "union",
+            Predicate::or(vec![
+                Predicate::eq("kind", "B"),
+                Predicate::eq_param("kind", "kind"),
+            ]),
+        ),
+        (
+            "intersect",
+            Predicate::and(vec![
+                Predicate::eq("kind", "B"),
+                Predicate::eq_param("status", "status"),
+            ]),
+        ),
+        (
+            "literal_in",
+            Predicate::is_in(
+                "kind",
+                PropertyValue::StringArray(vec!["A".to_owned(), "C".to_owned()]),
+            ),
+        ),
+        ("unique", Predicate::eq("code", "ca4")),
+        (
+            "unique_in",
+            Predicate::is_in(
+                "code",
+                PropertyValue::StringArray(vec!["ca1".to_owned(), "ca2".to_owned()]),
+            ),
+        ),
+        ("labels", Predicate::eq("$label", "Attribute")),
+        ("range", Predicate::gt("rank", 3_i64)),
+        (
+            "residual",
+            Predicate::and(vec![
+                Predicate::eq("$label", "Attribute"),
+                Predicate::eq("kind", "B"),
+                Predicate::contains_param("title", "needle"),
+            ]),
+        ),
+    ];
+    let reached = |predicate: &Predicate| {
+        traversal::g()
+            .n_with_label_where("Group", Predicate::eq("uid", "g"))
+            .in_(Some("IN_GROUP"))
+            .out(Some("HAS"))
+            .where_(predicate.clone())
+    };
+    let by_uid = |label: &str, param: &str| {
+        traversal::g().n_with_label_where(label, Predicate::is_in_param("uid", param))
+    };
+    // Each frame tags what every shape keeps, writes the graph, and tags
+    // again: new items and attributes join the group, attributes change an
+    // indexed or unindexed property, lose one, change label, or are dropped
+    // with their edges, and items lose their links.
+    let tags = |body: batch::WriteBatch, phase: &str| {
+        shapes.iter().fold(body, |body, (shape, predicate)| {
+            body.var_as(
+                &format!("{phase}_{shape}"),
+                reached(predicate)
+                    .set_property(format!("{phase}_{shape}"), PropertyInput::param("uid")),
+            )
+        })
+    };
+    let writes = tags(batch::write_batch(), "before")
+        .var_as(
+            "group",
+            traversal::g().n_with_label_where("Group", Predicate::eq("uid", "g")),
+        )
+        .var_as(
+            "item",
+            traversal::g().add_n("Item", vec![("uid", PropertyInput::param("uid"))]),
+        )
+        .var_as(
+            "attribute",
+            traversal::g().add_n(
+                "Attribute",
+                vec![
+                    ("uid", PropertyInput::param("uid")),
+                    ("kind", PropertyInput::param("new_kind")),
+                    ("status", PropertyInput::from("on")),
+                    ("rank", PropertyInput::from(4_i64)),
+                    ("title", PropertyInput::from("x")),
+                ],
+            ),
+        )
+        .var_as("item_group", edge("item", "IN_GROUP", "group"))
+        .var_as("item_attribute", edge("item", "HAS", "attribute"))
+        .var_as(
+            "flip",
+            by_uid("Attribute", "flips").set_property("kind", PropertyInput::param("kind_to")),
+        )
+        .var_as(
+            "restatus",
+            by_uid("Attribute", "restatus")
+                .set_property("status", PropertyInput::param("status_to")),
+        )
+        .var_as(
+            "retitle",
+            traversal::g()
+                .n_with_label("Attribute")
+                .set_property("title", PropertyInput::param("title_to")),
+        )
+        .var_as(
+            "strip",
+            by_uid("Attribute", "strips").remove_property("status"),
+        )
+        .var_as(
+            "relabel",
+            by_uid("Note", "relabels").set_property("$label", "Attribute"),
+        )
+        .var_as("drop", by_uid("Attribute", "drops").drop())
+        .var_as(
+            "unlink",
+            by_uid("Item", "unlinks").out_e(Some("HAS")).drop(),
+        );
+    let body = tags(writes, "after");
+    let finals = shapes
+        .iter()
+        .map(|(shape, _)| format!("final_{shape}"))
+        .chain(["nodes".to_owned()])
+        .collect::<Vec<_>>();
+    let request = |frames: Vec<BTreeMap<&str, QueryValue>>| {
+        let batch = shapes.iter().fold(
+            batch::write_batch().for_each_param("rows", body.clone()),
+            |batch, (shape, predicate)| {
+                batch.var_as(
+                    &format!("final_{shape}"),
+                    reached(predicate).values(vec!["uid"]),
+                )
+            },
+        );
+        let batch = batch
+            .var_as(
+                "nodes",
+                traversal::g().n(NodeRef::all()).values(vec![
+                    "uid",
+                    "kind",
+                    "status",
+                    "title",
+                    "before_equality",
+                    "before_domain",
+                    "before_union",
+                    "before_intersect",
+                    "before_literal_in",
+                    "before_unique",
+                    "before_unique_in",
+                    "before_labels",
+                    "before_range",
+                    "before_residual",
+                    "after_equality",
+                    "after_domain",
+                    "after_union",
+                    "after_intersect",
+                    "after_literal_in",
+                    "after_unique",
+                    "after_unique_in",
+                    "after_labels",
+                    "after_range",
+                    "after_residual",
+                ]),
+            )
+            .returning(finals.clone());
+        let rows = QueryValue::Array(
+            frames
+                .into_iter()
+                .map(|frame| {
+                    QueryValue::Object(
+                        frame
+                            .into_iter()
+                            .map(|(name, value)| (name.to_owned(), value))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        );
+        [
+            ("kind", QueryValue::String("B".to_owned())),
+            (
+                "kinds",
+                QueryValue::Array(vec![QueryValue::String("A".to_owned())]),
+            ),
+            ("status", QueryValue::String("on".to_owned())),
+            ("needle", QueryValue::String("x".to_owned())),
+        ]
+        .into_iter()
+        .fold(
+            QueryRequest::write(batch).with_parameter_value("rows", rows),
+            |request, (name, value)| request.with_parameter_value(name, value),
+        )
+    };
+    let text = |value: &str| QueryValue::String(value.to_owned());
+    let texts =
+        |values: &[&str]| QueryValue::Array(values.iter().map(|value| text(value)).collect());
+    let frame = |uid: &str,
+                 kind: QueryValue,
+                 kinds: &[&str],
+                 status: &str,
+                 needle: &str,
+                 new_kind: QueryValue,
+                 writes: [(&'static str, QueryValue); 8]| {
+        BTreeMap::from_iter(
+            [
+                ("uid", text(uid)),
+                ("kind", kind),
+                ("kinds", texts(kinds)),
+                ("status", text(status)),
+                ("needle", text(needle)),
+                ("new_kind", new_kind),
+            ]
+            .into_iter()
+            .chain(writes),
+        )
+    };
+    let frame_writes = |flips: &[&str],
+                        kind_to: &str,
+                        restatus: &[&str],
+                        status_to: &str,
+                        title_to: &str,
+                        strips: &[&str],
+                        relabels: &[&str],
+                        drops: &[&str]| {
+        [
+            ("flips", texts(flips)),
+            ("kind_to", text(kind_to)),
+            ("restatus", texts(restatus)),
+            ("status_to", text(status_to)),
+            ("title_to", text(title_to)),
+            ("strips", texts(strips)),
+            ("relabels", texts(relabels)),
+            ("drops", texts(drops)),
+        ]
+    };
+    let unlinks = |uids: &[&str]| ("unlinks", texts(uids));
+    let frames = vec![
+        // Unrelated writes: new nodes of other labels and an unindexed title.
+        frame(
+            "x1",
+            text("B"),
+            &["A", "B"],
+            "on",
+            "x",
+            text("B"),
+            frame_writes(&[], "B", &[], "on", "xt", &[], &[], &[]),
+        ),
+        // Indexed updates, a relabel, and a stripped status.
+        frame(
+            "x2",
+            text("A"),
+            &["A", "B", "C"],
+            "off",
+            "a",
+            QueryValue::Null,
+            frame_writes(
+                &["a2", "a3"],
+                "B",
+                &["a4"],
+                "on",
+                "q",
+                &["a1"],
+                &["n1"],
+                &[],
+            ),
+        ),
+        // A null binding, two attributes dropped with their edges, and an
+        // item's links dropped.
+        frame(
+            "x3",
+            QueryValue::Null,
+            &["B"],
+            "on",
+            "",
+            text("A"),
+            frame_writes(&[], "A", &[], "off", "xx", &[], &[], &["x1", "a3"]),
+        ),
+    ];
+    let with_unlinks = |mut frames: Vec<BTreeMap<&'static str, QueryValue>>| {
+        for (frame, uids) in frames.iter_mut().zip([&[][..], &["x1"], &["i2"]]) {
+            let (name, value) = unlinks(uids);
+            frame.insert(name, value);
+        }
+        frames
+    };
+    let response = answer(request(with_unlinks(frames.clone())))
+        .await
+        .expect("retention batch executes");
+    assert!(
+        finals.iter().any(|name| response[name]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty())),
+        "{response}"
+    );
+
+    // A batch whose last frame binds no `uid` fails, and both databases keep
+    // their committed state.
+    let committed = || {
+        answer(QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "nodes",
+                    traversal::g()
+                        .n(NodeRef::all())
+                        .values(vec!["uid", "kind", "status", "title"]),
+                )
+                .returning(["nodes"]),
+        ))
+    };
+    let before = committed().await.expect("committed state reads");
+    let mut failing = with_unlinks(frames);
+    failing[2].remove("uid");
+    answer(request(failing))
+        .await
+        .expect_err("a frame without its uid fails");
+    assert_eq!(committed().await.expect("committed state reads"), before);
+
+    indexed.close().await.unwrap();
+    unindexed.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -6530,6 +9048,135 @@ async fn public_query_boundary_rejects_folded_stream_consumers() {
     db.close().await.unwrap();
 }
 
+/// Proves a reader hydrates vector memory from its own snapshots.
+///
+/// Blocking startup hydration publishes the reader's store before open
+/// returns. The hour-long poll interval leaves the reader's status change
+/// after a later writer commit as the only trigger that can refresh it.
+/// The second document only queues its vector operation, so the store grows
+/// once the reader applies the writer's queue publication commit, not the
+/// document's own commit.
+#[test]
+fn public_reader_hydrates_vector_memory_at_open_and_on_status_changes() {
+    run_high_stack_contract(
+        "public-reader-vector-memory",
+        public_reader_hydrates_vector_memory_at_open_and_on_status_changes_contract,
+    );
+}
+
+async fn public_reader_hydrates_vector_memory_at_open_and_on_status_changes_contract() {
+    let token = ProcessLocalDatabaseToken::new("production-reader-vector-memory")
+        .expect("process-local database token validates");
+    let config = config::DbConfig::new().with_cache(config::CacheConfig::new(
+        config::VectorMemorySettings::try_new_with_hydration(
+            config::VectorMemoryBudget::bounded(64 * 1024 * 1024)
+                .expect("vector memory budget is positive"),
+            config::VectorMemoryHydrationMode::blocking_then_background(3_600)
+                .expect("poll interval is positive"),
+        )
+        .expect("vector memory settings validate"),
+        config::CacheMode::VectorMemoryOnly,
+    ));
+    let add_document = |embedding: Vec<f32>| {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "document",
+                    traversal::g().add_n(
+                        "Document",
+                        vec![("embedding", PropertyInput::from(embedding))],
+                    ),
+                )
+                .returning(Vec::<String>::new()),
+        )
+    };
+    let writer = HelixDB::open_with_config(
+        HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        },
+        config.clone(),
+    )
+    .await
+    .expect("vector-memory writer opens");
+    writer
+        .query(add_document(vec![1.0, 0.0]))
+        .await
+        .expect("first document commits");
+    let receipt = writer
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "operation",
+                    traversal::g().create_index_if_not_exists(index::IndexSpec::node_vector(
+                        "Document",
+                        "embedding",
+                        NonZeroUsize::new(2).expect("dimension is positive"),
+                        index::VectorDistanceMetric::Euclidean,
+                        None::<String>,
+                    )),
+                )
+                .returning(["operation"]),
+        ))
+        .await
+        .expect("vector index DDL is accepted");
+    let operation_id = receipt["operation"]["operation_id"]
+        .as_str()
+        .expect("accepted vector-index operation has an ID");
+    await_index_operation_success(&writer, operation_id, "reader vector index").await;
+
+    let reader = HelixDB::open_reader_with_config(HelixDbSource::InMemoryToken { token }, config)
+        .await
+        .expect("vector-memory reader opens");
+    let resident_bytes = |db: &HelixDB| {
+        let db::CacheTierState::Ready { used_bytes, .. } = db.cache_stats().vector_memory.state
+        else {
+            panic!("vector memory is always ready");
+        };
+        used_bytes
+    };
+    let hydrated = resident_bytes(&reader);
+    assert!(
+        hydrated > 0,
+        "the reader store is published before open returns"
+    );
+
+    writer
+        .query(add_document(vec![0.0, 1.0]))
+        .await
+        .expect("second document commits");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while resident_bytes(&reader) <= hydrated {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the reader refreshes its store after applying the writer commit");
+    assert_eq!(
+        reader
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "nodes",
+                        traversal::g()
+                            .vector_search_nodes_with(
+                                "Document",
+                                "embedding",
+                                PropertyInput::from(vec![0.0_f32, 1.0]),
+                                1_usize,
+                                None,
+                            )
+                            .id(),
+                    )
+                    .returning(["nodes"]),
+            ))
+            .await
+            .expect("reader vector search succeeds"),
+        serde_json::json!({ "nodes": [1] })
+    );
+    reader.close().await.expect("vector-memory reader closes");
+    writer.close().await.expect("vector-memory writer closes");
+}
+
 #[tokio::test]
 async fn public_reader_executes_parallel_stage_with_stable_output_order() {
     let token = ProcessLocalDatabaseToken::new("production-interpreter-parallel-stage")
@@ -7111,7 +9758,7 @@ async fn public_executable_plan_boundary_covers_scalar_stream_composition() {
         .unwrap_err();
     assert_eq!(
         error.to_string(),
-        "Query error: unfold expected stream or folded stream input, got Count(2)"
+        "Query error: unfold expected stream or folded stream input"
     );
 
     let scalar_group = linear_plan(vec![
@@ -7414,8 +10061,15 @@ async fn public_executable_plan_boundary_covers_merge_and_dependency_shapes() {
     db.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn public_query_boundary_covers_active_vector_index_mutations() {
+#[test]
+fn public_query_boundary_covers_active_vector_index_mutations() {
+    run_high_stack_contract(
+        "public-active-vector-index-mutations",
+        public_query_boundary_covers_active_vector_index_mutations_contract,
+    );
+}
+
+async fn public_query_boundary_covers_active_vector_index_mutations_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-interpreter-vector-index".to_owned(),
     })
@@ -8053,4 +10707,1598 @@ fn public_float_distance_kernels_cover_long_vectors_and_invalid_zero_cosine() {
             actual: 2,
         })
     );
+}
+
+#[test]
+fn public_query_boundary_serves_source_filters_and_counts_from_indexes() {
+    run_high_stack_contract(
+        "public-index-served-source-filters",
+        public_query_boundary_serves_source_filters_and_counts_from_indexes_contract,
+    );
+}
+
+/// Source filters and counts that indexes answer return exactly what per-row
+/// evaluation returns.
+///
+/// Two databases hold the same `Item` nodes and `Link` edges; only one has
+/// the equality, unique and range indexes. Every request, read or write, must
+/// return the same response from both. The shapes cover null and absent
+/// equality alone and inside intersections and unions, runtime equality and
+/// IN parameters (with null, and wider than one index union), range-only
+/// equality, unique lookups and batches, point and runtime IDs intersected
+/// with an index, saved-stream counts, range bounds no index entry can hold,
+/// and null equality read inside a write transaction. Plans with late-bound
+/// parameters, executed directly, add the runtime equality, membership and
+/// ID leaves that bound request parameters are specialized away from.
+async fn public_query_boundary_serves_source_filters_and_counts_from_indexes_contract() {
+    const ITEMS: i64 = 40;
+    // Every seventh element has no `kind`, every other fifth an explicit null.
+    let kind = |n: i64| match (n % 7, n % 5) {
+        (0, _) => None,
+        (_, 0) => Some(PropertyValue::Null),
+        _ => Some(PropertyValue::from(["A", "B", "C"][(n % 3) as usize])),
+    };
+    let seed = (0..ITEMS).fold(batch::write_batch(), |write, n| {
+        let mut item = vec![
+            ("uid", PropertyInput::from(format!("i{n}"))),
+            ("tier", PropertyInput::from(n % 4)),
+            ("rank", PropertyInput::from(n)),
+            (
+                "note",
+                PropertyInput::from(if n % 3 == 0 { "needle" } else { "hay" }),
+            ),
+        ];
+        item.extend(kind(n).map(|kind| ("kind", PropertyInput::from(kind))));
+        write.var_as(&format!("i{n}"), traversal::g().add_n("Item", item))
+    });
+    let seed = (0..ITEMS).fold(seed, |write, n| {
+        let mut link = vec![
+            ("tier", PropertyInput::from(n % 4)),
+            ("weight", PropertyInput::from(n)),
+            (
+                "note",
+                PropertyInput::from(if n % 4 == 0 { "needle" } else { "hay" }),
+            ),
+        ];
+        link.extend(kind(n).map(|kind| ("kind", PropertyInput::from(kind))));
+        write.var_as(
+            &format!("l{n}"),
+            traversal::g().n(NodeRef::var(format!("i{n}"))).add_e(
+                "Link",
+                NodeRef::var(format!("i{}", (n + 1) % ITEMS)),
+                link,
+            ),
+        )
+    });
+    let mut databases = Vec::new();
+    for (name, indexed) in [
+        ("production-index-served-sources-indexed", true),
+        ("production-index-served-sources-unindexed", false),
+    ] {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: name.to_owned(),
+        })
+        .await
+        .expect("index-served source fixture opens");
+        let operations = [
+            index::IndexSpec::node_equality("Item", "kind"),
+            index::IndexSpec::node_equality("Item", "tier"),
+            index::IndexSpec::node_unique_equality("Item", "uid"),
+            index::IndexSpec::node_range("Item", "rank"),
+            index::IndexSpec::edge_equality("Link", "kind"),
+            index::IndexSpec::edge_equality("Link", "tier"),
+            index::IndexSpec::edge_range("Link", "weight"),
+        ]
+        .map(|spec| traversal::g().create_index_if_not_exists(spec))
+        .into_iter()
+        .chain([
+            traversal::g().create_text_index_nodes("Item", "note", None::<String>),
+            traversal::g().create_text_index_edges("Link", "note", None::<String>),
+        ]);
+        for operation in operations.filter(|_| indexed) {
+            let receipt = db
+                .query(QueryRequest::write(
+                    batch::write_batch()
+                        .var_as("operation", operation)
+                        .returning(["operation"]),
+                ))
+                .await
+                .unwrap();
+            let operation_id = receipt["operation"]["operation_id"]
+                .as_str()
+                .expect("accepted source-filter index operation has an ID");
+            await_index_operation_success(&db, operation_id, "source-filter index").await;
+        }
+        db.query(QueryRequest::write(
+            seed.clone().returning(Vec::<String>::new()),
+        ))
+        .await
+        .expect("index-served source fixture seeds");
+        databases.push(db);
+    }
+
+    // IDs are read back per database, so point-ID shapes name the same rows
+    // in both.
+    let mut id_maps = Vec::new();
+    for db in &databases {
+        let ids = db
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "items",
+                        traversal::g()
+                            .n_with_label("Item")
+                            .values(vec!["$id", "rank"]),
+                    )
+                    .var_as(
+                        "links",
+                        traversal::g()
+                            .e_with_label("Link")
+                            .values(vec!["$id", "weight"]),
+                    )
+                    .returning(["items", "links"]),
+            ))
+            .await
+            .unwrap();
+        let by_ordinal = |rows: &serde_json::Value, ordinal: &str| {
+            rows.as_array()
+                .expect("ID rows are an array")
+                .iter()
+                .map(|row| {
+                    (
+                        row[ordinal].as_i64().expect("ordinal is an integer"),
+                        row["$id"].as_u64().expect("ID is an integer"),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        id_maps.push((
+            by_ordinal(&ids["items"], "rank"),
+            by_ordinal(&ids["links"], "weight"),
+        ));
+    }
+
+    let items = |predicate: Predicate| traversal::g().n_with_label_where("Item", predicate);
+    let links = |predicate: Predicate| traversal::g().e_with_label_where("Link", predicate);
+    let read = |result: traversal::Traversal<traversal::Terminal>| {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as("result", result)
+                .returning(["result"]),
+        )
+    };
+    let wide_tiers = QueryValue::Array((0..100).map(QueryValue::I64).collect());
+    let kind_or_null = QueryValue::Array(vec![QueryValue::String("A".into()), QueryValue::Null]);
+    let requests = |(nodes, edges): &(BTreeMap<i64, u64>, BTreeMap<i64, u64>)| {
+        // A point ID no element holds proves nothing on its own.
+        let missing = nodes.values().chain(edges.values()).max().unwrap() + 1_000;
+        let points = |ids: &BTreeMap<i64, u64>| {
+            [1, 2, 3, 6, 9, 10]
+                .map(|ordinal| ids[&ordinal])
+                .into_iter()
+                .chain([missing])
+                .collect::<Vec<_>>()
+        };
+        let (node_ids, edge_ids) = (points(nodes), points(edges));
+        let id_values = |ids: &[u64]| {
+            QueryValue::Array(ids.iter().map(|id| QueryValue::I64(*id as i64)).collect())
+        };
+        vec![
+            // Null equality alone, inside intersections and unions, as rows
+            // and as counts.
+            read(items(Predicate::eq("kind", PropertyValue::Null)).count()),
+            read(links(Predicate::eq("kind", PropertyValue::Null)).count()),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyValue::Null),
+                    Predicate::eq("tier", 1),
+                ]))
+                .values(vec!["uid"]),
+            ),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyValue::Null),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+            ),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyValue::Null),
+                    Predicate::eq("tier", 3),
+                ]))
+                .values(vec!["weight"]),
+            ),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyValue::Null),
+                    Predicate::eq("tier", 0),
+                ]))
+                .count(),
+            ),
+            read(
+                items(Predicate::or(vec![
+                    Predicate::eq("uid", "i4"),
+                    Predicate::eq("kind", PropertyValue::Null),
+                ]))
+                .count(),
+            ),
+            // Runtime equality and IN parameters, with null and wider than
+            // one index union.
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyInput::param("kind")),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kind", QueryValue::String("B".into())),
+            read(items(Predicate::eq("kind", PropertyInput::param("kind"))).count())
+                .with_parameter_value("kind", QueryValue::Null),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::eq("kind", PropertyInput::param("kind")),
+                    Predicate::eq("tier", 1),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kind", QueryValue::String("C".into())),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::is_in_param("kind", "kinds"),
+                    Predicate::eq("tier", 0),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kinds", kind_or_null.clone()),
+            read(items(Predicate::is_in_param("kind", "kinds")).values(vec!["uid"]))
+                .with_parameter_value("kinds", kind_or_null.clone()),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::is_in_param("kind", "kinds"),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kinds", kind_or_null.clone()),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::is_in_param("tier", "tiers"),
+                    Predicate::eq("kind", "B"),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("tiers", wide_tiers.clone()),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::is_in_param("tier", "tiers"),
+                    Predicate::eq("kind", "A"),
+                ]))
+                .values(vec!["weight"]),
+            )
+            .with_parameter_value("tiers", wide_tiers.clone()),
+            // Range-only equality, unique lookups and batches, and unions of
+            // sets read in different ways.
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("rank", 5),
+                    Predicate::eq("tier", 1),
+                ]))
+                .count(),
+            ),
+            read(
+                links(Predicate::and(vec![
+                    Predicate::eq("weight", 6),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+            ),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::eq("uid", "i3"),
+                    Predicate::eq("kind", "A"),
+                ]))
+                .count(),
+            ),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::is_in(
+                        "uid",
+                        vec!["i1".to_owned(), "i2".to_owned(), "i5".to_owned()],
+                    ),
+                    Predicate::eq("tier", 1),
+                ]))
+                .values(vec!["uid"]),
+            ),
+            // Counts over unique literal sets read one batch of owners:
+            // alone, with null, and intersected with another index.
+            read(
+                items(Predicate::is_in(
+                    "uid",
+                    vec![
+                        "i1".to_owned(),
+                        "i2".to_owned(),
+                        "i5".to_owned(),
+                        "absent".to_owned(),
+                    ],
+                ))
+                .count(),
+            ),
+            read(
+                items(Predicate::is_in(
+                    "uid",
+                    PropertyValue::Array(vec![
+                        PropertyValue::from("i1"),
+                        PropertyValue::from("i2"),
+                        PropertyValue::Null,
+                    ]),
+                ))
+                .count(),
+            ),
+            read(
+                items(Predicate::and(vec![
+                    Predicate::is_in(
+                        "uid",
+                        vec!["i1".to_owned(), "i2".to_owned(), "i5".to_owned()],
+                    ),
+                    Predicate::eq("tier", 1),
+                ]))
+                .count(),
+            ),
+            read(
+                items(Predicate::or(vec![
+                    Predicate::eq("kind", PropertyInput::param("kind")),
+                    Predicate::eq("rank", 7),
+                ]))
+                .count(),
+            )
+            .with_parameter_value("kind", QueryValue::String("C".into())),
+            // Point and runtime IDs intersected with an index.
+            read(
+                traversal::g()
+                    .n(node_ids.clone())
+                    .where_(Predicate::eq("tier", 1))
+                    .count(),
+            ),
+            read(
+                traversal::g()
+                    .n(NodeRef::param("ids"))
+                    .where_(Predicate::eq("kind", "B"))
+                    .count(),
+            )
+            .with_parameter_value("ids", id_values(&node_ids)),
+            read(
+                traversal::g()
+                    .e(edge_ids.clone())
+                    .where_(Predicate::eq("tier", 2))
+                    .count(),
+            ),
+            read(
+                traversal::g()
+                    .e(EdgeRef::param("ids"))
+                    .where_(Predicate::eq("kind", "C"))
+                    .count(),
+            )
+            .with_parameter_value("ids", id_values(&edge_ids)),
+            // Point IDs united with index sets.
+            read(
+                items(Predicate::or(vec![
+                    Predicate::eq("$id", node_ids[0] as i64),
+                    Predicate::eq("$id", missing as i64),
+                    Predicate::eq("kind", PropertyValue::Null),
+                ]))
+                .count(),
+            ),
+            read(
+                items(Predicate::or(vec![
+                    Predicate::eq("$id", node_ids[1] as i64),
+                    Predicate::eq("rank", 30),
+                    Predicate::eq("uid", "i31"),
+                ]))
+                .count(),
+            ),
+            read(
+                links(Predicate::or(vec![
+                    Predicate::eq("$id", edge_ids[1] as i64),
+                    Predicate::eq("weight", 30),
+                    Predicate::eq("tier", 3),
+                ]))
+                .count(),
+            ),
+            // Saved-stream counts.
+            read(items(Predicate::eq("kind", "B")).as_("saved").count()),
+            read(
+                traversal::g()
+                    .e_with_label("Link")
+                    .where_(Predicate::eq("tier", 3))
+                    .store("saved")
+                    .count(),
+            ),
+            // Range bounds no index entry can hold match nothing.
+            read(items(Predicate::between("rank", 9, 3)).count()),
+            read(items(Predicate::gt("rank", f64::NAN)).count()),
+            read(links(Predicate::lt("weight", "heavy")).count()),
+            // Null equality read inside a write transaction.
+            QueryRequest::write(
+                batch::write_batch()
+                    .var_as(
+                        "added",
+                        traversal::g().add_n(
+                            "Item",
+                            vec![
+                                ("uid", PropertyInput::from("added")),
+                                ("tier", PropertyInput::from(1_i64)),
+                                ("kind", PropertyInput::from(PropertyValue::Null)),
+                            ],
+                        ),
+                    )
+                    .var_as(
+                        "result",
+                        items(Predicate::and(vec![
+                            Predicate::eq("kind", PropertyValue::Null),
+                            Predicate::eq("tier", 1),
+                        ]))
+                        .values(vec!["uid"]),
+                    )
+                    .returning(["result"]),
+            ),
+        ]
+    };
+    let [indexed, unindexed] = [&id_maps[0], &id_maps[1]].map(requests);
+    for (request, (indexed, unindexed)) in indexed.into_iter().zip(unindexed).enumerate() {
+        let sorted = |mut response: serde_json::Value| {
+            let Some(rows) = response["result"].as_array_mut() else {
+                return response;
+            };
+            rows.sort_by_key(|row| row.to_string());
+            response
+        };
+        let expected = sorted(databases[1].query(unindexed).await.unwrap());
+        let actual = sorted(databases[0].query(indexed).await.unwrap());
+        assert_eq!(actual, expected, "request {request}");
+    }
+
+    // Bound parameters are specialized into literals before planning, so
+    // late-bound ones reach the runtime equality, membership and ID leaves.
+    // Each database plans with its own catalog.
+    let param = |name: &str| ir::NonEmptyString::new(name).expect("parameter name is non-empty");
+    let late_bound = ["kind", "kinds", "tiers", "ids"]
+        .map(param)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let bind = |bindings: &[(&str, PropertyValue)]| {
+        bindings.iter().fold(
+            context::ParamBindings::default(),
+            |params, (name, value)| params.with_value(param(name), value.clone()),
+        )
+    };
+    let kind_or_null = PropertyValue::Array(vec![PropertyValue::from("A"), PropertyValue::Null]);
+    let wide_tiers = PropertyValue::I64Array((0..100).collect());
+    let late_reads = |(nodes, edges): &(BTreeMap<i64, u64>, BTreeMap<i64, u64>)| {
+        let points = |ids: &BTreeMap<i64, u64>| {
+            PropertyValue::I64Array(
+                [1, 2, 3, 6, 9, 10]
+                    .map(|ordinal| ids[&ordinal] as i64)
+                    .into(),
+            )
+        };
+        vec![
+            (
+                items(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::from("B"))]),
+            ),
+            (
+                items(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 1),
+                ]))
+                .values(vec!["uid"]),
+                bind(&[("kind", PropertyValue::from("A"))]),
+            ),
+            (
+                items(Predicate::eq_param("kind", "kind")).count(),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            // Runtime values no lane holds, inside intersections, verify only
+            // the rows the other index keeps.
+            (
+                items(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            (
+                items(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 1),
+                ]))
+                .values(vec!["uid"]),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 3),
+                ]))
+                .values(vec!["weight"]),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 0),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::Null)]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 1),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::from("C"))]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("tier", 3),
+                ]))
+                .values(vec!["weight"]),
+                bind(&[("kind", PropertyValue::from("B"))]),
+            ),
+            (
+                items(Predicate::and(vec![
+                    Predicate::is_in_param("kind", "kinds"),
+                    Predicate::eq("tier", 0),
+                ]))
+                .count(),
+                bind(&[("kinds", kind_or_null.clone())]),
+            ),
+            (
+                items(Predicate::is_in_param("kind", "kinds")).values(vec!["uid"]),
+                bind(&[("kinds", kind_or_null.clone())]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::is_in_param("kind", "kinds"),
+                    Predicate::eq("tier", 2),
+                ]))
+                .count(),
+                bind(&[("kinds", kind_or_null.clone())]),
+            ),
+            (
+                links(Predicate::is_in_param("kind", "kinds")).values(vec!["weight"]),
+                bind(&[("kinds", kind_or_null.clone())]),
+            ),
+            (
+                items(Predicate::and(vec![
+                    Predicate::is_in_param("tier", "tiers"),
+                    Predicate::eq("kind", "B"),
+                ]))
+                .count(),
+                bind(&[("tiers", wide_tiers.clone())]),
+            ),
+            (
+                links(Predicate::and(vec![
+                    Predicate::is_in_param("tier", "tiers"),
+                    Predicate::eq("kind", "A"),
+                ]))
+                .count(),
+                bind(&[("tiers", wide_tiers.clone())]),
+            ),
+            (
+                items(Predicate::or(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("rank", 7),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::from("C"))]),
+            ),
+            (
+                links(Predicate::or(vec![
+                    Predicate::eq_param("kind", "kind"),
+                    Predicate::eq("weight", 7),
+                ]))
+                .count(),
+                bind(&[("kind", PropertyValue::from("A"))]),
+            ),
+            (
+                traversal::g()
+                    .n(NodeRef::param("ids"))
+                    .where_(Predicate::eq("tier", 1))
+                    .count(),
+                bind(&[("ids", points(nodes))]),
+            ),
+            (
+                traversal::g()
+                    .e(EdgeRef::param("ids"))
+                    .where_(Predicate::eq("kind", "C"))
+                    .count(),
+                bind(&[("ids", points(edges))]),
+            ),
+        ]
+    };
+    let [indexed, unindexed] = [&id_maps[0], &id_maps[1]].map(late_reads);
+    for (request, ((indexed, indexed_params), (unindexed, unindexed_params))) in
+        indexed.into_iter().zip(unindexed).enumerate()
+    {
+        let mut results = Vec::new();
+        for (db, read, params) in [
+            (&databases[0], indexed, indexed_params),
+            (&databases[1], unindexed, unindexed_params),
+        ] {
+            let read = batch::read_batch()
+                .var_as("result", read)
+                .returning(["result"]);
+            let plan = planning::plan_read_batch(
+                &read,
+                &context::PlannerContext {
+                    late_bound_params: late_bound.clone(),
+                    ..db.planner_context(context::ParamBindings::default())
+                },
+            )
+            .unwrap_or_else(|error| panic!("late-bound request {request} plans: {error}"));
+            let result = db
+                .execute(&plan, params)
+                .await
+                .unwrap_or_else(|error| panic!("late-bound request {request} executes: {error}"))
+                .last;
+            // Index reads and scans may yield rows in different orders.
+            let Some(ExecutionValue::Scalars(mut rows)) = result else {
+                results.push(format!("{result:?}"));
+                continue;
+            };
+            rows.sort_by_key(|row| format!("{row:?}"));
+            results.push(format!("{rows:?}"));
+        }
+        assert_eq!(results[0], results[1], "late-bound request {request}");
+    }
+
+    // Count sets may also hold point IDs, runtime IDs, whole labels and text
+    // searches, which no planned shape above places there, so hand-built
+    // plans add them. Their index and search children come from planned
+    // counts.
+    let (nodes, edges) = &id_maps[0];
+    let indexed_context = databases[0].planner_context(context::ParamBindings::default());
+    let planned_count = |read: traversal::Traversal<traversal::Terminal>| {
+        let plan = planning::plan_read_batch(
+            &batch::read_batch()
+                .var_as("result", read)
+                .returning(["result"]),
+            &indexed_context,
+        )
+        .expect("index count plans");
+        plan.steps()
+            .iter()
+            .find_map(|step| {
+                let exec::ExecOp::Count { plan } = &step.op else {
+                    return None;
+                };
+                Some(plan.as_ref().clone())
+            })
+            .expect("count request plans a count step")
+    };
+    let exec::ExecCountPlan::NodeBitmap(node_tier) =
+        planned_count(items(Predicate::eq("tier", 1)).count())
+    else {
+        panic!("a node equality count reads its bitmap");
+    };
+    let exec::ExecCountPlan::EdgeBitmap(edge_tier) =
+        planned_count(links(Predicate::eq("tier", 3)).count())
+    else {
+        panic!("an edge equality count reads its bitmap");
+    };
+    let exec::ExecCountPlan::NodeTextSearch(node_needles) = planned_count(
+        traversal::g()
+            .text_search_nodes("Item", "note", "needle", 100, None)
+            .count(),
+    ) else {
+        panic!("a node text-search count reads its search");
+    };
+    let exec::ExecCountPlan::EdgeTextSearch(edge_needles) = planned_count(
+        traversal::g()
+            .text_search_edges("Link", "note", "needle", 100, None)
+            .count(),
+    ) else {
+        panic!("an edge text-search count reads its search");
+    };
+    let missing = nodes.values().chain(edges.values()).max().unwrap() + 1_000;
+    let points = |ids: &BTreeMap<i64, u64>| {
+        [1, 2, 3, 6, 9, 10]
+            .map(|ordinal| ids[&ordinal])
+            .into_iter()
+            .chain([missing])
+            .collect::<Vec<_>>()
+    };
+    let element_ids = |ids: Vec<u64>| {
+        ir::ElementIds::new(ir::AtLeast::try_from_vec(ids).expect("point IDs are non-empty"))
+            .expect("point IDs are distinct")
+    };
+    let label = |label: &str| ir::NonEmptyString::new(label).expect("label is non-empty");
+    let runtime_ids = || exec::ExecRuntimeInputPlan::Param(param("ids"));
+    let id_params = |ids: Vec<u64>| {
+        bind(&[(
+            "ids",
+            PropertyValue::I64Array(ids.into_iter().map(|id| id as i64).collect()),
+        )])
+    };
+    for (cursor, params, expected) in [
+        // Items 1 and 9 of the points have tier 1; the missing ID drops.
+        (
+            exec::ExecCountCursorPlan::Intersect {
+                driver: Box::new(exec::ExecCountCursorPlan::NodePointReads(element_ids(
+                    points(nodes),
+                ))),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::NodeBitmap(
+                    node_tier.bitmap.clone(),
+                )),
+            },
+            context::ParamBindings::default(),
+            2,
+        ),
+        // Ten links have tier 3; five more points are not among them.
+        (
+            exec::ExecCountCursorPlan::Union {
+                driver: Box::new(exec::ExecCountCursorPlan::EdgeBitmap(
+                    edge_tier.bitmap.clone(),
+                )),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::EdgePointReads(
+                    element_ids(points(edges)),
+                )),
+            },
+            context::ParamBindings::default(),
+            15,
+        ),
+        (
+            exec::ExecCountCursorPlan::Intersect {
+                driver: Box::new(exec::ExecCountCursorPlan::NodeLabelBitmap(label("Item"))),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::NodeRuntimeInput(
+                    runtime_ids(),
+                )),
+            },
+            id_params(points(nodes)),
+            6,
+        ),
+        (
+            exec::ExecCountCursorPlan::Union {
+                driver: Box::new(exec::ExecCountCursorPlan::EdgeRuntimeInput(runtime_ids())),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::EdgeLabelBitmap(label(
+                    "Link",
+                ))),
+            },
+            id_params(points(edges)),
+            40,
+        ),
+        // Items 9, 21 and 33 hold the needle and have tier 1.
+        (
+            exec::ExecCountCursorPlan::Intersect {
+                driver: Box::new(exec::ExecCountCursorPlan::NodeTextSearch {
+                    key: node_needles.key,
+                    index: node_needles.index,
+                    query_text: node_needles.query_text,
+                    k: node_needles.k,
+                }),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::NodeBitmap(
+                    node_tier.bitmap.clone(),
+                )),
+            },
+            context::ParamBindings::default(),
+            3,
+        ),
+        // Every fourth link holds the needle and ten others have tier 3.
+        (
+            exec::ExecCountCursorPlan::Union {
+                driver: Box::new(exec::ExecCountCursorPlan::EdgeTextSearch {
+                    key: edge_needles.key,
+                    index: edge_needles.index,
+                    query_text: edge_needles.query_text,
+                    k: edge_needles.k,
+                }),
+                rest: ir::AtLeast::from_one(exec::ExecCountCursorPlan::EdgeBitmap(
+                    edge_tier.bitmap.clone(),
+                )),
+            },
+            context::ParamBindings::default(),
+            20,
+        ),
+    ] {
+        let root = exec::ExecStepId::first();
+        let plan = exec::ExecutablePlan::new(
+            ir::PlanKind::Read,
+            ir::ReturnPlan::None,
+            ir::AtLeast::<_, 1>::from_one(exec::ExecStep {
+                id: root,
+                dependencies: Vec::new(),
+                output: ir::BatchOutputPlan::Discard,
+                semantic_return_shape: None,
+                condition: exec::ExecCondition::Always,
+                op: exec::ExecOp::Count {
+                    plan: Box::new(exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                        cursor: cursor.clone(),
+                        window: exec::ExecCountWindowPlan::identity(),
+                    })),
+                },
+                schedule: exec::ExecSchedule::Pipeline,
+                delivered: properties::DeliveredProperties::default(),
+                cost: cost::CostVector::ZERO,
+            }),
+            root,
+            trace::PlanningTrace::default(),
+            exec::PlannerMetrics::default(),
+        )
+        .expect("hand-built count plan validates");
+        let counted = databases[0]
+            .execute(&plan, params)
+            .await
+            .unwrap_or_else(|error| panic!("{cursor:?} counts: {error}"))
+            .last;
+        assert_eq!(counted, Some(ExecutionValue::Count(expected)), "{cursor:?}");
+    }
+    for db in databases {
+        db.close().await.unwrap();
+    }
+}
+
+#[test]
+fn public_query_boundary_keeps_scan_order_and_repeats_through_index_served_filters() {
+    run_high_stack_contract(
+        "public-index-served-order-and-repeats",
+        public_query_boundary_keeps_scan_order_and_repeats_through_index_served_filters_contract,
+    );
+}
+
+/// Index-served source filters return the rows per-row evaluation returns,
+/// in the same order and with the same repeats.
+///
+/// Two databases hold the same `Item` nodes and `Link` edges; only one has
+/// the indexes, and every response must equal the unindexed one unsorted.
+/// Partly indexed ORs over a node and an edge label, one of whose branches
+/// is a range scan delivering the reverse of ID order, keep the label scan's
+/// ID order, also under a limit. Parameter and variable IDs that repeat keep
+/// every repeat through a filter naming a label and an indexed property, as
+/// rows and as counts.
+async fn public_query_boundary_keeps_scan_order_and_repeats_through_index_served_filters_contract()
+{
+    const ITEMS: i64 = 30;
+    let kind = |n: i64| ["A", "B", "C"][(n % 3) as usize];
+    let note = |n: i64| if n % 2 == 0 { "x" } else { "y" };
+    // Ranks and weights fall as IDs rise, so a range scan delivers the
+    // reverse of ID order.
+    let seed = (0..ITEMS).fold(batch::write_batch(), |write, n| {
+        write.var_as(
+            &format!("i{n}"),
+            traversal::g().add_n(
+                "Item",
+                vec![
+                    ("uid", PropertyInput::from(format!("i{n}"))),
+                    ("rank", PropertyInput::from(100 - n)),
+                    ("kind", PropertyInput::from(kind(n))),
+                    ("note", PropertyInput::from(note(n))),
+                ],
+            ),
+        )
+    });
+    let seed = (0..ITEMS).fold(seed, |write, n| {
+        write.var_as(
+            &format!("l{n}"),
+            traversal::g().n(NodeRef::var(format!("i{n}"))).add_e(
+                "Link",
+                NodeRef::var(format!("i{}", (n + 1) % ITEMS)),
+                vec![
+                    ("uid", PropertyInput::from(format!("l{n}"))),
+                    ("weight", PropertyInput::from(100 - n)),
+                    ("kind", PropertyInput::from(kind(n))),
+                    ("note", PropertyInput::from(note(n))),
+                ],
+            ),
+        )
+    });
+    let mut databases = Vec::new();
+    for (name, indexed) in [
+        ("production-index-served-order-indexed", true),
+        ("production-index-served-order-unindexed", false),
+    ] {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: name.to_owned(),
+        })
+        .await
+        .expect("index-served order fixture opens");
+        let specs = [
+            index::IndexSpec::node_equality("Item", "kind"),
+            index::IndexSpec::node_equality("Item", "uid"),
+            index::IndexSpec::node_range("Item", "rank"),
+            index::IndexSpec::edge_equality("Link", "kind"),
+            index::IndexSpec::edge_equality("Link", "uid"),
+            index::IndexSpec::edge_range("Link", "weight"),
+        ];
+        for spec in specs.into_iter().filter(|_| indexed) {
+            let receipt = db
+                .query(QueryRequest::write(
+                    batch::write_batch()
+                        .var_as("operation", traversal::g().create_index_if_not_exists(spec))
+                        .returning(["operation"]),
+                ))
+                .await
+                .unwrap();
+            let operation_id = receipt["operation"]["operation_id"]
+                .as_str()
+                .expect("accepted order index operation has an ID");
+            await_index_operation_success(&db, operation_id, "order index").await;
+        }
+        db.query(QueryRequest::write(
+            seed.clone().returning(Vec::<String>::new()),
+        ))
+        .await
+        .expect("index-served order fixture seeds");
+        databases.push(db);
+    }
+
+    // Repeating ID lists, read back per database so they name the same rows
+    // in both: `i1`/`l1` and `i4`/`l4` have kind `B`, `i0`/`l0` kind `A`.
+    let mut id_lists = Vec::new();
+    for db in &databases {
+        let ids = db
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "items",
+                        traversal::g()
+                            .n_with_label("Item")
+                            .values(vec!["$id", "uid"]),
+                    )
+                    .var_as(
+                        "links",
+                        traversal::g()
+                            .e_with_label("Link")
+                            .values(vec!["$id", "uid"]),
+                    )
+                    .returning(["items", "links"]),
+            ))
+            .await
+            .unwrap();
+        let repeats = |rows: &serde_json::Value, prefix: &str| {
+            let by_uid = rows
+                .as_array()
+                .expect("ID rows are an array")
+                .iter()
+                .map(|row| {
+                    (
+                        row["uid"].as_str().expect("uid is a string").to_owned(),
+                        row["$id"].as_i64().expect("ID is an integer"),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            QueryValue::Array(
+                [1, 1, 4, 0, 4]
+                    .map(|n| QueryValue::I64(by_uid[&format!("{prefix}{n}")]))
+                    .into(),
+            )
+        };
+        id_lists.push((repeats(&ids["items"], "i"), repeats(&ids["links"], "l")));
+    }
+
+    let partial = |range: &str| {
+        Predicate::or(vec![
+            Predicate::and(vec![Predicate::gte(range, 80), Predicate::eq("note", "x")]),
+            Predicate::eq("kind", "B"),
+        ])
+    };
+    let kind_b = |label: &str| {
+        Predicate::and(vec![
+            Predicate::eq("$label", label),
+            Predicate::eq("kind", "B"),
+        ])
+    };
+    let read = |result: traversal::Traversal<traversal::Terminal>| {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as("result", result)
+                .returning(["result"]),
+        )
+    };
+    let requests = |(nodes, edges): &(QueryValue, QueryValue)| {
+        vec![
+            read(
+                traversal::g()
+                    .n_with_label_where("Item", partial("rank"))
+                    .values(vec!["uid"]),
+            ),
+            read(
+                traversal::g()
+                    .n_with_label_where("Item", partial("rank"))
+                    .limit(4usize)
+                    .values(vec!["uid"]),
+            ),
+            read(
+                traversal::g()
+                    .e_with_label_where("Link", partial("weight"))
+                    .values(vec!["uid"]),
+            ),
+            read(
+                traversal::g()
+                    .e_with_label_where("Link", partial("weight"))
+                    .limit(4usize)
+                    .values(vec!["uid"]),
+            ),
+            read(
+                traversal::g()
+                    .n(NodeRef::param("ids"))
+                    .where_(kind_b("Item"))
+                    .values(vec!["uid"]),
+            )
+            .with_parameter_value("ids", nodes.clone()),
+            read(
+                traversal::g()
+                    .n(NodeRef::param("ids"))
+                    .where_(kind_b("Item"))
+                    .count(),
+            )
+            .with_parameter_value("ids", nodes.clone()),
+            read(
+                traversal::g()
+                    .e(EdgeRef::param("ids"))
+                    .where_(kind_b("Link"))
+                    .values(vec!["uid"]),
+            )
+            .with_parameter_value("ids", edges.clone()),
+            read(
+                traversal::g()
+                    .e(EdgeRef::param("ids"))
+                    .where_(kind_b("Link"))
+                    .count(),
+            )
+            .with_parameter_value("ids", edges.clone()),
+            QueryRequest::read(
+                batch::read_batch()
+                    .var_as("saved", traversal::g().n(NodeRef::param("ids")))
+                    .var_as(
+                        "result",
+                        traversal::g()
+                            .n(NodeRef::var("saved"))
+                            .where_(kind_b("Item"))
+                            .values(vec!["uid"]),
+                    )
+                    .var_as(
+                        "counted",
+                        traversal::g()
+                            .n(NodeRef::var("saved"))
+                            .where_(kind_b("Item"))
+                            .count(),
+                    )
+                    .returning(["result", "counted"]),
+            )
+            .with_parameter_value("ids", nodes.clone()),
+            QueryRequest::read(
+                batch::read_batch()
+                    .var_as("saved", traversal::g().e(EdgeRef::param("ids")))
+                    .var_as(
+                        "result",
+                        traversal::g()
+                            .e(EdgeRef::var("saved"))
+                            .where_(kind_b("Link"))
+                            .values(vec!["uid"]),
+                    )
+                    .var_as(
+                        "counted",
+                        traversal::g()
+                            .e(EdgeRef::var("saved"))
+                            .where_(kind_b("Link"))
+                            .count(),
+                    )
+                    .returning(["result", "counted"]),
+            )
+            .with_parameter_value("ids", edges.clone()),
+        ]
+    };
+    let uids = |prefix: &str, ordinals: &[i64]| {
+        serde_json::Value::Array(
+            ordinals
+                .iter()
+                .map(|n| serde_json::json!({ "uid": format!("{prefix}{n}") }))
+                .collect(),
+        )
+    };
+    let mut expected_responses = Vec::new();
+    for (request, (indexed, unindexed)) in requests(&id_lists[0])
+        .into_iter()
+        .zip(requests(&id_lists[1]))
+        .enumerate()
+    {
+        let expected = databases[1].query(unindexed).await.unwrap();
+        let actual = databases[0].query(indexed).await.unwrap();
+        assert_eq!(actual, expected, "request {request}");
+        expected_responses.push(expected);
+    }
+    // The unindexed oracle is the label scan's ID order and keeps repeats.
+    assert_eq!(expected_responses[1]["result"], uids("i", &[0, 1, 2, 4]));
+    assert_eq!(expected_responses[3]["result"], uids("l", &[0, 1, 2, 4]));
+    assert_eq!(expected_responses[4]["result"], uids("i", &[1, 1, 4, 4]));
+    assert_eq!(expected_responses[5]["result"], serde_json::json!(4));
+    assert_eq!(expected_responses[6]["result"], uids("l", &[1, 1, 4, 4]));
+    assert_eq!(expected_responses[8]["counted"], serde_json::json!(4));
+    assert_eq!(expected_responses[9]["result"], uids("l", &[1, 1, 4, 4]));
+    for db in databases {
+        db.close().await.unwrap();
+    }
+}
+
+/// A count over a range-driven intersection applies every filter of the
+/// intersection, not only its range driver, alone, after `dedup`, and in a
+/// union branch, for node and edge sources. Each expected count is the
+/// brute-force count over the seeded `User` nodes and `Link` edges. A
+/// window over the intersection keeps the range's order, as its rows do.
+#[test]
+fn counts_over_range_intersections_apply_every_filter() {
+    // Match the other large query contracts: debug futures exceed the Linux
+    // test runner's default stack, so construct and poll them on this thread.
+    run_high_stack_contract(
+        "range-intersection-counts",
+        counts_over_range_intersections_apply_every_filter_contract,
+    );
+}
+
+async fn counts_over_range_intersections_apply_every_filter_contract() {
+    const USERS: i64 = 300;
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-range-intersection-counts".to_owned(),
+    })
+    .await
+    .expect("count fixture opens");
+    let properties = |n: i64, range: &'static str| {
+        vec![
+            ("uid", PropertyInput::from(n)),
+            (range, PropertyInput::from(n % 60)),
+            ("tier", PropertyInput::from(n % 3)),
+            ("name", PropertyInput::from(format!("name{}", n % 10))),
+        ]
+    };
+    let users = (0..USERS).fold(batch::write_batch(), |write, n| {
+        write.var_as(
+            &format!("u{n}"),
+            traversal::g().add_n("User", properties(n, "rank")),
+        )
+    });
+    let seed = (0..USERS).fold(users, |write, n| {
+        write.var_as(
+            &format!("l{n}"),
+            traversal::g().n(NodeRef::var(format!("u{n}"))).add_e(
+                "Link",
+                NodeRef::var(format!("u{}", (n + 1) % USERS)),
+                properties(n, "weight"),
+            ),
+        )
+    });
+    db.query(QueryRequest::write(seed.returning(Vec::<String>::new())))
+        .await
+        .expect("users and links are committed");
+    for spec in [
+        index::IndexSpec::node_range("User", "rank"),
+        index::IndexSpec::node_equality("User", "tier"),
+        index::IndexSpec::node_unique_equality("User", "uid"),
+        index::IndexSpec::node_equality("User", "name"),
+        index::IndexSpec::edge_range_desc("Link", "weight"),
+        index::IndexSpec::edge_equality("Link", "tier"),
+        index::IndexSpec::edge_equality("Link", "name"),
+    ] {
+        let receipt = db
+            .query(QueryRequest::write(
+                batch::write_batch()
+                    .var_as("operation", traversal::g().create_index_if_not_exists(spec))
+                    .returning(["operation"]),
+            ))
+            .await
+            .expect("count fixture index is accepted");
+        let Some(operation_id) = receipt["operation"]["operation_id"].as_str() else {
+            panic!("accepted count fixture index has an operation ID: {receipt}");
+        };
+        await_index_operation_success(&db, operation_id, "count fixture index").await;
+    }
+    let nodes = |predicate: Predicate| {
+        let source = || traversal::g().n_with_label_where("User", predicate.clone());
+        (source().count(), source().dedup().count())
+    };
+    let edges = |predicate: Predicate| {
+        let source = || traversal::g().e_with_label_where("Link", predicate.clone());
+        (source().count(), source().dedup().count())
+    };
+    let expected = |keep: &dyn Fn(i64) -> bool| (0..USERS).filter(|n| keep(*n)).count();
+    let (mut actual_counts, mut expected_counts) = (Vec::new(), Vec::new());
+    for (label, (count, distinct), count_expected) in [
+        (
+            "nodes: range with equality and residual filters",
+            nodes(Predicate::and(vec![
+                Predicate::lt("rank", 30),
+                Predicate::eq("tier", 1),
+                Predicate::neq("uid", 1),
+            ])),
+            expected(&|n| n % 60 < 30 && n % 3 == 1 && n != 1),
+        ),
+        (
+            "nodes: range intersection in a union branch",
+            nodes(Predicate::or(vec![
+                Predicate::eq("uid", 5),
+                Predicate::and(vec![Predicate::eq("tier", 1), Predicate::lt("rank", 30)]),
+            ])),
+            expected(&|n| n == 5 || (n % 3 == 1 && n % 60 < 30)),
+        ),
+        (
+            "nodes: unbounded range with an equality filter",
+            nodes(Predicate::and(vec![
+                Predicate::gte("rank", 0),
+                Predicate::eq("name", "name5"),
+            ])),
+            expected(&|n| n % 10 == 5),
+        ),
+        (
+            "edges: range with equality and residual filters",
+            edges(Predicate::and(vec![
+                Predicate::lt("weight", 30),
+                Predicate::eq("tier", 1),
+                Predicate::neq("name", "name1"),
+            ])),
+            expected(&|n| n % 60 < 30 && n % 3 == 1 && n % 10 != 1),
+        ),
+        (
+            "edges: range intersection in a union branch",
+            edges(Predicate::or(vec![
+                Predicate::eq("name", "name5"),
+                Predicate::and(vec![Predicate::eq("tier", 1), Predicate::lt("weight", 30)]),
+            ])),
+            expected(&|n| n % 10 == 5 || (n % 3 == 1 && n % 60 < 30)),
+        ),
+        (
+            "edges: unbounded range with an equality filter",
+            edges(Predicate::and(vec![
+                Predicate::gte("weight", 0),
+                Predicate::eq("name", "name5"),
+            ])),
+            expected(&|n| n % 10 == 5),
+        ),
+    ] {
+        let response = db
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as("count", count)
+                    .var_as("distinct", distinct)
+                    .returning(["count", "distinct"]),
+            ))
+            .await
+            .expect("count succeeds");
+        actual_counts.push((label, response));
+        expected_counts.push((
+            label,
+            serde_json::json!({ "count": count_expected, "distinct": count_expected }),
+        ));
+    }
+    // Compared together so a failure names every miscounted shape at once.
+    assert_eq!(actual_counts, expected_counts);
+
+    // Range order is not ID order, so a window before a later filter keeps
+    // the rows the range yields first. Each windowed count equals the number
+    // of rows the same traversal returns, for selective filters and for
+    // filters that keep every range row, over the ascending node index and
+    // the descending edge index.
+    let late = || Predicate::gte("uid", 150);
+    let mut windows = Vec::new();
+    for (label, source) in [
+        (
+            "nodes: selective filter",
+            traversal::g().n_with_label_where(
+                "User",
+                Predicate::and(vec![Predicate::lt("rank", 30), Predicate::eq("tier", 1)]),
+            ),
+        ),
+        (
+            "nodes: filter keeping every range row",
+            traversal::g().n_with_label_where(
+                "User",
+                Predicate::and(vec![Predicate::gte("rank", 0), Predicate::neq("uid", -1)]),
+            ),
+        ),
+    ] {
+        for (shape, windowed) in [
+            ("limit", source.clone().limit(10).where_(late())),
+            ("skip", source.clone().skip(40).where_(late())),
+            ("range", source.clone().range(5, 25).where_(late())),
+            (
+                "dedup then limit",
+                source.clone().dedup().limit(10).where_(late()),
+            ),
+        ] {
+            windows.push((label, shape, windowed.clone().count(), windowed.id()));
+        }
+    }
+    let edges = traversal::g().e_with_label_where(
+        "Link",
+        Predicate::and(vec![Predicate::lt("weight", 30), Predicate::eq("tier", 1)]),
+    );
+    for (shape, windowed) in [
+        ("limit", edges.clone().limit(10).where_(late())),
+        ("skip", edges.clone().skip(40).where_(late())),
+        ("range", edges.clone().range(5, 25).where_(late())),
+        (
+            "dedup then limit",
+            edges.clone().dedup().limit(10).where_(late()),
+        ),
+    ] {
+        windows.push((
+            "edges: selective filter",
+            shape,
+            windowed.clone().count(),
+            windowed.id(),
+        ));
+    }
+    let (mut windowed_counts, mut windowed_rows) = (Vec::new(), Vec::new());
+    for (label, shape, count, ids) in windows {
+        let response = db
+            .query(QueryRequest::read(
+                batch::read_batch()
+                    .var_as("count", count)
+                    .var_as("ids", ids)
+                    .returning(["count", "ids"]),
+            ))
+            .await
+            .expect("windowed count succeeds");
+        let Some(rows) = response["ids"].as_array() else {
+            panic!("windowed rows are an array: {response}");
+        };
+        windowed_counts.push((label, shape, response["count"].clone()));
+        windowed_rows.push((label, shape, serde_json::json!(rows.len())));
+    }
+    assert_eq!(windowed_counts, windowed_rows);
+    db.close().await.expect("count fixture closes");
+}
+
+mod vector_object_store_warm {
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    use futures::stream::BoxStream;
+    use helix_ast::prelude::{g, read_batch, write_batch};
+    use slatedb::object_store::{
+        path::Path, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+        ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        Result as ObjectStoreResult,
+    };
+
+    use super::*;
+
+    const DATABASE: &str = "production-vector-object-store-warm";
+    const DIMENSION: usize = 64;
+
+    /// In-memory durable store that counts reads of SST objects.
+    #[derive(Debug, Default)]
+    struct CountingStore {
+        inner: InMemory,
+        sst_gets: AtomicU64,
+    }
+
+    impl std::fmt::Display for CountingStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("counting-memory")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for CountingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> ObjectStoreResult<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: PutMultipartOptions,
+        ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: GetOptions,
+        ) -> ObjectStoreResult<GetResult> {
+            if location.as_ref().contains("/compacted/") {
+                self.sst_gets.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, ObjectStoreResult<Path>>,
+        ) -> BoxStream<'static, ObjectStoreResult<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> ObjectStoreResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: CopyOptions,
+        ) -> ObjectStoreResult<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// Hybrid caches rooted in `root` with small parts. `remote` sets the
+    /// object-store tier up as the server does for S3: it caches the SSTs
+    /// the writer puts and warms vector search rows at startup.
+    fn hybrid(root: &std::path::Path, remote: bool) -> config::DbConfig {
+        config::DbConfig::new().with_cache(config::CacheConfig::new(
+            config::VectorMemorySettings::default(),
+            config::CacheMode::Hybrid {
+                slate_db: config::SlateHybridCacheConfig::try_new(
+                    1024 * 1024,
+                    root.join("foyer"),
+                    16 * 1024 * 1024,
+                )
+                .expect("valid Slate hybrid cache"),
+                object_store: config::SlateObjectStoreCacheSettings::try_new(
+                    root.join("object-store"),
+                    Some(64 * 1024 * 1024),
+                    4096,
+                    remote,
+                    config::ObjectStoreWarmLevel::Off,
+                    None,
+                    64,
+                )
+                .expect("valid object-store cache")
+                .with_vector_part_warm(if remote {
+                    config::VectorPartWarm::Background
+                } else {
+                    config::VectorPartWarm::Off
+                }),
+                slate_warm: config::SlateWarmConfig::Off,
+                fts: None,
+            },
+        ))
+    }
+
+    /// A deterministic unit-ish vector for node `seed`.
+    fn embedding(seed: usize) -> Vec<f32> {
+        (0..DIMENSION)
+            .map(|index| (((seed * 31 + index * 17) % 97) as f32 - 48.0) / 48.0)
+            .collect()
+    }
+
+    /// Writes 400 embedded documents under an Active vector index.
+    async fn load(store: Arc<CountingStore>) {
+        let db = HelixDB::open_with_object_store(DATABASE, store)
+            .await
+            .expect("loading writer opens");
+        let receipt = db
+            .query(QueryRequest::write(
+                write_batch()
+                    .var_as(
+                        "vector",
+                        g().create_vector_index_nodes(
+                            "Doc",
+                            "embedding",
+                            NonZeroUsize::new(DIMENSION).expect("dimension is nonzero"),
+                            index::VectorDistanceMetric::Cosine,
+                            None::<String>,
+                        ),
+                    )
+                    .returning(["vector"]),
+            ))
+            .await
+            .expect("vector index is created");
+        if receipt["vector"]["kind"] != "already_active" {
+            let operation = receipt["vector"]["operation_id"]
+                .as_str()
+                .expect("a queued index reports its operation")
+                .to_string();
+            let status = tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    let status = db
+                        .query(QueryRequest::read(
+                            read_batch()
+                                .var_as("op", g().get_index_operation(operation.clone()))
+                                .returning(["op"]),
+                        ))
+                        .await
+                        .expect("index operation is readable");
+                    match status["op"]["status"].as_str() {
+                        Some("queued" | "running") => {
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        other => break other.map(str::to_owned),
+                    }
+                }
+            })
+            .await
+            .expect("the vector index build finishes");
+            assert_eq!(status.as_deref(), Some("succeeded"));
+        }
+        for chunk in (0..400).collect::<Vec<_>>().chunks(50) {
+            let batch = chunk.iter().fold(write_batch(), |batch, seed| {
+                batch.var_as(
+                    &format!("d{seed}"),
+                    g().add_n(
+                        "Doc",
+                        vec![("embedding", PropertyValue::from(embedding(*seed)))],
+                    ),
+                )
+            });
+            db.query(QueryRequest::write(batch))
+                .await
+                .expect("documents are written");
+        }
+        db.flush_writer().await.expect("documents are flushed");
+        db.close().await.expect("loading writer closes");
+    }
+
+    /// Opens `store` with an empty cache in `mode`, waits for startup warming,
+    /// and returns the SST reads and rows of one search.
+    async fn cold_search(store: &Arc<CountingStore>, remote: bool) -> (u64, serde_json::Value) {
+        let root = tempfile::tempdir().expect("temporary cache root");
+        let db = HelixDB::open_with_object_store_and_config(
+            DATABASE,
+            Arc::clone(store) as Arc<dyn slatedb::object_store::ObjectStore>,
+            hybrid(root.path(), remote),
+        )
+        .await
+        .expect("hybrid writer opens");
+        db.wait_for_startup_cache_warm().await;
+        store.sst_gets.store(0, AtomicOrdering::SeqCst);
+        let response = db
+            .query(QueryRequest::read(
+                read_batch()
+                    .var_as(
+                        "r",
+                        g().vector_search_nodes("Doc", "embedding", embedding(1_000), 10, None)
+                            .project(vec![helix_ast::projection::PropertyProjection::renamed(
+                                "$id", "id",
+                            )]),
+                    )
+                    .returning(["r"]),
+            ))
+            .await
+            .expect("vector search runs");
+        let gets = store.sst_gets.load(AtomicOrdering::SeqCst);
+        db.close().await.expect("hybrid writer closes");
+        (gets, response["r"].clone())
+    }
+
+    /// In front of a remote durable store, opening warms the vector rows a
+    /// search reads into the object-store tier, so the first search after a
+    /// restart reads fewer SST objects and returns the same rows. A tier set
+    /// up for a local store is not warmed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hybrid_open_warms_vector_search_rows_before_the_first_search() {
+        let store = Arc::new(CountingStore::default());
+        load(Arc::clone(&store)).await;
+
+        let (unwarmed_gets, unwarmed) = cold_search(&store, false).await;
+        let (warmed_gets, warmed) = cold_search(&store, true).await;
+        assert_eq!(warmed, unwarmed);
+        assert_eq!(warmed.as_array().map(Vec::len), Some(10));
+        assert!(
+            warmed_gets < unwarmed_gets,
+            "warmed {warmed_gets} SST reads, unwarmed {unwarmed_gets}"
+        );
+    }
 }

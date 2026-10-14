@@ -1,0 +1,214 @@
+---
+title: "What is a property graph?"
+description: "A property graph stores data as labeled nodes and edges with key-value properties on both, so a relationship can carry its own details."
+sidebarTitle: "Property graphs"
+pageType: "Concept"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
+
+A property graph is a data model of nodes (things) and edges (connections), where both
+can carry type labels and named values called properties. It works like a set of index
+cards joined by labeled strings, where each string can carry its own note, such as
+"purchased on the web store, with a gift note." Because a relationship holds its own
+details, that whole purchase is a single record you can filter on and follow. The model,
+often called a labeled property graph (LPG), is used by many
+[graph databases](/learn/graph-databases/what-is-a-graph-database) and by the GQL and
+openCypher query languages.
+
+<div className="learn-objectives">
+  <Card title="Learning objectives" icon="graduation-cap">
+    After reading this article you will be able to:
+
+    - Name the parts of a property graph and how they fit together
+    - Explain why a property graph can hold repeated edges between the same two nodes
+    - Decide what should become a node, an edge, or a property
+    - Describe how HelixDB implements the labeled property graph model
+  </Card>
+</div>
+
+## What are the parts of a property graph?
+
+A property graph has two kinds of elements, nodes and edges. Each one has an ID and can
+carry labels that say what kind of thing it is and properties that hold its data.
+
+| Part | What it is | Example |
+| --- | --- | --- |
+| Node | An entity | A customer, an order, a product |
+| Label | The type of a node or edge | `Customer`, `PURCHASED` |
+| Property | A named, typed value on a node or edge | `email` on a customer, `channel` on a purchase |
+| Edge | A directed relationship from a source node to a target node | Customer `PURCHASED` product |
+| Edge property | Data that belongs to the relationship itself | `channel`, `giftNote`, `purchasedAt` |
+| Identity | An identifier for each node and edge, typically assigned by the database | Used to address an element directly |
+
+Here is how that looks for an online store:
+
+```mermaid
+flowchart LR
+    c["Customer<br/>email: buyer@example.com"] -->|"PURCHASED<br/>channel: web<br/>giftNote: Happy birthday"| p["Product<br/>sku: LAMP-A"]
+    c -->|"REVIEWED<br/>title: Bright enough"| p
+    p -->|IN_CATEGORY| cat["Category<br/>name: Lighting"]
+```
+
+Labels and properties do different jobs. A label says what kind of thing an element is
+and is shared by every element of that kind. Properties hold the values that make one
+element different from another. Because properties live on the element itself, a
+customer node carries its own email and a purchase edge carries its own channel, with
+no separate attribute table.
+
+Identity is separate from both: two customers with the same name are still two nodes
+with two IDs. In systems with built-in search, properties are also where text for
+[full-text search](/learn/full-text-search/what-is-full-text-search) and
+[vector embeddings](/learn/vector-search/what-are-vector-embeddings), lists of numbers
+that capture meaning, typically live.
+
+### Do label and direction rules vary by system?
+
+Yes. Depending on the database, a node may have zero, one, or several labels, while an
+edge usually has exactly one type. Edges are usually directed; some models, including
+GQL, also allow undirected edges. Direction records meaning, not reachability: a query
+can typically follow an edge forward or backward.
+
+## Can a property graph have more than one edge between the same nodes?
+
+Yes. Property graphs are typically multigraphs, which means they allow more than one
+edge between the same pair of nodes. This matters because many real relationships
+repeat. A customer who buys the same lamp twice has two `PURCHASED` edges, each with its
+own date and channel, rather than one edge that has to summarize both.
+
+Many property graph systems also allow self-loops, edges whose source and target are the
+same node. Examples include a function that calls itself in a code graph and a web page
+that links to itself.
+
+<div className="learn-cta">
+  <Card title="Try HelixDB" icon="rocket" href="/database/helix-db/start-here/quickstart" cta="Get started">
+    Model your data as a labeled property graph with typed properties on nodes and edges, in open-source HelixDB.
+  </Card>
+</div>
+
+## How do you model data as a property graph?
+
+Put simply, things (nouns) become nodes, relationships (verbs) become edges, and facts
+about either become properties. Then check the model against the questions your
+application needs to answer. A few rules of thumb cover most designs:
+
+- **Nouns become nodes.** Customers, products, documents, and tickets.
+- **Verbs become edges.** `PURCHASED`, `AUTHORED`, `REPORTED`, `MEMBER_OF`.
+- **Facts about a relationship go on the edge.** When it happened, through which
+  channel, with what confidence.
+- **Promote a relationship to a node when it needs its own relationships.** An order
+  that has line items, a payment, and a shipment is better as an `Order` node than as a
+  single edge between customer and product.
+- **Promote a property to a node when you traverse through it.** If you often ask
+  "what else is in this category?", make `Category` a node rather than a string
+  property.
+- **Store references as edges, not as ID properties.** A `customerId` property on an
+  order records the link, but a query has to look the ID up instead of following an
+  edge.
+
+Start from the questions. Write down the traversals, or walks along edges, that you
+expect, such as "products bought by customers who reviewed this product." Then check
+that each step follows an edge rather than matching a string. A model that answers its
+main questions with a few hops and a filter or two is usually a good one.
+
+When a query has to join nodes by matching property values, such as comparing a
+`customerId` string the way a
+[relational database](/learn/graph-databases/graph-vs-relational-database) joins tables,
+a missing edge is often the cause. When it scans many nodes to filter on one property,
+an index is usually the fix.
+
+The same rules apply to graphs built for AI, such as a
+[knowledge graph](/learn/graph-databases/what-is-a-knowledge-graph) extracted from
+documents for [GraphRAG](/learn/ai-memory/what-is-graphrag), or an
+[AI agent's memory](/learn/ai-memory/what-is-ai-agent-memory).
+
+## How is a property graph different from RDF?
+
+A property graph puts data about a relationship on the edge itself. RDF (Resource
+Description Framework), another widely used graph model, stores every fact as a
+three-part subject-predicate-object statement called a triple, and identifies resources
+with IRIs, globally unique web-style identifiers.
+
+Because a triple has no place for attributes of the relationship itself, data about a
+relationship needs an intermediate node, reification (extra triples that describe a
+triple), or an extension such as RDF-star.
+A property graph usually fits application data with traversal-heavy queries, while RDF
+fits linked data that must merge across sources on shared identifiers. For a
+side-by-side comparison, one fact modeled both ways, and how to map one model to the
+other, see [property graph vs RDF](/learn/graph-databases/property-graph-vs-rdf).
+
+## How does HelixDB implement the property graph model?
+
+HelixDB stores all data as one labeled property graph:
+
+- **Exactly one label** on every node and edge. Model a secondary role as a property or
+  as a relationship to another node rather than as an extra label.
+- **Typed properties** on nodes and edges: null, boolean, integer, float, date-time,
+  string, bytes, arrays, and nested objects.
+- **Directed edges in a multigraph.** Several edges can connect the same pair of nodes,
+  and an edge can connect a node to itself.
+- **Separate ID spaces.** Node and edge IDs come from separate 64-bit sequences, so an
+  ID is unique only within its own space.
+- **Indexable top-level properties.** Only top-level properties can be indexed, so keep
+  a field you index at the top level rather than inside a nested object.
+- **Indexes on nodes or edges.** Equality, range,
+  [BM25](/learn/full-text-search/what-is-bm25) text, and
+  [vector](/learn/vector-search/what-is-vector-search) indexes can target edge labels as
+  well as node labels; unique equality indexes are available on node labels only.
+  Vector and BM25 search can also run inside a traversal-defined candidate set; see
+  [filtered vector search](/learn/vector-search/filtered-vector-search).
+
+Queries are built with typed SDKs in Rust, TypeScript, Go, and Python, or written as raw
+JSON, and are sent as a JSON operation tree to `POST /v2/query`. See the
+[data model](/database/helix-db/core-concepts/data-model) and
+[traversals](/database/helix-db/query-guides/traversals) guides.
+
+## Frequently asked questions
+
+### What does "labeled" mean in labeled property graph?
+
+It means nodes and edges carry labels that name their type, such as `Customer` or
+`PURCHASED`. Labels are how elements are typed: they group elements so queries and
+indexes can target one kind of node or relationship at a time. How many labels an
+element can have varies by system.
+
+### Can an edge have properties?
+
+Yes. Edge properties are a defining feature of the property graph model. They hold data
+that belongs to the relationship, such as when it started, its weight, or its source.
+
+### Is a property graph the same as a knowledge graph?
+
+No. A property graph is a data model; a knowledge graph is a body of facts about
+entities and their relationships, typically organized by a schema or ontology. A
+knowledge graph can be stored as a property graph or as RDF.
+
+### Which query languages work with property graphs?
+
+GQL (ISO/IEC 39075) is the standalone ISO property graph query language, and SQL/PGQ
+(ISO/IEC 9075-16) is the ISO extension that adds property graph queries to SQL.
+openCypher and Gremlin are also widely used. Some databases, including HelixDB, use
+typed SDK builders instead of a text language.
+
+## Related topics
+
+<CardGroup cols={2}>
+  <Card title="What is a graph database?" icon="diagram-project" href="/learn/graph-databases/what-is-a-graph-database">
+    Nodes, edges, traversals, and when a graph is the right model.
+  </Card>
+  <Card title="Property graph vs RDF" icon="scale-balanced" href="/learn/graph-databases/property-graph-vs-rdf">
+    Triples, IRIs, edge properties, and when each graph model fits.
+  </Card>
+  <Card title="What is a knowledge graph?" icon="brain" href="/learn/graph-databases/what-is-a-knowledge-graph">
+    Entities, relationships, and provenance for search and LLMs.
+  </Card>
+  <Card title="Graph vs relational database" icon="table" href="/learn/graph-databases/graph-vs-relational-database">
+    How graphs and tables store relationships, and when each fits.
+  </Card>
+  <Card title="HelixDB data model" icon="book" href="/database/helix-db/core-concepts/data-model">
+    Labels, properties, multigraph edges, and indexes in HelixDB.
+  </Card>
+  <Card title="Secondary indexes" icon="list" href="/database/helix-db/query-guides/secondary-indexes">
+    Equality and range lookups on nodes and edges, plus unique lookups on nodes.
+  </Card>
+</CardGroup>

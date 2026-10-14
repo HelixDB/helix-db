@@ -23,6 +23,12 @@ mod serde_impl;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KnownRuleId {
+    /// Implement a common row pipeline.
+    SeedRows,
+    /// Implement a common graph pattern.
+    SeedGraphPattern,
+    /// Explore alternative graph starting points and expansion orders.
+    GraphPatternOrder,
     /// Transpose filters below safe pure stream-preserving operators.
     FilterPushdown,
     /// Simplify no-op and idempotent side-effect-free pipeline operators.
@@ -53,7 +59,8 @@ pub enum KnownRuleId {
     SeedAccessWindow,
     /// Simplify residual filters over access.
     AccessFilterSimplification,
-    /// Explore catalog-backed indexes for access filters.
+    /// Explore label-domain and index alternatives for access filters;
+    /// property-index rewrites are required via `AccessSourceIndexFilter`.
     AccessFilterIndex,
     /// Implement residual access filters.
     SeedAccessFilter,
@@ -81,6 +88,11 @@ pub enum KnownRuleId {
     SeedAccessDistinct,
     /// Rewrite a leading access-pipeline filter.
     AccessPipelineFilter,
+    /// Rewrite a leading stream filter a property index serves into index
+    /// access.
+    AccessSourceIndexFilter,
+    /// Rewrite a node-stream filter behind the source into index membership.
+    AccessPipelineMembershipFilter,
     /// Rewrite or elide access-pipeline ordering.
     AccessPipelineOrder,
     /// Simplify access-rooted pipelines.

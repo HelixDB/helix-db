@@ -3,12 +3,24 @@
 mod state;
 
 use super::CascadesOptimizer;
-use crate::{ir, logical, memo, optimizer};
+use crate::{ir, logical, memo, optimizer, rules};
 
 use self::state::{ExplorationRun, ExplorationSeed};
 
-/// Explore all seeded logical roots under one shared guardrail budget.
+/// Explore all seeded logical roots under one shared guardrail budget. Index
+/// rewrites are derived once per filter for the whole run (see
+/// [`rules::with_index_rewrite_cache`]).
 pub(super) fn optimize_many(
+    optimizer: &CascadesOptimizer<'_>,
+    root_exprs: ir::AtLeast<logical::LogicalExpr, 1>,
+    config: &optimizer::OptimizerConfig,
+) -> Result<optimizer::OptimizationResult, memo::MemoError> {
+    rules::with_index_rewrite_cache(&config.indexes, &config.planner_limits, || {
+        explore(optimizer, root_exprs, config)
+    })
+}
+
+fn explore(
     optimizer: &CascadesOptimizer<'_>,
     root_exprs: ir::AtLeast<logical::LogicalExpr, 1>,
     config: &optimizer::OptimizerConfig,
@@ -18,12 +30,34 @@ pub(super) fn optimize_many(
         ExplorationSeed::Finished(result) => return Ok(result),
     };
 
+    // The exploration budget bounds optional exploration only. It counts rule
+    // fires, never elapsed time, so where it stops depends only on the query
+    // and limits and the same input always yields the same plan. Once it is
+    // reached no further optional logical alternatives are explored, but
+    // required rewrites and implementation rules still run for every
+    // expression already queued so each memo group keeps the physical
+    // alternatives selection needs. A required rewrite is one whose paired
+    // implementation rule rejects the shapes the rewrite matches (see
+    // `RuleApplicability::is_required_rewrite`), so it is the only route to a
+    // physical alternative; skipping it, or stopping outright, could leave a
+    // root group with no physical alternative and fail an otherwise plannable
+    // request. Rewritten expressions are re-queued into the same group and the
+    // loop keeps draining, so multi-step simplifications such as collapsing
+    // several adjacent distinct operators still reach an implementable form.
+    let mut exploration_guardrail = None;
     while let Some(task) = run.pop_task() {
-        if let Some(guardrail) = run.time_guardrail(config) {
-            return Ok(run.finish(Some(guardrail)));
+        if exploration_guardrail.is_none() {
+            exploration_guardrail = run.exploration_budget_guardrail(config);
         }
 
         for optimizer_rule in optimizer.rules.rules_for_expr(&task.expr) {
+            let metadata = optimizer_rule.metadata();
+            if exploration_guardrail.is_some()
+                && metadata.kind != rules::RuleKind::Implementation
+                && !metadata.applicability.is_required_rewrite()
+            {
+                continue;
+            }
             if let Some(guardrail) = run.rule_budget_guardrail(config) {
                 return Ok(run.finish(Some(guardrail)));
             }
@@ -49,8 +83,7 @@ pub(super) fn optimize_many(
                     }
                 }
                 optimizer::RuleResult::Applied(optimizer::RuleEffect::Physical(alternatives)) => {
-                    let provenance =
-                        optimizer::RuleProvenance::from_metadata(optimizer_rule.metadata());
+                    let provenance = optimizer::RuleProvenance::from_metadata(metadata);
                     if let Some(guardrail) = run.apply_physical_effect(
                         task.group,
                         task.source_expr,
@@ -65,5 +98,5 @@ pub(super) fn optimize_many(
         }
     }
 
-    Ok(run.finish(None))
+    Ok(run.finish(exploration_guardrail))
 }

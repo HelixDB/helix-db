@@ -22,6 +22,21 @@ var (
 	ErrMixedParameterModes       = errors.New("helix: typed and untyped parameters cannot be mixed")
 	ErrInvalidParameterType      = errors.New("helix: invalid parameter type")
 	ErrInvalidDateTimeParameter  = errors.New("helix: invalid datetime parameter")
+	// ErrEventualWriteSearchConsistency rejects eventual search on write
+	// requests; write batches always search strongly.
+	ErrEventualWriteSearchConsistency = errors.New(`helix: search consistency "eventual" is only valid for read requests`)
+	ErrUnknownSearchConsistency       = errors.New("helix: unknown search consistency")
+)
+
+// SearchConsistency selects request-level visibility of committed but not yet
+// indexed vector/text data. Strong (the default) searches every committed graph
+// change; Eventual overlays a bounded budget of unpublished changes and is valid
+// only for read requests.
+type SearchConsistency string
+
+const (
+	SearchConsistencyStrong   SearchConsistency = "strong"
+	SearchConsistencyEventual SearchConsistency = "eventual"
 )
 
 type PathError struct {
@@ -492,8 +507,13 @@ type StreamBound struct {
 	expr    *Expr
 }
 
-func BoundLiteral(value int) StreamBound { return StreamBound{literal: &value} }
-func BoundExpr(expr Expr) StreamBound    { return StreamBound{expr: &expr} }
+func BoundLiteral(value int) StreamBound {
+	if value < 0 {
+		panic("helix: stream bound literal must be non-negative")
+	}
+	return StreamBound{literal: &value}
+}
+func BoundExpr(expr Expr) StreamBound { return StreamBound{expr: &expr} }
 
 func streamBoundOf(value any) StreamBound {
 	switch v := value.(type) {
@@ -1002,20 +1022,19 @@ func (IndexDdlAlreadyActive) indexDdlReceipt() {}
 type IndexErrorCode string
 
 const (
-	IndexLifecycleUnavailable        IndexErrorCode = "index_lifecycle_unavailable"
-	IndexAlreadyExists               IndexErrorCode = "index_already_exists"
-	IndexDefinitionConflict          IndexErrorCode = "index_definition_conflict"
-	IndexBusy                        IndexErrorCode = "index_busy"
-	IndexNotFound                    IndexErrorCode = "index_not_found"
-	IndexOperationNotFound           IndexErrorCode = "index_operation_not_found"
-	IndexOperationNotAbortable       IndexErrorCode = "index_operation_not_abortable"
-	IndexIDExhausted                 IndexErrorCode = "index_id_exhausted"
-	VectorPhysicalIDExhausted        IndexErrorCode = "vector_physical_id_exhausted"
-	IndexGenerationExhausted         IndexErrorCode = "index_generation_exhausted"
-	IndexRevisionExhausted           IndexErrorCode = "index_revision_exhausted"
-	IndexOperationRevisionExhausted  IndexErrorCode = "index_operation_revision_exhausted"
-	StaleIndexGeneration             IndexErrorCode = "stale_index_generation"
-	WriterFencedCommitOutcomeUnknown IndexErrorCode = "writer_fenced_commit_outcome_unknown"
+	IndexLifecycleUnavailable       IndexErrorCode = "index_lifecycle_unavailable"
+	IndexAlreadyExists              IndexErrorCode = "index_already_exists"
+	IndexDefinitionConflict         IndexErrorCode = "index_definition_conflict"
+	IndexBusy                       IndexErrorCode = "index_busy"
+	IndexNotFound                   IndexErrorCode = "index_not_found"
+	IndexOperationNotFound          IndexErrorCode = "index_operation_not_found"
+	IndexOperationNotAbortable      IndexErrorCode = "index_operation_not_abortable"
+	IndexIDExhausted                IndexErrorCode = "index_id_exhausted"
+	VectorPhysicalIDExhausted       IndexErrorCode = "vector_physical_id_exhausted"
+	IndexGenerationExhausted        IndexErrorCode = "index_generation_exhausted"
+	IndexRevisionExhausted          IndexErrorCode = "index_revision_exhausted"
+	IndexOperationRevisionExhausted IndexErrorCode = "index_operation_revision_exhausted"
+	StaleIndexGeneration            IndexErrorCode = "stale_index_generation"
 )
 
 // IndexOperationBlockerCode is a stable reason explicit control is required.
@@ -2582,13 +2601,14 @@ func QueryArray(values ...QueryValue) QueryValue          { return values }
 func QueryObject(values map[string]QueryValue) QueryValue { return values }
 
 type QueryRequest struct {
-	requestType   QueryRequestType
-	queryName     *string
-	batch         batchBase
-	parameters    map[string]QueryValue
-	types         map[string]QueryParamType
-	parameterMode queryParameterMode
-	err           error
+	requestType       QueryRequestType
+	queryName         *string
+	searchConsistency SearchConsistency
+	batch             batchBase
+	parameters        map[string]QueryValue
+	types             map[string]QueryParamType
+	parameterMode     queryParameterMode
+	err               error
 }
 
 type queryParameterMode uint8
@@ -2626,10 +2646,11 @@ func newQueryRequest(requestType QueryRequestType, name string) QueryRequest {
 		queryName = &name
 	}
 	return QueryRequest{
-		requestType: requestType,
-		queryName:   queryName,
-		parameters:  map[string]QueryValue{},
-		types:       map[string]QueryParamType{},
+		requestType:       requestType,
+		queryName:         queryName,
+		searchConsistency: SearchConsistencyStrong,
+		parameters:        map[string]QueryValue{},
+		types:             map[string]QueryParamType{},
 	}
 }
 func (q *QueryRequest) Validate() error {
@@ -2714,6 +2735,35 @@ func (q *QueryRequest) WithQueryName(name string) *QueryRequest {
 	q.SetQueryName(name)
 	return q
 }
+
+// SearchConsistency returns the search visibility requested for unpublished
+// vector/text work.
+func (q *QueryRequest) SearchConsistency() SearchConsistency { return q.searchConsistency }
+
+// SetSearchConsistency selects search visibility; eventual search is rejected
+// for write requests.
+func (q *QueryRequest) SetSearchConsistency(consistency SearchConsistency) error {
+	switch consistency {
+	case SearchConsistencyStrong:
+	case SearchConsistencyEventual:
+		if q.requestType == RequestTypeWrite {
+			return ErrEventualWriteSearchConsistency
+		}
+	default:
+		return ErrUnknownSearchConsistency
+	}
+	q.searchConsistency = consistency
+	return nil
+}
+
+// WithSearchConsistency selects search visibility and records any rejection
+// for Validate.
+func (q *QueryRequest) WithSearchConsistency(consistency SearchConsistency) *QueryRequest {
+	if err := q.SetSearchConsistency(consistency); err != nil && q.err == nil {
+		q.err = err
+	}
+	return q
+}
 func (q *QueryRequest) ParamBool(name string, value bool) ParamRef {
 	return q.addParam(name, ParamTypeBool(), QueryBool(value), nil)
 }
@@ -2768,7 +2818,12 @@ func (q *QueryRequest) MarshalJSON() ([]byte, error) {
 		Query          any                       `json:"query"`
 		Parameters     map[string]QueryValue     `json:"parameters,omitempty"`
 		ParameterTypes map[string]QueryParamType `json:"parameter_types,omitempty"`
+		// Omitted for the strong default so existing request bytes are unchanged.
+		SearchConsistency SearchConsistency `json:"search_consistency,omitempty"`
 	}{RequestType: q.requestType, QueryName: q.queryName, Query: query}
+	if q.searchConsistency == SearchConsistencyEventual {
+		payload.SearchConsistency = q.searchConsistency
+	}
 	if len(q.parameters) > 0 {
 		payload.Parameters = q.parameters
 	}
@@ -2808,6 +2863,12 @@ func (q *ReadQueryBuilder) ForEachParam(param string, body *ReadBatch) *ReadQuer
 	if body != nil {
 		q.batch.queries = append(q.batch.queries, forEachParamEntry(param, body.queries))
 	}
+	return q
+}
+
+// WithSearchConsistency selects search visibility for this read query.
+func (q *ReadQueryBuilder) WithSearchConsistency(consistency SearchConsistency) *ReadQueryBuilder {
+	q.QueryRequest.WithSearchConsistency(consistency)
 	return q
 }
 func (q *ReadQueryBuilder) Returning(vars ...string) Request {
@@ -2944,7 +3005,23 @@ func queryFloat64(value any) (float64, error) {
 		return f, nil
 	case int:
 		return float64(v), nil
+	case int8:
+		return float64(v), nil
+	case int16:
+		return float64(v), nil
+	case int32:
+		return float64(v), nil
 	case int64:
+		return float64(v), nil
+	case uint:
+		return float64(v), nil
+	case uint8:
+		return float64(v), nil
+	case uint16:
+		return float64(v), nil
+	case uint32:
+		return float64(v), nil
+	case uint64:
 		return float64(v), nil
 	default:
 		return 0, ErrInvalidParameterType
@@ -3008,19 +3085,11 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 		}
 		return QueryString(typed), nil
 	case paramKindDateTime:
-		typed, ok := value.(string)
-		if !ok {
-			return nil, ErrInvalidDateTimeParameter
-		}
-		dateTime, err := ParseDateTimeRFC3339(typed)
+		formatted, err := queryDateTime(value)
 		if err != nil {
 			return nil, ErrInvalidDateTimeParameter
 		}
-		normalized, err := dateTime.RFC3339()
-		if err != nil {
-			return nil, ErrInvalidDateTimeParameter
-		}
-		return QueryString(normalized), nil
+		return QueryString(formatted), nil
 	case paramKindBytes:
 		return nil, ErrUnsupportedBytesParameter
 	case paramKindValue:

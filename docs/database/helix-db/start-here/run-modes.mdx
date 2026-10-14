@@ -7,49 +7,51 @@ pageType: "Concept"
 
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
-All deployment options use the same queries and SDK tooling. Choose based on deployment, storage, and operational ownership.
+Every deployment option runs the same queries with the same SDKs, so you can develop
+against one and deploy to another without changing application code. Choose based on
+where the engine runs, where data is stored, and who operates it.
 
 | Mode | Best for | Interface | Storage | Availability |
 | --- | --- | --- | --- | --- |
-| HelixDB Cloud | Production services and managed operations | HTTPS | Managed object storage | Highly available |
-| Local server | Development and production-shaped testing | HTTP | Memory or S3-compatible storage | Single node |
+| Helix Cloud | Production services with managed operations | HTTPS | Managed object storage | Highly available |
+| Local server | Development, production-shaped testing, and self-hosting | HTTP | Memory or S3-compatible storage | Single node |
 | Embedded | In-process applications and local tools | Native SDK call | Memory, disk, or object storage | In process |
 
-## HelixDB Cloud
+## Helix Cloud
 
-HelixDB Cloud runs a highly available, multi-tenant cluster to provide performant and cost-effective querying at scale. Use it when
-you want managed deployment, storage, database authentication, and high availability.
+Helix Cloud runs a highly available cluster that provides managed deployment, storage,
+database authentication, and read scaling. It supports multi-tenant and single-tenant
+deployments; BYOC is coming soon.
 
-HelixDB Cloud supports multi-tenant and single-tenant deployments. BYOC is coming soon.
+## Local server
 
-## Self hosting HelixDB
+The local server runs the standalone HelixDB container on your own machine or
+infrastructure. It exposes the same `POST /v2/query` interface as Helix Cloud, which
+makes it the default development target: code written against it works unchanged in
+Cloud.
 
-Self hosting allows you to run the database on your own infrastructure.
-You can use the local server mode to test your application code before deploying to production.
+## Embedded
 
-The local container exposes the same `POST /v2/query` interface as Cloud. It is the
-default development target because application code does not change when you deploy.
+Embedded clients open the engine inside your process and skip HTTP entirely. Rust,
+TypeScript, and Python ship embedded runtimes; the Go SDK is currently HTTP-only.
 
-## HelixDB Embedded
+## Which should I use?
 
-Embedded clients open the engine in-process and avoid HTTP.
-You can use the embedded mode to test your application code before deploying to production.
-
-## Our recommendation
-
-- Start with the local server when building a networked application.
-- Use Cloud when you need managed production operation.
-- Use embedded when process-local execution materially simplifies your architecture
-  and the target SDK's native packaging fits your distribution model.
+- **Building a networked application?** Develop against the local server.
+- **Going to production?** Use Helix Cloud for managed operations and high
+  availability.
+- **Shipping a tool or app that owns its data?** Use embedded mode when process-local
+  execution simplifies your architecture and the SDK's native packaging fits how you
+  distribute.
 
 ## Next steps
 
 <CardGroup cols={3}>
-  <Card title="Local development" icon="computer" href="/database/helix-db/start-here/local-development/local-server">
+  <Card title="Local server" icon="computer" href="/database/helix-db/start-here/local-development/local-server">
     Run the server locally with memory or persistent storage.
   </Card>
-  <Card title="Helix Cloud" icon="cloud" href="/database/helix-cloud/start-here/working-with-enterprise">
-    Connect applications to a managed cluster.
+  <Card title="Helix Cloud" icon="cloud" href="/database/helix-cloud/start-here/using-the-cloud">
+    Create a managed database and connect to it.
   </Card>
   <Card title="Embedded" icon="microchip" href="/database/helix-db/start-here/local-development/embedded-database">
     Open a writer or reader and review current SDK availability.

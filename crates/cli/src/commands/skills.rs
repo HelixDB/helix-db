@@ -7,6 +7,7 @@ use std::env;
 
 use crate::errors::CliError;
 use crate::external_tools::{self, ExternalTool};
+use crate::output::{self, OutputMode};
 use crate::SkillsAction;
 
 pub async fn run(action: SkillsAction) -> Result<()> {
@@ -19,6 +20,15 @@ pub async fn run(action: SkillsAction) -> Result<()> {
             .into());
     }
 
+    // `install` and `list` hand the terminal to the `skills` CLI (it prompts
+    // and prints its own listing), so there is no JSON result to give.
+    if OutputMode::current().is_json() && !matches!(action, SkillsAction::Update { .. }) {
+        return Err(
+            CliError::new("`helix skills install` and `list` are interactive")
+                .with_hint("--json is only supported for `helix skills update`")
+                .into(),
+        );
+    }
     // The `skills` CLI resolves global vs project scope itself; project scope is
     // relative to the current directory, so run from cwd.
     let project_dir = env::current_dir()?;
@@ -34,6 +44,7 @@ pub async fn run(action: SkillsAction) -> Result<()> {
             // Forced, non-interactive refresh of every Helix skill from source.
             crate::setup::install_skills(&project_dir, true, !project)?;
             crate::update::record_skills_refreshed();
+            output::emit(&serde_json::json!({"updated": true}), |_| Ok(()))?;
         }
         SkillsAction::List { project } => {
             crate::setup::list_skills(&project_dir, !project)?;

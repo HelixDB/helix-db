@@ -6,6 +6,9 @@ impl KnownRuleId {
     /// Stable serialized identifier for this production rule.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::SeedRows => "seed_rows",
+            Self::SeedGraphPattern => "seed_graph_pattern",
+            Self::GraphPatternOrder => "graph_pattern_order",
             Self::FilterPushdown => "filter_pushdown",
             Self::PurePipelineSimplification => "pure_pipeline_simplification",
             Self::StaticPredicateSimplification => "static_predicate_simplification",
@@ -35,6 +38,8 @@ impl KnownRuleId {
             Self::AccessDistinct => "access_distinct",
             Self::SeedAccessDistinct => "seed_access_distinct",
             Self::AccessPipelineFilter => "access_pipeline_filter",
+            Self::AccessSourceIndexFilter => "access_source_index_filter",
+            Self::AccessPipelineMembershipFilter => "access_pipeline_membership_filter",
             Self::AccessPipelineOrder => "access_pipeline_order",
             Self::AccessPipelineSimplification => "access_pipeline_simplification",
             Self::SeedAccessPipeline => "seed_access_pipeline",
@@ -59,6 +64,9 @@ impl KnownRuleId {
     /// Resolve a stable serialized identifier to a production rule ID.
     pub fn from_name(value: &str) -> Option<Self> {
         match value {
+            "seed_rows" => Some(Self::SeedRows),
+            "seed_graph_pattern" => Some(Self::SeedGraphPattern),
+            "graph_pattern_order" => Some(Self::GraphPatternOrder),
             "filter_pushdown" => Some(Self::FilterPushdown),
             "pure_pipeline_simplification" => Some(Self::PurePipelineSimplification),
             "static_predicate_simplification" => Some(Self::StaticPredicateSimplification),
@@ -88,6 +96,8 @@ impl KnownRuleId {
             "access_distinct" => Some(Self::AccessDistinct),
             "seed_access_distinct" => Some(Self::SeedAccessDistinct),
             "access_pipeline_filter" => Some(Self::AccessPipelineFilter),
+            "access_source_index_filter" => Some(Self::AccessSourceIndexFilter),
+            "access_pipeline_membership_filter" => Some(Self::AccessPipelineMembershipFilter),
             "access_pipeline_order" => Some(Self::AccessPipelineOrder),
             "access_pipeline_simplification" => Some(Self::AccessPipelineSimplification),
             "seed_access_pipeline" => Some(Self::SeedAccessPipeline),

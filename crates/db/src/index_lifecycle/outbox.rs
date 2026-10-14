@@ -28,6 +28,14 @@ use crate::encoding::v2::values::{
     encode_operation_record,
 };
 use crate::error::{HelixDbError, Result};
+use crate::execution_control;
+
+mod failure;
+#[cfg(test)]
+pub(crate) mod step_pause;
+
+#[cfg(feature = "production-coverage")]
+pub(crate) use failure::contracts::run as driver_failure_classification_contract;
 
 use super::failpoints::{self, IndexOutboxFailpoint};
 use super::{
@@ -145,6 +153,11 @@ pub(crate) enum IndexOperationStepResult {
     /// No physical work commits; the exact checkpoint is durably backed off.
     TransientFailure,
     /// No further automatic retry is legal until an explicit retry/abort.
+    ///
+    /// The step's transaction commits the blocker beside the operation's
+    /// unchanged checkpoint, so anything the driver staged commits too and a
+    /// retry rescans it: a driver stages before blocking only work that a
+    /// rescan from that checkpoint reconciles.
     Blocked(IndexOperationBlocker),
     /// The canonical lifecycle state and terminal operation commit together.
     Completed(IndexOperationOutcome),
@@ -261,11 +274,31 @@ impl StepResourceUsage {
     }
 }
 
+/// Process-local driver state released only after its step transaction commits.
+///
+/// The outbox hands this value to [`IndexOperationDriver::after_commit`] only
+/// when the repository transaction that staged the step committed. Every
+/// failure, conflict, or transient release drops it with the step, so a driver
+/// can never observe state derived from uncommitted writes.
+pub(crate) enum CommittedStepState {
+    /// Vector planning cache that mirrors the physical rows this step commits.
+    VectorBuild(Box<super::vector::OfferedVectorBuild>),
+}
+
+impl core::fmt::Debug for CommittedStepState {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::VectorBuild(_) => formatter.write_str("CommittedStepState::VectorBuild"),
+        }
+    }
+}
+
 /// One driver result plus disposable measurements from the same bounded turn.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct IndexOperationStepExecution {
     result: IndexOperationStepResult,
     resources: StepResourceUsage,
+    committed_state: Option<CommittedStepState>,
 }
 
 impl IndexOperationStepExecution {
@@ -303,6 +336,7 @@ impl IndexOperationStepExecution {
                     retained_payload_bytes: 0,
                 },
             },
+            committed_state: None,
         }
     }
 
@@ -310,6 +344,18 @@ impl IndexOperationStepExecution {
     pub(crate) const fn with_resources(mut self, resources: StepResourceUsage) -> Self {
         self.resources = resources;
         self
+    }
+
+    /// Attaches driver state that becomes reusable only once this step commits.
+    pub(crate) fn with_committed_state(mut self, state: Option<CommittedStepState>) -> Self {
+        self.committed_state = state;
+        self
+    }
+
+    /// Borrows the driver state released to `after_commit` on commit.
+    #[cfg(test)]
+    pub(crate) const fn committed_state(&self) -> Option<&CommittedStepState> {
+        self.committed_state.as_ref()
     }
 }
 
@@ -423,6 +469,21 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
     /// Family this driver is authorized to mutate.
     fn family(&self) -> IndexOperationFamily;
 
+    /// Acquires exclusive ownership of the operation's physical generation.
+    ///
+    /// The outbox holds it from before preparation through commit, so family
+    /// steps (build, activation, abort, cleanup) and queued publication of the
+    /// same generation never interleave. It is taken before any scope permit;
+    /// holders of this permit never wait for another generation's. Families
+    /// without queued publication use this unit default.
+    async fn acquire_generation_ownership(
+        &self,
+        _scope: DataScope,
+        _operation: &IndexOperationRecord,
+    ) -> Box<dyn IndexOperationStepPermit> {
+        Box::new(())
+    }
+
     /// Acquires any family-owned coordination required before the step snapshot.
     ///
     /// The returned permit is retained through the repository transaction and
@@ -469,13 +530,16 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
     ///
     /// This hook must not write database state. Its default is intentionally a
     /// no-op; vector cleanup uses it to forget a process-local retirement fence
-    /// only after the canonical `Dropped` transition has committed.
+    /// only after the canonical `Dropped` transition has committed, and vector
+    /// builds use it to retain planning state the committed step returned.
+    /// `operation` is the claimed record the step started from.
     async fn after_commit(
         &self,
         _scope: DataScope,
         _index: &IndexRecordV2,
         _operation: &IndexOperationRecord,
         _committed: CommittedOperationStep,
+        _state: Option<CommittedStepState>,
     ) {
     }
 }
@@ -507,6 +571,7 @@ struct StagedOperationStep {
     before_stage: IndexOperationStage,
     after_stage: IndexOperationStage,
     resources: StepResourceUsage,
+    committed_state: Option<CommittedStepState>,
 }
 
 /// Atomically stores the next canonical state, operation, and runnable pointer.
@@ -818,7 +883,7 @@ pub(crate) async fn observe_operation_pointer(
         return Ok(OperationPointerObservation::StalePointerRemoved);
     };
     let operation = decode_operation_record(&operation_value)?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     crate::migrations::observe_legacy_text_migration_operation(&operation)?;
     let index_key = scoped_index_key_for_identity(pointer.scope, operation.identity());
     let Some(index_value) = transaction.get(index_key).await? else {
@@ -987,9 +1052,18 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         ));
     }
 
-    let prepared = driver
+    let _ownership = driver
+        .acquire_generation_ownership(claimed.scope, &claimed.record)
+        .await;
+    let prepared = match driver
         .prepare_step(db, claimed.scope, &claimed.record, limits)
-        .await?;
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return record_driver_failure(db, claimed, error, now_unix_millis, started).await
+        }
+    };
     if prepared.family() != driver.family() {
         prepared.discard().await?;
         return Err(corruption(
@@ -997,6 +1071,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         ));
     }
 
+    let mut driver_failed = false;
     let staged: Result<Option<StagedOperationStep>> = async {
         let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
         failpoints::trip(IndexOutboxFailpoint::BatchReadBefore)?;
@@ -1018,20 +1093,17 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             .stage(driver, db, &transaction, claimed.scope, &operation, limits)
             .await;
         failpoints::trip(IndexOutboxFailpoint::PhysicalStagingAfter)?;
-        let execution = match step {
-            Ok(execution) => execution,
-            Err(error) => {
-                tracing::warn!(
-                    operation_id = %operation.operation_id().as_uuid(),
-                    error = %error,
-                    "index operation driver returned a transient failure"
-                );
-                return Ok(None);
-            }
-        };
+        #[cfg(test)]
+        step_pause::hold(db, &operation).await;
+        // An error can follow staged physical writes. Drop this transaction before
+        // recording a blocker or releasing the claim; never commit a partial step.
+        let execution = step.inspect_err(|_| {
+            driver_failed = true;
+        })?;
         let IndexOperationStepExecution {
             result: step,
             resources,
+            committed_state,
         } = execution;
         if matches!(step, IndexOperationStepResult::TransientFailure) {
             return Ok(None);
@@ -1145,7 +1217,10 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             IndexOperationStepResult::TransientFailure => return Ok(None),
         };
         failpoints::trip(IndexOutboxFailpoint::CheckpointStagingAfter)?;
-        failpoints::trip(IndexOutboxFailpoint::CommitBefore)?;
+        failpoints::trip_for_operation(
+            IndexOutboxFailpoint::CommitBefore,
+            operation.operation_id(),
+        )?;
         Ok(Some(StagedOperationStep {
             transaction,
             index,
@@ -1157,6 +1232,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                 before_stage,
                 counter_resources.saturating_add(resources),
             ),
+            committed_state,
         }))
     }
     .await;
@@ -1169,10 +1245,14 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         before_stage,
         after_stage,
         resources,
+        committed_state,
     }) = (match staged {
         Ok(staged) => staged,
         Err(error) => {
             prepared.discard().await?;
+            if driver_failed {
+                return record_driver_failure(db, claimed, error, now_unix_millis, started).await;
+            }
             return Err(error);
         }
     })
@@ -1200,14 +1280,88 @@ pub(crate) async fn execute_claimed_step_with_evidence(
     }
     prepared.after_commit().await;
     driver
-        .after_commit(claimed.scope, &index, &operation, committed)
+        .after_commit(
+            claimed.scope,
+            &index,
+            &operation,
+            committed,
+            committed_state,
+        )
         .await;
-    failpoints::trip(IndexOutboxFailpoint::CommitAfter)?;
+    failpoints::trip_for_operation(IndexOutboxFailpoint::CommitAfter, operation.operation_id())?;
     Ok(CommittedOperationStepEvidence {
         outcome: committed,
         before_stage,
         after_stage,
         resources,
+        elapsed_micros: elapsed_micros(started),
+    })
+}
+
+/// Records failures only after failed preparation and staging have been discarded.
+/// The exact claim is rechecked in a fresh serializable transaction so a stale
+/// worker cannot block an operation that another writer or an abort has advanced.
+async fn record_driver_failure(
+    db: &Db,
+    claimed: &ClaimedOperation,
+    error: HelixDbError,
+    now_unix_millis: u64,
+    started: Instant,
+) -> Result<CommittedOperationStepEvidence> {
+    if matches!(
+        error,
+        HelixDbError::DatabaseClosed | HelixDbError::WriterFencedCommitOutcomeUnknown
+    ) || matches!(&error, HelixDbError::Storage(storage) if matches!(storage.kind(), slatedb::ErrorKind::Closed(_)))
+    {
+        return Err(error);
+    }
+    let retryable = error.is_transaction_conflict()
+        || matches!(&error, HelixDbError::Storage(storage) if storage.kind() == slatedb::ErrorKind::Unavailable)
+        || matches!(&error, HelixDbError::ObjectStore(error) if failure::is_retryable_object_store(error));
+    let status = IndexOperationStatus::from_record(&claimed.record);
+    tracing::warn!(
+        operation_id = %claimed.record.operation_id().as_uuid(),
+        index_id = claimed.record.index_id().get(),
+        generation = claimed.record.generation().get(),
+        stage = ?status.common().stage,
+        error = %error,
+        retryable,
+        "index operation driver failed"
+    );
+    let outcome = if retryable {
+        release_transient_claim(db, claimed, now_unix_millis).await?;
+        CommittedOperationStep::TransientFailure
+    } else {
+        let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let Some((index, operation, _)) =
+            load_exact_link(&transaction, claimed.scope, claimed.record.operation_id()).await?
+        else {
+            return Err(corruption("failed operation disappeared before blocking"));
+        };
+        if operation.operation_revision() != claimed.record.operation_revision()
+            || operation.execution_state() != claimed.record.execution_state()
+        {
+            return Err(HelixDbError::TransactionConflict(
+                "failed index claim has advanced".into(),
+            ));
+        }
+        let next = operation
+            .block(IndexOperationBlocker::InvariantViolation)
+            .map_err(operation_model_error)?;
+        validate_link(claimed.scope, &index, &next, None)?;
+        transaction.put(
+            scoped_operation_key(claimed.scope, next.operation_id()),
+            encode_operation_record(&next),
+        )?;
+        transaction.delete(global_operation_key(next.operation_id()))?;
+        transaction.commit().await?;
+        CommittedOperationStep::Blocked
+    };
+    Ok(CommittedOperationStepEvidence {
+        outcome,
+        before_stage: status.common().stage,
+        after_stage: status.common().stage,
+        resources: StepResourceUsage::default(),
         elapsed_micros: elapsed_micros(started),
     })
 }
@@ -1285,7 +1439,9 @@ pub(crate) async fn retry_blocked_operation(
     scope: DataScope,
     operation_id: IndexOperationId,
     expected_revision: IndexOperationRevision,
+    execution_control: &execution_control::ExecutionControl,
 ) -> Result<Option<IndexOperationRecord>> {
+    execution_control.check()?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     let operation_key = scoped_operation_key(scope, operation_id);
     let Some(value) = transaction.get(&operation_key).await? else {
@@ -1319,7 +1475,10 @@ pub(crate) async fn retry_blocked_operation(
                 global_operation_key(operation_id),
                 encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
             )?;
-            transaction.commit().await?;
+            transaction
+                .commit()
+                .await
+                .map_err(HelixDbError::from_storage_commit)?;
             Ok(Some(next))
         }
         IndexOperationExecutionState::Queued { .. } | IndexOperationExecutionState::Claimed(_) => {
@@ -1376,10 +1535,26 @@ pub(crate) async fn read_operation(
 
 /// Convergently ensures a retained operation is runnable and returns its
 /// resulting public status source record.
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 pub(crate) async fn retry_operation(
     db: &Db,
     scope: DataScope,
     operation_id: IndexOperationId,
+) -> Result<IndexOperationRecord> {
+    let execution_control = execution_control::ExecutionControl::unlimited();
+    retry_operation_with_control(db, scope, operation_id, &execution_control).await
+}
+
+/// Requeues one request-owned blocked operation at its durable boundary.
+pub(crate) async fn retry_operation_with_control(
+    db: &Db,
+    scope: DataScope,
+    operation_id: IndexOperationId,
+    execution_control: &execution_control::ExecutionControl,
 ) -> Result<IndexOperationRecord> {
     loop {
         let snapshot = db.snapshot().await?;
@@ -1393,8 +1568,14 @@ pub(crate) async fn retry_operation(
         ) {
             return Ok(current);
         }
-        let Some(next) =
-            retry_blocked_operation(db, scope, operation_id, current.operation_revision()).await?
+        let Some(next) = retry_blocked_operation(
+            db,
+            scope,
+            operation_id,
+            current.operation_revision(),
+            execution_control,
+        )
+        .await?
         else {
             continue;
         };
@@ -1404,11 +1585,28 @@ pub(crate) async fn retry_operation(
 
 /// Converts a constructing BUILD into abort cleanup, or converges on an
 /// already-aborting/aborted BUILD with the same operation ID.
+#[cfg(any(
+    test,
+    feature = "production-coverage",
+    feature = "index-lifecycle-testing"
+))]
 pub(crate) async fn abort_operation(
     db: &Db,
     scope: DataScope,
     operation_id: IndexOperationId,
 ) -> Result<IndexOperationRecord> {
+    let execution_control = execution_control::ExecutionControl::unlimited();
+    abort_operation_with_control(db, scope, operation_id, &execution_control).await
+}
+
+/// Aborts one request-owned constructing operation at its durable boundary.
+pub(crate) async fn abort_operation_with_control(
+    db: &Db,
+    scope: DataScope,
+    operation_id: IndexOperationId,
+    execution_control: &execution_control::ExecutionControl,
+) -> Result<IndexOperationRecord> {
+    execution_control.check()?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     let operation_key = scoped_operation_key(scope, operation_id);
     let Some(operation_value) = transaction.get(&operation_key).await? else {
@@ -1448,7 +1646,10 @@ pub(crate) async fn abort_operation(
                 pointer_key,
                 encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(next_pointer)),
             )?;
-            transaction.commit().await?;
+            transaction
+                .commit()
+                .await
+                .map_err(HelixDbError::from_storage_commit)?;
             Ok(next_operation)
         }
         (IndexStateV2::Aborting { .. }, super::IndexOperationKind::Build, _)
@@ -1510,9 +1711,9 @@ async fn release_transient_claim(
         encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
     )?;
     failpoints::trip(IndexOutboxFailpoint::CheckpointStagingAfter)?;
-    failpoints::trip(IndexOutboxFailpoint::CommitBefore)?;
+    failpoints::trip_for_operation(IndexOutboxFailpoint::CommitBefore, operation.operation_id())?;
     transaction.commit().await?;
-    failpoints::trip(IndexOutboxFailpoint::CommitAfter)?;
+    failpoints::trip_for_operation(IndexOutboxFailpoint::CommitAfter, operation.operation_id())?;
     Ok(())
 }
 
@@ -1758,6 +1959,73 @@ fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
 }
 
+/// Test driver that commits `writes` after `inner` stages a step and before
+/// the outbox commits it, as a foreground write inside the step's window.
+#[cfg(test)]
+pub(crate) struct WriteDuringStepDriver<'a> {
+    pub(crate) inner: &'a dyn IndexOperationDriver,
+    pub(crate) writes: Vec<(Bytes, Bytes)>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl IndexOperationDriver for WriteDuringStepDriver<'_> {
+    fn family(&self) -> IndexOperationFamily {
+        self.inner.family()
+    }
+
+    async fn acquire_generation_ownership(
+        &self,
+        scope: DataScope,
+        operation: &IndexOperationRecord,
+    ) -> Box<dyn IndexOperationStepPermit> {
+        self.inner
+            .acquire_generation_ownership(scope, operation)
+            .await
+    }
+
+    async fn prepare_step(
+        &self,
+        db: &Db,
+        scope: DataScope,
+        operation: &IndexOperationRecord,
+        limits: SearchIndexBatchLimits,
+    ) -> Result<PreparedIndexOperationStep> {
+        self.inner.prepare_step(db, scope, operation, limits).await
+    }
+
+    async fn step(
+        &self,
+        db: &Db,
+        transaction: &DbTransaction,
+        scope: DataScope,
+        operation: &IndexOperationRecord,
+        limits: SearchIndexBatchLimits,
+    ) -> Result<IndexOperationStepExecution> {
+        let execution = self
+            .inner
+            .step(db, transaction, scope, operation, limits)
+            .await?;
+        for (key, value) in &self.writes {
+            db.put(key, value).await?;
+        }
+        Ok(execution)
+    }
+
+    async fn after_commit(
+        &self,
+        scope: DataScope,
+        index: &IndexRecordV2,
+        operation: &IndexOperationRecord,
+        committed: CommittedOperationStep,
+        state: Option<CommittedStepState>,
+    ) {
+        self.inner
+            .after_commit(scope, index, operation, committed, state)
+            .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1790,6 +2058,341 @@ mod tests {
         ) -> Result<IndexOperationStepExecution> {
             Ok(IndexOperationStepExecution::new(self.0.clone()))
         }
+    }
+
+    #[derive(Clone, Copy)]
+    enum FailureMode {
+        PrepareCorruption,
+        PrepareObjectStore,
+        PrepareObjectStoreDenied,
+        StorageUnavailable,
+        StorageCorruption,
+        StageCorruption,
+        StageInvariant,
+        StageConfig,
+        StageInvalidObjectRequest,
+        Conflict,
+        ObjectStore,
+    }
+
+    struct FailingDriver {
+        mode: FailureMode,
+        probe_key: Bytes,
+    }
+
+    #[async_trait]
+    impl IndexOperationDriver for FailingDriver {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn acquire_step_permit(
+            &self,
+            _scope: DataScope,
+            _operation: &IndexOperationRecord,
+        ) -> Result<Box<dyn IndexOperationStepPermit>> {
+            if matches!(self.mode, FailureMode::PrepareCorruption) {
+                return Err(corruption("prepare fixture"));
+            }
+            if matches!(self.mode, FailureMode::PrepareObjectStore) {
+                return Err(HelixDbError::ObjectStore(
+                    slatedb::object_store::Error::Generic {
+                        store: "fixture",
+                        source: std::io::Error::other("temporarily unavailable").into(),
+                    },
+                ));
+            }
+            if matches!(self.mode, FailureMode::PrepareObjectStoreDenied) {
+                return Err(HelixDbError::ObjectStore(
+                    slatedb::object_store::Error::PermissionDenied {
+                        path: "fixture".into(),
+                        source: std::io::Error::other("access denied").into(),
+                    },
+                ));
+            }
+            Ok(Box::new(()))
+        }
+
+        async fn step(
+            &self,
+            _db: &Db,
+            transaction: &DbTransaction,
+            _scope: DataScope,
+            _operation: &IndexOperationRecord,
+            _limits: SearchIndexBatchLimits,
+        ) -> Result<IndexOperationStepExecution> {
+            transaction.delete(self.probe_key.clone())?;
+            Err(match self.mode {
+                FailureMode::PrepareCorruption | FailureMode::StageCorruption => {
+                    corruption("stage fixture")
+                }
+                FailureMode::StageInvariant => {
+                    HelixDbError::InvariantViolation("stage fixture".into())
+                }
+                FailureMode::StageConfig => HelixDbError::Config("invalid configuration".into()),
+                FailureMode::PrepareObjectStoreDenied => {
+                    unreachable!("permission failure occurs during preparation")
+                }
+                FailureMode::StageInvalidObjectRequest => {
+                    HelixDbError::ObjectStore(slatedb::object_store::Error::Generic {
+                        store: "fixture",
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "invalid object request",
+                        )
+                        .into(),
+                    })
+                }
+                FailureMode::Conflict => HelixDbError::TransactionConflict("stage fixture".into()),
+                FailureMode::StorageUnavailable => {
+                    HelixDbError::Storage(slatedb::Error::unavailable("fixture".into()))
+                }
+                FailureMode::StorageCorruption => {
+                    HelixDbError::Storage(slatedb::Error::data("fixture".into()))
+                }
+                FailureMode::PrepareObjectStore | FailureMode::ObjectStore => {
+                    HelixDbError::ObjectStore(slatedb::object_store::Error::Generic {
+                        store: "fixture",
+                        source: std::io::Error::other("temporarily unavailable").into(),
+                    })
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn driver_errors_discard_partial_writes_and_preserve_retry_classification() {
+        for (aborting, mode, expected) in [false, true].into_iter().flat_map(|aborting| {
+            [
+                (
+                    FailureMode::PrepareObjectStore,
+                    CommittedOperationStep::TransientFailure,
+                ),
+                (
+                    FailureMode::StorageUnavailable,
+                    CommittedOperationStep::TransientFailure,
+                ),
+                (
+                    FailureMode::StorageCorruption,
+                    CommittedOperationStep::Blocked,
+                ),
+                (
+                    FailureMode::PrepareCorruption,
+                    CommittedOperationStep::Blocked,
+                ),
+                (
+                    FailureMode::StageCorruption,
+                    CommittedOperationStep::Blocked,
+                ),
+                (FailureMode::StageInvariant, CommittedOperationStep::Blocked),
+                (FailureMode::StageConfig, CommittedOperationStep::Blocked),
+                (
+                    FailureMode::PrepareObjectStoreDenied,
+                    CommittedOperationStep::Blocked,
+                ),
+                (
+                    FailureMode::StageInvalidObjectRequest,
+                    CommittedOperationStep::Blocked,
+                ),
+                (
+                    FailureMode::Conflict,
+                    CommittedOperationStep::TransientFailure,
+                ),
+                (
+                    FailureMode::ObjectStore,
+                    CommittedOperationStep::TransientFailure,
+                ),
+            ]
+            .map(|(mode, expected)| (aborting, mode, expected))
+        }) {
+            let db = db("outbox-driver-error").await;
+            let (index, operation) = fixture(70);
+            let scope = DataScope::LegacyUnscoped;
+            enqueue_operation(
+                &db,
+                scope,
+                ExpectedCanonicalRevision::Absent,
+                &index,
+                &operation,
+            )
+            .await
+            .unwrap();
+            if aborting {
+                abort_operation(&db, scope, operation.operation_id())
+                    .await
+                    .unwrap();
+            }
+            let epoch = WriterEpoch::from_bytes([71; 16]).unwrap();
+            let OperationPointerObservation::Eligible(eligible) =
+                observe_operation_pointer(&db, operation.operation_id(), epoch, 0)
+                    .await
+                    .unwrap()
+            else {
+                panic!("queued operation is eligible");
+            };
+            let claimed = claim_operation(
+                &db,
+                &eligible,
+                epoch,
+                ClaimSequence::new(1).unwrap(),
+                0,
+                ClaimPermission::Normal,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let probe_key = scoped_index_key(scope, &index);
+            let before = db.get(&probe_key).await.unwrap();
+            let result = execute_claimed_step(
+                &db,
+                &claimed,
+                &FailingDriver {
+                    mode,
+                    probe_key: probe_key.clone(),
+                },
+                SearchIndexBackfillLimits::default().batch(),
+                0,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, expected);
+            assert_eq!(
+                db.get(probe_key).await.unwrap(),
+                before,
+                "failed physical staging must roll back"
+            );
+            let value = db
+                .get(scoped_operation_key(scope, operation.operation_id()))
+                .await
+                .unwrap()
+                .unwrap();
+            let retained = decode_operation_record(&value).unwrap();
+            assert_eq!(retained.progress(), claimed.record.progress());
+            assert_eq!(retained.attempt(), claimed.record.attempt());
+            let pointer = db
+                .get(global_operation_key(operation.operation_id()))
+                .await
+                .unwrap();
+            match expected {
+                CommittedOperationStep::Blocked => {
+                    assert!(matches!(
+                        retained.execution_state(),
+                        IndexOperationExecutionState::Blocked(
+                            IndexOperationBlocker::InvariantViolation
+                        )
+                    ));
+                    assert!(pointer.is_none());
+                    let retried = retry_operation(&db, scope, operation.operation_id())
+                        .await
+                        .unwrap();
+                    assert_eq!(retried.progress(), retained.progress());
+                    assert!(
+                        db.get(global_operation_key(operation.operation_id()))
+                            .await
+                            .unwrap()
+                            .is_some(),
+                        "explicit retry must recreate the queue pointer"
+                    );
+                }
+                CommittedOperationStep::TransientFailure => {
+                    assert!(
+                        matches!(retained.execution_state(), IndexOperationExecutionState::Queued { not_before_unix_millis: Some(deadline) } if *deadline > 0)
+                    );
+                    assert!(pointer.is_some());
+                }
+                CommittedOperationStep::Progressed | CommittedOperationStep::Completed => {
+                    unreachable!()
+                }
+            }
+            db.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_and_unknown_claims_cannot_become_durable_blockers() {
+        let db = db("outbox-stale-failure").await;
+        let (index, operation) = fixture(72);
+        let scope = DataScope::LegacyUnscoped;
+        enqueue_operation(
+            &db,
+            scope,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let epoch = WriterEpoch::from_bytes([73; 16]).unwrap();
+        let OperationPointerObservation::Eligible(eligible) =
+            observe_operation_pointer(&db, operation.operation_id(), epoch, 0)
+                .await
+                .unwrap()
+        else {
+            panic!("queued operation is eligible");
+        };
+        let claimed = claim_operation(
+            &db,
+            &eligible,
+            epoch,
+            ClaimSequence::new(1).unwrap(),
+            0,
+            ClaimPermission::Normal,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let before = db
+            .get(scoped_operation_key(scope, operation.operation_id()))
+            .await
+            .unwrap();
+        for error in [
+            HelixDbError::WriterFencedCommitOutcomeUnknown,
+            HelixDbError::DatabaseClosed,
+            HelixDbError::Storage(slatedb::Error::closed(
+                "fixture".into(),
+                slatedb::CloseReason::Fenced,
+            )),
+        ] {
+            assert!(
+                record_driver_failure(&db, &claimed, error, 0, Instant::now())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                db.get(scoped_operation_key(scope, operation.operation_id()))
+                    .await
+                    .unwrap(),
+                before
+            );
+        }
+        release_transient_claim(&db, &claimed, 0).await.unwrap();
+        let advanced = db
+            .get(scoped_operation_key(scope, operation.operation_id()))
+            .await
+            .unwrap();
+        assert!(matches!(
+            record_driver_failure(
+                &db,
+                &claimed,
+                corruption("stale failure"),
+                0,
+                Instant::now()
+            )
+            .await,
+            Err(HelixDbError::TransactionConflict(_))
+        ));
+        assert_eq!(
+            db.get(scoped_operation_key(scope, operation.operation_id()))
+                .await
+                .unwrap(),
+            advanced
+        );
+        assert!(db
+            .get(global_operation_key(operation.operation_id()))
+            .await
+            .unwrap()
+            .is_some());
+        db.close().await.unwrap();
     }
 
     fn fixture(id_byte: u8) -> (IndexRecordV2, IndexOperationRecord) {
@@ -2678,7 +3281,7 @@ mod tests {
                 ))
             ));
             assert_eq!(
-                abort_operation(&db, DataScope::LegacyUnscoped, operation.operation_id(),)
+                abort_operation(&db, DataScope::LegacyUnscoped, operation.operation_id())
                     .await
                     .unwrap(),
                 aborted

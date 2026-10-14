@@ -11,7 +11,9 @@ pub use crate::projection::{
     BindingProjection, BindingTarget, BindingValueRef, ExprProjection, Projection,
     PropertyProjection,
 };
-pub use crate::query::{QueryError, QueryParamType, QueryRequest, QueryRequestType, QueryValue};
+pub use crate::query::{
+    QueryError, QueryParamType, QueryRequest, QueryRequestType, QueryValue, SearchConsistency,
+};
 pub use crate::traversal::{
     g, sub, AggregateFunction, AstNode, EmitBehavior, Empty, OnEdges, OnNodes, Order, ReadOnly,
     RepeatConfig, ShortestPathDirection, SubTraversal, Terminal, Traversal, TraversalState,

@@ -1,141 +1,41 @@
 ---
-title: "Configuration Guide"
-description: "Reference for helix.toml, ~/.helix/config, and credentials"
-sidebarTitle: "Configuration"
-icon: "gear"
+title: "CLI configuration"
+description: "Project linkage and WorkOS session files"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-This page documents the configuration files the Helix CLI reads and writes:
-
-- `helix.toml` — per-project configuration in your project root.
-- `~/.helix/config` — user-global state, currently the selected workspace.
-- `~/.helix/credentials` — Helix Cloud credentials written by `helix auth login`.
-
-## `helix.toml`
-
-`helix init` creates `helix.toml` in your project root. Everything the CLI knows about your project lives here.
+The CLI reads project configuration from `helix.toml` and its WorkOS session from
+`~/.helix/credentials`. There is no user-global workspace selection file.
 
 ```toml
 [project]
-name = "my-helix-app"
+name = "example"
+queries = "db"
+container_runtime = "docker"
+id = "project_123"          # stable optional Cloud link
+workspace_id = "ws_123"     # stable optional Cloud link
 
 [local.dev]
 port = 6969
-image = "ghcr.io/helixdb/helixdb"
-tag = "v0.0.4"
-# Optional; defaults to in-memory when omitted.
-# storage = "disk"
 
 [enterprise.production]
-cluster_id = "ec_01HX..."
-gateway_url = "https://gateway.example.com"
+database = "tenant:tenant_123"
+project_id = "project_123"  # optional stable link
+workspace_id = "ws_123"     # optional stable link
 ```
 
-At least one `[local.*]` or `[enterprise.*]` instance is required. The CLI rejects an empty `helix.toml`.
+Cloud `database` accepts only `tenant:<id>` or `cluster:<id>`. A physical shared cluster is not a
+database target. Unknown Cloud fields are rejected. In particular, gateway URLs, query auth headers,
+query auth environment variables, source snapshots, sync metadata, and query bundles are invalid.
 
-### `[project]`
+`helix init cloud`, `helix add cloud`, and `helix project link` write `[project] id` and
+`workspace_id`. Cloud commands run in the project then default to that project and its linked
+databases. An explicit argument (ID, slug, or name) always wins; without a link, a command uses the
+only candidate, prompts in a terminal, or fails and lists the candidates. See
+[Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
 
-| Key | Type | Required | Default | Description |
-|-----|------|----------|---------|-------------|
-| `name` | String | Yes | — | Project name. Used in the container name pattern `helix-<project>-<instance>`. |
-| `id` | String | No | — | Linked Helix Cloud project ID. Set by [`helix project switch`](/cli/command-reference/project). |
-| `workspace_id` | String | No | — | Linked Helix Cloud workspace ID. Set by [`helix project switch`](/cli/command-reference/project). |
-| `container_runtime` | `docker` \| `podman` | No | `docker` | Runtime used to manage local containers. |
-
-### `[local.<instance>]`
-
-One block per local instance. The instance name is the table key (e.g. `[local.dev]`).
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `port` | Number | `6969` | Host port published to container port `8080`. |
-| `image` | String | `ghcr.io/helixdb/helixdb` | Container image used by [`helix start`](/cli/command-reference/start). |
-| `tag` | String | `v0.0.4` | Image tag. |
-| `storage` | `memory` \| `disk` | `memory` | Local storage mode. `disk` uses a CLI-managed MinIO container and persistent volume. |
-
-You can define as many local instances as you want, each on a different port:
-
-```toml
-[local.dev]
-port = 6969
-
-[local.staging]
-port = 9090
-storage = "disk"
-```
-
-You can also use `helix start <instance> --disk` as a one-off disk-mode run without changing `helix.toml`.
-
-### `[enterprise.<instance>]`
-
-One block per Helix Cloud instance. Most fields here are populated automatically by [`helix sync`](/cli/command-reference/sync).
-
-| Key | Type | Required | Default | Description |
-|-----|------|----------|---------|-------------|
-| `cluster_id` | String | Yes | — | Helix Cloud cluster ID. List clusters with [`helix cluster list`](/cli/command-reference/cluster). |
-| `workspace_id` | String | No | — | Workspace the cluster belongs to. |
-| `project_id` | String | No | — | Linked project ID. |
-| `gateway_url` | URL | No (required at query time) | — | Runtime gateway base URL. Populated by `helix sync` when available. |
-| `query_auth_header` | String | No | `Authorization` | HTTP header name used for query auth. |
-| `query_auth_env` | String | No | `HELIX_API_KEY` | Environment variable read by [`helix query`](/cli/command-reference/query) for the auth header value. |
-| `query_auth_scheme` | `bearer` or `raw` | No | Inferred from the header | `bearer` adds the `Bearer` prefix; `raw` sends the environment value unchanged. Missing values infer `bearer` for `Authorization` and `raw` for other headers. |
-| `availability_mode` | String | No | — | Cluster availability mode, returned by `helix sync`. |
-| `gateway_node_type` | String | No | — | Gateway node type, returned by `helix sync`. |
-| `db_node_type` | String | No | — | DB node type, returned by `helix sync`. |
-
-If `gateway_url` is missing, [`helix query <instance>`](/cli/command-reference/query) fails with:
-
-```
-Enterprise gateway URL is not configured for '<instance>'.
-Run 'helix sync <instance>' or set gateway_url in helix.toml.
-```
-
-## `~/.helix/config`
-
-User-global configuration written by [`helix workspace switch`](/cli/command-reference/workspace).
-
-```toml
-workspace_id = "ws_01HX..."
-```
-
-This file is independent of any project directory and applies to every Helix Cloud command you run.
-
-## `~/.helix/credentials`
-
-Written by [`helix auth login`](/cli/command-reference/auth). Plain key=value format:
-
-```
-helix_user_id=usr_01HX...
-helix_user_key=hlxk_...
-```
-
-Remove with `helix auth logout`. Never commit this file.
-
-## Environment variables
-
-| Variable | Used by | Description |
-|----------|---------|-------------|
-| `HELIX_API_KEY` (default) | [`helix query`](/cli/command-reference/query) | Raw per-cluster Helix Cloud API key. With `query_auth_scheme = "bearer"`, the CLI adds the `Bearer` prefix. The variable name is configurable per-instance via `query_auth_env`. |
-
-## Troubleshooting
-
-- **Port conflict on `helix start`** — change the port in `[local.<instance>] port`, or pass `helix start <instance> --port <port>` to override for a single run.
-- **`Missing instances`** — `helix.toml` has no `[local.*]` or `[enterprise.*]` blocks. Add one with [`helix add`](/cli/command-reference/add).
-- **`Authentication required`** — run `helix auth login` for Helix Cloud commands.
-- **`gateway_url is still missing` after `helix sync`** — the cloud-side configuration has not been published yet. Re-run `helix sync` later, or set `gateway_url` manually under `[enterprise.<instance>]`.
-
-## Next Steps
-
-<CardGroup cols={2}>
-  <Card title="Local workflow" icon="route" href="/cli/workflows/local">
-    The local init/run/query loop
-  </Card>
-  <Card title="Troubleshooting" icon="wrench" href="/cli/troubleshooting">
-    Solve common CLI issues
-  </Card>
-</CardGroup>
+The strict credential file stores only `access_token`, rotating `refresh_token`, `expires_at`, and
+`email`. It is written atomically with mode `0600`. Do not edit it or put application keys or service
+credentials in it.

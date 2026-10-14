@@ -11,6 +11,13 @@ use crate::index_lifecycle::{
 
 use super::*;
 
+#[test]
+fn retired_membership_activation_value_is_not_reused() {
+    for mode in 0..=u8::MAX {
+        assert!(decode_metadata_value(&[INDEX_V2_VALUE_VERSION, 0x08, mode]).is_err());
+    }
+}
+
 pub(crate) fn encode_metadata_value(value: &IndexV2MetadataValue) -> Bytes {
     let kind = match value {
         IndexV2MetadataValue::StorageVersion(_) => 0x01,
@@ -116,6 +123,7 @@ pub(crate) fn decode_metadata_value(value: &[u8]) -> Result<IndexV2MetadataValue
             revision: crate::index_lifecycle::TextManifestRevision::new(decoder.take_u64()?)
                 .map_err(model_error)?,
         }),
+        // 0x08 is retired (experimental membership activation); do not reuse it.
         unknown => return Err(unknown_discriminant("metadata value", unknown)),
     };
     decoder.finish()?;

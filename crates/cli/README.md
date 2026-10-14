@@ -1,55 +1,67 @@
 # Helix CLI
 
-Command-line interface for managing Helix projects, local development instances, and Helix Cloud deployments. The v3 CLI is a runtime orchestrator: queries are validated by a running instance, with no local compile/check step.
+The v3 CLI manages local Helix instances and WorkOS-session-authenticated Helix Cloud resources.
 
-## Commands
+- Local: `init`, `add`, `start`, `stop`, `restart`, `status`, `logs`, `query`, `shell`, `explorer`, `prune`.
+- Cloud discovery/resources: `workspace`, `project`, `cluster`, `database`, `service-credential`, `api`.
+- Cloud queries: `query` and `shell` execute through the backend query broker.
+- Authentication: `auth login|status|logout` stores only a rotating WorkOS session.
+- Output: results go to stdout and progress to stderr; the global `--json` flag prints the result as JSON and never prompts.
+- Cloud arguments accept an ID, slug, or name and default to the project and databases linked in `helix.toml`.
 
-- `init`: initialize a project with `helix.toml` and a query example.
-- `chef`: bootstrap a first Helix app with skills, docs MCP, local runtime, starter queries, seed data, and a launched coding agent.
-- `add`: add a local or Helix Cloud instance to an existing project.
-- `start` (alias `run`): run `ghcr.io/helixdb/helixdb:v0.0.4` in the background by default, attached with `--foreground`, with persistent local storage using `--disk`, or against a user-managed S3/S3-compatible prefix using `--storage-uri`.
-- `stop` / `restart` / `status`: manage local instances and inspect Helix Cloud config.
-- `logs`: view local container logs or query Helix Cloud historical logs.
-- `query`: send a query request JSON file to `POST /v2/query`.
-- `push`: deploy a query project to a Helix Cloud cluster.
-- `auth`: login, logout, or create a Helix Cloud API key.
-- `workspace`: manage active Helix Cloud workspace selection.
-- `project`: manage linked Helix Cloud project selection.
-- `cluster`: list and inspect Helix Cloud clusters.
-- `sync`: reconcile query project source and sync Helix Cloud metadata into `helix.toml`.
-- `prune`: clean Helix-owned local containers, disk-mode volumes, and workspaces.
-- `delete`: remove an instance from `helix.toml` and clean local runtime state.
-- `skills`: install, update, and list Helix agent skills.
-- `metrics`: manage telemetry level.
-- `update`: update the CLI.
-- `feedback`: send feedback to the Helix team.
+The Cloud CLI accepts no API-key login, service-credential login, direct gateway path, or custom
+query authorization. Tenant creation returns a default read-write application key once for direct
+gateway clients; the CLI displays but never stores or uses it. Additional application keys remain
+explicitly managed secrets. `push` and `sync` are removed.
 
-Run `helix <command> --help` for command-specific flags and options.
+See [the CLI docs](../../docs/cli/command-reference.mdx).
 
-When run in a terminal, commands with missing choices use interactive prompts powered by `cliclack`. When run in non-interactive contexts, commands do not prompt and require explicit arguments or flags.
+## Local image selection
 
-## State directories
+The CLI defaults to its tested image version. `latest` is opt-in:
 
-Helix-owned user state has one layout on every platform. Credentials,
-workspace configuration, update caches, skills-update cache, and metrics live
-under `$HOME/.helix` on Linux and macOS or `%USERPROFILE%\.helix` on Windows.
+```bash
+helix start dev --image-version latest
+helix start dev --image-version v0.0.12 --persist
+helix start dev --pull never
+```
 
-Set `HELIX_HOME` to use a different directory. The value is the exact state
-directory, not a parent directory, and every Helix-owned state file follows it.
-Set `HELIX_CACHE_DIR` separately when disposable CLI cache data, such as the
-TypeScript query runtime, should live elsewhere. Project-local `.helix`
-directories and external agent-skill state are unaffected by either override.
+`--image-version` accepts a tag or `sha256:<64 lowercase hex digits>`. The
+repository remains the instance's configured `image`. `--persist` saves the
+resolved image, pull, port, and storage settings to `helix.toml`; otherwise flags
+apply only to that invocation.
 
-User-facing home-relative paths follow `HOME` on Linux and macOS and
-`USERPROFILE` on Windows before falling back to platform discovery. This
-includes the default `~/my-first-helix-project` created by `helix chef` and `~`
-expansion in its interactive project prompt.
+```toml
+[local.dev]
+image = "ghcr.io/helixdb/helixdb"
+tag = "v0.0.12"
+pull = "missing"
+```
 
-## Error handling
+Flags override configuration. Without a configured policy, `latest` pulls on
+every start and other tags/digests pull only when absent. `--pull always` requires
+a successful pull, `--pull missing` permits cached images, and `--pull never`
+requires cached images. Explicit pull policies also apply to the disk-mode
+SeaweedFS image; its default is `missing`.
 
-- Recoverable/library errors use `thiserror::Error` (config, project, port).
-- CLI commands return `eyre::Result` and render `CliError` for consistent output.
+Start resolves all required images before saving overrides or replacing containers.
+A failed image resolution leaves `helix.toml` unchanged. Helix and SeaweedFS
+start by their resolved immutable image IDs.
 
-## Testing
+Disk mode runs SeaweedFS (`ghcr.io/chrislusf/seaweedfs:4.47`, pinned by digest)
+as a private S3 sidecar with the `helix-db` bucket, stored in the
+`helix-<project>-<instance>-seaweedfs-data` volume. Releases before the switch
+used MinIO, whose images are no longer published. On `start`, `stop`, and
+`prune` the CLI removes an old `-minio` sidecar. `start` and `stop` keep the
+unreadable `-minio-data` volume and `start` warns while it exists; remove it
+with `docker volume rm` (or `podman volume rm`) once migrated, because
+`helix prune` also deletes the new SeaweedFS volume. See the
+[local workflow guide](https://docs.helix-db.com/cli/workflows/local#migrate-minio-disk-data)
+to copy that data.
 
-See [TESTING.md](TESTING.md) for the unit, mocked service, actual-binary, Docker runtime, coverage, and cross-platform CI contracts.
+Disk mode and S3 storage mount a `helix-<project>-<instance>-cache` volume at
+`/var/cache/helix` for the server's disk cache, with a 64 MiB budget in disk
+mode and 1 GiB for a bucket. `stop` keeps it; `prune` removes it.
+`helix restart dev` restarts the existing container with its existing image and
+settings and checks readiness on the container's published port. It fails if no container exists. Use `helix start dev` to apply new
+image or configuration settings. Restarting in-memory storage clears its data.

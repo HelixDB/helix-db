@@ -7,6 +7,12 @@
 //! implementations and production codecs. Default builds expose none of this
 //! support surface.
 
+/// Verifies permanent object-store errors block while temporary errors retain retry.
+#[tokio::test]
+async fn index_driver_failure_classification_preserves_retry_boundaries() {
+    db::production_coverage::index_driver_failure_classification_contract().await;
+}
+
 /// Verifies graph mutation no-op detection preserves exact V1 representation.
 #[test]
 fn graph_mutation_representation_is_recursive_and_bit_exact() {
@@ -102,6 +108,47 @@ async fn vector_batch_benchmark_exercises_all_metrics_and_workloads() {
     }
 }
 
+/// Exercises the feature-gated vector-memory hydration harness end to end:
+/// a fixture large enough to flush mid-build, a hydration that admits every
+/// upper and SimHash row, and lookups that read each upper node back.
+#[tokio::test]
+async fn vector_memory_benchmark_hydrates_every_memory_row() {
+    use db::production_coverage::{VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape};
+
+    let directory = tempfile::tempdir().expect("benchmark directory");
+    let shape = VectorMemoryBenchmarkShape {
+        nodes: 5_000,
+        dimensions: 4,
+        max_neighbors: 4,
+    };
+    let fixture = VectorMemoryBenchmarkFixture::build(directory.path(), shape)
+        .await
+        .expect("small vector-memory fixture builds");
+    assert!(!fixture.upper_nodes().is_empty());
+    assert!(fixture.upper_nodes().is_sorted());
+    assert!(fixture.upper_rows() > fixture.upper_nodes().len());
+
+    let hydrated = fixture.hydrate().await.expect("fixture hydrates");
+    assert_eq!(
+        hydrated.loaded_entries,
+        fixture.upper_rows() + 5_000,
+        "every upper row and SimHash is admitted; layer-0 rows are skipped"
+    );
+    assert!(hydrated.charged_bytes > 0);
+    let vector_bytes = 4 + 4 * 4;
+    assert!(
+        hydrated.lookup(fixture.upper_nodes()) > fixture.upper_nodes().len() * vector_bytes,
+        "every upper node returns its vector, layer-1 neighbors, and SimHash"
+    );
+    assert_eq!(
+        hydrated.lookup(&[u64::MAX]),
+        0,
+        "unknown nodes read nothing"
+    );
+    drop(hydrated);
+    fixture.close().await.expect("fixture closes");
+}
+
 /// Verifies every descriptor-bound memory-registry lifecycle transition.
 #[tokio::test]
 async fn vector_memory_registry_exercises_every_lifecycle_transition() {
@@ -156,12 +203,11 @@ async fn vector_storage_exercises_all_current_row_families() {
     db::production_coverage::vector_storage_contracts().await;
 }
 
-/// Keeps missing tenant mapping validation fail-closed for real vector rows.
+/// Keeps retained vector build planning state bound to its committed checkpoint.
 #[tokio::test]
-async fn vector_missing_partition_mapping_delete_fails_closed() {
-    db::production_coverage::vector_missing_partition_mapping_delete_contract().await;
+async fn vector_build_cache_reuses_only_exact_committed_checkpoints() {
+    db::production_coverage::vector_build_cache_contracts().await;
 }
-
 /// Characterizes safe finite-score limits independently of production validation.
 #[test]
 fn vector_magnitude_oracle_and_kernels_cover_numeric_boundaries() {
@@ -394,6 +440,18 @@ async fn interpreter_request_modes_preserve_isolated_mutation_ownership() {
     db::production_coverage::interpreter_request_mode_and_isolated_mutation_contracts().await;
 }
 
+/// Proves membership footprints and range-set retention the planner cannot reach.
+#[tokio::test]
+async fn interpreter_membership_retention_follows_write_footprints() {
+    db::production_coverage::interpreter_membership_retention_contracts().await;
+}
+
+/// Proves GetOperation does not commit or disable an open graph write.
+#[tokio::test]
+async fn interpreter_get_operation_keeps_open_graph_write() {
+    db::production_coverage::interpreter_get_operation_keeps_open_graph_write().await;
+}
+
 /// Proves coalescing order, multigraph topology, rollback, and conflict semantics.
 #[tokio::test]
 async fn interpreter_topology_mutations_preserve_transactional_semantics() {
@@ -404,6 +462,12 @@ async fn interpreter_topology_mutations_preserve_transactional_semantics() {
 #[tokio::test]
 async fn interpreter_scheduler_and_projection_paths_are_production_linked() {
     db::production_coverage::interpreter_scheduler_and_projection_contracts().await;
+}
+
+/// Proves filtered node vector searches fuse index-set accesses into their search.
+#[tokio::test]
+async fn interpreter_fused_vector_searches_are_production_linked() {
+    db::production_coverage::interpreter_fused_vector_search_contracts().await;
 }
 
 /// Verifies process-local writer identity and readiness through the public boundary.
@@ -421,4 +485,16 @@ fn process_local_runtime_dependencies_preserve_identity_and_readiness() {
     assert!(debug.contains("ProcessLocalDatabaseToken"));
     assert!(debug.contains("production-runtime-dependencies"));
     assert!(!debug.contains("object_store"));
+}
+
+/// Shared mixed aggregates execute through the production-linked row interpreter.
+#[tokio::test]
+async fn mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values() {
+    db::production_coverage::mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values().await;
+}
+
+/// Exercises the production unique batch reader, including its failure boundaries.
+#[tokio::test]
+async fn secondary_unique_batch_validates_inputs_storage_and_owners() {
+    db::production_coverage::secondary_unique_batch_contracts().await;
 }

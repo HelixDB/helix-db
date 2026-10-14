@@ -7,7 +7,7 @@
 use std::env;
 
 const TEST_HTTP_BASE_URL_ENV: &str = "HELIX_TEST_HTTP_BASE_URL";
-const DEFAULT_CLOUD_AUTHORITY: &str = "cloud.helix-db.com";
+const DEFAULT_CLOUD_AUTHORITY: &str = "api.prod.helix-db.com";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceEndpoint {
@@ -100,6 +100,14 @@ mod tests {
         assert_eq!(
             normalize_cloud_authority("http://127.0.0.1:3000"),
             "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn cloud_uses_the_production_api_host_by_default() {
+        assert_eq!(
+            endpoint_url(ServiceEndpoint::Cloud, None, None),
+            "https://api.prod.helix-db.com"
         );
     }
 }

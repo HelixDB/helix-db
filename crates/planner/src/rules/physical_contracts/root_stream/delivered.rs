@@ -87,7 +87,8 @@ fn delivered_after_root_pipeline(
         root_stream_delivered_properties(pipeline.input(), storage, stats),
         |delivered, op| {
             let rows = estimated_pipeline_rows(&delivered, storage.default_unknown_scan_rows);
-            let (_, next_delivered, _) = stream_pipeline_op_contract(op, delivered, rows, storage);
+            let (_, next_delivered, _) =
+                stream_pipeline_op_contract(op, delivered, rows, storage, stats);
             next_delivered
         },
     )

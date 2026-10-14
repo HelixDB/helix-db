@@ -2,7 +2,7 @@
 
 use crate::encoding::error::EncodingError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub(crate) enum EdgeDirection {
     Out = 0x00,

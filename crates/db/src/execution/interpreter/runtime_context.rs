@@ -13,7 +13,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use arrayvec::ArrayVec;
-use slatedb::DbTransaction;
 
 use super::*;
 
@@ -45,7 +44,7 @@ impl ProjectionReadCounters {
 }
 
 pub(in crate::execution::interpreter) struct ActiveWriteTx {
-    pub(in crate::execution::interpreter) txn: DbTransaction,
+    pub(in crate::execution::interpreter) txn: crate::transaction::Owned,
     pub(in crate::execution::interpreter) index_context: super::mutation::MutationIndexContext,
 }
 
@@ -269,6 +268,11 @@ impl RequestWriteScopeState {
 
 pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     pub(in crate::execution::interpreter) db: &'db HelixDB,
+    pub(in crate::execution::interpreter) row_memory: Option<super::rows::memory::Budget>,
+    /// Immutable relationship types remain observable through references after
+    /// deletion in the same statement. Reservations live with the cached types.
+    pub(in crate::execution::interpreter) row_relationship_types:
+        BTreeMap<u64, (String, super::rows::memory::Reservation)>,
     pub(in crate::execution::interpreter) tenant_scope: crate::encoding::keys::scope::DataScope,
     pub(in crate::execution::interpreter) params: ParamBindingsOwnership,
     pub(in crate::execution::interpreter) variables: ExecutionValueStore<ir::NonEmptyString>,
@@ -283,8 +287,28 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     pub(in crate::execution::interpreter) row_mode_max_rows: row_mode::RowModeMaxRowsSetting,
     pub(in crate::execution::interpreter) execution_control:
         crate::execution_control::ExecutionControl,
+    /// Index memberships resolved in this step context, kept while nothing
+    /// they depend on changes. Parallel step contexts start empty and never
+    /// resolve one.
+    pub(in crate::execution::interpreter) prepared_memberships: super::stream::PreparedMemberships,
+    /// Visibility of unpublished vector/text work for read-request searches.
+    /// Write transactions always search strongly regardless of this value.
+    pub(in crate::execution::interpreter) search_consistency: helix_ast::query::SearchConsistency,
+    /// Concurrent secondary-set child reads shared by every step context of
+    /// the request.
+    pub(in crate::execution::interpreter) shared_index_reads: Arc<super::access::SharedIndexReads>,
+    /// Committed pending search sets read in the current request view,
+    /// shared by every step context of a read request and replaced whenever
+    /// a write request's transaction changes (see
+    /// [`super::access::PendingSets`]).
+    pub(in crate::execution::interpreter) pending_sets: Arc<super::access::PendingSets>,
     #[cfg(test)]
     pub(in crate::execution::interpreter) projection_reads: Arc<ProjectionReadCounters>,
+    #[cfg(test)]
+    pub(in crate::execution::interpreter) pull_work: Arc<super::pull::metrics::WorkCounters>,
+    #[cfg(test)]
+    pub(in crate::execution::interpreter) range_reads:
+        Arc<crate::index_lifecycle::secondary::RangeScanCounters>,
     #[cfg(test)]
     pub(in crate::execution::interpreter) deadline_checks_remaining: AtomicUsize,
 }
@@ -340,6 +364,8 @@ impl<'db> ExecutionContext<'db> {
     ) -> Self {
         Self {
             db,
+            row_memory: None,
+            row_relationship_types: BTreeMap::new(),
             tenant_scope,
             params: ParamBindingsOwnership::Unique(params),
             variables: ExecutionValueStore::default(),
@@ -351,8 +377,16 @@ impl<'db> ExecutionContext<'db> {
             pending_catalog_freshness: catalog_freshness,
             row_mode_max_rows: row_mode::RowModeMaxRowsSetting::default(),
             execution_control,
+            prepared_memberships: super::stream::PreparedMemberships::default(),
+            search_consistency: helix_ast::query::SearchConsistency::Strong,
+            shared_index_reads: Arc::default(),
+            pending_sets: Arc::default(),
             #[cfg(test)]
             projection_reads: Arc::new(ProjectionReadCounters::default()),
+            #[cfg(test)]
+            pull_work: Arc::new(super::pull::metrics::WorkCounters::default()),
+            #[cfg(test)]
+            range_reads: Arc::new(crate::index_lifecycle::secondary::RangeScanCounters::default()),
             #[cfg(test)]
             deadline_checks_remaining: AtomicUsize::new(usize::MAX),
         }

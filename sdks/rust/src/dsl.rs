@@ -12,9 +12,9 @@ pub use helix_ast::prelude::{
     EdgeRef, EmitBehavior, Empty, Expr, ExprProjection, IndexSpec, NamedQuery, NodeId, NodeRef,
     OnEdges, OnNodes, Order, ParamObject, ParamValue, Predicate, Projection, PropertyInput,
     PropertyProjection, PropertyValue, QueryError, QueryParamType, QueryRequest, QueryRequestType,
-    QueryValue, RangeIndexDirection, ReadBatch, ReadOnly, RepeatConfig, ShortestPathDirection,
-    SourcePredicate, StreamBound, SubTraversal, Terminal, Traversal, TraversalState,
-    VectorDistanceMetric, WhenThen, WriteBatch, WriteEnabled,
+    QueryValue, RangeIndexDirection, ReadBatch, ReadOnly, RepeatConfig, SearchConsistency,
+    ShortestPathDirection, SourcePredicate, StreamBound, SubTraversal, Terminal, Traversal,
+    TraversalState, VectorDistanceMetric, WhenThen, WriteBatch, WriteEnabled,
 };
 pub use helix_dsl_macros::query;
 
@@ -96,8 +96,9 @@ pub mod prelude {
         NamedQuery, NodeId, NodeRef, OnEdges, OnNodes, Order, ParamObject, ParamValue, Predicate,
         Projection, PropertyInput, PropertyProjection, PropertyValue, QueryError, QueryParamType,
         QueryRequest, QueryRequestType, QueryValue, RangeIndexDirection, ReadBatch, ReadOnly,
-        RepeatConfig, ShortestPathDirection, SourcePredicate, StreamBound, SubTraversal, Terminal,
-        Traversal, TraversalState, VectorDistanceMetric, WhenThen, WriteBatch, WriteEnabled,
+        RepeatConfig, SearchConsistency, ShortestPathDirection, SourcePredicate, StreamBound,
+        SubTraversal, Terminal, Traversal, TraversalState, VectorDistanceMetric, WhenThen,
+        WriteBatch, WriteEnabled,
     };
 }
 

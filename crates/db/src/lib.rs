@@ -5,7 +5,16 @@
 #[cfg(test)]
 extern crate self as db;
 
+#[cfg(test)]
+mod allocation_testing;
+
+mod batch_reads;
+#[cfg(feature = "async-index-benchmark")]
+#[doc(hidden)]
+pub mod benchmark;
+mod commit_completion;
 pub mod config;
+pub mod cypher;
 pub mod encoding;
 pub mod error;
 pub mod execution;
@@ -18,12 +27,14 @@ pub mod index_lifecycle;
 #[cfg(feature = "index-lifecycle-testing")]
 pub mod index_lifecycle_testing;
 mod merge_operator;
-#[cfg(feature = "migration-parity")]
+#[cfg(feature = "production-coverage")]
 pub mod migration_parity;
 pub mod migrations;
+mod query_resources;
 pub mod query_service;
 mod runtime_dependencies;
 pub mod search;
+mod transaction;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
 
@@ -54,12 +65,15 @@ pub mod production_coverage {
 mod production_text_lifecycle_workspace_tests;
 
 use std::collections::HashMap;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use config::{DbConfig, HelixConfig};
+pub use index_lifecycle::queue::lag::PublicationLagHistogram;
+pub use index_lifecycle::queue::{BlockedIndexEntity, IndexOperationQueueStats};
+pub use merge_operator::{operation_queue_merge_stats, OperationQueueMergeStats, QueueMergeCost};
 
 #[cfg(any(test, feature = "production-coverage"))]
 use config::ValidatedDynamicIndexDefinition;
@@ -101,6 +115,70 @@ pub enum HelixDbMode {
     ReadOnly,
     /// Read/write handle.
     Writer,
+}
+
+/// Durable storage schema understood by managed writer migration authorization.
+pub const MANAGED_STORAGE_SCHEMA_VERSION: u32 = 1;
+
+/// Non-forgeable capability data for one operator-authorized storage migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedMigrationAuthorization {
+    operation_id: String,
+    target_revision: String,
+    target_schema_version: NonZeroU32,
+}
+
+impl ManagedMigrationAuthorization {
+    /// Creates authorization for one exact controlled rollout operation.
+    pub fn new(
+        operation_id: impl Into<String>,
+        target_revision: impl Into<String>,
+        target_schema_version: NonZeroU32,
+    ) -> Result<Self> {
+        let operation_id = operation_id.into();
+        if operation_id.trim().is_empty() || operation_id.trim() != operation_id {
+            return Err(HelixDbError::Config(
+                "managed migration operation ID must be nonempty and canonical".into(),
+            ));
+        }
+        let target_revision = target_revision.into();
+        if target_revision.trim().is_empty() || target_revision.trim() != target_revision {
+            return Err(HelixDbError::Config(
+                "managed migration target revision must be nonempty and canonical".into(),
+            ));
+        }
+        Ok(Self {
+            operation_id,
+            target_revision,
+            target_schema_version,
+        })
+    }
+
+    /// Exact durable controlled-rollout operation authorizing migration.
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    /// Exact workload revision authorized to run this migration.
+    pub fn target_revision(&self) -> &str {
+        &self.target_revision
+    }
+
+    /// Storage schema version the controlled rollout is authorized to install.
+    pub const fn target_schema_version(&self) -> NonZeroU32 {
+        self.target_schema_version
+    }
+}
+
+/// Explicit purpose for opening a managed SlateDB writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedWriterOpenIntent {
+    /// Initialize a pristine managed database at the current storage schema.
+    Bootstrap,
+    /// Recover current storage without running any migration work.
+    Failover,
+    /// Run storage migration authorized by one durable controlled rollout.
+    ControlledMigration(ManagedMigrationAuthorization),
 }
 
 /// Meaning of the byte accounting exposed for one cache tier.
@@ -329,6 +407,8 @@ impl HelixDbSource {
                 if let Some(endpoint) = endpoint {
                     builder = builder.with_endpoint(endpoint);
                 }
+                #[cfg(feature = "async-index-benchmark")]
+                let builder = builder.with_http_connector(benchmark::io::Connector::default());
                 Ok((database, Arc::new(builder.build()?)))
             }
         }
@@ -384,11 +464,19 @@ pub(crate) struct HelixWriter {
 }
 
 impl HelixWriter {
-    pub(crate) fn new(db: Arc<Db>, lease_size: u64) -> Self {
+    pub(crate) fn new(db: Arc<Db>, lease_size: u64, refill_threshold: u64) -> Self {
         Self {
             db: Arc::clone(&db),
-            node_ids: Arc::new(NodeIdAllocator::new(Arc::clone(&db), lease_size)),
-            edge_ids: Arc::new(EdgeIdAllocator::new(db, lease_size)),
+            node_ids: Arc::new(NodeIdAllocator::new_with_refill_threshold(
+                Arc::clone(&db),
+                lease_size,
+                refill_threshold,
+            )),
+            edge_ids: Arc::new(EdgeIdAllocator::new_with_refill_threshold(
+                db,
+                lease_size,
+                refill_threshold,
+            )),
         }
     }
 
@@ -402,6 +490,29 @@ impl HelixWriter {
 
     pub(crate) fn edge_ids(&self) -> &EdgeIdAllocator {
         self.edge_ids.as_ref()
+    }
+
+    async fn close(&self) -> Result<()> {
+        tokio::join!(self.node_ids.shutdown(), self.edge_ids.shutdown());
+        self.db.close().await?;
+        Ok(())
+    }
+
+    /// Preserve a writer-open error after draining allocators and closing storage.
+    pub(crate) async fn close_on_open_error<T>(&self, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(open_error) => {
+                if let Err(close_error) = self.close().await {
+                    tracing::warn!(
+                        error = %close_error,
+                        original_error = %open_error,
+                        "failed to close SlateDB after writer open failed"
+                    );
+                }
+                Err(open_error)
+            }
+        }
     }
 }
 
@@ -440,9 +551,12 @@ struct VectorMemoryCache {
 
 impl VectorMemoryCache {
     /// Builds all vector runtime caches from one validated, non-persisted policy.
-    fn new(settings: config::VectorMemorySettings) -> Self {
+    fn new(
+        settings: config::VectorMemorySettings,
+        visibility: search::vector::VectorCacheVisibility,
+    ) -> Self {
         Self {
-            registry: Arc::new(search::vector::VectorCacheRegistry::default()),
+            registry: Arc::new(search::vector::VectorCacheRegistry::new(visibility)),
             simhasher_registry: Arc::new(search::vector::SimHasherRegistry::new(
                 search::vector::SimHasherRegistryLimits::from_config(settings.simhasher_cache()),
             )),
@@ -491,6 +605,17 @@ pub struct SlateCacheStateSnapshot {
 struct StartupCacheTasks {
     slate: Mutex<Option<CacheWarmTask>>,
     fts: Mutex<Option<CacheWarmTask>>,
+    /// Streams vector search rows into the object-store tier after the first
+    /// vector memory refresh; see [`HelixDB::warm_vector_object_store_parts`].
+    vector_parts: Mutex<Option<WatchedWarmTask>>,
+}
+
+/// A startup warm that `close()` can always stop: waiters watch `finished`,
+/// which closes when the task ends or is aborted, instead of taking the
+/// handle away from `close()`.
+struct WatchedWarmTask {
+    task: CacheWarmTask,
+    finished: watch::Receiver<()>,
 }
 
 impl StartupCacheTasks {
@@ -498,6 +623,7 @@ impl StartupCacheTasks {
         Self {
             slate: Mutex::new(None),
             fts: Mutex::new(None),
+            vector_parts: Mutex::new(None),
         }
     }
 }
@@ -683,6 +809,7 @@ pub struct HelixDB {
 /// a detached in-memory view.
 struct HelixDBInner {
     storage: HelixStorageParts,
+    reader_storage_compatibility: RwLock<index_lifecycle::repository::ReaderStorageCompatibility>,
     caches: HelixCaches,
     index_scope_gates: Arc<index_lifecycle::IndexScopeGates>,
     config: HelixConfig,
@@ -692,6 +819,16 @@ struct HelixDBInner {
     index_worker: Mutex<Option<index_lifecycle::worker::IndexWorkerSupervisor>>,
     migration_worker: Mutex<Option<migrations::background::MigrationWorkerSupervisor>>,
     index_claim_sequences: Arc<index_lifecycle::worker::ClaimSequenceAllocator>,
+    index_operation_backlog: Arc<index_lifecycle::queue::backlog::IndexOperationBacklog>,
+    index_queue_store: Arc<index_lifecycle::queue::storage::QueueStore>,
+    index_queue_publisher: Option<Arc<index_lifecycle::queue::publication::QueuePublisher>>,
+    /// Analyses of queued text that text searches reuse, shared with the
+    /// publisher, which drops a generation's once nothing of it is queued.
+    pending_text_analyses: Arc<search::text::pending::PendingTextAnalyses>,
+    /// Strong text searches refused for unpublished text past their bound.
+    strong_text_search_rejections: std::sync::atomic::AtomicU64,
+    /// When such a refusal was last logged.
+    strong_text_search_warned: parking_lot::Mutex<Option<Instant>>,
     secondary_lifecycle_step: Mutex<()>,
     #[cfg(feature = "index-lifecycle-testing")]
     lifecycle_test_scheduling: IndexLifecycleScheduling,
@@ -699,7 +836,23 @@ struct HelixDBInner {
     lifecycle_metrics: Arc<index_lifecycle_testing::AutomaticLifecycleMetrics>,
     query_metrics: RwLock<Option<OssQueryMetrics>>,
     query_metrics_runtime: Mutex<Option<telemetry::Runtime>>,
+    commit_completions: commit_completion::Tracker,
     close_state: Mutex<CloseState>,
+    /// Index membership sets resolved from secondary indexes by any request.
+    ///
+    /// The per-row fallback keeps exactly the same rows, so only this count
+    /// tells tests that a request really read a set.
+    #[cfg(test)]
+    resolved_index_memberships: std::sync::atomic::AtomicUsize,
+    /// Secondary-set children that any concurrent set read has created and
+    /// not yet finished. A child counts from the moment the bounded stream
+    /// creates its read, before the read is first polled.
+    #[cfg(test)]
+    index_child_reads_in_flight: std::sync::atomic::AtomicUsize,
+    /// The highest `index_child_reads_in_flight` seen. Tests reset it with
+    /// `store(0)` before the read they measure.
+    #[cfg(test)]
+    peak_index_child_reads: std::sync::atomic::AtomicUsize,
 }
 
 /// Non-forgeable evidence that planning observed one exact runtime catalog.
@@ -744,8 +897,18 @@ impl PreparedPlannerContext {
         &self.context
     }
 
+    /// The catalog proof alone, for test plans built without the request's
+    /// parameters; request execution takes [`Self::into_execution_inputs`].
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) fn into_catalog_proof(self) -> CatalogRefreshProof {
         self.proof
+    }
+
+    /// Transfer the request's original parameters together with its catalog
+    /// proof. Planning only borrows the shared bindings, so once it is done
+    /// they move out without a copy.
+    pub(crate) fn into_execution_inputs(self) -> (ParamBindings, CatalogRefreshProof) {
+        (self.context.params.into_inner(), self.proof)
     }
 }
 
@@ -757,6 +920,14 @@ enum IndexLifecycleScheduling {
     /// Install every driver while excluding every lane from background discovery.
     #[cfg(feature = "index-lifecycle-testing")]
     ExplicitOnly,
+}
+
+enum WriterOpenMode {
+    Embedded,
+    Managed {
+        writer_epoch: NonZeroU64,
+        intent: ManagedWriterOpenIntent,
+    },
 }
 
 impl IndexLifecycleScheduling {
@@ -780,6 +951,23 @@ enum CloseState {
 }
 
 impl HelixDB {
+    /// Preserve a runtime-open error after stopping tasks and closing storage.
+    async fn close_on_open_error<T>(&self, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(open_error) => {
+                if let Err(close_error) = self.close().await {
+                    tracing::warn!(
+                        error = %close_error,
+                        original_error = %open_error,
+                        "failed to close database runtime after writer open failed"
+                    );
+                }
+                Err(open_error)
+            }
+        }
+    }
+
     /// Open a read/write database handle.
     pub async fn open(source: HelixDbSource) -> Result<Self> {
         let config = source.embedded_default_config();
@@ -806,7 +994,7 @@ impl HelixDB {
     }
 
     /// Opens one parity-harness process over a caller-provided store.
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     pub async fn open_with_object_store_for_migration_parity(
         database: impl Into<String>,
         object_store: Arc<dyn ObjectStore>,
@@ -816,17 +1004,85 @@ impl HelixDB {
     }
 
     /// Open a read/write database handle with explicit tuning config.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{DbConfig, HelixDB, HelixDbSource};
+    ///
+    /// let config = DbConfig::new()
+    ///     .try_with_id_lease_size(20_000)
+    ///     .unwrap()
+    ///     .with_id_lease_refill_threshold(8_000);
+    /// let db = HelixDB::open_with_config(
+    ///     HelixDbSource::InMemory {
+    ///         database: "custom-id-leasing".to_string(),
+    ///     },
+    ///     config,
+    /// ).await.unwrap();
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
     pub async fn open_with_config(source: HelixDbSource, config: DbConfig) -> Result<Self> {
         let (path, object_store) = source.into_parts()?;
         let db = Self::open_writer_inner(path, object_store, config).await?;
         Ok(db.with_embedded_query_metrics().await)
     }
 
-    /// Opens a database for a transport server that owns its metrics recorder.
-    #[doc(hidden)]
-    pub async fn open_for_server(source: HelixDbSource) -> Result<Self> {
+    /// Opens a managed writer using one exact monotonic SlateDB fencing epoch.
+    ///
+    /// The open fails before the writer WAL fence is published when an equal
+    /// or newer epoch is already durable. Callers must persist the epoch before
+    /// invoking this method and must never reuse it for another open attempt.
+    /// Advancing beyond `u64::MAX` is unsupported; authority must fail closed
+    /// instead of wrapping or reusing an epoch.
+    pub async fn open_managed_writer_with_config(
+        source: HelixDbSource,
+        config: DbConfig,
+        writer_epoch: NonZeroU64,
+        intent: ManagedWriterOpenIntent,
+    ) -> Result<Self> {
         let (path, object_store) = source.into_parts()?;
-        Self::open_writer_inner(path, object_store, DbConfig::new()).await
+        Self::open_writer_inner_with_index_scheduling(
+            path,
+            object_store,
+            config,
+            WriterOpenMode::Managed {
+                writer_epoch,
+                intent,
+            },
+            IndexLifecycleScheduling::Configured,
+        )
+        .await
+    }
+
+    /// Opens a database for a transport server that owns its metrics recorder.
+    ///
+    /// Unlike [`Self::open_with_config`], no embedded query-metrics recorder is
+    /// attached; `config` selects the server's cache tiers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{DbConfig, HelixDB, HelixDbSource};
+    ///
+    /// let db = HelixDB::open_for_server(
+    ///     HelixDbSource::InMemory {
+    ///         database: "server-open".to_string(),
+    ///     },
+    ///     DbConfig::new(),
+    /// )
+    /// .await
+    /// .unwrap();
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
+    #[doc(hidden)]
+    pub async fn open_for_server(source: HelixDbSource, config: DbConfig) -> Result<Self> {
+        let (path, object_store) = source.into_parts()?;
+        Self::open_writer_inner(path, object_store, config).await
     }
 
     #[cfg(test)]
@@ -868,19 +1124,32 @@ impl HelixDB {
                 .await?,
         );
         let writer = migrations::startup::prepare_writer(Arc::clone(&db), &config).await?;
-        let loaded_catalog =
-            index_lifecycle::repository::load_scope_catalog(db.as_ref(), DataScope::LegacyUnscoped)
-                .await?;
+        let runtime_inputs: Result<_> = async {
+            let loaded_catalog = index_lifecycle::repository::load_scope_catalog(
+                db.as_ref(),
+                DataScope::LegacyUnscoped,
+            )
+            .await?;
+            let fts_cache = build_fts_cache(&path, &object_store, &config)?;
+            Ok((loaded_catalog, fts_cache))
+        }
+        .await;
+        let (loaded_catalog, fts_cache) = writer.close_on_open_error(runtime_inputs).await?;
         let storage = HelixStorage::Writer(Arc::new(writer));
-        let fts_cache = build_fts_cache(&path, &object_store, &config)?;
         let db = Self::from_storage(
             HelixStorageParts::new(path, object_store, storage),
             HelixConfig::new(config),
             loaded_catalog,
             None,
             fts_cache,
+            index_lifecycle::repository::ReaderStorageCompatibility::Current,
         );
-        migrations::startup::finish_writer(&db).await?;
+        let finish_result: Result<()> = async {
+            migrations::startup::finish_writer(&db).await?;
+            db.load_index_operation_backlog().await
+        }
+        .await;
+        db.close_on_open_error(finish_result).await?;
         db.start_background_migration_worker().await;
         Ok(db)
     }
@@ -895,6 +1164,7 @@ impl HelixDB {
             path,
             object_store,
             config,
+            WriterOpenMode::Embedded,
             IndexLifecycleScheduling::Configured,
         )
         .await
@@ -905,10 +1175,41 @@ impl HelixDB {
         path: String,
         object_store: Arc<dyn ObjectStore>,
         config: DbConfig,
+        open_mode: WriterOpenMode,
         index_scheduling: IndexLifecycleScheduling,
     ) -> Result<Self> {
+        let open_started = Instant::now();
+        let (open_intent, writer_epoch) = match &open_mode {
+            WriterOpenMode::Embedded => ("embedded", 0),
+            WriterOpenMode::Managed {
+                writer_epoch,
+                intent: ManagedWriterOpenIntent::Bootstrap,
+            } => ("bootstrap", writer_epoch.get()),
+            WriterOpenMode::Managed {
+                writer_epoch,
+                intent: ManagedWriterOpenIntent::Failover,
+            } => ("failover", writer_epoch.get()),
+            WriterOpenMode::Managed {
+                writer_epoch,
+                intent: ManagedWriterOpenIntent::ControlledMigration(_),
+            } => ("controlled_migration", writer_epoch.get()),
+        };
+        let log_stage = |stage: &'static str, stage_started: Instant| {
+            tracing::info!(
+                stage,
+                open_intent,
+                writer_epoch,
+                elapsed_ms = u64::try_from(stage_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                total_elapsed_ms =
+                    u64::try_from(open_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "HelixDB writer open stage completed"
+            );
+        };
+
         let vector_memory_settings = *config.cache().vector_memory();
+        let stage_started = Instant::now();
         let slate_db_cache = build_slate_db_cache(config.cache().mode()).await?;
+        log_stage("slatedb_cache_construction", stage_started);
         let mut builder = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
             .with_settings(
@@ -916,6 +1217,13 @@ impl HelixDB {
                     .slate()
                     .to_writer_settings(config.cache().object_store_cache()),
             );
+        if let WriterOpenMode::Managed { writer_epoch, .. } = &open_mode {
+            builder = builder.with_writer_epoch(*writer_epoch);
+        }
+        #[cfg(feature = "async-index-benchmark")]
+        {
+            builder = builder.with_metrics_recorder(benchmark::storage_recorder());
+        }
 
         match config.cache().mode() {
             CacheMode::VectorMemoryOnly => builder = builder.with_db_cache_disabled(),
@@ -928,13 +1236,99 @@ impl HelixDB {
                 builder = builder.with_db_cache(Arc::clone(cache));
             }
         }
+        let stage_started = Instant::now();
         let db = Arc::new(builder.build().await?);
-        let writer = migrations::startup::prepare_writer(Arc::clone(&db), &config).await?;
-        let loaded_catalog =
-            index_lifecycle::repository::load_scope_catalog(db.as_ref(), DataScope::LegacyUnscoped)
+        log_stage("slatedb_writer_open", stage_started);
+        let stage_started = Instant::now();
+        match &open_mode {
+            WriterOpenMode::Embedded => {
+                migrations::startup::bootstrap_writer(&db).await?;
+                migrations::preflight_legacy_vector_reservations(&db).await?;
+            }
+            WriterOpenMode::Managed {
+                intent: ManagedWriterOpenIntent::Bootstrap,
+                ..
+            } => {
+                migrations::startup::bootstrap_managed_writer(&db).await?;
+                index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
+            }
+            WriterOpenMode::Managed {
+                intent: ManagedWriterOpenIntent::Failover,
+                ..
+            } => {
+                migrations::startup::require_current_managed_writer(&db).await?;
+                index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
+            }
+            WriterOpenMode::Managed {
+                intent: ManagedWriterOpenIntent::ControlledMigration(authorization),
+                ..
+            } => {
+                if authorization.target_schema_version().get() != MANAGED_STORAGE_SCHEMA_VERSION {
+                    return Err(HelixDbError::Config(format!(
+                        "managed migration operation {} targets storage schema {}, but this binary requires {}",
+                        authorization.operation_id(),
+                        authorization.target_schema_version(),
+                        MANAGED_STORAGE_SCHEMA_VERSION,
+                    )));
+                }
+                migrations::startup::bootstrap_writer(&db).await?;
+                migrations::preflight_legacy_vector_reservations(&db).await?;
+            }
+        }
+        log_stage("storage_contract_validation", stage_started);
+        let writer = HelixWriter::new(
+            Arc::clone(&db),
+            config.id_lease_size(),
+            config.id_lease_refill_threshold(),
+        );
+        let runtime_inputs: Result<_> = async {
+            let stage_started = Instant::now();
+            let migration_authorized = matches!(
+                &open_mode,
+                WriterOpenMode::Embedded
+                    | WriterOpenMode::Managed {
+                        intent: ManagedWriterOpenIntent::ControlledMigration(_),
+                        ..
+                    }
+            );
+            if migration_authorized {
+                migrations::run_blocking_startup_migration(&writer, config.migrations()).await?;
+                index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
+                    &db,
+                    DataScope::LegacyUnscoped,
+                )
                 .await?;
+            }
+            tracing::info!(
+                stage = "startup_migration",
+                open_intent,
+                writer_epoch,
+                migration_authorized,
+                elapsed_ms = u64::try_from(stage_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                total_elapsed_ms =
+                    u64::try_from(open_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "HelixDB writer open stage completed"
+            );
+            let stage_started = Instant::now();
+            index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
+            log_stage("operation_queue_reconciliation", stage_started);
+            let stage_started = Instant::now();
+            let loaded_catalog = index_lifecycle::repository::load_scope_catalog(
+                db.as_ref(),
+                DataScope::LegacyUnscoped,
+            )
+            .await?;
+            log_stage("catalog_load", stage_started);
+            let stage_started = Instant::now();
+            let fts_cache = build_fts_cache(&path, &object_store, &config)?;
+            log_stage("fts_cache_construction", stage_started);
+            Ok((migration_authorized, loaded_catalog, fts_cache))
+        }
+        .await;
+        let (migration_authorized, loaded_catalog, fts_cache) =
+            writer.close_on_open_error(runtime_inputs).await?;
         let storage = HelixStorage::Writer(Arc::new(writer));
-        let fts_cache = build_fts_cache(&path, &object_store, &config)?;
+        let stage_started = Instant::now();
         let db = Self::from_storage_with_index_scheduling(
             HelixStorageParts::new(path, object_store, storage),
             HelixConfig::new(config),
@@ -942,15 +1336,40 @@ impl HelixDB {
             slate_db_cache,
             fts_cache,
             index_scheduling,
+            index_lifecycle::repository::ReaderStorageCompatibility::Current,
         );
-        if let Err(error) = migrations::startup::finish_writer(&db).await {
-            let _ = db.close().await;
-            return Err(error);
+        log_stage("runtime_construction", stage_started);
+        let finish_result: Result<()> = async {
+            let stage_started = Instant::now();
+            if migration_authorized {
+                migrations::startup::finish_writer(&db).await?;
+            }
+            log_stage("legacy_migration_cleanup", stage_started);
+            let allow_blocking_warm = matches!(&open_mode, WriterOpenMode::Embedded);
+            let stage_started = Instant::now();
+            db.run_configured_startup_cache_warm(allow_blocking_warm)
+                .await?;
+            log_stage("startup_cache_warm", stage_started);
+            let stage_started = Instant::now();
+            db.run_configured_vector_memory_warm(vector_memory_settings, allow_blocking_warm)
+                .await?;
+            log_stage("vector_memory_warm", stage_started);
+            let stage_started = Instant::now();
+            db.load_index_operation_backlog().await?;
+            log_stage("index_operation_backlog_load", stage_started);
+            Ok(())
         }
-        db.run_configured_startup_cache_warm().await?;
-        db.run_configured_vector_memory_warm(vector_memory_settings)
-            .await?;
-        db.start_background_migration_worker().await;
+        .await;
+        db.close_on_open_error(finish_result).await?;
+        if migration_authorized {
+            db.start_background_migration_worker().await;
+        }
+        tracing::info!(
+            open_intent,
+            writer_epoch,
+            elapsed_ms = u64::try_from(open_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "HelixDB writer open completed"
+        );
         Ok(db)
     }
 
@@ -965,6 +1384,41 @@ impl HelixDB {
         let (path, object_store) = source.into_parts()?;
         let db = Self::open_reader_inner(path, object_store, config).await?;
         Ok(db.with_embedded_query_metrics().await)
+    }
+
+    /// Opens a read-only handle for a transport server that owns its metrics
+    /// recorder.
+    ///
+    /// Unlike [`Self::open_reader_with_config`], no embedded query-metrics
+    /// recorder is attached, so the server's queries are not also reported
+    /// under the embedded source; `config` selects the server's cache tiers.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use db::{DbConfig, HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
+    ///
+    /// let token = ProcessLocalDatabaseToken::new("server-reader-open").unwrap();
+    /// let source = || HelixDbSource::InMemoryToken {
+    ///     token: token.clone(),
+    /// };
+    /// HelixDB::open_for_server(source(), DbConfig::new())
+    ///     .await
+    ///     .unwrap()
+    ///     .close()
+    ///     .await
+    ///     .unwrap();
+    /// let reader = HelixDB::open_reader_for_server(source(), DbConfig::new())
+    ///     .await
+    ///     .unwrap();
+    /// reader.close().await.unwrap();
+    /// # });
+    /// ```
+    #[doc(hidden)]
+    pub async fn open_reader_for_server(source: HelixDbSource, config: DbConfig) -> Result<Self> {
+        let (path, object_store) = source.into_parts()?;
+        Self::open_reader_inner(path, object_store, config).await
     }
 
     /// Opens a read-only handle over a caller-provided object store.
@@ -1001,16 +1455,22 @@ impl HelixDB {
     ) -> Result<Self> {
         let path = database.into();
         let config = DbConfig::new();
+        let mut reader_options = config
+            .slate()
+            .to_reader_options(config.cache().object_store_cache());
+        reader_options.manifest_poll_interval = Duration::from_millis(10);
         let reader = DbReader::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
-            .with_options(
-                config
-                    .slate()
-                    .to_reader_options(config.cache().object_store_cache()),
-            )
+            .with_options(reader_options)
             .build()
             .await?;
-        index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        let compatibility =
+            index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        index_lifecycle::queue::recovery::require_layout(
+            &reader,
+            config.index_operation_queue().layout(),
+        )
+        .await?;
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -1022,6 +1482,7 @@ impl HelixDB {
             loaded_catalog,
             None,
             fts_cache,
+            compatibility,
         ))
     }
 
@@ -1050,8 +1511,21 @@ impl HelixDB {
                 builder = builder.with_db_cache(Arc::clone(cache));
             }
         }
+        #[cfg(feature = "async-index-benchmark")]
+        {
+            builder = builder.with_metrics_recorder(benchmark::storage_recorder());
+        }
         let reader = builder.build().await?;
-        index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        let compatibility =
+            index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+        // Product builds cannot select another queue layout, so only builds
+        // that can pay this per-tenant-scope probe.
+        #[cfg(any(test, feature = "async-index-benchmark"))]
+        index_lifecycle::queue::recovery::require_layout(
+            &reader,
+            config.index_operation_queue().layout(),
+        )
+        .await?;
         let loaded_catalog =
             index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
                 .await?;
@@ -1063,9 +1537,10 @@ impl HelixDB {
             loaded_catalog,
             slate_db_cache,
             fts_cache,
+            compatibility,
         );
-        db.run_configured_startup_cache_warm().await?;
-        db.run_configured_vector_memory_warm(vector_memory_settings)
+        db.run_configured_startup_cache_warm(true).await?;
+        db.run_configured_vector_memory_warm(vector_memory_settings, true)
             .await?;
         Ok(db)
     }
@@ -1076,6 +1551,7 @@ impl HelixDB {
         indexes: index_lifecycle::LoadedV2ScopeCatalog,
         slate_db_cache: Option<Arc<dyn DbCache>>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
+        reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
     ) -> Self {
         Self::from_storage_with_index_scheduling(
             storage,
@@ -1084,6 +1560,7 @@ impl HelixDB {
             slate_db_cache,
             fts_cache,
             IndexLifecycleScheduling::Configured,
+            reader_storage_compatibility,
         )
     }
 
@@ -1094,8 +1571,17 @@ impl HelixDB {
         slate_db_cache: Option<Arc<dyn DbCache>>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
         index_scheduling: IndexLifecycleScheduling,
+        reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
     ) -> Self {
-        let vector_memory = VectorMemoryCache::new(*config.db().cache().vector_memory());
+        // Every vector commit on a writer passes the registry fence, while
+        // readers observe commits without one and attach only exact sequences.
+        let vector_memory = VectorMemoryCache::new(
+            *config.db().cache().vector_memory(),
+            match storage.handle() {
+                HelixStorage::Writer(_) => search::vector::VectorCacheVisibility::CommitFenced,
+                HelixStorage::Reader(_) => search::vector::VectorCacheVisibility::ExactSequence,
+            },
+        );
         let index_scope_gates = Arc::new(index_lifecycle::IndexScopeGates::default());
         let secondary_tuning = config.db().secondary_index_lifecycle();
         let lifecycle_throughput = config.db().index_lifecycle_throughput();
@@ -1116,14 +1602,25 @@ impl HelixDB {
             )
             .with_scan_tuning(lifecycle_throughput.scan()),
         );
-        let vector_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> = Arc::new(
-            index_lifecycle::vector::VectorIndexDriver::new(
-                Arc::clone(&index_scope_gates),
-                Arc::clone(&vector_memory.registry),
-                Arc::clone(&vector_memory.simhasher_registry),
-            )
-            .with_scan_tuning(lifecycle_throughput.scan()),
+        let vector_driver = index_lifecycle::vector::VectorIndexDriver::new(
+            Arc::clone(&index_scope_gates),
+            Arc::clone(&vector_memory.registry),
+            Arc::clone(&vector_memory.simhasher_registry),
+        )
+        .with_scan_tuning(lifecycle_throughput.scan())
+        .with_batch_reads(batch_reads::BatchReads::for_block_cache(
+            slate_db_cache.as_ref(),
+        ))
+        .with_build_cache_bytes(
+            config
+                .db()
+                .search_index_backfill()
+                .vector_build_cache_bytes(),
         );
+        // Queue publication plans within the budget builds retain sessions in.
+        let vector_planning_cache = vector_driver.build_cache();
+        let vector_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> =
+            Arc::new(vector_driver);
         let secondary_scheduling = index_scheduling.resolve(match secondary_tuning.worker_mode() {
             config::SecondaryIndexLifecycleWorkerMode::Enabled => {
                 index_lifecycle::worker::IndexDriverScheduling::Automatic
@@ -1139,7 +1636,7 @@ impl HelixDB {
                 Arc::clone(&index_scope_gates),
                 Arc::clone(storage.object_store()),
                 storage.path().to_string(),
-                config.db().search_index_backfill().text_compaction(),
+                config.db().search_index_backfill(),
             )
             .with_scan_tuning(lifecycle_throughput.scan()),
         );
@@ -1172,25 +1669,100 @@ impl HelixDB {
         let lifecycle_metrics = Arc::new(index_lifecycle_testing::AutomaticLifecycleMetrics::new());
         let index_claim_sequences =
             Arc::new(index_lifecycle::worker::ClaimSequenceAllocator::new());
+        let queue_tuning = config.db().index_operation_queue();
+        let index_worker_wake = index_lifecycle::worker::IndexWorkerWakeHandle::default();
+        let index_operation_backlog = index_lifecycle::queue::backlog::IndexOperationBacklog::new(
+            index_lifecycle::queue::backlog::BacklogLimits {
+                max_retained_bytes: queue_tuning.max_retained_bytes().get(),
+                max_members: queue_tuning.max_members().get(),
+            },
+            index_worker_wake.clone(),
+        );
+        // Publishers retain between attempts at most one logical index's
+        // backlog ceiling per publication task, as much as the attempts
+        // themselves may hold at once.
+        let index_queue_store = Arc::new(index_lifecycle::queue::storage::QueueStore::new(
+            queue_tuning.layout(),
+            queue_tuning.effective_operand_bytes(
+                config
+                    .db()
+                    .slate()
+                    .to_writer_settings(None)
+                    .wal_replay
+                    .max_inflight_bytes,
+            ),
+            queue_tuning.max_retained_bytes().get().saturating_mul(
+                u64::try_from(lifecycle_throughput.concurrency().publication_tasks().get())
+                    .unwrap_or(u64::MAX),
+            ),
+        ));
+        let pending_text_analyses = Arc::new(search::text::pending::PendingTextAnalyses::new(
+            queue_tuning.strong_text_search_max_analysis_bytes(),
+        ));
+        // Every writer owns a publisher; only automatic scheduling hands it to
+        // the supervisor, so explicitly stepped harnesses drive it directly.
+        let index_queue_publisher = match storage.handle() {
+            HelixStorage::Writer(writer) => {
+                Some(index_lifecycle::queue::publication::QueuePublisher::new(
+                    Arc::clone(&writer.db),
+                    Arc::clone(&index_operation_backlog),
+                    Arc::clone(&index_queue_store),
+                    Arc::clone(&index_scope_gates),
+                    index_lifecycle::queue::publication::VectorPublicationResources {
+                        cache_registry: Arc::clone(&vector_memory.registry),
+                        simhasher_registry: Arc::clone(&vector_memory.simhasher_registry),
+                        batch_reads: batch_reads::BatchReads::for_block_cache(
+                            slate_db_cache.as_ref(),
+                        ),
+                        planning_cache: vector_planning_cache,
+                    },
+                    config.db().search_index_backfill().batch(),
+                    index_lifecycle::queue::publication::TextPublicationResources {
+                        object_store: Arc::clone(storage.object_store()),
+                        database: storage.path().to_string(),
+                        limits: config.db().search_index_backfill().active_text_mutation(),
+                        pending_analyses: Arc::clone(&pending_text_analyses),
+                    },
+                ))
+            }
+            HelixStorage::Reader(_) => None,
+        };
+        let scheduled_publisher = match automatic_scheduling {
+            index_lifecycle::worker::IndexDriverScheduling::Automatic => {
+                index_queue_publisher.clone()
+            }
+            index_lifecycle::worker::IndexDriverScheduling::ExplicitOnly => None,
+        };
+        #[cfg(test)]
+        if queue_tuning.starts_paused()
+            && let Some(publisher) = &index_queue_publisher
+        {
+            publisher
+                .hooks()
+                .paused
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let index_worker = match storage.handle() {
             HelixStorage::Writer(writer) => {
                 Some(index_lifecycle::worker::IndexWorkerSupervisor::start(
                     Arc::clone(&writer.db),
                     index_capabilities.clone(),
+                    scheduled_publisher,
+                    queue_tuning.recovery_sweep_interval(),
                     config.db().index_lifecycle_throughput().concurrency(),
                     Arc::clone(&index_claim_sequences),
+                    index_worker_wake.clone(),
                     #[cfg(feature = "index-lifecycle-testing")]
                     Arc::clone(&lifecycle_metrics),
                 ))
             }
             HelixStorage::Reader(_) => None,
         };
-        let index_worker_wake = index_worker
-            .as_ref()
-            .map(index_lifecycle::worker::IndexWorkerSupervisor::wake_handle);
+        let index_worker_wake = index_worker.is_some().then_some(index_worker_wake);
         Self {
             inner: Arc::new(HelixDBInner {
                 storage,
+                reader_storage_compatibility: RwLock::new(reader_storage_compatibility),
                 caches: HelixCaches {
                     slate_db: slate_db_cache,
                     fts: fts_cache,
@@ -1208,6 +1780,12 @@ impl HelixDB {
                 index_worker: Mutex::new(index_worker),
                 migration_worker: Mutex::new(None),
                 index_claim_sequences,
+                index_operation_backlog,
+                index_queue_store,
+                index_queue_publisher,
+                pending_text_analyses,
+                strong_text_search_rejections: std::sync::atomic::AtomicU64::new(0),
+                strong_text_search_warned: parking_lot::Mutex::new(None),
                 secondary_lifecycle_step: Mutex::new(()),
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_test_scheduling: index_scheduling,
@@ -1215,7 +1793,14 @@ impl HelixDB {
                 lifecycle_metrics,
                 query_metrics: RwLock::new(None),
                 query_metrics_runtime: Mutex::new(None),
+                commit_completions: commit_completion::Tracker::default(),
                 close_state: Mutex::new(CloseState::Open),
+                #[cfg(test)]
+                resolved_index_memberships: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                index_child_reads_in_flight: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                peak_index_child_reads: std::sync::atomic::AtomicUsize::new(0),
                 config,
             }),
         }
@@ -1267,6 +1852,17 @@ impl HelixDB {
         Ok(DatabaseSequence(sequence))
     }
 
+    /// Returns the latest SlateDB writer fencing epoch visible to this handle.
+    ///
+    /// Fresh storage has no writer epoch until its first writer open.
+    pub fn storage_writer_epoch(&self) -> Option<NonZeroU64> {
+        let epoch = match self.storage() {
+            HelixStorage::Reader(reader) => reader.manifest().writer_epoch(),
+            HelixStorage::Writer(writer) => writer.db().manifest().writer_epoch(),
+        };
+        NonZeroU64::new(epoch)
+    }
+
     /// Flushes an acknowledged writer state for reader-replica publication.
     ///
     /// The returned sequence is measured after the flush. Read-only handles
@@ -1277,7 +1873,11 @@ impl HelixDB {
                 actual: self.mode().as_str(),
             });
         };
-        writer.db().flush().await?;
+        writer
+            .db()
+            .flush()
+            .await
+            .map_err(HelixDbError::from_storage_commit)?;
         Ok(DatabaseSequence(writer.db().snapshot().await?.seq()))
     }
 
@@ -1356,11 +1956,25 @@ impl HelixDB {
     }
 
     /// Validates and atomically enqueues one public CREATE against the current source cut.
+    #[cfg(test)]
     pub(crate) async fn enqueue_index_create(
         &self,
         scope: DataScope,
         spec: &ir::IndexDdlCreateSpec,
         mode: ir::IndexCreateMode,
+    ) -> Result<index_lifecycle::IndexDdlReceipt> {
+        let execution_control = execution_control::ExecutionControl::unlimited();
+        self.enqueue_index_create_with_control(scope, spec, mode, &execution_control)
+            .await
+    }
+
+    /// Enqueues one request-owned CREATE at its exact durable commit boundary.
+    pub(crate) async fn enqueue_index_create_with_control(
+        &self,
+        scope: DataScope,
+        spec: &ir::IndexDdlCreateSpec,
+        mode: ir::IndexCreateMode,
+        execution_control: &execution_control::ExecutionControl,
     ) -> Result<index_lifecycle::IndexDdlReceipt> {
         let definition = runtime_catalog::dynamic_index_definition_from_create_spec(spec)?;
         let family = match definition.family() {
@@ -1376,22 +1990,37 @@ impl HelixDB {
                 actual: self.mode().as_str(),
             });
         };
-        let receipt = index_lifecycle::lifecycle::create_index_operation_from_current_source(
-            writer.db(),
-            scope,
-            definition,
-            mode,
-        )
-        .await?;
+        let receipt =
+            index_lifecycle::lifecycle::create_index_operation_from_current_source_with_control(
+                writer.db(),
+                scope,
+                definition,
+                mode,
+                execution_control,
+            )
+            .await?;
         self.notify_index_worker();
         Ok(receipt)
     }
 
     /// Resolves canonical settings and atomically enqueues one public DROP or abort.
+    #[cfg(test)]
     pub(crate) async fn enqueue_index_drop(
         &self,
         scope: DataScope,
         spec: &ir::IndexDdlDropSpec,
+    ) -> Result<index_lifecycle::IndexDdlReceipt> {
+        let execution_control = execution_control::ExecutionControl::unlimited();
+        self.enqueue_index_drop_with_control(scope, spec, &execution_control)
+            .await
+    }
+
+    /// Enqueues one request-owned DROP at its exact durable commit boundary.
+    pub(crate) async fn enqueue_index_drop_with_control(
+        &self,
+        scope: DataScope,
+        spec: &ir::IndexDdlDropSpec,
+        execution_control: &execution_control::ExecutionControl,
     ) -> Result<index_lifecycle::IndexDdlReceipt> {
         let identity = runtime_catalog::dynamic_index_identity_from_drop_spec(spec)?;
         let family = match identity.family() {
@@ -1422,9 +2051,13 @@ impl HelixDB {
             spec,
             record.definition(),
         )?;
-        let receipt =
-            index_lifecycle::lifecycle::drop_index_operation(writer.db(), scope, &definition)
-                .await?;
+        let receipt = index_lifecycle::lifecycle::drop_index_operation_with_control(
+            writer.db(),
+            scope,
+            &definition,
+            execution_control,
+        )
+        .await?;
         self.notify_index_worker();
         Ok(receipt)
     }
@@ -1435,13 +2068,30 @@ impl HelixDB {
         scope: DataScope,
         operation_id: index_lifecycle::IndexOperationId,
     ) -> Result<index_lifecycle::IndexOperationStatus> {
+        let execution_control = execution_control::ExecutionControl::unlimited();
+        self.retry_index_operation_with_control(scope, operation_id, &execution_control)
+            .await
+    }
+
+    /// Retries one request-owned operation at its exact durable commit boundary.
+    pub(crate) async fn retry_index_operation_with_control(
+        &self,
+        scope: DataScope,
+        operation_id: index_lifecycle::IndexOperationId,
+        execution_control: &execution_control::ExecutionControl,
+    ) -> Result<index_lifecycle::IndexOperationStatus> {
         let HelixStorage::Writer(writer) = self.storage() else {
             return Err(HelixDbError::WriterModeRequired {
                 actual: self.mode().as_str(),
             });
         };
-        let operation =
-            index_lifecycle::outbox::retry_operation(writer.db(), scope, operation_id).await?;
+        let operation = index_lifecycle::outbox::retry_operation_with_control(
+            writer.db(),
+            scope,
+            operation_id,
+            execution_control,
+        )
+        .await?;
         if matches!(
             operation.execution_state(),
             index_lifecycle::IndexOperationExecutionState::Queued { .. }
@@ -1460,13 +2110,30 @@ impl HelixDB {
         scope: DataScope,
         operation_id: index_lifecycle::IndexOperationId,
     ) -> Result<index_lifecycle::IndexOperationStatus> {
+        let execution_control = execution_control::ExecutionControl::unlimited();
+        self.abort_index_operation_with_control(scope, operation_id, &execution_control)
+            .await
+    }
+
+    /// Aborts one request-owned operation at its exact durable commit boundary.
+    pub(crate) async fn abort_index_operation_with_control(
+        &self,
+        scope: DataScope,
+        operation_id: index_lifecycle::IndexOperationId,
+        execution_control: &execution_control::ExecutionControl,
+    ) -> Result<index_lifecycle::IndexOperationStatus> {
         let HelixStorage::Writer(writer) = self.storage() else {
             return Err(HelixDbError::WriterModeRequired {
                 actual: self.mode().as_str(),
             });
         };
-        let operation =
-            index_lifecycle::outbox::abort_operation(writer.db(), scope, operation_id).await?;
+        let operation = index_lifecycle::outbox::abort_operation_with_control(
+            writer.db(),
+            scope,
+            operation_id,
+            execution_control,
+        )
+        .await?;
         if matches!(
             operation.execution_state(),
             index_lifecycle::IndexOperationExecutionState::Queued { .. }
@@ -1505,7 +2172,7 @@ impl HelixDB {
     pub fn planner_context(&self, params: ParamBindings) -> PlannerContext {
         let indexes = self.runtime_catalog_snapshot();
         PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -1524,7 +2191,7 @@ impl HelixDB {
     ) -> Result<PlannerContext> {
         let indexes = self.runtime_catalog_snapshot_scoped(tenant_scope).await?;
         Ok(PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -1573,7 +2240,7 @@ impl HelixDB {
         };
         Ok(PreparedPlannerContext {
             context: PlannerContext {
-                params,
+                params: params.into(),
                 late_bound_params: Default::default(),
                 indexes,
                 stats: Default::default(),
@@ -1639,6 +2306,7 @@ impl HelixDB {
         tenant_scope: DataScope,
         execution_control: execution_control::ExecutionControl,
         proof: CatalogRefreshProof,
+        search_consistency: helix_ast::query::SearchConsistency,
     ) -> Result<ExecutionResult> {
         Interpreter::new_scoped_controlled_prepared(
             self,
@@ -1647,6 +2315,7 @@ impl HelixDB {
             execution_control,
             proof,
         )
+        .with_search_consistency(search_consistency)
         .execute(plan)
         .await
     }
@@ -1699,7 +2368,7 @@ impl HelixDB {
         request_json: &[u8],
         tenant_scope: DataScope,
     ) -> Result<Vec<u8>> {
-        let request = sonic_rs::from_slice::<QueryRequest>(request_json)
+        let request = QueryRequest::from_json_slice(request_json)
             .map_err(|error| HelixDbError::InvalidQueryJson(error.to_string()))?;
         let query_metrics = self.embedded_query_metrics();
         query_service::execute_query_on_scoped_observed(
@@ -1719,9 +2388,10 @@ impl HelixDB {
 
     /// Cancels owned tasks and idempotently closes the underlying storage.
     ///
-    /// Concurrent callers either perform the close or wait for the current
-    /// attempt. Migration and outbox workers are always joined before SlateDB
-    /// or its cache closes, preserving their acyclic ownership contracts.
+    /// Concurrent callers elect one owned close task or wait for that attempt.
+    /// Dropping a caller does not interrupt shutdown. Started commits finish
+    /// before migration/outbox workers are joined and storage or caches close.
+    /// The finite close task retains no handle in the runtime it owns.
     pub async fn close(&self) -> Result<()> {
         loop {
             let wait = {
@@ -1747,7 +2417,25 @@ impl HelixDB {
             let _ = wait.await;
         }
 
+        self.inner.commit_completions.seal();
+        let db = Self {
+            inner: Arc::clone(&self.inner),
+        };
+        tokio::spawn(async move { db.finish_close().await })
+            .await
+            .map_err(|error| {
+                HelixDbError::InvariantViolation(format!(
+                    "database shutdown task terminated: {error}"
+                ))
+            })?
+    }
+
+    /// Complete the elected shutdown even when its original waiter is dropped.
+    async fn finish_close(&self) -> Result<()> {
         let result = async {
+            // Started commits own mutation permits and cache fences even if their
+            // request was dropped. Finish them before closing shared resources.
+            self.inner.commit_completions.seal_and_wait().await;
             let _secondary_step = self.inner.secondary_lifecycle_step.lock().await;
             self.inner
                 .query_metrics
@@ -1768,6 +2456,17 @@ impl HelixDB {
             }
             if let Some(task) = self.inner.caches.startup_tasks.fts.lock().await.take() {
                 task.stop().await;
+            }
+            if let Some(warm) = self
+                .inner
+                .caches
+                .startup_tasks
+                .vector_parts
+                .lock()
+                .await
+                .take()
+            {
+                warm.task.stop().await;
             }
             if let Some(task) = self
                 .inner
@@ -1815,7 +2514,9 @@ impl HelixDB {
     }
 
     async fn with_embedded_query_metrics(self) -> Self {
-        if cfg!(test) {
+        if cfg!(test)
+            || self.inner.config.db().query_telemetry() == config::QueryTelemetry::Disabled
+        {
             return self;
         }
         match helix_metrics::query::transport::start_oss_from_env(telemetry::Source::Embedded) {
@@ -1854,15 +2555,27 @@ impl HelixDB {
 
     /// Refresh descriptor-bound vector caches from canonical Active generations.
     ///
-    /// Writer storage supplies the exact snapshot sequence required by cache
-    /// visibility checks. Standalone readers expose no comparable WAL-inclusive
-    /// sequence and therefore remain on durable-storage fallback.
+    /// Writer and reader storage both hydrate from SlateDB snapshots whose
+    /// sequence is the one request read views report, so a published store is
+    /// attached only to request snapshots it is proven current for.
+    ///
+    /// On a reader node this returns [`HelixDbError::RequestReadViewChanged`]
+    /// when the reader applied newer state during a scope's catalog read or a
+    /// store's load: that scope or store was skipped, every other one was
+    /// refreshed, and a retry refreshes the rest.
     pub async fn refresh_vector_memory_cache(&self) -> Result<()> {
-        self.refresh_loaded_vector_memory_caches(
-            self.inner.config.db().cache().vector_memory().budget(),
-            None,
-        )
-        .await
+        match self
+            .refresh_loaded_vector_memory_caches(
+                self.inner.config.db().cache().vector_memory().budget(),
+                None,
+            )
+            .await?
+        {
+            search::vector::VectorCacheHydrationOutcome::Settled => Ok(()),
+            search::vector::VectorCacheHydrationOutcome::Outrun => {
+                Err(HelixDbError::RequestReadViewChanged)
+            }
+        }
     }
 
     /// Snapshot shared FTS split-cache state.
@@ -1982,6 +2695,8 @@ impl HelixDB {
     }
 
     /// Wait for owned startup warm tasks and the initial vector refresh to finish.
+    ///
+    /// With FTS warming off, the FTS task trims a disk tier to its budget.
     pub async fn wait_for_startup_cache_warm(&self) {
         if let Some(task) = self.inner.caches.startup_tasks.slate.lock().await.take() {
             task.wait().await;
@@ -2006,6 +2721,20 @@ impl HelixDB {
                 break;
             }
         }
+        let vector_parts = self
+            .inner
+            .caches
+            .startup_tasks
+            .vector_parts
+            .lock()
+            .await
+            .as_ref()
+            .map(|warm| warm.finished.clone());
+        let Some(mut finished) = vector_parts else {
+            return;
+        };
+        // Nothing is ever sent: the channel closes when the warm ends.
+        while finished.changed().await.is_ok() {}
     }
 
     /// Best-effort warm of currently loaded Active V2 text splits from one snapshot.
@@ -2118,12 +2847,13 @@ impl HelixDB {
     /// A bounded global budget is divided deterministically across scopes before
     /// per-index admission. The inventory is reread on every pass, so tenant
     /// scopes loaded after task startup participate without restarting the
-    /// worker.
+    /// worker. A reader that advances during one scope's catalog read skips
+    /// only that scope, and the pass reports it as outrun.
     async fn refresh_loaded_vector_memory_caches(
         &self,
         budget: config::VectorMemoryBudget,
         mut shutdown: Option<&mut watch::Receiver<bool>>,
-    ) -> Result<()> {
+    ) -> Result<search::vector::VectorCacheHydrationOutcome> {
         let scopes = self
             .inner
             .runtime_state
@@ -2135,6 +2865,7 @@ impl HelixDB {
                 "vector memory loaded scope count exceeds u64".to_string(),
             )
         })?;
+        let mut outcome = search::vector::VectorCacheHydrationOutcome::Settled;
         for (ordinal, scope) in scopes.into_iter().enumerate() {
             if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
                 break;
@@ -2152,30 +2883,46 @@ impl HelixDB {
                 }
                 None => None,
             };
-            self.refresh_one_vector_memory_scope(
-                scope,
-                search::vector::VectorCacheHydrationBudget::from_optional_bytes(scope_budget),
-                shutdown.as_deref_mut(),
-            )
-            .await?;
+            outcome = outcome.max(
+                self.refresh_one_vector_memory_scope(
+                    scope,
+                    search::vector::VectorCacheHydrationBudget::from_optional_bytes(scope_budget),
+                    shutdown.as_deref_mut(),
+                )
+                .await?,
+            );
         }
-        Ok(())
+        Ok(outcome)
     }
 
-    /// Hydrates one scope from exact Active handles and one stable writer snapshot.
+    /// Hydrates one scope from exact Active handles and this node's snapshots.
     async fn refresh_one_vector_memory_scope(
         &self,
         scope: DataScope,
         budget: search::vector::VectorCacheHydrationBudget,
         shutdown: Option<&mut watch::Receiver<bool>>,
-    ) -> Result<()> {
-        let HelixStorage::Writer(writer) = self.storage() else {
-            return Ok(());
-        };
-        self.refresh_runtime_catalog(scope).await?;
+    ) -> Result<search::vector::VectorCacheHydrationOutcome> {
+        match self.refresh_runtime_catalog(scope).await {
+            Ok(()) => {}
+            // The reader applied newer state during the catalog read, so the
+            // scope keeps its stores until a later pass.
+            Err(HelixDbError::RequestReadViewChanged) => {
+                return Ok(search::vector::VectorCacheHydrationOutcome::Outrun);
+            }
+            Err(error) => return Err(error),
+        }
         let active = self.active_index_handles_loaded(scope);
+        let source = match self.storage() {
+            HelixStorage::Reader(reader) => {
+                search::vector::VectorCacheSnapshotSource::Reader(reader.as_ref())
+            }
+            HelixStorage::Writer(writer) => {
+                search::vector::VectorCacheSnapshotSource::Writer(writer.db())
+            }
+        };
         search::vector::hydrate_active_generations(
-            writer.db(),
+            source,
+            scope,
             active,
             &self.inner.caches.vector_memory.registry,
             budget,
@@ -2187,67 +2934,223 @@ impl HelixDB {
     async fn run_configured_vector_memory_warm(
         &self,
         settings: config::VectorMemorySettings,
+        allow_blocking: bool,
     ) -> Result<()> {
-        if matches!(self.storage(), HelixStorage::Reader(_)) {
-            return Ok(());
-        }
         match settings.hydration() {
-            config::VectorMemoryHydrationMode::BlockingThenBackground { .. } => {
-                self.refresh_vector_memory_cache().await?;
+            config::VectorMemoryHydrationMode::BlockingThenBackground { .. } if allow_blocking => {
+                match self.refresh_vector_memory_cache().await {
+                    Ok(()) => {}
+                    // A reader poller advanced during a catalog read or a
+                    // load; the background loop refreshes what was skipped.
+                    Err(HelixDbError::RequestReadViewChanged) => {
+                        tracing::debug!("reader advanced during blocking vector memory warm");
+                    }
+                    Err(error) => return Err(error),
+                }
             }
-            config::VectorMemoryHydrationMode::Background { .. } => {}
+            config::VectorMemoryHydrationMode::BlockingThenBackground { .. }
+            | config::VectorMemoryHydrationMode::Background { .. } => {}
         }
 
         let runtime = Arc::downgrade(&self.inner);
         let budget = settings.budget();
         let interval = Duration::from_secs(settings.poll_interval_secs());
-        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let (shutdown, shutdown_rx) = watch::channel(false);
         let (initial_refresh_tx, initial_refresh) = watch::channel(false);
-        let handle = tokio::spawn(async move {
-            let mut initial_refresh_tx = Some(initial_refresh_tx);
-            loop {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-                let Some(inner) = runtime.upgrade() else {
-                    break;
+        let pass_shutdown = shutdown_rx.clone();
+        // A pass holds the database only while it runs, so a waiting loop
+        // never keeps a closed database alive.
+        let refresh = move || {
+            let runtime = runtime.clone();
+            let mut shutdown = pass_shutdown.clone();
+            async move {
+                let database = HelixDB {
+                    inner: runtime.upgrade()?,
                 };
-                let database = HelixDB { inner };
-                let result = database
-                    .refresh_loaded_vector_memory_caches(budget, Some(&mut shutdown_rx))
-                    .await;
-                drop(database);
-                if let Err(err) = result {
-                    tracing::warn!(error = %err, "failed to refresh vector memory stores");
-                }
-                if let Some(initial_refresh_tx) = initial_refresh_tx.take() {
-                    let _ = initial_refresh_tx.send(true);
-                }
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        match changed {
-                            Ok(()) => {
-                                if *shutdown_rx.borrow() {
+                Some(
+                    match database
+                        .refresh_loaded_vector_memory_caches(budget, Some(&mut shutdown))
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to refresh vector memory stores");
+                            search::vector::VectorCacheHydrationOutcome::Settled
+                        }
+                    },
+                )
+            }
+        };
+        let handle = match self.storage() {
+            // Reader snapshots advance only when the poller applies new WAL or
+            // manifest state, and exact-sequence stores attach only at that
+            // state, so readers refresh after each advance, paced by how long
+            // their passes run.
+            HelixStorage::Reader(reader) => tokio::spawn(search::vector::run_reader_refreshes(
+                reader.subscribe(),
+                |status: &slatedb::DbStatus| status.durable_seq,
+                interval,
+                shutdown_rx,
+                initial_refresh_tx,
+                refresh,
+            )),
+            // Commit-fenced writer stores stay attached across sequences, so
+            // the writer refreshes on its interval.
+            HelixStorage::Writer(_) => {
+                let mut shutdown_rx = shutdown_rx;
+                tokio::spawn(async move {
+                    loop {
+                        // Checked on its own so the flag's guard is released
+                        // before the pass awaits.
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                        if refresh().await.is_none() {
+                            break;
+                        }
+                        initial_refresh_tx
+                            .send_if_modified(|refreshed| !std::mem::replace(refreshed, true));
+                        tokio::select! {
+                            changed = shutdown_rx.changed() => {
+                                if changed.is_err() || *shutdown_rx.borrow() {
                                     break;
                                 }
                             }
-                            Err(_) => break,
+                            () = tokio::time::sleep(interval) => {}
                         }
                     }
-                    _ = tokio::time::sleep(interval) => {}
-                }
+                })
             }
-        });
+        };
+        let mut first_refresh = initial_refresh.clone();
         *self.inner.caches.vector_memory.refresh_task.lock().await =
             Some(VectorMemoryRefreshTask {
                 shutdown,
                 initial_refresh,
                 handle,
             });
+
+        // Only when configured, which the server does in front of S3 unless
+        // told not to warm: a local store serves cold reads itself.
+        let Some(tier) = self
+            .inner
+            .config
+            .db()
+            .cache()
+            .object_store_cache()
+            .filter(|tier| matches!(tier.vector_part_warm(), config::VectorPartWarm::Background))
+            .map(config::SlateObjectStoreCacheSettings::to_slate_options)
+        else {
+            return Ok(());
+        };
+        // Half the tier, so the warm never evicts everything else.
+        let budget = tier.max_cache_size_bytes.map_or(u64::MAX, |bytes| {
+            u64::try_from(bytes / 2).unwrap_or(u64::MAX)
+        });
+        let runtime = Arc::downgrade(&self.inner);
+        let (finished_tx, finished) = watch::channel(());
+        let handle = tokio::spawn(async move {
+            // Dropped when the task ends or is aborted, closing `finished`.
+            let _finished = finished_tx;
+            // After the first refresh, so the resident rows load first.
+            while !*first_refresh.borrow() {
+                if first_refresh.changed().await.is_err() {
+                    return;
+                }
+            }
+            let Some(inner) = runtime.upgrade() else {
+                return;
+            };
+            let started = Instant::now();
+            let (failed_scopes, summary) = (HelixDB { inner })
+                .warm_vector_object_store_parts(tier.part_size_bytes, budget)
+                .await;
+            tracing::info!(
+                warmed_targets = summary.warmed_targets,
+                failed_targets = summary.failed_targets,
+                failed_scopes,
+                charged = ?summary.read,
+                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                "vector search rows warmed into the object-store cache"
+            );
+        });
+        *self.inner.caches.startup_tasks.vector_parts.lock().await = Some(WatchedWarmTask {
+            task: CacheWarmTask { handle },
+            finished,
+        });
         Ok(())
     }
 
-    async fn run_configured_startup_cache_warm(&self) -> Result<()> {
+    /// Streams the search rows of every loaded scope's Active vector
+    /// generations through the object-store cache tier once, reading at most
+    /// `budget` key and value bytes, with `read_ahead` bytes (one part) read
+    /// ahead of each scan.
+    ///
+    /// Generations are enumerated from one snapshot; the rows are read
+    /// through the live handle. See [`search::vector::warm_object_store_parts`]
+    /// for what is warmed and its limits. Best effort: a scope whose
+    /// generations cannot be enumerated is logged and skipped, and the count
+    /// of such scopes is returned with the summary.
+    async fn warm_vector_object_store_parts(
+        &self,
+        read_ahead: usize,
+        budget: u64,
+    ) -> (usize, search::vector::VectorPartWarmSummary) {
+        let scopes = self
+            .inner
+            .runtime_state
+            .read()
+            .expect("runtime state lock is not poisoned")
+            .loaded_scopes();
+        let inventory = match self.storage() {
+            HelixStorage::Writer(writer) => writer.db().snapshot().await,
+            HelixStorage::Reader(reader) => reader.snapshot().await,
+        };
+        let mut targets = Vec::new();
+        let mut failed_scopes = 0;
+        match inventory {
+            Ok(inventory) => {
+                for scope in scopes {
+                    let active = self.active_index_handles_loaded(scope);
+                    match search::vector::active_vector_targets(inventory.as_ref(), scope, active)
+                        .await
+                    {
+                        Ok(scope_targets) => targets.extend(scope_targets),
+                        Err(error) => {
+                            tracing::warn!(
+                                ?scope,
+                                %error,
+                                "skipping a scope the object-store warm could not enumerate"
+                            );
+                            failed_scopes += 1;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the object-store warm could not snapshot the catalog");
+                failed_scopes = scopes.len();
+            }
+        }
+        let summary = match self.storage() {
+            HelixStorage::Writer(writer) => {
+                search::vector::warm_object_store_parts(writer.db(), &targets, read_ahead, budget)
+                    .await
+            }
+            HelixStorage::Reader(reader) => {
+                search::vector::warm_object_store_parts(
+                    reader.as_ref(),
+                    &targets,
+                    read_ahead,
+                    budget,
+                )
+                .await
+            }
+        };
+        (failed_scopes, summary)
+    }
+
+    async fn run_configured_startup_cache_warm(&self, allow_blocking: bool) -> Result<()> {
         match self
             .inner
             .config
@@ -2256,12 +3159,12 @@ impl HelixDB {
             .slate_warm()
             .map(config::SlateWarmConfig::mode)
         {
-            Some(config::CacheWarmMode::Blocking) => {
+            Some(config::CacheWarmMode::Blocking) if allow_blocking => {
                 if let Err(error) = self.warm_slate_cache().await {
                     tracing::warn!(%error, "SlateDB blocking startup cache warm failed");
                 }
             }
-            Some(config::CacheWarmMode::Background) => {
+            Some(config::CacheWarmMode::Blocking | config::CacheWarmMode::Background) => {
                 let runtime = Arc::downgrade(&self.inner);
                 let handle = tokio::spawn(async move {
                     let Some(inner) = runtime.upgrade() else {
@@ -2279,12 +3182,12 @@ impl HelixDB {
         }
 
         match self.inner.config.db().cache().fts_warm_mode() {
-            config::CacheWarmMode::Blocking => {
+            config::CacheWarmMode::Blocking if allow_blocking => {
                 if let Err(error) = self.warm_fts_cache().await {
                     tracing::warn!(%error, "FTS blocking startup cache warm failed");
                 }
             }
-            config::CacheWarmMode::Background => {
+            config::CacheWarmMode::Blocking | config::CacheWarmMode::Background => {
                 let runtime = Arc::downgrade(&self.inner);
                 let handle = tokio::spawn(async move {
                     let Some(inner) = runtime.upgrade() else {
@@ -2297,13 +3200,57 @@ impl HelixDB {
                 });
                 *self.inner.caches.startup_tasks.fts.lock().await = Some(CacheWarmTask { handle });
             }
-            config::CacheWarmMode::Off => {}
+            // Without a warm, a disk tier is otherwise trimmed only after a
+            // search admits a split. Trimming it once here makes a budget
+            // smaller than the previous run's apply from startup.
+            config::CacheWarmMode::Off => {
+                let (CacheMode::Hybrid { fts: Some(_), .. }, Some(cache)) = (
+                    self.inner.config.db().cache().mode(),
+                    &self.inner.caches.fts,
+                ) else {
+                    return Ok(());
+                };
+                let cache = Arc::downgrade(cache);
+                let handle = tokio::spawn(async move {
+                    let Some(cache) = cache.upgrade() else {
+                        return;
+                    };
+                    if let Err(error) = cache.cleanup_disk().await {
+                        tracing::warn!(%error, "FTS startup disk cleanup failed");
+                    }
+                });
+                *self.inner.caches.startup_tasks.fts.lock().await = Some(CacheWarmTask { handle });
+            }
         }
         Ok(())
     }
 
     pub(crate) fn storage(&self) -> &HelixStorage {
         self.inner.storage.handle()
+    }
+
+    pub(crate) fn observe_reader_storage_compatibility(
+        &self,
+        observed: index_lifecycle::repository::ReaderStorageCompatibility,
+    ) -> Result<()> {
+        let mut compatibility = self
+            .inner
+            .reader_storage_compatibility
+            .write()
+            .expect("reader storage compatibility lock is not poisoned");
+        *compatibility = compatibility.advance(observed)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reader_storage_compatibility_for_tests(
+        &self,
+    ) -> index_lifecycle::repository::ReaderStorageCompatibility {
+        *self
+            .inner
+            .reader_storage_compatibility
+            .read()
+            .expect("reader storage compatibility lock is not poisoned")
     }
 
     /// Returns why one family cannot cross the public lifecycle boundary.
@@ -2341,6 +3288,251 @@ impl HelixDB {
         self.inner.index_scope_gates.catalog_permit(scope).await
     }
 
+    /// Returns the queue storage layout shared by producers, the publisher,
+    /// and search overlays.
+    pub(crate) fn index_queue_store(&self) -> &index_lifecycle::queue::storage::QueueStore {
+        &self.inner.index_queue_store
+    }
+
+    /// Returns the retained index-operation admission ledger.
+    pub(crate) fn index_operation_backlog(
+        &self,
+    ) -> &Arc<index_lifecycle::queue::backlog::IndexOperationBacklog> {
+        &self.inner.index_operation_backlog
+    }
+
+    /// Returns asynchronous vector/text index backlog and publication counters.
+    ///
+    /// Reads in-memory state only: atomics plus one scan of retained charges
+    /// under the ledger lock, so sample it periodically rather than per
+    /// request. Reader handles own no ledger or publisher, so every field but
+    /// `strong_text_search_rejections` reads zero.
+    pub fn index_operation_queue_stats(&self) -> IndexOperationQueueStats {
+        let backlog = self.inner.index_operation_backlog.totals();
+        let stats = IndexOperationQueueStats {
+            retained_bytes: backlog.usage.retained_bytes,
+            pending_members: backlog.usage.members,
+            pending_operations: backlog.usage.operations,
+            uncertain_operations: backlog.usage.uncertain_operations,
+            committed_operations: backlog.outcomes.committed,
+            discovered_operations: backlog.outcomes.discovered,
+            acknowledged_operations: backlog.outcomes.acknowledged,
+            censored_acknowledgements: backlog.outcomes.acknowledged_censored,
+            oldest_pending_micros: backlog.oldest_committed_pending_micros,
+            strong_text_search_rejections: self
+                .inner
+                .strong_text_search_rejections
+                .load(std::sync::atomic::Ordering::Relaxed),
+            ..IndexOperationQueueStats::default()
+        };
+        let Some(publisher) = &self.inner.index_queue_publisher else {
+            return stats;
+        };
+        let metrics = publisher.metrics();
+        let load = |counter: &std::sync::atomic::AtomicU64| {
+            counter.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        IndexOperationQueueStats {
+            published_operations: load(&metrics.published_operations),
+            published_entities: load(&metrics.published_entities),
+            committed_batches: load(&metrics.committed_batches),
+            commit_conflicts: load(&metrics.commit_conflicts),
+            uncertain_commits: load(&metrics.uncertain_commits),
+            output_retries: load(&metrics.output_retries),
+            blocked_attempts: load(&metrics.blocked_attempts),
+            blocked_entities: publisher.blocked_entity_count() as u64,
+            discarded_operations: load(&metrics.discarded_operations),
+            queue_reads: load(&metrics.queue_reads),
+            queue_read_bytes: load(&metrics.queue_read_bytes),
+            queue_read_micros: load(&metrics.queue_read_micros),
+            publication_attempts: load(&metrics.attempts),
+            publication_attempt_micros: load(&metrics.attempt_micros),
+            publication_retries: load(&metrics.retry_attempts),
+            publication_error_retries: load(&metrics.error_retries),
+            deferred_attempts: load(&metrics.deferred_attempts),
+            ..stats
+        }
+    }
+
+    /// Returns how many entities this writer's publisher holds back, without
+    /// listing them: what [`Self::blocked_index_entities`] would list. Zero on
+    /// a reader.
+    pub fn blocked_index_entity_count(&self) -> u64 {
+        self.inner
+            .index_queue_publisher
+            .as_ref()
+            .map_or(0, |publisher| publisher.blocked_entity_count() as u64)
+    }
+
+    /// Returns the entities whose queued vector/text work this writer's
+    /// publisher holds back, in ascending order.
+    ///
+    /// Each one has an operation that alone can never fit a publication under
+    /// the current limits, or one whose planning failed deterministically;
+    /// see [`BlockedIndexEntity`] for what that means for writes and
+    /// searches, including strong text searches that fail with backpressure
+    /// no publication clears. The list is the publisher's process memory: it
+    /// is empty on a reader and is rebuilt after a restart as publication
+    /// blocks again.
+    pub fn blocked_index_entities(&self) -> Vec<BlockedIndexEntity> {
+        let Some(publisher) = &self.inner.index_queue_publisher else {
+            return Vec::new();
+        };
+        let mut blocked = publisher
+            .blocked_entities()
+            .into_iter()
+            .map(|(target, entity)| BlockedIndexEntity {
+                scope: target.scope,
+                index_id: target.index_id,
+                generation: target.generation,
+                kind: entity.kind,
+                id: entity.id,
+            })
+            .collect::<Vec<_>>();
+        blocked.sort_unstable();
+        blocked
+    }
+
+    /// Returns the cumulative publication lag of operations committed and
+    /// acknowledged through this handle, joined by exact operation ID.
+    ///
+    /// Operations without an observed commit instant are counted in
+    /// [`IndexOperationQueueStats::censored_acknowledgements`] instead.
+    pub fn index_operation_publication_lag(&self) -> PublicationLagHistogram {
+        self.inner.index_operation_backlog.lag()
+    }
+
+    /// Publishes every outstanding vector/text queue for an explicitly
+    /// stepped harness, returning the operations published or discarded.
+    ///
+    /// Only for explicit scheduling: no automatic worker may publish at the
+    /// same time, since two attempts for one generation must never overlap.
+    #[cfg(any(feature = "index-lifecycle-testing", feature = "production-coverage"))]
+    #[doc(hidden)]
+    pub async fn publish_index_queues_for_lifecycle_testing(&self) -> Result<u64> {
+        use index_lifecycle::queue::publication::PublicationOutcome;
+        let Some(publisher) = self.inner.index_queue_publisher.as_ref() else {
+            return Err(HelixDbError::WriterModeRequired {
+                actual: self.mode().as_str(),
+            });
+        };
+        let mut released = 0;
+        for target in self.inner.index_operation_backlog.outstanding_targets() {
+            let mut retries = 0_u32;
+            loop {
+                match publisher.publish_once(target).await? {
+                    PublicationOutcome::Published { operations, .. }
+                    | PublicationOutcome::Discarded { operations } => released += operations,
+                    PublicationOutcome::Trimmed | PublicationOutcome::Blocked => {}
+                    PublicationOutcome::Empty => break,
+                    PublicationOutcome::Retry if retries < 100 => retries += 1,
+                    outcome @ (PublicationOutcome::Retry
+                    | PublicationOutcome::Deferred
+                    | PublicationOutcome::Stalled) => {
+                        return Err(HelixDbError::InvariantViolation(format!(
+                            "queued publication stalled for index {}: {outcome:?}",
+                            target.index_id.get()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(released)
+    }
+
+    /// Returns this writer's queued-publication runtime.
+    #[cfg(test)]
+    pub(crate) fn index_queue_publisher(
+        &self,
+    ) -> Option<&Arc<index_lifecycle::queue::publication::QueuePublisher>> {
+        self.inner.index_queue_publisher.as_ref()
+    }
+
+    /// Returns the per-transaction queue operand ceiling in bytes.
+    pub(crate) fn index_operand_limit(&self) -> u64 {
+        self.inner.index_queue_store.max_operand_bytes()
+    }
+
+    /// Returns the analyses of queued text that text searches reuse.
+    pub(crate) fn pending_text_analyses(&self) -> &Arc<search::text::pending::PendingTextAnalyses> {
+        &self.inner.pending_text_analyses
+    }
+
+    /// Counts a strong text search that `error` refused because its
+    /// partition's unpublished text exceeded the strong text search bound,
+    /// and logs a warning at most once a minute; any other error is ignored.
+    pub(crate) fn record_strong_text_search_rejection(&self, error: &HelixDbError) {
+        const QUIET: Duration = Duration::from_secs(60);
+        let HelixDbError::IndexBackpressure {
+            scope,
+            index_id,
+            resource: error::IndexBackpressureResource::PendingTextAnalysisBytes,
+            requested,
+            limit,
+        } = error
+        else {
+            return;
+        };
+        let rejections = self
+            .inner
+            .strong_text_search_rejections
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        {
+            let mut warned = self.inner.strong_text_search_warned.lock();
+            if warned.is_some_and(|warned| warned.elapsed() < QUIET) {
+                return;
+            }
+            *warned = Some(Instant::now());
+        }
+        tracing::warn!(
+            ?scope,
+            index_id,
+            requested,
+            limit,
+            rejections,
+            "strong text search refused: unpublished text in its partition exceeds \
+             IndexOperationQueueTuning::strong_text_search_max_analysis_bytes \
+             (HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES on a server); it succeeds once the \
+             index worker publishes the backlog. Search with eventual consistency during \
+             heavy ingest, or raise the bound"
+        );
+    }
+
+    /// Returns the limits queued text publication applies to one entity.
+    pub(crate) fn active_text_mutation_limits(&self) -> config::ActiveTextMutationLimits {
+        self.inner
+            .config
+            .db()
+            .search_index_backfill()
+            .active_text_mutation()
+    }
+
+    /// Rebuilds retained-operation accounting from durable queues.
+    ///
+    /// Writers run this before returning from open so the first graph write is
+    /// admitted against exact durable usage.
+    async fn load_index_operation_backlog(&self) -> Result<()> {
+        let HelixStorage::Writer(writer) = self.storage() else {
+            return Ok(());
+        };
+        let summary = index_lifecycle::queue::recovery::load_backlog(
+            writer.db(),
+            &self.inner.index_queue_store,
+            &self.inner.index_operation_backlog,
+        )
+        .await?;
+        tracing::info!(
+            queues = summary.queues,
+            operations = summary.operations,
+            "HelixDB index operation backlog loaded"
+        );
+        if summary.operations > 0 {
+            self.notify_index_worker();
+        }
+        Ok(())
+    }
+
     /// Wakes the parent-owned lifecycle worker after migration enqueues work.
     pub(crate) async fn wake_index_worker(&self) {
         self.notify_index_worker();
@@ -2364,7 +3556,7 @@ impl HelixDB {
             .ok_or(HelixDbError::DatabaseClosed)
     }
 
-    #[cfg(any(test, feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(any(test, feature = "production-coverage"))]
     /// Advances at most one immediately eligible background migration step.
     ///
     /// This writer-only surface is available only when the migration worker is
@@ -2449,6 +3641,13 @@ impl HelixDB {
     /// Returns the runtime-owned bounded SimHasher projection registry.
     pub(crate) fn simhasher_registry(&self) -> &Arc<search::vector::SimHasherRegistry> {
         &self.inner.caches.vector_memory.simhasher_registry
+    }
+
+    /// Returns how this node's reads resolve batches of point reads: runs of
+    /// sorted keys overlap their cold block fetches only when a SlateDB block
+    /// cache serves the filter and index reads each run repeats.
+    pub(crate) fn batch_reads(&self) -> batch_reads::BatchReads {
+        batch_reads::BatchReads::for_block_cache(self.inner.caches.slate_db.as_ref())
     }
 
     pub(crate) fn runtime_config_snapshot_loaded(&self, scope: DataScope) -> RuntimeIndexCatalog {
@@ -2540,11 +3739,19 @@ impl HelixDB {
         let loaded = match self.storage() {
             HelixStorage::Reader(reader) => {
                 let observed = reader.status();
+                let snapshot = reader.snapshot().await?;
+                let compatibility =
+                    index_lifecycle::repository::require_reader_bootstrap_or_legacy(
+                        snapshot.as_ref(),
+                    )
+                    .await?;
                 let loaded =
-                    index_lifecycle::repository::load_scope_catalog(reader.as_ref(), scope).await?;
+                    index_lifecycle::repository::load_scope_catalog(snapshot.as_ref(), scope)
+                        .await?;
                 if reader.status() != observed {
                     return Err(HelixDbError::RequestReadViewChanged);
                 }
+                self.observe_reader_storage_compatibility(compatibility)?;
                 loaded
             }
             HelixStorage::Writer(writer) => {
@@ -2654,19 +3861,38 @@ fn build_fts_cache(
         .map(Some)
 }
 
-const FOYER_MIN_DISK_BLOCK_SIZE_BYTES: usize = 64 * 1024;
-const FOYER_MAX_DISK_BLOCK_SIZE_BYTES: usize = 16 * 1024 * 1024;
-const FOYER_TARGET_MAX_DISK_PARTITIONS: usize = 32 * 1024;
+const FOYER_PARTITION_FILE_PREFIX: &str = "foyer-storage-direct-fs-";
 
-fn foyer_disk_block_size(disk_capacity_bytes: usize) -> usize {
-    debug_assert!(disk_capacity_bytes > 0);
-    disk_capacity_bytes
-        .div_ceil(FOYER_TARGET_MAX_DISK_PARTITIONS)
-        .next_power_of_two()
-        .clamp(
-            FOYER_MIN_DISK_BLOCK_SIZE_BYTES,
-            FOYER_MAX_DISK_BLOCK_SIZE_BYTES,
-        )
+/// Removes Foyer partition files that the device about to open would not own.
+///
+/// Foyer opens partitions `0..partitions`, resizing reused files in place, and
+/// never looks at higher indexes. Files left by a larger earlier disk budget
+/// would stay on disk forever, and files of another block size would be
+/// recovered at the wrong block boundaries. Both are disposable cache data.
+fn remove_stale_foyer_partitions(
+    root: &std::path::Path,
+    partitions: usize,
+    block_bytes: usize,
+) -> std::io::Result<()> {
+    let entries = match std::fs::read_dir(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
+    entries.into_iter().try_for_each(|entry| {
+        let entry = entry?;
+        let Some(index) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix(FOYER_PARTITION_FILE_PREFIX))
+            .and_then(|index| index.parse::<usize>().ok())
+        else {
+            return Ok(());
+        };
+        if index < partitions && entry.metadata()?.len() == block_bytes as u64 {
+            return Ok(());
+        }
+        std::fs::remove_file(entry.path())
+    })
 }
 
 async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCache>>> {
@@ -2691,6 +3917,17 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
             )))
         }
         CacheMode::Hybrid { slate_db, .. } => {
+            remove_stale_foyer_partitions(
+                slate_db.disk().root(),
+                slate_db.disk_partitions(),
+                slate_db.disk_block_bytes(),
+            )
+            .map_err(|err| {
+                HelixDbError::Config(format!(
+                    "failed to remove stale Slate hybrid cache partitions in '{}': {err}",
+                    slate_db.disk().root().display()
+                ))
+            })?;
             let metrics = FoyerHybridCacheMetrics::new();
             let cache = HybridCacheBuilder::new()
                 .with_name("helix-slate-hybrid")
@@ -2710,7 +3947,7 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                                 ))
                             })?,
                     )
-                    .with_block_size(foyer_disk_block_size(slate_db.disk().bytes())),
+                    .with_block_size(slate_db.disk_block_bytes()),
                 )
                 .build()
                 .await
@@ -2738,6 +3975,117 @@ mod tests {
         DataScope::Tenant(TenantId::from_ulid_str(value).expect("valid tenant"))
     }
 
+    /// The object-store warm runs only when the tier enables it, whether or
+    /// not the tier caches written SSTs: memory caches and a tier left at
+    /// [`config::VectorPartWarm::Off`] start no warm. A started warm is
+    /// waited for by `wait_for_startup_cache_warm` without being taken from
+    /// `close()`, which stops it.
+    #[tokio::test]
+    async fn object_store_warm_starts_only_when_the_tier_enables_it() {
+        use crate::config::{
+            ObjectStoreWarmLevel, SlateHybridCacheConfig, SlateObjectStoreCacheSettings,
+            SlateWarmConfig, VectorPartWarm,
+        };
+
+        let hybrid = |root: &std::path::Path, cache_puts: bool, warm: VectorPartWarm| {
+            DbConfig::new().with_cache(config::CacheConfig::new(
+                config::VectorMemorySettings::default(),
+                CacheMode::Hybrid {
+                    slate_db: SlateHybridCacheConfig::try_new(
+                        1024 * 1024,
+                        root.join("foyer"),
+                        16 * 1024 * 1024,
+                    )
+                    .expect("valid Slate hybrid cache"),
+                    object_store: SlateObjectStoreCacheSettings::try_new(
+                        root.join("object-store"),
+                        Some(16 * 1024 * 1024),
+                        4096,
+                        cache_puts,
+                        ObjectStoreWarmLevel::Off,
+                        None,
+                        8,
+                    )
+                    .expect("valid object-store cache")
+                    .with_vector_part_warm(warm),
+                    slate_warm: SlateWarmConfig::Off,
+                    fts: None,
+                },
+            ))
+        };
+        let warm_started = |db: &HelixDB| {
+            db.inner
+                .caches
+                .startup_tasks
+                .vector_parts
+                .try_lock()
+                .expect("no one holds the warm slot")
+                .is_some()
+        };
+        let root = tempfile::tempdir().expect("temporary cache root");
+        for (config, started) in [
+            (DbConfig::new(), false),
+            (
+                hybrid(&root.path().join("local"), false, VectorPartWarm::Off),
+                false,
+            ),
+            (
+                hybrid(&root.path().join("remote-off"), true, VectorPartWarm::Off),
+                false,
+            ),
+            (
+                hybrid(
+                    &root.path().join("remote"),
+                    true,
+                    VectorPartWarm::Background,
+                ),
+                true,
+            ),
+            (
+                hybrid(
+                    &root.path().join("local-on"),
+                    false,
+                    VectorPartWarm::Background,
+                ),
+                true,
+            ),
+        ] {
+            let db = HelixDB::open_with_object_store_and_config(
+                "object-store-warm-gate",
+                Arc::new(InMemory::new()),
+                config,
+            )
+            .await
+            .expect("writer opens");
+            assert_eq!(warm_started(&db), started);
+            db.wait_for_startup_cache_warm().await;
+            assert_eq!(
+                warm_started(&db),
+                started,
+                "waiting leaves the warm to close()"
+            );
+            db.close().await.expect("writer closes");
+            assert!(!warm_started(&db), "close() stops the warm");
+        }
+
+        // close() stops a warm that has not finished, without waiting for it.
+        let db = HelixDB::open_with_object_store_and_config(
+            "object-store-warm-close",
+            Arc::new(InMemory::new()),
+            hybrid(
+                &root.path().join("closing"),
+                true,
+                VectorPartWarm::Background,
+            ),
+        )
+        .await
+        .expect("writer opens");
+        tokio::time::timeout(Duration::from_secs(10), db.close())
+            .await
+            .expect("close() does not wait for the warm")
+            .expect("writer closes");
+    }
+
     #[tokio::test]
     async fn slate_hybrid_cache_uses_bounded_foyer_partitions() {
         use crate::config::{
@@ -2747,10 +4095,11 @@ mod tests {
 
         let root = tempfile::tempdir().expect("temporary cache root");
         let foyer_root = root.path().join("foyer");
-        let disk_bytes = 16 * 1024 * 1024;
+        let slate_db = SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, 16 * 1024 * 1024)
+            .expect("valid Slate hybrid cache");
+        let expected_partitions = slate_db.disk_partitions();
         let mode = CacheMode::Hybrid {
-            slate_db: SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, disk_bytes)
-                .expect("valid Slate hybrid cache"),
+            slate_db,
             object_store: SlateObjectStoreCacheSettings::try_new(
                 root.path().join("object-store"),
                 Some(1024 * 1024),
@@ -2779,27 +4128,98 @@ mod tests {
                     .starts_with("foyer-storage-direct-fs-")
             })
             .count();
-        assert_eq!(
-            partition_count,
-            disk_bytes / foyer_disk_block_size(disk_bytes)
-        );
+        assert_eq!(partition_count, expected_partitions);
         cache.close().await.expect("Foyer cache closes");
     }
 
+    #[tokio::test]
+    async fn slate_hybrid_cache_removes_partitions_beyond_a_smaller_budget() {
+        use crate::config::{
+            ObjectStoreWarmLevel, SlateHybridCacheConfig, SlateObjectStoreCacheSettings,
+            SlateWarmConfig,
+        };
+
+        let root = tempfile::tempdir().expect("temporary cache root");
+        let foyer_root = root.path().join("foyer");
+        let partition_indexes = || {
+            let mut indexes = std::fs::read_dir(&foyer_root)
+                .expect("Foyer cache directory exists")
+                .map(|entry| {
+                    entry
+                        .expect("readable cache entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .strip_prefix(FOYER_PARTITION_FILE_PREFIX)
+                        .expect("only partition files")
+                        .parse::<usize>()
+                        .expect("numbered partition")
+                })
+                .collect::<Vec<_>>();
+            indexes.sort_unstable();
+            indexes
+        };
+        for (disk_bytes, partitions) in [(16 * 1024 * 1024, 256), (8 * 1024 * 1024, 128)] {
+            let mode = CacheMode::Hybrid {
+                slate_db: SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, disk_bytes)
+                    .expect("valid Slate hybrid cache"),
+                object_store: SlateObjectStoreCacheSettings::try_new(
+                    root.path().join("object-store"),
+                    Some(1024 * 1024),
+                    4096,
+                    false,
+                    ObjectStoreWarmLevel::Off,
+                    None,
+                    1,
+                )
+                .expect("valid object-store cache"),
+                slate_warm: SlateWarmConfig::Off,
+                fts: None,
+            };
+            let cache = build_slate_db_cache(&mode)
+                .await
+                .expect("Foyer cache builds")
+                .expect("hybrid mode enables Foyer");
+            assert_eq!(partition_indexes(), (0..partitions).collect::<Vec<_>>());
+            cache.close().await.expect("Foyer cache closes");
+        }
+    }
+
     #[test]
-    fn foyer_disk_block_size_scales_embedded_and_managed_caches() {
+    fn stale_foyer_partitions_are_indexes_past_the_device_or_another_block_size() {
+        const BLOCK: u64 = 64 * 1024;
+        let root = tempfile::tempdir().expect("temporary cache root");
+        for (name, length) in [
+            ("foyer-storage-direct-fs-00000000", BLOCK),
+            ("foyer-storage-direct-fs-00000001", 2 * BLOCK),
+            ("foyer-storage-direct-fs-00000003", BLOCK),
+            ("foyer-storage-direct-fs-00000004", BLOCK),
+            ("foyer-storage-direct-fs-not-a-number", BLOCK),
+            ("unrelated", 2 * BLOCK),
+        ] {
+            std::fs::File::create(root.path().join(name))
+                .and_then(|file| file.set_len(length))
+                .expect("fixture file");
+        }
+
+        remove_stale_foyer_partitions(root.path(), 4, BLOCK as usize)
+            .expect("stale partitions are removed");
+        let mut remaining = std::fs::read_dir(root.path())
+            .expect("cache root exists")
+            .map(|entry| entry.expect("readable entry").file_name())
+            .collect::<Vec<_>>();
+        remaining.sort();
         assert_eq!(
-            foyer_disk_block_size(16 * 1024 * 1024),
-            FOYER_MIN_DISK_BLOCK_SIZE_BYTES
+            remaining,
+            [
+                "foyer-storage-direct-fs-00000000",
+                "foyer-storage-direct-fs-00000003",
+                "foyer-storage-direct-fs-not-a-number",
+                "unrelated",
+            ]
         );
-        assert_eq!(
-            foyer_disk_block_size(352 * 1024 * 1024 * 1024),
-            FOYER_MAX_DISK_BLOCK_SIZE_BYTES
-        );
-        assert_eq!(
-            352 * 1024 * 1024 * 1024 / foyer_disk_block_size(352 * 1024 * 1024 * 1024),
-            22_528
-        );
+
+        remove_stale_foyer_partitions(&root.path().join("missing"), 4, BLOCK as usize)
+            .expect("a missing cache directory has nothing to remove");
     }
 
     #[test]
@@ -2957,7 +4377,7 @@ mod tests {
         db.query_scoped(request.clone(), DataScope::LegacyUnscoped)
             .await
             .expect("scoped query");
-        let encoded = sonic_rs::to_vec(&request).expect("encode request");
+        let encoded = simd_json::to_vec(&request).expect("encode request");
         db.query_json(&encoded).await.expect("JSON query");
         db.query_json_scoped(&encoded, DataScope::LegacyUnscoped)
             .await
@@ -3026,6 +4446,762 @@ mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(reader.object_store(), &expected_store,));
         reader.close().await.unwrap();
+    }
+
+    #[test]
+    fn managed_migration_authorization_rejects_incomplete_identity() {
+        assert!(matches!(
+            ManagedMigrationAuthorization::new(
+                "   ",
+                "v2",
+                NonZeroU32::new(MANAGED_STORAGE_SCHEMA_VERSION).unwrap(),
+            ),
+            Err(HelixDbError::Config(_))
+        ));
+        assert!(matches!(
+            ManagedMigrationAuthorization::new(
+                " migration-a",
+                "v2",
+                NonZeroU32::new(MANAGED_STORAGE_SCHEMA_VERSION).unwrap(),
+            ),
+            Err(HelixDbError::Config(_))
+        ));
+        assert!(matches!(
+            ManagedMigrationAuthorization::new(
+                "migration-a",
+                " ",
+                NonZeroU32::new(MANAGED_STORAGE_SCHEMA_VERSION).unwrap(),
+            ),
+            Err(HelixDbError::Config(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn managed_bootstrap_is_explicit_and_failover_is_recovery_only() {
+        let token = ProcessLocalDatabaseToken::new("facade-managed-open-intents").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+
+        let Err(error) = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(1).unwrap(),
+            ManagedWriterOpenIntent::Failover,
+        )
+        .await
+        else {
+            panic!("failover must not initialize pristine storage")
+        };
+        assert!(matches!(
+            error,
+            HelixDbError::WriterMigrationRequired {
+                requirement: crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
+            }
+        ));
+
+        let bootstrap = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(2).unwrap(),
+            ManagedWriterOpenIntent::Bootstrap,
+        )
+        .await
+        .expect("explicit bootstrap initializes current storage");
+        let prefix = migrations::migration_job_scan_prefix_scoped(DataScope::LegacyUnscoped);
+        let mut jobs = bootstrap
+            .inner_db()
+            .scan_prefix(prefix.clone(), ..)
+            .await
+            .unwrap();
+        assert!(jobs.next().await.unwrap().is_none());
+        bootstrap.close().await.expect("bootstrap writer closes");
+
+        let recovered = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(3).unwrap(),
+            ManagedWriterOpenIntent::Failover,
+        )
+        .await
+        .expect("current storage recovers without migration");
+        let mut jobs = recovered.inner_db().scan_prefix(prefix, ..).await.unwrap();
+        assert!(jobs.next().await.unwrap().is_none());
+        recovered.close().await.expect("recovered writer closes");
+    }
+
+    #[tokio::test]
+    async fn managed_failover_does_not_repair_incomplete_storage() {
+        let token = ProcessLocalDatabaseToken::new("facade-managed-incomplete-failover").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let bootstrap = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(1).unwrap(),
+            ManagedWriterOpenIntent::Bootstrap,
+        )
+        .await
+        .expect("managed bootstrap succeeds");
+        bootstrap
+            .inner_db()
+            .delete(migrations::storage_schema_complete_key_for_tests(
+                DataScope::LegacyUnscoped,
+            ))
+            .await
+            .expect("schema completion marker is removed");
+        bootstrap.close().await.expect("bootstrap closes");
+
+        let Err(error) = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(2).unwrap(),
+            ManagedWriterOpenIntent::Failover,
+        )
+        .await
+        else {
+            panic!("failover must fail closed on incomplete storage")
+        };
+        assert!(matches!(
+            error,
+            HelixDbError::WriterMigrationRequired {
+                requirement: crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
+            }
+        ));
+
+        let raw = DbReader::builder(token.database().to_string(), token.object_store())
+            .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
+            .build()
+            .await
+            .expect("raw reader opens");
+        assert!(
+            raw.get(migrations::storage_schema_complete_key_for_tests(
+                DataScope::LegacyUnscoped,
+            ))
+            .await
+            .unwrap()
+            .is_none(),
+            "recovery-only failover must not publish migration markers"
+        );
+        raw.close().await.expect("raw reader closes");
+    }
+
+    #[test]
+    fn storage_version_four_reopens_without_membership_activation() {
+        // Public cascade queries have large debug futures. Use the same dedicated
+        // stack as the production deletion contracts; do not change runtime limits.
+        std::thread::Builder::new()
+            .name("default-membership-reopen".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        use crate::encoding::v2::{keys, values};
+                        use crate::index_lifecycle::{IndexStorageVersion, IndexV2MetadataValue};
+
+                        let token =
+                            ProcessLocalDatabaseToken::new("facade-default-membership").unwrap();
+                        let write = || {
+                            QueryRequest::write(
+                                write_batch()
+                                    .var_as(
+                                        "created",
+                                        g().add_n(
+                                            "User",
+                                            vec![("name", PropertyInput::from("Ada"))],
+                                        )
+                                        .count(),
+                                    )
+                                    .returning(["created"]),
+                            )
+                        };
+                        let read = || {
+                            QueryRequest::read(
+                                read_batch()
+                                    .var_as("users", g().n_with_label("User").count())
+                                    .returning(["users"]),
+                            )
+                        };
+                        let version_key = keys::ManagedIndexKey::Global {
+                            kind: keys::GlobalKey::StorageVersion,
+                        }
+                        .to_bytes();
+                        let writer = HelixDB::open(HelixDbSource::InMemoryToken {
+                            token: token.clone(),
+                        })
+                        .await
+                        .unwrap();
+                        writer.query(write()).await.unwrap();
+                        writer.query(write()).await.unwrap();
+                        assert_eq!(writer.query(read()).await.unwrap()["users"], 2);
+                        assert_eq!(
+                            values::decode_metadata_value(
+                                &writer.inner_db().get(&version_key).await.unwrap().unwrap()
+                            )
+                            .unwrap(),
+                            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
+                        );
+                        writer.inner_db().flush().await.unwrap();
+                        writer.close().await.unwrap();
+
+                        let reader = HelixDB::open_reader(HelixDbSource::InMemoryToken {
+                            token: token.clone(),
+                        })
+                        .await
+                        .expect("a reader accepts default storage without activation");
+                        assert_eq!(reader.query(read()).await.unwrap()["users"], 2);
+                        reader.close().await.unwrap();
+
+                        let writer = HelixDB::open(HelixDbSource::InMemoryToken {
+                            token: token.clone(),
+                        })
+                        .await
+                        .expect("a writer reopens without format activation");
+                        assert_eq!(writer.query(read()).await.unwrap()["users"], 2);
+                        writer.query(write()).await.unwrap();
+                        assert_eq!(writer.query(read()).await.unwrap()["users"], 3);
+                        writer.flush_writer().await.unwrap();
+                        let reader = HelixDB::open_reader(HelixDbSource::InMemoryToken {
+                            token: token.clone(),
+                        })
+                        .await
+                        .unwrap();
+                        assert_eq!(reader.query(read()).await.unwrap()["users"], 3);
+                        // Keep the ordinary reader open while the membership row becomes empty
+                        // and is recreated. Allow three default manifest polling intervals.
+                        for expected in [0, 1] {
+                            if expected == 0 {
+                                writer
+                                    .query(QueryRequest::write(
+                                        write_batch()
+                                            .var_as("deleted", g().n_with_label("User").drop())
+                                            .returning(Vec::<String>::new()),
+                                    ))
+                                    .await
+                                    .unwrap();
+                            } else {
+                                writer.query(write()).await.unwrap();
+                            }
+                            assert_eq!(writer.query(read()).await.unwrap()["users"], expected);
+                            let published = writer.flush_writer().await.unwrap();
+                            let replay = tokio::time::timeout(Duration::from_secs(30), async {
+                                while reader.visible_sequence().await.unwrap() < published {
+                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                }
+                            })
+                            .await;
+                            assert!(
+                                replay.is_ok(),
+                                "reader sequence {:?}, published {:?}, rows {:?}",
+                                reader.visible_sequence().await.unwrap(),
+                                published,
+                                reader.query(read()).await.unwrap()
+                            );
+                            assert_eq!(reader.query(read()).await.unwrap()["users"], expected);
+                        }
+                        reader.close().await.unwrap();
+                        assert_eq!(
+                            values::decode_metadata_value(
+                                &writer.inner_db().get(&version_key).await.unwrap().unwrap()
+                            )
+                            .unwrap(),
+                            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
+                        );
+                        writer.close().await.unwrap();
+                        let reopened = HelixDB::open(HelixDbSource::InMemoryToken { token })
+                            .await
+                            .unwrap();
+                        assert_eq!(reopened.query(read()).await.unwrap()["users"], 1);
+                        reopened.close().await.unwrap();
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn storage_version_after_max_supported_is_rejected_without_downgrade() {
+        use crate::encoding::v2::{keys, values};
+        use crate::index_lifecycle::{IndexStorageVersion, IndexV2MetadataValue};
+
+        // Exercise each public startup role against its own persisted store.
+        for role in [
+            "reader",
+            "embedded",
+            "managed-bootstrap",
+            "managed-failover",
+        ] {
+            let token =
+                ProcessLocalDatabaseToken::new(format!("reject-next-version-{role}")).unwrap();
+            let source = || HelixDbSource::InMemoryToken {
+                token: token.clone(),
+            };
+            let writer = HelixDB::open(source()).await.unwrap();
+            let key = keys::ManagedIndexKey::Global {
+                kind: keys::GlobalKey::StorageVersion,
+            }
+            .to_bytes();
+            let marker = values::encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+                IndexStorageVersion::new(IndexStorageVersion::MAX_SUPPORTED.get() + 1).unwrap(),
+            ));
+            writer.inner_db().put(&key, marker.clone()).await.unwrap();
+            writer.inner_db().flush().await.unwrap();
+            writer.close().await.unwrap();
+
+            let result = match role {
+                "reader" => HelixDB::open_reader(source()).await,
+                "embedded" => HelixDB::open(source()).await,
+                "managed-bootstrap" | "managed-failover" => {
+                    HelixDB::open_managed_writer_with_config(
+                        source(),
+                        DbConfig::new(),
+                        NonZeroU64::new(10).unwrap(),
+                        if role == "managed-bootstrap" {
+                            ManagedWriterOpenIntent::Bootstrap
+                        } else {
+                            ManagedWriterOpenIntent::Failover
+                        },
+                    )
+                    .await
+                }
+                _ => unreachable!("all startup roles are listed above"),
+            };
+            let Err(error) = result else {
+                panic!("{role} accepted a version after the supported maximum");
+            };
+            if role == "managed-bootstrap" {
+                // Bootstrap is only valid for a pristine store, regardless of its version.
+                assert!(
+                    matches!(
+                        error,
+                        HelixDbError::WriterMigrationRequired {
+                            requirement:
+                                crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
+                        }
+                    ),
+                    "{error}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        error,
+                        HelixDbError::UnsupportedIndexStorageVersion {
+                            found: 6,
+                            supported: 5,
+                        }
+                    ),
+                    "{role}: {error}"
+                );
+            }
+            let raw = DbReader::builder(token.database().to_string(), token.object_store())
+                .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(
+                raw.get(&key).await.unwrap(),
+                Some(marker),
+                "{role} changed the marker"
+            );
+            raw.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn version_four_store_upgrades_by_rewriting_only_its_marker() {
+        use crate::encoding::v2::{keys, values};
+        use crate::index_lifecycle::{IndexStorageVersion, IndexV2MetadataValue};
+
+        async fn raw_rows(token: &ProcessLocalDatabaseToken) -> Vec<(bytes::Bytes, bytes::Bytes)> {
+            let raw = DbReader::builder(token.database().to_string(), token.object_store())
+                .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
+                .build()
+                .await
+                .unwrap();
+            let mut rows = raw.scan(..).await.unwrap();
+            let mut collected = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                collected.push((row.key, row.value));
+            }
+            raw.close().await.unwrap();
+            collected
+        }
+
+        let token = ProcessLocalDatabaseToken::new("upgrade-version-four").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let key = keys::ManagedIndexKey::Global {
+            kind: keys::GlobalKey::StorageVersion,
+        }
+        .to_bytes();
+        let marker = |version: IndexStorageVersion| {
+            values::encode_metadata_value(&IndexV2MetadataValue::StorageVersion(version))
+        };
+
+        // A store as the last version-4 release leaves it: fully initialized,
+        // with the V4 cleanup and tenant-envelope markers set.
+        let writer = HelixDB::open(source()).await.unwrap();
+        writer
+            .inner_db()
+            .put(&key, marker(IndexStorageVersion::EQUALITY_BITMAPS))
+            .await
+            .unwrap();
+        writer.inner_db().flush().await.unwrap();
+        writer.close().await.unwrap();
+        let before = raw_rows(&token).await;
+
+        // Readers serve it before its writer upgrades.
+        let reader = HelixDB::open_reader(source()).await.unwrap();
+        reader.close().await.unwrap();
+
+        // Recovery-only managed failover never migrates.
+        let Err(error) = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(10).unwrap(),
+            ManagedWriterOpenIntent::Failover,
+        )
+        .await
+        else {
+            panic!("managed failover upgraded a version-four store");
+        };
+        assert!(
+            matches!(
+                error,
+                HelixDbError::WriterMigrationRequired {
+                    requirement: crate::error::WriterMigrationRequirement::StorageVersion {
+                        found: 4,
+                        target: 5,
+                    },
+                }
+            ),
+            "{error}"
+        );
+        assert_eq!(raw_rows(&token).await, before, "failover changed storage");
+
+        // An embedded writer publishes the current marker and nothing else.
+        let writer = HelixDB::open(source()).await.unwrap();
+        writer.close().await.unwrap();
+        let after = raw_rows(&token).await;
+        let expected = before
+            .iter()
+            .map(|(row_key, value)| {
+                if row_key.as_ref() == key.as_ref() {
+                    (row_key.clone(), marker(IndexStorageVersion::CURRENT))
+                } else {
+                    (row_key.clone(), value.clone())
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(after, expected);
+
+        // Reopening a current store rewrites nothing.
+        let writer = HelixDB::open(source()).await.unwrap();
+        writer.close().await.unwrap();
+        assert_eq!(raw_rows(&token).await, after);
+    }
+
+    #[tokio::test]
+    async fn managed_writer_epoch_rejects_equal_and_lower_claims() {
+        let token = ProcessLocalDatabaseToken::new("facade-managed-writer-stale-claims").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+
+        let writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(11).unwrap(),
+            ManagedWriterOpenIntent::Bootstrap,
+        )
+        .await
+        .expect("epoch 11 writer opens");
+        assert_eq!(writer.storage_writer_epoch().map(NonZeroU64::get), Some(11));
+
+        for stale_epoch in [10, 11] {
+            let Err(error) = HelixDB::open_managed_writer_with_config(
+                source(),
+                DbConfig::new(),
+                NonZeroU64::new(stale_epoch).unwrap(),
+                ManagedWriterOpenIntent::Failover,
+            )
+            .await
+            else {
+                panic!("equal and lower epochs must be rejected")
+            };
+            let HelixDbError::Storage(error) = error else {
+                panic!("stale epoch must fail at the SlateDB fence boundary")
+            };
+            assert_eq!(
+                error.kind(),
+                slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+            );
+            assert_eq!(writer.storage_writer_epoch().map(NonZeroU64::get), Some(11));
+        }
+
+        let transaction = writer
+            .inner_db()
+            .begin(slatedb::IsolationLevel::Snapshot)
+            .await
+            .expect("current writer remains open after rejected claims");
+        transaction
+            .put(b"current-writer", b"still-authoritative")
+            .expect("current writer stages after rejected claims");
+        transaction
+            .commit()
+            .await
+            .expect("rejected stale claims do not fence the current writer");
+        writer.close().await.expect("epoch 11 writer closes");
+    }
+
+    #[tokio::test]
+    async fn managed_writer_epoch_fences_an_inflight_old_transaction() {
+        let token = ProcessLocalDatabaseToken::new("facade-managed-writer-inflight-fence").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+
+        let old_writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(20).unwrap(),
+            ManagedWriterOpenIntent::Bootstrap,
+        )
+        .await
+        .expect("epoch 20 writer opens");
+        let old_transaction = old_writer
+            .inner_db()
+            .begin(slatedb::IsolationLevel::Snapshot)
+            .await
+            .expect("old transaction begins before fencing");
+        old_transaction
+            .put(b"old-writer", b"must-not-commit")
+            .expect("old transaction stages before fencing");
+
+        let new_writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(21).unwrap(),
+            ManagedWriterOpenIntent::Failover,
+        )
+        .await
+        .expect("epoch 21 writer fences epoch 20");
+        let new_transaction = new_writer
+            .inner_db()
+            .begin(slatedb::IsolationLevel::Snapshot)
+            .await
+            .expect("new writer transaction begins");
+        new_transaction
+            .put(b"new-writer", b"committed")
+            .expect("new writer stages a write");
+        new_transaction
+            .commit()
+            .await
+            .expect("new writer commits after its fence");
+
+        let old_error = old_transaction
+            .commit()
+            .await
+            .expect_err("old transaction must not commit after epoch 21 opens");
+        assert_eq!(
+            old_error.kind(),
+            slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+        );
+        assert!(matches!(
+            HelixDbError::from_storage_commit(old_error),
+            HelixDbError::WriterFencedCommitOutcomeUnknown
+        ));
+
+        let Err(delayed) = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(20).unwrap(),
+            ManagedWriterOpenIntent::Failover,
+        )
+        .await
+        else {
+            panic!("delayed epoch 20 open cannot fence epoch 21")
+        };
+        let HelixDbError::Storage(delayed) = delayed else {
+            panic!("delayed stale open must fail at the SlateDB fence boundary")
+        };
+        assert_eq!(
+            delayed.kind(),
+            slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+        );
+
+        new_writer
+            .flush_writer()
+            .await
+            .expect("new writer publishes committed data");
+        new_writer.close().await.expect("epoch 21 writer closes");
+        old_writer
+            .close()
+            .await
+            .expect("fenced old writer closes idempotently");
+
+        let reader = HelixDB::open_reader(source())
+            .await
+            .expect("reader observes latest epoch");
+        assert_eq!(reader.storage_writer_epoch().map(NonZeroU64::get), Some(21));
+        let HelixStorage::Reader(raw_reader) = reader.storage() else {
+            panic!("reader open returns reader storage")
+        };
+        assert_eq!(
+            raw_reader.get(b"new-writer").await.unwrap().as_deref(),
+            Some(b"committed".as_slice())
+        );
+        assert_eq!(raw_reader.get(b"old-writer").await.unwrap(), None);
+        reader.close().await.expect("reader closes");
+    }
+
+    #[tokio::test]
+    async fn concurrent_managed_writer_epoch_claim_has_one_winner() {
+        let token =
+            ProcessLocalDatabaseToken::new("facade-managed-writer-concurrent-claim").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let epoch = NonZeroU64::new(30).unwrap();
+
+        let (left, right) = tokio::join!(
+            HelixDB::open_managed_writer_with_config(
+                source(),
+                DbConfig::new(),
+                epoch,
+                ManagedWriterOpenIntent::Bootstrap,
+            ),
+            HelixDB::open_managed_writer_with_config(
+                source(),
+                DbConfig::new(),
+                epoch,
+                ManagedWriterOpenIntent::Bootstrap,
+            ),
+        );
+        let (writer, error) = match (left, right) {
+            (Ok(writer), Err(error)) | (Err(error), Ok(writer)) => (writer, error),
+            (Ok(_), Ok(_)) => panic!("equal concurrent epochs cannot both open"),
+            (Err(_), Err(_)) => panic!("one exact epoch claimant must win"),
+        };
+        let HelixDbError::Storage(error) = error else {
+            panic!("losing equal claim must fail at the SlateDB fence boundary")
+        };
+        assert_eq!(
+            error.kind(),
+            slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+        );
+        assert_eq!(writer.storage_writer_epoch().map(NonZeroU64::get), Some(30));
+        writer.close().await.expect("winning writer closes");
+    }
+
+    #[cfg(feature = "production-coverage")]
+    #[tokio::test]
+    async fn old_storage_reader_stays_available_until_managed_writer_migrates() {
+        let token =
+            ProcessLocalDatabaseToken::new("facade-reader-before-writer-migration").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let fixture = HelixDB::open(source()).await.expect("fixture writer opens");
+        fixture
+            .migration_parity_make_storage_v2_fixture()
+            .await
+            .expect("fixture becomes exact storage version two");
+        fixture
+            .migration_parity_inner_db()
+            .unwrap()
+            .delete(b"\xFFkv_migration_ready:index_storage_v4_cleanup")
+            .await
+            .expect("version four cleanup marker is removed");
+        fixture.close().await.expect("fixture writer closes");
+
+        let reader = HelixDB::open_reader(source())
+            .await
+            .expect("compatible old storage remains readable");
+        assert_eq!(reader.mode(), HelixDbMode::ReadOnly);
+        reader.close().await.expect("old-storage reader closes");
+
+        let Err(error) = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(2).unwrap(),
+            ManagedWriterOpenIntent::Failover,
+        )
+        .await
+        else {
+            panic!("recovery-only failover must not migrate old storage")
+        };
+        assert!(matches!(
+            error,
+            HelixDbError::WriterMigrationRequired {
+                requirement: crate::error::WriterMigrationRequirement::StorageVersion {
+                    found: 2,
+                    target: 5,
+                },
+            }
+        ));
+
+        let authorization = ManagedMigrationAuthorization::new(
+            "controlled-v2-to-v4",
+            "v2",
+            NonZeroU32::new(MANAGED_STORAGE_SCHEMA_VERSION).unwrap(),
+        )
+        .expect("valid controlled migration authorization");
+        let writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            DbConfig::new(),
+            NonZeroU64::new(3).unwrap(),
+            ManagedWriterOpenIntent::ControlledMigration(authorization),
+        )
+        .await
+        .expect("authorized managed writer owns and completes migration");
+        writer.close().await.expect("migrated writer closes");
+        let reader = HelixDB::open_reader(source())
+            .await
+            .expect("reader reopens after migration");
+        reader.close().await.expect("migrated reader closes");
+    }
+
+    #[tokio::test]
+    async fn incomplete_tenant_envelope_rejects_production_and_test_reader_opens() {
+        let token = ProcessLocalDatabaseToken::new("facade-incomplete-tenant-reader").unwrap();
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let writer = HelixDB::open(source()).await.expect("fixture writer opens");
+        writer
+            .inner_db()
+            .delete(b"\xFFkv_migration_ready:tenant_key_envelope_v1")
+            .await
+            .expect("tenant readiness marker is removed");
+        writer
+            .inner_db()
+            .flush()
+            .await
+            .expect("incomplete migration state becomes reader-visible");
+        writer.close().await.expect("fixture writer closes");
+
+        for result in [
+            HelixDB::open_reader(source()).await,
+            HelixDB::open_reader_with_object_store_for_tests(
+                token.database().to_string(),
+                token.object_store(),
+            )
+            .await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(HelixDbError::WriterMigrationRequired {
+                    requirement: crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
+                })
+            ));
+        }
     }
 
     #[tokio::test]
@@ -3185,7 +5361,10 @@ mod tests {
             config::SimHasherCacheSettings::try_new(3 * 64 * core::mem::size_of::<f32>(), 2)
                 .unwrap(),
         );
-        let cache = VectorMemoryCache::new(settings);
+        let cache = VectorMemoryCache::new(
+            settings,
+            search::vector::VectorCacheVisibility::ExactSequence,
+        );
         assert!(cache.simhasher_registry.validate_dimension(3).is_ok());
         assert!(cache.simhasher_registry.validate_dimension(4).is_err());
     }
@@ -3281,7 +5460,7 @@ mod tests {
 
         let guard = db
             .vector_cache_registry()
-            .read_guard_for(&generation)
+            .resident_guard_for(&generation)
             .unwrap();
         assert_eq!(
             guard.store().get_upper_vector(7).as_deref(),
@@ -3414,6 +5593,32 @@ mod tests {
             Some(&serde_json::json!(0))
         );
         assert!(db.query_json(b"not-json").await.is_err());
+        db.close().await.expect("writer closes");
+    }
+
+    #[tokio::test]
+    async fn open_with_config_applies_lease_size_to_both_id_allocators() {
+        let config = DbConfig::new()
+            .try_with_id_lease_size(7)
+            .expect("nonzero lease size is valid")
+            .with_id_lease_refill_threshold(3);
+        let db = HelixDB::open_with_config(
+            HelixDbSource::InMemory {
+                database: "configured-id-lease-size".to_string(),
+            },
+            config,
+        )
+        .await
+        .expect("writer opens with custom ID leasing");
+        let HelixStorage::Writer(writer) = db.storage() else {
+            panic!("writer handle expected")
+        };
+
+        assert_eq!(writer.node_ids().allocate().await.unwrap(), 0);
+        assert_eq!(writer.edge_ids().allocate().await.unwrap(), 0);
+        assert_eq!(writer.node_ids().remaining_in_lease(), 6);
+        assert_eq!(writer.edge_ids().remaining_in_lease(), 6);
+
         db.close().await.expect("writer closes");
     }
 
@@ -3923,20 +6128,20 @@ mod tests {
             .await
             .expect("tenant b second write succeeds");
 
-        let tenant_a_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_a_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_a)
                 .await
-                .expect("tenant a read succeeds"),
+                .expect("tenant a read succeeds")[..],
         )
         .expect("tenant a response decodes");
-        let tenant_b_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_b_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_b)
                 .await
-                .expect("tenant b read succeeds"),
+                .expect("tenant b read succeeds")[..],
         )
         .expect("tenant b response decodes");
         let legacy_json: serde_json::Value =
-            sonic_rs::from_slice(&db.query_json(&read).await.expect("legacy read succeeds"))
+            simd_json::from_reader(&db.query_json(&read).await.expect("legacy read succeeds")[..])
                 .expect("legacy response decodes");
 
         assert_eq!(tenant_a_json.get("users"), Some(&serde_json::json!(1)));

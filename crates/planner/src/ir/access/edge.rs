@@ -1,6 +1,7 @@
 //! Edge access-plan contracts.
 
 mod analysis;
+mod branch;
 mod source;
 
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,7 @@ use crate::catalog;
 
 use crate::ir;
 
+pub use branch::{EdgeResidualBranch, EdgeResidualBranches};
 pub use source::EdgeAccessSourcePlan;
 
 /// Edge access plan.
@@ -56,6 +58,9 @@ pub enum EdgeAccessPlan {
         key: catalog::ScopedPropertyDirectionKey,
         /// Range bounds.
         range: ir::IndexRange,
+        /// Traversal within the physical lane.
+        #[serde(default)]
+        iteration: ir::RangeScanIteration,
     },
     /// Vector search.
     VectorSearch {
@@ -92,6 +97,10 @@ pub enum EdgeAccessPlan {
         /// Residual predicate.
         residual: ir::PredicatePlan,
     },
+    /// Rows of each branch's index set that its residual accepts; a row
+    /// matches when some branch holds and accepts it. Every branch reads an
+    /// index-only set, so no branch scans.
+    BranchResidualUnion(EdgeResidualBranches),
 }
 
 impl AsRef<EdgeAccessPlan> for EdgeAccessPlan {
@@ -101,6 +110,13 @@ impl AsRef<EdgeAccessPlan> for EdgeAccessPlan {
 }
 
 impl EdgeAccessPlan {
+    /// Union of index-only sets, each filtered by its own residual, or `None`
+    /// unless there are at least two branches, at least one has a residual,
+    /// and every branch source is an index-only set.
+    pub fn branch_residual_union(branches: Vec<EdgeResidualBranch>) -> Option<Self> {
+        EdgeResidualBranches::new(branches).map(Self::BranchResidualUnion)
+    }
+
     /// Whether every leaf can participate in one executable secondary ID set.
     pub(crate) fn is_secondary_set_eligible(&self) -> bool {
         analysis::secondary_set_eligible(self)
@@ -168,6 +184,7 @@ mod tests {
     #[test]
     fn secondary_set_eligibility_covers_nested_and_mixed_edge_trees() {
         let range = EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::EdgeRangeIndexMeta::try_new("likes_weight").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "LIKES",
@@ -210,6 +227,7 @@ mod tests {
                 ),
             },
             EdgeAccessPlan::RangeIndex {
+                iteration: crate::ir::RangeScanIteration::Forward,
                 index: catalog::EdgeRangeIndexMeta::try_new("likes_created").unwrap(),
                 key: catalog::ScopedPropertyDirectionKey::try_new(
                     "LIKES",
@@ -258,6 +276,7 @@ mod tests {
                 label: likes.clone(),
             }),
             source(EdgeAccessPlan::RangeIndex {
+                iteration: crate::ir::RangeScanIteration::Forward,
                 index: catalog::EdgeRangeIndexMeta::try_new("likes_created").unwrap(),
                 key: catalog::ScopedPropertyDirectionKey::try_new(
                     "LIKES",

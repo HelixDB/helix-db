@@ -106,7 +106,7 @@ fi
     COVERAGE_ARGS=(
         --quiet
         -p db
-        --features production-coverage,migration-parity,index-lifecycle-testing
+        --features production-coverage,index-lifecycle-testing
         --json
         --output-path "$REPORT_PATH"
         --ignore-filename-regex '(^|/)(tests|benches|examples)/|/(registry|rustc)/|/crates/db/src/index_lifecycle_testing(/|\.rs$)'

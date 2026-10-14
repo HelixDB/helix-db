@@ -31,6 +31,16 @@ pub enum PhysicalPipelineOp {
     Mutation,
     /// Explicit sort.
     Sort,
+    /// Ordering proven against this expression's executable access driver.
+    OrderSatisfiedByAccess {
+        /// Complete ordering contract retained from the logical operation.
+        ordering: ir::OrderKeys,
+    },
+    /// A logical bound evaluated inside an eligible range access.
+    AccessReadLimit {
+        /// Bound retained for matching and runtime parameter validation.
+        count: ir::StreamBoundPlan,
+    },
 }
 
 /// Non-empty physical pipeline.

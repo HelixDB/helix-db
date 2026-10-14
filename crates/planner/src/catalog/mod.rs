@@ -25,7 +25,10 @@ pub use metadata::{
     EdgeEqualityIndexMeta, EdgeRangeIndexMeta, IndexUniqueness, NodeEqualityIndexMeta,
     NodeRangeIndexMeta, TextIndexMeta, VectorIndexMeta,
 };
-pub use property::{ScopedPropertyDirectionKey, ScopedPropertyKey};
+pub use property::{
+    ScopedPropertyDirectionKey, ScopedPropertyDirectionKeyView, ScopedPropertyKey,
+    ScopedPropertyKeyView,
+};
 pub use search::{EdgeSearchIndexKey, NodeSearchIndexKey, SearchIndexKey, SearchIndexScope};
 pub use snapshot::IndexCatalogSnapshot;
 

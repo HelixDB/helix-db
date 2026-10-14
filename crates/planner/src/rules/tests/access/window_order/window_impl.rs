@@ -39,7 +39,7 @@ fn access_window_implementation_rule_keeps_unfoldable_window_in_cascades() {
     assert_eq!(
         alternative.cost,
         storage
-            .range_scan(storage.default_unknown_scan_rows)
+            .element_scan(storage.default_unknown_scan_rows)
             .serial(storage.stream_operator(cost::EstimatedRows::rows(5)))
     );
 

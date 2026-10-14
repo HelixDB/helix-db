@@ -30,6 +30,7 @@ struct SelectedPage {
 /// Compacts at most one durable Active-page pointer.
 pub(crate) async fn compact_once(
     db: &Db,
+    scope_gates: &index_lifecycle::IndexScopeGates,
     object_store: &Arc<dyn ObjectStore>,
     db_path: &str,
     limits: TextBackfillCompactionLimits,
@@ -54,6 +55,15 @@ pub(crate) async fn compact_once(
             "text compaction pointer key contains another metadata value kind",
         ));
     };
+    // Compaction rewrites the same manifest rows queued publication appends
+    // to, so it shares the generation's exclusive publication ownership.
+    let _ownership = scope_gates
+        .publication_permit(index_lifecycle::queue::QueueTarget::new(
+            target.scope(),
+            target.index_id(),
+            target.generation(),
+        ))
+        .await;
 
     let snapshot = db.begin(IsolationLevel::Snapshot).await?;
     let record_key = scoped_key(
@@ -654,7 +664,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(compact_once(&db, &store, "db", limits(2)).await.unwrap());
+        assert!(compact_once(
+            &db,
+            &index_lifecycle::IndexScopeGates::default(),
+            &store,
+            "db",
+            limits(2)
+        )
+        .await
+        .unwrap());
 
         let page =
             index_values::decode_manifest_page(&db.get(page_key).await.unwrap().unwrap()).unwrap();

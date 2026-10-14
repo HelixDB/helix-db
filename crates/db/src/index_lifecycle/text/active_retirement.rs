@@ -10,7 +10,6 @@
 //! hidden-build deltas before buffering any graph or index write.
 
 use bytes::Bytes;
-use slatedb::DbTransaction;
 
 use crate::config::ActiveTextMutationLimits;
 use crate::encoding::v2::keys as index_keys;
@@ -55,7 +54,7 @@ pub(super) struct ValidatedActiveTextRetirement {
 
 /// Prepares one exact live-to-dead Active entity-state transition.
 pub(super) async fn prepare_active_text_retirement(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     handle: &index_lifecycle::ActiveIndexHandle,
     partition: work::TextPartition,
     entity: index_keys::IndexEntity,
@@ -210,7 +209,7 @@ pub(super) async fn prepare_active_text_retirement(
 /// Revalidates one retirement without staging either replacement row.
 #[cfg(any(test, feature = "production-coverage"))]
 pub(super) async fn validate_active_text_retirement(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     prepared: &PreparedActiveTextRetirement,
 ) -> Result<ValidatedActiveTextRetirement> {
     for observation in &prepared.observations {
@@ -228,7 +227,7 @@ pub(super) async fn validate_active_text_retirement(
 /// Stages one retirement only after every request input has validated.
 #[cfg(any(test, feature = "production-coverage"))]
 pub(super) fn stage_validated_active_text_retirement(
-    transaction: &DbTransaction,
+    transaction: &impl crate::transaction::Mutation,
     validated: ValidatedActiveTextRetirement,
 ) -> Result<()> {
     transaction.put(validated.prepared.root_key, validated.prepared.root_value)?;
@@ -363,7 +362,7 @@ mod tests {
                 NonZeroU64::new(u64::MAX).unwrap(),
                 NonZeroU64::MIN,
                 NonZeroU64::new(u64::MAX).unwrap(),
-                NonZeroU64::new(u64::MAX).unwrap(),
+                NonZeroU64::new(1024).unwrap(),
             ),
         )
         .unwrap()
@@ -708,21 +707,18 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        assert!(matches!(
-            prepare_active_text_retirement(
-                &limited,
-                &fixture.handle,
-                work::TextPartition::Unpartitioned,
-                fixture.entity,
-                limits_with_max_output_operations(1),
-            )
-            .await,
-            Err(HelixDbError::ActiveTextMutationLimitExceeded {
-                resource: crate::error::ActiveTextMutationResource::OutputOperations,
-                observed: 2,
-                limit: 1,
-            })
-        ));
+        // Every valid policy allows at least 14 operations (twice a one-term
+        // document's seven), so a two-row retirement always fits.
+        let prepared = prepare_active_text_retirement(
+            &limited,
+            &fixture.handle,
+            work::TextPartition::Unpartitioned,
+            fixture.entity,
+            limits_with_max_output_operations(14),
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.measurements().output_operations(), 2);
         limited.commit().await.unwrap();
         db.close().await.unwrap();
     }

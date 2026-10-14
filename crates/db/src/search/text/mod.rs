@@ -3,8 +3,8 @@
 //! V2 lifecycle code uploads immutable content-addressed split blobs before a
 //! SlateDB transaction atomically attaches their durable references.
 
-use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs;
 use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -65,7 +65,10 @@ mod caching_directory;
 pub(crate) mod compaction;
 mod debug_proxy_directory;
 mod hot_directory;
+#[cfg(test)]
+mod live_state_tests;
 mod overlay_directory;
+pub(crate) mod pending;
 #[cfg(feature = "production-coverage")]
 mod prefilter_benchmark;
 mod restricted;
@@ -155,12 +158,35 @@ pub(crate) struct TextSearchRequest<'a> {
     query: &'a str,
     k: usize,
     scope: TextSearchScope,
+    demand: SplitDemand,
 }
 
 impl<'a> TextSearchRequest<'a> {
     pub(crate) const fn new(query: &'a str, k: usize, scope: TextSearchScope) -> Self {
-        Self { query, k, scope }
+        Self {
+            query,
+            k,
+            scope,
+            demand: SplitDemand::Record,
+        }
     }
+
+    /// Sets whether this search counts toward disk-tier split admission.
+    pub(crate) const fn with_split_demand(mut self, demand: SplitDemand) -> Self {
+        self.demand = demand;
+        self
+    }
+}
+
+/// Whether a manifest search counts as a use of its splits for disk-tier
+/// admission, which admits a split on its second successful use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SplitDemand {
+    /// Records one successful use of every searched split.
+    Record,
+    /// Repeats a physical search of one logical search that already recorded
+    /// its use, such as a widened overlay search.
+    Skip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,6 +528,25 @@ enum TextLiveStateSource<'a> {
 }
 
 /// Runs the common split search while keeping live-state ownership explicit.
+///
+/// Returns the `k` best live hits in [`HitRank`] order, exactly as an
+/// exhaustive search of every split would after dropping each candidate whose
+/// version is not the entity's live version.
+///
+/// Each split serves its candidates in descending [`HitRank`] and is
+/// re-searched with a doubled limit only while fewer than `k` live hits are
+/// known or its frontier (last served candidate) still outranks the `k`-th,
+/// so unseen candidates can never displace a hit. Live state is resolved
+/// lazily: candidates wait in a best-first queue and are resolved in batches
+/// only while the best of them outranks the `k`-th live hit, so a search
+/// reads about `k` states (plus dead or stale candidates above them) however
+/// many splits it searches.
+///
+/// Corruption is reported only where it is read: a missing or foreign state
+/// row, or live copies of one entity with different scores, fail the search
+/// when the candidate is resolved, and a served V2 hit's statistics marker is
+/// validated before return. Candidates ranked below every resolved batch are
+/// never read, so corruption confined to them is not reported.
 async fn search_manifest_with_state_source(
     reader: &(impl DbReadOps + Send + Sync),
     runtime: TextSearchRuntime<'_>,
@@ -511,20 +556,38 @@ async fn search_manifest_with_state_source(
     request: TextSearchRequest<'_>,
 ) -> Result<Vec<TextSearchHit>, HelixDbError> {
     const SPLIT_READ_CONCURRENCY: usize = 8;
-    const STATE_BATCH_SIZE: usize = 512;
-    let TextSearchRequest { query, k, scope } = request;
+    /// Largest live-state batch; matches the V2 state loader's bound.
+    const MAX_STATE_BATCH: usize = 512;
+    /// Smallest live-state batch, so a run of dead or stale candidates
+    /// resolves in few round trips once `k` hits are nearly known.
+    const MIN_STATE_BATCH: usize = 64;
+    let TextSearchRequest {
+        query,
+        k,
+        scope,
+        demand,
+    } = request;
     if k == 0 || scope.is_empty_restricted() {
         return Ok(Vec::new());
+    }
+
+    /// How much of one split's ranked candidate list has been read.
+    enum SplitProgress {
+        /// Not searched yet; the first search asks for `min(k, total_docs)`.
+        Unsearched,
+        /// Served a full page of its best `served` candidates, fewer than its
+        /// documents; unseen candidates rank at or below `frontier`, and the
+        /// next search asks for twice as many.
+        Partial { frontier: HitRank, served: usize },
+        /// Served every candidate.
+        Exhausted,
     }
 
     struct SplitSearchState {
         split_ref: TextSplitRef,
         reader: Arc<SplitSearchReader>,
         total_docs: usize,
-        candidate_limit: usize,
-        processed_candidates: usize,
-        exhausted: bool,
-        frontier_score: Option<f32>,
+        progress: SplitProgress,
     }
 
     let opened = futures::stream::iter(manifest.split_refs().iter().cloned())
@@ -536,44 +599,94 @@ async fn search_manifest_with_state_source(
                 split_ref,
                 reader: Arc::new(index_reader),
                 total_docs,
-                candidate_limit: k.min(total_docs).max(1),
-                processed_candidates: 0,
-                exhausted: total_docs == 0,
-                frontier_score: None,
+                progress: if total_docs == 0 {
+                    SplitProgress::Exhausted
+                } else {
+                    SplitProgress::Unsearched
+                },
             })
         })
         .buffered(SPLIT_READ_CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
     let mut splits = opened.into_iter().collect::<Result<Vec<_>, _>>()?;
-    let mut live_states = BTreeMap::new();
-    let mut hits_by_entity = BTreeMap::new();
+    // Resolved live state per entity; `None` is a legacy entity without state.
+    let mut live_states = BTreeMap::<u64, Option<TextIndexLiveState>>::new();
+    // Rank of every resolved live hit, keyed by entity to merge split copies.
+    let mut hit_ranks = BTreeMap::<u64, HitRank>::new();
+    // The best `k` hit ranks, worst on top, so its top is the `k`-th hit.
+    let mut top_k = BinaryHeap::<Reverse<HitRank>>::new();
+    // Served but unresolved candidates as (rank, logical version), best on
+    // top. The version only orders an entity's copies deterministically.
+    let mut unresolved = BinaryHeap::<(HitRank, u64)>::new();
     loop {
-        let kth_score = if hits_by_entity.len() < k {
-            None
-        } else {
-            let mut scores = hits_by_entity
-                .values()
-                .map(|hit: &TextSearchHit| hit.score)
+        let kth = loop {
+            let kth = top_k
+                .peek()
+                .filter(|_| top_k.len() == k)
+                .map(|Reverse(rank)| *rank);
+            let Some(&(best, _)) = unresolved.peek() else {
+                break kth;
+            };
+            if kth.is_some_and(|kth| best <= kth) {
+                break kth;
+            }
+            let batch = std::iter::from_fn(|| unresolved.pop())
+                .take(
+                    k.saturating_sub(hit_ranks.len())
+                        .clamp(MIN_STATE_BATCH, MAX_STATE_BATCH),
+                )
                 .collect::<Vec<_>>();
-            scores.sort_by(|left, right| right.partial_cmp(left).unwrap_or(Ordering::Equal));
-            scores.get(k - 1).copied()
+            let missing = batch
+                .iter()
+                .map(|(rank, _)| rank.entity_id.0)
+                .filter(|entity_id| !live_states.contains_key(entity_id))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                load_text_live_states_batch(reader, state_source, &missing, &mut live_states)
+                    .await?;
+            }
+            for (rank, logical_version) in batch {
+                let state = live_states
+                    .get(&rank.entity_id.0)
+                    .expect("every candidate in a resolved batch has loaded live state");
+                if !state
+                    .as_ref()
+                    .is_none_or(|state| state.live && state.logical_version == logical_version)
+                {
+                    continue;
+                }
+                match hit_ranks.insert(rank.entity_id.0, rank) {
+                    None => {
+                        top_k.push(Reverse(rank));
+                        if top_k.len() > k {
+                            top_k.pop();
+                        }
+                    }
+                    Some(existing) if existing == rank => {}
+                    Some(_) => {
+                        return Err(HelixDbError::IndexCatalogCorruption(
+                            "duplicate live text versions have different BM25 score bits"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
         };
         let selected = splits
             .iter()
             .enumerate()
             .filter_map(|(index, split)| {
-                (!split.exhausted
-                    && kth_score.is_none_or(|score| {
-                        split
-                            .frontier_score
-                            .is_none_or(|frontier| frontier >= score)
-                    }))
-                .then_some((
-                    index,
-                    Arc::clone(&split.reader),
-                    split.candidate_limit,
-                ))
+                let limit = match split.progress {
+                    SplitProgress::Unsearched => Some(k.min(split.total_docs)),
+                    SplitProgress::Partial { frontier, served } => kth
+                        .is_none_or(|kth| frontier > kth)
+                        .then(|| served.saturating_mul(2).min(split.total_docs)),
+                    SplitProgress::Exhausted => None,
+                };
+                limit.map(|limit| (index, Arc::clone(&split.reader), limit))
             })
             .collect::<Vec<_>>();
         if selected.is_empty() {
@@ -607,70 +720,80 @@ async fn search_manifest_with_state_source(
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut new_candidates = Vec::new();
         for (index, requested, candidates) in searched {
             let split = &mut splits[index];
-            let candidate_count = candidates.len();
-            let frontier_score = candidates.last().map(|candidate| candidate.score);
-            let processed = split.processed_candidates.min(candidate_count);
-            new_candidates.extend(candidates.into_iter().skip(processed));
-            split.processed_candidates = candidate_count;
-            split.exhausted = candidate_count < requested || requested >= split.total_docs;
-            split.frontier_score = (!split.exhausted).then_some(frontier_score).flatten();
-            if !split.exhausted {
-                split.candidate_limit = requested.saturating_mul(2).min(split.total_docs);
-            }
-        }
-
-        let missing_ids = new_candidates
-            .iter()
-            .map(|candidate| candidate.entity_id)
-            .filter(|entity_id| !live_states.contains_key(entity_id))
-            .collect::<BTreeSet<_>>();
-        for entity_ids in missing_ids
-            .into_iter()
-            .collect::<Vec<_>>()
-            .chunks(STATE_BATCH_SIZE)
-        {
-            load_text_live_states_batch(reader, state_source, entity_ids, &mut live_states).await?;
-        }
-        for candidate in new_candidates {
-            let state = live_states
-                .get(&candidate.entity_id)
-                .expect("every newly exposed candidate has cached live state");
-            if text_candidate_matches_live_state(&candidate, state.as_ref()) {
-                let hit = TextSearchHit {
-                    entity_id: candidate.entity_id,
-                    score: candidate.score,
-                };
-                if let Some(existing) = hits_by_entity.insert(hit.entity_id, hit.clone())
-                    && existing.score.to_bits() != hit.score.to_bits()
-                {
-                    return Err(HelixDbError::IndexCatalogCorruption(
-                        "duplicate live text versions have different BM25 score bits".to_string(),
-                    ));
+            // A re-search serves the previous page again first; skip it.
+            let served = match split.progress {
+                SplitProgress::Partial { served, .. } => served,
+                SplitProgress::Unsearched | SplitProgress::Exhausted => 0,
+            };
+            split.progress = match candidates.last() {
+                Some(last) if candidates.len() >= requested && requested < split.total_docs => {
+                    SplitProgress::Partial {
+                        frontier: HitRank::new(last.score, last.entity_id),
+                        served: candidates.len(),
+                    }
                 }
-            }
+                _ => SplitProgress::Exhausted,
+            };
+            unresolved.extend(candidates.into_iter().skip(served).map(|candidate| {
+                (
+                    HitRank::new(candidate.score, candidate.entity_id),
+                    candidate.logical_version,
+                )
+            }));
         }
     }
-    if let Some(cache) = runtime.cache {
+
+    let hits = top_k
+        .into_sorted_vec()
+        .into_iter()
+        .map(|Reverse(rank)| TextSearchHit {
+            entity_id: rank.entity_id.0,
+            score: f32::from_bits(rank.score_bits),
+        })
+        .collect::<Vec<_>>();
+    if let TextLiveStateSource::V2(root) = state_source {
+        let served = hits.iter().map(|hit| hit.entity_id).collect::<Vec<_>>();
+        crate::index_lifecycle::text::serving::validate_live_entity_contributions(
+            reader, root, &served,
+        )
+        .await?;
+    }
+    if demand == SplitDemand::Record
+        && let Some(cache) = runtime.cache
+    {
         futures::stream::iter(splits.iter().map(|split| split.split_ref.clone()))
             .for_each_concurrent(SPLIT_READ_CONCURRENCY, |split| async move {
                 cache.after_successful_search(split).await;
             })
             .await;
     }
-
-    let mut hits = hits_by_entity.into_values().collect::<Vec<_>>();
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| left.entity_id.cmp(&right.entity_id))
-    });
-    hits.truncate(k);
     Ok(hits)
+}
+
+/// Serving rank of one BM25 candidate or hit: a higher score ranks higher,
+/// then a lower entity ID.
+///
+/// The derived order compares the score's bits, which order like the score
+/// for the finite non-negative scores BM25 produces. It is the split
+/// collector's sort key, so a split serves its candidates in descending
+/// `HitRank` and every candidate it has not served ranks at or below its last
+/// served one. Two candidates of one entity with equal scores have equal
+/// ranks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct HitRank {
+    score_bits: u32,
+    entity_id: Reverse<u64>,
+}
+
+impl HitRank {
+    const fn new(score: f32, entity_id: u64) -> Self {
+        Self {
+            score_bits: score.to_bits(),
+            entity_id: Reverse(entity_id),
+        }
+    }
 }
 
 enum SplitSearchReader {
@@ -749,6 +872,10 @@ impl SplitSearchReader {
     }
 }
 
+/// Reads the live state of at most 512 distinct entities into `live_states`.
+///
+/// A legacy entity without a state row maps to `None`, which accepts every
+/// version; a V2 entity must have a state row.
 async fn load_text_live_states_batch(
     reader: &(impl DbReadOps + Send + Sync),
     state_source: TextLiveStateSource<'_>,
@@ -787,13 +914,6 @@ async fn load_text_live_states_batch(
         }
     }
     Ok(())
-}
-
-fn text_candidate_matches_live_state(
-    candidate: &TextSearchCandidate,
-    state: Option<&TextIndexLiveState>,
-) -> bool {
-    state.is_none_or(|state| state.live && state.logical_version == candidate.logical_version)
 }
 
 async fn open_manifest_index(
@@ -1694,6 +1814,134 @@ fn search_index(
     search_reader(&reader, fields, analyzer, query, k)
 }
 
+/// Analysis bytes of the pending documents each overlay scored, by index
+/// label, so a test bounds its own searches' analysis without observing
+/// searches of tests running beside it.
+#[cfg(test)]
+pub(crate) static PENDING_ANALYSIS_BYTES: std::sync::Mutex<Vec<(String, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Pending documents one scoring step scores between cancellation checks.
+const PENDING_SCORE_CHUNK: usize = 4_096;
+
+/// Scores pending documents exactly as persisted splits score them.
+///
+/// Each document arrives analyzed ([`analyze_text_for_indexing`]), possibly
+/// by an earlier search, and is scored from that analysis in place rather
+/// than copied into an in-memory index, and only the `k` best are kept, so a
+/// search's memory grows with `k`, not its documents. Every query term is
+/// one OR clause weighted by Tantivy's BM25 for the caller-supplied
+/// statistics, as each persisted term query weighs it; a document's field
+/// norm and term frequencies are those indexing its token stream records. A
+/// document matching no term never ranks, and hits rank by score, then
+/// ascending entity ID, as the persisted collector ranks them. Clause scores
+/// are summed in query-term order: Tantivy's own order varies with index
+/// layout, so a document matching three or more terms may differ from its
+/// published score in the last place, as it may between two persisted
+/// layouts.
+///
+/// The caller restricts `documents` to the search's traversal scope and
+/// selected them within `analysis_limit` of charged analysis, so documents
+/// charged past it are an invariant violation rather than a limit a request
+/// can reach. Scoring calls `check` before each step of at most 4,096
+/// documents and stops with its error.
+pub(crate) fn search_pending_documents(
+    definition: &TextIndexDefinition,
+    documents: &[(u64, Arc<IndexedTextAnalysis>)],
+    analysis_limit: NonZeroU64,
+    query: &str,
+    k: usize,
+    statistics: &crate::index_lifecycle::text::statistics::TextBm25Statistics,
+    mut check: impl FnMut() -> Result<(), HelixDbError>,
+) -> Result<Vec<TextSearchHit>, HelixDbError> {
+    let terms = analyze_query_terms(definition.analyzer(), query);
+    if documents.is_empty() || terms.is_empty() || k == 0 {
+        return Ok(Vec::new());
+    }
+    let charged = documents
+        .iter()
+        .map(|(_, analysis)| analysis.retained_bytes())
+        .fold(0, u64::saturating_add);
+    if charged > analysis_limit.get() {
+        return Err(HelixDbError::InvariantViolation(format!(
+            "pending text analysis reached {charged} bytes past the {analysis_limit} its \
+             selection was sized to"
+        )));
+    }
+    #[cfg(test)]
+    PENDING_ANALYSIS_BYTES
+        .lock()
+        .expect("pending analysis log is never poisoned")
+        .push((definition.label().to_string(), charged));
+    let (_, fields) = build_schema(definition.analyzer(), definition.positions_enabled());
+    let weights = terms
+        .iter()
+        .map(|term| {
+            tantivy::query::Bm25Weight::for_terms(
+                statistics,
+                &[Term::from_field_text(fields.body, term)],
+            )
+        })
+        .collect::<tantivy::Result<Vec<_>>>()
+        .map_err(|error| {
+            HelixDbError::InvariantViolation(format!(
+                "pending text statistics failed to weigh a query term: {error}"
+            ))
+        })?;
+    // Analyzed query terms are unique and sorted, so each token finds its
+    // clause by binary search; the counts are reused across documents rather
+    // than allocated per document.
+    debug_assert!(terms.is_sorted());
+    let mut term_frequencies = vec![0_u32; terms.len()];
+    let mut score = |analysis: &IndexedTextAnalysis| {
+        term_frequencies.fill(0);
+        analysis
+            .pre_tokenized
+            .tokens
+            .iter()
+            .filter_map(|token| terms.binary_search(&token.text).ok())
+            .for_each(|clause| {
+                term_frequencies[clause] = term_frequencies[clause].saturating_add(1);
+            });
+        let fieldnorm_id = tantivy::fieldnorm::FieldNormReader::fieldnorm_to_id(
+            u32::try_from(analysis.statistics.token_count).unwrap_or(u32::MAX),
+        );
+        term_frequencies
+            .iter()
+            .zip(&weights)
+            .filter(|(frequency, _)| **frequency > 0)
+            .map(|(frequency, weight)| weight.score(fieldnorm_id, *frequency))
+            .reduce(|total, score| total + score)
+    };
+    let rank = |left: &TextSearchHit, right: &TextSearchHit| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+    };
+    // Only a document among a step's `k` best, ties broken by entity ID, can
+    // be among the `k` best overall.
+    let mut hits = documents.chunks(PENDING_SCORE_CHUNK).try_fold(
+        Vec::with_capacity(k.saturating_add(PENDING_SCORE_CHUNK).min(documents.len())),
+        |mut best, chunk| {
+            check()?;
+            best.extend(chunk.iter().filter_map(|(entity_id, analysis)| {
+                score(analysis).map(|score| TextSearchHit {
+                    entity_id: *entity_id,
+                    score,
+                })
+            }));
+            if best.len() > k {
+                best.select_nth_unstable_by(k - 1, rank);
+                best.truncate(k);
+            }
+            Ok::<_, HelixDbError>(best)
+        },
+    )?;
+    hits.sort_unstable_by(rank);
+    Ok(hits)
+}
+
 fn build_reader(index: &Index) -> Result<IndexReader, HelixDbError> {
     let reader = index
         .reader_builder()
@@ -1806,7 +2054,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
             .first_or_default_col(0);
         move |doc, score: f32| {
             debug_assert!(score.is_finite() && score >= 0.0);
-            (score.to_bits(), Reverse(entity_ids.get_val(doc)))
+            HitRank::new(score, entity_ids.get_val(doc))
         }
     });
     let docs = match scope {
@@ -1834,7 +2082,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
     .map_err(|err| HelixDbError::Config(format!("failed to execute Tantivy search: {err}")))?;
 
     let mut hits = Vec::with_capacity(docs.len());
-    for ((score_bits, Reverse(sort_entity_id)), address) in docs {
+    for (rank, address) in docs {
         let entity_id = entity_id_columns
             .get(address.segment_ord as usize)
             .ok_or_else(|| {
@@ -1849,7 +2097,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
                     "text index document is missing the entity_id field".into(),
                 )
             })?;
-        if entity_id != sort_entity_id {
+        if entity_id != rank.entity_id.0 {
             return Err(HelixDbError::InvariantViolation(
                 "text deterministic collector observed inconsistent entity IDs".to_string(),
             ));
@@ -1878,7 +2126,7 @@ pub(crate) fn search_reader_candidates_with_statistics(
         hits.push(TextSearchCandidate {
             entity_id,
             logical_version,
-            score: f32::from_bits(score_bits),
+            score: f32::from_bits(rank.score_bits),
         });
     }
     Ok(hits)
@@ -1929,8 +2177,38 @@ impl IndexedTextAnalysis {
         self.pre_tokenized
     }
 
+    /// Returns the analyzed text.
+    pub(crate) fn text(&self) -> &str {
+        &self.pre_tokenized.text
+    }
+
     pub(crate) fn retained_bytes(&self) -> u64 {
         self.retained_bytes
+    }
+
+    /// Charges `budget` exactly what analyzing this text again under it
+    /// would ([`analyze_text_for_indexing`]): [`Self::retained_bytes`] when
+    /// it fits, or else the same refusal, at the same token, that analysis
+    /// reports.
+    pub(crate) fn recharge(
+        &self,
+        budget: &mut TextAnalysisMemoryBudget,
+    ) -> Result<(), HelixDbError> {
+        if budget.try_reserve(self.retained_bytes).is_ok() {
+            return Ok(());
+        }
+        // Analysis charged the text, then each retained token in order, and
+        // nothing else, so replaying those charges fails where it would.
+        budget
+            .try_reserve(u64::try_from(self.pre_tokenized.text.capacity()).unwrap_or(u64::MAX))?;
+        self.pre_tokenized.tokens.iter().try_for_each(|token| {
+            budget.try_reserve(indexed_token_charge(
+                u64::try_from(token.text.len()).unwrap_or(u64::MAX),
+            ))
+        })?;
+        Err(HelixDbError::InvariantViolation(
+            "a text analysis's charges fit a budget its total did not".to_string(),
+        ))
     }
 }
 
@@ -1951,6 +2229,8 @@ impl TextAnalysisMemoryBudget {
         Self { limit, used: 0 }
     }
 
+    /// Charges `additional` bytes, or fails with the charge it would reach
+    /// past the limit and charges nothing.
     fn try_reserve(&mut self, additional: u64) -> Result<(), HelixDbError> {
         let observed = self.used.saturating_add(additional);
         if observed > self.limit.get() {
@@ -1968,6 +2248,133 @@ impl TextAnalysisMemoryBudget {
     const fn used(&self) -> u64 {
         self.used
     }
+}
+
+/// Bytes a [`TextAnalysisMemoryBudget`] charges for one retained indexed token.
+///
+/// Conservatively covers vector over-allocation, owned token text,
+/// unique-term tree/vector storage, and downstream Tantivy copies.
+pub(crate) const fn indexed_token_charge(token_bytes: u64) -> u64 {
+    const OVERHEAD: u64 = (core::mem::size_of::<Token>() * 3
+        + core::mem::size_of::<Bytes>() * 2
+        + core::mem::size_of::<usize>() * 6) as u64;
+    OVERHEAD.saturating_add(token_bytes.saturating_mul(3))
+}
+
+/// Split bytes that do not grow with the document, rounded up to over twice
+/// the largest measured: Tantivy's meta, managed, fast-field, field-norm,
+/// store, and file footers, plus the bundle footer and hotcache.
+const SINGLE_DOCUMENT_SPLIT_OVERHEAD: u64 = 16 * 1024;
+
+/// Upper bound on the immutable split holding only one document that a
+/// [`TextAnalysisMemoryBudget`] charged `analysis_bytes`.
+///
+/// The body is indexed but not stored. Beyond its fixed layout, a split
+/// stores each distinct term in up to three places (its term-dictionary
+/// block, the block index, and the hotcache's copy of that index) plus a few
+/// bytes of frequency and position per token. Analysis charges every retained
+/// token [`indexed_token_charge`] (over 280 bytes plus three per token byte)
+/// on top of the text, and lowercasing grows a token to at most one and a
+/// half times its text, so every token byte is charged more than three and a
+/// half bytes. Adversarial documents measure below 0.71 of their charge
+/// beyond the fixed layout
+/// (`single_document_splits_stay_within_the_analysis_bound`).
+pub(crate) const fn single_document_split_bytes(analysis_bytes: u64) -> u64 {
+    SINGLE_DOCUMENT_SPLIT_OVERHEAD.saturating_add(analysis_bytes)
+}
+
+/// What indexing one document charges and retains, as admission sizes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextAnalysisTotals {
+    /// Bytes [`analyze_text_for_indexing`] charges for an owned copy of the
+    /// text whose capacity equals its length.
+    pub(crate) analysis_bytes: u64,
+    /// Bytes of the source text.
+    pub(crate) text_bytes: u64,
+    /// Distinct indexed terms.
+    pub(crate) unique_terms: u64,
+    /// Bytes of all distinct indexed terms together.
+    pub(crate) unique_term_bytes: u64,
+}
+
+impl TextAnalysisTotals {
+    /// Returns totals no analyzer exceeds for ASCII `text`, without running
+    /// one; `None` for other text, whose lowercase forms can grow.
+    ///
+    /// Both tokenizers emit disjoint, non-empty substrings of the text.
+    /// Lowercasing keeps an ASCII token's length, and English stemming only
+    /// deletes a suffix or replaces it with an ASCII one no longer than it.
+    /// An ASCII text of `L` bytes therefore yields at most `L` tokens holding
+    /// at most `L` bytes, so every total is at most its value for `L` distinct
+    /// one-byte terms.
+    pub(crate) fn ascii_bound(text: &str) -> Option<Self> {
+        text.is_ascii().then(|| {
+            let bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
+            Self {
+                analysis_bytes: bytes.saturating_add(bytes.saturating_mul(indexed_token_charge(1))),
+                text_bytes: bytes,
+                unique_terms: bytes,
+                unique_term_bytes: bytes,
+            }
+        })
+    }
+}
+
+/// Analyzes `text` like [`analyze_text`] while charging `budget` exactly what
+/// [`analyze_text_for_indexing`] charges for an owned copy of it whose
+/// capacity equals its length.
+///
+/// Only distinct terms are retained, and analysis stops at the first token
+/// the budget rejects, so sizing a document neither copies its text nor
+/// keeps its token stream.
+pub(crate) fn analyze_text_within_budget(
+    analyzer: TextAnalyzerKind,
+    text: &str,
+    budget: &mut TextAnalysisMemoryBudget,
+) -> Result<(AnalyzedText, TextAnalysisTotals), HelixDbError> {
+    let charged_before = budget.used;
+    let text_bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
+    budget.try_reserve(text_bytes)?;
+    let mut terms = BTreeSet::<Bytes>::new();
+    let mut token_count = 0_u64;
+    let mut text_analyzer = build_text_analyzer(analyzer);
+    let mut stream = text_analyzer.token_stream(text);
+    // Tantivy streams tokens through one reused buffer rather than an
+    // iterator, and the loop returns at the first rejected charge.
+    while stream.advance() {
+        let term = stream.token().text.as_bytes();
+        if term.is_empty() || term.len() > MAX_TOKEN_LEN {
+            continue;
+        }
+        budget.try_reserve(indexed_token_charge(
+            u64::try_from(term.len()).unwrap_or(u64::MAX),
+        ))?;
+        token_count = token_count
+            .checked_add(1)
+            .expect("an in-memory text cannot contain more than u64 tokens");
+        if !terms.contains(term) {
+            terms.insert(Bytes::copy_from_slice(term));
+        }
+    }
+    let totals = TextAnalysisTotals {
+        analysis_bytes: budget
+            .used
+            .checked_sub(charged_before)
+            .expect("text analysis budget consumption is monotonic"),
+        text_bytes,
+        unique_terms: u64::try_from(terms.len()).unwrap_or(u64::MAX),
+        unique_term_bytes: terms
+            .iter()
+            .map(|term| u64::try_from(term.len()).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add),
+    };
+    Ok((
+        AnalyzedText {
+            token_count,
+            unique_terms: terms.into_iter().collect(),
+        },
+        totals,
+    ))
 }
 
 /// Applies the production analyzer and Tantivy's postings token-length boundary.
@@ -2011,21 +2418,9 @@ pub(crate) fn analyze_text_for_indexing(
             return;
         }
         if !token.text.is_empty() && token.text.len() <= MAX_TOKEN_LEN {
-            // Conservatively cover vector over-allocation, owned token text,
-            // unique-term tree/vector storage, and downstream Tantivy copies.
-            let retained_token_bytes = u64::try_from(
-                core::mem::size_of::<Token>()
-                    .saturating_mul(3)
-                    .saturating_add(core::mem::size_of::<Bytes>().saturating_mul(2))
-                    .saturating_add(core::mem::size_of::<usize>().saturating_mul(6)),
-            )
-            .unwrap_or(u64::MAX)
-            .saturating_add(
-                u64::try_from(token.text.len())
-                    .unwrap_or(u64::MAX)
-                    .saturating_mul(3),
-            );
-            if let Err(error) = budget.try_reserve(retained_token_bytes) {
+            if let Err(error) = budget.try_reserve(indexed_token_charge(
+                u64::try_from(token.text.len()).unwrap_or(u64::MAX),
+            )) {
                 analysis_error = Some(error);
                 return;
             }
@@ -2456,6 +2851,307 @@ mod tests {
         }
     }
 
+    /// Analyzes `text` as a text search analyzes pending documents.
+    fn pending_analysis(text: &str) -> Arc<IndexedTextAnalysis> {
+        Arc::new(
+            analyze_text_for_indexing(
+                TextAnalyzerKind::Standard,
+                text.to_string(),
+                &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Statistics of `documents` plus `others` documents published beside
+    /// them, holding `other_tokens` tokens and each analyzed term
+    /// `other_frequency` times.
+    fn corpus_statistics(
+        documents: &[(u64, Arc<IndexedTextAnalysis>)],
+        others: u64,
+        other_tokens: u64,
+        other_frequency: u64,
+    ) -> crate::index_lifecycle::text::statistics::TextBm25Statistics {
+        let mut frequencies = BTreeMap::<Bytes, u64>::new();
+        documents
+            .iter()
+            .flat_map(|(_, analysis)| &analysis.statistics.unique_terms)
+            .for_each(|term| *frequencies.entry(term.clone()).or_default() += 1);
+        frequencies
+            .values_mut()
+            .for_each(|frequency| *frequency += other_frequency.min(others));
+        crate::index_lifecycle::text::statistics::TextBm25Statistics::for_benchmark(
+            documents.len() as u64 + others,
+            documents
+                .iter()
+                .map(|(_, analysis)| analysis.statistics.token_count)
+                .sum::<u64>()
+                + other_tokens,
+            frequencies,
+        )
+    }
+
+    /// What a Tantivy index of `documents`, built as publication builds a
+    /// split, answers for the same statistics and scope.
+    fn indexed_hits(
+        documents: &[(u64, Arc<IndexedTextAnalysis>)],
+        query: &str,
+        k: usize,
+        statistics: &crate::index_lifecycle::text::statistics::TextBm25Statistics,
+        scope: &TextSearchScope,
+    ) -> Vec<TextSearchHit> {
+        let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+        let (index, fields) = create_ram_index(&definition).unwrap();
+        populate_analyzed_index(
+            &index,
+            fields,
+            documents
+                .iter()
+                .map(|(entity_id, analysis)| AnalyzedTextDocumentInput {
+                    entity_id: *entity_id,
+                    logical_version: 0,
+                    analyzed: (**analysis).clone(),
+                })
+                .collect(),
+        )
+        .unwrap();
+        let reader = build_reader(&index).unwrap();
+        search_reader_candidates_with_statistics(
+            &reader,
+            fields,
+            definition.analyzer(),
+            query,
+            k,
+            Some(statistics),
+            scope,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|candidate| TextSearchHit {
+            entity_id: candidate.entity_id,
+            score: candidate.score,
+        })
+        .collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Scoring pending analyses in place answers exactly what indexing
+        /// them answers, to the bit, for queries of up to two terms: field
+        /// norms past Tantivy's lossless range, repeated terms, documents
+        /// matching nothing or holding no token, ties, restricted scopes,
+        /// and corpus statistics beyond the pending documents.
+        #[test]
+        fn pending_documents_score_exactly_as_an_index_of_them(
+            bodies in prop::collection::vec(prop::collection::vec(0_usize..5, 0..120), 1..24),
+            query in prop::collection::vec(0_usize..6, 1..3),
+            restricted in prop::option::of(prop::collection::vec(0_u64..80, 0..40)),
+            published in (0_u64..1_000, 0_u64..50_000, 0_u64..1_000),
+            k in 1_usize..30,
+        ) {
+            const WORDS: [&str; 6] = ["alpha", "beta", "gamma", "delta", "epsilon", "missing"];
+            let (others, other_tokens, other_frequency) = published;
+            let documents = bodies
+                .iter()
+                .enumerate()
+                .map(|(ordinal, words)| {
+                    let text = words.iter().map(|word| WORDS[*word]).collect::<Vec<_>>();
+                    (ordinal as u64 * 3 + 1, pending_analysis(&text.join(" ")))
+                })
+                .collect::<Vec<_>>();
+            let statistics = corpus_statistics(&documents, others, other_tokens, other_frequency);
+            let query = query.iter().map(|word| WORDS[*word]).collect::<Vec<_>>().join(" ");
+            let scope = restricted.map_or(TextSearchScope::Unrestricted, |ids| {
+                TextSearchScope::restricted(Arc::new(RestrictedTextCandidates::from_ids(ids).unwrap()))
+            });
+            let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+            // The caller passes only documents in scope.
+            let in_scope = documents
+                .iter()
+                .filter(|(id, _)| scope.candidates().is_none_or(|ids| ids.contains(*id)))
+                .cloned()
+                .collect::<Vec<_>>();
+            let scored = search_pending_documents(
+                &definition,
+                &in_scope,
+                NonZeroU64::MAX,
+                &query,
+                k,
+                &statistics,
+                || Ok(()),
+            )
+            .unwrap();
+            prop_assert_eq!(scored, indexed_hits(&documents, &query, k, &statistics, &scope));
+        }
+    }
+
+    /// Past two matching terms only the float sum order may differ from an
+    /// index's, never the hits or more than rounding.
+    #[test]
+    fn pending_documents_matching_many_terms_score_within_rounding_of_an_index() {
+        let documents = (0..40_u64)
+            .map(|id| {
+                let filler = "epsilon ".repeat(usize::try_from(id).unwrap());
+                (
+                    id,
+                    pending_analysis(&format!("alpha beta gamma delta {filler}")),
+                )
+            })
+            .collect::<Vec<_>>();
+        let statistics = corpus_statistics(&documents, 100, 4_000, 7);
+        let query = "delta gamma beta alpha epsilon";
+        let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+        let by_id = |mut hits: Vec<TextSearchHit>| {
+            hits.sort_by_key(|hit| hit.entity_id);
+            hits
+        };
+        let scored = by_id(
+            search_pending_documents(
+                &definition,
+                &documents,
+                NonZeroU64::MAX,
+                query,
+                documents.len(),
+                &statistics,
+                || Ok(()),
+            )
+            .unwrap(),
+        );
+        let indexed = by_id(indexed_hits(
+            &documents,
+            query,
+            documents.len(),
+            &statistics,
+            &TextSearchScope::Unrestricted,
+        ));
+        assert_eq!(scored.len(), documents.len());
+        for (scored, indexed) in scored.iter().zip(&indexed) {
+            assert_eq!(scored.entity_id, indexed.entity_id);
+            assert!(
+                (scored.score - indexed.score).abs() <= indexed.score * 4.0 * f32::EPSILON,
+                "{scored:?} vs {indexed:?}"
+            );
+        }
+    }
+
+    /// Ties keep the lowest entity IDs; a zero `k` or a query without terms
+    /// finds nothing; documents charged past the bound their selection was
+    /// sized to are an invariant violation, not a result.
+    #[test]
+    fn pending_document_scoring_ranks_ties_and_rejects_impossible_input() {
+        let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+        let documents = [9_u64, 4, 7, 1, 5]
+            .map(|id| (id, pending_analysis("alpha beta")))
+            .to_vec();
+        let statistics = corpus_statistics(&documents, 0, 0, 0);
+        let search = |query: &str, k: usize, limit: u64| {
+            search_pending_documents(
+                &definition,
+                &documents,
+                NonZeroU64::new(limit).unwrap(),
+                query,
+                k,
+                &statistics,
+                || Ok(()),
+            )
+        };
+        let charged = documents
+            .iter()
+            .map(|(_, analysis)| analysis.retained_bytes())
+            .sum::<u64>();
+        let top = search("alpha", 3, charged).unwrap();
+        assert_eq!(
+            top.iter().map(|hit| hit.entity_id).collect::<Vec<_>>(),
+            [1, 4, 5]
+        );
+        assert_eq!(
+            top,
+            indexed_hits(
+                &documents,
+                "alpha",
+                3,
+                &statistics,
+                &TextSearchScope::Unrestricted
+            )
+        );
+        assert!(search("alpha", 0, charged).unwrap().is_empty());
+        assert!(search("!! ??", 3, charged).unwrap().is_empty());
+        assert!(matches!(
+            search("alpha", 3, charged - 1),
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+    }
+
+    /// Scoring in steps keeps exactly the `k` best of every document, ties
+    /// across steps included, and checks before each step, stopping with
+    /// the check's error.
+    #[test]
+    fn pending_document_scoring_keeps_the_k_best_across_steps_and_checks_each() {
+        let definition = TextIndexDefinition::new_node("Doc", "body").unwrap();
+        let count = 2 * PENDING_SCORE_CHUNK as u64 + 5;
+        // Field norms repeat every seven documents, so scores tie across
+        // steps; every fifth document matches nothing.
+        let documents = (0..count)
+            .map(|id| {
+                let body = if id % 5 == 0 {
+                    "other".to_string()
+                } else {
+                    format!("alpha {}", "beta ".repeat(usize::try_from(id % 7).unwrap()))
+                };
+                (count - id, pending_analysis(&body))
+            })
+            .collect::<Vec<_>>();
+        let statistics = corpus_statistics(&documents, 0, 0, 0);
+        for k in [1, 10, PENDING_SCORE_CHUNK + 1, count as usize] {
+            let mut checks = 0;
+            let scored = search_pending_documents(
+                &definition,
+                &documents,
+                NonZeroU64::MAX,
+                "alpha",
+                k,
+                &statistics,
+                || {
+                    checks += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(checks, 3, "k {k}");
+            assert_eq!(
+                scored,
+                indexed_hits(
+                    &documents,
+                    "alpha",
+                    k,
+                    &statistics,
+                    &TextSearchScope::Unrestricted
+                ),
+                "k {k}"
+            );
+        }
+        let mut checks = 0;
+        let error = search_pending_documents(
+            &definition,
+            &documents,
+            NonZeroU64::MAX,
+            "alpha",
+            10,
+            &statistics,
+            || {
+                checks += 1;
+                if checks == 2 {
+                    return Err(HelixDbError::QueryDeadlineExceeded);
+                }
+                Ok(())
+            },
+        )
+        .expect_err("a failed check stops scoring");
+        assert!(matches!(error, HelixDbError::QueryDeadlineExceeded));
+        assert_eq!(checks, 2);
+    }
+
     #[test]
     fn standard_analyzer_matches_timestamp_style_suffix_tokens() {
         let definition =
@@ -2492,6 +3188,101 @@ mod tests {
         assert!(build_documents_as_split(&definition, &[])
             .expect("empty split build")
             .is_none());
+    }
+
+    /// Worst-case one-document splits stay within the bound admission charges.
+    ///
+    /// Long distinct terms that share a stem in pairs keep the block index
+    /// from shortening its keys, random two-byte and case-expanding characters
+    /// resist compression and grow when lowercased, and many short or
+    /// repeated terms stress postings, positions, and the fixed layout.
+    #[test]
+    fn single_document_splits_stay_within_the_analysis_bound() {
+        let mut state = 7_u64;
+        let mut random = |alphabet: &[char], len: usize| {
+            (0..len)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    alphabet[usize::try_from(state >> 33).unwrap() % alphabet.len()]
+                })
+                .collect::<String>()
+        };
+        let printable = ('!'..='~').collect::<Vec<_>>();
+        let two_byte = ('\u{100}'..='\u{7FF}')
+            .filter(|character| !character.is_whitespace())
+            .collect::<Vec<_>>();
+        let expanding = ['\u{130}', '\u{23A}', '\u{23E}'];
+        let mut paired = |alphabet: &[char], stems: usize, len: usize| {
+            (0..stems)
+                .map(|_| random(alphabet, len))
+                .flat_map(|stem| [format!("{stem}0 "), format!("{stem}1 ")])
+                .collect::<String>()
+        };
+        let documents = [
+            "a".to_string(),
+            " ".to_string(),
+            "x".repeat(MAX_TOKEN_LEN + 1),
+            paired(&two_byte, 10, 30_000),
+            paired(&two_byte, 50, 4_000),
+            paired(&expanding, 50, 4_000),
+            paired(&printable, 200, 1_000),
+            paired(&printable, 5_000, 3),
+            "a ".repeat(100_000),
+            (0..100_000)
+                .map(|index| format!("t{} ", (index * 7_919) % 4_000))
+                .collect(),
+        ];
+        let mut worst = 0.0_f64;
+        for analyzer in [
+            TextAnalyzerKind::Standard,
+            TextAnalyzerKind::StandardStemEn,
+            TextAnalyzerKind::WhitespaceLowercase,
+        ] {
+            for positions in [false, true] {
+                let definition = TextIndexDefinition::new_node("Doc", "body")
+                    .expect("test text definition is valid")
+                    .with_analyzer(analyzer)
+                    .with_positions_enabled(positions);
+                for text in &documents {
+                    let (_, totals) = analyze_text_within_budget(
+                        analyzer,
+                        text,
+                        &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                    )
+                    .expect("an unbounded budget admits every document");
+                    let analyzed = analyze_text_for_indexing(
+                        analyzer,
+                        text.clone(),
+                        &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                    )
+                    .expect("an unbounded budget admits every document");
+                    let (payload, _, _) = build_analyzed_documents_as_split(
+                        &definition,
+                        vec![AnalyzedTextDocumentInput {
+                            entity_id: u64::MAX,
+                            logical_version: u64::MAX,
+                            analyzed,
+                        }],
+                    )
+                    .expect("build one-document split")
+                    .expect("one document produces a split")
+                    .into_parts();
+                    let split = u64::try_from(payload.len()).unwrap();
+                    assert!(
+                        split <= single_document_split_bytes(totals.analysis_bytes),
+                        "{analyzer:?} positions={positions}: {split} bytes for {totals:?}"
+                    );
+                    worst = worst.max(
+                        split.saturating_sub(SINGLE_DOCUMENT_SPLIT_OVERHEAD) as f64
+                            / totals.analysis_bytes.max(1) as f64,
+                    );
+                }
+            }
+        }
+        // The stem pairs reach the adversarial regime the bound must cover.
+        assert!(worst > 0.5, "{worst}");
     }
 
     #[test]
@@ -2646,6 +3437,150 @@ mod tests {
             } if observed > limit.get()
         ));
         assert!(budget.used() <= limit.get());
+    }
+
+    const ANALYZERS: [TextAnalyzerKind; 3] = [
+        TextAnalyzerKind::Standard,
+        TextAnalyzerKind::StandardStemEn,
+        TextAnalyzerKind::WhitespaceLowercase,
+    ];
+
+    /// Words that exercise every English stemmer rewrite and exception.
+    const STEMMER_WORDS: &str = "caresses ponies ties cries gas this eed agreed feed \
+        plastered bled motoring sing conflated troubled sized hopping tanned falling \
+        hissing fizzed failing filing happy sky relational conditional rational valenci \
+        hesitanci digitizer conformabli radicalli differentli vileli analogousli \
+        vietnamization predication operator feudalism decisiveness hopefulness \
+        callousness formaliti sensitiviti sensibiliti fruitfulli lessli archaeologi \
+        triplicate formative formalize electriciti electrical hopeful goodness revival \
+        allowance inference airliner gyroscopic adjustable defensible irritant \
+        replacement adjustment dependent adoption homologou communism activate \
+        angulariti homologous effective bowdlerize probate rate cease skis skies dying \
+        lying tying idly gently ugly early only singly news howe atlas cosmos bias andes \
+        inning outing canning herring earring proceed exceed succeed generously arsenal \
+        communal generate yying sayings";
+
+    fn sizing_corpus() -> Vec<String> {
+        vec![
+            String::new(),
+            "!!! ???".to_string(),
+            "Hello, happy tax payer!".to_string(),
+            "a a a b b c".to_string(),
+            "Ünïcödé İstanbul ΣΊΣΥΦΟΣ Ⱥ ǅ ß".to_string(),
+            "x".repeat(70_000),
+            STEMMER_WORDS.to_string(),
+        ]
+    }
+
+    /// Budgeted sizing counts exactly what indexing analysis retains and
+    /// charges, and both reject one byte below that charge identically.
+    #[test]
+    fn budgeted_sizing_matches_indexing_analysis_exactly() {
+        for analyzer in ANALYZERS {
+            for text in sizing_corpus() {
+                let indexed = analyze_text_for_indexing(
+                    analyzer,
+                    text.clone(),
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .unwrap();
+                let (statistics, totals) = analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .unwrap();
+                assert_eq!(&statistics, indexed.statistics());
+                assert_eq!(statistics, analyze_text(analyzer, &text));
+                assert_eq!(totals.analysis_bytes, indexed.retained_bytes());
+                assert_eq!(totals.text_bytes, text.len() as u64);
+                assert_eq!(totals.unique_terms, statistics.unique_terms.len() as u64);
+                assert_eq!(
+                    totals.unique_term_bytes,
+                    statistics
+                        .unique_terms
+                        .iter()
+                        .map(|term| term.len() as u64)
+                        .sum::<u64>()
+                );
+                let Some(short) = NonZeroU64::new(totals.analysis_bytes.saturating_sub(1)) else {
+                    continue;
+                };
+                analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(
+                        NonZeroU64::new(totals.analysis_bytes).unwrap(),
+                    ),
+                )
+                .expect("the exact charge is admitted");
+                let sized = analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(short),
+                )
+                .map(drop)
+                .unwrap_err();
+                let full = analyze_text_for_indexing(
+                    analyzer,
+                    text.clone(),
+                    &mut TextAnalysisMemoryBudget::new(short),
+                )
+                .map(drop)
+                .unwrap_err();
+                assert_eq!(sized.to_string(), full.to_string(), "{analyzer:?}");
+            }
+        }
+    }
+
+    /// The ASCII bound covers every analyzer, stemming included, and is
+    /// refused for text whose lowercase forms can grow.
+    #[test]
+    fn ascii_bound_covers_every_analyzer_or_is_refused() {
+        for text in sizing_corpus() {
+            let Some(bound) = TextAnalysisTotals::ascii_bound(&text) else {
+                assert!(!text.is_ascii());
+                continue;
+            };
+            for analyzer in ANALYZERS {
+                let (_, exact) = analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .unwrap();
+                assert!(exact.analysis_bytes <= bound.analysis_bytes, "{analyzer:?}");
+                assert_eq!(exact.text_bytes, bound.text_bytes);
+                assert!(exact.unique_terms <= bound.unique_terms, "{analyzer:?}");
+                assert!(
+                    exact.unique_term_bytes <= bound.unique_term_bytes,
+                    "{analyzer:?}"
+                );
+            }
+        }
+        // Stemming never lengthens a word, so no stem outgrows its source.
+        for word in STEMMER_WORDS.split_whitespace() {
+            let stems = analyze_text(TextAnalyzerKind::StandardStemEn, word).unique_terms;
+            assert!(stems.iter().all(|stem| stem.len() <= word.len()), "{word}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn ascii_bound_never_undercounts(text in "[ -~]{0,160}") {
+            let bound = TextAnalysisTotals::ascii_bound(&text).unwrap();
+            for analyzer in ANALYZERS {
+                let (_, exact) = analyze_text_within_budget(
+                    analyzer,
+                    &text,
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .unwrap();
+                prop_assert!(exact.analysis_bytes <= bound.analysis_bytes);
+                prop_assert!(exact.unique_terms <= bound.unique_terms);
+                prop_assert!(exact.unique_term_bytes <= bound.unique_term_bytes);
+            }
+        }
     }
 
     #[tokio::test]

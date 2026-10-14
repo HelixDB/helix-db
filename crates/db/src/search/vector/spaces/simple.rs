@@ -182,6 +182,63 @@ pub fn dot_product_non_optimized(u: &UnalignedVector<f32>, v: &UnalignedVector<f
     dot_product_scalar(pair)
 }
 
+/// Return the sum of squared components, accumulated in f64.
+///
+/// Contract: every f32 square is exact in f64 (a 24-bit significand squared
+/// needs at most 48 bits, and squares of finite f32 values lie between 2^-298
+/// and 2^256, far inside the normal f64 range), so the only rounding is in the
+/// additions. Every kernel adds the same non-negative terms in some grouping, so
+/// whatever kernel this CPU selects the result is within a relative
+/// `(n - 1) * 2^-53` of the exact sum. Kernels may differ from each other in the
+/// last bits; callers that need a reproducible value must bound that error, as
+/// the cosine norm does. An empty vector sums to `+0.0`.
+///
+/// ```
+/// use db::search::vector::spaces::simple::squared_l2_norm;
+/// use db::search::vector::unaligned_vector::UnalignedVector;
+///
+/// let vector = UnalignedVector::from_slice(&[3.0_f32, -4.0]);
+/// assert_eq!(squared_l2_norm(&vector), 25.0);
+/// assert_eq!(squared_l2_norm(&UnalignedVector::from_slice(&[])).to_bits(), 0);
+/// ```
+#[inline(always)]
+pub fn squared_l2_norm(vector: &UnalignedVector<f32>) -> f64 {
+    #[cfg(feature = "force-vector-scalar-kernel")]
+    {
+        squared_l2_norm_scalar(vector)
+    }
+    #[cfg(not(feature = "force-vector-scalar-kernel"))]
+    {
+        let len = vector.len();
+        // SAFETY: each kernel arm runs only when `float_simd` detected the CPU
+        // feature that kernel enables, and every kernel reads exactly the
+        // `vector.len()` values the unaligned view holds.
+        match float_simd() {
+            #[cfg(target_arch = "x86_64")]
+            FloatSimd::AvxFma if len >= MIN_DIM_SIZE_AVX => unsafe { squared_norm_avx_fma(vector) },
+            #[cfg(target_arch = "x86_64")]
+            FloatSimd::Avx if len >= MIN_DIM_SIZE_AVX => unsafe { squared_norm_avx(vector) },
+            // SSE2, which the widening conversion needs, is baseline only on x86_64.
+            #[cfg(target_arch = "x86_64")]
+            FloatSimd::Sse if len >= MIN_DIM_SIZE_SIMD => unsafe { squared_norm_sse2(vector) },
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            FloatSimd::Neon if len >= MIN_DIM_SIZE_SIMD => unsafe { squared_norm_neon(vector) },
+            _ => squared_l2_norm_scalar(vector),
+        }
+    }
+}
+
+/// Scalar reference for [`squared_l2_norm`]: sequential f64 accumulation.
+///
+/// Folds from `+0.0` rather than using `Sum`, which starts from `-0.0`, so an
+/// empty vector yields `+0.0` like the SIMD kernels.
+pub(super) fn squared_l2_norm_scalar(vector: &UnalignedVector<f32>) -> f64 {
+    vector.iter().fold(0.0, |sum, component| {
+        let component = f64::from(component);
+        sum + component * component
+    })
+}
+
 /// Return the Manhattan distance after proving both inputs have one non-zero dimension.
 pub(crate) fn manhattan_distance(u: &UnalignedVector<f32>, v: &UnalignedVector<f32>) -> f32 {
     let pair = SameDimensionPair::try_new(u, v)
@@ -357,6 +414,32 @@ mod tests {
         let mismatch =
             std::panic::catch_unwind(|| dot_product_binary_quantized(&mismatched_u, &mismatched_v));
         assert!(mismatch.is_err());
+    }
+
+    #[test]
+    fn squared_l2_norm_dispatch_agrees_with_scalar_reference() {
+        use crate::search::vector::spaces::kernel_agreement::assert_squared_norm_kernel;
+
+        assert_squared_norm_kernel(squared_l2_norm, "dispatched squared norm");
+        assert_eq!(
+            squared_l2_norm(&UnalignedVector::from_slice(&[])).to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            squared_l2_norm(&UnalignedVector::from_slice(&[-0.0; 40])).to_bits(),
+            0.0_f64.to_bits()
+        );
+        // Powers of two keep every partial sum exact at both ends of the range.
+        let largest_power = 2.0_f32.powi(127);
+        assert_eq!(
+            squared_l2_norm(&UnalignedVector::from_slice(&[largest_power; 4096])),
+            2.0_f64.powi(12 + 254)
+        );
+        let subnormal = f32::from_bits(1);
+        assert_eq!(
+            squared_l2_norm(&UnalignedVector::from_slice(&[subnormal; 33])),
+            33.0 * f64::from(subnormal) * f64::from(subnormal)
+        );
     }
 
     #[test]

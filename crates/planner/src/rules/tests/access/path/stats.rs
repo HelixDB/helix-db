@@ -32,6 +32,7 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
         value: equality_literal(1),
     });
     let range = edge_access_expr(ir::EdgeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::EdgeRangeIndexMeta::try_new("likes_weight").unwrap(),
         key: likes_weight,
         range: lower_range(10),
@@ -143,7 +144,7 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
         &stats,
     );
 
-    assert_eq!(label.cost, storage.range_scan(cost::EstimatedRows::rows(4)));
+    assert_eq!(label.cost, storage.label_scan(cost::EstimatedRows::rows(4)));
     assert_eq!(
         equality.cost,
         storage
@@ -161,7 +162,7 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
         storage
             .bitmap_equality_lookup(cost::EstimatedRows::rows(7))
             .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(7)))
-            .serial(storage.predicate_eval(cost::EstimatedRows::rows(7)))
+            .serial(storage.stored_predicate_filter(cost::EstimatedRows::rows(7)))
     );
     assert_eq!(filtered.estimated_rows, cost::EstimatedRows::rows(7));
     assert_eq!(
@@ -169,7 +170,7 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
         storage
             .unique_equality_lookup(cost::EstimatedRows::rows(1))
             .serial(storage.secondary_row_materialization(cost::EstimatedRows::rows(1)))
-            .serial(storage.predicate_eval(cost::EstimatedRows::rows(1)))
+            .serial(storage.stored_predicate_filter(cost::EstimatedRows::rows(1)))
     );
     assert_eq!(unique_filtered.estimated_rows, cost::EstimatedRows::rows(1));
     assert_eq!(
@@ -180,7 +181,9 @@ fn access_path_rule_uses_stats_for_label_index_and_filtered_costs() {
                 unique_missing_stats_storage
                     .secondary_row_materialization(cost::EstimatedRows::ZERO),
             )
-            .serial(unique_missing_stats_storage.predicate_eval(cost::EstimatedRows::ZERO))
+            .serial(
+                unique_missing_stats_storage.stored_predicate_filter(cost::EstimatedRows::ZERO)
+            )
     );
     assert_eq!(
         unique_missing_stats_filtered.estimated_rows,

@@ -5,10 +5,8 @@
 //! not substitute access families, batch leaves, reorder children, or push
 //! windows across cursor operators.
 
-use std::collections::BTreeSet;
-
 use futures::future::BoxFuture;
-use futures::FutureExt;
+use futures::{FutureExt, TryStreamExt};
 use helix_ast::query::QueryValue;
 use helix_ast::value::PropertyValue as AstPropertyValue;
 use helix_planner::{exec, ir, properties};
@@ -17,10 +15,12 @@ use super::access::SearchReadLimit;
 use super::*;
 use crate::config::{TextElementType, VectorElementType};
 
+pub(super) mod literal;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EvaluatedCountWindow {
-    skip: usize,
-    take: Option<usize>,
+pub(super) struct EvaluatedCountWindow {
+    pub(super) skip: usize,
+    pub(super) take: Option<usize>,
 }
 
 // Keep leaf and recursive structural futures separate. Besides making a
@@ -34,6 +34,11 @@ enum CountCursorLeaf<'a> {
     NodeUnique {
         lookup: &'a exec::ExecNodeUniqueOwnerReadPlan,
         verification: &'a exec::ExecNodeAuthoritativeVerificationPlan,
+    },
+    NodeUniqueBatch {
+        index: &'a exec::ExecNodeUniqueEqualityIndex,
+        key: &'a helix_planner::catalog::ScopedPropertyKey,
+        values: &'a ir::AtLeast<exec::ExecIndexedEqualityValue, 2>,
     },
     NodeRange(&'a exec::ExecNodeVerifiedRangeScanPlan),
     EdgeRange(&'a exec::ExecEdgeVerifiedRangeScanPlan),
@@ -94,61 +99,10 @@ enum CountCursorLeaf<'a> {
     },
 }
 
-enum CountCursorStructural<'a> {
-    Union {
-        driver: &'a exec::ExecCountCursorPlan,
-        rest: &'a ir::AtLeast<exec::ExecCountCursorPlan, 1>,
-    },
-    Intersect {
-        driver: &'a exec::ExecCountCursorPlan,
-        rest: &'a ir::AtLeast<exec::ExecCountCursorPlan, 1>,
-    },
-    Filter {
-        input: &'a exec::ExecCountCursorPlan,
-        predicate: &'a ir::PredicatePlan,
-    },
-    Window {
-        input: &'a exec::ExecCountCursorPlan,
-        window: &'a exec::ExecCountWindowPlan,
-    },
-    Order {
-        input: &'a exec::ExecCountCursorPlan,
-        plan: &'a ir::OrderPlan,
-    },
-    Expand {
-        input: &'a exec::ExecCountCursorPlan,
-        plan: &'a ir::ExpandPlan,
-    },
-    VectorSearch {
-        input: &'a exec::ExecCountCursorPlan,
-        plan: &'a ir::RestrictedVectorSearchPlan,
-    },
-    TextSearch {
-        input: &'a exec::ExecCountCursorPlan,
-        plan: &'a ir::RestrictedTextSearchPlan,
-    },
-    Variable {
-        input: &'a exec::ExecCountCursorPlan,
-        op: &'a helix_planner::logical::PureStreamVariableOp,
-    },
-    Distinct {
-        input: &'a exec::ExecCountCursorPlan,
-        plan: exec::ExecCountDistinctPlan,
-    },
-}
-
 impl EvaluatedCountWindow {
     fn apply(self, cardinality: usize) -> usize {
         let cardinality = cardinality.saturating_sub(self.skip);
         self.take.map_or(cardinality, |take| cardinality.min(take))
-    }
-
-    fn apply_rows(self, rows: Vec<ExecutionRow>) -> Vec<ExecutionRow> {
-        let rows = rows.into_iter().skip(self.skip);
-        match self.take {
-            Some(take) => rows.take(take).collect(),
-            None => rows.collect(),
-        }
     }
 
     fn threshold(self) -> Option<usize> {
@@ -156,7 +110,7 @@ impl EvaluatedCountWindow {
     }
 }
 
-fn count_plan_window(plan: &exec::ExecCountPlan) -> Option<&exec::ExecCountWindowPlan> {
+pub(super) fn count_plan_window(plan: &exec::ExecCountPlan) -> Option<&exec::ExecCountWindowPlan> {
     match plan {
         exec::ExecCountPlan::Constant(_) => None,
         exec::ExecCountPlan::NodeBitmap(plan) => Some(&plan.window),
@@ -198,6 +152,7 @@ impl<'db> ExecutionContext<'db> {
         plan.validate().map_err(|error| {
             HelixDbError::InvariantViolation(format!("invalid count program: {error:?}"))
         })?;
+        pull::cardinality::validate_contract(self, plan)?;
         let evaluated_window = count_plan_window(plan)
             .map(|window| self.count_window(window))
             .transpose()?;
@@ -205,11 +160,13 @@ impl<'db> ExecutionContext<'db> {
             exec::ExecCountPlan::Constant(count) => *count,
             exec::ExecCountPlan::NodeBitmap(plan) => {
                 let window = evaluated_window.expect("bitmap counts carry a window");
-                window.apply(self.node_bitmap(&plan.bitmap).await?.len() as usize)
+                let read = self.node_bitmap(&plan.bitmap, access::PARALLEL_INDEX_READS);
+                window.apply(read.await?.len() as usize)
             }
             exec::ExecCountPlan::EdgeBitmap(plan) => {
                 let window = evaluated_window.expect("bitmap counts carry a window");
-                window.apply(self.edge_bitmap(&plan.bitmap).await?.len() as usize)
+                let read = self.edge_bitmap(&plan.bitmap, access::PARALLEL_INDEX_READS);
+                window.apply(read.await?.len() as usize)
             }
             exec::ExecCountPlan::NodeUnique(plan) => {
                 let window = evaluated_window.expect("unique counts carry a window");
@@ -222,17 +179,20 @@ impl<'db> ExecutionContext<'db> {
                 let filters = match &plan.membership {
                     exec::ExecNodeRangeMembershipPlan::All => Vec::new(),
                     exec::ExecNodeRangeMembershipPlan::BitmapFilters(filters) => {
-                        let mut bitmaps = Vec::with_capacity(filters.as_ref().len());
-                        for filter in filters {
-                            bitmaps.push(self.node_bitmap(filter).await?);
-                        }
-                        bitmaps
+                        self.read_children(
+                            filters.iter().collect(),
+                            access::PARALLEL_INDEX_READS,
+                            |filter, reads| self.node_bitmap(filter, reads),
+                        )
+                        .try_collect::<Vec<_>>()
+                        .await?
                     }
                 };
+                let membership = filters.iter().map(|bitmap| &**bitmap).collect::<Vec<_>>();
                 let read = self.node_range_index_count_with_membership(
                     &plan.driver.key,
                     &plan.driver.range,
-                    &filters,
+                    &membership,
                     window.threshold(),
                 );
                 let accepted = read.await?;
@@ -244,17 +204,20 @@ impl<'db> ExecutionContext<'db> {
                 let filters = match &plan.membership {
                     exec::ExecEdgeRangeMembershipPlan::All => Vec::new(),
                     exec::ExecEdgeRangeMembershipPlan::BitmapFilters(filters) => {
-                        let mut bitmaps = Vec::with_capacity(filters.as_ref().len());
-                        for filter in filters {
-                            bitmaps.push(self.edge_bitmap(filter).await?);
-                        }
-                        bitmaps
+                        self.read_children(
+                            filters.iter().collect(),
+                            access::PARALLEL_INDEX_READS,
+                            |filter, reads| self.edge_bitmap(filter, reads),
+                        )
+                        .try_collect::<Vec<_>>()
+                        .await?
                     }
                 };
+                let membership = filters.iter().map(|bitmap| &**bitmap).collect::<Vec<_>>();
                 let read = self.edge_range_index_count_with_membership(
                     &plan.driver.key,
                     &plan.driver.range,
-                    &filters,
+                    &membership,
                     window.threshold(),
                 );
                 let accepted = read.await?;
@@ -274,23 +237,45 @@ impl<'db> ExecutionContext<'db> {
             }
             exec::ExecCountPlan::NodePointReads { ids, .. } => {
                 let window = evaluated_window.expect("point-read counts carry a window");
-                let read = self.existing_node_count(ids.as_ref(), window.threshold());
+                let read = self.existing_count(
+                    exec::ElementKeyspace::NodeProperty,
+                    ids.as_ref(),
+                    window.threshold(),
+                );
                 window.apply(read.await?)
             }
             exec::ExecCountPlan::EdgePointReads { ids, .. } => {
                 let window = evaluated_window.expect("point-read counts carry a window");
-                let read = self.existing_edge_count(ids.as_ref(), window.threshold());
+                let read = self.existing_count(
+                    exec::ElementKeyspace::EdgeEndpoints,
+                    ids.as_ref(),
+                    window.threshold(),
+                );
                 window.apply(read.await?)
             }
             exec::ExecCountPlan::NodeRuntimeInput { input, .. } => {
                 let window = evaluated_window.expect("runtime counts carry a window");
                 let ids = self.runtime_ids(input)?;
-                window.apply(self.existing_node_count(&ids, window.threshold()).await?)
+                window.apply(
+                    self.existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        &ids,
+                        window.threshold(),
+                    )
+                    .await?,
+                )
             }
             exec::ExecCountPlan::EdgeRuntimeInput { input, .. } => {
                 let window = evaluated_window.expect("runtime counts carry a window");
                 let ids = self.runtime_ids(input)?;
-                window.apply(self.existing_edge_count(&ids, window.threshold()).await?)
+                window.apply(
+                    self.existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        &ids,
+                        window.threshold(),
+                    )
+                    .await?,
+                )
             }
             exec::ExecCountPlan::RuntimeInput { input, .. } => {
                 let window = evaluated_window.expect("runtime counts carry a window");
@@ -338,7 +323,11 @@ impl<'db> ExecutionContext<'db> {
                     .map(|result| result.entity_id().local_id())
                     .collect::<Vec<_>>();
                 return self
-                    .existing_node_count(&ids, window.threshold())
+                    .existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        &ids,
+                        window.threshold(),
+                    )
                     .await
                     .map(|count| ExecutionValue::Count(window.apply(count)));
             }
@@ -358,7 +347,11 @@ impl<'db> ExecutionContext<'db> {
                     .map(|result| result.entity_id().local_id())
                     .collect::<Vec<_>>();
                 return self
-                    .existing_edge_count(&ids, window.threshold())
+                    .existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        &ids,
+                        window.threshold(),
+                    )
                     .await
                     .map(|count| ExecutionValue::Count(window.apply(count)));
             }
@@ -378,7 +371,11 @@ impl<'db> ExecutionContext<'db> {
                     .map(|result| result.entity_id)
                     .collect::<Vec<_>>();
                 return self
-                    .existing_node_count(&ids, window.threshold())
+                    .existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        &ids,
+                        window.threshold(),
+                    )
                     .await
                     .map(|count| ExecutionValue::Count(window.apply(count)));
             }
@@ -398,7 +395,11 @@ impl<'db> ExecutionContext<'db> {
                     .map(|result| result.entity_id)
                     .collect::<Vec<_>>();
                 return self
-                    .existing_edge_count(&ids, window.threshold())
+                    .existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        &ids,
+                        window.threshold(),
+                    )
                     .await
                     .map(|count| ExecutionValue::Count(window.apply(count)));
             }
@@ -434,6 +435,8 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Node,
                         &plan.key,
                         &plan.values,
+                        access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?;
                 window.apply(ids.len() as usize)
@@ -446,6 +449,8 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Edge,
                         &plan.key,
                         &plan.values,
+                        access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?;
                 window.apply(ids.len() as usize)
@@ -494,7 +499,10 @@ impl<'db> ExecutionContext<'db> {
         Ok(ExecutionValue::Count(count))
     }
 
-    fn count_window(&self, plan: &exec::ExecCountWindowPlan) -> Result<EvaluatedCountWindow> {
+    pub(super) fn count_window(
+        &self,
+        plan: &exec::ExecCountWindowPlan,
+    ) -> Result<EvaluatedCountWindow> {
         let mut resolve = |name: &ir::NonEmptyString| self.count_bound_param(name);
         let skip = plan.skip.evaluate(&mut resolve)?;
         let take = match &plan.take {
@@ -534,7 +542,7 @@ impl<'db> ExecutionContext<'db> {
         })
     }
 
-    fn runtime_ids(&self, input: &exec::ExecRuntimeInputPlan) -> Result<Vec<u64>> {
+    pub(super) fn runtime_ids(&self, input: &exec::ExecRuntimeInputPlan) -> Result<Vec<u64>> {
         match input {
             exec::ExecRuntimeInputPlan::Param(param) => self.param_ids(param),
             exec::ExecRuntimeInputPlan::Variable(variable) => {
@@ -576,40 +584,47 @@ impl<'db> ExecutionContext<'db> {
         }
     }
 
-    async fn existing_node_count(&self, ids: &[u64], threshold: Option<usize>) -> Result<usize> {
+    /// How many of `ids` exist, counting no further than `threshold`.
+    ///
+    /// Existence is read in multi-gets of at most
+    /// [`helix_planner::cost::RECORD_BATCH_ROWS`] keys, and never of more keys
+    /// than the threshold still needs.
+    async fn existing_count(
+        &self,
+        keyspace: exec::ElementKeyspace,
+        mut ids: &[u64],
+        threshold: Option<usize>,
+    ) -> Result<usize> {
+        const BATCH: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
         let mut count = 0usize;
-        for id in ids {
-            if threshold.is_some_and(|threshold| count >= threshold) {
-                break;
+        loop {
+            let wanted = threshold.map_or(BATCH, |threshold| {
+                threshold.saturating_sub(count).min(BATCH)
+            });
+            if wanted == 0 || ids.is_empty() {
+                return Ok(count);
             }
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id)),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                count = count.saturating_add(1);
-            }
+            let (batch, rest) = ids.split_at(wanted.min(ids.len()));
+            ids = rest;
+            let keys = batch
+                .iter()
+                .map(|id| {
+                    access::kv::physical_element_key(
+                        self.tenant_scope,
+                        &exec::KvKey::from_id(keyspace, *id),
+                    )
+                    .2
+                })
+                .collect::<Vec<_>>();
+            // Boxed: the recursive count frames that await this stay small.
+            count = count.saturating_add(
+                Box::pin(self.multi_get_raw(&keys))
+                    .await?
+                    .iter()
+                    .filter(|record| record.is_some())
+                    .count(),
+            );
         }
-        Ok(count)
-    }
-
-    async fn existing_edge_count(&self, ids: &[u64], threshold: Option<usize>) -> Result<usize> {
-        let mut count = 0usize;
-        for id in ids {
-            if threshold.is_some_and(|threshold| count >= threshold) {
-                break;
-            }
-            let key = keys::DataKey::Data {
-                scope: self.tenant_scope,
-                kind: keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(*id)),
-            }
-            .to_bytes();
-            if self.get_raw(&key).await?.is_some() {
-                count = count.saturating_add(1);
-            }
-        }
-        Ok(count)
     }
 
     async fn authoritative_node_rows(
@@ -617,25 +632,54 @@ impl<'db> ExecutionContext<'db> {
         predicate: &exec::ExecNodeAuthoritativeScanPredicate,
         threshold: Option<usize>,
     ) -> Result<usize> {
-        let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
-        let ids = read.await?;
-        let mut accepted = 0usize;
-        for id in ids {
-            if threshold.is_some_and(|threshold| accepted >= threshold) {
-                break;
+        if threshold == Some(0) {
+            return Ok(0);
+        }
+        let predicate = match predicate {
+            exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
+                let read = self.null_equality_rows(
+                    crate::index_lifecycle::IndexElementKind::Node,
+                    key,
+                    None,
+                );
+                let rows = usize::try_from(read.await?.len()).unwrap_or(usize::MAX);
+                return Ok(threshold.map_or(rows, |threshold| rows.min(threshold)));
             }
-            let row = ExecutionRow::current(ElementRef::Node(id));
-            let matches = match predicate {
-                exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                    let read = self.scoped_null_matches(&row, key);
-                    read.await?
-                }
-                exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                    let read = self.eval_predicate(&row, predicate.predicate());
-                    read.await?
-                }
+            exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => predicate,
+        };
+        let keyspace = exec::ElementKeyspace::NodeProperty;
+        let mut iter = self
+            .open_raw_range(
+                access::kv::element_prefix(keyspace).into(),
+                access::kv::element_prefix_end(keyspace).into(),
+            )
+            .await?;
+        let mut accepted = 0usize;
+        let mut buffers = crate::encoding::v2::values::property::view::Buffers::default();
+        while !threshold.is_some_and(|threshold| accepted >= threshold) {
+            self.check_execution_deadline()?;
+            let Some(entry) = iter.next().await? else {
+                break;
             };
-            if matches {
+            let key = self.tenant_scope.strip_key(&entry.key).ok_or_else(|| {
+                HelixDbError::InvariantViolation(
+                    "tenant-scoped count returned key outside tenant prefix".into(),
+                )
+            })?;
+            let Some(id) = access::kv::parse_element_id(keyspace, key) else {
+                continue;
+            };
+            let row = ExecutionRow::current(ElementRef::Node(id));
+            // Nothing writes between the scan and this read, so the scanned
+            // record is the one storage would return. The predicate accounts
+            // for it as the storage read it replaces, only if it reads it.
+            let record = storage::ScannedRecord {
+                key: entry.key,
+                value: entry.value,
+            };
+            let read =
+                self.eval_predicate_plan_on_record(&row, predicate, Some(record), &mut buffers);
+            if read.await? {
                 accepted = accepted.saturating_add(1);
             }
         }
@@ -647,50 +691,49 @@ impl<'db> ExecutionContext<'db> {
         predicate: &exec::ExecEdgeAuthoritativeScanPredicate,
         threshold: Option<usize>,
     ) -> Result<usize> {
-        let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, None);
-        let ids = read.await?;
-        let mut accepted = 0usize;
-        for id in ids {
-            if threshold.is_some_and(|threshold| accepted >= threshold) {
-                break;
+        if threshold == Some(0) {
+            return Ok(0);
+        }
+        let predicate = match predicate {
+            exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
+                let read = self.null_equality_rows(
+                    crate::index_lifecycle::IndexElementKind::Edge,
+                    key,
+                    None,
+                );
+                let rows = usize::try_from(read.await?.len()).unwrap_or(usize::MAX);
+                return Ok(threshold.map_or(rows, |threshold| rows.min(threshold)));
             }
-            let row = ExecutionRow::current(ElementRef::Edge(id));
-            let matches = match predicate {
-                exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                    let read = self.scoped_null_matches(&row, key);
-                    read.await?
-                }
-                exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                    let read = self.eval_predicate(&row, predicate.predicate());
-                    read.await?
-                }
+            exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => predicate,
+        };
+        let keyspace = exec::ElementKeyspace::EdgeEndpoints;
+        let mut iter = self
+            .open_raw_range(
+                access::kv::element_prefix(keyspace).into(),
+                access::kv::element_prefix_end(keyspace).into(),
+            )
+            .await?;
+        let mut accepted = 0usize;
+        while !threshold.is_some_and(|threshold| accepted >= threshold) {
+            self.check_execution_deadline()?;
+            let Some(entry) = iter.next().await? else {
+                break;
             };
-            if matches {
+            let key = self.tenant_scope.strip_key(&entry.key).ok_or_else(|| {
+                HelixDbError::InvariantViolation(
+                    "tenant-scoped count returned key outside tenant prefix".into(),
+                )
+            })?;
+            let Some(id) = access::kv::parse_element_id(keyspace, key) else {
+                continue;
+            };
+            let row = ExecutionRow::current(ElementRef::Edge(id));
+            let read = self.eval_predicate_plan(&row, predicate);
+            if read.await? {
                 accepted = accepted.saturating_add(1);
             }
         }
         Ok(accepted)
-    }
-
-    pub(in crate::execution::interpreter) async fn scoped_null_matches(
-        &self,
-        row: &ExecutionRow,
-        key: &helix_planner::catalog::ScopedPropertyKey,
-    ) -> Result<bool> {
-        let read = self.row_properties(row);
-        let properties = read.await?;
-        if properties
-            .iter()
-            .find(|property| property.name == "$label")
-            .and_then(|property| property.value.as_str())
-            != Some(key.label.as_ref())
-        {
-            return Ok(false);
-        }
-        Ok(properties
-            .iter()
-            .find(|property| property.name == key.property.as_ref())
-            .is_none_or(|property| matches!(property.value, DbPropertyValue::Null)))
     }
 
     /// Execute the exact unique-owner primitive and verify the authoritative row.
@@ -709,7 +752,7 @@ impl<'db> ExecutionContext<'db> {
                 "unique verification does not match its exact owner lookup".to_string(),
             ));
         }
-        let lookup_value = indexed_value(&lookup.value);
+        let lookup_value = literal::Value::new(&lookup.value, self.row_memory.as_ref())?;
         let read = self.lookup_managed_equality_point_exact(
             crate::index_lifecycle::IndexElementKind::Node,
             &lookup.key,
@@ -722,20 +765,26 @@ impl<'db> ExecutionContext<'db> {
             return Ok(None);
         };
         let row = ExecutionRow::current(ElementRef::Node(id));
-        let expected = indexed_value(&verification.value);
         crate::index_lifecycle::secondary::record_equality_graph_read();
-        let read = self.row_properties(&row);
-        let properties = read.await?;
-        let label_matches = properties
-            .iter()
-            .find(|property| property.name == "$label")
-            .and_then(|property| property.value.as_str())
-            == Some(verification.key.label.as_ref());
-        let value_matches = properties
-            .iter()
-            .find(|property| property.name == verification.key.property.as_ref())
-            .is_some_and(|property| property.value.eq_value(&expected));
-        if !label_matches || !value_matches {
+        let verified = self
+            .row_properties_match(
+                &row,
+                &["$label", verification.key.property.as_ref()],
+                |properties| {
+                    let label_matches = properties
+                        .iter()
+                        .find(|property| property.name == "$label")
+                        .and_then(|property| property.value.as_str())
+                        == Some(verification.key.label.as_ref());
+                    let value_matches = properties
+                        .iter()
+                        .find(|property| property.name == verification.key.property.as_ref())
+                        .is_some_and(|property| property.value.eq_value(&lookup_value));
+                    label_matches && value_matches
+                },
+            )
+            .await?;
+        if !verified {
             return Err(HelixDbError::IndexCatalogCorruption(
                 "unique equality owner disagrees with its authoritative node".to_string(),
             ));
@@ -743,26 +792,30 @@ impl<'db> ExecutionContext<'db> {
         Ok(Some(id))
     }
 
+    /// Resolve a bitmap program, reading the children of each `Union` and
+    /// `Intersect` concurrently in plan order within `reads` leaf reads.
     pub(in crate::execution::interpreter) fn node_bitmap<'a>(
         &'a self,
         expression: &'a exec::ExecNodeBitmapExpr,
-    ) -> BoxFuture<'a, Result<roaring::RoaringTreemap>> {
-        async move {
+        reads: core::num::NonZeroUsize,
+    ) -> crate::query_resources::future::Admitted<'a, crate::query_resources::bitmap::Bitmap> {
+        crate::query_resources::future::Admitted::new(self.row_memory.as_ref(), async move {
             self.check_execution_deadline()?;
             match expression {
                 exec::ExecNodeBitmapExpr::PointRead { index, key, value } => {
                     validate_node_equality_index(&index.metadata().index_id, key)?;
+                    let value = literal::Value::new(value, self.row_memory.as_ref())?;
                     self.lookup_managed_equality_point_exact(
                         crate::index_lifecycle::IndexElementKind::Node,
                         key,
-                        &indexed_value(value),
+                        &value,
                         false,
                     )
                     .await
                 }
                 exec::ExecNodeBitmapExpr::BatchedUnionRead { index, key, values } => {
                     validate_node_equality_index(&index.metadata().index_id, key)?;
-                    let values = values.iter().map(indexed_value).collect::<Vec<_>>();
+                    let values = literal::Batch::new(values.as_ref(), self.row_memory.as_ref())?;
                     self.lookup_managed_equality_literal_batch(
                         crate::index_lifecycle::IndexElementKind::Node,
                         key,
@@ -771,54 +824,59 @@ impl<'db> ExecutionContext<'db> {
                     .await
                 }
                 exec::ExecNodeBitmapExpr::Union { driver, rest } => {
-                    let mut result = self.node_bitmap(driver).await?;
-                    for child in rest {
-                        let read = self.node_bitmap(child);
-                        let child = match read.await {
-                            Ok(child) => child,
-                            Err(error) => return Err(error),
-                        };
-                        result |= child;
-                    }
-                    Ok(result)
+                    access::union(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.node_bitmap(child, reads),
+                        ),
+                        self.row_memory.as_ref(),
+                    )
+                    .await
                 }
                 exec::ExecNodeBitmapExpr::Intersect { driver, rest } => {
-                    let mut result = self.node_bitmap(driver).await?;
-                    for child in rest {
-                        let read = self.node_bitmap(child);
-                        let child = match read.await {
-                            Ok(child) => child,
-                            Err(error) => return Err(error),
-                        };
-                        result &= child;
-                    }
-                    Ok(result)
+                    access::intersection(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.node_bitmap(child, reads),
+                        ),
+                        self.row_memory.as_ref(),
+                    )
+                    .await
                 }
             }
-        }
-        .boxed()
+        })
     }
 
+    /// Resolve a bitmap program, reading the children of each `Union` and
+    /// `Intersect` concurrently in plan order within `reads` leaf reads.
     pub(in crate::execution::interpreter) fn edge_bitmap<'a>(
         &'a self,
         expression: &'a exec::ExecEdgeBitmapExpr,
-    ) -> BoxFuture<'a, Result<roaring::RoaringTreemap>> {
-        async move {
+        reads: core::num::NonZeroUsize,
+    ) -> crate::query_resources::future::Admitted<'a, crate::query_resources::bitmap::Bitmap> {
+        crate::query_resources::future::Admitted::new(self.row_memory.as_ref(), async move {
             self.check_execution_deadline()?;
             match expression {
                 exec::ExecEdgeBitmapExpr::PointRead { index, key, value } => {
                     validate_edge_equality_index(&index.metadata().index_id, key)?;
+                    let value = literal::Value::new(value, self.row_memory.as_ref())?;
                     self.lookup_managed_equality_point_exact(
                         crate::index_lifecycle::IndexElementKind::Edge,
                         key,
-                        &indexed_value(value),
+                        &value,
                         false,
                     )
                     .await
                 }
                 exec::ExecEdgeBitmapExpr::BatchedUnionRead { index, key, values } => {
                     validate_edge_equality_index(&index.metadata().index_id, key)?;
-                    let values = values.iter().map(indexed_value).collect::<Vec<_>>();
+                    let values = literal::Batch::new(values.as_ref(), self.row_memory.as_ref())?;
                     self.lookup_managed_equality_literal_batch(
                         crate::index_lifecycle::IndexElementKind::Edge,
                         key,
@@ -827,32 +885,33 @@ impl<'db> ExecutionContext<'db> {
                     .await
                 }
                 exec::ExecEdgeBitmapExpr::Union { driver, rest } => {
-                    let mut result = self.edge_bitmap(driver).await?;
-                    for child in rest {
-                        let read = self.edge_bitmap(child);
-                        let child = match read.await {
-                            Ok(child) => child,
-                            Err(error) => return Err(error),
-                        };
-                        result |= child;
-                    }
-                    Ok(result)
+                    access::union(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.edge_bitmap(child, reads),
+                        ),
+                        self.row_memory.as_ref(),
+                    )
+                    .await
                 }
                 exec::ExecEdgeBitmapExpr::Intersect { driver, rest } => {
-                    let mut result = self.edge_bitmap(driver).await?;
-                    for child in rest {
-                        let read = self.edge_bitmap(child);
-                        let child = match read.await {
-                            Ok(child) => child,
-                            Err(error) => return Err(error),
-                        };
-                        result &= child;
-                    }
-                    Ok(result)
+                    access::intersection(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.edge_bitmap(child, reads),
+                        ),
+                        self.row_memory.as_ref(),
+                    )
+                    .await
                 }
             }
-        }
-        .boxed()
+        })
     }
 
     /// Count an exact recursive cursor without constructing its terminal row collection.
@@ -881,10 +940,12 @@ impl<'db> ExecutionContext<'db> {
                     }
                 },
                 exec::ExecCountCursorPlan::NodeBitmap(bitmap) => {
-                    self.node_bitmap(bitmap).await?.len() as usize
+                    let read = self.node_bitmap(bitmap, access::PARALLEL_INDEX_READS);
+                    read.await?.len() as usize
                 }
                 exec::ExecCountCursorPlan::EdgeBitmap(bitmap) => {
-                    self.edge_bitmap(bitmap).await?.len() as usize
+                    let read = self.edge_bitmap(bitmap, access::PARALLEL_INDEX_READS);
+                    read.await?.len() as usize
                 }
                 exec::ExecCountCursorPlan::NodeUnique {
                     lookup,
@@ -894,6 +955,10 @@ impl<'db> ExecutionContext<'db> {
                         .await?
                         .is_some(),
                 ),
+                exec::ExecCountCursorPlan::NodeUniqueBatch { index, key, values } => {
+                    let read = self.node_unique_batch_ids(index, key, values);
+                    read.await?.len() as usize
+                }
                 exec::ExecCountCursorPlan::NodeRange(plan) => {
                     validate_range_index("node_range:", &plan.index.index_id, &plan.key)?;
                     self.node_range_index_count_with_membership(
@@ -923,20 +988,38 @@ impl<'db> ExecutionContext<'db> {
                         .await?
                 }
                 exec::ExecCountCursorPlan::NodePointReads(ids) => {
-                    self.existing_node_count(ids.as_ref(), window.threshold())
-                        .await?
+                    self.existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        ids.as_ref(),
+                        window.threshold(),
+                    )
+                    .await?
                 }
                 exec::ExecCountCursorPlan::EdgePointReads(ids) => {
-                    self.existing_edge_count(ids.as_ref(), window.threshold())
-                        .await?
+                    self.existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        ids.as_ref(),
+                        window.threshold(),
+                    )
+                    .await?
                 }
                 exec::ExecCountCursorPlan::NodeRuntimeInput(input) => {
                     let ids = self.runtime_ids(input)?;
-                    self.existing_node_count(&ids, window.threshold()).await?
+                    self.existing_count(
+                        exec::ElementKeyspace::NodeProperty,
+                        &ids,
+                        window.threshold(),
+                    )
+                    .await?
                 }
                 exec::ExecCountCursorPlan::EdgeRuntimeInput(input) => {
                     let ids = self.runtime_ids(input)?;
-                    self.existing_edge_count(&ids, window.threshold()).await?
+                    self.existing_count(
+                        exec::ElementKeyspace::EdgeEndpoints,
+                        &ids,
+                        window.threshold(),
+                    )
+                    .await?
                 }
                 exec::ExecCountCursorPlan::RuntimeInput(input) => self.runtime_row_count(input)?,
                 exec::ExecCountCursorPlan::NodeFullScan => {
@@ -983,7 +1066,11 @@ impl<'db> ExecutionContext<'db> {
                         .map(|result| result.entity_id().local_id())
                         .collect::<Vec<_>>();
                     return self
-                        .existing_node_count(&ids, window.threshold())
+                        .existing_count(
+                            exec::ElementKeyspace::NodeProperty,
+                            &ids,
+                            window.threshold(),
+                        )
                         .await
                         .map(|cardinality| window.apply(cardinality));
                 }
@@ -1008,7 +1095,11 @@ impl<'db> ExecutionContext<'db> {
                         .map(|result| result.entity_id().local_id())
                         .collect::<Vec<_>>();
                     return self
-                        .existing_edge_count(&ids, window.threshold())
+                        .existing_count(
+                            exec::ElementKeyspace::EdgeEndpoints,
+                            &ids,
+                            window.threshold(),
+                        )
                         .await
                         .map(|cardinality| window.apply(cardinality));
                 }
@@ -1033,7 +1124,11 @@ impl<'db> ExecutionContext<'db> {
                         .map(|result| result.entity_id)
                         .collect::<Vec<_>>();
                     return self
-                        .existing_node_count(&ids, window.threshold())
+                        .existing_count(
+                            exec::ElementKeyspace::NodeProperty,
+                            &ids,
+                            window.threshold(),
+                        )
                         .await
                         .map(|cardinality| window.apply(cardinality));
                 }
@@ -1058,7 +1153,11 @@ impl<'db> ExecutionContext<'db> {
                         .map(|result| result.entity_id)
                         .collect::<Vec<_>>();
                     return self
-                        .existing_edge_count(&ids, window.threshold())
+                        .existing_count(
+                            exec::ElementKeyspace::EdgeEndpoints,
+                            &ids,
+                            window.threshold(),
+                        )
                         .await
                         .map(|cardinality| window.apply(cardinality));
                 }
@@ -1090,6 +1189,8 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Node,
                         key,
                         values,
+                        access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?
                     .len() as usize
@@ -1100,38 +1201,16 @@ impl<'db> ExecutionContext<'db> {
                         crate::index_lifecycle::IndexElementKind::Edge,
                         key,
                         values,
+                        access::PARALLEL_INDEX_READS,
+                        None,
                     )
                     .await?
                     .len() as usize
                 }
-                exec::ExecCountCursorPlan::Filter { input, predicate } => {
-                    let rows = self.count_cursor(input, dependency).await?;
-                    let mut accepted = 0usize;
-                    for row in rows {
-                        if window
-                            .threshold()
-                            .is_some_and(|threshold| accepted >= threshold)
-                        {
-                            break;
-                        }
-                        self.check_execution_deadline()?;
-                        if self.eval_predicate(&row, predicate.predicate()).await? {
-                            accepted = accepted.saturating_add(1);
-                        }
-                    }
-                    accepted
-                }
-                exec::ExecCountCursorPlan::Window {
-                    input,
-                    window: positioned,
-                } => {
-                    let positioned = self.count_window(positioned)?;
-                    let positioned = self
-                        .count_cursor_cardinality(input, dependency, positioned)
-                        .await?;
-                    return Ok(window.apply(positioned));
-                }
-                exec::ExecCountCursorPlan::Union { .. }
+                exec::ExecCountCursorPlan::Filter { .. }
+                | exec::ExecCountCursorPlan::IndexMembership { .. }
+                | exec::ExecCountCursorPlan::Window { .. }
+                | exec::ExecCountCursorPlan::Union { .. }
                 | exec::ExecCountCursorPlan::Intersect { .. }
                 | exec::ExecCountCursorPlan::Order { .. }
                 | exec::ExecCountCursorPlan::Expand { .. }
@@ -1139,7 +1218,9 @@ impl<'db> ExecutionContext<'db> {
                 | exec::ExecCountCursorPlan::TextSearch { .. }
                 | exec::ExecCountCursorPlan::Variable { .. }
                 | exec::ExecCountCursorPlan::Distinct { .. } => {
-                    self.count_cursor(cursor, dependency).await?.len()
+                    return self
+                        .pull_count_cardinality(cursor, dependency, window.skip, window.take)
+                        .await;
                 }
             };
             Ok(window.apply(cardinality))
@@ -1147,7 +1228,7 @@ impl<'db> ExecutionContext<'db> {
         .boxed()
     }
 
-    fn count_cursor<'a>(
+    pub(super) fn count_cursor<'a>(
         &'a mut self,
         cursor: &'a exec::ExecCountCursorPlan,
         dependency: &'a mut Option<ExecutionValue>,
@@ -1175,6 +1256,11 @@ impl<'db> ExecutionContext<'db> {
                 },
                 dependency,
             ),
+            exec::ExecCountCursorPlan::NodeUniqueBatch { index, key, values } => self
+                .count_cursor_leaf(
+                    CountCursorLeaf::NodeUniqueBatch { index, key, values },
+                    dependency,
+                ),
             exec::ExecCountCursorPlan::NodeRange(plan) => {
                 self.count_cursor_leaf(CountCursorLeaf::NodeRange(plan), dependency)
             }
@@ -1292,39 +1378,19 @@ impl<'db> ExecutionContext<'db> {
                     CountCursorLeaf::EdgeDynamicMembership { index, key, values },
                     dependency,
                 ),
-            exec::ExecCountCursorPlan::Union { driver, rest } => self
-                .count_cursor_structural(CountCursorStructural::Union { driver, rest }, dependency),
-            exec::ExecCountCursorPlan::Intersect { driver, rest } => self.count_cursor_structural(
-                CountCursorStructural::Intersect { driver, rest },
-                dependency,
-            ),
-            exec::ExecCountCursorPlan::Filter { input, predicate } => self.count_cursor_structural(
-                CountCursorStructural::Filter { input, predicate },
-                dependency,
-            ),
-            exec::ExecCountCursorPlan::Window { input, window } => self.count_cursor_structural(
-                CountCursorStructural::Window { input, window },
-                dependency,
-            ),
-            exec::ExecCountCursorPlan::Order { input, plan } => self
-                .count_cursor_structural(CountCursorStructural::Order { input, plan }, dependency),
-            exec::ExecCountCursorPlan::Expand { input, plan } => self
-                .count_cursor_structural(CountCursorStructural::Expand { input, plan }, dependency),
-            exec::ExecCountCursorPlan::VectorSearch { input, plan } => self
-                .count_cursor_structural(
-                    CountCursorStructural::VectorSearch { input, plan },
-                    dependency,
-                ),
-            exec::ExecCountCursorPlan::TextSearch { input, plan } => self.count_cursor_structural(
-                CountCursorStructural::TextSearch { input, plan },
-                dependency,
-            ),
-            exec::ExecCountCursorPlan::Variable { input, op } => self
-                .count_cursor_structural(CountCursorStructural::Variable { input, op }, dependency),
-            exec::ExecCountCursorPlan::Distinct { input, plan } => self.count_cursor_structural(
-                CountCursorStructural::Distinct { input, plan: *plan },
-                dependency,
-            ),
+            exec::ExecCountCursorPlan::Filter { .. }
+            | exec::ExecCountCursorPlan::IndexMembership { .. }
+            | exec::ExecCountCursorPlan::Window { .. }
+            | exec::ExecCountCursorPlan::Union { .. }
+            | exec::ExecCountCursorPlan::Intersect { .. }
+            | exec::ExecCountCursorPlan::Order { .. }
+            | exec::ExecCountCursorPlan::Expand { .. }
+            | exec::ExecCountCursorPlan::VectorSearch { .. }
+            | exec::ExecCountCursorPlan::TextSearch { .. }
+            | exec::ExecCountCursorPlan::Variable { .. }
+            | exec::ExecCountCursorPlan::Distinct { .. } => {
+                self.pull_count_rows(cursor, dependency).boxed()
+            }
         }
     }
 
@@ -1345,7 +1411,7 @@ impl<'db> ExecutionContext<'db> {
                     )),
                 },
                 CountCursorLeaf::NodeBitmap(bitmap) => {
-                    let read = self.node_bitmap(bitmap);
+                    let read = self.node_bitmap(bitmap, access::PARALLEL_INDEX_READS);
                     let ids = read.await?;
                     Ok(ids
                         .into_iter()
@@ -1353,7 +1419,7 @@ impl<'db> ExecutionContext<'db> {
                         .collect())
                 }
                 CountCursorLeaf::EdgeBitmap(bitmap) => {
-                    let read = self.edge_bitmap(bitmap);
+                    let read = self.edge_bitmap(bitmap, access::PARALLEL_INDEX_READS);
                     let ids = read.await?;
                     Ok(ids
                         .into_iter()
@@ -1367,6 +1433,14 @@ impl<'db> ExecutionContext<'db> {
                     let read = self.verified_node_unique_owner(lookup, verification);
                     let id = read.await?;
                     Ok(id
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Node(id)))
+                        .collect())
+                }
+                CountCursorLeaf::NodeUniqueBatch { index, key, values } => {
+                    let read = self.node_unique_batch_ids(index, key, values);
+                    let ids = read.await?;
+                    Ok(ids
                         .into_iter()
                         .map(|id| ExecutionRow::current(ElementRef::Node(id)))
                         .collect())
@@ -1387,45 +1461,59 @@ impl<'db> ExecutionContext<'db> {
                         .map(|id| ExecutionRow::current(ElementRef::Edge(id)))
                         .collect())
                 }
-                CountCursorLeaf::NodeAuthoritativeScan(predicate) => {
+                CountCursorLeaf::NodeAuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                ) => {
+                    let read = self.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        None,
+                    );
+                    let ids = read.await?;
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Node(id)))
+                        .collect())
+                }
+                CountCursorLeaf::NodeAuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate),
+                ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::NodeProperty, None);
                     let ids = read.await?;
                     let mut rows = Vec::new();
                     for id in ids {
                         let row = ExecutionRow::current(ElementRef::Node(id));
-                        let matches = match predicate {
-                            exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key } => {
-                                let read = self.scoped_null_matches(&row, key);
-                                read.await?
-                            }
-                            exec::ExecNodeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                let read = self.eval_predicate(&row, predicate.predicate());
-                                read.await?
-                            }
-                        };
-                        if matches {
+                        let read = self.eval_predicate_plan(&row, predicate);
+                        if read.await? {
                             rows.push(row);
                         }
                     }
                     Ok(rows)
                 }
-                CountCursorLeaf::EdgeAuthoritativeScan(predicate) => {
+                CountCursorLeaf::EdgeAuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                ) => {
+                    let read = self.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        key,
+                        None,
+                    );
+                    let ids = read.await?;
+                    Ok(ids
+                        .into_iter()
+                        .map(|id| ExecutionRow::current(ElementRef::Edge(id)))
+                        .collect())
+                }
+                CountCursorLeaf::EdgeAuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate),
+                ) => {
                     let read = self.scan_element_ids(exec::ElementKeyspace::EdgeEndpoints, None);
                     let ids = read.await?;
                     let mut rows = Vec::new();
                     for id in ids {
                         let row = ExecutionRow::current(ElementRef::Edge(id));
-                        let matches = match predicate {
-                            exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key } => {
-                                let read = self.scoped_null_matches(&row, key);
-                                read.await?
-                            }
-                            exec::ExecEdgeAuthoritativeScanPredicate::Predicate(predicate) => {
-                                let read = self.eval_predicate(&row, predicate.predicate());
-                                read.await?
-                            }
-                        };
-                        if matches {
+                        let read = self.eval_predicate_plan(&row, predicate);
+                        if read.await? {
                             rows.push(row);
                         }
                     }
@@ -1603,6 +1691,8 @@ impl<'db> ExecutionContext<'db> {
                             crate::index_lifecycle::IndexElementKind::Node,
                             key,
                             values,
+                            access::PARALLEL_INDEX_READS,
+                            None,
                         )
                         .await?;
                     Ok(ids
@@ -1617,6 +1707,8 @@ impl<'db> ExecutionContext<'db> {
                             crate::index_lifecycle::IndexElementKind::Edge,
                             key,
                             values,
+                            access::PARALLEL_INDEX_READS,
+                            None,
                         )
                         .await?;
                     Ok(ids
@@ -1629,88 +1721,445 @@ impl<'db> ExecutionContext<'db> {
         .boxed()
     }
 
-    fn count_cursor_structural<'a>(
-        &'a mut self,
-        cursor: CountCursorStructural<'a>,
-        dependency: &'a mut Option<ExecutionValue>,
-    ) -> BoxFuture<'a, Result<Vec<ExecutionRow>>> {
+    /// The existing elements a set of ID leaves yields, and their keyspace.
+    ///
+    /// Boxed, and out of line, so recursive cursor polls stay small.
+    pub(in crate::execution::interpreter) fn count_id_set<'a>(
+        &'a self,
+        plan: &'a exec::ExecCountCursorPlan,
+    ) -> BoxFuture<'a, Result<(roaring::RoaringTreemap, exec::ElementKeyspace)>> {
         async move {
-            self.check_execution_deadline()?;
-            match cursor {
-                CountCursorStructural::Union { driver, rest } => {
-                    let mut rows = self.count_cursor(driver, dependency).await?;
-                    let mut seen = rows.iter().cloned().collect::<BTreeSet<_>>();
-                    for child in rest {
-                        for row in self.count_cursor(child, dependency).await? {
-                            if seen.insert(row.clone()) {
-                                rows.push(row);
-                            }
-                        }
-                    }
-                    Ok(rows)
-                }
-                CountCursorStructural::Intersect { driver, rest } => {
-                    let mut rows = self.count_cursor(driver, dependency).await?;
-                    for child in rest {
-                        let read = self.count_cursor(child, dependency);
-                        let allowed = read.await?.into_iter().collect::<BTreeSet<_>>();
-                        rows.retain(|row| allowed.contains(row));
-                    }
-                    Ok(rows)
-                }
-                CountCursorStructural::Filter { input, predicate } => {
-                    let input = ExecutionValue::Stream(self.count_cursor(input, dependency).await?);
-                    let output = self.filter(input, predicate).await?;
-                    self.stream_rows(output, "exact count filter")
-                }
-                CountCursorStructural::Window { input, window } => {
-                    let rows = self.count_cursor(input, dependency).await?;
-                    Ok(self.count_window(window)?.apply_rows(rows))
-                }
-                CountCursorStructural::Order { input, plan } => {
-                    let input = ExecutionValue::Stream(self.count_cursor(input, dependency).await?);
-                    let output = self.order(input, plan).await?;
-                    self.stream_rows(output, "exact count order")
-                }
-                CountCursorStructural::Expand { input, plan } => {
-                    let input = ExecutionValue::Stream(self.count_cursor(input, dependency).await?);
-                    let output = self.expand(input, plan).await?;
-                    self.stream_rows(output, "exact count expansion")
-                }
-                CountCursorStructural::VectorSearch { input, plan } => {
-                    let input = ExecutionValue::Stream(self.count_cursor(input, dependency).await?);
-                    let output = self.restricted_vector_search(input, plan).await?;
-                    self.stream_rows(output, "exact count restricted vector search")
-                }
-                CountCursorStructural::TextSearch { input, plan } => {
-                    let input = ExecutionValue::Stream(self.count_cursor(input, dependency).await?);
-                    let output = self.restricted_text_search(input, plan).await?;
-                    self.stream_rows(output, "exact count restricted text search")
-                }
-                CountCursorStructural::Variable { input, op } => {
-                    let input = ExecutionValue::Stream(self.count_cursor(input, dependency).await?);
-                    let executable = exec::ExecVariableOp::Stream(op.to_stream_op());
-                    let output = self.variable(input, &executable)?;
-                    self.stream_rows(output, "exact count variable")
-                }
-                CountCursorStructural::Distinct { input, plan } => {
-                    let mut rows = self.count_cursor(input, dependency).await?;
-                    match plan {
-                        exec::ExecCountDistinctPlan::HashRows => {
-                            let output = self
-                                .distinct(ExecutionValue::Stream(rows))
-                                .expect("typed count distinct always receives rows");
-                            self.stream_rows(output, "exact count distinct")
-                        }
-                        exec::ExecCountDistinctPlan::OrderedRows => {
-                            rows.dedup();
-                            Ok(rows)
-                        }
-                    }
-                }
-            }
+            let keyspace = id_set_keyspace(plan).ok_or_else(|| {
+                HelixDbError::InvariantViolation(
+                    "count set leaf holds a cursor that is not an ID leaf".into(),
+                )
+            })?;
+            let ids = self
+                .count_cursor_ids(plan, access::PARALLEL_INDEX_READS)
+                .await?
+                .existing(self, keyspace)
+                .await?;
+            Ok((ids, keyspace))
         }
         .boxed()
+    }
+
+    /// IDs of a count cursor over ID leaves: one leaf, or a union or
+    /// intersection of them, nested to any depth.
+    ///
+    /// Set children are read concurrently within `reads`, in plan order, and
+    /// combined as bitmaps: no row is built for any of them. Callers only pass
+    /// plans [`id_set_keyspace`] accepts.
+    pub(in crate::execution::interpreter) fn count_cursor_ids<'a>(
+        &'a self,
+        plan: &'a exec::ExecCountCursorPlan,
+        reads: core::num::NonZeroUsize,
+    ) -> BoxFuture<'a, Result<CountIds>> {
+        use exec::ExecCountCursorPlan as C;
+        async move {
+            self.check_execution_deadline()?;
+            let search = |k| SearchReadLimit::new(k, None);
+            let (ids, existence) = match plan {
+                C::Union { driver, rest } => {
+                    return CountIds::union(
+                        self.read_children(
+                            core::iter::once(driver.as_ref())
+                                .chain(rest.iter())
+                                .collect(),
+                            reads,
+                            |child, reads| self.count_cursor_ids(child, reads),
+                        ),
+                    )
+                    .await;
+                }
+                C::Intersect { driver, rest } => {
+                    // Leaves that verify label records read only the IDs the
+                    // other children keep, so those children are read first.
+                    let (late, others): (Vec<_>, Vec<_>) = core::iter::once(driver.as_ref())
+                        .chain(rest.iter())
+                        .map(|child| (self.count_label_verified_leaf(child), child))
+                        .partition(|(leaf, _)| leaf.is_some());
+                    let others = others
+                        .into_iter()
+                        .map(|(_, child)| child)
+                        .collect::<Vec<_>>();
+                    let Some((kind, _)) = late.first().and_then(|(leaf, _)| leaf.as_ref()) else {
+                        return CountIds::intersection(self.read_children(
+                            others,
+                            reads,
+                            |child, reads| self.count_cursor_ids(child, reads),
+                        ))
+                        .await;
+                    };
+                    let kind = *kind;
+                    let within = match others.is_empty() {
+                        true => None,
+                        false => {
+                            let ids = CountIds::intersection(self.read_children(
+                                others,
+                                reads,
+                                |child, reads| self.count_cursor_ids(child, reads),
+                            ))
+                            .await?;
+                            Some(ids.proven | ids.unproven)
+                        }
+                    };
+                    // Every remaining ID is in a label-verified leaf, which
+                    // read its record, so all of them are proven.
+                    let ids = self
+                        .label_verified_intersection(
+                            kind,
+                            late.into_iter()
+                                .filter_map(|(leaf, _)| leaf.map(|(_, leaf)| leaf))
+                                .collect(),
+                            within
+                                .map(|ids| {
+                                    crate::query_resources::bitmap::Bitmap::retain_legacy(
+                                        ids,
+                                        self.row_memory.as_ref(),
+                                    )
+                                })
+                                .transpose()?,
+                            reads,
+                        )
+                        .await?;
+                    return Ok(CountIds::leaf(ids.into_unbudgeted(), Existence::Proven));
+                }
+                C::NodeBitmap(bitmap) => (
+                    self.node_bitmap(bitmap, reads).await?.into_unbudgeted(),
+                    Existence::Proven,
+                ),
+                C::EdgeBitmap(bitmap) => (
+                    self.edge_bitmap(bitmap, reads).await?.into_unbudgeted(),
+                    Existence::Proven,
+                ),
+                C::NodeUnique {
+                    lookup,
+                    verification,
+                } => (
+                    self.verified_node_unique_owner(lookup, verification)
+                        .await?
+                        .into_iter()
+                        .collect(),
+                    Existence::Proven,
+                ),
+                C::NodeUniqueBatch { index, key, values } => (
+                    self.node_unique_batch_ids(index, key, values).await?,
+                    Existence::Proven,
+                ),
+                C::NodeRange(range) => (
+                    self.validated_node_range_ids(range)
+                        .await?
+                        .into_iter()
+                        .collect(),
+                    Existence::Proven,
+                ),
+                C::EdgeRange(range) => (
+                    self.validated_edge_range_ids(range)
+                        .await?
+                        .into_iter()
+                        .collect(),
+                    Existence::Proven,
+                ),
+                C::NodeLabelBitmap(label) => (
+                    self.lookup_equality_index_set(
+                        "$label",
+                        &DbPropertyValue::String(label.as_ref().to_string()),
+                    )
+                    .await?
+                    .into_unbudgeted(),
+                    Existence::Proven,
+                ),
+                C::EdgeLabelBitmap(label) => (
+                    self.lookup_global_edge_label_index(label.as_ref())
+                        .await?
+                        .into_unbudgeted(),
+                    Existence::Proven,
+                ),
+                C::NodeDynamicEquality { index, key, param } => {
+                    validate_node_equality_index(&index.index_id, key)?;
+                    let value = self.param_value(param)?;
+                    (
+                        self.lookup_managed_equality_union(
+                            crate::index_lifecycle::IndexElementKind::Node,
+                            key,
+                            core::slice::from_ref(&value),
+                        )
+                        .await?
+                        .into_unbudgeted(),
+                        Existence::Proven,
+                    )
+                }
+                C::EdgeDynamicEquality { index, key, param } => {
+                    validate_edge_equality_index(&index.index_id, key)?;
+                    let value = self.param_value(param)?;
+                    (
+                        self.lookup_managed_equality_union(
+                            crate::index_lifecycle::IndexElementKind::Edge,
+                            key,
+                            core::slice::from_ref(&value),
+                        )
+                        .await?
+                        .into_unbudgeted(),
+                        Existence::Proven,
+                    )
+                }
+                C::NodeDynamicMembership { index, key, values } => {
+                    validate_node_equality_index(&index.index_id, key)?;
+                    (
+                        self.dynamic_membership_ids(
+                            crate::index_lifecycle::IndexElementKind::Node,
+                            key,
+                            values,
+                            reads,
+                            None,
+                        )
+                        .await?
+                        .into_unbudgeted(),
+                        Existence::Proven,
+                    )
+                }
+                C::EdgeDynamicMembership { index, key, values } => {
+                    validate_edge_equality_index(&index.index_id, key)?;
+                    (
+                        self.dynamic_membership_ids(
+                            crate::index_lifecycle::IndexElementKind::Edge,
+                            key,
+                            values,
+                            reads,
+                            None,
+                        )
+                        .await?
+                        .into_unbudgeted(),
+                        Existence::Proven,
+                    )
+                }
+                C::NodeAuthoritativeScan(
+                    exec::ExecNodeAuthoritativeScanPredicate::NullEquality { key },
+                ) => (
+                    self.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        key,
+                        None,
+                    )
+                    .await?
+                    .into_unbudgeted(),
+                    Existence::Proven,
+                ),
+                C::EdgeAuthoritativeScan(
+                    exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { key },
+                ) => (
+                    self.null_equality_rows(
+                        crate::index_lifecycle::IndexElementKind::Edge,
+                        key,
+                        None,
+                    )
+                    .await?
+                    .into_unbudgeted(),
+                    Existence::Proven,
+                ),
+                C::NodePointReads(ids) | C::EdgePointReads(ids) => {
+                    (ids.as_ref().iter().copied().collect(), Existence::Unproven)
+                }
+                C::NodeRuntimeInput(input) | C::EdgeRuntimeInput(input) => (
+                    self.runtime_ids(input)?.into_iter().collect(),
+                    Existence::Unproven,
+                ),
+                C::NodeTextSearch {
+                    key,
+                    index,
+                    query_text,
+                    k,
+                } => (
+                    self.text_search_hits(
+                        TextElementType::Node,
+                        &key.label,
+                        &key.property,
+                        index,
+                        query_text,
+                        search(k),
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|hit| hit.entity_id)
+                    .collect(),
+                    Existence::Unproven,
+                ),
+                C::EdgeTextSearch {
+                    key,
+                    index,
+                    query_text,
+                    k,
+                } => (
+                    self.text_search_hits(
+                        TextElementType::Edge,
+                        &key.label,
+                        &key.property,
+                        index,
+                        query_text,
+                        search(k),
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|hit| hit.entity_id)
+                    .collect(),
+                    Existence::Unproven,
+                ),
+                C::EmptyRows
+                | C::InputRows
+                | C::RuntimeInput(_)
+                | C::NodeFullScan
+                | C::EdgeFullScan
+                | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                    _,
+                ))
+                | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::Predicate(
+                    _,
+                ))
+                | C::Filter { .. }
+                | C::IndexMembership { .. }
+                | C::Window { .. }
+                | C::Order { .. }
+                | C::Expand { .. }
+                | C::VectorSearch { .. }
+                | C::TextSearch { .. }
+                | C::NodeVectorSearch { .. }
+                | C::EdgeVectorSearch { .. }
+                | C::Variable { .. }
+                | C::Distinct { .. } => {
+                    return Err(HelixDbError::InvariantViolation(
+                        "count ID set received a cursor that is not an ID leaf".to_string(),
+                    ));
+                }
+            };
+            Ok(CountIds::leaf(ids, existence))
+        }
+        .boxed()
+    }
+
+    /// Verified owners of `values` in a unique node equality index, read and
+    /// verified in batched multi-gets, as a row read of the same set is.
+    async fn node_unique_batch_ids(
+        &self,
+        index: &exec::ExecNodeUniqueEqualityIndex,
+        key: &helix_planner::catalog::ScopedPropertyKey,
+        values: &ir::AtLeast<exec::ExecIndexedEqualityValue, 2>,
+    ) -> Result<roaring::RoaringTreemap> {
+        validate_node_equality_index(&index.metadata().index_id, key)?;
+        let values = values.iter().map(indexed_value).collect::<Vec<_>>();
+        let ids = self
+            .lookup_managed_equality_batch(
+                crate::index_lifecycle::IndexElementKind::Node,
+                key,
+                &values,
+                true,
+            )
+            .await?;
+        self.check_execution_deadline()?;
+        Ok(ids.into_unbudgeted())
+    }
+
+    /// The label-verified leaf a count ID leaf reads, with its element kind,
+    /// or `None` for a leaf answered by index reads alone.
+    fn count_label_verified_leaf<'a>(
+        &self,
+        cursor: &'a exec::ExecCountCursorPlan,
+    ) -> Option<(
+        crate::index_lifecycle::IndexElementKind,
+        access::LabelVerifiedLeaf<'a>,
+    )> {
+        use crate::index_lifecycle::IndexElementKind as K;
+        use exec::ExecCountCursorPlan as C;
+        match cursor {
+            C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+                key,
+            }) => Some((K::Node, access::LabelVerifiedLeaf::Null(key))),
+            C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::NullEquality {
+                key,
+            }) => Some((K::Edge, access::LabelVerifiedLeaf::Null(key))),
+            C::NodeDynamicEquality { key, param, .. } => self
+                .label_verified_equality(key, param)
+                .map(|leaf| (K::Node, leaf)),
+            C::EdgeDynamicEquality { key, param, .. } => self
+                .label_verified_equality(key, param)
+                .map(|leaf| (K::Edge, leaf)),
+            C::NodeDynamicMembership { key, values, .. } => self
+                .label_verified_membership(key, values)
+                .map(|leaf| (K::Node, leaf)),
+            C::EdgeDynamicMembership { key, values, .. } => self
+                .label_verified_membership(key, values)
+                .map(|leaf| (K::Edge, leaf)),
+            C::EmptyRows
+            | C::InputRows
+            | C::NodeBitmap(_)
+            | C::EdgeBitmap(_)
+            | C::NodeUnique { .. }
+            | C::NodeUniqueBatch { .. }
+            | C::NodeRange(_)
+            | C::EdgeRange(_)
+            | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::Predicate(_))
+            | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::Predicate(_))
+            | C::NodePointReads(_)
+            | C::EdgePointReads(_)
+            | C::NodeRuntimeInput(_)
+            | C::EdgeRuntimeInput(_)
+            | C::RuntimeInput(_)
+            | C::NodeFullScan
+            | C::EdgeFullScan
+            | C::NodeLabelBitmap(_)
+            | C::EdgeLabelBitmap(_)
+            | C::NodeVectorSearch { .. }
+            | C::EdgeVectorSearch { .. }
+            | C::NodeTextSearch { .. }
+            | C::EdgeTextSearch { .. }
+            | C::Union { .. }
+            | C::Intersect { .. }
+            | C::Filter { .. }
+            | C::IndexMembership { .. }
+            | C::Window { .. }
+            | C::Order { .. }
+            | C::Expand { .. }
+            | C::VectorSearch { .. }
+            | C::TextSearch { .. }
+            | C::Variable { .. }
+            | C::Distinct { .. } => None,
+        }
+    }
+
+    /// The elements of `ids` that exist, read in multi-gets of at most
+    /// [`helix_planner::cost::RECORD_BATCH_ROWS`] keys.
+    pub(in crate::execution::interpreter) async fn existing_ids(
+        &self,
+        keyspace: exec::ElementKeyspace,
+        ids: roaring::RoaringTreemap,
+    ) -> Result<roaring::RoaringTreemap> {
+        let mut ids = ids.into_iter();
+        let mut existing = roaring::RoaringTreemap::new();
+        loop {
+            let batch = ids
+                .by_ref()
+                .take(helix_planner::cost::RECORD_BATCH_ROWS as usize)
+                .collect::<Vec<_>>();
+            if batch.is_empty() {
+                return Ok(existing);
+            }
+            let keys = batch
+                .iter()
+                .map(|id| {
+                    access::kv::physical_element_key(
+                        self.tenant_scope,
+                        &exec::KvKey::from_id(keyspace, *id),
+                    )
+                    .2
+                })
+                .collect::<Vec<_>>();
+            existing.extend(
+                batch
+                    .into_iter()
+                    .zip(Box::pin(self.multi_get_raw(&keys)).await?)
+                    .filter_map(|(id, record)| record.map(|_| id)),
+            );
+        }
     }
 
     async fn validated_node_range_ids(
@@ -1729,6 +2178,148 @@ impl<'db> ExecutionContext<'db> {
         validate_range_index("edge_range:", &plan.index.index_id, &plan.key)?;
         self.edge_range_index_ids(&plan.key, &plan.range, None)
             .await
+    }
+}
+
+/// Whether storage already proves that the elements of a set exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Existence {
+    /// Index, range, label and null-equality sets hold only live elements.
+    Proven,
+    /// Point IDs, runtime inputs and search results may name deleted ones.
+    Unproven,
+}
+
+/// IDs a count cursor over ID leaves yields, split by whether storage already
+/// proves each element exists. The two sets are disjoint.
+#[derive(Debug, Default, PartialEq)]
+pub(in crate::execution::interpreter) struct CountIds {
+    proven: roaring::RoaringTreemap,
+    unproven: roaring::RoaringTreemap,
+}
+
+impl CountIds {
+    fn leaf(ids: roaring::RoaringTreemap, existence: Existence) -> Self {
+        match existence {
+            Existence::Proven => Self {
+                proven: ids,
+                unproven: roaring::RoaringTreemap::new(),
+            },
+            Existence::Unproven => Self {
+                proven: roaring::RoaringTreemap::new(),
+                unproven: ids,
+            },
+        }
+    }
+
+    /// Every child's IDs; an ID any child proves is proven.
+    async fn union(children: impl futures::Stream<Item = Result<Self>>) -> Result<Self> {
+        let united = children
+            .try_fold(Self::default(), |mut united, child| {
+                united.proven |= child.proven;
+                united.unproven |= child.unproven;
+                futures::future::ready(Ok(united))
+            })
+            .await?;
+        Ok(Self {
+            unproven: united.unproven - &united.proven,
+            proven: united.proven,
+        })
+    }
+
+    /// The IDs every child holds; an ID any child proves is proven.
+    async fn intersection(children: impl futures::Stream<Item = Result<Self>>) -> Result<Self> {
+        let (all, proven) = children
+            .try_fold(
+                (None, roaring::RoaringTreemap::new()),
+                |(all, mut proven): (Option<roaring::RoaringTreemap>, _), child| {
+                    proven |= &child.proven;
+                    let ids = child.proven | child.unproven;
+                    futures::future::ready(Ok((
+                        Some(match all {
+                            None => ids,
+                            Some(all) => all & ids,
+                        }),
+                        proven,
+                    )))
+                },
+            )
+            .await?;
+        let all = all.unwrap_or_default();
+        let proven = &all & proven;
+        Ok(Self {
+            unproven: all - &proven,
+            proven,
+        })
+    }
+
+    /// Proven IDs plus the unproven ones that exist.
+    pub(in crate::execution::interpreter) async fn existing(
+        self,
+        ctx: &ExecutionContext<'_>,
+        keyspace: exec::ElementKeyspace,
+    ) -> Result<roaring::RoaringTreemap> {
+        Ok(self.proven | ctx.existing_ids(keyspace, self.unproven).await?)
+    }
+}
+
+/// Element keyspace of a count cursor made only of ID leaves of one element
+/// kind (point reads, runtime inputs, text-search results, and index, range,
+/// label and null-equality sets), unions and intersections of them included;
+/// `None` for any other cursor. Such a cursor is counted on ID bitmaps.
+pub(in crate::execution::interpreter) fn id_set_keyspace(
+    plan: &exec::ExecCountCursorPlan,
+) -> Option<exec::ElementKeyspace> {
+    use exec::ExecCountCursorPlan as C;
+    match plan {
+        C::Union { driver, rest } | C::Intersect { driver, rest } => {
+            let keyspace = id_set_keyspace(driver)?;
+            rest.iter()
+                .all(|child| id_set_keyspace(child) == Some(keyspace))
+                .then_some(keyspace)
+        }
+        C::NodeBitmap(_)
+        | C::NodeUnique { .. }
+        | C::NodeUniqueBatch { .. }
+        | C::NodeRange(_)
+        | C::NodeLabelBitmap(_)
+        | C::NodeDynamicEquality { .. }
+        | C::NodeDynamicMembership { .. }
+        | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::NullEquality {
+            ..
+        })
+        | C::NodePointReads(_)
+        | C::NodeRuntimeInput(_)
+        | C::NodeTextSearch { .. } => Some(exec::ElementKeyspace::NodeProperty),
+        C::EdgeBitmap(_)
+        | C::EdgeRange(_)
+        | C::EdgeLabelBitmap(_)
+        | C::EdgeDynamicEquality { .. }
+        | C::EdgeDynamicMembership { .. }
+        | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::NullEquality {
+            ..
+        })
+        | C::EdgePointReads(_)
+        | C::EdgeRuntimeInput(_)
+        | C::EdgeTextSearch { .. } => Some(exec::ElementKeyspace::EdgeEndpoints),
+        C::EmptyRows
+        | C::InputRows
+        | C::RuntimeInput(_)
+        | C::NodeFullScan
+        | C::EdgeFullScan
+        | C::NodeAuthoritativeScan(exec::ExecNodeAuthoritativeScanPredicate::Predicate(_))
+        | C::EdgeAuthoritativeScan(exec::ExecEdgeAuthoritativeScanPredicate::Predicate(_))
+        | C::Filter { .. }
+        | C::IndexMembership { .. }
+        | C::Window { .. }
+        | C::Order { .. }
+        | C::Expand { .. }
+        | C::NodeVectorSearch { .. }
+        | C::EdgeVectorSearch { .. }
+        | C::VectorSearch { .. }
+        | C::TextSearch { .. }
+        | C::Variable { .. }
+        | C::Distinct { .. } => None,
     }
 }
 
@@ -1766,7 +2357,7 @@ pub(in crate::execution::interpreter) fn validate_edge_equality_index(
     validate_index_id("edge_eq:", index_id, key)
 }
 
-fn validate_range_index(
+pub(super) fn validate_range_index(
     prefix: &'static str,
     index_id: &ir::NonEmptyString,
     key: &helix_planner::catalog::ScopedPropertyDirectionKey,
@@ -1779,10 +2370,21 @@ fn validate_index_id(
     actual: &ir::NonEmptyString,
     key: &impl std::fmt::Display,
 ) -> Result<()> {
-    let expected = ir::NonEmptyString::from_prefixed_display(prefix, key);
-    if actual != &expected {
+    // Compare formatting chunks against the borrowed identity. Long labels and
+    // property names must not allocate a second identity on every index probe.
+    struct Remaining<'a>(&'a str);
+    impl std::fmt::Write for Remaining<'_> {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            self.0 = self.0.strip_prefix(text).ok_or(std::fmt::Error)?;
+            Ok(())
+        }
+    }
+    let mut remaining = Remaining(actual.as_ref());
+    if std::fmt::write(&mut remaining, format_args!("{prefix}{key}")).is_err()
+        || !remaining.0.is_empty()
+    {
         return Err(HelixDbError::IndexCatalogCorruption(format!(
-            "planner logical index identity `{actual}` disagrees with `{expected}`"
+            "planner logical index identity `{actual}` disagrees with `{prefix}{key}`"
         )));
     }
     Ok(())
@@ -1795,6 +2397,8 @@ pub(super) async fn run_production_contracts() {
 
 #[cfg(any(test, feature = "production-coverage"))]
 mod tests {
+    #[cfg(test)]
+    mod dynamic_membership;
     use helix_ast::expr::Predicate;
     use helix_ast::index::RangeIndexDirection;
     use helix_ast::query::QueryValue;
@@ -1888,14 +2492,6 @@ mod tests {
             take: None,
         };
         assert_eq!(all.apply(5), 3);
-        assert_eq!(
-            all.apply_rows(vec![
-                ExecutionRow::current(ElementRef::Node(1)),
-                ExecutionRow::current(ElementRef::Node(2)),
-                ExecutionRow::current(ElementRef::Node(3)),
-            ]),
-            vec![ExecutionRow::current(ElementRef::Node(3))]
-        );
         assert_eq!(all.threshold(), None);
 
         let bounded = EvaluatedCountWindow {
@@ -1903,7 +2499,6 @@ mod tests {
             take: Some(2),
         };
         assert_eq!(bounded.apply(3), 0);
-        assert!(bounded.apply_rows(Vec::new()).is_empty());
         assert_eq!(bounded.threshold(), Some(usize::MAX));
         assert_eq!(positive_limit(None), None);
         assert_eq!(positive_limit(Some(0)), None);
@@ -1926,8 +2521,27 @@ mod tests {
         );
     }
 
-    #[cfg_attr(test, tokio::test)]
-    async fn direct_non_search_count_families_match_materialized_sources() {
+    #[cfg(test)]
+    #[test]
+    fn direct_non_search_count_families_match_materialized_sources() {
+        std::thread::Builder::new()
+            .name("direct-count-source-matrix".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("direct count test runtime builds")
+                    .block_on(
+                        direct_non_search_count_families_match_materialized_sources_contract(),
+                    );
+            })
+            .expect("direct count test thread starts")
+            .join()
+            .expect("direct count test thread completes");
+    }
+
+    async fn direct_non_search_count_families_match_materialized_sources_contract() {
         let db = test_support::open_db_with_config(
             test_support::in_memory_config("count-direct-source-matrix")
                 .with_equality_index("User", "status")
@@ -2441,6 +3055,8 @@ mod tests {
                 ExecutionValue::Count(expected)
             );
         }
+        // No stored value can equal a value no lane entry can hold: the
+        // verified label rows outside the lane answer it, never an error.
         for value in [
             PropertyValue::Array(Vec::new()),
             PropertyValue::String("x".repeat(
@@ -2448,13 +3064,16 @@ mod tests {
                     + 1,
             )),
         ] {
-            assert!(execute_direct_count_with_params(
-                &db,
-                node.clone(),
-                context::ParamBindings::default().with_value(param.clone(), value),
-            )
-            .await
-            .is_err());
+            assert_eq!(
+                execute_direct_count_with_params(
+                    &db,
+                    node.clone(),
+                    context::ParamBindings::default().with_value(param.clone(), value),
+                )
+                .await
+                .unwrap(),
+                ExecutionValue::Count(0)
+            );
         }
 
         let unique =
@@ -4270,11 +4889,17 @@ mod tests {
             crate::execution_control::ExecutionControl::from_timeout(std::time::Duration::ZERO),
         );
         assert!(expired
-            .node_bitmap(&node_point("User", "status", "active"))
+            .node_bitmap(
+                &node_point("User", "status", "active"),
+                access::PARALLEL_INDEX_READS,
+            )
             .await
             .is_err());
         assert!(expired
-            .edge_bitmap(&edge_point("FOLLOWS", "status", "active"))
+            .edge_bitmap(
+                &edge_point("FOLLOWS", "status", "active"),
+                access::PARALLEL_INDEX_READS,
+            )
             .await
             .is_err());
         let mut dependency = Some(ExecutionValue::Stream(Vec::new()));
@@ -4298,64 +4923,68 @@ mod tests {
 
     #[cfg_attr(test, tokio::test)]
     async fn point_and_batch_bitmap_counts_issue_only_the_encoded_primitive() {
-        let db = test_support::open_db_with_config(
-            test_support::in_memory_config("count-exact-bitmap-primitives")
-                .with_equality_index("User", "status"),
-        )
-        .await;
-        test_support::add_node_with_properties(
-            &db,
-            "User",
-            vec![("status", PropertyValue::from("active"))],
-        )
-        .await;
-        test_support::add_node_with_properties(
-            &db,
-            "User",
-            vec![("status", PropertyValue::from("inactive"))],
-        )
-        .await;
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        let point = exec::ExecCountPlan::NodeBitmap(exec::ExecNodeBitmapCountPlan {
-            bitmap: node_point("User", "status", "active"),
-            window: exec::ExecCountWindowPlan::identity(),
-        });
-        assert_eq!(
-            execute_direct_count(&db, point).await.unwrap(),
-            ExecutionValue::Count(1)
-        );
-        assert_eq!(
-            crate::index_lifecycle::secondary::equality_read_metrics(),
-            crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
-                point_reads: 2,
-                multi_get_calls: 0,
-                scans: 0,
-                graph_reads: 0,
-            }
-        );
+        crate::index_lifecycle::secondary::EqualityReadObserver::default()
+            .scope(async {
+                let db = test_support::open_db_with_config(
+                    test_support::in_memory_config("count-exact-bitmap-primitives")
+                        .with_equality_index("User", "status"),
+                )
+                .await;
+                test_support::add_node_with_properties(
+                    &db,
+                    "User",
+                    vec![("status", PropertyValue::from("active"))],
+                )
+                .await;
+                test_support::add_node_with_properties(
+                    &db,
+                    "User",
+                    vec![("status", PropertyValue::from("inactive"))],
+                )
+                .await;
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                let point = exec::ExecCountPlan::NodeBitmap(exec::ExecNodeBitmapCountPlan {
+                    bitmap: node_point("User", "status", "active"),
+                    window: exec::ExecCountWindowPlan::identity(),
+                });
+                assert_eq!(
+                    execute_direct_count(&db, point).await.unwrap(),
+                    ExecutionValue::Count(1)
+                );
+                assert_eq!(
+                    crate::index_lifecycle::secondary::equality_read_metrics(),
+                    crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
+                        point_reads: 2,
+                        multi_get_calls: 0,
+                        scans: 0,
+                        graph_reads: 0,
+                    }
+                );
 
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        let batch = exec::ExecCountPlan::NodeBitmap(exec::ExecNodeBitmapCountPlan {
-            bitmap: exec::ExecNodeBitmapExpr::BatchedUnionRead {
-                index: node_equality_index("User", "status"),
-                key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
-                values: ir::AtLeast::from_pair(indexed("active"), indexed("inactive")),
-            },
-            window: exec::ExecCountWindowPlan::identity(),
-        });
-        assert_eq!(
-            execute_direct_count(&db, batch).await.unwrap(),
-            ExecutionValue::Count(2)
-        );
-        assert_eq!(
-            crate::index_lifecycle::secondary::equality_read_metrics(),
-            crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
-                point_reads: 3,
-                multi_get_calls: 1,
-                scans: 0,
-                graph_reads: 0,
-            }
-        );
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                let batch = exec::ExecCountPlan::NodeBitmap(exec::ExecNodeBitmapCountPlan {
+                    bitmap: exec::ExecNodeBitmapExpr::BatchedUnionRead {
+                        index: node_equality_index("User", "status"),
+                        key: catalog::ScopedPropertyKey::try_new("User", "status").unwrap(),
+                        values: ir::AtLeast::from_pair(indexed("active"), indexed("inactive")),
+                    },
+                    window: exec::ExecCountWindowPlan::identity(),
+                });
+                assert_eq!(
+                    execute_direct_count(&db, batch).await.unwrap(),
+                    ExecutionValue::Count(2)
+                );
+                assert_eq!(
+                    crate::index_lifecycle::secondary::equality_read_metrics(),
+                    crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
+                        point_reads: 3,
+                        multi_get_calls: 1,
+                        scans: 0,
+                        graph_reads: 0,
+                    }
+                );
+            })
+            .await
     }
 
     #[cfg_attr(test, tokio::test)]
@@ -4385,6 +5014,84 @@ mod tests {
                 .contains("node_eq:Other:status` disagrees with `node_eq:User:status"),
             "{error}"
         );
+    }
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn range_count_bitmap_filters_are_read_concurrently() {
+        let db = test_support::open_db_with_config(
+            test_support::in_memory_config("count-range-concurrent-filters")
+                .with_equality_index("User", "status")
+                .with_equality_index("User", "role")
+                .with_range_index("User", "rank"),
+        )
+        .await;
+        for (status, role, rank) in [
+            ("active", "admin", "a"),
+            ("active", "member", "b"),
+            ("paused", "admin", "c"),
+        ] {
+            test_support::add_node_with_properties(
+                &db,
+                "User",
+                vec![
+                    ("status", PropertyValue::from(status)),
+                    ("role", PropertyValue::from(role)),
+                    ("rank", PropertyValue::from(rank)),
+                ],
+            )
+            .await;
+        }
+        let range = |membership| {
+            exec::ExecCountPlan::NodeRange(exec::ExecNodeRangeCountPlan {
+                driver: exec::ExecNodeVerifiedRangeScanPlan {
+                    index: catalog::NodeRangeIndexMeta::new(test_support::name(
+                        "node_range:User:rank:Asc",
+                    )),
+                    key: catalog::ScopedPropertyDirectionKey::try_new(
+                        "User",
+                        "rank",
+                        RangeIndexDirection::Asc,
+                    )
+                    .unwrap(),
+                    range: ir::IndexRange::All,
+                },
+                membership,
+                window: exec::ExecCountWindowPlan::identity(),
+            })
+        };
+
+        // One pre-intersected filter is the sequential oracle.
+        let intersected = execute_direct_count(
+            &db,
+            range(exec::ExecNodeRangeMembershipPlan::BitmapFilters(
+                ir::AtLeast::from_one(exec::ExecNodeBitmapExpr::Intersect {
+                    driver: Box::new(node_point("User", "status", "active")),
+                    rest: ir::AtLeast::from_one(node_point("User", "role", "admin")),
+                }),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(intersected, ExecutionValue::Count(1));
+        let peak = &db.inner.peak_index_child_reads;
+        peak.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            execute_direct_count(
+                &db,
+                range(exec::ExecNodeRangeMembershipPlan::BitmapFilters(
+                    ir::AtLeast::try_from_vec(vec![
+                        node_point("User", "status", "active"),
+                        node_point("User", "role", "admin"),
+                    ])
+                    .unwrap(),
+                )),
+            )
+            .await
+            .unwrap(),
+            intersected
+        );
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[cfg_attr(test, tokio::test)]
@@ -4422,7 +5129,14 @@ mod tests {
             values: ir::AtLeast::from_pair(indexed("active"), indexed("paused")),
         };
         let valid_node = node_point("User", "status", "active");
-        assert_eq!(execution.node_bitmap(&valid_node).await.unwrap().len(), 1);
+        assert_eq!(
+            execution
+                .node_bitmap(&valid_node, access::PARALLEL_INDEX_READS)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         for expression in [
             invalid_node_point(),
             invalid_node_batch,
@@ -4443,7 +5157,10 @@ mod tests {
                 rest: ir::AtLeast::from_one(invalid_node_point()),
             },
         ] {
-            assert!(execution.node_bitmap(&expression).await.is_err());
+            assert!(execution
+                .node_bitmap(&expression, access::PARALLEL_INDEX_READS)
+                .await
+                .is_err());
         }
 
         let invalid_edge_point = || exec::ExecEdgeBitmapExpr::PointRead {
@@ -4457,7 +5174,14 @@ mod tests {
             values: ir::AtLeast::from_pair(indexed("active"), indexed("paused")),
         };
         let valid_edge = edge_point("FOLLOWS", "status", "active");
-        assert_eq!(execution.edge_bitmap(&valid_edge).await.unwrap().len(), 1);
+        assert_eq!(
+            execution
+                .edge_bitmap(&valid_edge, access::PARALLEL_INDEX_READS)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         for expression in [
             invalid_edge_point(),
             invalid_edge_batch,
@@ -4478,142 +5202,156 @@ mod tests {
                 rest: ir::AtLeast::from_one(invalid_edge_point()),
             },
         ] {
-            assert!(execution.edge_bitmap(&expression).await.is_err());
+            assert!(execution
+                .edge_bitmap(&expression, access::PARALLEL_INDEX_READS)
+                .await
+                .is_err());
         }
     }
 
     #[cfg_attr(test, tokio::test)]
     async fn unique_count_performs_one_owner_read_and_one_authoritative_verification() {
-        let db = test_support::open_db_with_config(
-            test_support::in_memory_config("count-exact-unique-owner")
-                .with_unique_equality_index("User", "email"),
-        )
-        .await;
-        let owner = test_support::add_node_with_properties(
-            &db,
-            "User",
-            vec![("email", PropertyValue::from("alice@example.com"))],
-        )
-        .await;
-        let exact = exec::ExecNodeAccessPlan::exact_equality(
-            catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:email"))
-                .with_uniqueness(catalog::IndexUniqueness::Unique),
-            catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
-            ir::IndexValue::Literal(
-                ir::SecondaryIndexLiteral::new(PropertyValue::from("alice@example.com")).unwrap(),
-            ),
-        );
-        let exec::ExecNodeAccessPlan::Unique {
-            lookup,
-            verification,
-        } = exact
-        else {
-            panic!("unique metadata must select the exact unique family")
-        };
-        crate::index_lifecycle::secondary::reset_equality_read_metrics();
-        assert_eq!(
-            execute_direct_count(
-                &db,
-                exec::ExecCountPlan::NodeUnique(exec::ExecNodeUniqueCountPlan {
-                    lookup: lookup.clone(),
-                    verification: verification.clone(),
-                    window: exec::ExecCountWindowPlan::identity(),
-                }),
-            )
-            .await
-            .unwrap(),
-            ExecutionValue::Count(1)
-        );
-        assert_eq!(
-            crate::index_lifecycle::secondary::equality_read_metrics(),
-            crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
-                point_reads: 2,
-                multi_get_calls: 0,
-                scans: 0,
-                graph_reads: 1,
-            }
-        );
-        let missing_value = indexed("missing@example.com");
-        let mut missing_lookup = lookup.clone();
-        missing_lookup.value = missing_value.clone();
-        let mut missing_verification = verification.clone();
-        missing_verification.value = missing_value;
-        assert_eq!(
-            execute_direct_count(
-                &db,
-                exec::ExecCountPlan::NodeUnique(exec::ExecNodeUniqueCountPlan {
-                    lookup: missing_lookup,
-                    verification: missing_verification,
-                    window: exec::ExecCountWindowPlan::identity(),
-                }),
-            )
-            .await
-            .unwrap(),
-            ExecutionValue::Count(0)
-        );
-        let mut invalid_lookup = lookup.clone();
-        invalid_lookup.index = exec::ExecNodeUniqueEqualityIndex::try_from(
-            catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:Other:email"))
-                .with_uniqueness(catalog::IndexUniqueness::Unique),
-        )
-        .unwrap();
-        let context = ExecutionContext::new(&db, context::ParamBindings::default());
-        assert!(context
-            .verified_node_unique_owner(&invalid_lookup, &verification)
-            .await
-            .is_err());
-
-        db.inner_db()
-            .put(
-                keys::DataKey::Data {
-                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-                    kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(owner)),
-                }
-                .to_bytes(),
-                crate::encoding::v2::values::property::encode_properties(&[
-                    crate::encoding::v2::values::property::Property::string("$label", "Other"),
-                    crate::encoding::v2::values::property::Property::string(
-                        "email",
-                        "alice@example.com",
+        crate::index_lifecycle::secondary::EqualityReadObserver::default()
+            .scope(async {
+                let db = test_support::open_db_with_config(
+                    test_support::in_memory_config("count-exact-unique-owner")
+                        .with_unique_equality_index("User", "email"),
+                )
+                .await;
+                let owner = test_support::add_node_with_properties(
+                    &db,
+                    "User",
+                    vec![("email", PropertyValue::from("alice@example.com"))],
+                )
+                .await;
+                let exact = exec::ExecNodeAccessPlan::exact_equality(
+                    catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:User:email"))
+                        .with_uniqueness(catalog::IndexUniqueness::Unique),
+                    catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
+                    ir::IndexValue::Literal(
+                        ir::SecondaryIndexLiteral::new(PropertyValue::from("alice@example.com"))
+                            .unwrap(),
                     ),
-                ]),
-            )
+                );
+                let exec::ExecNodeAccessPlan::Unique {
+                    lookup,
+                    verification,
+                } = exact
+                else {
+                    panic!("unique metadata must select the exact unique family")
+                };
+                crate::index_lifecycle::secondary::reset_equality_read_metrics();
+                assert_eq!(
+                    execute_direct_count(
+                        &db,
+                        exec::ExecCountPlan::NodeUnique(exec::ExecNodeUniqueCountPlan {
+                            lookup: lookup.clone(),
+                            verification: verification.clone(),
+                            window: exec::ExecCountWindowPlan::identity(),
+                        }),
+                    )
+                    .await
+                    .unwrap(),
+                    ExecutionValue::Count(1)
+                );
+                assert_eq!(
+                    crate::index_lifecycle::secondary::equality_read_metrics(),
+                    crate::index_lifecycle::secondary::SecondaryEqualityReadMetrics {
+                        point_reads: 2,
+                        multi_get_calls: 0,
+                        scans: 0,
+                        graph_reads: 1,
+                    }
+                );
+                let missing_value = indexed("missing@example.com");
+                let mut missing_lookup = lookup.clone();
+                missing_lookup.value = missing_value.clone();
+                let mut missing_verification = verification.clone();
+                missing_verification.value = missing_value;
+                assert_eq!(
+                    execute_direct_count(
+                        &db,
+                        exec::ExecCountPlan::NodeUnique(exec::ExecNodeUniqueCountPlan {
+                            lookup: missing_lookup,
+                            verification: missing_verification,
+                            window: exec::ExecCountWindowPlan::identity(),
+                        }),
+                    )
+                    .await
+                    .unwrap(),
+                    ExecutionValue::Count(0)
+                );
+                let mut invalid_lookup = lookup.clone();
+                invalid_lookup.index = exec::ExecNodeUniqueEqualityIndex::try_from(
+                    catalog::NodeEqualityIndexMeta::new(test_support::name("node_eq:Other:email"))
+                        .with_uniqueness(catalog::IndexUniqueness::Unique),
+                )
+                .unwrap();
+                let context = ExecutionContext::new(&db, context::ParamBindings::default());
+                assert!(context
+                    .verified_node_unique_owner(&invalid_lookup, &verification)
+                    .await
+                    .is_err());
+
+                db.inner_db()
+                    .put(
+                        keys::DataKey::Data {
+                            scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                            kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                                owner,
+                            )),
+                        }
+                        .to_bytes(),
+                        crate::encoding::v2::values::property::encode_properties(&[
+                            crate::encoding::v2::values::property::Property::string(
+                                "$label", "Other",
+                            ),
+                            crate::encoding::v2::values::property::Property::string(
+                                "email",
+                                "alice@example.com",
+                            ),
+                        ]),
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    execute_direct_count(
+                        &db,
+                        exec::ExecCountPlan::NodeUnique(exec::ExecNodeUniqueCountPlan {
+                            lookup: lookup.clone(),
+                            verification: verification.clone(),
+                            window: exec::ExecCountWindowPlan::identity(),
+                        }),
+                    )
+                    .await,
+                    Err(HelixDbError::IndexCatalogCorruption(message))
+                        if message.contains("authoritative node")
+                ));
+                db.inner_db()
+                    .put(
+                        keys::DataKey::Data {
+                            scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                            kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                                owner,
+                            )),
+                        }
+                        .to_bytes(),
+                        bytes::Bytes::from_static(b"malformed unique authority"),
+                    )
+                    .await
+                    .unwrap();
+                assert!(execute_direct_count(
+                    &db,
+                    exec::ExecCountPlan::NodeUnique(exec::ExecNodeUniqueCountPlan {
+                        lookup,
+                        verification,
+                        window: exec::ExecCountWindowPlan::identity(),
+                    }),
+                )
+                .await
+                .is_err());
+            })
             .await
-            .unwrap();
-        assert!(matches!(
-            execute_direct_count(
-                &db,
-                exec::ExecCountPlan::NodeUnique(exec::ExecNodeUniqueCountPlan {
-                    lookup: lookup.clone(),
-                    verification: verification.clone(),
-                    window: exec::ExecCountWindowPlan::identity(),
-                }),
-            )
-            .await,
-            Err(HelixDbError::IndexCatalogCorruption(message))
-                if message.contains("authoritative node")
-        ));
-        db.inner_db()
-            .put(
-                keys::DataKey::Data {
-                    scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-                    kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(owner)),
-                }
-                .to_bytes(),
-                bytes::Bytes::from_static(b"malformed unique authority"),
-            )
-            .await
-            .unwrap();
-        assert!(execute_direct_count(
-            &db,
-            exec::ExecCountPlan::NodeUnique(exec::ExecNodeUniqueCountPlan {
-                lookup,
-                verification,
-                window: exec::ExecCountWindowPlan::identity(),
-            }),
-        )
-        .await
-        .is_err());
     }
 
     #[cfg_attr(test, tokio::test)]
@@ -4837,6 +5575,81 @@ mod tests {
     }
 
     #[cfg(test)]
+    #[cfg_attr(test, tokio::test)]
+    async fn count_intersection_of_point_ids_and_index_uses_bitmaps() {
+        let db = test_support::open_db_with_config(
+            test_support::in_memory_config("count-id-set-bitmaps")
+                .with_equality_index("User", "status"),
+        )
+        .await;
+        let mut active = Vec::new();
+        for _ in 0..3 {
+            active.push(
+                test_support::add_node_with_properties(
+                    &db,
+                    "User",
+                    vec![("status", PropertyValue::from("active"))],
+                )
+                .await,
+            );
+        }
+        let paused = test_support::add_node_with_properties(
+            &db,
+            "User",
+            vec![("status", PropertyValue::from("paused"))],
+        )
+        .await;
+        // Never written, as if deleted: point IDs do not prove existence.
+        let missing = paused + 1_000;
+        let points = || {
+            exec::ExecCountCursorPlan::NodePointReads(test_support::ids(vec![
+                active[0], paused, missing,
+            ]))
+        };
+        let status =
+            || exec::ExecCountCursorPlan::NodeBitmap(node_point("User", "status", "active"));
+
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        // The index proves the one ID both sets hold: no row is built and no
+        // existence is read.
+        let intersect = exec::ExecCountCursorPlan::Intersect {
+            driver: Box::new(points()),
+            rest: ir::AtLeast::from_one(status()),
+        };
+        assert_eq!(
+            execution
+                .pull_count_cardinality(&intersect, &mut None, 0, None)
+                .await
+                .unwrap(),
+            1
+        );
+        let work = execution.pull_work.snapshot();
+        assert_eq!(work.raw_gets, 0);
+        assert_eq!(work.multi_get_keys, 0);
+        assert_eq!(work.source_visits, 1);
+
+        // A union verifies only the point IDs the index does not prove, in
+        // one batched read, and drops the missing one.
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        let union = exec::ExecCountCursorPlan::Union {
+            driver: Box::new(status()),
+            rest: ir::AtLeast::from_one(points()),
+        };
+        assert_eq!(
+            execution
+                .pull_count_cardinality(&union, &mut None, 0, None)
+                .await
+                .unwrap(),
+            4
+        );
+        let work = execution.pull_work.snapshot();
+        assert_eq!(work.raw_gets, 0);
+        assert_eq!(work.multi_get_keys, 2);
+        assert_eq!(work.source_visits, 4);
+    }
+
     #[tokio::test]
     async fn randomized_recursive_counts_match_the_materialized_row_oracle() {
         let db = test_support::open_db("count-randomized-recursive-oracle").await;
@@ -4969,7 +5782,7 @@ mod tests {
     pub(super) async fn run_production_contracts() {
         test_support::run_production_contracts().await;
         evaluated_windows_and_index_identity_validation_cover_boundaries();
-        direct_non_search_count_families_match_materialized_sources().await;
+        direct_non_search_count_families_match_materialized_sources_contract().await;
         dynamic_equality_runtime_classification_covers_every_named_case().await;
         every_direct_storage_count_propagates_its_own_read_failure().await;
         direct_and_cursor_authoritative_counts_propagate_each_predicate_failure().await;
@@ -4987,5 +5800,368 @@ mod tests {
         unique_count_performs_one_owner_read_and_one_authoritative_verification().await;
         authoritative_null_count_applies_its_normalized_window_after_matches().await;
         terminal_cursor_counts_avoid_row_output_and_stop_at_the_encoded_threshold().await;
+    }
+
+    /// Direct and single-cursor stream authoritative counts select exactly
+    /// the stored matches, read a corrupt row only when the predicate needs
+    /// it, and report it like the full-row decoder.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_counts_match_stored_rows_and_fail_on_read_corruption() {
+        use crate::encoding::property::{
+            encode_properties, property_value::PropertyValue as V, Property,
+        };
+        let db = test_support::open_db("count-scan-predicate-golden").await;
+        let key = |id: u64| {
+            keys::DataKey::Data {
+                scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+            }
+            .to_bytes()
+        };
+        let rows = [
+            vec![
+                Property::string("status", "active"),
+                Property::i64("score", 5),
+                Property::new("meta", V::Object([("score".into(), V::I64(9))].into())),
+            ],
+            vec![
+                Property::string("status", "inactive"),
+                Property::f64("score", 7.5),
+            ],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+                Property::i64("score", 11),
+                Property::string("status", "inactive"),
+            ],
+            Vec::new(),
+            vec![
+                Property::string("status", "inactive"),
+                Property::string("status", "active"),
+            ],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.inner_db()
+                .put(key(id), encode_properties(properties))
+                .await
+                .unwrap();
+        }
+        let cases = [
+            (Predicate::eq("status", "active"), 2),
+            (Predicate::gt("score", 6_i64), 2),
+            (Predicate::eq("meta.score", 9_i64), 1),
+            (Predicate::is_null("status"), 1),
+            (
+                Predicate::and(vec![
+                    Predicate::eq("status", "active"),
+                    Predicate::gt("score", 6_i64),
+                ]),
+                1,
+            ),
+            (Predicate::eq("$id", 4_i64), 1),
+        ];
+        let count = |predicate: Predicate| {
+            let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                ir::PredicatePlan::new(predicate).unwrap(),
+            );
+            [
+                exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                    predicate: predicate.clone(),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+                exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                    cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+            ]
+        };
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        for (predicate, expected) in cases.clone() {
+            for plan in count(predicate.clone()) {
+                assert_eq!(
+                    execution
+                        .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                        .await
+                        .unwrap(),
+                    ExecutionValue::Count(expected),
+                    "{predicate:?}"
+                );
+            }
+        }
+        db.inner_db()
+            .put(key(4), bytes::Bytes::from_static(b"corrupt node row"))
+            .await
+            .unwrap();
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        for plan in count(Predicate::eq("$id", 4_i64)) {
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(1)
+            );
+        }
+        for plan in count(Predicate::eq("status", "active")) {
+            assert!(matches!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                    .await,
+                Err(HelixDbError::Encoding(
+                    crate::encoding::error::EncodingError::Rkyv(_)
+                ))
+            ));
+        }
+        db.close().await.unwrap();
+    }
+
+    /// Direct and single-cursor stream scan counts evaluate predicates on the
+    /// records the scan returned instead of reading each one again.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_counts_do_not_read_scanned_records_again() {
+        let db = test_support::open_db("count-scan-predicate-record-reuse").await;
+        for (n, status) in ["active", "inactive", "active"].into_iter().enumerate() {
+            db.inner_db()
+                .put(
+                    keys::DataKey::Data {
+                        scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                        kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
+                            n as u64 + 1,
+                        )),
+                    }
+                    .to_bytes(),
+                    crate::encoding::property::encode_properties(&[
+                        crate::encoding::property::Property::string("status", status),
+                    ]),
+                )
+                .await
+                .unwrap();
+        }
+        let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+            ir::PredicatePlan::new(Predicate::eq("status", "active")).unwrap(),
+        );
+        for plan in [
+            exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                predicate: predicate.clone(),
+                window: exec::ExecCountWindowPlan::identity(),
+            }),
+            exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                window: exec::ExecCountWindowPlan::identity(),
+            }),
+        ] {
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), &plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(2)
+            );
+            assert_eq!(execution.pull_work.snapshot().raw_gets, 0);
+        }
+        db.close().await.unwrap();
+    }
+
+    /// Direct and single-cursor stream scan counts charge every row their
+    /// predicate reads to the request's row-memory budget, as the storage
+    /// reads they once made did: a row larger than the budget fails the count
+    /// only when read, every charge is released after it, and each read row is
+    /// reported as the point read it replaces.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_counts_charge_evaluated_rows_to_the_row_memory_budget() {
+        use crate::encoding::property::{encode_properties, Property};
+        let db = test_support::open_db("count-scan-predicate-budget").await;
+        let rows = [
+            vec![Property::string("status", "active")],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+            ],
+            vec![Property::string("status", "inactive")],
+            Vec::new(),
+            vec![Property::bytes("blob", vec![1; 4096])],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.inner_db()
+                .put(
+                    keys::DataKey::Data {
+                        scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                        kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+                    }
+                    .to_bytes(),
+                    encode_properties(properties),
+                )
+                .await
+                .unwrap();
+        }
+        let plans = |predicate: Predicate| {
+            let predicate = exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                ir::PredicatePlan::new(predicate).unwrap(),
+            );
+            [
+                exec::ExecCountPlan::NodeAuthoritativeScan(exec::ExecNodeScanCountPlan {
+                    predicate: predicate.clone(),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+                exec::ExecCountPlan::Stream(exec::ExecCountStreamPlan {
+                    cursor: exec::ExecCountCursorPlan::NodeAuthoritativeScan(predicate),
+                    window: exec::ExecCountWindowPlan::identity(),
+                }),
+            ]
+        };
+        // A predicate that reads no record charges none, as before.
+        for plan in &plans(Predicate::eq("$id", 2_i64)) {
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(crate::query_resources::Budget::new(2048));
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(1)
+            );
+        }
+        for plan in &plans(Predicate::eq("status", "active")) {
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(crate::query_resources::Budget::new(2048));
+            assert!(matches!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), plan)
+                    .await,
+                Err(HelixDbError::QueryMemoryLimitExceeded)
+            ));
+            let limit = 1 << 20;
+            let budget = crate::query_resources::Budget::new(limit);
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(budget.clone());
+            assert_eq!(
+                execution
+                    .execute_count(ExecutionValue::Stream(Vec::new()), plan)
+                    .await
+                    .unwrap(),
+                ExecutionValue::Count(2)
+            );
+            assert!(
+                budget.peak() >= 1536 * size_of::<f32>(),
+                "{}",
+                budget.peak()
+            );
+            assert_eq!(budget.available(), limit);
+            let reads = budget.reads();
+            assert_eq!(
+                (reads.scan_rows, reads.point_gets, reads.multi_get_keys),
+                (0, 5, 0)
+            );
+        }
+        db.close().await.unwrap();
+    }
+
+    /// The row cursor of an authoritative node scan, which compound counts
+    /// consume, selects exactly the stored matches, reads a corrupt row only
+    /// when its predicate needs it, and charges the rows it collects to the
+    /// row-memory budget.
+    #[cfg(test)]
+    #[tokio::test]
+    async fn authoritative_scan_row_cursor_selects_stored_matches_within_its_budget() {
+        use crate::encoding::property::{encode_properties, Property};
+        let db = test_support::open_db("count-scan-row-cursor").await;
+        let key = |id: u64| {
+            keys::DataKey::Data {
+                scope: crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+            }
+            .to_bytes()
+        };
+        let rows = [
+            vec![Property::string("status", "active")],
+            vec![
+                Property::string("status", "active"),
+                Property::f32_array("embedding", vec![0.5; 1536]),
+            ],
+            vec![Property::string("status", "inactive")],
+            Vec::new(),
+            vec![Property::bytes("blob", vec![1; 4096])],
+        ];
+        for (id, properties) in (1_u64..).zip(&rows) {
+            db.inner_db()
+                .put(key(id), encode_properties(properties))
+                .await
+                .unwrap();
+        }
+        let cursor = |predicate: Predicate| {
+            exec::ExecCountCursorPlan::NodeAuthoritativeScan(
+                exec::ExecNodeAuthoritativeScanPredicate::Predicate(
+                    ir::PredicatePlan::new(predicate).unwrap(),
+                ),
+            )
+        };
+        let ids = |rows: Vec<ExecutionRow>| {
+            rows.into_iter()
+                .map(|row| row.current.unwrap().id())
+                .collect::<Vec<_>>()
+        };
+        let cases = [
+            (Predicate::eq("status", "active"), vec![1, 2]),
+            (Predicate::eq("$id", 3_i64), vec![3]),
+            (Predicate::is_null("status"), vec![4, 5]),
+            (Predicate::is_not_null("embedding"), vec![2]),
+        ];
+        for (predicate, expected) in cases {
+            let limit = 1 << 20;
+            let budget = crate::query_resources::Budget::new(limit);
+            let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+            execution.enable_request_read_view().await.unwrap();
+            execution.row_memory = Some(budget.clone());
+            let rows = execution
+                .count_cursor(&cursor(predicate.clone()), &mut None)
+                .await
+                .unwrap();
+            assert_eq!(ids(rows), expected, "{predicate:?}");
+            // Every row is collected before any is evaluated.
+            assert!(budget.peak() >= (1536 + 1024) * size_of::<f32>());
+            assert_eq!(budget.available(), limit);
+            assert_eq!(budget.reads().scan_rows, 5);
+        }
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        execution.row_memory = Some(crate::query_resources::Budget::new(2048));
+        assert!(matches!(
+            execution
+                .count_cursor(&cursor(Predicate::eq("status", "active")), &mut None)
+                .await,
+            Err(HelixDbError::QueryMemoryLimitExceeded)
+        ));
+        db.inner_db()
+            .put(key(6), bytes::Bytes::from_static(b"corrupt node row"))
+            .await
+            .unwrap();
+        let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+        execution.enable_request_read_view().await.unwrap();
+        assert_eq!(
+            ids(execution
+                .count_cursor(&cursor(Predicate::eq("$id", 6_i64)), &mut None)
+                .await
+                .unwrap()),
+            vec![6]
+        );
+        assert!(matches!(
+            execution
+                .count_cursor(&cursor(Predicate::eq("status", "active")), &mut None)
+                .await,
+            Err(HelixDbError::Encoding(
+                crate::encoding::error::EncodingError::Rkyv(_)
+            ))
+        ));
+        db.close().await.unwrap();
     }
 }

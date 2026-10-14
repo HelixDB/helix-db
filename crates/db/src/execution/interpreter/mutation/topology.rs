@@ -1,15 +1,15 @@
 //! Transaction-local coalescing for current-format graph topology rows.
 //!
-//! Add-only bitmap and adjacency rows need no observation: one current-format
-//! merge operand represents the complete union. Any key whose final mutation
-//! removes membership participates in one sorted `multi_get`, after which this
-//! runtime stages one final current-format put/delete. No runtime state is
-//! serialized.
+//! Bitmap and adjacency rows are staged as associative membership deltas. The
+//! transaction conflict metadata names each logical member, so mutations to
+//! disjoint members of one physical row can commit concurrently without a
+//! read/modify/write cycle.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::Bytes;
-use roaring::RoaringTreemap;
+use helix_planner::relational::allocation;
+#[cfg(test)]
 use slatedb::DbTransaction;
 
 use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey};
@@ -18,35 +18,158 @@ use crate::encoding::indexes::{
 };
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{AdjacencyKey, DataKey, DataKeyKind, EdgePairIndexKey};
-use crate::encoding::v2::values::adjacency::Edges;
-use crate::encoding::v2::values::{adjacency as edges, indexes as secondary};
+use crate::encoding::v2::values::adjacency as edges;
+#[cfg(test)]
+use crate::encoding::v2::values::indexes as secondary;
 use crate::{HelixDbError, Result};
 
-/// A final membership operation for one ID within the current epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MembershipMutation {
-    Present,
-    Absent,
+use crate::query_resources::{self, membership};
+use crate::transaction::merges;
+use membership::Change as MembershipMutation;
+
+/// Logical identity for one shared bitmap row. Physical keys are encoded once
+/// when the coalesced epoch is flushed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BitmapRow {
+    NodeLabel {
+        scope: DataScope,
+        label_hash: [u8; 8],
+    },
+    EdgePair {
+        scope: DataScope,
+        from: u64,
+        to: u64,
+    },
+    EdgeLabelNeighbor {
+        scope: DataScope,
+        direction: EdgeDirection,
+        node: u64,
+        label_hash: [u8; 8],
+    },
+    GlobalEdgeLabel {
+        scope: DataScope,
+        label_hash: [u8; 8],
+    },
 }
 
-/// Direction local to adjacency rows; `Both` is represented by two entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum AdjacencyDirection {
-    Out,
-    In,
+impl BitmapRow {
+    fn key(self) -> DataKey<'static> {
+        match self {
+            Self::NodeLabel { scope, label_hash } => DataKey::Data {
+                scope,
+                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
+                    crate::encoding::indexes::equality::EqualityIndexKey::new(
+                        hash_property_name("$label"),
+                        label_hash,
+                    ),
+                )),
+            },
+            Self::EdgePair { scope, from, to } => DataKey::Data {
+                scope,
+                kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(from, to)),
+            },
+            Self::EdgeLabelNeighbor {
+                scope,
+                direction,
+                node,
+                label_hash,
+            } => DataKey::Data {
+                scope,
+                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
+                    EdgeLabelNeighborKey::new(direction, node, label_hash),
+                )),
+            },
+            Self::GlobalEdgeLabel { scope, label_hash } => DataKey::Data {
+                scope,
+                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
+                    label_hash,
+                ))),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Default)]
+struct AdjacencyDelta {
+    outgoing: membership::Delta,
+    incoming: membership::Delta,
+}
+
+impl AdjacencyDelta {
+    fn apply(
+        &mut self,
+        neighbor: u64,
+        direction: helix_planner::ir::ExpandDirection,
+        mutation: MembershipMutation,
+    ) -> Result<()> {
+        match direction {
+            helix_planner::ir::ExpandDirection::Out => {
+                self.outgoing.prepare(neighbor, mutation)?.apply()
+            }
+            helix_planner::ir::ExpandDirection::In => {
+                self.incoming.prepare(neighbor, mutation)?.apply()
+            }
+            helix_planner::ir::ExpandDirection::Both => {
+                let outgoing = self.outgoing.prepare(neighbor, mutation)?;
+                let incoming = self.incoming.prepare(neighbor, mutation)?;
+                outgoing.apply();
+                incoming.apply();
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 struct TopologyMutationBatch {
-    bitmaps: BTreeMap<Bytes, BTreeMap<u64, MembershipMutation>>,
-    adjacency: BTreeMap<Bytes, BTreeMap<(AdjacencyDirection, u64), MembershipMutation>>,
+    bitmaps: BTreeMap<BitmapRow, membership::Delta>,
+    adjacency: BTreeMap<(DataScope, u64), AdjacencyDelta>,
+    // Field order keeps collection admission alive until its maps are dropped.
+    memory: Option<query_resources::Reservation>,
+}
+impl std::fmt::Debug for TopologyMutationBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TopologyMutationBatch")
+            .field("bitmaps", &self.bitmaps)
+            .field("adjacency", &self.adjacency)
+            .finish_non_exhaustive()
+    }
+}
+impl TopologyMutationBatch {
+    fn admit_rows(&mut self, bitmaps: usize, adjacency: usize) -> Result<()> {
+        let Some(memory) = &mut self.memory else {
+            return Ok(());
+        };
+        use helix_planner::relational::allocation;
+        let bitmap_bytes = if bitmaps == 0 {
+            0
+        } else {
+            allocation::btree_bytes::<BitmapRow, membership::Delta>(bitmaps)
+        };
+        let adjacency_bytes = if adjacency == 0 {
+            0
+        } else {
+            allocation::btree_bytes::<(DataScope, u64), AdjacencyDelta>(adjacency)
+        };
+        memory.resize(bitmap_bytes.saturating_add(adjacency_bytes))
+    }
 }
 
 /// Transaction-owned topology mutations with a terminal prepared state.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(in crate::execution::interpreter) struct TopologyMutationRuntime {
     state: TopologyMutationRuntimeState,
     staged_keys: BTreeSet<Bytes>,
+    staged_memory: Option<query_resources::Reservation>,
+    budget: Option<query_resources::Budget>,
+}
+impl std::fmt::Debug for TopologyMutationRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TopologyMutationRuntime")
+            .field("state", &self.state)
+            .field("staged_keys", &self.staged_keys)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -58,10 +181,18 @@ enum TopologyMutationRuntimeState {
 }
 
 impl TopologyMutationRuntime {
+    /// Bind collection growth to this request's optional memory admission.
+    pub(super) fn new(budget: Option<&query_resources::Budget>) -> Self {
+        Self {
+            budget: budget.cloned(),
+            ..Self::default()
+        }
+    }
+
     /// Reads topology rows while preserving transaction-local staged overlays.
     pub(in crate::execution::interpreter) async fn observe(
         &self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
         keys: &[Bytes],
     ) -> Result<Vec<Option<Bytes>>> {
         let mut values = vec![None; keys.len()];
@@ -94,7 +225,10 @@ impl TopologyMutationRuntime {
         node_id: u64,
     ) -> Result<()> {
         self.record_bitmap(
-            node_label_key(scope, label),
+            BitmapRow::NodeLabel {
+                scope,
+                label_hash: hash_property_value(label),
+            },
             node_id,
             MembershipMutation::Present,
         )
@@ -108,7 +242,10 @@ impl TopologyMutationRuntime {
         node_id: u64,
     ) -> Result<()> {
         self.record_bitmap(
-            node_label_key(scope, label),
+            BitmapRow::NodeLabel {
+                scope,
+                label_hash: hash_property_value(label),
+            },
             node_id,
             MembershipMutation::Absent,
         )
@@ -123,7 +260,7 @@ impl TopologyMutationRuntime {
         edge_id: u64,
     ) -> Result<()> {
         self.record_bitmap(
-            edge_pair_key(scope, from, to),
+            BitmapRow::EdgePair { scope, from, to },
             edge_id,
             MembershipMutation::Present,
         )
@@ -138,7 +275,7 @@ impl TopologyMutationRuntime {
         edge_id: u64,
     ) -> Result<()> {
         self.record_bitmap(
-            edge_pair_key(scope, from, to),
+            BitmapRow::EdgePair { scope, from, to },
             edge_id,
             MembershipMutation::Absent,
         )
@@ -154,17 +291,30 @@ impl TopologyMutationRuntime {
         edge_id: u64,
     ) -> Result<()> {
         self.record_bitmap(
-            edge_label_neighbor_key(scope, EdgeDirection::Out, from, label),
+            BitmapRow::EdgeLabelNeighbor {
+                scope,
+                direction: EdgeDirection::Out,
+                node: from,
+                label_hash: hash_property_value(label),
+            },
             to,
             MembershipMutation::Present,
         )?;
         self.record_bitmap(
-            edge_label_neighbor_key(scope, EdgeDirection::In, to, label),
+            BitmapRow::EdgeLabelNeighbor {
+                scope,
+                direction: EdgeDirection::In,
+                node: to,
+                label_hash: hash_property_value(label),
+            },
             from,
             MembershipMutation::Present,
         )?;
         self.record_bitmap(
-            global_edge_label_key(scope, label),
+            BitmapRow::GlobalEdgeLabel {
+                scope,
+                label_hash: hash_property_value(label),
+            },
             edge_id,
             MembershipMutation::Present,
         )
@@ -178,7 +328,10 @@ impl TopologyMutationRuntime {
         edge_id: u64,
     ) -> Result<()> {
         self.record_bitmap(
-            global_edge_label_key(scope, label),
+            BitmapRow::GlobalEdgeLabel {
+                scope,
+                label_hash: hash_property_value(label),
+            },
             edge_id,
             MembershipMutation::Absent,
         )
@@ -193,12 +346,22 @@ impl TopologyMutationRuntime {
         label: &str,
     ) -> Result<()> {
         self.record_bitmap(
-            edge_label_neighbor_key(scope, EdgeDirection::Out, from, label),
+            BitmapRow::EdgeLabelNeighbor {
+                scope,
+                direction: EdgeDirection::Out,
+                node: from,
+                label_hash: hash_property_value(label),
+            },
             to,
             MembershipMutation::Absent,
         )?;
         self.record_bitmap(
-            edge_label_neighbor_key(scope, EdgeDirection::In, to, label),
+            BitmapRow::EdgeLabelNeighbor {
+                scope,
+                direction: EdgeDirection::In,
+                node: to,
+                label_hash: hash_property_value(label),
+            },
             from,
             MembershipMutation::Absent,
         )
@@ -232,9 +395,24 @@ impl TopologyMutationRuntime {
         self.record_adjacency(scope, node, neighbor, direction, MembershipMutation::Absent)
     }
 
-    fn record_bitmap(&mut self, key: Bytes, id: u64, mutation: MembershipMutation) -> Result<()> {
+    fn record_bitmap(
+        &mut self,
+        row: BitmapRow,
+        id: u64,
+        mutation: MembershipMutation,
+    ) -> Result<()> {
+        let budget = self.budget.clone();
         let batch = self.collecting_batch()?;
-        batch.bitmaps.entry(key).or_default().insert(id, mutation);
+        let Some(delta) = batch.bitmaps.get_mut(&row) else {
+            // Admit map growth and the first member before publishing the row.
+            // A rejected update must never leave an empty delta for later flush.
+            batch.admit_rows(batch.bitmaps.len() + 1, batch.adjacency.len())?;
+            let mut delta = membership::Delta::new(budget.as_ref())?;
+            delta.prepare(id, mutation)?.apply();
+            batch.bitmaps.insert(row, delta);
+            return Ok(());
+        };
+        delta.prepare(id, mutation)?.apply();
         Ok(())
     }
 
@@ -246,30 +424,32 @@ impl TopologyMutationRuntime {
         direction: helix_planner::ir::ExpandDirection,
         mutation: MembershipMutation,
     ) -> Result<()> {
-        let key = DataKey::Data {
-            scope,
-            kind: DataKeyKind::Adjacency(AdjacencyKey::new(node)),
-        }
-        .to_bytes();
-        let row = self.collecting_batch()?.adjacency.entry(key).or_default();
-        match direction {
-            helix_planner::ir::ExpandDirection::Out => {
-                row.insert((AdjacencyDirection::Out, neighbor), mutation);
-            }
-            helix_planner::ir::ExpandDirection::In => {
-                row.insert((AdjacencyDirection::In, neighbor), mutation);
-            }
-            helix_planner::ir::ExpandDirection::Both => {
-                row.insert((AdjacencyDirection::Out, neighbor), mutation);
-                row.insert((AdjacencyDirection::In, neighbor), mutation);
-            }
-        }
-        Ok(())
+        let budget = self.budget.clone();
+        let batch = self.collecting_batch()?;
+        let row = (scope, node);
+        let Some(delta) = batch.adjacency.get_mut(&row) else {
+            batch.admit_rows(batch.bitmaps.len(), batch.adjacency.len() + 1)?;
+            let mut delta = AdjacencyDelta {
+                outgoing: membership::Delta::new(budget.as_ref())?,
+                incoming: membership::Delta::new(budget.as_ref())?,
+            };
+            delta.apply(neighbor, direction, mutation)?;
+            batch.adjacency.insert(row, delta);
+            return Ok(());
+        };
+        delta.apply(neighbor, direction, mutation)
     }
 
     fn collecting_batch(&mut self) -> Result<&mut TopologyMutationBatch> {
         if matches!(self.state, TopologyMutationRuntimeState::Collecting) {
-            self.state = TopologyMutationRuntimeState::Pending(TopologyMutationBatch::default());
+            self.state = TopologyMutationRuntimeState::Pending(TopologyMutationBatch {
+                memory: self
+                    .budget
+                    .as_ref()
+                    .map(|budget| budget.reserve(0))
+                    .transpose()?,
+                ..TopologyMutationBatch::default()
+            });
         }
         match &mut self.state {
             TopologyMutationRuntimeState::Pending(batch) => Ok(batch),
@@ -285,7 +465,7 @@ impl TopologyMutationRuntime {
     /// Flushes one coalesced epoch and returns to the collecting state.
     pub(in crate::execution::interpreter) async fn flush(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<()> {
         let state = std::mem::take(&mut self.state);
         let batch = match state {
@@ -299,138 +479,85 @@ impl TopologyMutationRuntime {
             }
         };
 
-        let mut observation_keys = batch
-            .bitmaps
-            .iter()
-            .filter(|(_, mutations)| {
-                mutations
-                    .values()
-                    .any(|mutation| *mutation == MembershipMutation::Absent)
+        let TopologyMutationBatch {
+            bitmaps,
+            adjacency,
+            mut memory,
+        } = batch;
+        let count = bitmaps
+            .len()
+            .checked_add(adjacency.len())
+            .ok_or(HelixDbError::QueryMemoryLimitExceeded)?;
+        if count == 0 {
+            return Ok(());
+        }
+        // The temporary key vector and retained lookup tree own their container
+        // admission. Each encoded key returned by the common batch owns its bytes.
+        let key_vector_memory = self
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(count.saturating_mul(size_of::<Bytes>())))
+            .transpose()?;
+        if self.staged_memory.is_none() {
+            self.staged_memory = self
+                .budget
+                .as_ref()
+                .map(|budget| budget.reserve(0))
+                .transpose()?;
+        }
+        self.staged_memory
+            .as_mut()
+            .map(|memory| {
+                memory.resize(allocation::btree_bytes::<Bytes, ()>(
+                    self.staged_keys.len().saturating_add(count),
+                ))
             })
-            .map(|(key, _)| key.clone())
-            .chain(
-                batch
-                    .adjacency
-                    .iter()
-                    .filter(|(_, mutations)| {
-                        mutations
-                            .values()
-                            .any(|mutation| *mutation == MembershipMutation::Absent)
-                    })
-                    .map(|(key, _)| key.clone()),
-            )
-            .collect::<Vec<_>>();
-        observation_keys.sort_unstable();
-        observation_keys.dedup();
-        let (staged_keys, snapshot_keys): (Vec<_>, Vec<_>) = observation_keys
-            .into_iter()
-            .partition(|key| self.staged_keys.contains(key));
-        let snapshot_values = if snapshot_keys.is_empty() {
-            Vec::new()
-        } else {
-            transaction.multi_get(&snapshot_keys).await?
+            .transpose()?;
+        let mut merges = transaction.merge_batch(count)?;
+        let mut staged_keys = Vec::with_capacity(count);
+        for (row, delta) in bitmaps {
+            let (delta, admission) = delta.into_parts();
+            staged_keys.push(merges.bitmap(merges::Key::Typed(row.key()), &delta)?);
+            let Some(admission) = admission else {
+                continue;
+            };
+            memory
+                .as_mut()
+                .expect("budgeted collection epoch")
+                .absorb(admission);
+        }
+
+        for ((scope, node), delta) in adjacency {
+            let (outgoing, out_admission) = delta.outgoing.into_parts();
+            let (incoming, in_admission) = delta.incoming.into_parts();
+            for admission in [out_admission, in_admission].into_iter().flatten() {
+                memory
+                    .as_mut()
+                    .expect("budgeted collection epoch")
+                    .absorb(admission);
+            }
+            let delta = edges::AdjacencyMembershipDelta::from_directions(outgoing, incoming);
+            let key = DataKey::Data {
+                scope,
+                kind: DataKeyKind::Adjacency(AdjacencyKey::new(node)),
+            };
+            staged_keys.push(merges.adjacency(merges::Key::Typed(key), &delta)?);
+        }
+
+        merges.stage().await?;
+        self.staged_keys.extend(staged_keys);
+        drop(key_vector_memory);
+        let Some(memory) = self.staged_memory.as_mut() else {
+            return Ok(());
         };
-        let mut observations = snapshot_keys
-            .into_iter()
-            .zip(snapshot_values)
-            .collect::<BTreeMap<_, _>>();
-        for key in staged_keys {
-            observations.insert(key.clone(), transaction.get(&key).await?);
-        }
-
-        for (key, mutations) in batch.bitmaps {
-            if mutations
-                .values()
-                .all(|mutation| *mutation == MembershipMutation::Present)
-            {
-                let additions = mutations.keys().copied().collect::<RoaringTreemap>();
-                transaction.merge_commutative(
-                    &key,
-                    secondary::SecondaryEqualityValue::encode_ids(&additions),
-                )?;
-                self.staged_keys.insert(key);
-                continue;
-            }
-            let mut bitmap = observations
-                .get(&key)
-                .cloned()
-                .flatten()
-                .map(|value| {
-                    secondary::SecondaryEqualityValue::decode(&value).map(|value| value.into_ids())
-                })
-                .transpose()?
-                .unwrap_or_default();
-            for (id, mutation) in mutations {
-                match mutation {
-                    MembershipMutation::Present => {
-                        bitmap.insert(id);
-                    }
-                    MembershipMutation::Absent => {
-                        bitmap.remove(id);
-                    }
-                }
-            }
-            if bitmap.is_empty() {
-                transaction.delete(&key)?;
-            } else {
-                transaction.put(&key, secondary::SecondaryEqualityValue::encode_ids(&bitmap))?;
-            }
-            self.staged_keys.insert(key);
-        }
-
-        for (key, mutations) in batch.adjacency {
-            if mutations
-                .values()
-                .all(|mutation| *mutation == MembershipMutation::Present)
-            {
-                let mut additions = Edges::new();
-                for ((direction, neighbor), _) in mutations {
-                    match direction {
-                        AdjacencyDirection::Out => additions.add_out(neighbor),
-                        AdjacencyDirection::In => additions.add_in(neighbor),
-                    }
-                }
-                transaction.merge_commutative(&key, edges::encode_edges(&additions))?;
-                self.staged_keys.insert(key);
-                continue;
-            }
-            let mut adjacency = observations
-                .get(&key)
-                .cloned()
-                .flatten()
-                .map(|value| edges::decode_edges(&value))
-                .transpose()?
-                .unwrap_or_default();
-            for ((direction, neighbor), mutation) in mutations {
-                match (direction, mutation) {
-                    (AdjacencyDirection::Out, MembershipMutation::Present) => {
-                        adjacency.add_out(neighbor);
-                    }
-                    (AdjacencyDirection::In, MembershipMutation::Present) => {
-                        adjacency.add_in(neighbor);
-                    }
-                    (AdjacencyDirection::Out, MembershipMutation::Absent) => {
-                        adjacency.remove_out(neighbor);
-                    }
-                    (AdjacencyDirection::In, MembershipMutation::Absent) => {
-                        adjacency.remove_in(neighbor);
-                    }
-                }
-            }
-            if adjacency.is_empty() {
-                transaction.delete(&key)?;
-            } else {
-                transaction.put(&key, edges::encode_edges(&adjacency))?;
-            }
-            self.staged_keys.insert(key);
-        }
+        memory.shrink_to(allocation::btree_bytes::<Bytes, ()>(self.staged_keys.len()));
         Ok(())
     }
 
     /// Flushes the final epoch and seals the runtime for commit.
     pub(in crate::execution::interpreter) async fn prepare(
         &mut self,
-        transaction: &DbTransaction,
+        transaction: &impl crate::transaction::Mutation,
     ) -> Result<()> {
         self.flush(transaction).await?;
         self.state = TopologyMutationRuntimeState::Prepared;
@@ -450,7 +577,8 @@ impl TopologyMutationRuntime {
     }
 }
 
-fn node_label_key(scope: DataScope, label: &str) -> Bytes {
+#[cfg(test)]
+pub(super) fn node_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
@@ -463,7 +591,8 @@ fn node_label_key(scope: DataScope, label: &str) -> Bytes {
     .to_bytes()
 }
 
-fn edge_pair_key(scope: DataScope, from: u64, to: u64) -> Bytes {
+#[cfg(test)]
+pub(super) fn edge_pair_key(scope: DataScope, from: u64, to: u64) -> Bytes {
     DataKey::Data {
         scope,
         kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(from, to)),
@@ -471,7 +600,8 @@ fn edge_pair_key(scope: DataScope, from: u64, to: u64) -> Bytes {
     .to_bytes()
 }
 
-fn edge_label_neighbor_key(
+#[cfg(test)]
+pub(super) fn edge_label_neighbor_key(
     scope: DataScope,
     direction: EdgeDirection,
     node: u64,
@@ -486,7 +616,8 @@ fn edge_label_neighbor_key(
     .to_bytes()
 }
 
-fn global_edge_label_key(scope: DataScope, label: &str) -> Bytes {
+#[cfg(test)]
+pub(super) fn global_edge_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
@@ -498,22 +629,29 @@ fn global_edge_label_key(scope: DataScope, label: &str) -> Bytes {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
+    use roaring::RoaringTreemap;
     use slatedb::object_store::memory::InMemory;
     use slatedb::{Db, IsolationLevel};
 
     use super::*;
 
     async fn database(name: &str) -> Db {
-        Db::builder(
+        let db = Db::builder(
             format!("topology-mutation-runtime/{name}"),
             Arc::new(InMemory::new()),
         )
         .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
         .build()
         .await
-        .expect("topology test database opens")
+        .expect("topology test database opens");
+        crate::migrations::startup::bootstrap_writer(&db)
+            .await
+            .expect("topology test database bootstraps storage metadata");
+        db
     }
 
     async fn transaction(name: &str) -> DbTransaction {
@@ -560,18 +698,20 @@ mod tests {
 
         async fn ids(self, db: &Db, scope: DataScope) -> Vec<u64> {
             match self {
-                Self::NodeLabel(label) => secondary::SecondaryEqualityValue::decode(
-                    &db.get(node_label_key(scope, label))
-                        .await
-                        .unwrap()
-                        .expect("node label race row exists"),
-                )
-                .unwrap()
-                .into_ids()
-                .iter()
-                .collect(),
-                Self::OutAdjacency(node) => edges::decode_edges(
-                    &db.get(
+                Self::NodeLabel(label) => db
+                    .get(node_label_key(scope, label))
+                    .await
+                    .unwrap()
+                    .map(|value| {
+                        secondary::SecondaryEqualityValue::decode(&value)
+                            .unwrap()
+                            .into_ids()
+                            .iter()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                Self::OutAdjacency(node) => db
+                    .get(
                         DataKey::Data {
                             scope,
                             kind: DataKeyKind::Adjacency(AdjacencyKey::new(node)),
@@ -580,18 +720,146 @@ mod tests {
                     )
                     .await
                     .unwrap()
-                    .expect("adjacency race row exists"),
-                )
-                .unwrap()
-                .iter_out()
-                .collect(),
+                    .map(|value| edges::decode_edges(&value).unwrap().iter_out().collect())
+                    .unwrap_or_default(),
+            }
+        }
+    }
+
+    fn stage_linked_event(
+        runtime: &mut TopologyMutationRuntime,
+        scope: DataScope,
+        parent_id: u64,
+        event_id: u64,
+        edge_id: u64,
+        (node_label, edge_label): (&str, &str),
+        mutation: MembershipMutation,
+    ) {
+        match mutation {
+            MembershipMutation::Present => {
+                runtime.add_node_label(scope, node_label, event_id).unwrap();
+                runtime
+                    .add_edge_pair(scope, parent_id, event_id, edge_id)
+                    .unwrap();
+                runtime
+                    .add_edge_label(scope, parent_id, event_id, edge_label, edge_id)
+                    .unwrap();
+                runtime
+                    .add_adjacency(
+                        scope,
+                        parent_id,
+                        event_id,
+                        helix_planner::ir::ExpandDirection::Out,
+                    )
+                    .unwrap();
+                runtime
+                    .add_adjacency(
+                        scope,
+                        event_id,
+                        parent_id,
+                        helix_planner::ir::ExpandDirection::In,
+                    )
+                    .unwrap();
+            }
+            MembershipMutation::Absent => {
+                runtime
+                    .remove_node_label(scope, node_label, event_id)
+                    .unwrap();
+                runtime
+                    .remove_edge_pair(scope, parent_id, event_id, edge_id)
+                    .unwrap();
+                runtime
+                    .remove_global_edge_label(scope, edge_label, edge_id)
+                    .unwrap();
+                runtime
+                    .remove_edge_label_neighbors(scope, parent_id, event_id, edge_label)
+                    .unwrap();
+                runtime
+                    .remove_adjacency(
+                        scope,
+                        parent_id,
+                        event_id,
+                        helix_planner::ir::ExpandDirection::Out,
+                    )
+                    .unwrap();
+                runtime
+                    .remove_adjacency(
+                        scope,
+                        event_id,
+                        parent_id,
+                        helix_planner::ir::ExpandDirection::In,
+                    )
+                    .unwrap();
             }
         }
     }
 
     #[tokio::test]
+    async fn corrupt_topology_rows_fail_closed() {
+        let scope = DataScope::LegacyUnscoped;
+        for row in [
+            "node-label",
+            "edge-pair",
+            "edge-neighbor-out",
+            "edge-neighbor-in",
+            "global-edge-label",
+            "adjacency",
+        ] {
+            let db = database(&format!("corrupt-{row}")).await;
+            let key = match row {
+                "node-label" => node_label_key(scope, "Corrupt"),
+                "edge-pair" => edge_pair_key(scope, 10, 11),
+                "edge-neighbor-out" => {
+                    edge_label_neighbor_key(scope, EdgeDirection::Out, 10, "CORRUPT")
+                }
+                "edge-neighbor-in" => {
+                    edge_label_neighbor_key(scope, EdgeDirection::In, 11, "CORRUPT")
+                }
+                "global-edge-label" => global_edge_label_key(scope, "CORRUPT"),
+                "adjacency" => DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::Adjacency(AdjacencyKey::new(10)),
+                }
+                .to_bytes(),
+                _ => unreachable!("the fixture lists every topology row"),
+            };
+            let corrupt = Bytes::from_static(b"corrupt-topology-value");
+            db.put(&key, corrupt.clone()).await.unwrap();
+
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut runtime = TopologyMutationRuntime::default();
+            match row {
+                "node-label" => runtime.remove_node_label(scope, "Corrupt", 1).unwrap(),
+                "edge-pair" => runtime.remove_edge_pair(scope, 10, 11, 1).unwrap(),
+                "edge-neighbor-out" | "edge-neighbor-in" => runtime
+                    .remove_edge_label_neighbors(scope, 10, 11, "CORRUPT")
+                    .unwrap(),
+                "global-edge-label" => runtime
+                    .remove_global_edge_label(scope, "CORRUPT", 1)
+                    .unwrap(),
+                "adjacency" => runtime
+                    .remove_adjacency(scope, 10, 11, helix_planner::ir::ExpandDirection::Out)
+                    .unwrap(),
+                _ => unreachable!("the fixture lists every topology row"),
+            }
+            assert!(runtime.flush(&transaction).await.is_err(), "{row}");
+            transaction.rollback();
+            assert_eq!(db.get(&key).await.unwrap(), Some(corrupt), "{row}");
+            db.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn concurrent_add_only_rows_commit_and_preserve_every_topology_membership() {
-        let db = database("concurrent-add-only").await;
+        let facade = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+            database: "concurrent-add-only-default".to_string(),
+        })
+        .await
+        .unwrap();
+        let db = facade.inner_db();
         let scope = DataScope::LegacyUnscoped;
         let left = db
             .begin(IsolationLevel::SerializableSnapshot)
@@ -687,11 +955,132 @@ mod tests {
         .unwrap();
         assert_eq!(adjacency.iter_out().collect::<Vec<_>>(), vec![60, 61]);
         assert_eq!(adjacency.iter_in().collect::<Vec<_>>(), vec![60, 61]);
-        db.close().await.unwrap();
+        facade.close().await.unwrap();
     }
 
     #[tokio::test]
-    async fn topology_insert_remove_races_conflict_in_both_commit_orders() {
+    async fn default_startup_disjoint_topology_commits_without_retries() {
+        for (left_present, right_present) in [(true, true), (false, false), (true, false)] {
+            for left_first in [false, true] {
+                let facade = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+                    database: format!(
+                        "default-topology-{left_present}-{right_present}-{left_first}"
+                    ),
+                })
+                .await
+                .unwrap();
+                let db = facade.inner_db();
+                for scope in [
+                    DataScope::LegacyUnscoped,
+                    DataScope::Tenant(crate::encoding::keys::scope::TenantId::from_u128(42)),
+                ] {
+                    for row in [RaceRow::NodeLabel("Event"), RaceRow::OutAdjacency(100)] {
+                        let seed = db
+                            .begin(IsolationLevel::SerializableSnapshot)
+                            .await
+                            .unwrap();
+                        let mut runtime = TopologyMutationRuntime::default();
+                        for (id, present) in [(1, left_present), (2, right_present)] {
+                            if !present {
+                                row.stage(&mut runtime, scope, id, MembershipMutation::Present);
+                            }
+                        }
+                        runtime.prepare(&seed).await.unwrap();
+                        runtime.consume_prepared().unwrap();
+                        seed.commit().await.unwrap();
+
+                        // Both snapshots and both preparations precede either commit. No facade
+                        // retry loop can turn a false conflict into a passing test.
+                        let left = db
+                            .begin(IsolationLevel::SerializableSnapshot)
+                            .await
+                            .unwrap();
+                        let right = db
+                            .begin(IsolationLevel::SerializableSnapshot)
+                            .await
+                            .unwrap();
+                        for (txn, id, present) in
+                            [(&left, 1, left_present), (&right, 2, right_present)]
+                        {
+                            let mut runtime = TopologyMutationRuntime::default();
+                            row.stage(
+                                &mut runtime,
+                                scope,
+                                id,
+                                if present {
+                                    MembershipMutation::Present
+                                } else {
+                                    MembershipMutation::Absent
+                                },
+                            );
+                            runtime.prepare(txn).await.unwrap();
+                            runtime.consume_prepared().unwrap();
+                        }
+                        let (first, second) = if left_first {
+                            (left, right)
+                        } else {
+                            (right, left)
+                        };
+                        first.commit().await.unwrap();
+                        second
+                            .commit()
+                            .await
+                            .expect("disjoint members must not conflict");
+                        let expected = [(1, left_present), (2, right_present)]
+                            .into_iter()
+                            .filter_map(|(id, present)| present.then_some(id))
+                            .collect::<Vec<_>>();
+                        assert_eq!(row.ids(&db, scope).await, expected);
+                    }
+                }
+                facade.close().await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_membership_writes_keep_explicit_row_and_range_conflicts() {
+        for range_read in [false, true] {
+            let facade = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+                database: format!("default-membership-observations-{range_read}"),
+            })
+            .await
+            .unwrap();
+            let db = facade.inner_db();
+            let scope = DataScope::LegacyUnscoped;
+            let key = node_label_key(scope, "Event");
+            let observed = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let concurrent = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            if range_read {
+                let mut rows = observed.scan(key.clone()..=key.clone()).await.unwrap();
+                assert!(rows.next().await.unwrap().is_none());
+            } else {
+                assert!(observed.get(&key).await.unwrap().is_none());
+            }
+            for (txn, id) in [(&observed, 1), (&concurrent, 2)] {
+                let mut runtime = TopologyMutationRuntime::default();
+                runtime.add_node_label(scope, "Event", id).unwrap();
+                runtime.prepare(txn).await.unwrap();
+                runtime.consume_prepared().unwrap();
+            }
+            concurrent.commit().await.unwrap();
+            assert_eq!(
+                observed.commit().await.unwrap_err().kind(),
+                slatedb::ErrorKind::Transaction
+            );
+            assert_eq!(RaceRow::NodeLabel("Event").ids(&db, scope).await, vec![2]);
+            facade.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn topology_insert_remove_races_on_disjoint_members_commit_in_both_orders() {
         let db = database("insert-remove-races").await;
         let scope = DataScope::LegacyUnscoped;
         let cases = [
@@ -729,33 +1118,302 @@ mod tests {
             remove_runtime.prepare(&remove).await.unwrap();
             remove_runtime.consume_prepared().unwrap();
 
-            let retry_mutation = if insert_commits_first {
+            if insert_commits_first {
+                insert.commit().await.unwrap();
+                remove.commit().await.unwrap();
+            } else {
+                remove.commit().await.unwrap();
+                insert.commit().await.unwrap();
+            }
+            assert_eq!(row.ids(&db, scope).await, vec![2]);
+        }
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incoming_and_outgoing_tokens_do_not_alias_at_the_id_boundary() {
+        const NODE: u64 = 300;
+        const NEIGHBOR: u64 = u64::MAX;
+
+        for outgoing_commits_first in [false, true] {
+            let db = database(&format!(
+                "adjacency-direction-token-boundary-{outgoing_commits_first}"
+            ))
+            .await;
+            let scope = DataScope::LegacyUnscoped;
+            let seed = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut seed_runtime = TopologyMutationRuntime::default();
+            seed_runtime
+                .add_adjacency(
+                    scope,
+                    NODE,
+                    NEIGHBOR,
+                    helix_planner::ir::ExpandDirection::In,
+                )
+                .unwrap();
+            seed_runtime.prepare(&seed).await.unwrap();
+            seed_runtime.consume_prepared().unwrap();
+            seed.commit().await.unwrap();
+
+            let outgoing = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let incoming = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut outgoing_runtime = TopologyMutationRuntime::default();
+            outgoing_runtime
+                .add_adjacency(
+                    scope,
+                    NODE,
+                    NEIGHBOR,
+                    helix_planner::ir::ExpandDirection::Out,
+                )
+                .unwrap();
+            outgoing_runtime.prepare(&outgoing).await.unwrap();
+            outgoing_runtime.consume_prepared().unwrap();
+            let mut incoming_runtime = TopologyMutationRuntime::default();
+            incoming_runtime
+                .remove_adjacency(
+                    scope,
+                    NODE,
+                    NEIGHBOR,
+                    helix_planner::ir::ExpandDirection::In,
+                )
+                .unwrap();
+            incoming_runtime.prepare(&incoming).await.unwrap();
+            incoming_runtime.consume_prepared().unwrap();
+
+            if outgoing_commits_first {
+                outgoing.commit().await.unwrap();
+                incoming.commit().await.unwrap();
+            } else {
+                incoming.commit().await.unwrap();
+                outgoing.commit().await.unwrap();
+            }
+
+            let adjacency = edges::decode_edges(
+                &db.get(
+                    DataKey::Data {
+                        scope,
+                        kind: DataKeyKind::Adjacency(AdjacencyKey::new(NODE)),
+                    }
+                    .to_bytes(),
+                )
+                .await
+                .unwrap()
+                .expect("adjacency row remains present"),
+            )
+            .unwrap();
+            assert_eq!(adjacency.iter_out().collect::<Vec<_>>(), vec![NEIGHBOR]);
+            assert_eq!(adjacency.iter_in().collect::<Vec<_>>(), Vec::<u64>::new());
+            db.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn topology_insert_remove_races_on_same_member_conflict_in_both_orders() {
+        let db = database("same-member-insert-remove-races").await;
+        let scope = DataScope::LegacyUnscoped;
+        let cases = [
+            (RaceRow::NodeLabel("insert-first"), true),
+            (RaceRow::NodeLabel("remove-first"), false),
+            (RaceRow::OutAdjacency(200), true),
+            (RaceRow::OutAdjacency(201), false),
+        ];
+
+        for (row, insert_commits_first) in cases {
+            let seed = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut seed_runtime = TopologyMutationRuntime::default();
+            row.stage(&mut seed_runtime, scope, 1, MembershipMutation::Present);
+            seed_runtime.prepare(&seed).await.unwrap();
+            seed_runtime.consume_prepared().unwrap();
+            seed.commit().await.unwrap();
+
+            let insert = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let remove = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut insert_runtime = TopologyMutationRuntime::default();
+            row.stage(&mut insert_runtime, scope, 1, MembershipMutation::Present);
+            insert_runtime.prepare(&insert).await.unwrap();
+            insert_runtime.consume_prepared().unwrap();
+            let mut remove_runtime = TopologyMutationRuntime::default();
+            row.stage(&mut remove_runtime, scope, 1, MembershipMutation::Absent);
+            remove_runtime.prepare(&remove).await.unwrap();
+            remove_runtime.consume_prepared().unwrap();
+
+            if insert_commits_first {
                 insert.commit().await.unwrap();
                 let error = remove.commit().await.expect_err("remove must conflict");
                 assert_eq!(error.kind(), slatedb::ErrorKind::Transaction);
-                MembershipMutation::Absent
+                assert_eq!(row.ids(&db, scope).await, vec![1]);
             } else {
                 remove.commit().await.unwrap();
                 let error = insert.commit().await.expect_err("insert must conflict");
                 assert_eq!(error.kind(), slatedb::ErrorKind::Transaction);
-                MembershipMutation::Present
-            };
+                assert_eq!(row.ids(&db, scope).await, Vec::<u64>::new());
+            }
+        }
 
-            let retry = db
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn linked_event_insert_and_expiry_preserve_every_shared_topology_row() {
+        let db = database("linked-event-insert-expiry-races").await;
+        let scope = DataScope::LegacyUnscoped;
+
+        for (case, insert_commits_first) in [(0_u64, false), (1, true)] {
+            let parent_id = 1_000 + case * 100;
+            let expired_event_id = parent_id + 1;
+            let inserted_event_id = parent_id + 2;
+            let expired_edge_id = parent_id + 10;
+            let inserted_edge_id = parent_id + 11;
+            let node_label = format!("Event-{case}");
+            let edge_label = format!("HAS_EVENT-{case}");
+
+            let seed = db
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .unwrap();
-            let mut retry_runtime = TopologyMutationRuntime::default();
-            row.stage(
-                &mut retry_runtime,
+            let mut seed_runtime = TopologyMutationRuntime::default();
+            stage_linked_event(
+                &mut seed_runtime,
                 scope,
-                if insert_commits_first { 1 } else { 2 },
-                retry_mutation,
+                parent_id,
+                expired_event_id,
+                expired_edge_id,
+                (&node_label, &edge_label),
+                MembershipMutation::Present,
             );
-            retry_runtime.prepare(&retry).await.unwrap();
-            retry_runtime.consume_prepared().unwrap();
-            retry.commit().await.unwrap();
-            assert_eq!(row.ids(&db, scope).await, vec![2]);
+            seed_runtime.prepare(&seed).await.unwrap();
+            seed_runtime.consume_prepared().unwrap();
+            seed.commit().await.unwrap();
+
+            let insert = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let remove = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut insert_runtime = TopologyMutationRuntime::default();
+            stage_linked_event(
+                &mut insert_runtime,
+                scope,
+                parent_id,
+                inserted_event_id,
+                inserted_edge_id,
+                (&node_label, &edge_label),
+                MembershipMutation::Present,
+            );
+            insert_runtime.prepare(&insert).await.unwrap();
+            insert_runtime.consume_prepared().unwrap();
+            let mut remove_runtime = TopologyMutationRuntime::default();
+            stage_linked_event(
+                &mut remove_runtime,
+                scope,
+                parent_id,
+                expired_event_id,
+                expired_edge_id,
+                (&node_label, &edge_label),
+                MembershipMutation::Absent,
+            );
+            remove_runtime.prepare(&remove).await.unwrap();
+            remove_runtime.consume_prepared().unwrap();
+
+            if insert_commits_first {
+                insert.commit().await.unwrap();
+                remove.commit().await.unwrap();
+            } else {
+                remove.commit().await.unwrap();
+                insert.commit().await.unwrap();
+            }
+
+            let bitmap_ids = |key| async {
+                db.get(key)
+                    .await
+                    .unwrap()
+                    .map(|value| {
+                        secondary::SecondaryEqualityValue::decode(&value)
+                            .unwrap()
+                            .into_ids()
+                            .iter()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            assert_eq!(
+                bitmap_ids(node_label_key(scope, &node_label)).await,
+                vec![inserted_event_id]
+            );
+            assert_eq!(
+                bitmap_ids(edge_label_neighbor_key(
+                    scope,
+                    EdgeDirection::Out,
+                    parent_id,
+                    &edge_label,
+                ))
+                .await,
+                vec![inserted_event_id]
+            );
+            assert_eq!(
+                bitmap_ids(global_edge_label_key(scope, &edge_label)).await,
+                vec![inserted_edge_id]
+            );
+            assert_eq!(
+                bitmap_ids(edge_pair_key(scope, parent_id, expired_event_id)).await,
+                Vec::<u64>::new()
+            );
+            assert_eq!(
+                bitmap_ids(edge_pair_key(scope, parent_id, inserted_event_id)).await,
+                vec![inserted_edge_id]
+            );
+            let parent_adjacency = edges::decode_edges(
+                &db.get(
+                    DataKey::Data {
+                        scope,
+                        kind: DataKeyKind::Adjacency(AdjacencyKey::new(parent_id)),
+                    }
+                    .to_bytes(),
+                )
+                .await
+                .unwrap()
+                .expect("parent adjacency remains"),
+            )
+            .unwrap();
+            assert_eq!(
+                parent_adjacency.iter_out().collect::<Vec<_>>(),
+                vec![inserted_event_id]
+            );
+            let expired_adjacency = db
+                .get(
+                    DataKey::Data {
+                        scope,
+                        kind: DataKeyKind::Adjacency(AdjacencyKey::new(expired_event_id)),
+                    }
+                    .to_bytes(),
+                )
+                .await
+                .unwrap()
+                .map(|value| edges::decode_edges(&value).unwrap())
+                .unwrap_or_default();
+            assert!(expired_adjacency.is_empty());
         }
 
         db.close().await.unwrap();
@@ -833,6 +1491,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coalesced_membership_deltas_keep_the_last_mutation_per_member() {
+        let db = database("coalesced-last-membership-mutation").await;
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let scope = DataScope::LegacyUnscoped;
+        let mut runtime = TopologyMutationRuntime::default();
+
+        runtime.add_node_label(scope, "User", 1).unwrap();
+        runtime.remove_node_label(scope, "User", 1).unwrap();
+        runtime.remove_node_label(scope, "User", 2).unwrap();
+        runtime.add_node_label(scope, "User", 2).unwrap();
+        runtime
+            .add_adjacency(scope, 9, 1, helix_planner::ir::ExpandDirection::Both)
+            .unwrap();
+        runtime
+            .remove_adjacency(scope, 9, 1, helix_planner::ir::ExpandDirection::Out)
+            .unwrap();
+        runtime
+            .remove_adjacency(scope, 9, 2, helix_planner::ir::ExpandDirection::Both)
+            .unwrap();
+        runtime
+            .add_adjacency(scope, 9, 2, helix_planner::ir::ExpandDirection::Out)
+            .unwrap();
+        runtime.prepare(&transaction).await.unwrap();
+        runtime.consume_prepared().unwrap();
+        transaction.commit().await.unwrap();
+
+        assert_eq!(
+            secondary::SecondaryEqualityValue::decode(
+                &db.get(node_label_key(scope, "User"))
+                    .await
+                    .unwrap()
+                    .expect("coalesced node-label row exists"),
+            )
+            .unwrap()
+            .into_ids()
+            .iter()
+            .collect::<Vec<_>>(),
+            vec![2]
+        );
+        let adjacency = edges::decode_edges(
+            &db.get(
+                DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::Adjacency(AdjacencyKey::new(9)),
+                }
+                .to_bytes(),
+            )
+            .await
+            .unwrap()
+            .expect("coalesced adjacency row exists"),
+        )
+        .unwrap();
+        assert_eq!(adjacency.iter_out().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(adjacency.iter_in().collect::<Vec<_>>(), vec![1]);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn prepared_runtime_rejects_further_collection() {
         let transaction = transaction("prepared-rejects-collection").await;
         let mut runtime = TopologyMutationRuntime::default();
@@ -842,5 +1562,514 @@ mod tests {
             runtime.add_node_label(DataScope::LegacyUnscoped, "User", 1),
             Err(HelixDbError::InvariantViolation(_))
         ));
+        assert!(matches!(
+            runtime.flush(&transaction).await,
+            Err(HelixDbError::InvariantViolation(_))
+        ));
+        // A rejected extra flush must retain the prepared state for commit.
+        runtime.consume_prepared().unwrap();
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum SweepBenchmarkStrategy {
+        ExclusiveReadModifyWrite,
+        DisjointDelta,
+    }
+
+    #[derive(Debug)]
+    struct SweepConflictBenchmarkResult {
+        writer_conflicts: usize,
+        sweeper_conflicts: usize,
+        writer_commits: usize,
+        sweeper_commits: usize,
+    }
+
+    #[derive(Debug)]
+    struct SweepPreparationBenchmarkResult {
+        minimum: Duration,
+        median: Duration,
+        maximum: Duration,
+        samples: usize,
+    }
+
+    async fn stage_benchmark_memberships(
+        db: &Db,
+        strategy: SweepBenchmarkStrategy,
+        ids: std::ops::Range<u64>,
+        present: bool,
+    ) -> DbTransaction {
+        const PARENT_ID: u64 = u64::MAX - 1;
+        const LABEL: &str = "KubernetesEvent";
+
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("benchmark transaction begins");
+        match strategy {
+            SweepBenchmarkStrategy::ExclusiveReadModifyWrite if present => {
+                let additions = ids.clone().collect::<RoaringTreemap>();
+                transaction
+                    .merge_commutative(
+                        node_label_key(DataScope::LegacyUnscoped, LABEL),
+                        secondary::SecondaryEqualityValue::encode_ids(&additions),
+                    )
+                    .expect("exclusive benchmark label additions stage");
+                let mut adjacency = edges::Edges::new();
+                for id in ids {
+                    adjacency.add_out(id);
+                }
+                transaction
+                    .merge_commutative(
+                        DataKey::Data {
+                            scope: DataScope::LegacyUnscoped,
+                            kind: DataKeyKind::Adjacency(AdjacencyKey::new(PARENT_ID)),
+                        }
+                        .to_bytes(),
+                        edges::encode_edges(&adjacency),
+                    )
+                    .expect("exclusive benchmark adjacency additions stage");
+            }
+            SweepBenchmarkStrategy::ExclusiveReadModifyWrite => {
+                let label_key = node_label_key(DataScope::LegacyUnscoped, LABEL);
+                let adjacency_key = DataKey::Data {
+                    scope: DataScope::LegacyUnscoped,
+                    kind: DataKeyKind::Adjacency(AdjacencyKey::new(PARENT_ID)),
+                }
+                .to_bytes();
+                let values = transaction
+                    .multi_get(&[label_key.clone(), adjacency_key.clone()])
+                    .await
+                    .expect("exclusive benchmark rows read");
+                let mut labels = values[0]
+                    .as_deref()
+                    .map(secondary::SecondaryEqualityValue::decode)
+                    .transpose()
+                    .expect("exclusive benchmark labels decode")
+                    .map(secondary::SecondaryEqualityValue::into_ids)
+                    .unwrap_or_default();
+                let mut adjacency = values[1]
+                    .as_deref()
+                    .map(edges::decode_edges)
+                    .transpose()
+                    .expect("exclusive benchmark adjacency decodes")
+                    .unwrap_or_default();
+                for id in ids {
+                    labels.remove(id);
+                    adjacency.remove_out(id);
+                }
+                if labels.is_empty() {
+                    transaction
+                        .delete(label_key)
+                        .expect("exclusive benchmark empty label row deletes");
+                } else {
+                    transaction
+                        .put(
+                            label_key,
+                            secondary::SecondaryEqualityValue::encode_ids(&labels),
+                        )
+                        .expect("exclusive benchmark label replacement stages");
+                }
+                if adjacency.is_empty() {
+                    transaction
+                        .delete(adjacency_key)
+                        .expect("exclusive benchmark empty adjacency row deletes");
+                } else {
+                    transaction
+                        .put(adjacency_key, edges::encode_edges(&adjacency))
+                        .expect("exclusive benchmark adjacency replacement stages");
+                }
+            }
+            SweepBenchmarkStrategy::DisjointDelta => {
+                let mut runtime = TopologyMutationRuntime::default();
+                for id in ids {
+                    if present {
+                        runtime
+                            .add_node_label(DataScope::LegacyUnscoped, LABEL, id)
+                            .unwrap();
+                        runtime
+                            .add_adjacency(
+                                DataScope::LegacyUnscoped,
+                                PARENT_ID,
+                                id,
+                                helix_planner::ir::ExpandDirection::Out,
+                            )
+                            .unwrap();
+                    } else {
+                        runtime
+                            .remove_node_label(DataScope::LegacyUnscoped, LABEL, id)
+                            .unwrap();
+                        runtime
+                            .remove_adjacency(
+                                DataScope::LegacyUnscoped,
+                                PARENT_ID,
+                                id,
+                                helix_planner::ir::ExpandDirection::Out,
+                            )
+                            .unwrap();
+                    }
+                }
+                runtime.prepare(&transaction).await.unwrap();
+                runtime.consume_prepared().unwrap();
+            }
+        }
+        transaction
+    }
+
+    async fn run_sweep_conflict_benchmark(
+        strategy: SweepBenchmarkStrategy,
+        expired_members: u64,
+        inserted_members: u64,
+        sweep_chunk: u64,
+        writer_chunk: u64,
+    ) -> SweepConflictBenchmarkResult {
+        const PARENT_ID: u64 = u64::MAX - 1;
+        const LABEL: &str = "KubernetesEvent";
+
+        let db = Arc::new(
+            database(match strategy {
+                SweepBenchmarkStrategy::ExclusiveReadModifyWrite => "benchmark-exclusive",
+                SweepBenchmarkStrategy::DisjointDelta => "benchmark-disjoint",
+            })
+            .await,
+        );
+        let label_key = node_label_key(DataScope::LegacyUnscoped, LABEL);
+        db.put(
+            &label_key,
+            secondary::SecondaryEqualityValue::encode_ids(
+                &(0..expired_members).collect::<RoaringTreemap>(),
+            ),
+        )
+        .await
+        .expect("benchmark label seed persists");
+        let mut adjacency = edges::Edges::new();
+        for id in 0..expired_members {
+            adjacency.add_out(id);
+        }
+        db.put(
+            DataKey::Data {
+                scope: DataScope::LegacyUnscoped,
+                kind: DataKeyKind::Adjacency(AdjacencyKey::new(PARENT_ID)),
+            }
+            .to_bytes(),
+            edges::encode_edges(&adjacency),
+        )
+        .await
+        .expect("benchmark adjacency seed persists");
+
+        let writer_chunks = inserted_members.div_ceil(writer_chunk) as usize;
+        let sweeper_chunks = expired_members.div_ceil(sweep_chunk) as usize;
+        let synchronized_chunks = writer_chunks.min(sweeper_chunks);
+        let barriers = (0..synchronized_chunks)
+            .map(|_| Arc::new(tokio::sync::Barrier::new(2)))
+            .collect::<Vec<_>>();
+        let writer_progress = Arc::new(AtomicUsize::new(0));
+        let writer_notify = Arc::new(tokio::sync::Notify::new());
+        let writer = {
+            let db = Arc::clone(&db);
+            let barriers = barriers.clone();
+            let writer_progress = Arc::clone(&writer_progress);
+            let writer_notify = Arc::clone(&writer_notify);
+            tokio::spawn(async move {
+                let mut conflicts = 0;
+                for chunk in 0..writer_chunks {
+                    let start = expired_members + chunk as u64 * writer_chunk;
+                    let end = (start + writer_chunk).min(expired_members + inserted_members);
+                    let mut first_attempt = true;
+                    loop {
+                        let transaction =
+                            stage_benchmark_memberships(&db, strategy, start..end, true).await;
+                        if first_attempt && chunk < synchronized_chunks {
+                            barriers
+                                .get(chunk)
+                                .expect("synchronized chunk has a barrier")
+                                .wait()
+                                .await;
+                        }
+                        match transaction.commit().await {
+                            Ok(_) => break,
+                            Err(error) if error.kind() == slatedb::ErrorKind::Transaction => {
+                                conflicts += 1;
+                                first_attempt = false;
+                            }
+                            Err(error) => panic!("benchmark writer commit failed: {error}"),
+                        }
+                    }
+                    writer_progress.store(chunk + 1, Ordering::Release);
+                    writer_notify.notify_waiters();
+                }
+                conflicts
+            })
+        };
+        let sweeper = {
+            let db = Arc::clone(&db);
+            let barriers = barriers.clone();
+            let writer_progress = Arc::clone(&writer_progress);
+            let writer_notify = Arc::clone(&writer_notify);
+            tokio::spawn(async move {
+                let mut conflicts = 0;
+                for chunk in 0..sweeper_chunks {
+                    let start = chunk as u64 * sweep_chunk;
+                    let end = (start + sweep_chunk).min(expired_members);
+                    let mut first_attempt = true;
+                    loop {
+                        let transaction =
+                            stage_benchmark_memberships(&db, strategy, start..end, false).await;
+                        if first_attempt && chunk < synchronized_chunks {
+                            barriers
+                                .get(chunk)
+                                .expect("synchronized chunk has a barrier")
+                                .wait()
+                                .await;
+                            loop {
+                                let notified = writer_notify.notified();
+                                if writer_progress.load(Ordering::Acquire) > chunk {
+                                    break;
+                                }
+                                notified.await;
+                            }
+                        }
+                        match transaction.commit().await {
+                            Ok(_) => break,
+                            Err(error) if error.kind() == slatedb::ErrorKind::Transaction => {
+                                conflicts += 1;
+                                first_attempt = false;
+                            }
+                            Err(error) => panic!("benchmark sweeper commit failed: {error}"),
+                        }
+                    }
+                }
+                conflicts
+            })
+        };
+        let writer_conflicts = writer.await.expect("benchmark writer joins");
+        let sweeper_conflicts = sweeper.await.expect("benchmark sweeper joins");
+        let labels = secondary::SecondaryEqualityValue::decode(
+            &db.get(&label_key)
+                .await
+                .expect("benchmark result reads")
+                .expect("inserted memberships remain"),
+        )
+        .expect("benchmark result decodes")
+        .into_ids();
+        assert_eq!(labels.len(), inserted_members);
+        assert_eq!(labels.min(), Some(expired_members));
+        assert_eq!(labels.max(), Some(expired_members + inserted_members - 1));
+        let adjacency = edges::decode_edges(
+            &db.get(
+                DataKey::Data {
+                    scope: DataScope::LegacyUnscoped,
+                    kind: DataKeyKind::Adjacency(AdjacencyKey::new(PARENT_ID)),
+                }
+                .to_bytes(),
+            )
+            .await
+            .expect("benchmark adjacency result reads")
+            .expect("inserted adjacency memberships remain"),
+        )
+        .expect("benchmark adjacency result decodes");
+        let outgoing = adjacency.iter_out().collect::<RoaringTreemap>();
+        assert_eq!(outgoing.len(), inserted_members);
+        assert_eq!(outgoing.min(), Some(expired_members));
+        assert_eq!(outgoing.max(), Some(expired_members + inserted_members - 1));
+        db.close().await.expect("benchmark database closes");
+
+        SweepConflictBenchmarkResult {
+            writer_conflicts,
+            sweeper_conflicts,
+            writer_commits: writer_chunks,
+            sweeper_commits: sweeper_chunks,
+        }
+    }
+
+    async fn run_sweep_preparation_benchmark(
+        strategy: SweepBenchmarkStrategy,
+        expired_members: u64,
+        sweep_chunk: u64,
+        samples: usize,
+    ) -> SweepPreparationBenchmarkResult {
+        const PARENT_ID: u64 = u64::MAX - 1;
+        const LABEL: &str = "KubernetesEvent";
+
+        let db = database(match strategy {
+            SweepBenchmarkStrategy::ExclusiveReadModifyWrite => "prepare-exclusive",
+            SweepBenchmarkStrategy::DisjointDelta => "prepare-disjoint",
+        })
+        .await;
+        db.put(
+            node_label_key(DataScope::LegacyUnscoped, LABEL),
+            secondary::SecondaryEqualityValue::encode_ids(
+                &(0..expired_members).collect::<RoaringTreemap>(),
+            ),
+        )
+        .await
+        .expect("preparation benchmark label seed persists");
+        let mut adjacency = edges::Edges::new();
+        for id in 0..expired_members {
+            adjacency.add_out(id);
+        }
+        db.put(
+            DataKey::Data {
+                scope: DataScope::LegacyUnscoped,
+                kind: DataKeyKind::Adjacency(AdjacencyKey::new(PARENT_ID)),
+            }
+            .to_bytes(),
+            edges::encode_edges(&adjacency),
+        )
+        .await
+        .expect("preparation benchmark adjacency seed persists");
+
+        // Warm storage and codec paths before collecting paired samples. The
+        // transaction is deliberately not committed so every sample stages a
+        // sweep against the same full hot rows.
+        drop(
+            stage_benchmark_memberships(&db, strategy, 0..sweep_chunk.min(expired_members), false)
+                .await,
+        );
+
+        let mut elapsed = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            let started = Instant::now();
+            for start in (0..expired_members).step_by(sweep_chunk as usize) {
+                drop(
+                    stage_benchmark_memberships(
+                        &db,
+                        strategy,
+                        start..(start + sweep_chunk).min(expired_members),
+                        false,
+                    )
+                    .await,
+                );
+            }
+            elapsed.push(started.elapsed());
+        }
+        elapsed.sort_unstable();
+        db.close()
+            .await
+            .expect("preparation benchmark database closes");
+
+        SweepPreparationBenchmarkResult {
+            minimum: elapsed[0],
+            median: elapsed[elapsed.len() / 2],
+            maximum: elapsed[elapsed.len() - 1],
+            samples: elapsed.len(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manual 100K-member conflict and preparation-performance comparison"]
+    async fn benchmark_exclusive_vs_disjoint_linked_event_sweep() {
+        let expired_members = std::env::var("HELIX_SWEEP_BENCH_EXPIRED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(100_000);
+        let inserted_members = std::env::var("HELIX_SWEEP_BENCH_INSERTED")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(10_000);
+        let sweep_chunk = std::env::var("HELIX_SWEEP_BENCH_SWEEP_CHUNK")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1_000);
+        let writer_chunk = std::env::var("HELIX_SWEEP_BENCH_WRITER_CHUNK")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(250);
+        let performance_samples = std::env::var("HELIX_SWEEP_BENCH_SAMPLES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(9);
+        assert!(expired_members > 0);
+        assert!(inserted_members > 0);
+        assert!(sweep_chunk > 0);
+        assert!(writer_chunk > 0);
+        assert!(performance_samples >= 3);
+        assert!(performance_samples % 2 == 1);
+
+        let before_conflicts = run_sweep_conflict_benchmark(
+            SweepBenchmarkStrategy::ExclusiveReadModifyWrite,
+            expired_members,
+            inserted_members,
+            sweep_chunk,
+            writer_chunk,
+        )
+        .await;
+        let after_conflicts = run_sweep_conflict_benchmark(
+            SweepBenchmarkStrategy::DisjointDelta,
+            expired_members,
+            inserted_members,
+            sweep_chunk,
+            writer_chunk,
+        )
+        .await;
+        let before_sweep_conflict_rate = before_conflicts.sweeper_conflicts as f64
+            / (before_conflicts.sweeper_commits + before_conflicts.sweeper_conflicts) as f64;
+        let after_sweep_conflict_rate = after_conflicts.sweeper_conflicts as f64
+            / (after_conflicts.sweeper_commits + after_conflicts.sweeper_conflicts) as f64;
+
+        let before_preparation = run_sweep_preparation_benchmark(
+            SweepBenchmarkStrategy::ExclusiveReadModifyWrite,
+            expired_members,
+            sweep_chunk,
+            performance_samples,
+        )
+        .await;
+        let after_preparation = run_sweep_preparation_benchmark(
+            SweepBenchmarkStrategy::DisjointDelta,
+            expired_members,
+            sweep_chunk,
+            performance_samples,
+        )
+        .await;
+        let before_preparation_throughput =
+            expired_members as f64 / before_preparation.median.as_secs_f64();
+        let after_preparation_throughput =
+            expired_members as f64 / after_preparation.median.as_secs_f64();
+        let exclusive_preparation_time_ratio =
+            after_preparation.median.as_secs_f64() / before_preparation.median.as_secs_f64();
+
+        println!(
+            "SWEEP_CONFLICT before sweep_commits={} sweep_conflicts={} sweep_conflict_rate={:.4} writer_commits={} writer_conflicts={}",
+            before_conflicts.sweeper_commits,
+            before_conflicts.sweeper_conflicts,
+            before_sweep_conflict_rate,
+            before_conflicts.writer_commits,
+            before_conflicts.writer_conflicts,
+        );
+        println!(
+            "SWEEP_CONFLICT after sweep_commits={} sweep_conflicts={} sweep_conflict_rate={:.4} writer_commits={} writer_conflicts={}",
+            after_conflicts.sweeper_commits,
+            after_conflicts.sweeper_conflicts,
+            after_sweep_conflict_rate,
+            after_conflicts.writer_commits,
+            after_conflicts.writer_conflicts,
+        );
+        println!(
+            "SWEEP_PREP before samples={} min_ms={} median_ms={} max_ms={} throughput_members_per_s={:.0}",
+            before_preparation.samples,
+            before_preparation.minimum.as_millis(),
+            before_preparation.median.as_millis(),
+            before_preparation.maximum.as_millis(),
+            before_preparation_throughput,
+        );
+        println!(
+            "SWEEP_PREP after samples={} min_ms={} median_ms={} max_ms={} throughput_members_per_s={:.0}",
+            after_preparation.samples,
+            after_preparation.minimum.as_millis(),
+            after_preparation.median.as_millis(),
+            after_preparation.maximum.as_millis(),
+            after_preparation_throughput,
+        );
+        println!(
+            "SWEEP_DELTA conflict_rate_points={:.2} exclusive_preparation_time_ratio={:.3}",
+            (after_sweep_conflict_rate - before_sweep_conflict_rate) * 100.0,
+            exclusive_preparation_time_ratio,
+        );
+
+        assert!(before_conflicts.sweeper_conflicts > 0);
+        assert_eq!(after_conflicts.sweeper_conflicts, 0);
+        assert_eq!(after_conflicts.writer_conflicts, 0);
     }
 }
+
+#[cfg(test)]
+mod admission_tests;

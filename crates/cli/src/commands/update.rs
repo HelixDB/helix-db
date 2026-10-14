@@ -1,10 +1,9 @@
-use color_eyre::owo_colors::OwoColorize;
 use eyre::Result;
 use self_update::cargo_crate_version;
 use std::env;
 
-use crate::output::{Operation, Step, Verbosity};
-use crate::utils::print_error_with_hint;
+use crate::errors::CliError;
+use crate::output::{self, Step};
 
 const V1_TARGET_VERSION: &str = "2.3.5";
 const V1_TARGET_TAG: &str = "v2.3.5";
@@ -24,7 +23,7 @@ fn run_sync(force: bool, v1: bool) -> Result<()> {
 }
 
 fn run_production_update(force: bool, v1: bool) -> Result<()> {
-    let op = Operation::new("Updating", "CLI");
+    output::intro("Updating the Helix CLI");
 
     let mut check_step = Step::with_messages("Checking for updates", "Checked for updates");
     check_step.start();
@@ -34,7 +33,9 @@ fn run_production_update(force: bool, v1: bool) -> Result<()> {
         .repo_owner("HelixDB")
         .repo_name("helix-db")
         .bin_name("helix")
-        .show_download_progress(true)
+        // The spinner below is the progress indicator; a second progress bar
+        // would redraw underneath it.
+        .show_download_progress(false)
         .show_output(false)
         .no_confirm(true)
         .current_version(cargo_crate_version!());
@@ -57,12 +58,15 @@ fn run_production_update(force: bool, v1: bool) -> Result<()> {
 
         if target_release.version == current_version {
             check_step.done_with_info("already up to date");
-            op.success();
-            println!("  Use --force to reinstall");
             // Still refresh skills — `helix update` keeps the whole toolchain
             // current, even when the binary itself is already on latest.
             refresh_skills_if_installed();
-            return Ok(());
+            output::remark("Use --force to reinstall");
+            output::outro(&format!("Already on v{current_version}"));
+            return output::emit(
+                &serde_json::json!({"version": current_version, "updated": false}),
+                |_| Ok(()),
+            );
         }
 
         check_step.done_with_info(&format!(
@@ -76,38 +80,35 @@ fn run_production_update(force: bool, v1: bool) -> Result<()> {
     }
 
     if is_v3_update(current_version, &latest_release.version) {
-        print_v3_update_warning();
+        output::warning(
+            "This updates to v3, a breaking change: existing v2 databases stop working.\nSee https://docs.helix-db.com before continuing.",
+        );
     }
 
     let mut install_step =
         Step::with_messages("Downloading and installing", "Downloaded and installed");
     install_step.start();
 
-    match status.update() {
-        Ok(_) => {
+    let version = match status.update() {
+        Ok(updated) => {
             install_step.done();
-            op.success();
-            if Verbosity::current().show_normal() {
-                Operation::print_details(&[(
-                    "Note",
-                    "Please restart your terminal to use the new version",
-                )]);
-            }
+            updated.version().to_owned()
         }
-        Err(e) => {
+        Err(error) => {
             install_step.fail();
-            op.failure();
-            print_error_with_hint(
-                &format!("Update failed: {e}"),
-                "check your internet connection and try again",
-            );
-            return Err(e.into());
+            output::outro_cancel("Update failed");
+            return Err(CliError::new(format!("update failed: {error}"))
+                .with_hint("check your internet connection and try again")
+                .into());
         }
-    }
-
+    };
     refresh_skills_if_installed();
-
-    Ok(())
+    output::remark("Restart your terminal to use the new version");
+    output::outro("Updated the Helix CLI");
+    output::emit(
+        &serde_json::json!({"version": version, "updated": true}),
+        |_| Ok(()),
+    )
 }
 
 /// Refresh the Helix agent skills as part of `helix update`, but only when they
@@ -124,19 +125,19 @@ fn refresh_skills_if_installed() {
     let project_dir = env::current_dir().unwrap_or_else(|_| ".".into());
     match crate::setup::install_skills(&project_dir, true, true) {
         Ok(()) => crate::update::record_skills_refreshed(),
-        Err(e) => crate::output::warning(&format!("Skipping Helix skills refresh: {e}")),
+        Err(e) => output::warning(&format!("Skipping Helix skills refresh: {e}")),
     }
 }
 
 fn run_test_update(outcome: crate::host_actions::TestUpdateOutcome) -> Result<()> {
     match outcome {
         crate::host_actions::TestUpdateOutcome::Updated => {
-            crate::output::success("CLI updated successfully");
-            Ok(())
+            output::success("CLI updated successfully");
+            output::emit(&serde_json::json!({"updated": true}), |_| Ok(()))
         }
         crate::host_actions::TestUpdateOutcome::Unchanged => {
-            crate::output::info("CLI is already up to date");
-            Ok(())
+            output::info("CLI is already up to date");
+            output::emit(&serde_json::json!({"updated": false}), |_| Ok(()))
         }
         crate::host_actions::TestUpdateOutcome::Error => {
             Err(eyre::eyre!("simulated CLI update failure"))
@@ -149,30 +150,4 @@ fn is_v3_update(current_version: &str, latest_version: &str) -> bool {
     let latest_version = latest_version.trim_start_matches('v');
 
     !current_version.starts_with("3.") && latest_version.starts_with("3.")
-}
-
-fn print_v3_update_warning() {
-    if !Verbosity::current().show_normal() {
-        return;
-    }
-
-    println!();
-    println!(
-        "{}",
-        "WARNING: Updating from this version will update to v3, which is a breaking change."
-            .yellow()
-            .bold()
-    );
-    println!(
-        "{}",
-        "All existing databases will cease to work and only the Helix v2 DB will be available."
-            .yellow()
-            .bold()
-    );
-    println!(
-        "{}",
-        "For more information, see https://docs.helix-db.com"
-            .yellow()
-            .bold()
-    );
 }

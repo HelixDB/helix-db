@@ -6,7 +6,7 @@ use bytes::Bytes;
 
 use crate::encoding::error::EncodingError;
 use crate::index_lifecycle::work::{
-    AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaValue,
+    AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaState, CoalescedBuildDeltaValue,
 };
 
 use super::*;
@@ -17,6 +17,17 @@ pub(crate) fn encode_build_delta(value: &CoalescedBuildDeltaValue) -> Bytes {
     put_generation(&mut encoder, value.generation);
     put_element_kind(&mut encoder, value.entity_kind);
     encoder.put_u64(value.entity_id.get());
+    match &value.state {
+        CoalescedBuildDeltaState::Marker => {}
+        CoalescedBuildDeltaState::SecondaryBefore(previous) => {
+            encoder.put_u8(0x01);
+            put_option(&mut encoder, previous.as_ref(), put_secondary_value);
+        }
+        CoalescedBuildDeltaState::VectorBefore(previous) => {
+            encoder.put_u8(0x02);
+            put_option(&mut encoder, previous.as_ref(), put_partition);
+        }
+    }
     encoder.finish()
 }
 
@@ -28,11 +39,27 @@ pub(crate) fn decode_build_delta(value: &[u8]) -> Result<CoalescedBuildDeltaValu
             actual: decoder.kind(),
         });
     }
+    let index_id = take_index_id(&mut decoder)?;
+    let generation = take_generation(&mut decoder)?;
+    let entity_kind = take_element_kind(&mut decoder)?;
+    let entity_id = crate::index_lifecycle::IndexEntityId::new(decoder.take_u64()?);
+    let state = if decoder.is_finished() {
+        CoalescedBuildDeltaState::Marker
+    } else {
+        match decoder.take_u8()? {
+            0x01 => CoalescedBuildDeltaState::SecondaryBefore(
+                decoder.take_option(take_secondary_value)?,
+            ),
+            0x02 => CoalescedBuildDeltaState::VectorBefore(decoder.take_option(take_partition)?),
+            unknown => return Err(unknown_discriminant("build-delta family state", unknown)),
+        }
+    };
     let decoded = CoalescedBuildDeltaValue {
-        index_id: take_index_id(&mut decoder)?,
-        generation: take_generation(&mut decoder)?,
-        entity_kind: take_element_kind(&mut decoder)?,
-        entity_id: crate::index_lifecycle::IndexEntityId::new(decoder.take_u64()?),
+        index_id,
+        generation,
+        entity_kind,
+        entity_id,
+        state,
     };
     decoder.finish()?;
     Ok(decoded)

@@ -13,6 +13,8 @@ fn empty_access_json() -> Value {
         "point_lookups": 0,
         "equality_index_lookups": 0,
         "range_index_scans": 0,
+        "reverse_range_index_scans": 0,
+        "dynamic_bounded_accesses": 0,
         "vector_searches": 0,
         "text_searches": 0,
         "bounded_accesses": 0,
@@ -21,6 +23,10 @@ fn empty_access_json() -> Value {
 
 fn empty_statistics_json() -> Value {
     json!({
+        "pull_regions": 0,
+        "pull_operators": 0,
+        "full_input_operators": 0,
+        "observable_boundaries": 0,
         "memo_groups": 0,
         "memo_expressions": 0,
         "rules_fired": 0,
@@ -263,7 +269,8 @@ fn predicate_literals_and_parameter_values_never_reach_diagnostics() {
             .with_query_value(
                 name("payload_parameter"),
                 QueryValue::String(QUERY_SECRET.to_string()),
-            ),
+            )
+            .into(),
         ..context::PlannerContext::default()
     };
     let batch = read_batch()

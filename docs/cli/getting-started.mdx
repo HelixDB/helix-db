@@ -1,142 +1,70 @@
 ---
 title: "Getting started with HelixDB CLI"
-description: "Install the Helix CLI 3.x release, bootstrap a first app, run a local instance, and send your first dynamic query"
-icon: "rocket"
+description: "Install the CLI, run locally, or link a WorkOS-authenticated Cloud database"
 pageType: "Tutorial"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-<Warning>
-**Prerequisites**
-
-- **Docker** or **Podman** (for the local `helixdb` runtime)
-- **Git** (recommended for version-controlling your project)
-- **Node.js/npm** if you use [`helix chef`](/cli/command-reference/chef), which runs `npx` for agent skills and MCP setup
-- A Helix Cloud account is only required if you want to query a Helix Cloud cluster from the CLI.
-</Warning>
-
-## Agent quickstart
-
-If you are starting a new project inside a coding-agent environment, use `helix chef`:
-
-```bash
-helix chef
-```
-
-`helix chef` asks what you want to build, then lets you choose automatic or manual setup. It installs the Helix skills, connects the Helix docs MCP at `https://docs.helix-db.com/mcp`, scaffolds a local project (`helix init local`), starts the `dev` instance, seeds starter data, writes a `HELIX_CHEF_PROMPT.md` build prompt, and launches the first supported agent it finds: Claude Code → OpenAI Codex → OpenCode → Cursor Agent.
-
-<Note>
-**Auth and non-interactive use.** The first interactive run signs you in to Helix Cloud via a GitHub device-code flow (used only for an optional, anonymized setup snapshot). When stdin is not a TTY — agents, CI, sandboxes — `helix chef` skips this login automatically and proceeds without it; set `HELIX_SKIP_CLOUD_AUTH=1` to opt out in an interactive shell too.
-
-For a fully scriptable setup with **no** Cloud auth, skip `chef` and follow the
-[canonical local quickstart](/database/helix-db/start-here/quickstart). This path
-never prompts and never logs in.
-</Note>
+The `helix` CLI scaffolds projects, runs local HelixDB instances, sends queries, and
+manages Helix Cloud resources. Local commands need only Docker or Podman; Cloud
+commands also need a Helix Cloud account.
 
 ## Local quickstart
 
-Windows PowerShell installs the CLI with:
+macOS and Linux:
+
+```bash
+curl -sSL "https://install.helix-db.com" | bash
+```
+
+Windows PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
-Use the [canonical local quickstart](/database/helix-db/start-here/quickstart)
-for the executable `helix init local` → `helix start dev` → `helix query dev`
-→ `helix stop dev` journey. It lists the exact generated files, instance name,
-and query file so this CLI guide does not maintain a second copy of the tutorial.
+Then:
 
-## Version names
+```bash
+mkdir my-helix-app && cd my-helix-app
+helix init local
+helix start dev
+helix query dev --file examples/request.json
+helix stop dev
+```
 
-- **HelixDB v3** is the current product and SDK generation.
-- **Helix CLI 3.x** is the independently released command-line client. Run `helix --version` for the exact installed release.
-- **`POST /v2/query`** is the current HTTP wire endpoint. The endpoint version is independent of the product and CLI versions.
+Local requests use the local auth-disabled runtime. The default storage is in-memory; use `--disk`
+or an S3 storage URI when persistence is required. `helix chef` can automate local scaffolding and
+agent setup without any Cloud login.
 
-## Helix Cloud quickstart
+When `helix chef` launches an installed agent, it uses this priority order:
+Claude Code → OpenAI Codex → OpenCode → Cursor Agent.
 
-To query a Helix Cloud cluster from the CLI:
+## Cloud quickstart
 
-<Steps>
-
-<Step title="Authenticate">
 ```bash
 helix auth login
+mkdir my-cloud-app && cd my-cloud-app
+helix init cloud
+helix query production --file request.json
 ```
 
-Credentials are stored in `~/.helix/credentials`.
-</Step>
+`helix init cloud` picks your workspace, project, and database, using the only one of each or
+asking you to choose, and links them in `helix.toml`. Later Cloud commands in the directory, such
+as `helix database` or `helix logs`, need no IDs or flags.
 
-<Step title="Pick a workspace and project">
-```bash
-helix workspace list
-helix workspace switch <workspace>
-helix project list
-helix project switch <project>
-helix cluster list
-```
-</Step>
+Cloud commands use only the rotating WorkOS session. Query execution goes through the backend broker
+and requires an independent `database.query.read` or `database.query.write` grant. The CLI does not
+need a gateway URL, application key, service credential, or sync step.
 
-<Step title="Initialize or add a Helix Cloud instance">
-```bash
-helix init cloud --cluster-id <cluster-id>
-# or, in an existing project:
-helix add cloud --name production --cluster-id <cluster-id>
-```
-</Step>
-
-<Step title="Sync metadata and query">
-```bash
-helix sync production
-export HELIX_API_KEY="..."   # raw key; bearer mode adds the prefix
-helix query production --file examples/request.json
-```
-
-`helix sync` writes the gateway URL and auth contract into `helix.toml`. If `gateway_url` is missing after sync, set it manually or re-run `helix sync` once your cluster is reachable.
-</Step>
-
-</Steps>
-
-## Tips
-
-<AccordionGroup>
-  <Accordion title="Iterating on queries">
-    - Edit `examples/request.json` (or any other file) and run `helix query dev --file …` again.
-    - Read requests can be replayed with `--warm` to pre-populate caches. Helix Cloud fanout returns no response body; standalone local warming returns the normal body.
-    - Every traversal must contain a source operation before a terminal operation such as `count`.
-  </Accordion>
-  <Accordion title="Scripting and CI">
-    - Pass subcommands explicitly (`helix init local …`, `helix add cloud …`) — the CLI never prompts when stdin is not a TTY.
-    - Use `--yes` for destructive operations in non-interactive contexts: [`helix delete <INSTANCE> --yes`](/cli/command-reference/delete), [`helix prune --all --yes`](/cli/command-reference/prune).
-    - `helix stop` exits cleanly when the instance is not running, so it is safe to call unconditionally in teardown.
-  </Accordion>
-  <Accordion title="Cleaning up">
-    - `helix stop <instance>` stops a running container.
-    - [`helix prune`](/cli/command-reference/prune) removes Helix-owned containers, workspace state, and disk-mode volumes. It never runs a broad `docker system prune`.
-    - [`helix delete <instance>`](/cli/command-reference/delete) removes the instance from `helix.toml` and cleans up local runtime state.
-  </Accordion>
-  <Accordion title="Version control">
-    - Commit `helix.toml` and any `*.json` request files you author.
-    - `.helix/`, `target/`, and `*.log` are added to `.gitignore` by `helix init`.
-    - Credentials in `~/.helix/credentials` are user-global and should never be committed.
-  </Accordion>
-</AccordionGroup>
-
-## Next Steps
+When a command cannot choose a resource on its own, pass it by ID, slug, or name, for example
+`--project <project>` or `tenant:<id>`. Stable links live only in the current project's
+`helix.toml`. See [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
 
 <CardGroup cols={2}>
-  <Card title="Local workflow" icon="computer" href="/cli/workflows/local">
-    The full local init/run/query loop with iteration tips
-  </Card>
-  <Card title="Helix Cloud workflow" icon="cloud" href="/cli/workflows/helix_cloud">
-    Authenticate, link a project, and query a Helix Cloud cluster
-  </Card>
-  <Card title="CLI Command Reference" icon="terminal" href="/cli/command-reference">
-    Every command, subcommand, and flag
-  </Card>
-  <Card title="Troubleshooting" icon="wrench" href="/cli/troubleshooting">
-    Solutions to common issues
-  </Card>
+  <Card title="Local workflow" href="/cli/workflows/local">Run and query a local instance</Card>
+  <Card title="Cloud workflow" href="/cli/workflows/helix_cloud">Use the session-authenticated Cloud CLI</Card>
+  <Card title="Command reference" href="/cli/command-reference">See every retained command</Card>
+  <Card title="Troubleshooting" href="/cli/troubleshooting">Resolve common errors</Card>
 </CardGroup>

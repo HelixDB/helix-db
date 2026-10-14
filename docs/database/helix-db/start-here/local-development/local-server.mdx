@@ -1,13 +1,14 @@
 ---
 title: "Local server"
-description: "Start HelixDB locally with ephemeral memory or persistent object storage"
+description: "Start HelixDB locally with memory, a persistent directory, or S3-compatible storage"
 sidebarTitle: "Local server"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The `ghcr.io/helixdb/helixdb:v0.0.4` image runs the standalone HelixDB server.
+The `ghcr.io/helixdb/helixdb:v0.0.12` image runs the standalone HelixDB server.
+It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
 
@@ -15,9 +16,10 @@ It exposes the same operation-tree request contract used by Helix Cloud at
 
 | Mode | Persistence | Use when |
 | --- | --- | --- |
-| Memory | Lost when the container is replaced | Fast local iteration and tests |
-| Disk (`--disk`) | Preserved in a MinIO volume | Testing restart and persistence behavior |
-| Existing S3-compatible store | Owned outside Helix | Reusing MinIO, LocalStack, Ceph, or AWS S3 |
+| Memory | Lost when the server stops | Fast local iteration and tests |
+| Native directory (`HELIX_DATA_DIR`) | Preserved in a mounted volume or directory | Running the image directly with local persistence |
+| CLI disk (`--disk`) | Preserved in a CLI-managed SeaweedFS volume | Testing restart and persistence through the CLI |
+| Existing S3-compatible store | Owned outside Helix | Reusing SeaweedFS, Ceph, LocalStack, or AWS S3 |
 
 ## Start with the CLI
 
@@ -42,7 +44,16 @@ helix init local --name dev # add --disk to make persistence the project default
 helix start dev             # add --disk to persist this instance
 ```
 
-The gateway listens at `http://localhost:6969/v2/query`.
+The standalone server accepts queries at `http://localhost:6969/v2/query`.
+
+For an existing project, set `tag = "v0.0.12"` in its `[local.dev]` block in
+`helix.toml` before starting it. An explicitly saved tag overrides the CLI default.
+
+<Warning>
+The first time v0.0.10 or later opens a persisted database, it upgrades the index storage
+version, and v0.0.9 and earlier then refuse to open that database. Back up the data
+before changing the tag if you may need to roll back.
+</Warning>
 
 ```bash
 helix query dev \
@@ -66,13 +77,13 @@ AWS_SECRET_ACCESS_KEY=your-secret-key
 <Warning>Do not commit `.env`.</Warning>
 
 <Tabs>
-  <Tab title="MinIO">
+  <Tab title="S3-compatible">
 
 ```bash
 helix start dev \
   --storage-uri s3://helix-db/my-app \
   --s3-region us-east-1 \
-  --s3-endpoint-url https://minio.example.com \
+  --s3-endpoint-url https://s3.example.com \
   --persist
 ```
 
@@ -96,12 +107,12 @@ externally managed object-store data during stop, restart, or prune.
 
 ## Run the image directly
 
-Memory mode is selected by leaving `S3_BUCKET` unset:
+Memory mode is selected by leaving both `HELIX_DATA_DIR` and `S3_BUCKET` unset:
 
 ```bash
 docker run --rm --name helixdb \
   -p 6969:8080 \
-  ghcr.io/helixdb/helixdb:v0.0.4
+  ghcr.io/helixdb/helixdb:v0.0.12
 ```
 
 The standalone server exposes liveness and readiness checks:
@@ -113,80 +124,255 @@ curl -fsS http://127.0.0.1:6969/readyz
 
 <Warning>
 Do not set `S3_BUCKET=IN_MEMORY`. Every defined `S3_BUCKET` value selects
-S3-compatible storage and is interpreted as a real bucket name.
+S3-compatible storage and is interpreted as a real bucket name. Setting
+`HELIX_DATA_DIR` and `S3_BUCKET` together causes startup to fail.
 </Warning>
 
-## Run with MinIO persistence
+## Run with native directory persistence
 
-This Compose configuration creates a bucket and stores HelixDB objects in the
-`minio-data` volume:
+Set `HELIX_DATA_DIR` to a mounted directory inside the container:
+
+```bash
+docker volume create helixdb-data
+docker run --rm --name helixdb \
+  -p 6969:8080 \
+  -e HELIX_DATA_DIR=/var/lib/helix \
+  --mount type=volume,source=helixdb-data,target=/var/lib/helix \
+  ghcr.io/helixdb/helixdb:v0.0.12
+```
+
+Stop the server with `docker stop helixdb`. Starting a new container with the
+same volume preserves its database. Removing the volume deletes the data.
+This mode needs no object store; the CLI's `--disk` mode uses SeaweedFS.
+
+The image runs as user and group `65532:65532`. Its `/var/lib/helix` directory
+is prepared for that user, including when initializing a new Docker named volume.
+If you use a bind mount or an existing volume, its directory must be writable by
+that user.
+
+## Run with SeaweedFS persistence
+
+This Compose configuration runs SeaweedFS as a single-node S3 store with a
+static identity, creates the `helix-db` bucket on startup, and stores HelixDB
+objects in the `seaweedfs-data` volume. HelixDB starts once a signed request
+to the bucket succeeds:
 
 ```yaml docker-compose.yaml expandable
 services:
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
+  seaweedfs:
+    image: ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882
+    command:
+      - mini
+      - -dir=/data
+      - -bucket=helix-db
+      - -s3.config=/etc/seaweedfs/s3.json
+      - -master.telemetry=false
+      - -admin.ui=false
+      - -webdav=false
+      - -s3.port.iceberg=0
+      - -s3.port.lance=0
     restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+    configs:
+      - source: seaweedfs-s3
+        target: /etc/seaweedfs/s3.json
     volumes:
-      - minio-data:/data
-
-  minio-init:
-    image: minio/mc:latest
-    restart: "no"
-    depends_on:
-      - minio
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done
-        mc mb --ignore-existing local/helix-db
+      - seaweedfs-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - -o
+        - /dev/null
+        - --max-time
+        - "2"
+        - -I
+        - --aws-sigv4
+        - aws:amz:us-east-1:s3
+        - --user
+        - helix:helix-local-secret
+        - http://127.0.0.1:8333/helix-db
+      interval: 1s
+      timeout: 5s
+      retries: 120
 
   helix:
-    image: ghcr.io/helixdb/helixdb:v0.0.4
+    image: ghcr.io/helixdb/helixdb:v0.0.12
     restart: unless-stopped
     depends_on:
-      minio-init:
-        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
     ports:
       - "6969:8080"
     environment:
       S3_BUCKET: helix-db
       S3_REGION: us-east-1
       DB_PATH: db/
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
-      AWS_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: helix
+      AWS_SECRET_ACCESS_KEY: helix-local-secret
+      AWS_ENDPOINT: http://seaweedfs:8333
       AWS_ALLOW_HTTP: "true"
 
+configs:
+  seaweedfs-s3:
+    content: |
+      {
+        "identities": [
+          {
+            "name": "helix",
+            "credentials": [
+              {"accessKey": "helix", "secretKey": "helix-local-secret"}
+            ],
+            "actions": ["Read:helix-db", "Write:helix-db", "List:helix-db"]
+          }
+        ]
+      }
+
 volumes:
-  minio-data:
+  seaweedfs-data:
 ```
 
+Inline `configs` content needs Docker Compose 2.23.1 or later. The SeaweedFS
+container is not published to the host. Change the example credentials in all
+three places if you expose it.
+
 Run `docker compose down` to replace the HelixDB container without deleting
-the MinIO data. `docker compose down -v` deletes the persisted database.
+the SeaweedFS data. `docker compose down -v` deletes the persisted database.
 
 For an existing object store, use the same HelixDB environment variables and
-omit the MinIO services. For AWS S3, omit the endpoint and HTTP override.
+omit the SeaweedFS service. For AWS S3, omit the endpoint and HTTP override.
+
+<Warning>
+HelixDB's storage engine needs S3 conditional writes: `If-None-Match: *` on
+create and `If-Match` on replace must fail with HTTP 412 when the condition
+does not hold. A store that ignores them can silently lose data. AWS S3 and
+SeaweedFS 4.09 or later enforce both.
+</Warning>
 
 | Variable | Purpose |
 | --- | --- |
-| `S3_BUCKET` | Selects S3 mode and names the object-store bucket; omit it for memory mode |
+| `HELIX_DATA_DIR` | Selects native disk storage and names its container directory; mount a volume there for persistence |
+| `S3_BUCKET` | Selects S3 mode and names the object-store bucket; omit both storage selectors for memory mode |
 | `S3_REGION` | Region supplied to the S3 client; falls back to `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1` |
-| `DB_PATH` | Logical database prefix inside the object store; defaults to `db/` |
+| `DB_PATH` | Logical database prefix inside the selected store, including under `HELIX_DATA_DIR`; defaults to `db/` |
 | `AWS_ACCESS_KEY_ID` | Access key |
 | `AWS_SECRET_ACCESS_KEY` | Secret key |
 | `AWS_SESSION_TOKEN` | Optional temporary-credential token |
 | `AWS_ENDPOINT` or `AWS_ENDPOINT_URL_S3` | Non-AWS S3 endpoint |
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` to permit an HTTP endpoint |
+| `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` | Most unpublished vector work, in bytes, one `strong` vector search scores before it fails with `index_backpressure`; defaults to the index's retained-byte limit (1,000,000,000), which writes reach first. See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
+| `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` | Most unpublished text, in analysis bytes, one `strong` text search includes per partition before it fails with `index_backpressure`; defaults to 512 MiB (536,870,912). See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
 
 The endpoint must be reachable from inside the container; container `localhost` is not
-the host machine. `DB_PATH` is not a host filesystem path, and mounting a volume at
-that path does not enable native directory persistence. The standalone image does not
-expose native directory storage; the CLI's `--disk` mode uses MinIO.
+the host machine. `DB_PATH` is a logical prefix, not the storage directory. To use
+native directory persistence, set `HELIX_DATA_DIR` and mount the directory there.
+
+## Add a local disk cache
+
+With `S3_BUCKET`, the server always keeps recently read data on local disk, ideally
+NVMe, in `/var/cache/helix` unless `HELIX_DISK_CACHE_DIR` names another directory.
+Vector indexes on S3 need it: once an index outgrows the memory cache, every graph
+hop that misses it would otherwise wait on its own S3 request. Mount a volume at
+`/var/cache/helix` so the cache survives restarts; without one, each new container
+starts with an empty cache. With `HELIX_DATA_DIR`, set `HELIX_DISK_CACHE_DIR` to add
+the disk cache. Memory storage rejects the cache variables.
+
+<Note>
+The disk cache needs v0.0.7 or later, and the v0.0.6 image and earlier ignore the
+`HELIX_DISK_CACHE_*` variables. v0.0.7 and v0.0.8 cache S3 on disk only when
+`HELIX_DISK_CACHE_DIR` is set, so the example below sets it to the default.
+</Note>
+
+```bash
+sudo mkdir -p /data/helix-cache
+sudo chown 65532:65532 /data/helix-cache
+docker run --rm --name helixdb \
+  -p 6969:8080 \
+  -e S3_BUCKET=my-bucket \
+  -e S3_REGION=eu-west-2 \
+  -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
+  -e HELIX_DISK_CACHE_BYTES=107374182400 \
+  -v /data/helix-cache:/var/cache/helix \
+  ghcr.io/helixdb/helixdb:v0.0.12
+```
+
+In Compose, add a volume at `/var/cache/helix` to the `helix` service. A new
+named volume mounted there is already writable; a bind mount must be owned by
+`65532:65532`. When running as another user or outside the image, set
+`HELIX_DISK_CACHE_DIR` to a directory that user can write. With a read-only root
+filesystem, mount a writable volume (for example a tmpfs or `emptyDir`) at the cache
+directory. Use one cache directory per running server and per database; changing
+`DB_PATH` on the same directory leaves the old database's full-text cache behind.
+
+| Variable | Purpose |
+| --- | --- |
+| `HELIX_DISK_CACHE_DIR` | Disk cache directory, created if needed. Defaults to `/var/cache/helix` with `S3_BUCKET`; with `HELIX_DATA_DIR`, setting it enables the disk cache |
+| `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 8 GiB |
+| `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the block cache in bytes; defaults to 640 MiB |
+| `HELIX_DISK_CACHE_WARM` | `on` (the default) or `off`: whether the server warms the disk cache at startup |
+
+Half of the disk budget caches object-store files, 3/8 caches database blocks,
+and the rest caches full-text search data. With `S3_BUCKET`, the object-store cache
+also keeps the files the server writes; with `HELIX_DATA_DIR` they are already on
+local disk, so it keeps only the files the server reads. Changing the budget
+usually changes the block size, which discards the database-block cache at startup
+so it refills from the object store. The object-store cache keeps its files and
+evicts down to a smaller budget as it admits new data. Full-text search data is
+cached on demand, once searches have used it twice; the server downloads none of it
+at startup. At startup and on every admission the full-text cache evicts down to
+its share. Each of these trims spares data admitted or recorded as used in the
+second before it (use is recorded at most once a minute) and data still open in
+searches or the 64 MiB full-text memory cache, so the cache can stay over its share
+by that data until the next admission. It never caches a split larger than its
+whole share. After a restart, the first search to use each cached split reads and
+checksums the whole split, up to 64 MiB, before it answers. Budget at least twice
+the data the server reads often: the object-store cache fetches whole file parts
+(4 MiB, or smaller under a 2 GiB budget), so once that data outgrows half the
+budget, cold reads fetch more than memory-only caches would. The budget must also
+fit on the cache's filesystem: its free space plus what the cache already uses.
+When `HELIX_DISK_CACHE_BYTES` is unset and the 8 GiB default does not fit, startup
+fails naming the variable; without a volume the cache would otherwise share, and
+could fill, the filesystem of the container runtime. A budget you set that does not
+fit only logs a warning at startup.
+
+Once storage opens, the server warms the disk cache in the background: it caches the
+database blocks that index the newest files and, with `S3_BUCKET`, the rows vector
+searches read, using at most half the object-store cache. The warm delays neither
+startup nor readiness; queries that arrive first read from the object store as usual.
+Set `HELIX_DISK_CACHE_WARM=off` to skip it, and the caches then fill only as queries
+read.
+
+The block cache also indexes its disk share in memory, outside
+`HELIX_DISK_CACHE_MEMORY_BYTES`. Once full, the index takes roughly 2–9 MiB of RAM
+per GiB of `HELIX_DISK_CACHE_BYTES` (about 20–70 MiB at the default, 2–9 GiB at
+1 TiB), and a restart briefly needs about twice that while it rebuilds the index.
+Size the container's memory limit for this index as well as the memory tier.
+
+The block cache keeps up to 32,768 files open, so the server needs at least 34,792
+open files in the worst case (26,600 at the default budget), plus one per open
+full-text split. It raises its soft open-file limit to the hard limit at startup.
+If the container's hard limit is below that minimum, startup fails naming
+`HELIX_DISK_CACHE_BYTES`; raise the hard limit with `--ulimit nofile=65536:65536`.
+Lowering the budget is not a reliable fix above about 3 GiB, where the file count
+does not fall steadily with it; budgets of 1 GiB or less need about 8,200 or fewer.
+Run natively on macOS, the limit is also capped by `sysctl kern.maxfilesperproc`.
+
+Startup also fails with a message naming the variable when a size is invalid or
+out of range, a size is set with `HELIX_DATA_DIR` but without `HELIX_DISK_CACHE_DIR`,
+the default budget does not fit, the cache directory is not writable or cannot be
+locked (some network and FUSE filesystems do not support locks), or another running
+server already uses it. Stop the old container before starting its replacement on
+the same cache directory.
+
+<Warning>
+An S3 container that ran v0.0.8 or earlier used no local disk, so it can fail or
+use more resources after upgrading: it needs a hard open-file limit of at least
+26,600 at the default budget (about 8,200 or fewer at 1 GiB or less), about 20–70
+MiB more RAM at the default budget, a writable cache directory (mount a volume with
+a read-only root filesystem, and set `HELIX_DISK_CACHE_DIR` when running as a user
+other than `65532`), and room for the 8 GiB default unless `HELIX_DISK_CACHE_BYTES`
+is set.
+</Warning>
 
 ## Stop or inspect
 
@@ -199,13 +385,13 @@ helix stop dev
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Get Started" icon="rocket" href="/database/helix-db/start-here/quickstart">
-    Create and traverse a small graph.
+  <Card title="Get started" icon="rocket" href="/database/helix-db/start-here/quickstart">
+    Create a project and run your first query.
   </Card>
   <Card title="Embedded database" icon="microchip" href="/database/helix-db/start-here/local-development/embedded-database">
     Open HelixDB directly inside your process.
   </Card>
-  <Card title="Helix Cloud" icon="cloud" href="/database/helix-cloud/start-here/working-with-enterprise">
+  <Card title="Helix Cloud" icon="cloud" href="/database/helix-cloud/start-here/using-the-cloud">
     Move the same application requests to a managed cluster.
   </Card>
   <Card title="Local CLI workflow" icon="terminal" href="/cli/workflows/local">

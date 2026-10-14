@@ -13,6 +13,9 @@ impl Default for StorageCostProfile {
             multi_get_per_key: LatencyEstimate::micros(75),
             range_seek: LatencyEstimate::micros(2_000),
             range_next: LatencyEstimate::micros(10),
+            // Paired 50,000-entry arm64 image reads: 0.1917 us/entry.
+            // Reproduce with docker-image/tests/range_benchmark.py --calibrate.
+            reverse_range_per_1000: LatencyEstimate::micros(192),
             cpu_predicate_eval: LatencyEstimate::micros(1),
             stream_operator_eval: LatencyEstimate::micros(1),
             bitmap_decode_per_id: LatencyEstimate::micros(1),
@@ -32,7 +35,7 @@ impl Default for StorageCostProfile {
             default_equality_index_rows: EstimatedRows::rows(10),
             default_range_index_rows: EstimatedRows::rows(200),
             default_unique_equality_rows: UniqueEqualityRows::at_most(1),
-            max_parallel_kv_reads: PositiveUsize::at_least_one(16),
+            max_parallel_kv_reads: PositiveUsize::from(crate::cost::MAX_PARALLEL_KV_READS),
             close_key_multi_get_batch: PositiveUsize::at_least_one(256),
             sparse_key_multi_get_batch: PositiveUsize::at_least_one(16),
         }

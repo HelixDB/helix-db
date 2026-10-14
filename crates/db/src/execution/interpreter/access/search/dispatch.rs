@@ -65,14 +65,14 @@ impl<'db> ExecutionContext<'db> {
         query_vector: &ir::VectorQueryInputPlan,
         limit: SearchReadLimit<'_>,
     ) -> Result<Vec<TypedVectorSearchResult>> {
-        self.vector_search_results_with_candidates(
+        Box::pin(self.vector_search_results_with_candidates(
             element_type,
             label,
             property,
             index,
             query_vector,
             VectorSearchScope::Unrestricted(limit),
-        )
+        ))
         .await
     }
 
@@ -85,17 +85,20 @@ impl<'db> ExecutionContext<'db> {
         query_vector: &ir::VectorQueryInputPlan,
         read: RestrictedVectorSearchRead<'_>,
     ) -> Result<Vec<TypedVectorSearchResult>> {
-        self.vector_search_results_with_candidates(
+        Box::pin(self.vector_search_results_with_candidates(
             element_type,
             label,
             property,
             index,
             query_vector,
             VectorSearchScope::Restricted(read),
-        )
+        ))
         .await
     }
 
+    /// Callers box this future: the queued-state overlay makes it large, and
+    /// boxing keeps it out of every frame of recursive callers such as count
+    /// cursors.
     async fn vector_search_results_with_candidates(
         &self,
         element_type: VectorElementType,
@@ -118,72 +121,68 @@ impl<'db> ExecutionContext<'db> {
         let tenant_value = self.search_tenant_value(&index.tenant).await?;
         validate_vector_search_tenant(&definition, &index.tenant, tenant_value.as_ref())?;
         let query = self.search_query_vector(query_vector).await?;
-        let (limit, candidates) = match scope {
-            VectorSearchScope::Unrestricted(limit) => (limit, None),
-            VectorSearchScope::Restricted(read) => (read.limit, Some(read.candidates)),
+        // Restricted search has its own reject-based result-count ceiling,
+        // computed against the traversal's exact candidate count rather than
+        // the raw request. Applying the unrestricted path's blanket
+        // default-ceiling clamp ahead of that would silently truncate a request
+        // the restricted path is meant to reject outright. It is checked here,
+        // before pending overlays shrink the physical candidate set, so pending
+        // work never lifts it. See `effective_restricted_vector_search_limit`.
+        let (k, candidates) = match scope {
+            VectorSearchScope::Unrestricted(limit) => {
+                (self.effective_search_limit(limit).await?, None)
+            }
+            VectorSearchScope::Restricted(read) => {
+                let k = self
+                    .effective_restricted_vector_search_limit(read.limit)
+                    .await?;
+                read.candidates.validate_result_count(k)?;
+                (k, Some(read.candidates))
+            }
         };
-        let k = self.effective_search_limit(limit).await?;
 
+        let pending = self
+            .pending_selection(
+                &crate::index_lifecycle::ValidatedVectorIndexDefinition::try_from_runtime(
+                    &definition,
+                )?
+                .identity(),
+                crate::encoding::v2::values::indexes::operation_queue::QueueFamily::Vector,
+            )
+            .await?;
         let raw_results = match definition.metric() {
             VectorDistanceMetric::Cosine => {
-                let generation = self
-                    .managed_vector_generation::<Cosine>(&definition, tenant_value.as_ref())
-                    .await?;
-                match candidates {
-                    Some(candidates) => {
-                        self.search_vector_index_restricted::<Cosine>(
-                            &query,
-                            k,
-                            generation.as_ref(),
-                            candidates,
-                        )
-                        .await
-                    }
-                    None => {
-                        self.search_vector_index::<Cosine>(&query, k, generation.as_ref())
-                            .await
-                    }
-                }
+                self.overlaid_vector_results::<Cosine>(
+                    &definition,
+                    tenant_value.as_ref(),
+                    &query,
+                    k,
+                    candidates,
+                    pending,
+                )
+                .await
             }
             VectorDistanceMetric::Euclidean => {
-                let generation = self
-                    .managed_vector_generation::<Euclidean>(&definition, tenant_value.as_ref())
-                    .await?;
-                match candidates {
-                    Some(candidates) => {
-                        self.search_vector_index_restricted::<Euclidean>(
-                            &query,
-                            k,
-                            generation.as_ref(),
-                            candidates,
-                        )
-                        .await
-                    }
-                    None => {
-                        self.search_vector_index::<Euclidean>(&query, k, generation.as_ref())
-                            .await
-                    }
-                }
+                self.overlaid_vector_results::<Euclidean>(
+                    &definition,
+                    tenant_value.as_ref(),
+                    &query,
+                    k,
+                    candidates,
+                    pending,
+                )
+                .await
             }
             VectorDistanceMetric::Manhattan => {
-                let generation = self
-                    .managed_vector_generation::<Manhattan>(&definition, tenant_value.as_ref())
-                    .await?;
-                match candidates {
-                    Some(candidates) => {
-                        self.search_vector_index_restricted::<Manhattan>(
-                            &query,
-                            k,
-                            generation.as_ref(),
-                            candidates,
-                        )
-                        .await
-                    }
-                    None => {
-                        self.search_vector_index::<Manhattan>(&query, k, generation.as_ref())
-                            .await
-                    }
-                }
+                self.overlaid_vector_results::<Manhattan>(
+                    &definition,
+                    tenant_value.as_ref(),
+                    &query,
+                    k,
+                    candidates,
+                    pending,
+                )
+                .await
             }
         }?;
         let entity_kind = match element_type {
@@ -203,6 +202,130 @@ impl<'db> ExecutionContext<'db> {
             .collect())
     }
 
+    /// Merges physical ANN results with exact scores of selected pending
+    /// vectors in the searched partition.
+    ///
+    /// Physical rows of selected pending entities are superseded. A
+    /// traversal-restricted search removes them from its allowed set, so it
+    /// runs once at `k` within the restricted result cap, or not at all when
+    /// no candidate remains. An unrestricted search suppresses them, so they
+    /// still route the ANN traversal, and widens past them with
+    /// [`settle_physical`]; a search past its suppression limit fails or
+    /// reruns with a smaller selection, as
+    /// [`PendingSelection::yield_to_suppression_limit`] decides.
+    /// Pending vectors pass the same traversal restriction, tenant partition,
+    /// and metric as physical rows, are scored exactly on the blocking pool
+    /// ([`score_pending_vectors`]), and both sources merge by
+    /// `(distance, entity id)`.
+    ///
+    /// [`PendingSelection::yield_to_suppression_limit`]: super::pending::PendingSelection::yield_to_suppression_limit
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one overlay binds the definition, tenant, query, limit, restriction, and selection"
+    )]
+    async fn overlaid_vector_results<D: crate::search::vector::Distance>(
+        &self,
+        definition: &crate::config::VectorIndexDefinition,
+        tenant_value: Option<&crate::encoding::property::property_value::PropertyValue>,
+        query: &[f32],
+        k: usize,
+        candidates: Option<&RestrictedVectorCandidates>,
+        pending: Option<super::pending::PendingSelection>,
+    ) -> Result<Vec<crate::search::vector::SearchResult>> {
+        let generation = self
+            .managed_vector_generation::<D>(definition, tenant_value)
+            .await?;
+        let Some(mut pending) = pending else {
+            return match candidates {
+                Some(candidates) => {
+                    self.search_vector_index_restricted::<D>(
+                        query,
+                        k,
+                        generation.as_ref(),
+                        candidates,
+                    )
+                    .await
+                }
+                None => {
+                    self.search_vector_index::<D>(query, k, generation.as_ref())
+                        .await
+                }
+            };
+        };
+        loop {
+            let mut pending_scored = score_pending_vectors::<D>(
+                &self.execution_control,
+                definition,
+                tenant_value,
+                query,
+                k,
+                candidates,
+                &pending,
+            )
+            .await?;
+            let physical = match generation.as_ref() {
+                super::generation::VectorSearchAuthority::AbsentManagedPartition => None,
+                super::generation::VectorSearchAuthority::Managed(handle) => Some((
+                    handle,
+                    candidates.map(|candidates| candidates.without(&pending.superseded)),
+                )),
+            };
+            let mut results = match physical {
+                // An absent partition has no physical rows, and no physical row
+                // can rank once every candidate is superseded, so neither runs
+                // a physical search.
+                None | Some((_, Some(RestrictedVectorCandidates::Empty))) => Vec::new(),
+                Some((handle, unsuperseded)) => {
+                    let physical_candidates = unsuperseded.as_ref();
+                    let settlement = settle_physical(
+                        k,
+                        &pending.superseded,
+                        pending.local(),
+                        |result: &crate::search::vector::SearchResult| result.entity_id(),
+                        |farthest| {
+                            pending_scored
+                                .iter()
+                                .filter(|pending| pending.score() < farthest.score())
+                                .count()
+                        },
+                        move |request| async move {
+                            let authority =
+                                super::generation::VectorSearchAuthority::Managed(handle);
+                            match physical_candidates {
+                                Some(candidates) => {
+                                    self.search_vector_index_restricted::<D>(
+                                        query, request, authority, candidates,
+                                    )
+                                    .await
+                                }
+                                None => {
+                                    self.search_vector_index::<D>(query, request, authority)
+                                        .await
+                                }
+                            }
+                        },
+                    )
+                    .await?;
+                    match settlement {
+                        Settlement::Settled(kept) => kept,
+                        Settlement::Exceeded { skipped } => {
+                            pending.yield_to_suppression_limit(skipped)?;
+                            continue;
+                        }
+                    }
+                }
+            };
+            results.append(&mut pending_scored);
+            results.sort_by(|left, right| {
+                left.score()
+                    .cmp(&right.score())
+                    .then_with(|| left.entity_id().cmp(&right.entity_id()))
+            });
+            results.truncate(k);
+            return Ok(results);
+        }
+    }
+
     pub(in crate::execution::interpreter) async fn text_search_hits(
         &self,
         element_type: TextElementType,
@@ -219,7 +342,7 @@ impl<'db> ExecutionContext<'db> {
             index,
             query_text,
         };
-        self.text_search_hits_with_scope(&access, limit, TextSearchScope::Unrestricted)
+        Box::pin(self.text_search_hits_with_scope(&access, limit, TextSearchScope::Unrestricted))
             .await
     }
 
@@ -239,14 +362,16 @@ impl<'db> ExecutionContext<'db> {
             index,
             query_text,
         };
-        self.text_search_hits_with_scope(
+        Box::pin(self.text_search_hits_with_scope(
             &access,
             read.limit,
             TextSearchScope::restricted(read.candidates),
-        )
+        ))
         .await
     }
 
+    /// Callers box this future for the same reason as
+    /// [`Self::vector_search_results_with_candidates`].
     async fn text_search_hits_with_scope(
         &self,
         access: &TextSearchAccess<'_>,
@@ -266,10 +391,744 @@ impl<'db> ExecutionContext<'db> {
         let generation = self
             .managed_text_generation(&definition, tenant_value.as_ref())
             .await?;
-        let Some(manifest) = self.load_text_manifest_root(generation.as_ref()).await? else {
+        let pending = self
+            .pending_selection(
+                &crate::index_lifecycle::ValidatedTextIndexDefinition::try_from_runtime(
+                    &definition,
+                )?
+                .identity(),
+                crate::encoding::v2::values::indexes::operation_queue::QueueFamily::Text,
+            )
+            .await?;
+        let Some(mut pending) = pending else {
+            // A strong search that finds nothing pending read the whole
+            // queue, so nothing cached for the generation can be selected
+            // again. The index worker drops it too, but readers have none.
+            let strong = self.active_write_tx().is_some()
+                || self.search_consistency == helix_ast::query::SearchConsistency::Strong;
+            match generation.as_ref() {
+                super::generation::TextSearchAuthority::Managed(handle) if strong => {
+                    let authority = handle.physical();
+                    self.db.pending_text_analyses().forget(
+                        crate::index_lifecycle::queue::QueueTarget::new(
+                            authority.scope(),
+                            authority.index_id(),
+                            authority.generation(),
+                        ),
+                    );
+                }
+                super::generation::TextSearchAuthority::Managed(_)
+                | super::generation::TextSearchAuthority::AbsentManagedPartition => {}
+            }
+            let Some(manifest) = self.load_text_manifest_root(generation.as_ref()).await? else {
+                return Ok(Vec::new());
+            };
+            return self
+                .search_text_manifest_with_scope(&manifest, &query, k, scope)
+                .await;
+        };
+        // An absent partition has neither physical nor pending documents.
+        let super::generation::TextSearchAuthority::Managed(handle) = generation.as_ref() else {
             return Ok(Vec::new());
         };
-        self.search_text_manifest_with_scope(&manifest, &query, k, scope)
+        // Strong searches answer exactly or fail, so their bound is the
+        // configured strong one; eventual searches overlay at most what one
+        // text publication analyzes and serve the rest as published.
+        let analysis_limit = if pending.is_strong() {
+            self.db
+                .config()
+                .db()
+                .index_operation_queue()
+                .strong_text_search_max_analysis_bytes()
+        } else {
+            self.db.active_text_mutation_limits().max_input_bytes()
+        };
+        let analyses = pending
+            .analyze_text(
+                &self.execution_control,
+                handle.partition(),
+                definition.analyzer(),
+                analysis_limit,
+                self.db.pending_text_analyses(),
+            )
             .await
+            .inspect_err(|error| self.db.record_strong_text_search_rejection(error))?;
+        let mut overlay = pending
+            .entities()
+            .iter()
+            .map(|pending| pending.entity)
+            .zip(analyses)
+            .collect::<Vec<_>>();
+        // One logical search records one use of its splits, however often it
+        // widens or reruns with a smaller selection.
+        let mut demand = crate::search::text::SplitDemand::Record;
+        loop {
+            match self
+                .overlaid_text_hits(
+                    &definition,
+                    handle,
+                    &pending,
+                    &overlay,
+                    analysis_limit,
+                    &query,
+                    k,
+                    &scope,
+                    &mut demand,
+                )
+                .await?
+            {
+                Settlement::Settled(hits) => return Ok(hits),
+                Settlement::Exceeded { skipped } => {
+                    pending.yield_to_suppression_limit(skipped)?;
+                    overlay.truncate(pending.entities().len());
+                }
+            }
+        }
+    }
+
+    /// Merges persisted split hits with pending documents under one
+    /// consistent set of BM25 statistics.
+    ///
+    /// Selected pending entities supersede their physical documents: their
+    /// persisted contributions leave the corpus statistics, and their latest
+    /// documents in the searched partition, analyzed in `overlay` (one entry
+    /// per selected entity, in selection order), join them and are scored
+    /// from those analyses against the same statistics, on the blocking pool
+    /// ([`crate::search::text::search_pending_documents`]). Only documents
+    /// holding a query term are scored: the query is a disjunction of its
+    /// terms, so any other document matches no clause and never ranks. A
+    /// traversal-restricted search removes superseded entities from its
+    /// candidate set and skips its physical search when none remain. An
+    /// unrestricted search suppresses their split hits and widens past them
+    /// with [`settle_physical`], reporting a search past its suppression
+    /// limit to the caller, which fails or reruns it with a smaller
+    /// selection. Only the first physical search that `demand` allows
+    /// records a use of its splits. The caller analyzed `overlay` within
+    /// `analysis_limit` with [`PendingSelection::analyze_text`], which
+    /// scoring asserts.
+    ///
+    /// [`PendingSelection::analyze_text`]: super::pending::PendingSelection::analyze_text
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one overlaid attempt binds its definition, partition, selection, analyses, bound, query, and demand"
+    )]
+    async fn overlaid_text_hits(
+        &self,
+        definition: &crate::config::TextIndexDefinition,
+        handle: &super::generation::ResolvedTextGenerationHandle,
+        pending: &super::pending::PendingSelection,
+        overlay: &[(
+            crate::encoding::v2::keys::IndexEntity,
+            Option<Arc<crate::search::text::IndexedTextAnalysis>>,
+        )],
+        analysis_limit: std::num::NonZeroU64,
+        query: &str,
+        k: usize,
+        scope: &TextSearchScope,
+        demand: &mut crate::search::text::SplitDemand,
+    ) -> Result<Settlement<crate::search::text::TextSearchHit>> {
+        assert_eq!(
+            overlay.len(),
+            pending.entities().len(),
+            "the overlay analyzes exactly the selected entities"
+        );
+        let partition = handle.partition();
+        let authority = handle.physical();
+        let counted = overlay
+            .iter()
+            .map(|(entity, analysis)| {
+                (
+                    *entity,
+                    analysis
+                        .as_deref()
+                        .map(crate::search::text::IndexedTextAnalysis::statistics),
+                )
+            })
+            .collect::<Vec<_>>();
+        let statistics = if let Some(active) = self.active_write_tx() {
+            crate::index_lifecycle::text::statistics::load_overlaid_query_statistics(
+                &active.txn,
+                authority.scope(),
+                authority.index_id(),
+                authority.generation(),
+                partition,
+                definition.analyzer(),
+                query,
+                &counted,
+            )
+            .await?
+        } else if let Some(view) = self.request_read_view() {
+            crate::index_lifecycle::text::statistics::load_overlaid_query_statistics(
+                view,
+                authority.scope(),
+                authority.index_id(),
+                authority.generation(),
+                partition,
+                definition.analyzer(),
+                query,
+                &counted,
+            )
+            .await?
+        } else {
+            return Err(HelixDbError::InvariantViolation(
+                "text overlay escaped its request view".to_string(),
+            ));
+        };
+        let crate::index_lifecycle::text::statistics::LoadedTextQueryStatistics::Ready(statistics) =
+            statistics
+        else {
+            return Ok(Settlement::Settled(Vec::new()));
+        };
+        let terms = crate::search::text::analyze_text(definition.analyzer(), query).unique_terms;
+        let documents = overlay
+            .iter()
+            .filter_map(|(entity, analysis)| {
+                let analysis = analysis.as_ref()?;
+                let id = entity.id.get();
+                let unique_terms = &analysis.statistics().unique_terms;
+                (scope
+                    .candidates()
+                    .is_none_or(|candidates| candidates.contains(id))
+                    && terms
+                        .iter()
+                        .any(|term| unique_terms.binary_search(term).is_ok()))
+                .then(|| (id, Arc::clone(analysis)))
+            })
+            .collect::<Vec<_>>();
+        let pending_hits = {
+            let definition = definition.clone();
+            let query = query.to_string();
+            let statistics = statistics.clone();
+            super::blocking::run_blocking(&self.execution_control, move |probe| {
+                crate::search::text::search_pending_documents(
+                    &definition,
+                    &documents,
+                    analysis_limit,
+                    &query,
+                    k,
+                    &statistics,
+                    || probe.check(),
+                )
+            })
+            .await?
+        };
+        let physical_scope = match scope.candidates() {
+            Some(candidates) => {
+                TextSearchScope::restricted(Arc::new(candidates.without(&pending.superseded)))
+            }
+            None => TextSearchScope::Unrestricted,
+        };
+        // No physical document can rank once every candidate is superseded,
+        // so the search reads neither the manifest nor its splits.
+        let manifest = if physical_scope.is_empty_restricted() {
+            None
+        } else {
+            self.load_text_manifest_root(super::generation::TextSearchAuthority::Managed(handle))
+                .await?
+        };
+        let settlement = match manifest {
+            None => Settlement::Settled(Vec::new()),
+            Some(manifest) => {
+                let (manifest, statistics, physical_scope) =
+                    (&manifest, &statistics, &physical_scope);
+                settle_physical(
+                    k,
+                    &pending.superseded,
+                    pending.local(),
+                    |hit: &crate::search::text::TextSearchHit| hit.entity_id,
+                    |lowest| {
+                        pending_hits
+                            .iter()
+                            .filter(|hit| hit.score > lowest.score)
+                            .count()
+                    },
+                    move |request| {
+                        let scope = physical_scope.clone();
+                        let demand =
+                            std::mem::replace(demand, crate::search::text::SplitDemand::Skip);
+                        async move {
+                            self.search_text_manifest_with_statistics(
+                                manifest,
+                                query,
+                                request,
+                                scope,
+                                Some(statistics),
+                                demand,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .await?
+            }
+        };
+        let mut hits = match settlement {
+            Settlement::Settled(hits) => hits,
+            exceeded @ Settlement::Exceeded { .. } => return Ok(exceeded),
+        };
+        hits.extend(pending_hits);
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.entity_id.cmp(&right.entity_id))
+        });
+        hits.truncate(k);
+        Ok(Settlement::Settled(hits))
+    }
+}
+
+/// Results of one overlaid search attempt.
+#[derive(Debug)]
+enum Settlement<T> {
+    /// Results settled within the suppression limit.
+    Settled(Vec<T>),
+    /// Settling needs more than [`MAX_SUPPRESSED_SEARCH_RESULTS`] physical
+    /// results superseded by committed work skipped; the last attempt skipped
+    /// `skipped` of those.
+    ///
+    /// [`MAX_SUPPRESSED_SEARCH_RESULTS`]: super::limits::MAX_SUPPRESSED_SEARCH_RESULTS
+    Exceeded { skipped: usize },
+}
+
+/// Widens a physical search past superseded results until `k` are settled.
+///
+/// `search(request)` returns up to `request` physical results in rank order.
+/// It is a closure returning a future rather than an async closure, whose
+/// borrow-generic future would stop the calling request future from being
+/// provably `Send`.
+/// Settled results are the kept physical results, whose entity is not in
+/// `superseded`, plus the pending results `pending_ahead` counts as ranking
+/// strictly ahead of the last physical result examined; an exhausted source
+/// settles whatever it returned. `local`, a subset of `superseded`, holds the
+/// entities the searching write transaction changed itself. Each attempt
+/// grows the request by the superseded results it skipped, up to `k` plus
+/// every local entity plus at most [`MAX_SUPPRESSED_SEARCH_RESULTS`] others:
+/// the widening grows with the transaction's own changes, which it bounds
+/// itself, but not with the committed backlog. A request at that bound keeps
+/// at least `k` results whenever at most that many committed entities are
+/// superseded, so only a larger committed selection can exceed it, and the
+/// committed results the last attempt skipped then exceed the limit.
+///
+/// [`MAX_SUPPRESSED_SEARCH_RESULTS`]: super::limits::MAX_SUPPRESSED_SEARCH_RESULTS
+async fn settle_physical<T, Search>(
+    k: usize,
+    superseded: &roaring::RoaringTreemap,
+    local: Option<&roaring::RoaringTreemap>,
+    entity_id: impl Fn(&T) -> u64,
+    pending_ahead: impl Fn(&T) -> usize,
+    mut search: impl FnMut(usize) -> Search,
+) -> Result<Settlement<T>>
+where
+    Search: std::future::Future<Output = Result<Vec<T>>>,
+{
+    debug_assert!(
+        local.is_none_or(|local| local.is_subset(superseded)),
+        "local changes supersede their physical results"
+    );
+    let local_count = local.map_or(0, roaring::RoaringTreemap::len);
+    let bound = k
+        .saturating_add(usize::try_from(local_count).unwrap_or(usize::MAX))
+        .saturating_add(
+            usize::try_from(superseded.len() - local_count)
+                .unwrap_or(usize::MAX)
+                .min(super::limits::MAX_SUPPRESSED_SEARCH_RESULTS),
+        );
+    let mut request = k;
+    loop {
+        let found = search(request).await?;
+        let returned = found.len();
+        let pending_settled = found.last().map_or(0, &pending_ahead);
+        let (kept, skipped): (Vec<_>, Vec<_>) = found
+            .into_iter()
+            .partition(|result| !superseded.contains(entity_id(result)));
+        if returned < request || kept.len() + pending_settled >= k {
+            return Ok(Settlement::Settled(kept));
+        }
+        if request >= bound {
+            return Ok(Settlement::Exceeded {
+                skipped: skipped
+                    .iter()
+                    .filter(|result| local.is_none_or(|local| !local.contains(entity_id(result))))
+                    .count(),
+            });
+        }
+        request = request.saturating_add(skipped.len()).min(bound);
+    }
+}
+
+/// Pending vectors one exact scoring step scores between cancellation checks.
+const PENDING_SCORE_CHUNK: usize = 4_096;
+
+/// Scores, on the blocking pool, the selected pending vectors in the searched
+/// partition that pass the traversal restriction, and keeps the `k` best by
+/// `(distance, entity id)`, best first.
+///
+/// No other pending vector can rank among the `k` results, and the `k` best
+/// settle a physical result exactly as every pending vector would: settling
+/// only asks whether at least `k` results rank ahead of it (see
+/// [`settle_physical`]). Selection keeps memory and sorting at `k`; the
+/// scoring itself still grows with the pending entities and their dimension,
+/// which the strong vector bound and the eventual budget cap. Scoring stops
+/// between chunks once the request stops awaiting it.
+async fn score_pending_vectors<D: crate::search::vector::Distance>(
+    control: &crate::execution_control::ExecutionControl,
+    definition: &crate::config::VectorIndexDefinition,
+    tenant_value: Option<&crate::encoding::property::property_value::PropertyValue>,
+    query: &[f32],
+    k: usize,
+    candidates: Option<&RestrictedVectorCandidates>,
+    pending: &super::pending::PendingSelection,
+) -> Result<Vec<crate::search::vector::SearchResult>> {
+    let partition = match (definition.tenant_property(), tenant_value) {
+        (None, _) => Some(crate::index_lifecycle::work::TextPartition::Unpartitioned),
+        (Some(_), Some(value)) => crate::search::text::normalize_tenant_value(value)
+            .map(|value| {
+                crate::index_lifecycle::work::TextPartition::try_tenant_value(
+                    crate::encoding::v2::values::property::encode_index_partition_value(value),
+                )
+                .map_err(|error| HelixDbError::IndexCatalogCorruption(error.to_string()))
+            })
+            .transpose()?,
+        (Some(_), None) => None,
+    };
+    let Some(partition) = partition else {
+        return Ok(Vec::new());
+    };
+    let dimension = crate::search::vector::VectorDimension::try_new(definition.dimension())
+        .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
+    let entities = pending.entities().clone();
+    let candidates = candidates.cloned();
+    let query = query.to_vec();
+    super::blocking::run_blocking(control, move |probe| {
+        let rank = |left: &crate::search::vector::SearchResult,
+                    right: &crate::search::vector::SearchResult| {
+            left.score()
+                .cmp(&right.score())
+                .then_with(|| left.entity_id().cmp(&right.entity_id()))
+        };
+        let scored = entities
+            .iter()
+            .filter_map(|pending| {
+                let Some((pending_partition, super::pending::PendingValue::Vector(vector))) =
+                    &pending.latest
+                else {
+                    return None;
+                };
+                let id = pending.entity.id.get();
+                (*pending_partition == partition
+                    && candidates
+                        .as_ref()
+                        .is_none_or(|candidates| candidates.contains(id)))
+                .then_some((id, &vector[..]))
+            })
+            .collect::<Vec<_>>();
+        let mut best = scored.chunks(PENDING_SCORE_CHUNK).try_fold(
+            Vec::with_capacity(k.saturating_add(PENDING_SCORE_CHUNK).min(scored.len())),
+            |mut best, chunk| {
+                probe.check()?;
+                best.extend(crate::search::vector::score_exact_in_memory::<D>(
+                    &query,
+                    dimension,
+                    chunk.iter().copied(),
+                )?);
+                if best.len() > k {
+                    best.select_nth_unstable_by(k, rank);
+                    best.truncate(k);
+                }
+                Ok::<_, HelixDbError>(best)
+            },
+        )?;
+        best.sort_unstable_by(rank);
+        Ok(best)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use roaring::RoaringTreemap;
+
+    use super::*;
+    use crate::encoding::v2::keys::IndexEntity;
+    use crate::index_lifecycle::work::TextPartition;
+    use crate::index_lifecycle::{IndexElementKind, IndexEntityId, IndexGenerationId, IndexId};
+
+    /// `count` pending nodes; node `id` sits at `(id % 97, 0)`, so distances
+    /// tie across many IDs. Every seventh is deleted and every eleventh moved
+    /// to another tenant partition.
+    fn pending_nodes(count: u64) -> super::super::pending::PendingSelection {
+        let other = TextPartition::try_tenant_value(
+            crate::encoding::v2::values::property::encode_index_partition_value(
+                &crate::encoding::property::property_value::PropertyValue::from("t"),
+            ),
+        )
+        .unwrap();
+        super::super::pending::PendingSelection::strong_for_tests(
+            crate::index_lifecycle::queue::QueueTarget::new(
+                crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                IndexId::new(1).unwrap(),
+                IndexGenerationId::new(1).unwrap(),
+            ),
+            (0..count)
+                .map(|id| super::super::pending::PendingEntity {
+                    entity: IndexEntity {
+                        kind: IndexElementKind::Node,
+                        id: IndexEntityId::new(id),
+                    },
+                    latest: (id % 7 != 0).then(|| {
+                        (
+                            if id % 11 == 0 {
+                                other.clone()
+                            } else {
+                                TextPartition::Unpartitioned
+                            },
+                            super::super::pending::PendingValue::Vector(std::sync::Arc::from([
+                                (id % 97) as f32,
+                                0.0,
+                            ])),
+                        )
+                    }),
+                })
+                .collect(),
+        )
+    }
+
+    /// The `k` best of every eligible pending node, scored in one pass.
+    fn brute_force(
+        selection: &super::super::pending::PendingSelection,
+        k: usize,
+        candidates: Option<&RestrictedVectorCandidates>,
+    ) -> Vec<crate::search::vector::SearchResult> {
+        let mut all = crate::search::vector::score_exact_in_memory::<Euclidean>(
+            &[0.0, 0.0],
+            crate::search::vector::VectorDimension::try_new(2).unwrap(),
+            selection.entities().iter().filter_map(|pending| {
+                let Some((
+                    TextPartition::Unpartitioned,
+                    super::super::pending::PendingValue::Vector(vector),
+                )) = &pending.latest
+                else {
+                    return None;
+                };
+                let id = pending.entity.id.get();
+                candidates
+                    .is_none_or(|candidates| candidates.contains(id))
+                    .then_some((id, &vector[..]))
+            }),
+        )
+        .unwrap();
+        all.truncate(k);
+        all
+    }
+
+    /// Keeping the `k` best across scoring chunks returns exactly what
+    /// scoring every pending vector at once and truncating returns, ties
+    /// broken by entity ID, with partitions, deletions, and a traversal
+    /// restriction applied.
+    #[tokio::test]
+    async fn pending_scoring_keeps_exactly_the_k_best_across_chunks() {
+        let definition = crate::config::VectorIndexDefinition::new_node(
+            "Doc",
+            "embedding",
+            2,
+            VectorDistanceMetric::Euclidean,
+        )
+        .unwrap();
+        let control = crate::execution_control::ExecutionControl::unlimited();
+        let count = 3 * PENDING_SCORE_CHUNK as u64 + 17;
+        let selection = pending_nodes(count);
+        let restricted =
+            RestrictedVectorCandidates::from_ids((0..count).filter(|id| id % 3 != 0)).unwrap();
+        for candidates in [None, Some(&restricted)] {
+            for k in [1, 2, 96, 800, PENDING_SCORE_CHUNK + 1, count as usize] {
+                let scored = score_pending_vectors::<Euclidean>(
+                    &control,
+                    &definition,
+                    None,
+                    &[0.0, 0.0],
+                    k,
+                    candidates,
+                    &selection,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    scored,
+                    brute_force(&selection, k, candidates),
+                    "k {k}, restricted {}",
+                    candidates.is_some()
+                );
+            }
+        }
+
+        // A tenant search scores only its own partition; a null tenant
+        // scores nothing.
+        let tenant = definition.clone().with_tenant_property("tenant").unwrap();
+        let value = crate::encoding::property::property_value::PropertyValue::from("t");
+        let scored = score_pending_vectors::<Euclidean>(
+            &control,
+            &tenant,
+            Some(&value),
+            &[0.0, 0.0],
+            usize::MAX,
+            None,
+            &selection,
+        )
+        .await
+        .unwrap();
+        assert!(!scored.is_empty());
+        assert!(scored
+            .iter()
+            .all(|result| result.entity_id() % 11 == 0 && result.entity_id() % 7 != 0));
+        assert!(score_pending_vectors::<Euclidean>(
+            &control,
+            &tenant,
+            None,
+            &[0.0, 0.0],
+            10,
+            None,
+            &selection,
+        )
+        .await
+        .unwrap()
+        .is_empty());
+
+        // An expired request scores nothing.
+        let error = score_pending_vectors::<Euclidean>(
+            &crate::execution_control::ExecutionControl::from_timeout(std::time::Duration::ZERO),
+            &definition,
+            None,
+            &[0.0, 0.0],
+            10,
+            None,
+            &selection,
+        )
+        .await
+        .expect_err("an expired request stops");
+        assert!(matches!(error, HelixDbError::QueryDeadlineExceeded));
+    }
+
+    /// Settles `k` results over the physical results `1..=physical`, in rank
+    /// order, with the `local` subset of `superseded` changed by the searching
+    /// transaction, and returns each request made.
+    async fn settle(
+        k: usize,
+        physical: u64,
+        superseded: &RoaringTreemap,
+        local: Option<&RoaringTreemap>,
+        pending_ahead: usize,
+    ) -> (Settlement<u64>, Vec<usize>) {
+        let mut requests = Vec::new();
+        let settlement = settle_physical(
+            k,
+            superseded,
+            local,
+            |id: &u64| *id,
+            |_| pending_ahead,
+            |request| {
+                requests.push(request);
+                let found = (1..=physical).take(request).collect::<Vec<_>>();
+                async move { Ok(found) }
+            },
+        )
+        .await
+        .unwrap();
+        (settlement, requests)
+    }
+
+    #[tokio::test]
+    async fn settling_grows_the_request_by_the_superseded_results_skipped() {
+        let (settlement, requests) =
+            settle(2, 10, &RoaringTreemap::from_iter([1, 2, 3]), None, 0).await;
+        assert!(
+            matches!(&settlement, Settlement::Settled(kept) if *kept == [4, 5]),
+            "{settlement:?}"
+        );
+        assert_eq!(requests, [2, 4, 5], "capped at k plus the superseded count");
+    }
+
+    #[tokio::test]
+    async fn pending_results_ahead_of_the_last_physical_result_settle_it() {
+        let superseded = (1..=900).collect::<RoaringTreemap>();
+        let (settlement, requests) = settle(1, 1_000, &superseded, None, 1).await;
+        assert!(
+            matches!(&settlement, Settlement::Settled(kept) if kept.is_empty()),
+            "{settlement:?}"
+        );
+        assert_eq!(requests, [1]);
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_source_settles_what_it_returned() {
+        let (settlement, requests) = settle(5, 3, &RoaringTreemap::from_iter([1]), None, 0).await;
+        assert!(
+            matches!(&settlement, Settlement::Settled(kept) if *kept == [2, 3]),
+            "{settlement:?}"
+        );
+        assert_eq!(requests, [5]);
+    }
+
+    #[tokio::test]
+    async fn settling_exceeds_only_past_the_suppression_limit() {
+        let limit = super::super::limits::MAX_SUPPRESSED_SEARCH_RESULTS;
+        let bound = limit + 1;
+        // Exactly the limit of superseded results ahead of the answer settles.
+        let superseded = (1..=limit as u64).collect::<RoaringTreemap>();
+        let (settlement, requests) = settle(1, 1_000, &superseded, None, 0).await;
+        assert!(
+            matches!(&settlement, Settlement::Settled(kept) if *kept == [bound as u64]),
+            "{settlement:?}"
+        );
+        assert_eq!(requests.last(), Some(&bound));
+        // One more is reported with the results skipped, never widened past.
+        let superseded = (1..=bound as u64).collect::<RoaringTreemap>();
+        let (settlement, requests) = settle(1, 1_000, &superseded, None, 0).await;
+        assert!(
+            matches!(settlement, Settlement::Exceeded { skipped } if skipped == bound),
+            "{settlement:?}"
+        );
+        assert!(requests.iter().all(|request| *request <= bound));
+    }
+
+    #[tokio::test]
+    async fn local_changes_widen_the_search_without_counting_toward_the_limit() {
+        let limit = super::super::limits::MAX_SUPPRESSED_SEARCH_RESULTS as u64;
+        // Every superseded result is the transaction's own: the search widens
+        // past all of them, far beyond the limit.
+        let local = (1..=limit + 100).collect::<RoaringTreemap>();
+        let (settlement, requests) = settle(1, 2_000, &local, Some(&local), 0).await;
+        assert!(
+            matches!(&settlement, Settlement::Settled(kept) if *kept == [limit + 101]),
+            "{settlement:?}"
+        );
+        assert_eq!(requests.last(), Some(&(limit as usize + 101)));
+
+        // Local changes ahead of exactly the limit of committed ones settle.
+        let local = (1..=100).collect::<RoaringTreemap>();
+        let superseded = (1..=limit + 100).collect::<RoaringTreemap>();
+        let (settlement, _) = settle(1, 2_000, &superseded, Some(&local), 0).await;
+        assert!(
+            matches!(&settlement, Settlement::Settled(kept) if *kept == [limit + 101]),
+            "{settlement:?}"
+        );
+
+        // One more committed one exceeds, and only committed results count.
+        let superseded = (1..=limit + 101).collect::<RoaringTreemap>();
+        let (settlement, requests) = settle(1, 2_000, &superseded, Some(&local), 0).await;
+        assert!(
+            matches!(settlement, Settlement::Exceeded { skipped } if skipped == limit as usize + 1),
+            "{settlement:?}"
+        );
+        assert!(requests
+            .iter()
+            .all(|request| *request <= limit as usize + 101));
+
+        // A strong read selection has no local changes and counts them all.
+        let (settlement, _) = settle(1, 2_000, &superseded, Some(&RoaringTreemap::new()), 0).await;
+        assert!(
+            matches!(settlement, Settlement::Exceeded { skipped } if skipped == limit as usize + 1),
+            "{settlement:?}"
+        );
     }
 }

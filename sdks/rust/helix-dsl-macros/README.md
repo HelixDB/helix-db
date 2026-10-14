@@ -3,31 +3,49 @@
 Procedural macros for the [`helix-db`](../README.md) query DSL.
 
 This crate provides the `#[query]` attribute macro, which transforms a typed
-query-building function into a callable function returning `QueryRequest`.
+query-building function into a callable function returning
+`Result<QueryRequest, QueryError>`.
 
 ## Usage
 
+The compile-tested mirror of this example is
+[`examples/readme_macros_query.rs`](../examples/readme_macros_query.rs).
+
 ```rust
-use helix_db::prelude::*;
+use helix_db::dsl::prelude::*;
 
 #[query]
 fn find_user(username: String) -> ReadBatch {
     read_batch()
-        .var_as("user", g().n_where(SourcePredicate::eq("username", username)))
+        .var_as(
+            "user",
+            g().n_where(SourcePredicate::eq("username", username)),
+        )
         .returning(["user"])
 }
 
 #[query]
-fn create_post(payload: ParamObject) -> WriteBatch {
+fn create_post(title: String) -> WriteBatch {
     write_batch()
-        .create_node("Post", payload)
+        .var_as("post", g().add_n("Post", vec![("title", title)]))
+        .returning(["post"])
+}
+
+fn main() -> Result<(), QueryError> {
+    let request = find_user("alice".to_string())?;
+    assert_eq!(request.query_name(), Some("find_user"));
+
+    let request = create_post("hello".to_string())?;
+    assert_eq!(request.query_name(), Some("create_post"));
+    Ok(())
 }
 ```
 
 The macro preserves the function's visibility and parameters, builds the query
 AST with `Expr::param(...)` references, inserts parameter values and types, sets
-`query_name` to the function name, and returns the complete request. It does not
-register or persist queries.
+`query_name` to the function name, and returns the complete request (or a
+`QueryError` if parameter coercion fails). It does not register or persist
+queries.
 
 ## Supported parameter types
 

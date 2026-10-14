@@ -4,7 +4,8 @@
 //! Canonical V2 identities and generation-qualified physical rows are resolved
 //! through the same stable request snapshot.
 
-use helix_planner::{catalog, ir, properties};
+use crate::query_resources::{self, bitmap};
+use helix_planner::{catalog, ir};
 use slatedb::DbReadOps;
 
 use super::super::stream::ast_to_db_value;
@@ -15,13 +16,24 @@ use crate::error::{HelixDbError, Result};
 use crate::HelixStorage;
 
 impl<'db> ExecutionContext<'db> {
-    pub(super) fn index_value(&self, value: &ir::IndexValue) -> Result<DbPropertyValue> {
+    pub(in crate::execution::interpreter) fn index_value(
+        &self,
+        value: &ir::IndexValue,
+    ) -> Result<DbPropertyValue> {
         match value {
             ir::IndexValue::Literal(value) => {
                 Ok(ast_to_db_value(value.as_property_value().clone()))
             }
             ir::IndexValue::Param(param) => self.param_value(param),
             ir::IndexValue::ParamSet(values) => self.param_value(values.param()),
+            ir::IndexValue::LiteralSet(values) => {
+                Ok(ast_to_db_value(helix_ast::value::PropertyValue::Array(
+                    values
+                        .iter()
+                        .map(|value| value.as_property_value().clone())
+                        .collect(),
+                )))
+            }
         }
     }
 
@@ -29,7 +41,7 @@ impl<'db> ExecutionContext<'db> {
         &self,
         property: &str,
         value: &DbPropertyValue,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         let identity = crate::config::split_scoped_secondary_index_property(property)
             .map(|(label, property)| {
                 secondary_identity(
@@ -74,45 +86,193 @@ impl<'db> ExecutionContext<'db> {
         }
     }
 
+    /// Rows of `key` whose property equals any of `values`.
+    ///
+    /// Indexed values read the Active lane. Null and values no lane can hold
+    /// are answered by [`Self::unindexed_label_rows`], under the request's
+    /// read budget, and united with them.
     pub(in crate::execution::interpreter) async fn lookup_managed_equality_union(
         &self,
         element_kind: crate::index_lifecycle::IndexElementKind,
         key: &catalog::ScopedPropertyKey,
         values: &[DbPropertyValue],
-    ) -> Result<roaring::RoaringTreemap> {
-        if values.is_empty() {
-            return Ok(roaring::RoaringTreemap::new());
+    ) -> Result<bitmap::Bitmap> {
+        use crate::encoding::v2::values::property::equality_index_value as projection;
+        let (indexed, unindexed): (Vec<_>, Vec<_>) = values.iter().partition(|value| {
+            matches!(
+                projection::project_equality_value(value),
+                projection::EqualityValueProjection::Indexed(_)
+                    | projection::EqualityValueProjection::NonReflexive
+            )
+        });
+        let unindexed_ids = match unindexed.as_slice() {
+            [] => None,
+            unindexed => Some(
+                self.unindexed_label_rows(
+                    element_kind,
+                    key,
+                    |stored| {
+                        let stored = stored.unwrap_or(&DbPropertyValue::Null);
+                        unindexed.iter().any(|value| stored.eq_value(value))
+                    },
+                    None,
+                )
+                .await?,
+            ),
+        };
+        if indexed.is_empty() {
+            return unindexed_ids
+                .map_or_else(|| bitmap::Bitmap::empty(self.row_memory.as_ref()), Ok);
         }
+        // Only a list holding unindexed values is copied.
+        let indexed_values;
+        let values = if unindexed.is_empty() {
+            values
+        } else {
+            indexed_values = indexed.into_iter().cloned().collect::<Vec<_>>();
+            &indexed_values
+        };
         let identity = secondary_identity(
             crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
             element_kind,
             key.label.as_ref(),
             key.property.as_ref(),
         )?;
+        let indexed_ids = async {
+            if let Some(active) = self.active_write_tx() {
+                return lookup_managed_equalities_in_view(self, &active.txn, &identity, values)
+                    .await;
+            }
+            if let Some(view) = self.request_read_view() {
+                return lookup_managed_equalities_in_view(self, view, &identity, values).await;
+            }
+            #[cfg(test)]
+            {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        lookup_managed_equalities_in_view(self, reader.as_ref(), &identity, values)
+                            .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        lookup_managed_equalities_in_view(self, writer.db(), &identity, values)
+                            .await
+                    }
+                }
+            }
+            #[cfg(not(test))]
+            {
+                Err(HelixDbError::InvariantViolation(
+                    "secondary equality batch escaped its request read view".to_string(),
+                ))
+            }
+        }
+        .await?;
+        match unindexed_ids {
+            Some(unindexed_ids) => indexed_ids.union(unindexed_ids),
+            None => Ok(indexed_ids),
+        }
+    }
+
+    /// Rows of `key.label` whose `key.property` no Active equality entry holds
+    /// and whose value (`None` when missing) passes `accept`, narrowed to
+    /// `within` when it is given.
+    ///
+    /// This serves null equality and query values no lane can encode. It reads
+    /// the label bitmap and the Active lane, then verifies only the label rows
+    /// outside the lane, in record batches, so it never reads a row of another
+    /// label. A property with no Active equality generation verifies every
+    /// label row. A small `within` is verified directly, without reading the
+    /// label or the lane; `accept` must then reject every value a lane holds,
+    /// or the caller must unite the result with the lane's rows for the values
+    /// it accepts.
+    ///
+    /// The label and the lane are read concurrently only when the request's
+    /// [`super::SharedIndexReads`] have a read free, which this read holds
+    /// until it ends; otherwise they are read one after the other.
+    pub(in crate::execution::interpreter) async fn unindexed_label_rows(
+        &self,
+        element_kind: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyKey,
+        accept: impl Fn(Option<&DbPropertyValue>) -> bool,
+        within: Option<&roaring::RoaringTreemap>,
+    ) -> Result<bitmap::Bitmap> {
+        let identity = secondary_identity(
+            crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
+            element_kind,
+            key.label.as_ref(),
+            key.property.as_ref(),
+        )?;
+        let label = crate::index_lifecycle::secondary::UnindexedLabel {
+            scope: self.tenant_scope,
+            kind: element_kind,
+            label: key.label.as_ref(),
+            property: key.property.as_ref(),
+        };
         if let Some(active) = self.active_write_tx() {
-            return lookup_managed_equalities_in_view(self, &active.txn, &identity, values).await;
+            return unindexed_label_rows_in_view(
+                self,
+                &active.txn,
+                &identity,
+                label,
+                accept,
+                within,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
-            return lookup_managed_equalities_in_view(self, view, &identity, values).await;
+            return unindexed_label_rows_in_view(self, view, &identity, label, accept, within)
+                .await;
         }
         #[cfg(test)]
         {
             match self.db.storage() {
                 HelixStorage::Reader(reader) => {
-                    lookup_managed_equalities_in_view(self, reader.as_ref(), &identity, values)
-                        .await
+                    unindexed_label_rows_in_view(
+                        self,
+                        reader.as_ref(),
+                        &identity,
+                        label,
+                        accept,
+                        within,
+                    )
+                    .await
                 }
                 HelixStorage::Writer(writer) => {
-                    lookup_managed_equalities_in_view(self, writer.db(), &identity, values).await
+                    unindexed_label_rows_in_view(
+                        self,
+                        writer.db(),
+                        &identity,
+                        label,
+                        accept,
+                        within,
+                    )
+                    .await
                 }
             }
         }
         #[cfg(not(test))]
         {
             Err(HelixDbError::InvariantViolation(
-                "secondary equality batch escaped its request read view".to_string(),
+                "unindexed label rows escaped their request read view".to_string(),
             ))
         }
+    }
+
+    /// Rows of `key.label` whose `key.property` is missing or null, narrowed
+    /// to `within` when it is given; see [`Self::unindexed_label_rows`].
+    pub(in crate::execution::interpreter) async fn null_equality_rows(
+        &self,
+        element_kind: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyKey,
+        within: Option<&roaring::RoaringTreemap>,
+    ) -> Result<bitmap::Bitmap> {
+        self.unindexed_label_rows(
+            element_kind,
+            key,
+            |value| value.is_none_or(|value| matches!(value, DbPropertyValue::Null)),
+            within,
+        )
+        .await
     }
 
     /// Execute a planner-selected literal bitmap batch without key folding.
@@ -121,7 +281,18 @@ impl<'db> ExecutionContext<'db> {
         element_kind: crate::index_lifecycle::IndexElementKind,
         key: &catalog::ScopedPropertyKey,
         values: &[DbPropertyValue],
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
+        self.lookup_managed_equality_batch(element_kind, key, values, false)
+            .await
+    }
+
+    pub(in crate::execution::interpreter) async fn lookup_managed_equality_batch(
+        &self,
+        element_kind: crate::index_lifecycle::IndexElementKind,
+        key: &catalog::ScopedPropertyKey,
+        values: &[DbPropertyValue],
+        unique: bool,
+    ) -> Result<bitmap::Bitmap> {
         let identity = match secondary_identity(
             crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
             element_kind,
@@ -135,14 +306,30 @@ impl<'db> ExecutionContext<'db> {
             let Some(handle) = active.index_context.active_handle(&identity) else {
                 return Err(secondary_catalog_unavailable());
             };
-            return lookup_managed_active_literal_batch(&active.txn, handle, values).await;
+            return lookup_managed_active_literal_batch(
+                self.row_memory.as_ref(),
+                &active.txn,
+                handle,
+                values,
+                unique,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
             if let Some(catalog) = self.request_read_index_catalog() {
                 let Some(handle) = catalog.handle(&identity) else {
                     return Err(secondary_catalog_unavailable());
                 };
-                return lookup_managed_active_literal_batch(view, handle, values).await;
+                return lookup_managed_active_literal_batch(
+                    self.row_memory.as_ref(),
+                    view,
+                    handle,
+                    values,
+                    unique,
+                    view.storage_compatibility(),
+                )
+                .await;
             }
             crate::index_lifecycle::secondary::record_equality_point_read();
             let Some(record) = crate::index_lifecycle::repository::load_index_record(
@@ -160,7 +347,15 @@ impl<'db> ExecutionContext<'db> {
             ) else {
                 return Err(secondary_catalog_unavailable());
             };
-            return lookup_managed_active_literal_batch(view, &handle, values).await;
+            return lookup_managed_active_literal_batch(
+                self.row_memory.as_ref(),
+                view,
+                &handle,
+                values,
+                unique,
+                view.storage_compatibility(),
+            )
+            .await;
         }
         Err(HelixDbError::InvariantViolation(
             "literal secondary equality batch escaped its request read view".to_string(),
@@ -174,7 +369,7 @@ impl<'db> ExecutionContext<'db> {
         key: &catalog::ScopedPropertyKey,
         value: &DbPropertyValue,
         unique: bool,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         let identity = match secondary_identity(
             crate::index_lifecycle::IndexIdentityFamily::SecondaryEquality,
             element_kind,
@@ -188,14 +383,30 @@ impl<'db> ExecutionContext<'db> {
             let Some(handle) = active.index_context.active_handle(&identity) else {
                 return Err(secondary_catalog_unavailable());
             };
-            return lookup_managed_active_point_exact(&active.txn, handle, value, unique).await;
+            return lookup_managed_active_point_exact(
+                self.row_memory.as_ref(),
+                &active.txn,
+                handle,
+                value,
+                unique,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
             if let Some(catalog) = self.request_read_index_catalog() {
                 let Some(handle) = catalog.handle(&identity) else {
                     return Err(secondary_catalog_unavailable());
                 };
-                return lookup_managed_active_point_exact(view, handle, value, unique).await;
+                return lookup_managed_active_point_exact(
+                    self.row_memory.as_ref(),
+                    view,
+                    handle,
+                    value,
+                    unique,
+                    view.storage_compatibility(),
+                )
+                .await;
             }
             crate::index_lifecycle::secondary::record_equality_point_read();
             let Some(record) = crate::index_lifecycle::repository::load_index_record(
@@ -213,7 +424,15 @@ impl<'db> ExecutionContext<'db> {
             ) else {
                 return Err(secondary_catalog_unavailable());
             };
-            return lookup_managed_active_point_exact(view, &handle, value, unique).await;
+            return lookup_managed_active_point_exact(
+                self.row_memory.as_ref(),
+                view,
+                &handle,
+                value,
+                unique,
+                view.storage_compatibility(),
+            )
+            .await;
         }
         Err(HelixDbError::InvariantViolation(
             "exact secondary equality point read escaped its request read view".to_string(),
@@ -223,20 +442,22 @@ impl<'db> ExecutionContext<'db> {
     pub(in crate::execution::interpreter) async fn lookup_global_edge_label_index(
         &self,
         label: &str,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         if let Some(active) = self.active_write_tx() {
-            return crate::search::lookup_global_edge_label_index_scoped(
+            return crate::search::lookup_global_edge_label_index_admitted(
                 &active.txn,
                 label,
                 self.tenant_scope,
+                self.row_memory.as_ref(),
             )
             .await;
         }
         if let Some(view) = self.request_read_view() {
-            return crate::search::lookup_global_edge_label_index_scoped(
+            return crate::search::lookup_global_edge_label_index_admitted(
                 view,
                 label,
                 self.tenant_scope,
+                self.row_memory.as_ref(),
             )
             .await;
         }
@@ -244,18 +465,20 @@ impl<'db> ExecutionContext<'db> {
         {
             match self.db.storage() {
                 HelixStorage::Reader(reader) => {
-                    crate::search::lookup_global_edge_label_index_scoped(
+                    crate::search::lookup_global_edge_label_index_admitted(
                         reader.as_ref(),
                         label,
                         self.tenant_scope,
+                        self.row_memory.as_ref(),
                     )
                     .await
                 }
                 HelixStorage::Writer(writer) => {
-                    crate::search::lookup_global_edge_label_index_scoped(
+                    crate::search::lookup_global_edge_label_index_admitted(
                         writer.db(),
                         label,
                         self.tenant_scope,
+                        self.row_memory.as_ref(),
                     )
                     .await
                 }
@@ -272,7 +495,7 @@ impl<'db> ExecutionContext<'db> {
         &self,
         property: &str,
         value: &DbPropertyValue,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         let identity = crate::config::split_scoped_secondary_index_property(property)
             .map(|(label, property)| {
                 secondary_identity(
@@ -321,22 +544,24 @@ impl<'db> ExecutionContext<'db> {
         &self,
         node_id: u64,
         label: &str,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         if let Some(active) = self.active_write_tx() {
-            return crate::search::lookup_out_neighbors_by_label_scoped(
+            return crate::search::lookup_out_neighbors_by_label_admitted(
                 &active.txn,
                 node_id,
                 label,
                 self.tenant_scope,
+                self.row_memory.as_ref(),
             )
             .await;
         }
         if let Some(view) = self.request_read_view() {
-            return crate::search::lookup_out_neighbors_by_label_scoped(
+            return crate::search::lookup_out_neighbors_by_label_admitted(
                 view,
                 node_id,
                 label,
                 self.tenant_scope,
+                self.row_memory.as_ref(),
             )
             .await;
         }
@@ -344,20 +569,22 @@ impl<'db> ExecutionContext<'db> {
         {
             match self.db.storage() {
                 HelixStorage::Reader(reader) => {
-                    crate::search::lookup_out_neighbors_by_label_scoped(
+                    crate::search::lookup_out_neighbors_by_label_admitted(
                         reader.as_ref(),
                         node_id,
                         label,
                         self.tenant_scope,
+                        self.row_memory.as_ref(),
                     )
                     .await
                 }
                 HelixStorage::Writer(writer) => {
-                    crate::search::lookup_out_neighbors_by_label_scoped(
+                    crate::search::lookup_out_neighbors_by_label_admitted(
                         writer.db(),
                         node_id,
                         label,
                         self.tenant_scope,
+                        self.row_memory.as_ref(),
                     )
                     .await
                 }
@@ -373,22 +600,24 @@ impl<'db> ExecutionContext<'db> {
         &self,
         node_id: u64,
         label: &str,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
         if let Some(active) = self.active_write_tx() {
-            return crate::search::lookup_in_neighbors_by_label_scoped(
+            return crate::search::lookup_in_neighbors_by_label_admitted(
                 &active.txn,
                 node_id,
                 label,
                 self.tenant_scope,
+                self.row_memory.as_ref(),
             )
             .await;
         }
         if let Some(view) = self.request_read_view() {
-            return crate::search::lookup_in_neighbors_by_label_scoped(
+            return crate::search::lookup_in_neighbors_by_label_admitted(
                 view,
                 node_id,
                 label,
                 self.tenant_scope,
+                self.row_memory.as_ref(),
             )
             .await;
         }
@@ -396,20 +625,22 @@ impl<'db> ExecutionContext<'db> {
         {
             match self.db.storage() {
                 HelixStorage::Reader(reader) => {
-                    crate::search::lookup_in_neighbors_by_label_scoped(
+                    crate::search::lookup_in_neighbors_by_label_admitted(
                         reader.as_ref(),
                         node_id,
                         label,
                         self.tenant_scope,
+                        self.row_memory.as_ref(),
                     )
                     .await
                 }
                 HelixStorage::Writer(writer) => {
-                    crate::search::lookup_in_neighbors_by_label_scoped(
+                    crate::search::lookup_in_neighbors_by_label_admitted(
                         writer.db(),
                         node_id,
                         label,
                         self.tenant_scope,
+                        self.row_memory.as_ref(),
                     )
                     .await
                 }
@@ -425,38 +656,51 @@ impl<'db> ExecutionContext<'db> {
         &self,
         from: u64,
         to: u64,
-    ) -> Result<roaring::RoaringTreemap> {
+    ) -> Result<bitmap::Bitmap> {
+        #[cfg(test)]
+        self.pull_work
+            .pair_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(active) = self.active_write_tx() {
-            return crate::search::lookup_edge_pair_index_scoped(
+            return crate::search::lookup_edge_pair_index_admitted(
                 &active.txn,
                 from,
                 to,
                 self.tenant_scope,
+                self.row_memory.as_ref(),
             )
             .await;
         }
         if let Some(view) = self.request_read_view() {
-            return crate::search::lookup_edge_pair_index_scoped(view, from, to, self.tenant_scope)
-                .await;
+            return crate::search::lookup_edge_pair_index_admitted(
+                view,
+                from,
+                to,
+                self.tenant_scope,
+                self.row_memory.as_ref(),
+            )
+            .await;
         }
         #[cfg(test)]
         {
             match self.db.storage() {
                 HelixStorage::Reader(reader) => {
-                    crate::search::lookup_edge_pair_index_scoped(
+                    crate::search::lookup_edge_pair_index_admitted(
                         reader.as_ref(),
                         from,
                         to,
                         self.tenant_scope,
+                        self.row_memory.as_ref(),
                     )
                     .await
                 }
                 HelixStorage::Writer(writer) => {
-                    crate::search::lookup_edge_pair_index_scoped(
+                    crate::search::lookup_edge_pair_index_admitted(
                         writer.db(),
                         from,
                         to,
                         self.tenant_scope,
+                        self.row_memory.as_ref(),
                     )
                     .await
                 }
@@ -536,7 +780,7 @@ async fn lookup_equality_in_view(
     identity: Option<&crate::index_lifecycle::IndexIdentity>,
     property: &str,
     value: &DbPropertyValue,
-) -> Result<roaring::RoaringTreemap> {
+) -> Result<bitmap::Bitmap> {
     if let Some(identity) = identity {
         return lookup_managed_equality_in_view(context, reader, identity, value).await;
     }
@@ -547,10 +791,16 @@ async fn lookup_equality_in_view(
         });
     }
     let Some(value) = value.as_str() else {
-        return Ok(roaring::RoaringTreemap::new());
+        return bitmap::Bitmap::empty(context.row_memory.as_ref());
     };
-    crate::search::lookup_equality_index_set_scoped(reader, property, value, context.tenant_scope)
-        .await
+    crate::search::lookup_equality_index_set_admitted(
+        reader,
+        property,
+        value,
+        context.tenant_scope,
+        context.row_memory.as_ref(),
+    )
+    .await
 }
 
 /// Resolves one request-authorized equality generation and reads its physical row.
@@ -559,7 +809,7 @@ async fn lookup_managed_equality_in_view(
     reader: &(impl DbReadOps + Send + Sync),
     identity: &crate::index_lifecycle::IndexIdentity,
     value: &DbPropertyValue,
-) -> Result<roaring::RoaringTreemap> {
+) -> Result<bitmap::Bitmap> {
     lookup_managed_equalities_in_view(context, reader, identity, core::slice::from_ref(value)).await
 }
 
@@ -568,7 +818,7 @@ async fn lookup_managed_equalities_in_view(
     reader: &(impl DbReadOps + Send + Sync),
     identity: &crate::index_lifecycle::IndexIdentity,
     values: &[DbPropertyValue],
-) -> Result<roaring::RoaringTreemap> {
+) -> Result<bitmap::Bitmap> {
     if let Some(active_write) = context.active_write_tx() {
         let Some(active) = active_write.index_context.active_handle(identity) else {
             return Err(HelixDbError::IndexLifecycleUnavailable {
@@ -576,7 +826,14 @@ async fn lookup_managed_equalities_in_view(
                 reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
             });
         };
-        return lookup_managed_active_equalities_in_view(reader, active, values).await;
+        return lookup_managed_active_equalities_in_view(
+            context,
+            reader,
+            active,
+            values,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+        )
+        .await;
     }
 
     if let Some(catalog) = context.request_read_index_catalog() {
@@ -586,7 +843,17 @@ async fn lookup_managed_equalities_in_view(
                 reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
             });
         };
-        return lookup_managed_active_equalities_in_view(reader, active, values).await;
+        return lookup_managed_active_equalities_in_view(
+            context,
+            reader,
+            active,
+            values,
+            context
+                .request_read_view()
+                .expect("prepared catalog requires its exact request read view")
+                .storage_compatibility(),
+        )
+        .await;
     }
 
     crate::index_lifecycle::secondary::record_equality_point_read();
@@ -610,14 +877,87 @@ async fn lookup_managed_equalities_in_view(
             reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
         });
     };
-    lookup_managed_active_equalities_in_view(reader, &active, values).await
+    lookup_managed_active_equalities_in_view(
+        context,
+        reader,
+        &active,
+        values,
+        context.request_read_view().map_or(
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+            super::super::read_view::StableRequestReadView::storage_compatibility,
+        ),
+    )
+    .await
+}
+
+/// Resolves the request's Active equality generation for `identity`, when
+/// there is one, and returns the verified label rows outside its lane.
+async fn unindexed_label_rows_in_view(
+    context: &ExecutionContext<'_>,
+    reader: &(impl DbReadOps + Send + Sync),
+    identity: &crate::index_lifecycle::IndexIdentity,
+    label: crate::index_lifecycle::secondary::UnindexedLabel<'_>,
+    accept: impl Fn(Option<&DbPropertyValue>) -> bool,
+    within: Option<&roaring::RoaringTreemap>,
+) -> Result<bitmap::Bitmap> {
+    let compatibility = context.request_read_view().map_or(
+        crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+        super::super::read_view::StableRequestReadView::storage_compatibility,
+    );
+    let loaded;
+    let handle = if let Some(active_write) = context.active_write_tx() {
+        active_write.index_context.active_handle(identity)
+    } else if let Some(catalog) = context.request_read_index_catalog() {
+        catalog.handle(identity)
+    } else {
+        crate::index_lifecycle::secondary::record_equality_point_read();
+        loaded = crate::index_lifecycle::repository::load_index_record(
+            reader,
+            context.tenant_scope,
+            identity,
+        )
+        .await?
+        .and_then(|record| {
+            crate::index_lifecycle::ActiveIndexHandle::try_from_record(
+                context.tenant_scope,
+                &record,
+            )
+        });
+        loaded.as_ref()
+    };
+    let deadline = || context.check_execution_deadline();
+    let extra = context.shared_index_reads.take(1);
+    let candidates = crate::index_lifecycle::secondary::unindexed_label_rows(
+        reader,
+        label,
+        handle.map(|handle| (handle, compatibility)),
+        within,
+        match extra.taken {
+            0 => crate::index_lifecycle::secondary::LabelLaneReads::Sequential,
+            _ => crate::index_lifecycle::secondary::LabelLaneReads::Concurrent,
+        },
+        &deadline,
+    )
+    .await?;
+    drop(extra);
+    crate::index_lifecycle::secondary::verified_unindexed_rows(
+        reader,
+        label,
+        candidates,
+        accept,
+        &deadline,
+        context.row_memory.as_ref(),
+    )
+    .await
 }
 
 async fn lookup_managed_active_equalities_in_view(
+    context: &ExecutionContext<'_>,
     reader: &(impl DbReadOps + Send + Sync),
     active: &crate::index_lifecycle::ActiveIndexHandle,
     values: &[DbPropertyValue],
-) -> Result<roaring::RoaringTreemap> {
+    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
+) -> Result<bitmap::Bitmap> {
     if !matches!(
         active,
         crate::index_lifecycle::ActiveIndexHandle::Secondary { .. }
@@ -626,25 +966,51 @@ async fn lookup_managed_active_equalities_in_view(
             "secondary equality identity resolved another Active family".to_string(),
         ));
     }
-    crate::index_lifecycle::secondary::lookup_active_equality_generations(reader, active, values)
-        .await
+    crate::index_lifecycle::secondary::lookup_active_equality_generations_admitted(
+        reader,
+        active,
+        values,
+        compatibility,
+        context.row_memory.as_ref(),
+        &|| context.check_execution_deadline(),
+    )
+    .await
 }
 
 async fn lookup_managed_active_literal_batch(
+    budget: Option<&query_resources::Budget>,
     reader: &(impl DbReadOps + Send + Sync),
     active: &crate::index_lifecycle::ActiveIndexHandle,
     values: &[DbPropertyValue],
-) -> Result<roaring::RoaringTreemap> {
-    crate::index_lifecycle::secondary::lookup_active_equality_literal_batch(reader, active, values)
-        .await
+    unique: bool,
+    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
+) -> Result<bitmap::Bitmap> {
+    if unique {
+        return Box::pin(
+            crate::index_lifecycle::secondary::lookup_active_unique_equality_batch_admitted(
+                reader, active, values, budget,
+            ),
+        )
+        .await;
+    }
+    crate::index_lifecycle::secondary::lookup_active_equality_batch_admitted(
+        reader,
+        active,
+        values,
+        compatibility,
+        budget,
+    )
+    .await
 }
 
 async fn lookup_managed_active_point_exact(
+    budget: Option<&query_resources::Budget>,
     reader: &(impl DbReadOps + Send + Sync),
     active: &crate::index_lifecycle::ActiveIndexHandle,
     value: &DbPropertyValue,
     unique: bool,
-) -> Result<roaring::RoaringTreemap> {
+    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
+) -> Result<bitmap::Bitmap> {
     let Some(definition) = active.secondary_definition() else {
         return Err(HelixDbError::IndexCatalogCorruption(
             "exact equality point resolved another Active family".to_string(),
@@ -665,24 +1031,20 @@ async fn lookup_managed_active_point_exact(
                 .to_string(),
         ));
     }
-    crate::index_lifecycle::secondary::lookup_active_equality_point_literal(reader, active, value)
-        .await
+    crate::index_lifecycle::secondary::lookup_active_equality_point_admitted(
+        reader,
+        active,
+        value,
+        compatibility,
+        budget,
+    )
+    .await
 }
 
 fn secondary_catalog_unavailable() -> HelixDbError {
     HelixDbError::IndexLifecycleUnavailable {
         family: crate::error::IndexFamily::Secondary,
         reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
-    }
-}
-
-pub(super) fn limited_index_ids(
-    ids: roaring::RoaringTreemap,
-    limit: Option<properties::PositiveUsize>,
-) -> Vec<u64> {
-    match limit {
-        Some(limit) => ids.into_iter().take(limit.get()).collect(),
-        None => ids.into_iter().collect(),
     }
 }
 
@@ -702,10 +1064,6 @@ pub(super) mod tests {
 
     fn name(value: &str) -> ir::NonEmptyString {
         test_support::name(value)
-    }
-
-    fn positive(value: usize) -> properties::PositiveUsize {
-        properties::PositiveUsize::new(value).expect("positive test limit")
     }
 
     fn active_handle(
@@ -789,14 +1147,6 @@ pub(super) mod tests {
     }
 
     #[cfg_attr(test, test)]
-    fn limited_index_ids_preserve_storage_order_and_apply_positive_limits() {
-        let ids = roaring::RoaringTreemap::from_iter([9, 1, 5, 3]);
-
-        assert_eq!(limited_index_ids(ids.clone(), None), vec![1, 3, 5, 9]);
-        assert_eq!(limited_index_ids(ids, Some(positive(2))), vec![1, 3]);
-    }
-
-    #[cfg_attr(test, test)]
     fn scoped_property_key_uses_internal_secondary_index_scope() {
         let key = catalog::ScopedPropertyKey::try_new("User", "email")
             .expect("valid scoped property key");
@@ -829,7 +1179,7 @@ pub(super) mod tests {
             vec![("status", PropertyValue::from("active"))],
         )
         .await;
-        let writer_context = ExecutionContext::new(&writer, context::ParamBindings::default());
+        let mut writer_context = ExecutionContext::new(&writer, context::ParamBindings::default());
         assert_eq!(
             writer_context
                 .lookup_global_edge_equality_index(
@@ -842,6 +1192,36 @@ pub(super) mod tests {
                 .collect::<Vec<_>>(),
             vec![edge]
         );
+        // Direct writer reads obey the same ownership contract as snapshot
+        // reads: reject before decoding, then retain the charge through iteration.
+        for limit in [1, 1_000_000] {
+            let budget = query_resources::Budget::new(limit);
+            writer_context.row_memory = Some(budget.clone());
+            let result = writer_context.lookup_edge_pair_index(alice, bob).await;
+            assert_eq!(budget.reads().point_gets, 1);
+            if limit == 1 {
+                assert!(matches!(
+                    result,
+                    Err(HelixDbError::QueryMemoryLimitExceeded)
+                ));
+            } else {
+                let ids = result.unwrap();
+                assert!(budget.available() < limit);
+                assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec![edge]);
+                assert!(writer_context
+                    .lookup_equality_index_set("$label", &DbPropertyValue::Null)
+                    .await
+                    .unwrap()
+                    .is_empty());
+                assert!(matches!(
+                    writer_context
+                        .lookup_equality_index_set("unscoped", &DbPropertyValue::Null)
+                        .await,
+                    Err(HelixDbError::IndexLifecycleUnavailable { .. })
+                ));
+            }
+            assert_eq!(budget.available(), limit);
+        }
         drop(writer);
         let reader = test_support::open_reader_with_config(config).await;
         let context = ExecutionContext::new(&reader, context::ParamBindings::default());
@@ -954,19 +1334,23 @@ pub(super) mod tests {
                 .expect("node unique definition validates"),
         );
         assert!(lookup_managed_active_point_exact(
+            None,
             db.inner_db().as_ref(),
             &node_unique,
             &value,
             true,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .expect("matching unique lane reads literally")
         .is_empty());
         assert!(lookup_managed_active_point_exact(
+            None,
             db.inner_db().as_ref(),
             &node_unique,
             &value,
             false,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .is_err());
@@ -976,19 +1360,23 @@ pub(super) mod tests {
                 .expect("edge equality definition validates"),
         );
         assert!(lookup_managed_active_point_exact(
+            None,
             db.inner_db().as_ref(),
             &edge_equality,
             &value,
             false,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .expect("edge equality uses its non-unique lane")
         .is_empty());
         assert!(lookup_managed_active_point_exact(
+            None,
             db.inner_db().as_ref(),
             &edge_equality,
             &value,
             true,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .is_err());
@@ -1000,10 +1388,12 @@ pub(super) mod tests {
                 .expect("edge range definition validates"),
         ] {
             assert!(lookup_managed_active_point_exact(
+                None,
                 db.inner_db().as_ref(),
                 &secondary_handle(range),
                 &value,
                 false,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
             )
             .await
             .is_err());
@@ -1033,10 +1423,12 @@ pub(super) mod tests {
             },
         );
         assert!(lookup_managed_active_point_exact(
+            None,
             db.inner_db().as_ref(),
             &vector_handle,
             &value,
             false,
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .is_err());
@@ -1104,6 +1496,36 @@ pub(super) mod tests {
             )
             .await
             .is_err());
+        // Dynamic membership uses the same captured Active catalog as exact
+        // literal access, including rejection of identities outside that view.
+        let budget = query_resources::Budget::new(1024 * 1024);
+        prepared_context.row_memory = Some(budget.clone());
+        let ids = prepared_context
+            .lookup_managed_equality_union(
+                crate::index_lifecycle::IndexElementKind::Node,
+                &node_key,
+                &batch_values,
+            )
+            .await
+            .unwrap();
+        let retained = budget.available();
+        assert!(retained < 1024 * 1024);
+        let mut ids = ids.into_iter();
+        assert_eq!(ids.next(), Some(alice));
+        assert_eq!(budget.available(), retained);
+        assert_eq!(ids.next(), None);
+        drop(ids);
+        assert_eq!(budget.available(), 1024 * 1024);
+        assert!(matches!(
+            prepared_context
+                .lookup_managed_equality_union(
+                    crate::index_lifecycle::IndexElementKind::Node,
+                    &missing_key,
+                    &batch_values,
+                )
+                .await,
+            Err(HelixDbError::IndexLifecycleUnavailable { .. })
+        ));
         prepared_context
             .close_request_read_view()
             .expect("prepared read view closes");
@@ -1302,6 +1724,20 @@ pub(super) mod tests {
                 .expect("transaction endpoint lookup succeeds"),
             Some((alice, bob))
         );
+        assert_eq!(
+            context
+                .lookup_edge_pair_index(alice, bob)
+                .await
+                .expect("transaction edge pair lookup succeeds")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![edge]
+        );
+        assert!(context
+            .lookup_edge_pair_index(bob, alice)
+            .await
+            .expect("transaction reverse pair lookup succeeds")
+            .is_empty());
         context.abort_request_write_scope();
         assert!(context
             .lookup_managed_equality_literal_batch(
@@ -1441,7 +1877,6 @@ pub(super) mod tests {
     pub(in crate::execution::interpreter::access) async fn run_production_contracts() {
         index_value_converts_literals_and_runtime_parameters().await;
         index_value_rejects_missing_parameters().await;
-        limited_index_ids_preserve_storage_order_and_apply_positive_limits();
         scoped_property_key_uses_internal_secondary_index_scope();
         exact_equality_dispatch_rejects_every_wrong_catalog_lane().await;
         active_transaction_dispatches_index_lookup_contracts().await;

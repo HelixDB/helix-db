@@ -1399,7 +1399,7 @@ mod tests {
 
         let cycles = graph.simple_cycles(3, Some(1)).unwrap();
         assert_eq!(cycles.cycles.len(), 1);
-        assert!(cycles.truncated);
+        assert!(!cycles.truncated);
         for (strategy, hub_policy) in [
             (
                 NativeTraversalStrategy::BreadthFirst,

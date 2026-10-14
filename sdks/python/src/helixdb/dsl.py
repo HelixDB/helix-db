@@ -13,7 +13,7 @@ import re
 import struct
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Literal, TypeAlias
 
@@ -176,6 +176,17 @@ def _int_to_json(value: int) -> int:
     return value
 
 
+_I64_MIN = -(1 << 63)
+_I64_MAX = (1 << 63) - 1
+
+
+def _i64_to_json(value: int) -> int:
+    integer = _int_to_json(value)
+    if not _I64_MIN <= integer <= _I64_MAX:
+        raise TypeError("integer outside signed 64-bit range")
+    return integer
+
+
 def _finite_float(value: float, *, name: str = "float") -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"expected {name}, got {value!r}")
@@ -193,6 +204,9 @@ def _normalize_f32(value: float, *, name: str = "f32") -> float:
         raise TypeError(f"{name} is outside the f32 range") from exc
 
 
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 @dataclass(frozen=True)
 class DateTime:
     """Millisecond timestamp rendered as RFC3339 UTC for query parameters."""
@@ -207,11 +221,19 @@ class DateTime:
     def from_datetime(cls, value: datetime) -> "DateTime":
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
-        return cls.from_millis(int(value.astimezone(timezone.utc).timestamp() * 1000))
+        return cls.from_millis((value - _UNIX_EPOCH) // timedelta(milliseconds=1))
 
     @classmethod
     def parse_rfc3339(cls, value: str) -> "DateTime":
-        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        if (
+            re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)",
+                value,
+            )
+            is None
+        ):
+            raise TypeError(f"invalid RFC3339 datetime: {value}")
+        text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
         try:
             return cls.from_datetime(datetime.fromisoformat(text))
         except ValueError as exc:
@@ -227,8 +249,8 @@ class DateTime:
 def _datetime_to_rfc3339(value: DateTime, path: str) -> str:
     millis = value.millis()
     try:
-        dt = datetime.fromtimestamp(millis / 1000, timezone.utc)
-    except (OverflowError, OSError) as exc:
+        dt = _UNIX_EPOCH + timedelta(milliseconds=millis)
+    except OverflowError as exc:
         raise QueryError.invalid_datetime(path, millis) from exc
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -259,7 +281,7 @@ class DateTimeLiteral:
 
 
 def i64(value: int) -> I64Literal:
-    return I64Literal(_int_to_json(value))
+    return I64Literal(_i64_to_json(value))
 
 
 def f32(value: float) -> F32Literal:
@@ -300,7 +322,7 @@ class PropertyValue:
 
     @classmethod
     def i64(cls, value: int) -> "PropertyValue":
-        return cls("I64", _int_to_json(value))
+        return cls("I64", _i64_to_json(value))
 
     @classmethod
     def date_time(cls, value: DateTime | int) -> "PropertyValue":
@@ -329,11 +351,16 @@ class PropertyValue:
 
     @classmethod
     def bytes(cls, value: bytes | bytearray | Sequence[int]) -> "PropertyValue":
-        return cls("Bytes", [int(byte) for byte in value])
+        normalized: list[int] = []
+        for index, byte in enumerate(value):
+            if isinstance(byte, bool) or not isinstance(byte, int) or not 0 <= byte <= 255:
+                raise TypeError(f"byte at index {index} must be an integer from 0 to 255: {byte!r}")
+            normalized.append(byte)
+        return cls("Bytes", normalized)
 
     @classmethod
     def i64_array(cls, values: Iterable[int]) -> "PropertyValue":
-        return cls("I64Array", [_int_to_json(value) for value in values])
+        return cls("I64Array", [_i64_to_json(value) for value in values])
 
     @classmethod
     def f64_array(cls, values: Iterable[float]) -> "PropertyValue":
@@ -746,7 +773,10 @@ class StreamBound:
 
     @classmethod
     def literal(cls, value: int) -> "StreamBound":
-        return cls("Literal", _int_to_json(value))
+        safe = _int_to_json(value)
+        if safe < 0:
+            raise ValueError("Stream bound literal must be non-negative")
+        return cls("Literal", safe)
 
     @classmethod
     def expr(cls, expr: "Expr | ParamRef") -> "StreamBound":
@@ -1472,7 +1502,6 @@ class IndexErrorCode(str, Enum):
     INDEX_REVISION_EXHAUSTED = "index_revision_exhausted"
     INDEX_OPERATION_REVISION_EXHAUSTED = "index_operation_revision_exhausted"
     STALE_INDEX_GENERATION = "stale_index_generation"
-    WRITER_FENCED_COMMIT_OUTCOME_UNKNOWN = "writer_fenced_commit_outcome_unknown"
 
 
 class IndexOperationBlockerCode(str, Enum):
@@ -3037,7 +3066,8 @@ class Traversal:
         return self._push(Step.remove_property(name), "nodes", "write")
 
     def drop(self) -> "Traversal":
-        return self._push(Step.drop(), "nodes", "write")
+        """Delete current edges, or nodes and their incident edges; return an empty stream."""
+        return self._push(Step.drop(), self.state, "write")
 
     def drop_edge(self, to: NodeRef | NodeId | Iterable[NodeId] | str) -> "Traversal":
         return self._push(Step.drop_edge(NodeRef.from_value(to)), "nodes", "write")
@@ -3299,9 +3329,16 @@ class ReadBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> "QueryRequest":
         request = QueryRequest.read(self)
-        return _build_query_request(request, params, values, query_name=query_name)
+        return _build_query_request(
+            request,
+            params,
+            values,
+            query_name=query_name,
+            search_consistency=search_consistency,
+        )
 
     def to_query_json(
         self,
@@ -3309,8 +3346,11 @@ class ReadBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> str:
-        return self.to_query_request(params, values, query_name=query_name).to_json_string()
+        return self.to_query_request(
+            params, values, query_name=query_name, search_consistency=search_consistency
+        ).to_json_string()
 
     def to_query_bytes(
         self,
@@ -3318,8 +3358,11 @@ class ReadBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> bytes:
-        return self.to_query_request(params, values, query_name=query_name).to_json_bytes()
+        return self.to_query_request(
+            params, values, query_name=query_name, search_consistency=search_consistency
+        ).to_json_bytes()
 
 
 @dataclass(frozen=True, init=False)
@@ -3384,9 +3427,16 @@ class WriteBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> "QueryRequest":
         request = QueryRequest.write(self)
-        return _build_query_request(request, params, values, query_name=query_name)
+        return _build_query_request(
+            request,
+            params,
+            values,
+            query_name=query_name,
+            search_consistency=search_consistency,
+        )
 
     def to_query_json(
         self,
@@ -3394,8 +3444,11 @@ class WriteBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> str:
-        return self.to_query_request(params, values, query_name=query_name).to_json_string()
+        return self.to_query_request(
+            params, values, query_name=query_name, search_consistency=search_consistency
+        ).to_json_string()
 
     def to_query_bytes(
         self,
@@ -3403,8 +3456,11 @@ class WriteBatch:
         values: Mapping[str, Any] | None = None,
         *,
         query_name: str | None | object = _UNSET,
+        search_consistency: "SearchConsistency | object" = _UNSET,
     ) -> bytes:
-        return self.to_query_request(params, values, query_name=query_name).to_json_bytes()
+        return self.to_query_request(
+            params, values, query_name=query_name, search_consistency=search_consistency
+        ).to_json_bytes()
 
 
 def read_batch() -> ReadBatch:
@@ -3682,7 +3738,7 @@ def _convert_param_value(schema: ParamSchema, value: Any, path: str) -> JsonValu
             raise TypeError(f"parameter '{path}' must be boolean")
         return value
     if schema.kind == "I64":
-        return _int_to_json(value)
+        return _i64_to_json(value)
     if schema.kind == "F64":
         return _finite_float(value)
     if schema.kind == "F32":
@@ -3757,6 +3813,22 @@ QueryRequestType.Read = QueryRequestType.READ  # type: ignore[attr-defined]
 QueryRequestType.Write = QueryRequestType.WRITE  # type: ignore[attr-defined]
 
 
+class SearchConsistency(str, Enum):
+    """Request-level visibility of committed but not yet indexed vector/text data.
+
+    ``STRONG`` (the default) searches every committed graph change. ``EVENTUAL``
+    overlays a bounded budget of unpublished changes and is valid only for read
+    requests; write batches always search strongly.
+    """
+
+    STRONG = "strong"
+    EVENTUAL = "eventual"
+
+
+SearchConsistency.Strong = SearchConsistency.STRONG  # type: ignore[attr-defined]
+SearchConsistency.Eventual = SearchConsistency.EVENTUAL  # type: ignore[attr-defined]
+
+
 class _QueryValueNamespace:
     def null(self) -> JsonValue:
         return None
@@ -3765,7 +3837,7 @@ class _QueryValueNamespace:
         return bool(value)
 
     def i64(self, value: int) -> JsonValue:
-        return _int_to_json(value)
+        return _i64_to_json(value)
 
     def f64(self, value: float) -> JsonValue:
         return _finite_float(value)
@@ -3823,7 +3895,7 @@ def _normalize_typed_query_value(
             raise TypeError(f"parameter '{path}' must be boolean")
         return value
     if parameter_type.variant == "I64":
-        return _int_to_json(value)
+        return _i64_to_json(value)
     if parameter_type.variant == "F64":
         return _finite_float(value)
     if parameter_type.variant == "F32":
@@ -3864,6 +3936,7 @@ class QueryRequest:
     _parameters: dict[str, JsonValue]
     _parameter_types: dict[str, QueryParamType]
     _parameter_mode: Literal["untyped", "typed"] | None
+    _search_consistency: SearchConsistency
 
     def __init__(
         self,
@@ -3881,6 +3954,7 @@ class QueryRequest:
         self._parameters = {}
         self._parameter_types = {}
         self._parameter_mode = None
+        self._search_consistency = SearchConsistency.STRONG
 
     @property
     def request_type(self) -> QueryRequestType:
@@ -3957,6 +4031,28 @@ class QueryRequest:
         self.set_query_name(name)
         return self
 
+    @property
+    def search_consistency(self) -> SearchConsistency:
+        return self._search_consistency
+
+    def set_search_consistency(self, consistency: SearchConsistency) -> None:
+        """Selects search visibility; eventual search is rejected for writes."""
+        if not isinstance(consistency, SearchConsistency):
+            raise TypeError(f"unknown search consistency: {consistency!r}")
+        if (
+            consistency is SearchConsistency.EVENTUAL
+            and self.request_type is QueryRequestType.WRITE
+        ):
+            raise TypeError(
+                'search consistency "eventual" is only valid for read requests; '
+                "write batches always search strongly"
+            )
+        self._search_consistency = consistency
+
+    def with_search_consistency(self, consistency: SearchConsistency) -> "QueryRequest":
+        self.set_search_consistency(consistency)
+        return self
+
     def to_json(self) -> JsonValue:
         query_tag = self.request_type.value
         return {
@@ -3966,6 +4062,12 @@ class QueryRequest:
             "parameters": self._parameters if self._parameters else _OMIT,
             "parameter_types": (
                 self._parameter_types if self._parameter_mode == "typed" else _OMIT
+            ),
+            # Omitted for the strong default so existing request bytes are unchanged.
+            "search_consistency": (
+                self._search_consistency
+                if self._search_consistency is SearchConsistency.EVENTUAL
+                else _OMIT
             ),
         }
 
@@ -4010,9 +4112,12 @@ def _build_query_request(
     values: Mapping[str, Any] | None = None,
     *,
     query_name: str | None | object = _UNSET,
+    search_consistency: SearchConsistency | object = _UNSET,
 ) -> QueryRequest:
     if params is None and values is not None:
         raise TypeError("query parameter values require a parameter schema")
+    if search_consistency is not _UNSET:
+        request.set_search_consistency(search_consistency)  # type: ignore[arg-type]
     return _apply_query_name(_add_query_parameters(request, params, values), query_name)
 
 
@@ -4150,6 +4255,8 @@ def _install_aliases() -> None:
             "setQueryName": "set_query_name",
             "clearQueryName": "clear_query_name",
             "withQueryName": "with_query_name",
+            "setSearchConsistency": "set_search_consistency",
+            "withSearchConsistency": "with_search_consistency",
             "toJsonString": "to_json_string",
             "toJsonBytes": "to_json_bytes",
         },
@@ -4235,6 +4342,7 @@ prelude = {
     "DateTime": DateTime,
     "QueryRequest": QueryRequest,
     "QueryRequestType": QueryRequestType,
+    "SearchConsistency": SearchConsistency,
     "QueryValue": QueryValue,
     "PropertyValue": PropertyValue,
     "PropertyInput": PropertyInput,
@@ -4293,6 +4401,7 @@ __all__ = [
     "QueryError",
     "QueryRequest",
     "QueryRequestType",
+    "SearchConsistency",
     "QueryValue",
     "EdgeId",
     "EdgeRef",

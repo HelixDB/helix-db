@@ -77,7 +77,9 @@ pub(super) const fn classify_node(source: &ir::NodeAccessPlan) -> AccessSourceKi
             AccessSourceKind::Search
         }
         ir::NodeAccessPlan::Intersect(_) => AccessSourceKind::Intersection,
-        ir::NodeAccessPlan::Union(_) => AccessSourceKind::Union,
+        ir::NodeAccessPlan::Union(_) | ir::NodeAccessPlan::BranchResidualUnion(_) => {
+            AccessSourceKind::Union
+        }
         ir::NodeAccessPlan::ScanThenFilter { .. } => AccessSourceKind::Scan,
     }
 }
@@ -98,7 +100,9 @@ pub(super) const fn classify_edge(source: &ir::EdgeAccessPlan) -> AccessSourceKi
             AccessSourceKind::Search
         }
         ir::EdgeAccessPlan::Intersect(_) => AccessSourceKind::Intersection,
-        ir::EdgeAccessPlan::Union(_) => AccessSourceKind::Union,
+        ir::EdgeAccessPlan::Union(_) | ir::EdgeAccessPlan::BranchResidualUnion(_) => {
+            AccessSourceKind::Union
+        }
         ir::EdgeAccessPlan::ScanThenFilter { .. } => AccessSourceKind::Scan,
     }
 }
@@ -179,6 +183,7 @@ mod tests {
             ),
             (
                 ir::NodeAccessPlan::RangeIndex {
+                    iteration: crate::ir::RangeScanIteration::Forward,
                     index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
                     key: range_key,
                     range: ir::IndexRange::All,
@@ -275,6 +280,7 @@ mod tests {
             ),
             (
                 ir::EdgeAccessPlan::RangeIndex {
+                    iteration: crate::ir::RangeScanIteration::Forward,
                     index: catalog::EdgeRangeIndexMeta::try_new("edge_range").unwrap(),
                     key: range_key,
                     range: ir::IndexRange::All,

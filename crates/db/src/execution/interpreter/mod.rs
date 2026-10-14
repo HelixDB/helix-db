@@ -10,10 +10,14 @@ mod count;
 mod ddl;
 mod dependencies;
 mod dispatch;
+#[cfg(test)]
+mod early_termination_tests;
 mod mutation;
+mod pull;
 pub(crate) mod read_view;
 mod reserved;
 mod row_mode;
+mod rows;
 mod runtime_context;
 mod scheduler;
 mod shortest_path;
@@ -36,7 +40,8 @@ pub use types::{
 };
 use types::{ExecutionValueSlot, ExecutionValueStore};
 
-use helix_ast::expr::{CompareOp, Expr, Predicate};
+#[cfg(test)]
+use helix_ast::expr::{Expr, Predicate};
 use helix_planner::{context, exec, ir};
 
 use self::runtime_context::ExecutionContext;
@@ -124,6 +129,17 @@ impl<'db> Interpreter<'db> {
         }
     }
 
+    /// Selects read-request visibility of unpublished vector/text work.
+    ///
+    /// Write plans ignore this and always search strongly.
+    pub(crate) const fn with_search_consistency(
+        mut self,
+        consistency: helix_ast::query::SearchConsistency,
+    ) -> Self {
+        self.ctx.search_consistency = consistency;
+        self
+    }
+
     /// Execute a validated executable plan.
     pub async fn execute(mut self, plan: &exec::ExecutablePlan) -> Result<ExecutionResult> {
         self.ctx.check_execution_deadline()?;
@@ -145,7 +161,12 @@ impl<'db> Interpreter<'db> {
 
         let result = self
             .ctx
-            .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+            .execute_steps(
+                plan.steps(),
+                plan.execution_order(),
+                plan.root(),
+                plan.execution_program(),
+            )
             .await;
         if let Err(err) = result {
             self.ctx.abort_request_write_scope();
@@ -220,16 +241,13 @@ impl RequestSideEffects {
     fn operation(operation: &exec::ExecOp) -> Self {
         match operation {
             exec::ExecOp::Mutation { .. } => Self::GraphMutation,
-            exec::ExecOp::IndexDdl {
-                plan: ir::IndexDdlPlan::GetOperation { .. },
-            } => Self::None,
-            exec::ExecOp::IndexDdl {
-                plan:
-                    ir::IndexDdlPlan::Create { .. }
-                    | ir::IndexDdlPlan::Drop { .. }
-                    | ir::IndexDdlPlan::RetryOperation { .. }
-                    | ir::IndexDdlPlan::AbortOperation { .. },
-            } => Self::IndexDdl,
+            exec::ExecOp::IndexDdl { plan } => {
+                if plan.requires_isolated_catalog_transaction() {
+                    Self::IndexDdl
+                } else {
+                    Self::None
+                }
+            }
             exec::ExecOp::Branch { plan } => match plan {
                 exec::ExecBranchPlan::Union(plans) => {
                     plans.iter().fold(Self::None, |effects, plan| {
@@ -258,6 +276,7 @@ impl RequestSideEffects {
             | exec::ExecOp::VectorSearch { .. }
             | exec::ExecOp::TextSearch { .. }
             | exec::ExecOp::Filter { .. }
+            | exec::ExecOp::IndexMembership { .. }
             | exec::ExecOp::Limit { .. }
             | exec::ExecOp::Skip { .. }
             | exec::ExecOp::Range { .. }
@@ -420,6 +439,26 @@ mod request_execution_mode_tests {
             RequestExecutionMode::Read
         );
     }
+
+    #[test]
+    fn graph_write_with_index_status_stays_one_write_transaction() {
+        let first = exec::ExecStepId::new(1).unwrap();
+        let second = exec::ExecStepId::new(2).unwrap();
+        let plan = test_support::executable(
+            ir::PlanKind::Write,
+            vec![
+                test_support::step(1, Vec::new(), mutation()),
+                test_support::step(2, vec![first], index_status()),
+                test_support::step(3, vec![second], mutation()),
+            ],
+            3,
+        );
+
+        assert_eq!(
+            RequestExecutionMode::try_from(&plan).unwrap(),
+            RequestExecutionMode::GraphWrite
+        );
+    }
 }
 
 #[cfg(test)]
@@ -470,8 +509,31 @@ mod cutover_tests {
 
     use super::*;
 
+    /// Reads the operations queued for one hidden build generation.
+    async fn queued_operations(
+        db: &crate::HelixDB,
+        index_id: crate::index_lifecycle::IndexId,
+        generation: crate::index_lifecycle::IndexGenerationId,
+    ) -> Vec<crate::encoding::v2::values::indexes::operation_queue::QueuedOperation> {
+        let target = crate::index_lifecycle::queue::QueueTarget::new(
+            DataScope::LegacyUnscoped,
+            index_id,
+            generation,
+        );
+        let value = db
+            .inner_db()
+            .get(target.key())
+            .await
+            .unwrap()
+            .expect("the graph write committed its queue operand");
+        crate::encoding::v2::values::indexes::operation_queue::OperationQueue::decode(&value)
+            .unwrap()
+            .operations()
+            .to_vec()
+    }
+
     #[tokio::test]
-    async fn graph_write_records_vector_build_delta_in_its_graph_transaction() {
+    async fn graph_write_enqueues_vector_operation_in_its_graph_transaction() {
         let db = test_support::open_db("mutation-v2-vector-build-delta").await;
         let definition = crate::index_lifecycle::ValidatedDynamicIndexDefinition::try_from(
             crate::config::VectorIndexDefinition::new_node(
@@ -531,23 +593,25 @@ mod cutover_tests {
 
         db.execute(&plan, context::ParamBindings::default())
             .await
-            .expect("graph mutation and vector delta commit together");
+            .expect("graph mutation and vector operation commit together");
 
-        let delta_key = crate::encoding::v2::keys::ManagedIndexKey::Data {
-            scope: DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::ScopedKey::BuildDelta(
-                crate::encoding::v2::keys::IndexEntityStateKey {
-                    index_id,
-                    generation,
-                    entity: crate::encoding::v2::keys::IndexEntity {
-                        kind: crate::index_lifecycle::IndexElementKind::Node,
-                        id: crate::index_lifecycle::IndexEntityId::new(0),
-                    },
-                },
-            ),
-        }
-        .to_bytes();
-        assert!(db.inner_db().get(delta_key).await.unwrap().is_some());
+        let operations = queued_operations(&db, index_id, generation).await;
+        let [operation] = operations.as_slice() else {
+            panic!("one graph write queues exactly one operation: {operations:?}");
+        };
+        let crate::encoding::v2::values::indexes::operation_queue::QueuedPayload::Vector(payload) =
+            operation.payload()
+        else {
+            panic!("a vector build queues a vector payload");
+        };
+        assert!(payload.previous.is_none());
+        assert_eq!(
+            payload
+                .replacement
+                .as_ref()
+                .map(|replacement| replacement.vector().to_vec()),
+            Some(vec![1.0, 0.0, 0.0])
+        );
 
         let allocator_key = keys::DataKey::Global {
             kind: keys::GlobalKeyKind::Metadata(keys::metadata::MetadataKey::next_node_id_key()),
@@ -557,7 +621,7 @@ mod cutover_tests {
     }
 
     #[tokio::test]
-    async fn graph_write_records_text_build_delta_in_its_graph_transaction() {
+    async fn graph_write_enqueues_text_operation_in_its_graph_transaction() {
         let db = test_support::open_db("mutation-v2-text-build-delta").await;
         let definition = crate::index_lifecycle::ValidatedDynamicIndexDefinition::try_from(
             crate::config::TextIndexDefinition::new_node("User", "bio").expect("text definition"),
@@ -611,39 +675,23 @@ mod cutover_tests {
 
         db.execute(&plan, context::ParamBindings::default())
             .await
-            .expect("graph mutation and text delta commit together");
+            .expect("graph mutation and text operation commit together");
 
-        let delta_key = crate::encoding::v2::keys::ManagedIndexKey::Data {
-            scope: DataScope::LegacyUnscoped,
-            kind: crate::encoding::v2::keys::ScopedKey::BuildDelta(
-                crate::encoding::v2::keys::IndexEntityStateKey {
-                    index_id,
-                    generation,
-                    entity: crate::encoding::v2::keys::IndexEntity {
-                        kind: crate::index_lifecycle::IndexElementKind::Node,
-                        id: crate::index_lifecycle::IndexEntityId::new(0),
-                    },
-                },
-            ),
-        }
-        .to_bytes();
-        let value = db
-            .inner_db()
-            .get(delta_key)
-            .await
-            .expect("text delta read succeeds")
-            .expect("text delta committed with graph row");
-        let delta =
-            crate::encoding::v2::values::decode_build_delta(&value).expect("text delta decodes");
-        assert_eq!(delta.index_id, index_id);
-        assert_eq!(delta.generation, generation);
+        let operations = queued_operations(&db, index_id, generation).await;
+        let [operation] = operations.as_slice() else {
+            panic!("one graph write queues exactly one operation: {operations:?}");
+        };
+        let crate::encoding::v2::values::indexes::operation_queue::QueuedPayload::Text(payload) =
+            operation.payload()
+        else {
+            panic!("a text build queues a text payload");
+        };
         assert_eq!(
-            delta.entity_kind,
-            crate::index_lifecycle::IndexElementKind::Node
-        );
-        assert_eq!(
-            delta.entity_id,
-            crate::index_lifecycle::IndexEntityId::new(0)
+            payload
+                .replacement
+                .as_ref()
+                .map(|replacement| replacement.text().to_string()),
+            Some("coalesced text delta".to_string())
         );
     }
 }

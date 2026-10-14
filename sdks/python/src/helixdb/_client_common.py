@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Mapping
 from urllib.parse import urljoin, urlparse
 
@@ -12,6 +13,67 @@ from .dsl import QueryRequest
 DEFAULT_URL = "http://localhost:6969"
 QUERY_PATH = "/v2/query"
 DATABASE_ID_HEADER = "x-helix-database-id"
+
+
+class CypherRoute(Enum):
+    """One Cypher operation: its HTTP path and the matching embedded binding.
+
+    >>> CypherRoute.EXPLAIN.path, CypherRoute.EXPLAIN.native_method
+    ('/v2/cypher/explain', 'explain_cypher_json')
+    """
+
+    EXECUTE = ("/v2/cypher", "cypher_json", "rebuild native bindings with Cypher support")
+    EXPLAIN = (
+        "/v2/cypher/explain",
+        "explain_cypher_json",
+        "rebuild native bindings with Cypher explain support",
+    )
+
+    def __init__(self, path: str, native_method: str, unavailable: str) -> None:
+        self.path = path
+        self.native_method = native_method
+        self.unavailable = unavailable
+
+    def decode(self, status: int, response_body: bytes) -> Any:
+        """Decode a successful server response for this operation.
+
+        A successful warm request is answered with 204 No Content: execution
+        then yields an empty rectangular result and explain yields ``None``.
+
+        >>> CypherRoute.EXECUTE.decode(204, b"")
+        {'columns': [], 'rows': []}
+        >>> CypherRoute.EXPLAIN.decode(204, b"") is None
+        True
+        >>> CypherRoute.EXPLAIN.decode(200, b'{"plan": {}}')
+        {'plan': {}}
+        """
+
+        if status == 204:
+            return {"columns": [], "rows": []} if self is CypherRoute.EXECUTE else None
+        return decode_response(response_body)
+
+
+def serialize_cypher(
+    query: str, parameters: dict[str, Any] | None, query_name: str | None
+) -> bytes:
+    """Serialize the additive Cypher request; lossless envelopes remain explicit."""
+    if not isinstance(query, str):
+        raise HelixError.invalid_request("Cypher query must be a string")
+    if parameters is not None and not isinstance(parameters, dict):
+        raise HelixError.invalid_request("Cypher parameters must be a dictionary")
+    if query_name is not None and not isinstance(query_name, str):
+        raise HelixError.invalid_request("Cypher query_name must be a string")
+    try:
+        return json.dumps(
+            {
+                "query": query,
+                "parameters": {} if parameters is None else parameters,
+                "query_name": query_name,
+            },
+            allow_nan=False,
+        ).encode("utf-8")
+    except (ValueError, TypeError) as exc:
+        raise HelixError.serialization(str(exc), cause=exc) from exc
 
 
 class HelixError(Exception):
@@ -25,13 +87,16 @@ class HelixError(Exception):
         details: str | None = None,
         code: str | None = None,
         status_code: int | None = None,
+        retryable: bool | None = None,
         cause: BaseException | None = None,
     ) -> None:
         super().__init__(message)
+        self.server_details: Any = None
         self.kind = kind
         self.details = details
         self.code = code
         self.status_code = status_code
+        self.retryable = retryable
         self.__cause__ = cause
 
     @classmethod
@@ -50,6 +115,7 @@ class HelixError(Exception):
         *,
         code: str | None = None,
         status_code: int | None = None,
+        retryable: bool | None = None,
     ) -> "HelixError":
         return cls(
             "Remote",
@@ -57,7 +123,32 @@ class HelixError(Exception):
             details=details,
             code=code,
             status_code=status_code,
+            retryable=retryable,
         )
+
+    def is_retryable(self) -> bool:
+        """Return true when the failure is explicitly retryable.
+
+        Remote failures are retryable only when the server says so. Embedded
+        ``index_backpressure`` failures are retryable because the whole request
+        was rejected without effect: a write before commit, or a strong search.
+        """
+
+        if self.kind == "Embedded":
+            return self.is_index_backpressure()
+        return self.kind == "Remote" and self.retryable is True
+
+    def is_index_backpressure(self) -> bool:
+        """Return whether asynchronous vector/text index work rejected the request.
+
+        Either a write was rejected before commit because the index backlog is
+        full, or a strong search's answer lies behind more than 800 unpublished
+        changes; eventual searches are never rejected this way. The whole
+        request was rejected (HTTP 429, gRPC resource-exhausted); retry it
+        unchanged after a backoff.
+        """
+
+        return self.kind in ("Remote", "Embedded") and self.code == "index_backpressure"
 
     @classmethod
     def serialization(cls, message: str, *, cause: BaseException | None = None) -> "HelixError":
@@ -178,26 +269,63 @@ def validate_base_url(url: str | None) -> str:
 def prepare_request(
     base_url: str,
     api_key: str | None,
-    database_id: str | None,
-    require_database_id: bool,
     headers: Mapping[str, str],
     query: QueryRequest,
+    database_id: str | None = None,
+    *,
+    require_database_id: bool = False,
 ) -> PreparedRequest:
     """Serialize a query and resolve the common HelixDB HTTP request."""
 
-    validate_database_id(database_id, required=require_database_id)
-    body = serialize_query(query)
-    try:
-        url = urljoin(base_url.rstrip("/") + "/", QUERY_PATH)
-    except Exception as exc:
-        raise HelixError.invalid_url(str(exc), cause=exc) from exc
+    return _prepare(
+        base_url,
+        QUERY_PATH,
+        api_key,
+        database_id,
+        headers,
+        serialize_query(query),
+        require_database_id=require_database_id,
+    )
 
-    prepared_headers = dict(headers)
-    if api_key is not None:
-        prepared_headers["Authorization"] = f"Bearer {api_key}"
-    if database_id is not None:
-        prepared_headers[DATABASE_ID_HEADER] = database_id
-    return PreparedRequest(url, tuple(prepared_headers.items()), body)
+
+def prepare_cypher_request(
+    base_url: str,
+    api_key: str | None,
+    database_id: str | None,
+    route: CypherRoute,
+    body: bytes,
+    options: ExecuteOptions,
+    *,
+    require_database_id: bool = False,
+) -> PreparedRequest:
+    """Resolve one serialized Cypher body into its server request.
+
+    Execute and explain share the body, routing options, and client headers;
+    only the path differs.
+
+    >>> prepared = prepare_cypher_request(
+    ...     "http://localhost:6969/base",
+    ...     "key",
+    ...     "db-1",
+    ...     CypherRoute.EXPLAIN,
+    ...     serialize_cypher("RETURN 1", None, None),
+    ...     ExecuteOptions(warm_only=True),
+    ... )
+    >>> prepared.url
+    'http://localhost:6969/v2/cypher/explain'
+    >>> prepared.header_map()["x-helix-database-id"], prepared.header_map()["x-helix-warm"]
+    ('db-1', 'true')
+    """
+
+    return _prepare(
+        base_url,
+        route.path,
+        api_key,
+        database_id,
+        options.apply({"Content-Type": "application/json"}),
+        body,
+        require_database_id=require_database_id,
+    )
 
 
 def validate_database_id(database_id: str | None, *, required: bool = False) -> None:
@@ -207,6 +335,30 @@ def validate_database_id(database_id: str | None, *, required: bool = False) -> 
         raise HelixError.invalid_request("managed clients require a database ID")
     if database_id is not None and not database_id.strip():
         raise HelixError.invalid_request("database ID must not be empty")
+
+
+def _prepare(
+    base_url: str,
+    path: str,
+    api_key: str | None,
+    database_id: str | None,
+    headers: Mapping[str, str],
+    body: bytes,
+    *,
+    require_database_id: bool = False,
+) -> PreparedRequest:
+    validate_database_id(database_id, required=require_database_id)
+    try:
+        url = urljoin(base_url.rstrip("/") + "/", path)
+    except Exception as exc:
+        raise HelixError.invalid_url(str(exc), cause=exc) from exc
+
+    prepared_headers = dict(headers)
+    if api_key is not None:
+        prepared_headers["Authorization"] = f"Bearer {api_key}"
+    if database_id is not None:
+        prepared_headers[DATABASE_ID_HEADER] = database_id
+    return PreparedRequest(url, tuple(prepared_headers.items()), body)
 
 
 def serialize_query(query: QueryRequest) -> bytes:
@@ -246,19 +398,29 @@ def remote_error(
         error = payload.get("error")
         msg = payload.get("msg")
         legacy_code = payload.get("code")
+        retryable = payload.get("retryable")
+        explicit_retryable = retryable if isinstance(retryable, bool) else None
         if isinstance(error, str) and isinstance(msg, str):
-            return HelixError.remote(msg, code=error, status_code=status_code)
+            result = HelixError.remote(
+                msg,
+                code=error,
+                status_code=status_code,
+                retryable=explicit_retryable,
+            )
+            result.server_details = payload.get("details")
+            return result
         if isinstance(error, str):
             return HelixError.remote(
                 error,
                 code=legacy_code if isinstance(legacy_code, str) else None,
                 status_code=status_code,
+                retryable=explicit_retryable,
             )
     return HelixError.remote(text or fallback, status_code=status_code)
 
 
 def parse_execute_options(options: Mapping[str, Any], *, embedded: bool) -> ExecuteOptions:
-    """Validate ``execute`` keyword options without changing caller-owned state."""
+    """Validate ``execute`` and Cypher keyword options without changing caller-owned state."""
 
     if embedded and options:
         unknown = ", ".join(sorted(options))

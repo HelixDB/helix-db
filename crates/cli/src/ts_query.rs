@@ -25,7 +25,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// `package.json`; exact pins prevent a warm cache and a cold install from
 /// evaluating different query-envelope implementations.
 const SDK_PACKAGE: &str = "@helix-db/helix-db";
-const SDK_VERSION: &str = "3.0.4";
+const SDK_VERSION: &str = "3.1.0";
 const VERSION_MARKER: &str = ".sdk-version";
 const INSTALL_LOCK: &str = ".ts-runtime-install-lock";
 const INSTALL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -405,6 +405,9 @@ impl Drop for WrapperFile {
 /// Write the Node wrapper that injects the common DSL imports, evaluates the
 /// snippet as an expression, and prints `toQueryJson()` to stdout.
 fn write_wrapper(runtime_dir: &Path, snippet: &str) -> Result<PathBuf> {
+    // Files conventionally end expressions with a semicolon. The snippet is
+    // embedded inside parentheses, where that terminator is invalid syntax.
+    let snippet = snippet.trim_end().trim_end_matches(';').trim_end();
     let wrapper = format!(
         r#"import {{ g, readBatch, writeBatch, defineParams, param }} from "{SDK_PACKAGE}";
 
@@ -494,6 +497,16 @@ mod tests {
         assert!(contents.contains(snippet));
         assert!(contents.contains("toQueryJson()"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn wrapper_accepts_a_trailing_expression_semicolon() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_wrapper(dir.path(), "readBatch();\n").unwrap();
+        let contents = std::fs::read_to_string(path).unwrap();
+
+        assert!(contents.contains("\nreadBatch()\n);"));
+        assert!(!contents.contains("\nreadBatch();\n);"));
     }
 
     #[test]

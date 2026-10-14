@@ -14,7 +14,8 @@ use super::{
     TextManifestRevision,
 };
 
-const MAX_LENGTH_DELIMITED_FIELD: usize = 16 * 1024 * 1024;
+/// Largest length-delimited field one stored V2 work value encodes.
+pub(crate) const MAX_LENGTH_DELIMITED_FIELD: usize = 16 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS: usize = u16::MAX as usize;
 const MAX_TEXT_TERM_LEN: usize = u16::MAX as usize - 5;
 
@@ -293,13 +294,25 @@ impl SplitRef {
     }
 }
 
+/// Family-specific recovery state carried by one coalesced build delta.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum CoalescedBuildDeltaState {
+    /// The owning family reconciles from durable builder state or authoritative data.
+    Marker,
+    /// Original secondary value before the first still-pending mutation.
+    SecondaryBefore(Option<CanonicalSecondaryValue>),
+    /// Original vector partition before the first still-pending mutation.
+    VectorBefore(Option<TextPartition>),
+}
+
 /// Coalesced build delta body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CoalescedBuildDeltaValue {
     pub(crate) index_id: IndexId,
     pub(crate) generation: IndexGenerationId,
     pub(crate) entity_kind: IndexElementKind,
     pub(crate) entity_id: IndexEntityId,
+    pub(crate) state: CoalescedBuildDeltaState,
 }
 
 /// Family-specific authoritative state last applied by a builder.
@@ -661,7 +674,8 @@ impl TextTermStatisticsValue {
 /// One entity's exact contribution to live corpus and term statistics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum TextStatisticsContribution {
-    /// A mutation removed an entity before a concurrent source scan reached it.
+    /// The entity has no indexed document: build reconciliation retired it,
+    /// or an Active publication removed its accounted document.
     Absent,
     /// The currently accounted document and its sorted unique terms.
     Present {

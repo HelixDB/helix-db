@@ -15,9 +15,14 @@ use std::sync::Once;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
+#[cfg(feature = "production-scale")]
+pub use crate::search::vector::RestrictedSearchStrategy;
 pub use crate::search::vector::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
+};
+pub use crate::search::vector::{
+    VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape, VectorMemoryBenchmarkStore,
 };
 
 /// Current managed-index storage version exposed to production fixtures.
@@ -30,16 +35,35 @@ mod index_lifecycle;
 mod index_lifecycle_scale;
 mod index_lifecycle_text_rows;
 mod index_lifecycle_typed_boundaries;
+#[cfg(feature = "index-lifecycle-testing")]
+mod index_operation_queue;
 mod migration_text_rebuild;
+mod queue_admission_memory;
 mod secondary_equality_hot_path;
+mod text_generation_rows;
 mod v1_migration;
 
 pub use graph_mutation_representation::graph_mutation_representation_contracts;
+#[cfg(feature = "index-lifecycle-testing")]
+pub use index_operation_queue::{
+    index_operation_queue_codec_contracts, index_operation_queue_ledger_contracts,
+    index_operation_queue_reconciliation_contracts,
+    index_operation_queue_recovery_corruption_contracts,
+    index_operation_queue_scope_walk_contracts, index_operation_queue_tenant_scope_contracts,
+};
+pub use queue_admission_memory::{
+    index_operation_queue_memory_samples, AllocationProbe, QueueMemorySample,
+};
 pub use secondary_equality_hot_path::{
     benchmark_million_sequential_id_bitmap, SecondaryEqualityHotPathFixture,
     SecondaryEqualityInsertMode, SecondaryEqualityInsertSample, SecondaryEqualityInspection,
     SecondaryEqualityLookupInspection, SecondaryEqualityMillionBitmapSample,
     SecondaryEqualityReadMode, SecondaryEqualityReadSample,
+};
+pub use text_generation_rows::{
+    damage_text_build, damage_text_split_object, restore_text_split_object,
+    text_compaction_pointer_count, text_manifest_row_counts, text_manifest_split_counts,
+    TextBuildDamage, TextSplitObjectDamage,
 };
 
 pub use crate::search::text::{
@@ -67,6 +91,11 @@ pub use v1_migration::{
     V1RangeFailureMigrationObservation, V1RangeMigrationObservation,
     V1RetirementFailpointObservation, V1SemanticRow, V1UniqueMigrationObservation,
 };
+
+/// Exercises typed permanent and transient driver failures without test-only code paths.
+pub async fn index_driver_failure_classification_contract() {
+    crate::index_lifecycle::outbox::driver_failure_classification_contract().await;
+}
 
 /// Runs graph-first legacy-definition migration contracts with one-row batches.
 pub async fn migration_definition_contracts() {
@@ -276,12 +305,42 @@ pub async fn vector_storage_contracts() {
     crate::search::vector::run_storage_contracts().await;
 }
 
-/// Requires a real tenant-indexed vector delete to fail without its mapping.
+/// Proves the retained vector build cache reuses only exact committed checkpoints.
 #[cfg(not(test))]
-pub async fn vector_missing_partition_mapping_delete_contract() {
-    crate::index_lifecycle::vector::run_missing_partition_mapping_delete_contract().await;
+pub async fn vector_build_cache_contracts() {
+    crate::index_lifecycle::vector::run_build_cache_contracts().await;
 }
 
+/// Drives the vector lifecycle driver's build, cleanup, and planning boundaries.
+///
+/// The owning-module children step builds, cleanups, and legacy adoptions
+/// through the production outbox against raw storage, and prove queued
+/// publication rejects inconsistent tenant partitions, other-family targets,
+/// and non-numeric payloads.
+pub async fn vector_lifecycle_driver_contracts() {
+    crate::index_lifecycle::vector::run_driver_contracts().await;
+    crate::index_lifecycle::vector::run_publication_contracts().await;
+}
+
+/// Drives bounded vector and text queue publication through explicitly
+/// scheduled writers.
+///
+/// Covers budget trims and blocks, selection and collapse boundaries,
+/// uncertain acknowledgements, retired generations, refused, corrupt, and
+/// closed attempts, inconsistent namespace metadata, commit conflicts,
+/// uncertain commits, and fenced writers.
+#[cfg(feature = "index-lifecycle-testing")]
+pub async fn queue_publication_contracts() {
+    crate::index_lifecycle::queue::publication::production_contracts::run().await;
+}
+
+/// Drives queue work that only the WAL holds through a fenced writer and a
+/// failed WAL upload, then proves the next writer recovers, serves, and
+/// drains it exactly.
+#[cfg(feature = "index-lifecycle-testing")]
+pub async fn queue_publication_wal_only_contracts() {
+    crate::index_lifecycle::queue::publication::production_contracts::wal_only_queue_work_survives_fencing_and_failed_commits().await;
+}
 /// Characterizes the independent finite-score magnitude oracle and active kernels.
 pub fn vector_magnitude_oracle_and_kernel_contracts() {
     crate::search::vector::run_magnitude_oracle_and_kernel_contracts();
@@ -333,6 +392,7 @@ pub async fn vector_search_contracts() {
 /// metric, corruption rejection, SimHash-directory lifecycle and seeding,
 /// bounded bridge traversal, termination reasons, membership, and recall.
 pub async fn vector_restricted_search_contracts() {
+    enable_vector_tracing();
     crate::search::vector::run_restricted_contracts().await;
 }
 
@@ -469,6 +529,17 @@ pub async fn interpreter_request_mode_and_isolated_mutation_contracts() {
         .await;
 }
 
+/// Proves membership retention decisions the public planner cannot reach.
+pub async fn interpreter_membership_retention_contracts() {
+    crate::execution::interpreter::production_contracts::run_membership_retention_contracts().await;
+}
+
+/// Proves index status stays on the open graph write and does not publish it.
+pub async fn interpreter_get_operation_keeps_open_graph_write() {
+    crate::execution::interpreter::production_contracts::run_get_operation_keeps_open_graph_write()
+        .await;
+}
+
 /// Proves coalesced topology rows preserve transactional graph semantics.
 pub async fn interpreter_topology_mutation_contracts() {
     crate::execution::interpreter::production_contracts::run_topology_mutation_contracts().await;
@@ -478,6 +549,12 @@ pub async fn interpreter_topology_mutation_contracts() {
 pub async fn interpreter_scheduler_and_projection_contracts() {
     crate::execution::interpreter::production_contracts::run_scheduler_and_projection_contracts()
         .await;
+}
+
+/// Proves filtered node vector searches fuse each index-set access into its
+/// search, and that every other shape runs unfused.
+pub async fn interpreter_fused_vector_search_contracts() {
+    crate::execution::interpreter::production_contracts::run_fused_vector_search_contracts().await;
 }
 
 #[cfg(feature = "index-lifecycle-testing")]
@@ -564,6 +641,23 @@ pub async fn index_lifecycle_blocked_limit_scale_contracts() {
     index_lifecycle_scale::run_blocked_limits().await;
 }
 
+/// Runs `query` and returns the strategy of the restricted vector search it ran.
+///
+/// `None` means `query` ran no traversal-scoped vector search; when it ran
+/// several, the last one is reported. Release gates use this to prove which
+/// restricted execution a scoped shape's recall measures, so an exact scan
+/// cannot stand in for the filtered graph walk.
+#[cfg(feature = "production-scale")]
+pub async fn observe_restricted_vector_strategy<F>(
+    query: F,
+) -> (F::Output, Option<RestrictedSearchStrategy>)
+where
+    F: std::future::Future,
+{
+    let (output, stats) = crate::search::vector::observe_restricted_search(query).await;
+    (output, stats.and_then(|stats| stats.strategy))
+}
+
 /// Runs vector property materialization and physical retirement for 100k rows.
 #[cfg(feature = "production-scale")]
 pub async fn vector_migration_scale_100k() {
@@ -580,4 +674,11 @@ pub async fn vector_migration_scale_1m() {
 #[cfg(feature = "production-scale")]
 pub async fn vector_migration_scale_10m() {
     crate::migrations::run_vector_migration_scale_contract(10_000_000).await;
+}
+
+mod mixed_aggregation;
+pub use mixed_aggregation::mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values;
+/// Verifies unique batched reads validate inputs and owners and propagate storage errors.
+pub async fn secondary_unique_batch_contracts() {
+    crate::index_lifecycle::secondary::run_unique_batch_production_contracts().await;
 }

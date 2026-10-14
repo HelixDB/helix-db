@@ -1,11 +1,12 @@
+use crate::cloud::model::Named as _;
+use crate::cloud::resolve::{Link, ResolvedDatabase, Scope};
 use crate::config::{
-    EnterpriseInstanceConfig, HelixConfig, LocalInstanceConfig, LocalStorageMode, QueryAuthScheme,
-    S3StorageConfig, DEFAULT_QUERY_AUTH_ENV, DEFAULT_QUERY_AUTH_HEADER,
+    EnterpriseInstanceConfig, HelixConfig, LocalInstanceConfig, LocalStorageMode, S3StorageConfig,
 };
-use crate::output::Operation;
+use crate::output;
 use crate::prompts;
-use crate::utils::{command_exists, print_instructions};
-use crate::InitTarget;
+use crate::utils::command_exists;
+use crate::{InitTarget, ScopeArgs};
 use eyre::Result;
 use std::env;
 use std::fs;
@@ -17,17 +18,13 @@ pub async fn run(
     target: Option<InitTarget>,
     skills: Option<bool>,
 ) -> Result<()> {
+    output::intro("Create a Helix project");
     let current_dir = env::current_dir()?;
     let project_dir = match path {
         Some(path) => path.into(),
         None if prompts::is_interactive() => prompts::select_init_project_dir(&current_dir)?,
         None => current_dir,
     };
-    let project_name = project_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("helix-project")
-        .to_string();
     let config_path = project_dir.join("helix.toml");
 
     if config_path.exists() {
@@ -39,8 +36,14 @@ pub async fn run(
 
     fs::create_dir_all(&project_dir)?;
     fs::create_dir_all(project_dir.join(".helix"))?;
+    // Canonicalize so `--path .` or `..` names the project after the real
+    // directory rather than falling back to the default.
+    let project_name = dunce::canonicalize(&project_dir)?
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("helix-project")
+        .to_string();
 
-    let op = Operation::new("Initializing", &project_name);
     let mut config = HelixConfig::default_config(&project_name);
 
     let target = match target {
@@ -69,6 +72,7 @@ pub async fn run(
             s3,
             ..
         } => {
+            validate_name(&name)?;
             // Surface a missing/stopped container runtime before we write any files,
             // so the user can react before the project is scaffolded.
             crate::setup::warn_if_container_runtime_unavailable();
@@ -82,51 +86,59 @@ pub async fn run(
         }
         InitTarget::Enterprise {
             name,
-            cluster_id,
-            gateway_url,
+            database,
+            project,
+            workspace,
             ..
         } => {
+            validate_name(&name)?;
             let instance_name = name.clone();
-            let target = crate::commands::config::resolve_enterprise_target(
-                cluster_id,
-                gateway_url,
-                None,
-                None,
-            )
-            .await?;
+            // A new project never inherits the link of a project it sits in.
+            let scope = Scope::new(Link::default()).await?;
+            let ResolvedDatabase { database, owner } = scope
+                .database(database.as_deref(), &ScopeArgs { workspace, project })
+                .await?;
             config.local.clear();
+            config.project.id = Some(owner.project_id.clone());
+            config.project.workspace_id = Some(owner.workspace_id.clone());
             config.enterprise.insert(
                 name,
                 EnterpriseInstanceConfig {
-                    cluster_id: target.cluster_id,
-                    workspace_id: target.workspace_id,
-                    project_id: target.project_id,
-                    gateway_url: target.gateway_url,
-                    query_auth_header: DEFAULT_QUERY_AUTH_HEADER.to_string(),
-                    query_auth_env: DEFAULT_QUERY_AUTH_ENV.to_string(),
-                    query_auth_scheme: Some(QueryAuthScheme::Bearer),
-                    availability_mode: None,
-                    gateway_node_type: None,
-                    db_node_type: None,
-                    min_instances: 1,
-                    max_instances: 1,
-                    db_config: Default::default(),
+                    database: database.reference(),
+                    workspace_id: Some(owner.workspace_id),
+                    project_id: Some(owner.project_id),
                 },
             );
+            output::step(&format!(
+                "Linked {} ({})",
+                database.label(),
+                database.reference()
+            ));
             enterprise_next_steps(&instance_name)
         }
     };
 
     config.save_to_file(&config_path)?;
     append_gitignore(&project_dir)?;
-    op.success();
+    output::step(&format!("Wrote {}", config_path.display()));
 
     maybe_install_tooling(&project_dir, skills);
 
-    let next_step_refs: Vec<&str> = next_steps.iter().map(String::as_str).collect();
-    print_instructions("Next steps:", &next_step_refs);
+    output::next_steps(&next_steps);
+    output::outro(&format!("Initialized {project_name}"));
+    output::emit(
+        &serde_json::json!({"project": project_name, "config": config_path}),
+        |_| Ok(()),
+    )
+}
 
-    Ok(())
+/// Rejects a `--name`/`-n` the interactive prompt (`prompts::input_name`) would
+/// never let through, before `helix.toml` is written. Without this, `helix init
+/// local --name <bad>` would scaffold a project successfully and then every
+/// subsequent `helix.toml` load would fail `HelixConfig::validate`, locking the
+/// project out until the name was fixed by hand.
+fn validate_name(name: &str) -> Result<()> {
+    crate::config::validate_instance_name(name).map_err(|message| eyre::eyre!(message))
 }
 
 fn local_instance_config(
@@ -177,7 +189,7 @@ fn maybe_install_tooling(project_dir: &Path, skills: Option<bool>) {
     }
 
     if !command_exists("npx") {
-        crate::output::warning(
+        output::warning(
             "npx not found; skipping Helix skills + docs MCP install. Install Node.js/npm, \
              then run 'npx skills add HelixDB/skills'.",
         );
@@ -185,30 +197,25 @@ fn maybe_install_tooling(project_dir: &Path, skills: Option<bool>) {
     }
 
     if let Err(err) = crate::setup::install_skills(project_dir, true, true) {
-        crate::output::warning(&format!("Skipping Helix skills install: {err}"));
+        output::warning(&format!("Skipping Helix skills install: {err}"));
     }
     if let Err(err) = crate::setup::install_mcp(project_dir, true, true) {
-        crate::output::warning(&format!("Skipping Helix docs MCP install: {err}"));
+        output::warning(&format!("Skipping Helix docs MCP install: {err}"));
     }
 }
 
 fn local_next_steps(instance_name: &str) -> Vec<String> {
     vec![
+        format!("helix start {instance_name}"),
+        format!("helix query {instance_name} --file examples/request.json"),
         format!(
-            "Run 'helix start {instance_name}' to start local Helix Enterprise dev in the background"
-        ),
-        format!("Run 'helix query {instance_name} --file examples/request.json'"),
-        format!(
-            "Or query in TypeScript: helix query {instance_name} -e 'readBatch().varAs(\"c\", g().nWithLabel(\"User\").count()).returning([\"c\"])'"
+            "helix query {instance_name} -e 'readBatch().varAs(\"c\", g().nWithLabel(\"User\").count()).returning([\"c\"])'"
         ),
     ]
 }
 
 fn enterprise_next_steps(instance_name: &str) -> Vec<String> {
-    vec![
-        format!("Run 'helix sync {instance_name}' to refresh Enterprise Cloud metadata"),
-        format!("Run 'helix query {instance_name} --file <request.json>'"),
-    ]
+    vec![format!("helix query {instance_name} --file <request.json>")]
 }
 
 fn write_example_request(project_dir: &Path) -> Result<()> {
@@ -385,7 +392,9 @@ mod tests {
         assert!(content.contains("helix start qa"));
         assert!(content.contains("helix query qa --file examples/request.json"));
         assert!(content.contains("install.helix-db.com"));
-        assert!(content.contains("crates/cli/install.ps1"));
+        assert!(content.contains(
+            "irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex"
+        ));
         assert!(content.contains("container_runtime = \"podman\""));
         assert!(content.contains("llms.txt"));
     }
@@ -424,7 +433,20 @@ mod tests {
     fn enterprise_next_steps_use_instance_name() {
         let steps = enterprise_next_steps("production");
 
-        assert!(steps[0].contains("helix sync production"));
-        assert!(steps[1].contains("helix query production"));
+        assert!(steps[0].contains("helix query production"));
+    }
+
+    #[test]
+    fn validate_name_rejects_disallowed_characters() {
+        assert!(validate_name("my.prod").is_err());
+        assert!(validate_name("../evil").is_err());
+        assert!(validate_name("").is_err());
+    }
+
+    #[test]
+    fn validate_name_accepts_the_normal_charset() {
+        assert!(validate_name("dev").is_ok());
+        assert!(validate_name("prod-1").is_ok());
+        assert!(validate_name("my_instance").is_ok());
     }
 }

@@ -33,7 +33,8 @@ fn filter_and_barrier_rules_preserve_effect_boundaries() {
         filter.expr,
         physical::PhysicalExpr::ResidualFilter
     ));
-    assert_eq!(filter.cost.latency, cost::LatencyEstimate::micros(12));
+    // Three unknown-scan rows, each read (10us) and evaluated (4us).
+    assert_eq!(filter.cost.latency, cost::LatencyEstimate::micros(42));
     assert_eq!(barrier.delivered.effect, properties::EffectKind::Barrier);
     assert_eq!(
         barrier.delivered.cardinality,

@@ -174,6 +174,11 @@ impl RowVirtualProperties {
         self.values.is_empty()
     }
 
+    /// Whether the row carries a virtual value called `name`.
+    pub fn contains(&self, name: &ir::NonEmptyString) -> bool {
+        self.values.contains_key(name)
+    }
+
     /// Clone a virtual value for projection.
     pub fn get(&self, name: &ir::NonEmptyString) -> Option<DbPropertyValue> {
         self.values.get(name).cloned()

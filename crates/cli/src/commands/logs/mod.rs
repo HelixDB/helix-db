@@ -1,127 +1,122 @@
 use crate::commands::auth::require_auth;
-use crate::config::InstanceInfo;
-use crate::enterprise_cloud::cloud_base_url;
+use crate::config::{DatabaseReference, InstanceInfo};
+use crate::errors::CliError;
 use crate::local_runtime::LocalRuntime;
+use crate::output::{self, table, OutputMode};
 use crate::project::ProjectContext;
-use crate::prompts;
 use chrono::{DateTime, Duration, Utc};
-use eyre::{eyre, Result};
-use serde::Deserialize;
+use eyre::Result;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
-struct LogsRangeResponse {
-    logs: Vec<LogEntry>,
+/// One failed Cloud query.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryError {
+    #[serde(default)]
+    timestamp: String,
+    #[serde(default)]
+    query_name: String,
+    #[serde(default)]
+    output: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct LogEntry {
-    message: String,
-}
-
+/// Local instances stream container logs; Cloud instances list recent query
+/// errors (the last hour unless `--start`/`--end` say otherwise).
 pub async fn run(
     instance: Option<String>,
     follow: bool,
-    range: bool,
     start: Option<String>,
     end: Option<String>,
 ) -> Result<()> {
     let project = ProjectContext::find_and_load(None)?;
-    let instance = resolve_instance(&project, instance)?;
+    let instance = super::query::resolve_instance_name(&project, instance)?;
     match project.config.get_instance(&instance)? {
         InstanceInfo::Local(_) => {
-            if range || start.is_some() || end.is_some() {
-                return Err(eyre!(
-                    "--range, --start, and --end are only supported for Enterprise logs; local logs use docker/podman logs"
-                ));
+            if start.is_some() || end.is_some() {
+                return Err(CliError::new("--start and --end only apply to Cloud instances")
+                    .with_hint("local logs come straight from docker/podman; use --follow to stream them")
+                    .into());
+            }
+            if OutputMode::current().is_json() {
+                return Err(CliError::new("local logs are plain text")
+                    .with_hint("--json is only supported for Cloud query errors")
+                    .into());
             }
             LocalRuntime::new(&project).logs(&instance, follow)?;
         }
         InstanceInfo::Enterprise(config) => {
             if follow {
-                return Err(eyre!(
-                    "live Enterprise logs are not supported yet; use --range instead"
-                ));
+                return Err(CliError::new("Cloud logs cannot be followed")
+                    .with_hint("omit --follow to list recent query errors")
+                    .into());
             }
-            let credentials = require_auth().await?;
-            let (start, end) = parse_range(range, start, end)?;
-            let logs =
-                query_enterprise_logs(&config.cluster_id, &credentials.helix_admin_key, start, end)
-                    .await?;
-            for line in logs {
-                println!("{line}");
-            }
+            let (start, end) = parse_range(start, end)?;
+            let path = match &config.database {
+                DatabaseReference::Cluster(id) => format!("/v1/clusters/{id}/query-errors"),
+                DatabaseReference::Tenant(id) => format!("/v1/tenants/{id}/query-errors"),
+            };
+            let (start_time, end_time) =
+                (start.timestamp().to_string(), end.timestamp().to_string());
+            let errors: Vec<QueryError> = require_auth()
+                .await?
+                .list(
+                    &path,
+                    &[("startTime", &start_time), ("endTime", &end_time)],
+                    "errors",
+                    "list Cloud query errors",
+                )
+                .await?;
+            output::emit(&errors, |errors| {
+                if errors.is_empty() {
+                    output::info(&format!(
+                        "No query errors on {instance} between {} and {}",
+                        start.format("%Y-%m-%d %H:%M UTC"),
+                        end.format("%Y-%m-%d %H:%M UTC")
+                    ));
+                    return Ok(());
+                }
+                let mut rows = table::Table::new(["TIME", "QUERY", "ERROR"]);
+                for error in errors {
+                    rows.row([
+                        error.timestamp.clone(),
+                        error.query_name.clone(),
+                        error.output.lines().collect::<Vec<_>>().join(" "),
+                    ]);
+                }
+                rows.print();
+                Ok(())
+            })?;
         }
     }
     Ok(())
 }
 
-fn resolve_instance(project: &ProjectContext, instance: Option<String>) -> Result<String> {
-    if let Some(instance) = instance {
-        return Ok(instance);
-    }
-    let instances = all_instances(project);
-    if prompts::is_interactive() && instances.len() > 1 {
-        return prompts::select_instance(&instances, "Show logs for which instance?");
-    }
-    if project.config.local.contains_key("dev") || project.config.enterprise.contains_key("dev") {
-        return Ok("dev".to_string());
-    }
-    if instances.len() == 1 {
-        return Ok(instances[0].0.clone());
-    }
-    Err(eyre!("No instance specified"))
-}
-
-fn all_instances(project: &ProjectContext) -> Vec<(String, String)> {
-    project
-        .config
-        .list_instances_with_types()
-        .into_iter()
-        .map(|(name, kind)| (name.clone(), kind.to_string()))
-        .collect()
-}
-
 fn parse_range(
-    range: bool,
     start: Option<String>,
     end: Option<String>,
 ) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+    let parse = |flag: &str, value: &str| -> Result<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(value)
+            .map(|time| time.with_timezone(&Utc))
+            .map_err(|error| {
+                CliError::new(format!("--{flag} '{value}' is not an RFC 3339 time"))
+                    .with_caused_by(error.to_string())
+                    .with_hint("use a time like 2026-01-02T15:04:05Z")
+                    .into()
+            })
+    };
     let end = match end {
-        Some(end) => DateTime::parse_from_rfc3339(&end)?.with_timezone(&Utc),
+        Some(end) => parse("end", &end)?,
         None => Utc::now(),
     };
     let start = match start {
-        Some(start) => DateTime::parse_from_rfc3339(&start)?.with_timezone(&Utc),
-        None if range => end - Duration::hours(1),
+        Some(start) => parse("start", &start)?,
         None => end - Duration::hours(1),
     };
-    Ok((start, end))
-}
-
-async fn query_enterprise_logs(
-    cluster_id: &str,
-    api_key: &str,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-) -> Result<Vec<String>> {
-    let url = format!(
-        "{}/api/cli/enterprise-clusters/{}/logs/range?start_time={}&end_time={}",
-        cloud_base_url(),
-        cluster_id,
-        start.timestamp(),
-        end.timestamp()
-    );
-    let response = reqwest::Client::new()
-        .get(url)
-        .header("x-api-key", api_key)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(eyre!("Failed to fetch Enterprise logs: {body}"));
+    if start >= end {
+        return Err(CliError::new("--start must be before --end").into());
     }
-    let payload: LogsRangeResponse = response.json().await?;
-    Ok(payload.logs.into_iter().map(|log| log.message).collect())
+    Ok((start, end))
 }
 
 #[cfg(test)]
@@ -131,7 +126,6 @@ mod tests {
     #[test]
     fn explicit_log_range_is_parsed_in_utc() {
         let (start, end) = parse_range(
-            true,
             Some("2026-01-01T00:00:00+01:00".to_string()),
             Some("2026-01-01T02:00:00+01:00".to_string()),
         )
@@ -142,14 +136,19 @@ mod tests {
 
     #[test]
     fn missing_start_defaults_to_one_hour_before_end() {
-        let (start, end) =
-            parse_range(true, None, Some("2026-01-01T02:00:00Z".to_string())).unwrap();
+        let (start, end) = parse_range(None, Some("2026-01-01T02:00:00Z".to_string())).unwrap();
         assert_eq!(end - start, Duration::hours(1));
     }
 
     #[test]
-    fn malformed_log_timestamp_is_rejected() {
-        assert!(parse_range(true, Some("yesterday".to_string()), None).is_err());
-        assert!(parse_range(true, None, Some("later".to_string())).is_err());
+    fn malformed_or_inverted_ranges_are_rejected() {
+        let error = parse_range(Some("yesterday".to_string()), None).unwrap_err();
+        assert!(error.to_string().contains("--start 'yesterday'"));
+        assert!(parse_range(None, Some("later".to_string())).is_err());
+        assert!(parse_range(
+            Some("2026-01-01T02:00:00Z".to_string()),
+            Some("2026-01-01T01:00:00Z".to_string()),
+        )
+        .is_err());
     }
 }

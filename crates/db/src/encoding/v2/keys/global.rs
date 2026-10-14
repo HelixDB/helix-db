@@ -18,6 +18,16 @@ use super::{
 const TENANT_ID_LEN: usize = core::mem::size_of::<u128>();
 const GLOBAL_SENTINEL_LEN: usize = TENANT_ID_LEN + core::mem::size_of::<u8>();
 
+#[test]
+fn retired_membership_activation_key_is_not_reused() {
+    let mut bytes = GlobalKey::StorageVersion.to_bytes().to_vec();
+    bytes[GLOBAL_SENTINEL_LEN] = 0x0C;
+    assert!(matches!(
+        GlobalKey::parse_from_slice(&bytes),
+        Err(EncodingError::InvalidKey(_))
+    ));
+}
+
 /// Exact V2-only database-global envelope.
 pub(crate) const GLOBAL_SENTINEL: [u8; GLOBAL_SENTINEL_LEN] = [0xFE; GLOBAL_SENTINEL_LEN];
 
@@ -30,6 +40,7 @@ pub(crate) enum GlobalKind {
     OperationPointer = 0x04,
     LegacyVectorPhysicalReservation = 0x0A,
     TextCompactionPointer = 0x0B,
+    // 0x0C is retired (experimental membership activation); do not reuse it.
 }
 
 impl GlobalKind {

@@ -17,13 +17,15 @@ mod vector_retirement;
 mod vector_scale;
 mod vector_simhash_directory;
 
+#[cfg(all(test, feature = "production-coverage"))]
+pub(crate) use indexes::equality_bitmap::make_legacy_equality_fixture;
 pub(crate) use tenant::envelope::legacy_key_requires_migration;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -60,6 +62,11 @@ const TENANT_KEY_ENVELOPE_READY: &[u8] = b"kv_migration_ready:tenant_key_envelop
 const INDEX_STORAGE_V4_CLEANUP_READY: &[u8] = b"kv_migration_ready:index_storage_v4_cleanup";
 const STORAGE_SCHEMA_VERSION: u64 = 1;
 const STORAGE_SCHEMA_COMPLETE: &[u8] = b"storage_schema_complete:v1";
+
+#[cfg(test)]
+pub(crate) fn storage_schema_complete_key_for_tests(scope: DataScope) -> Bytes {
+    scoped_metadata_key(scope, STORAGE_SCHEMA_COMPLETE)
+}
 const LEGACY_DYNAMIC_INDEX_CATALOG_METADATA: [&[u8]; 3] = [
     b"dynamic_index_catalog_blob",
     b"dynamic_index_catalog_token",
@@ -281,7 +288,7 @@ impl LegacyDynamicIndexKey {
     }
 }
 
-#[cfg(any(test, feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-coverage"))]
 pub fn migration_parity_legacy_catalog_row(
     definition: &crate::index_lifecycle::ValidatedDynamicIndexDefinition,
     tombstone: bool,
@@ -395,7 +402,7 @@ pub fn migration_parity_legacy_catalog_row(
 }
 
 /// Stable crash-injection boundaries used by the release recovery harness.
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationFailpoint {
@@ -444,26 +451,25 @@ pub enum MigrationFailpoint {
 }
 
 /// Durable legacy-text rebuild boundary selected by migration acceptance tests.
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LegacyTextMigrationCheckpoint {
     BeforeEnqueue,
     SourceScan,
-    CatchUp,
     ValidatePages,
     ValidateRoots,
     ValidateEntityStates,
     AfterActivationBeforeRetirement,
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 #[derive(Debug, Default)]
 struct LegacyTextMigrationCheckpointState {
     target: Option<LegacyTextMigrationCheckpoint>,
     triggered: bool,
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 static LEGACY_TEXT_MIGRATION_CHECKPOINT: Mutex<LegacyTextMigrationCheckpointState> =
     Mutex::new(LegacyTextMigrationCheckpointState {
         target: None,
@@ -471,7 +477,7 @@ static LEGACY_TEXT_MIGRATION_CHECKPOINT: Mutex<LegacyTextMigrationCheckpointStat
     });
 
 /// Arms one non-persisted, process-local migration interruption.
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 pub fn inject_legacy_text_migration_checkpoint_once(
     checkpoint: LegacyTextMigrationCheckpoint,
 ) -> Result<()> {
@@ -489,7 +495,7 @@ pub fn inject_legacy_text_migration_checkpoint_once(
 }
 
 /// Clears the feature-gated migration interruption before recovery reopen.
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 pub fn clear_legacy_text_migration_checkpoint() {
     *LEGACY_TEXT_MIGRATION_CHECKPOINT
         .lock()
@@ -498,7 +504,7 @@ pub fn clear_legacy_text_migration_checkpoint() {
 }
 
 /// Reports whether the selected durable migration boundary was observed.
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 pub fn legacy_text_migration_checkpoint_was_triggered() -> bool {
     LEGACY_TEXT_MIGRATION_CHECKPOINT
         .lock()
@@ -506,7 +512,7 @@ pub fn legacy_text_migration_checkpoint_was_triggered() -> bool {
         .triggered
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 fn trip_legacy_text_migration_checkpoint(checkpoint: LegacyTextMigrationCheckpoint) -> Result<()> {
     let mut state = LEGACY_TEXT_MIGRATION_CHECKPOINT
         .lock()
@@ -527,7 +533,7 @@ fn trip_legacy_text_migration_checkpoint(checkpoint: LegacyTextMigrationCheckpoi
     Ok(())
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 fn check_legacy_text_migration_interruption() -> Result<()> {
     let state = LEGACY_TEXT_MIGRATION_CHECKPOINT
         .lock()
@@ -546,7 +552,7 @@ fn check_legacy_text_migration_interruption() -> Result<()> {
 }
 
 /// Observes an exact queued text-build stage before a worker acquires it.
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 pub(crate) fn observe_legacy_text_migration_operation(
     operation: &crate::index_lifecycle::IndexOperationRecord,
 ) -> Result<()> {
@@ -561,7 +567,6 @@ pub(crate) fn observe_legacy_text_migration_operation(
     };
     let checkpoint = match stage {
         TextBuildStage::ScanSource(_) => Some(LegacyTextMigrationCheckpoint::SourceScan),
-        TextBuildStage::CatchUp(_) => Some(LegacyTextMigrationCheckpoint::CatchUp),
         TextBuildStage::ValidateManifests(validation) => Some(match validation {
             TextManifestValidationProgress::Pages(_) => {
                 LegacyTextMigrationCheckpoint::ValidatePages
@@ -573,7 +578,10 @@ pub(crate) fn observe_legacy_text_migration_operation(
                 LegacyTextMigrationCheckpoint::ValidateEntityStates
             }
         }),
+        // Queued builds never persist CatchUp; pre-queue records holding it
+        // block before any migration boundary.
         TextBuildStage::ScanPartitions(_)
+        | TextBuildStage::CatchUp(_)
         | TextBuildStage::Compact(_)
         | TextBuildStage::PrepareManifests(_)
         | TextBuildStage::Activate(_) => None,
@@ -584,7 +592,7 @@ pub(crate) fn observe_legacy_text_migration_operation(
     }
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 impl MigrationFailpoint {
     pub const ALL: [Self; 42] = [
         Self::JobCreationBeforeCommit,
@@ -707,13 +715,37 @@ impl MigrationFailpoint {
     }
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 static INJECTED_MIGRATION_FAILPOINT: Mutex<Option<MigrationFailpoint>> = Mutex::new(None);
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 static MIGRATION_FAILPOINT_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(feature = "production-coverage")]
+impl MigrationFailpoint {
+    /// Driver checkpoints simulate a temporary interruption so cold reopen can
+    /// retry the exact adoption claim. Real configuration errors stay permanent.
+    fn injected_error(self) -> HelixDbError {
+        let message = format!("injected migration failpoint {}", self.as_str());
+        if matches!(
+            self,
+            Self::LegacyVectorValidationCheckpointBefore
+                | Self::LegacyVectorValidationCheckpointAfter
+                | Self::LegacyVectorMetadataPublicationBefore
+                | Self::LegacyVectorMetadataPublicationAfter
+                | Self::LegacyVectorReservationTransitionBefore
+                | Self::LegacyVectorReservationTransitionAfter
+                | Self::LegacyDefinitionRetirementBefore
+                | Self::LegacyDefinitionRetirementAfter
+        ) {
+            HelixDbError::Storage(slatedb::Error::unavailable(message))
+        } else {
+            HelixDbError::Config(message)
+        }
+    }
+}
+
 /// Inject one typed migration error in this process for recovery verification.
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 pub fn inject_migration_failpoint_once(failpoint: MigrationFailpoint) -> Result<()> {
     let mut injected = INJECTED_MIGRATION_FAILPOINT.lock().map_err(|_| {
         HelixDbError::InvariantViolation("migration failpoint mutex was poisoned".to_string())
@@ -724,12 +756,12 @@ pub fn inject_migration_failpoint_once(failpoint: MigrationFailpoint) -> Result<
 }
 
 /// Return whether the currently requested one-shot failpoint fired.
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 pub fn migration_failpoint_was_triggered() -> bool {
     MIGRATION_FAILPOINT_TRIGGERED.load(Ordering::SeqCst)
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 pub(crate) fn trip_migration_failpoint(failpoint: MigrationFailpoint) -> Result<()> {
     let mut injected = INJECTED_MIGRATION_FAILPOINT.lock().map_err(|_| {
         HelixDbError::InvariantViolation("migration failpoint mutex was poisoned".to_string())
@@ -737,10 +769,7 @@ pub(crate) fn trip_migration_failpoint(failpoint: MigrationFailpoint) -> Result<
     if *injected == Some(failpoint) {
         *injected = None;
         MIGRATION_FAILPOINT_TRIGGERED.store(true, Ordering::SeqCst);
-        return Err(HelixDbError::Config(format!(
-            "injected migration failpoint {}",
-            failpoint.as_str()
-        )));
+        return Err(failpoint.injected_error());
     }
     drop(injected);
     if std::env::var("HELIX_MIGRATION_FAILPOINT").as_deref() != Ok(failpoint.as_str()) {
@@ -749,10 +778,7 @@ pub(crate) fn trip_migration_failpoint(failpoint: MigrationFailpoint) -> Result<
     if std::env::var("HELIX_MIGRATION_FAIL_ACTION").as_deref() == Ok("abort") {
         std::process::abort();
     }
-    Err(HelixDbError::Config(format!(
-        "injected migration failpoint {}",
-        failpoint.as_str()
-    )))
+    Err(failpoint.injected_error())
 }
 
 /// Durable migration identifier.
@@ -1130,12 +1156,12 @@ pub(crate) async fn ensure_migration_job(
         txn.rollback();
         return Ok(());
     }
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::JobCreationBeforeCommit)?;
     let job = MigrationJob::new(id, mode);
     txn.put(key.into_bytes(), encode_json(&job)?)?;
     txn.commit().await?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::JobCreationAfterCommit)?;
     tracing::info!(
         migration_id = id.log_name(),
@@ -1254,6 +1280,28 @@ pub(crate) fn stage_tenant_key_envelope_ready(transaction: &DbTransaction) -> Re
         Bytes::from_static(b"1"),
     )?;
     Ok(())
+}
+
+/// Stages the complete current storage-schema marker tuple in one transaction.
+pub(crate) fn stage_current_storage_schema_ready(transaction: &DbTransaction) -> Result<()> {
+    for marker in [
+        GRAPH_FORMAT_V1_READY,
+        INDEX_V2_MIGRATION_READY,
+        STORAGE_SCHEMA_COMPLETE,
+    ] {
+        transaction.put(
+            scoped_metadata_key(DataScope::LegacyUnscoped, marker),
+            Bytes::from_static(b"1"),
+        )?;
+    }
+    stage_tenant_key_envelope_ready(transaction)
+}
+
+#[cfg(test)]
+pub(crate) fn stage_reader_compatible_storage_schema_for_tests(
+    transaction: &DbTransaction,
+) -> Result<()> {
+    stage_current_storage_schema_ready(transaction)
 }
 
 /// Stages V4 cleanup completion in the caller's existing transaction.
@@ -1380,7 +1428,7 @@ async fn publish_storage_schema_completion(db: &Db, scope: DataScope) -> Result<
         return Ok(());
     }
 
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::StorageSchemaCompletionBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     if !graph_format_v1_ready(&transaction, scope).await?
@@ -1400,7 +1448,7 @@ async fn publish_storage_schema_completion(db: &Db, scope: DataScope) -> Result<
         Bytes::from_static(b"1"),
     )?;
     transaction.commit().await?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::StorageSchemaCompletionAfter)?;
     tracing::info!(
         migration_version = STORAGE_SCHEMA_VERSION,
@@ -1473,7 +1521,7 @@ pub(crate) async fn run_blocking_startup_migration(
             ));
         }
     }
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::CleanupEnqueueBefore)?;
     ensure_migration_job(
         writer.db(),
@@ -1497,7 +1545,7 @@ pub(crate) async fn run_blocking_startup_migration(
         written_count = if rewrite_completed { 0 } else { processed_rows },
         "storage schema migration step finished"
     );
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::CleanupEnqueueAfter)?;
     Ok(())
 }
@@ -1579,7 +1627,7 @@ pub(crate) async fn migrate_legacy_definitions(db: &crate::HelixDB) -> Result<()
     // secondary property hashes can collide, so retiring one shared physical
     // lane is safe only after every current full-string identity is Active.
     for row in legacy_rows {
-        #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+        #[cfg(feature = "production-coverage")]
         trip_legacy_text_migration_checkpoint(
             LegacyTextMigrationCheckpoint::AfterActivationBeforeRetirement,
         )?;
@@ -1640,7 +1688,7 @@ pub(crate) async fn migrate_legacy_definitions(db: &crate::HelixDB) -> Result<()
         }
     }
 
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::MigrationReadyPublicationBefore)?;
     let transaction = writer
         .db()
@@ -1673,7 +1721,7 @@ pub(crate) async fn migrate_legacy_definitions(db: &crate::HelixDB) -> Result<()
         transaction.delete(scoped_metadata_key(scope, name))?;
     }
     transaction.commit().await?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::MigrationReadyPublicationAfter)?;
     db.refresh_runtime_catalog(scope).await?;
     publish_storage_schema_completion(writer.db(), scope).await?;
@@ -2158,7 +2206,7 @@ pub(crate) async fn preflight_legacy_vector_reservations(db: &Db) -> Result<()> 
             physical_name = legacy.physical_name,
             "reserved legacy vector physical namespace"
         );
-        #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+        #[cfg(feature = "production-coverage")]
         trip_migration_failpoint(MigrationFailpoint::LegacyVectorReservationBefore)?;
         transaction.put(
             IndexKey::Global {
@@ -2169,7 +2217,7 @@ pub(crate) async fn preflight_legacy_vector_reservations(db: &Db) -> Result<()> 
                 LegacyVectorPhysicalReservation::LegacySource,
             )),
         )?;
-        #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+        #[cfg(feature = "production-coverage")]
         trip_migration_failpoint(MigrationFailpoint::LegacyVectorReservationAfter)?;
     }
     transaction.commit().await?;
@@ -2289,7 +2337,7 @@ async fn enqueue_legacy_definition(
         &definition,
         crate::index_lifecycle::ValidatedDynamicIndexDefinition::Secondary(_)
     );
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     if matches!(
         &definition,
         crate::index_lifecycle::ValidatedDynamicIndexDefinition::Text(_)
@@ -2299,7 +2347,7 @@ async fn enqueue_legacy_definition(
     if let Some(reason) = db.index_lifecycle_unavailable_reason(family) {
         return Err(HelixDbError::IndexLifecycleUnavailable { family, reason });
     }
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::LegacyDefinitionEnqueueBefore)?;
     let adoption_physical_id = match &definition {
         crate::index_lifecycle::ValidatedDynamicIndexDefinition::Vector(vector)
@@ -2363,7 +2411,7 @@ async fn enqueue_legacy_definition(
         }
         None => enqueue_rebuild(writer.db(), scope, definition).await?,
     };
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::LegacyDefinitionEnqueueAfter)?;
     db.wake_index_worker().await;
     if let Some(operation_id) = receipt_operation_id(receipt) {
@@ -2459,7 +2507,7 @@ async fn wait_for_index_operation(
     };
     let writer_epoch = db.index_worker_epoch().await?;
     loop {
-        #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+        #[cfg(feature = "production-coverage")]
         check_legacy_text_migration_interruption()?;
         let snapshot = writer.db().snapshot().await?;
         let Some(operation) =
@@ -2553,7 +2601,7 @@ async fn retire_legacy_definition_row(
     definition: Option<&crate::index_lifecycle::ValidatedDynamicIndexDefinition>,
     identity: &LegacyDynamicIndexKey,
 ) -> Result<()> {
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::LegacyDefinitionRetirementBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     let legacy_row_present = transaction.get(&storage_key).await?.is_some();
@@ -2629,7 +2677,7 @@ async fn retire_legacy_definition_row(
         transaction.delete(storage_key)?;
     }
     transaction.commit().await?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::LegacyDefinitionRetirementAfter)?;
     Ok(())
 }
@@ -2747,7 +2795,7 @@ const fn legacy_range_direction(
     }
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -2760,7 +2808,7 @@ pub enum MigrationParityId {
     VectorSimHashDirectoryV1,
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -2770,7 +2818,7 @@ pub enum MigrationParityMode {
     Background,
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -2793,7 +2841,7 @@ pub enum MigrationParityStage {
     VectorDirectoryPublish,
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum MigrationParityState {
@@ -2813,7 +2861,7 @@ pub enum MigrationParityState {
     },
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 impl MigrationParityState {
     pub const fn is_completed(&self) -> bool {
         matches!(self, Self::Completed { .. })
@@ -2828,7 +2876,7 @@ impl MigrationParityState {
     }
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MigrationParityJobStatus {
     pub id: MigrationParityId,
@@ -2836,7 +2884,7 @@ pub struct MigrationParityJobStatus {
     pub state: MigrationParityState,
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 const fn parity_id(id: MigrationId) -> MigrationParityId {
     match id {
         MigrationId::GraphFormatV1Rewrite => MigrationParityId::GraphFormatV1Rewrite,
@@ -2848,7 +2896,7 @@ const fn parity_id(id: MigrationId) -> MigrationParityId {
     }
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 const fn parity_mode(mode: MigrationMode) -> MigrationParityMode {
     match mode {
         MigrationMode::BlockingStartup => MigrationParityMode::BlockingStartup,
@@ -2856,7 +2904,7 @@ const fn parity_mode(mode: MigrationMode) -> MigrationParityMode {
     }
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 const fn parity_stage(stage: MigrationStage) -> MigrationParityStage {
     match stage {
         MigrationStage::PropertyIndexes => MigrationParityStage::PropertyIndexes,
@@ -2874,7 +2922,7 @@ const fn parity_stage(stage: MigrationStage) -> MigrationParityStage {
     }
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 fn parity_state(state: &MigrationJobState) -> MigrationParityState {
     match state {
         MigrationJobState::Running {
@@ -2903,7 +2951,7 @@ fn parity_state(state: &MigrationJobState) -> MigrationParityState {
     }
 }
 
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+#[cfg(feature = "production-coverage")]
 pub async fn migration_parity_job_statuses(
     db: &Db,
     scope: DataScope,
@@ -3048,7 +3096,7 @@ async fn process_migration_once_by_id_with_catalog_measured(
     match result {
         Ok(step) => {
             let rewrite_completed = id == MigrationId::GraphFormatV1Rewrite && job.is_completed();
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             if rewrite_completed {
                 trip_migration_failpoint(MigrationFailpoint::RewriteCompletionBefore)?;
             }
@@ -3059,12 +3107,12 @@ async fn process_migration_once_by_id_with_catalog_measured(
                     Bytes::from_static(b"1"),
                 )?;
             }
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             trip_migration_failpoint(MigrationFailpoint::BatchCommitBefore)?;
             txn.commit().await?;
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             trip_migration_failpoint(MigrationFailpoint::BatchCommitAfter)?;
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             if rewrite_completed {
                 trip_migration_failpoint(MigrationFailpoint::RewriteCompletionAfter)?;
             }
@@ -3284,10 +3332,10 @@ async fn process_loaded_job(
             })
         }
         MigrationBatch::StageComplete => {
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             trip_migration_failpoint(MigrationFailpoint::StageTransitionBefore)?;
             advance_or_complete(job);
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             trip_migration_failpoint(MigrationFailpoint::StageTransitionAfter)?;
             tracing::info!(
                 migration_version = 1,
@@ -3441,7 +3489,7 @@ async fn rewrite_legacy_edge_pair_batch(
         source_bytes,
     } = source
     else {
-        #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+        #[cfg(feature = "production-coverage")]
         trip_migration_failpoint(MigrationFailpoint::BatchReadAfter)?;
         return Ok(MigrationBatch::StageComplete);
     };
@@ -3516,7 +3564,7 @@ async fn rewrite_legacy_edge_pair_batch(
             .await?;
         }
     }
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::BatchReadAfter)?;
 
     Ok(MigrationBatch::Advanced {
@@ -3551,7 +3599,7 @@ async fn rebuild_edge_endpoint_batch(
         source_bytes,
     } = source
     else {
-        #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+        #[cfg(feature = "production-coverage")]
         trip_migration_failpoint(MigrationFailpoint::BatchReadAfter)?;
         return Ok(MigrationBatch::StageComplete);
     };
@@ -3589,7 +3637,7 @@ async fn rebuild_edge_endpoint_batch(
         };
         maintain_current_edge_rows(txn, scope, edge_id, from, to, Some(&properties)).await?;
     }
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::BatchReadAfter)?;
 
     Ok(MigrationBatch::Advanced {
@@ -3636,10 +3684,10 @@ async fn cleanup_legacy_edge_pair_batch(
             // lookups per legacy row on object storage. Current writers never
             // create pair-addressed legacy rows, so an intervening delete of the
             // current edge also makes deleting this obsolete source row correct.
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             trip_migration_failpoint(MigrationFailpoint::CleanupDeleteBefore)?;
             txn.delete(key)?;
-            #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+            #[cfg(feature = "production-coverage")]
             trip_migration_failpoint(MigrationFailpoint::CleanupDeleteAfter)?;
             Ok(())
         },
@@ -3667,7 +3715,7 @@ where
         source_bytes,
     } = source
     else {
-        #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+        #[cfg(feature = "production-coverage")]
         trip_migration_failpoint(MigrationFailpoint::BatchReadAfter)?;
         return Ok(MigrationBatch::StageComplete);
     };
@@ -3679,7 +3727,7 @@ where
     for (key, value) in rows {
         process_row(key, value).await?;
     }
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::BatchReadAfter)?;
 
     Ok(MigrationBatch::Advanced {
@@ -3715,7 +3763,7 @@ async fn read_stage_batch(
     };
     let prefix = stage.prefix(scope);
     let bounds = scan_bounds_for_prefix(prefix.as_ref(), resume_after_key.as_ref());
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::BatchReadBefore)?;
     let mut iter = txn.scan(bounds).await?;
     let mut scanned_rows = 0_u64;
@@ -3904,7 +3952,7 @@ pub(crate) async fn reserve_allocators_above_existing(
     scope: DataScope,
 ) -> Result<()> {
     let started = Instant::now();
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::AllocatorReservationBefore)?;
     let max_node_id = max_existing_node_id(writer.db(), scope).await?;
     let max_edge_id = max_existing_edge_id(writer.db(), scope).await?;
@@ -3941,7 +3989,7 @@ pub(crate) async fn reserve_allocators_above_existing(
         written_count = u64::from(next_node_id.is_some()) + u64::from(next_edge_id.is_some()),
         "storage schema migration step finished"
     );
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     trip_migration_failpoint(MigrationFailpoint::AllocatorReservationAfter)?;
     Ok(())
 }
@@ -4158,6 +4206,7 @@ mod tests {
     use crate::encoding::property;
     use crate::encoding::v1::values;
     use crate::encoding::v2::legacy::edge_property_pair::LegacyEdgePropertyPairKey as EdgePropertyPairKey;
+    use crate::error::WriterMigrationRequirement;
     use crate::{DbConfig, HelixDB};
 
     fn migration_test_config() -> DbConfig {
@@ -4178,6 +4227,15 @@ mod tests {
                     )
                     .with_worker_mode(config::MigrationWorkerMode::Disabled),
             )
+    }
+
+    async fn all_test_rows(read: &(impl DbReadOps + Send + Sync)) -> Vec<(Bytes, Bytes)> {
+        let mut rows = read.scan(..).await.expect("migration test scans");
+        let mut collected = Vec::new();
+        while let Some(row) = rows.next().await.expect("migration test row reads") {
+            collected.push((row.key, row.value));
+        }
+        collected
     }
 
     fn edge_delta(op: u8, node_id: NodeId) -> Bytes {
@@ -4816,7 +4874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reader_requires_tenant_migration_without_mutating_bootstrap_metadata() {
+    async fn reader_rejects_incomplete_tenant_migration_without_mutating_storage() {
         let root = tempfile::tempdir().expect("temporary object-store root");
         let database = "reader-requires-migration";
         let object_store = Arc::new(
@@ -4839,6 +4897,7 @@ mod tests {
         )
         .await
         .expect("legacy tenant row writes");
+        let legacy_rows = all_test_rows(&raw).await;
         raw.close().await.expect("raw pre-migration db closes");
         let source = crate::HelixDbSource::Disk {
             root: root.path().to_path_buf(),
@@ -4846,12 +4905,12 @@ mod tests {
         };
 
         let Err(error) = HelixDB::open_reader(source.clone()).await else {
-            panic!("pre-migration reader requires blocking writer startup");
+            panic!("incomplete tenant migration must not become query-routable")
         };
         assert!(matches!(
             error,
             HelixDbError::WriterMigrationRequired {
-                requirement: crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
+                requirement: WriterMigrationRequirement::IncompleteStorageSchema,
             }
         ));
 
@@ -4863,6 +4922,7 @@ mod tests {
             .build()
             .await
             .expect("raw pre-migration db reopens");
+        assert_eq!(all_test_rows(&raw).await, legacy_rows);
         assert!(
             !tenant_key_envelope_ready(&raw)
                 .await
@@ -4885,16 +4945,27 @@ mod tests {
             .await
             .expect("writer bootstrap tuple commits");
         raw.flush().await.expect("bootstrap tuple flushes");
+        let tuple_rows = all_test_rows(&raw).await;
         raw.close().await.expect("raw tuple-only db closes");
         let Err(error) = HelixDB::open_reader(source.clone()).await else {
-            panic!("tuple-only bootstrap must not make a reader ready");
+            panic!("tuple-only storage must not become query-routable")
         };
         assert!(matches!(
             error,
             HelixDbError::WriterMigrationRequired {
-                requirement: crate::error::WriterMigrationRequirement::IncompleteStorageSchema,
+                requirement: WriterMigrationRequirement::IncompleteStorageSchema,
             }
         ));
+        let object_store = Arc::new(
+            slatedb::object_store::local::LocalFileSystem::new_with_prefix(root.path())
+                .expect("local object store reopens after tuple rejection"),
+        );
+        let raw = Db::builder(database, object_store)
+            .build()
+            .await
+            .expect("raw tuple-only db reopens");
+        assert_eq!(all_test_rows(&raw).await, tuple_rows);
+        raw.close().await.expect("raw tuple-only db closes again");
 
         let writer = HelixDB::open_with_config(source.clone(), migration_test_config())
             .await
@@ -5265,32 +5336,32 @@ pub(crate) mod production_contracts {
             .expect("complete current schema is reader-ready");
 
         fixture
-            .put(
-                global(GlobalKey::StorageVersion),
-                encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-                    IndexStorageVersion::new(0x0002).expect("version two is nonzero"),
-                )),
-            )
+            .delete(scoped_metadata_key(
+                DataScope::LegacyUnscoped,
+                INDEX_STORAGE_V4_CLEANUP_READY,
+            ))
             .await
-            .expect("version-two marker writes");
-        let error =
-            crate::index_lifecycle::repository::require_reader_bootstrap_or_legacy(&fixture)
+            .expect("legacy fixture clears the V4 cleanup marker");
+        for legacy_version in [2, 3] {
+            fixture
+                .put(
+                    global(GlobalKey::StorageVersion),
+                    encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+                        IndexStorageVersion::new(legacy_version)
+                            .expect("legacy reader version is nonzero"),
+                    )),
+                )
                 .await
-                .expect_err("complete version-two storage requires a writer");
-        let HelixDbError::WriterMigrationRequired { requirement } = error else {
-            panic!("complete version-two storage must remain typed: {error}")
-        };
-        assert_eq!(
-            requirement,
-            crate::error::WriterMigrationRequirement::StorageVersion {
-                found: 2,
-                target: 4,
-            }
-        );
-        assert_eq!(
-            requirement.to_string(),
-            "storage version 2 must be upgraded to 4"
-        );
+                .expect("legacy storage marker writes");
+            let before = all_rows(&fixture).await;
+            assert_eq!(
+                crate::index_lifecycle::repository::require_reader_bootstrap_or_legacy(&fixture)
+                    .await
+                    .expect("complete versions two and three are explicitly reader-compatible"),
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::LegacyEqualityUnion
+            );
+            assert_eq!(all_rows(&fixture).await, before);
+        }
         fixture.close().await.expect("fixture closes");
     }
 
@@ -5304,6 +5375,15 @@ pub(crate) mod production_contracts {
             .build()
             .await
             .expect("migration contract raw database opens")
+    }
+
+    async fn all_rows(read: &(impl DbReadOps + Send + Sync)) -> Vec<(Bytes, Bytes)> {
+        let mut rows = read.scan(..).await.expect("migration contract scans");
+        let mut collected = Vec::new();
+        while let Some(row) = rows.next().await.expect("migration contract row reads") {
+            collected.push((row.key, row.value));
+        }
+        collected
     }
 
     fn global(key: GlobalKey) -> Bytes {
@@ -6027,7 +6107,7 @@ pub(crate) mod production_contracts {
             .expect("adopted vector cache refreshes");
         let cache_guard = db
             .vector_cache_registry()
-            .read_guard_for(&generation)
+            .resident_guard_for(&generation)
             .expect("adopted generation is admitted to the vector cache");
         assert!(cache_guard.store().estimated_bytes() > 0);
         drop(cache_guard);
@@ -7673,7 +7753,7 @@ pub(crate) mod production_contracts {
             (
                 "future",
                 encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-                    IndexStorageVersion::new(IndexStorageVersion::CURRENT.get() + 1)
+                    IndexStorageVersion::new(IndexStorageVersion::MAX_SUPPORTED.get() + 1)
                         .expect("future version is nonzero"),
                 )),
                 true,
@@ -7920,7 +8000,11 @@ pub(crate) mod production_contracts {
     ) -> MigrationJob {
         let raw = Arc::new(raw(database, store).await);
         let config = one_row_config();
-        let writer = crate::HelixWriter::new(Arc::clone(&raw), config.id_lease_size());
+        let writer = crate::HelixWriter::new(
+            Arc::clone(&raw),
+            config.id_lease_size(),
+            config.id_lease_refill_threshold(),
+        );
         let target = recovery_stage.migration_stage();
         let target_rank = recovery_stage
             .stage_rank(target)

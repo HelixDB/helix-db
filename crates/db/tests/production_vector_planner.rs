@@ -7,6 +7,7 @@
 //! keep the active physical generation synchronized.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
@@ -24,6 +25,26 @@ use helix_ast::query::QueryRequest;
 use helix_ast::traversal;
 use helix_ast::value::PropertyValue;
 use helix_planner::{catalog, context, cost, exec, ir, properties, trace};
+
+fn run_high_stack_contract<F, Fut>(name: &'static str, contract: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("vector planner contract runtime builds")
+                .block_on(contract());
+        })
+        .expect("vector planner contract thread starts")
+        .join()
+        .expect("vector planner contract thread completes");
+}
 
 /// Constructs a non-empty planner identifier used by the executable fixtures.
 fn name(value: &str) -> ir::NonEmptyString {
@@ -635,6 +656,76 @@ enum VectorAction {
     AbortBlockedBuild,
 }
 
+/// Invalid public mutation values and the exact error family each must retain.
+#[derive(Debug, Clone, Copy)]
+enum InvalidVectorUpdate {
+    WrongDimension,
+    NotANumber,
+    PositiveInfinity,
+    NegativeInfinity,
+    UnsupportedProperty,
+}
+
+impl InvalidVectorUpdate {
+    const ALL: [Self; 5] = [
+        Self::WrongDimension,
+        Self::NotANumber,
+        Self::PositiveInfinity,
+        Self::NegativeInfinity,
+        Self::UnsupportedProperty,
+    ];
+
+    fn value(self) -> PropertyValue {
+        match self {
+            Self::WrongDimension => PropertyValue::F32Array(vec![1.0]),
+            Self::NotANumber => PropertyValue::F32Array(vec![f32::NAN, 1.0]),
+            Self::PositiveInfinity => PropertyValue::F32Array(vec![1.0, f32::INFINITY]),
+            Self::NegativeInfinity => PropertyValue::F32Array(vec![f32::NEG_INFINITY, 1.0]),
+            Self::UnsupportedProperty => PropertyValue::String("not-a-vector".to_string()),
+        }
+    }
+
+    fn assert_error(self, error: &db::error::HelixDbError) {
+        match self {
+            Self::WrongDimension => assert!(
+                matches!(
+                    error,
+                    db::error::HelixDbError::InvalidDimension {
+                        expected: 2,
+                        got: 1
+                    }
+                ),
+                "wrong-dimension update returned {error:?}"
+            ),
+            Self::NotANumber => assert!(
+                matches!(
+                    error,
+                    db::error::HelixDbError::InvalidVectorComponent { index: 0 }
+                ),
+                "NaN update returned {error:?}"
+            ),
+            Self::PositiveInfinity => assert!(
+                matches!(
+                    error,
+                    db::error::HelixDbError::InvalidVectorComponent { index: 1 }
+                ),
+                "positive-infinity update returned {error:?}"
+            ),
+            Self::NegativeInfinity => assert!(
+                matches!(
+                    error,
+                    db::error::HelixDbError::InvalidVectorComponent { index: 0 }
+                ),
+                "negative-infinity update returned {error:?}"
+            ),
+            Self::UnsupportedProperty => assert!(
+                matches!(error, db::error::HelixDbError::Query(reason) if reason.contains("numeric array")),
+                "unsupported-property update returned {error:?}"
+            ),
+        }
+    }
+}
+
 /// Independent brute-force oracle for visible vector membership.
 #[derive(Default)]
 struct VectorReferenceModel {
@@ -666,9 +757,9 @@ struct VectorMachine {
 
 impl VectorMachine {
     /// Opens one coordinated writer whose token survives model reopen actions.
-    async fn open() -> Self {
-        let token = ProcessLocalDatabaseToken::new("production-vector-lifecycle-state-machine")
-            .expect("vector lifecycle token is valid");
+    async fn open(database: &'static str) -> Self {
+        let token =
+            ProcessLocalDatabaseToken::new(database).expect("vector lifecycle token is valid");
         let db = HelixDB::open(HelixDbSource::InMemoryToken {
             token: token.clone(),
         })
@@ -799,6 +890,40 @@ impl VectorMachine {
             }
             VectorAction::RetryAfterHigherLimit => self.exercise_limit_retry().await,
             VectorAction::AbortBlockedBuild => self.exercise_blocked_abort().await,
+        }
+    }
+
+    /// Proves invalid public updates roll back graph, physical, and cache state.
+    async fn reject_invalid_updates(&self, slot: VectorSlot) {
+        assert!(self.model.active, "invalid update requires an Active index");
+        let (entity_id, vector) = *self
+            .model
+            .vectors
+            .get(&slot)
+            .expect("invalid update names an existing vector");
+        for case in InvalidVectorUpdate::ALL {
+            let parameter = name("invalid_vector_model_node");
+            let error = self
+                .db
+                .execute(
+                    &node_property_mutation_plan(
+                        parameter.clone(),
+                        exec::ExecMutationPlan::SetProperty {
+                            name: name("embedding"),
+                            value: ir::PropertyInputPlan::Value(case.value()),
+                        },
+                    ),
+                    context::ParamBindings::default().with_value(
+                        parameter,
+                        PropertyValue::I64(
+                            i64::try_from(entity_id).expect("fixture node ID fits i64"),
+                        ),
+                    ),
+                )
+                .await
+                .expect_err("invalid vector update fails closed");
+            case.assert_error(&error);
+            self.assert_search(vector).await;
         }
     }
 
@@ -1124,9 +1249,16 @@ fn blocked_vector_limit_config() -> DbConfig {
 }
 
 /// Drives every vector lifecycle action against one brute-force model.
-#[tokio::test]
-async fn public_vector_lifecycle_matches_reference_model() {
-    let mut machine = VectorMachine::open().await;
+#[test]
+fn public_vector_lifecycle_matches_reference_model() {
+    run_high_stack_contract(
+        "public-vector-lifecycle-model",
+        public_vector_lifecycle_matches_reference_model_contract,
+    );
+}
+
+async fn public_vector_lifecycle_matches_reference_model_contract() {
+    let mut machine = VectorMachine::open("production-vector-lifecycle-state-machine").await;
     for action in [
         VectorAction::Insert {
             slot: VectorSlot::First,
@@ -1169,6 +1301,55 @@ async fn public_vector_lifecycle_matches_reference_model() {
         .close()
         .await
         .expect("vector lifecycle writer closes cleanly");
+}
+
+/// Proves every invalid vector value rolls back and cannot poison a rebuild.
+#[test]
+fn public_invalid_vector_updates_are_atomic_across_reopen_and_rebuild() {
+    std::thread::Builder::new()
+        .name("public-invalid-vector-updates".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 * 1024 * 1024)
+                .build()
+                .expect("invalid-vector runtime should build")
+                .block_on(async {
+                    let mut machine =
+                        VectorMachine::open("production-vector-invalid-update-state-machine").await;
+                    machine
+                        .apply(VectorAction::Insert {
+                            slot: VectorSlot::First,
+                            vector: [0.75, 0.25],
+                        })
+                        .await;
+                    machine.apply(VectorAction::Create).await;
+                    Box::pin(machine.reject_invalid_updates(VectorSlot::First)).await;
+                    machine.apply(VectorAction::Reopen).await;
+                    machine
+                        .apply(VectorAction::Search {
+                            query: [0.75, 0.25],
+                        })
+                        .await;
+                    machine.apply(VectorAction::Drop).await;
+                    machine.apply(VectorAction::Recreate).await;
+                    machine
+                        .apply(VectorAction::Search {
+                            query: [0.75, 0.25],
+                        })
+                        .await;
+                    machine.apply(VectorAction::Drop).await;
+                    machine
+                        .db
+                        .close()
+                        .await
+                        .expect("invalid-vector writer closes cleanly");
+                });
+        })
+        .expect("invalid-vector test thread should spawn")
+        .join()
+        .expect("invalid-vector test thread should not panic");
 }
 
 #[tokio::test]
@@ -1231,6 +1412,129 @@ async fn public_dynamic_vector_ddl_backfills_existing_nodes() {
     reopened.close().await.expect("reopened writer closes");
 }
 
+/// Proves bounded output batches and a tiny build cache still converge.
+///
+/// The build first blocks on a one-byte input budget. The 16 documents written
+/// while it is blocked lie past its scan bound, so they go only to the building
+/// generation's queue, where publication defers them. Retried under a small
+/// output-operation budget, source-scan steps end on an entity whose planned
+/// writes no longer fit; that entity is discarded from the retained planning
+/// cache and replanned by the next step. The 8 KiB cache budget evicts retained
+/// rows between entities throughout the build. After activation the queued
+/// documents publish under the same 256-operation budget, and once the queue
+/// is empty every search answers from published rows alone.
+#[tokio::test]
+async fn public_vector_backfill_splits_scan_and_publishes_queued_writes_under_small_budgets() {
+    let token = ProcessLocalDatabaseToken::new("production-vector-bounded-backfill-batches")
+        .expect("fixture token is valid");
+    let defaults = SearchIndexBackfillLimits::default();
+    let batch = defaults.batch();
+    let cache_bytes = NonZeroU64::new(8 * 1024).expect("fixture cache budget is positive");
+    let limits = SearchIndexBackfillLimits::try_new(
+        SearchIndexBatchLimits::try_new(
+            batch.max_entities(),
+            batch.max_input_bytes(),
+            NonZeroU64::new(256).expect("fixture output budget is positive"),
+            batch.max_output_bytes(),
+            batch.max_single_vector_output_bytes(),
+        )
+        .expect("small output limits remain internally consistent"),
+        defaults.edge_property_read_batch(),
+        defaults.text_artifacts(),
+        defaults.text_compaction(),
+    )
+    .expect("small output policy preserves cross-budget invariants")
+    .with_vector_build_cache_bytes(cache_bytes);
+    assert_eq!(limits.vector_build_cache_bytes(), cache_bytes);
+    let document = |offset: u16| {
+        let displacement = f32::from(offset) / 48.0;
+        add_node_plan(
+            "Doc",
+            vec![(
+                "embedding",
+                PropertyValue::F32Array(vec![1.0 - displacement, displacement]),
+            )],
+        )
+    };
+
+    let db = HelixDB::open_with_config(
+        HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        },
+        blocked_vector_limit_config(),
+    )
+    .await
+    .expect("blocking writer opens");
+    let mut node_ids = Vec::new();
+    for offset in 0_u16..32 {
+        node_ids.push(created_node_id(
+            db.execute(&document(offset), context::ParamBindings::default())
+                .await
+                .expect("scanned fixture node commits before DDL"),
+        ));
+    }
+    let operation_id = accepted_operation_id(
+        db.execute(
+            &node_vector_ddl_plan("Doc", "embedding", ir::VectorIndexMetric::Euclidean),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("bounded-batch vector DDL is accepted"),
+    );
+    wait_for_expected(&db, operation_id, ExpectedVectorTerminal::Blocked).await;
+    for offset in 32_u16..48 {
+        node_ids.push(created_node_id(
+            db.execute(&document(offset), context::ParamBindings::default())
+                .await
+                .expect("queued fixture node commits during the blocked build"),
+        ));
+    }
+    db.close().await.expect("blocking writer closes");
+
+    let db = HelixDB::open_with_config(
+        HelixDbSource::InMemoryToken { token },
+        DbConfig::new().with_search_index_backfill_limits(limits),
+    )
+    .await
+    .expect("bounded-batch writer opens");
+    db.retry_index_operation(DataScope::LegacyUnscoped, operation_id)
+        .await
+        .expect("blocked vector build requeues");
+    wait_for_expected(&db, operation_id, ExpectedVectorTerminal::Succeeded).await;
+    db.planner_context_scoped(context::ParamBindings::default(), DataScope::LegacyUnscoped)
+        .await
+        .expect("the completed build is visible through a refreshed planner catalog");
+    let stats = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let stats = db.index_operation_queue_stats();
+            if stats.pending_operations == 0 && stats.uncertain_operations == 0 {
+                return stats;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the writes queued during the build publish after activation");
+    assert!(
+        stats.published_operations >= 16,
+        "every queued document was published, got {stats:?}"
+    );
+    assert_eq!(
+        stats.blocked_attempts, 0,
+        "each queued document fits the 256-operation output budget"
+    );
+
+    for (query, expected) in [
+        (vec![1.0, 0.0], node_ids[0]),
+        (vec![0.5, 0.5], node_ids[24]),
+        (vec![0.25, 0.75], node_ids[36]),
+        (vec![0.0, 1.0], node_ids[47]),
+    ] {
+        assert_eq!(search_node_ids(&db, query).await, vec![expected]);
+    }
+    db.close().await.expect("bounded-batch writer closes");
+}
+
 #[tokio::test]
 async fn public_managed_search_executes_every_active_vector_metric() {
     let db = HelixDB::open(HelixDbSource::InMemoryToken {
@@ -1282,11 +1586,51 @@ async fn public_managed_search_executes_every_active_vector_metric() {
         );
     }
 
+    let node = name("zero_cosine_node");
+    let error = db
+        .execute(
+            &node_property_mutation_plan(
+                node.clone(),
+                exec::ExecMutationPlan::SetProperty {
+                    name: name("cosine_embedding"),
+                    value: ir::PropertyInputPlan::Value(PropertyValue::F32Array(vec![0.0, -0.0])),
+                },
+            ),
+            context::ParamBindings::default().with_value(
+                node,
+                PropertyValue::I64(i64::try_from(node_ids[0]).expect("fixture node ID fits i64")),
+            ),
+        )
+        .await
+        .expect_err("zero-norm cosine update fails closed");
+    assert!(
+        matches!(error, db::error::HelixDbError::ZeroNormCosineVector),
+        "zero-norm cosine update returned {error:?}"
+    );
+    assert_eq!(
+        projected_node_ids(
+            db.execute(
+                &node_vector_search_plan("Doc", "cosine_embedding", vec![1.0, 0.0]),
+                context::ParamBindings::default(),
+            )
+            .await
+            .expect("cosine search survives rejected zero-norm update"),
+        ),
+        vec![node_ids[0]]
+    );
+
     db.close().await.expect("writer closes");
 }
 
-#[tokio::test]
-async fn public_managed_vector_search_enforces_tenant_partitions() {
+#[test]
+fn public_managed_vector_search_enforces_tenant_partitions() {
+    run_high_stack_contract(
+        "public-vector-tenant-partitions",
+        public_managed_vector_search_enforces_tenant_partitions_contract,
+    );
+}
+
+async fn public_managed_vector_search_enforces_tenant_partitions_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-vector-tenant-partitions".to_owned(),
     })
@@ -1604,6 +1948,122 @@ async fn public_restricted_search_deduplicates_and_omits_other_labels() {
         )
         .await
         .expect("restricted vector search succeeds");
+
+    assert_eq!(projected_node_ids(result), vec![nearest, farther]);
+    db.close().await.expect("writer closes");
+}
+
+#[tokio::test]
+async fn public_restricted_search_rejects_when_the_effective_result_count_exceeds_the_restricted_ceiling(
+) {
+    let db = HelixDB::open(HelixDbSource::InMemoryToken {
+        token: ProcessLocalDatabaseToken::new("production-vector-restricted-oversized-count")
+            .expect("fixture token is valid"),
+    })
+    .await
+    .expect("writer opens");
+    execute_ddl_to_success(
+        &db,
+        &node_vector_ddl_plan("Doc", "embedding", ir::VectorIndexMetric::Euclidean),
+    )
+    .await;
+
+    let mut candidate_ids = Vec::with_capacity(801);
+    for _ in 0..801 {
+        let id = created_node_id(
+            db.execute(
+                &add_node_plan(
+                    "Doc",
+                    vec![("embedding", PropertyValue::F32Array(vec![1.0, 0.0]))],
+                ),
+                context::ParamBindings::default(),
+            )
+            .await
+            .expect("candidate node commits"),
+        );
+        candidate_ids.push(i64::try_from(id).expect("fixture node ID fits i64"));
+    }
+
+    let parameter = name("traversal_candidates");
+    let error = db
+        .execute(
+            &restricted_node_vector_search_plan(
+                "Doc",
+                "embedding",
+                vec![1.0, 0.0],
+                parameter.clone(),
+                801,
+            ),
+            context::ParamBindings::default()
+                .with_value(parameter, PropertyValue::I64Array(candidate_ids)),
+        )
+        .await
+        .expect_err("an effective result count above 800 is rejected, not silently clamped");
+
+    assert!(
+        error
+            .to_string()
+            .contains("restricted vector search result count must be at most 800, got 801"),
+        "{error}"
+    );
+    db.close().await.expect("writer closes");
+}
+
+#[tokio::test]
+async fn public_restricted_search_permits_a_large_k_against_a_small_candidate_set() {
+    let db = HelixDB::open(HelixDbSource::InMemoryToken {
+        token: ProcessLocalDatabaseToken::new("production-vector-restricted-large-k-small-set")
+            .expect("fixture token is valid"),
+    })
+    .await
+    .expect("writer opens");
+    let nearest = created_node_id(
+        db.execute(
+            &add_node_plan(
+                "Doc",
+                vec![("embedding", PropertyValue::F32Array(vec![1.0, 0.0]))],
+            ),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("nearest node commits"),
+    );
+    let farther = created_node_id(
+        db.execute(
+            &add_node_plan(
+                "Doc",
+                vec![("embedding", PropertyValue::F32Array(vec![0.0, 1.0]))],
+            ),
+            context::ParamBindings::default(),
+        )
+        .await
+        .expect("farther node commits"),
+    );
+    execute_ddl_to_success(
+        &db,
+        &node_vector_ddl_plan("Doc", "embedding", ir::VectorIndexMetric::Euclidean),
+    )
+    .await;
+
+    let parameter = name("traversal_candidates");
+    let candidate_ids = [nearest, farther]
+        .into_iter()
+        .map(|id| i64::try_from(id).expect("fixture node ID fits i64"))
+        .collect();
+    let result = db
+        .execute(
+            &restricted_node_vector_search_plan(
+                "Doc",
+                "embedding",
+                vec![1.0, 0.0],
+                parameter.clone(),
+                10_000,
+            ),
+            context::ParamBindings::default()
+                .with_value(parameter, PropertyValue::I64Array(candidate_ids)),
+        )
+        .await
+        .expect("a k far larger than the candidate set still succeeds once intersected");
 
     assert_eq!(projected_node_ids(result), vec![nearest, farther]);
     db.close().await.expect("writer closes");

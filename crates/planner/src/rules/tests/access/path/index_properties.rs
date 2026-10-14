@@ -16,6 +16,7 @@ fn access_path_rule_delivers_index_ordering_cardinality_and_locality() {
         ),
     });
     let range = edge_access_expr(ir::EdgeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::EdgeRangeIndexMeta::try_new("edge_weight").unwrap(),
         key: catalog::ScopedPropertyDirectionKey::try_new(
             "LIKES",

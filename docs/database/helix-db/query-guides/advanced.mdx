@@ -22,17 +22,137 @@ branching operations; use `g()` only for a top-level traversal entry.
 
 ## Retain row-local values
 
-Bind the starting service, use `optional` and `union` sub-traversals to bind each
-candidate workload path, then use `projectDistinctBindings` with `coalesce` to produce
-one stable row shape. See [projections](/database/helix-db/query-guides/projections#project-correlated-bindings).
+Combine branches with [bindings](/database/helix-db/query-guides/traversals#preserve-correlated-values)
+to keep one stable row shape across alternative paths. Bind the starting service, use
+`optional` and `union` sub-traversals to bind each candidate workload path, then
+project with `projectDistinctBindings` and `coalesce`. See
+[Project correlated bindings](/database/helix-db/query-guides/projections#project-correlated-bindings).
 
 ## Gate later entries
 
-Batch conditions refer to earlier entry results:
+A batch condition runs an entry only when an earlier entry's result meets a test.
+Add the entry with `varAsIf` / `var_as_if` instead of `varAs`. This request returns a
+user's posts only when the user exists:
 
-Create the `user` entry, then add `posts` with `varAsIf` / `var_as_if` and a
-`varNotEmpty("user")` condition. Conditions serialize inside the named entry, not as
-a separate step.
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as(
+        "user",
+        g().n_with_label("User")
+            .where_(Predicate::eq("username", "alice")),
+    )
+    .var_as_if(
+        "posts",
+        BatchCondition::VarNotEmpty("user".to_string()),
+        g().n(NodeRef::var("user"))
+            .out(Some("AUTHORED"))
+            .value_map(Some(vec!["$id", "title"])),
+    )
+    .returning(["posts"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs("user", g().nWithLabel("User").where(Predicate.eq("username", "alice")))
+  .varAsIf(
+    "posts",
+    BatchCondition.varNotEmpty("user"),
+    g().n(NodeRef.var("user")).out("AUTHORED").valueMap(["$id", "title"]),
+  )
+  .returning(["posts"]);
+```
+
+```go Go
+helix.ReadQuery("user_posts").
+	VarAs("user", helix.G().NWithLabel("User").Where(helix.PredEq("username", "alice"))).
+	VarAsIf(
+		"posts",
+		helix.VarNotEmpty("user"),
+		helix.G().N(helix.NodeVar("user")).Out("AUTHORED").ValueMap("$id", "title"),
+	).
+	Returning("posts")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as(
+        "user",
+        g().n_with_label("User").where(Predicate.eq("username", "alice")),
+    )
+    .var_as_if(
+        "posts",
+        BatchCondition.var_not_empty("user"),
+        g().n(NodeRef.var("user")).out("AUTHORED").value_map(["$id", "title"]),
+    )
+    .returning(["posts"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "user_posts",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "user",
+            "root": {
+              "where": {
+                "input": {
+                  "nodes_where": {
+                    "predicate": {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "User" } }
+                      }
+                    }
+                  }
+                },
+                "predicate": {
+                  "eq": {
+                    "left": { "property": "username" },
+                    "right": { "constant": { "string": "alice" } }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "query": {
+            "name": "posts",
+            "root": {
+              "value_map": {
+                "input": {
+                  "out": {
+                    "input": { "nodes": { "reference": { "var": "user" } } },
+                    "label": "AUTHORED"
+                  }
+                },
+                "properties": ["$id", "title"]
+              }
+            },
+            "condition": { "var_not_empty": "user" }
+          }
+        }
+      ],
+      "returns": ["posts"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+The condition serializes inside the named entry, not as a separate step. Other
+conditions test for an empty result (`varEmpty`), a minimum size (`varMinSize`), or
+the previous entry (`prevNotEmpty`). The first entry in a batch cannot depend on a
+previous result.
 
 ## Bound recursive work
 

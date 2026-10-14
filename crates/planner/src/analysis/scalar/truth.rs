@@ -6,7 +6,8 @@ use helix_ast::expr::{CompareOp, Expr, Predicate};
 use helix_ast::value::PropertyValue;
 
 use super::values::{
-    literal_collection_values, property_value_has_reflexive_equality, property_value_ordering,
+    property_value_has_reflexive_equality, property_value_ordering, property_values_equal,
+    LiteralCollection,
 };
 
 pub(super) fn static_predicate_value(predicate: &Predicate) -> Option<bool> {
@@ -88,7 +89,7 @@ fn static_eq_value(left: &Expr, right: &Expr) -> Option<bool> {
         return None;
     };
     (property_value_has_reflexive_equality(left) && property_value_has_reflexive_equality(right))
-        .then_some(left == right)
+        .then_some(property_values_equal(left, right))
 }
 
 fn static_order_value(
@@ -140,6 +141,6 @@ fn static_in_value(value: &Expr, values: &Expr) -> Option<bool> {
         return None;
     };
     property_value_has_reflexive_equality(value)
-        .then(|| literal_collection_values(values).map(|values| values.contains(value)))
+        .then(|| LiteralCollection::new(values).map(|values| values.contains(value)))
         .flatten()
 }

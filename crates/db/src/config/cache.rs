@@ -75,6 +75,21 @@ impl FromStr for ObjectStoreWarmLevel {
     }
 }
 
+/// Startup warm of vector search rows into the object-store tier.
+///
+/// Worth enabling only in front of a remote durable store: a local store
+/// serves cold reads itself, so the warm would only copy local files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorPartWarm {
+    /// Rows reach the tier only as searches read them.
+    #[default]
+    Off,
+    /// After open and the first vector memory refresh, stream every loaded
+    /// scope's Active vector search rows through the tier once in the
+    /// background, reading at most half the tier.
+    Background,
+}
+
 /// Checked settings for SlateDB's block/meta Foyer hybrid cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlateHybridCacheConfig {
@@ -111,7 +126,51 @@ impl SlateHybridCacheConfig {
     pub const fn disk(&self) -> &DiskCacheConfig {
         &self.disk
     }
+
+    /// Foyer disk block size: the disk capacity divided by 32Ki, rounded up
+    /// to a power of two and clamped to 64 KiB..=16 MiB.
+    ///
+    /// Up to 512 GiB this gives at most 32Ki blocks. Above it blocks stay at
+    /// 16 MiB and the count grows linearly; see [`Self::disk_partitions`].
+    ///
+    /// ```
+    /// # use db::config::SlateHybridCacheConfig;
+    /// let small = SlateHybridCacheConfig::try_new(1, "/tmp/slate", 16 * 1024 * 1024)?;
+    /// assert_eq!(small.disk_block_bytes(), 64 * 1024);
+    /// let large = SlateHybridCacheConfig::try_new(1, "/tmp/slate", 12 << 30)?;
+    /// assert_eq!(large.disk_block_bytes(), 512 * 1024);
+    /// # Ok::<(), db::config::ConfigError>(())
+    /// ```
+    pub fn disk_block_bytes(&self) -> usize {
+        self.disk
+            .bytes()
+            .div_ceil(FOYER_TARGET_MAX_DISK_PARTITIONS)
+            .next_power_of_two()
+            .clamp(
+                FOYER_MIN_DISK_BLOCK_SIZE_BYTES,
+                FOYER_MAX_DISK_BLOCK_SIZE_BYTES,
+            )
+    }
+
+    /// Number of Foyer partition files, each held open while the cache runs.
+    ///
+    /// At most 32Ki until the disk capacity exceeds 512 GiB, where blocks
+    /// stop growing and the count grows linearly.
+    ///
+    /// ```
+    /// # use db::config::SlateHybridCacheConfig;
+    /// let cache = SlateHybridCacheConfig::try_new(1, "/tmp/slate", 12 << 30)?;
+    /// assert_eq!(cache.disk_partitions(), 24_576);
+    /// # Ok::<(), db::config::ConfigError>(())
+    /// ```
+    pub fn disk_partitions(&self) -> usize {
+        self.disk.bytes() / self.disk_block_bytes()
+    }
 }
+
+const FOYER_MIN_DISK_BLOCK_SIZE_BYTES: usize = 64 * 1024;
+const FOYER_MAX_DISK_BLOCK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+const FOYER_TARGET_MAX_DISK_PARTITIONS: usize = 32 * 1024;
 
 /// Checked capacities for SlateDB's in-memory block and metadata caches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +313,7 @@ pub struct SlateObjectStoreCacheSettings {
     part_size_bytes: NonZeroUsize,
     cache_puts: bool,
     warm: ObjectStoreWarmLevel,
+    vector_part_warm: VectorPartWarm,
     scan_interval: Option<Duration>,
     max_open_file_handles: NonZeroUsize,
 }
@@ -282,6 +342,7 @@ impl SlateObjectStoreCacheSettings {
                 .ok_or_else(|| ConfigError::new("object-store cache part size must be nonzero"))?,
             cache_puts,
             warm,
+            vector_part_warm: VectorPartWarm::Off,
             scan_interval,
             max_open_file_handles: NonZeroUsize::new(max_open_file_handles).ok_or_else(|| {
                 ConfigError::new("object-store cache file-handle count must be nonzero")
@@ -310,6 +371,71 @@ impl SlateObjectStoreCacheSettings {
     /// Startup preload level for the object-store cache.
     pub const fn warm(&self) -> ObjectStoreWarmLevel {
         self.warm
+    }
+
+    /// Most cache files the object-store tier keeps open at once.
+    pub const fn max_open_file_handles(&self) -> usize {
+        self.max_open_file_handles.get()
+    }
+
+    /// These settings, caching the SSTs a writer flushes or compacts only
+    /// when `cache_puts` is set.
+    ///
+    /// ```
+    /// use db::config::{ObjectStoreWarmLevel, SlateObjectStoreCacheSettings};
+    ///
+    /// let settings = SlateObjectStoreCacheSettings::try_new(
+    ///     "/var/cache/helix/object-store",
+    ///     None,
+    ///     4096,
+    ///     true,
+    ///     ObjectStoreWarmLevel::Off,
+    ///     None,
+    ///     8,
+    /// )?;
+    /// let reads_only = settings.clone().with_cache_puts(false);
+    /// assert!(!reads_only.to_slate_options().cache_puts);
+    /// assert_eq!(reads_only.with_cache_puts(true), settings);
+    /// # Ok::<(), db::config::ConfigError>(())
+    /// ```
+    #[must_use]
+    pub fn with_cache_puts(self, cache_puts: bool) -> Self {
+        Self { cache_puts, ..self }
+    }
+
+    /// These settings, warming vector search rows into the tier at startup
+    /// as `vector_part_warm` says. [`Self::try_new`] starts with
+    /// [`VectorPartWarm::Off`].
+    ///
+    /// ```
+    /// use db::config::{ObjectStoreWarmLevel, SlateObjectStoreCacheSettings, VectorPartWarm};
+    ///
+    /// let settings = SlateObjectStoreCacheSettings::try_new(
+    ///     "/var/cache/helix/object-store",
+    ///     None,
+    ///     4096,
+    ///     true,
+    ///     ObjectStoreWarmLevel::Off,
+    ///     None,
+    ///     8,
+    /// )?;
+    /// assert_eq!(settings.vector_part_warm(), VectorPartWarm::Off);
+    /// let warmed = settings.clone().with_vector_part_warm(VectorPartWarm::Background);
+    /// assert_eq!(warmed.vector_part_warm(), VectorPartWarm::Background);
+    /// assert_eq!(warmed.with_vector_part_warm(VectorPartWarm::Off), settings);
+    /// # Ok::<(), db::config::ConfigError>(())
+    /// ```
+    #[must_use]
+    pub fn with_vector_part_warm(self, vector_part_warm: VectorPartWarm) -> Self {
+        Self {
+            vector_part_warm,
+            ..self
+        }
+    }
+
+    /// Startup warm of vector search rows into this tier.
+    pub const fn vector_part_warm(&self) -> VectorPartWarm {
+        self.vector_part_warm
     }
 }
 
@@ -349,6 +475,7 @@ impl SlateRuntimeConfig {
         object_store_cache: Option<&SlateObjectStoreCacheSettings>,
     ) -> slatedb::config::DbReaderOptions {
         slatedb::config::DbReaderOptions {
+            wal_replay: self.runtime_settings.wal_replay,
             object_store_cache_options: match object_store_cache {
                 None => slatedb::config::ObjectStoreCacheOptions {
                     root_folder: None,

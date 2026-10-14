@@ -18,7 +18,7 @@ use crate::index_lifecycle::{
 
 #[cfg(test)]
 use crate::index_lifecycle::work::{
-    AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaValue,
+    AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaState, CoalescedBuildDeltaValue,
 };
 #[cfg(test)]
 use crate::index_lifecycle::IndexRecordV2;
@@ -755,6 +755,21 @@ mod wire_fixtures {
             generation: generation(),
             entity_kind: IndexElementKind::Node,
             entity_id: crate::index_lifecycle::IndexEntityId::new(3),
+            state: CoalescedBuildDeltaState::Marker,
+        };
+        let secondary_delta = CoalescedBuildDeltaValue {
+            state: CoalescedBuildDeltaState::SecondaryBefore(Some(
+                CanonicalSecondaryValue::equality_string("shared"),
+            )),
+            ..delta.clone()
+        };
+        let tenant_partition = crate::index_lifecycle::work::TextPartition::try_tenant_value(
+            Bytes::from_static(b"tenant"),
+        )
+        .unwrap();
+        let vector_delta = CoalescedBuildDeltaValue {
+            state: CoalescedBuildDeltaState::VectorBefore(Some(tenant_partition.clone())),
+            ..delta.clone()
         };
         let applied = AppliedEntityStateValue {
             index_id: index_id(),
@@ -765,10 +780,6 @@ mod wire_fixtures {
                 "shared",
             ))),
         };
-        let tenant_partition = crate::index_lifecycle::work::TextPartition::try_tenant_value(
-            Bytes::from_static(b"tenant"),
-        )
-        .unwrap();
         let applied_vector = AppliedEntityStateValue {
             index_id: index_id(),
             generation: generation(),
@@ -787,11 +798,21 @@ mod wire_fixtures {
             ))),
         };
         let encoded_delta = encode_build_delta(&delta);
+        let encoded_secondary_delta = encode_build_delta(&secondary_delta);
+        let encoded_vector_delta = encode_build_delta(&vector_delta);
         let encoded_applied = encode_applied_state(&applied);
         let encoded_vector = encode_applied_state(&applied_vector);
         let encoded_text = encode_applied_state(&applied_text);
 
         assert_eq!(decode_build_delta(&encoded_delta).unwrap(), delta);
+        assert_eq!(
+            decode_build_delta(&encoded_secondary_delta).unwrap(),
+            secondary_delta
+        );
+        assert_eq!(
+            decode_build_delta(&encoded_vector_delta).unwrap(),
+            vector_delta
+        );
         assert_eq!(decode_applied_state(&encoded_applied).unwrap(), applied);
         assert_eq!(
             decode_applied_state(&encoded_vector).unwrap(),
@@ -800,14 +821,18 @@ mod wire_fixtures {
         assert_eq!(decode_applied_state(&encoded_text).unwrap(), applied_text);
         insta::assert_snapshot!(
             format!(
-                "build_delta={}\napplied_secondary={}\napplied_vector={}\napplied_text={}\n",
+                "build_delta={}\nbuild_delta_secondary={}\nbuild_delta_vector={}\napplied_secondary={}\napplied_vector={}\napplied_text={}\n",
                 hex(&encoded_delta),
+                hex(&encoded_secondary_delta),
+                hex(&encoded_vector_delta),
                 hex(&encoded_applied),
                 hex(&encoded_vector),
                 hex(&encoded_text),
             ),
             @"
 build_delta=010300000000000000010000000000000002010000000000000003
+build_delta_secondary=010300000000000000010000000000000002010000000000000003010101e9cf50951f33fb140000000b0400000006736861726564
+build_delta_vector=0103000000000000000100000000000000020100000000000000030201020000000674656e616e74
 applied_secondary=010400000000000000010000000000000002010000000000000003010101e9cf50951f33fb140000000b0400000006736861726564
 applied_vector=0104000000000000000100000000000000020100000000000000030201020000000674656e616e74
 applied_text=0104000000000000000100000000000000020100000000000000030301020000000674656e616e740000000000000004

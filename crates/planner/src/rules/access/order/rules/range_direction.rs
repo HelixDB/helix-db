@@ -32,6 +32,7 @@ impl optimizer::OptimizerRule for AccessOrderRangeDirectionRule {
         if !order.has_range_direction_candidate() {
             return optimizer::RuleResult::NotApplicable;
         }
-        rewrite_access_order_range_direction(order, input.indexes).into_rule_result()
+        rewrite_access_order_range_direction(order, input.indexes)
+            .into_rule_result(order.ordering().clone())
     }
 }

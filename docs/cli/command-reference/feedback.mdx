@@ -1,14 +1,14 @@
 ---
 title: "helix feedback"
 sidebarTitle: "feedback"
+description: "Open a pre-filled feedback issue for the Helix team"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-Send feedback to the Helix team.
+Send feedback to the Helix team by opening a pre-filled GitHub issue in your browser. No login is
+required.
 
 ## Usage
 
@@ -19,15 +19,26 @@ helix feedback [MESSAGE]
 ## Arguments
 
 | Argument | Description |
-|----------|-------------|
-| `MESSAGE` | Feedback message. If omitted, the CLI prompts for one in a TTY. |
+| --- | --- |
+| `MESSAGE` | Feedback text used as the issue body. If omitted, the body is `Helix CLI feedback`. |
+
+## Behavior
+
+- Opens a new issue on `github.com/helixdb/helix-db` titled `feedback: Helix CLI`, with your message as the body.
+- Nothing is sent until you submit the issue on GitHub, so you can edit it first.
+- The CLI does not prompt for a message.
 
 ## Examples
 
 ```bash
-# Send feedback inline
+# Open an issue with your message filled in
 helix feedback "love the new dynamic query flow"
 
-# Open an interactive prompt
+# Open an issue with the default body
 helix feedback
 ```
+
+## Related
+
+- [`helix update`](/cli/command-reference/update) — check you are on the latest CLI before reporting.
+- [`helix metrics`](/cli/command-reference/metrics) — configure CLI telemetry.

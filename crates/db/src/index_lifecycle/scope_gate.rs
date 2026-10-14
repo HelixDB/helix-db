@@ -46,12 +46,34 @@ pub(crate) struct IndexScopeLifecyclePermit {
     _mutation_guard: OwnedRwLockWriteGuard<()>,
 }
 
+/// Exclusive process-local ownership of one generation's physical publication.
+///
+/// Queued publication into an Active generation, build steps, activation,
+/// retirement, and compaction of the same generation serialize on this
+/// permit. Work that touches only the queue (deferral, reconciliation, and
+/// discards) does not take it. It complements, and never replaces, the
+/// transactional checks each publication makes against the canonical record
+/// and SlateDB writer fencing.
+#[derive(Debug)]
+pub(crate) struct IndexGenerationPublicationPermit {
+    target: super::queue::QueueTarget,
+    _guard: OwnedMutexGuard<()>,
+}
+
+impl IndexGenerationPublicationPermit {
+    /// Returns the generation this permit owns.
+    pub(crate) const fn target(&self) -> super::queue::QueueTarget {
+        self.target
+    }
+}
+
 /// Exact-scope gate registry shared by mutation contexts and family drivers.
 #[derive(Debug, Default)]
 pub(crate) struct IndexScopeGates {
     gates: Mutex<HashMap<DataScope, Weak<RwLock<()>>>>,
     catalogs: Mutex<HashMap<DataScope, Weak<RwLock<()>>>>,
     catalog_refreshes: Mutex<HashMap<DataScope, Weak<AsyncMutex<()>>>>,
+    publications: Mutex<HashMap<super::queue::QueueTarget, Weak<AsyncMutex<()>>>>,
 }
 
 impl IndexScopeGates {
@@ -94,6 +116,41 @@ impl IndexScopeGates {
     /// a newer scan without serializing unrelated tenant scopes.
     pub(crate) async fn catalog_refresh_permit(&self, scope: DataScope) -> OwnedMutexGuard<()> {
         self.catalog_refresh_gate(scope).lock_owned().await
+    }
+
+    /// Acquires exclusive physical-publication ownership of one generation.
+    pub(crate) async fn publication_permit(
+        &self,
+        target: super::queue::QueueTarget,
+    ) -> IndexGenerationPublicationPermit {
+        IndexGenerationPublicationPermit {
+            target,
+            _guard: self.publication_gate(target).lock_owned().await,
+        }
+    }
+
+    /// Returns how many tasks hold or await `target`'s publication permit.
+    #[cfg(test)]
+    pub(crate) fn publication_permit_holders(&self, target: super::queue::QueueTarget) -> usize {
+        self.publications
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&target)
+            .map_or(0, Weak::strong_count)
+    }
+
+    fn publication_gate(&self, target: super::queue::QueueTarget) -> Arc<AsyncMutex<()>> {
+        let mut gates = self
+            .publications
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(gate) = gates.get(&target).and_then(Weak::upgrade) else {
+            gates.retain(|_, gate| gate.strong_count() != 0);
+            let gate = Arc::new(AsyncMutex::new(()));
+            gates.insert(target, Arc::downgrade(&gate));
+            return gate;
+        };
+        gate
     }
 
     fn mutation_gate(&self, scope: DataScope) -> Arc<RwLock<()>> {

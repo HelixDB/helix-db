@@ -3,7 +3,9 @@
 pub(crate) mod cache;
 pub(crate) mod db;
 mod definition_differences;
+mod host_memory;
 mod index_lifecycle_throughput;
+mod index_operation_queue;
 pub(crate) mod indexes;
 mod migrations;
 pub(crate) mod runtime_catalog;
@@ -16,14 +18,19 @@ pub use cache::{
     CacheConfig, CacheMode, CacheWarmMode, FtsHybridCacheConfig, FtsMemoryCacheConfig,
     FtsWarmConfig, ObjectStoreWarmLevel, SimHasherCacheSettings, SlateHybridCacheConfig,
     SlateMemoryCacheConfig, SlateObjectStoreCacheSettings, SlateRuntimeConfig, SlateWarmConfig,
-    VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings,
+    VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings, VectorPartWarm,
     DEFAULT_VECTOR_MEMORY_BUDGET_BYTES,
 };
-pub use db::{DbConfig, EdgeEncoding, EdgeUpdatePolicy, HelixConfig, OpenAttribution};
+pub use db::{
+    DbConfig, EdgeEncoding, EdgeUpdatePolicy, HelixConfig, OpenAttribution, QueryTelemetry,
+};
 pub use definition_differences::{DefinitionDifference, NonEmptyDefinitionDifferences};
 pub use index_lifecycle_throughput::{
     IndexLifecycleConcurrency, IndexLifecycleScanTuning, IndexLifecycleThroughputTuning,
     IndexLifecycleThroughputTuningError,
+};
+pub use index_operation_queue::{
+    IndexOperationQueueTuning, IndexOperationQueueTuningError, QueueLayout,
 };
 pub(crate) use indexes::RuntimeIndexCatalog;
 pub use indexes::{

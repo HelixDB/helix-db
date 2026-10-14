@@ -104,6 +104,10 @@ pub enum QueryErrorCode {
     RequestReadViewChanged,
     /// The query exceeded its execution deadline.
     QueryDeadlineExceeded,
+    /// Retaining a query buffer would exceed the request's memory budget.
+    QueryMemoryLimitExceeded,
+    /// Reader retirement cancelled an admitted read before completion.
+    QueryCancelledByReaderRetirement,
     /// A supplied node ID is invalid.
     InvalidNodeId,
     /// A requested node does not exist.
@@ -122,6 +126,24 @@ pub enum QueryErrorCode {
     MigrationSteppingRequiresDisabledMode,
     /// An active text mutation exceeded an admission limit.
     ActiveTextMutationLimitExceeded,
+    /// A vector/text index has too much committed but unpublished work.
+    ///
+    /// The whole request was rejected (a write before commit, or a strong
+    /// search whose answer lies behind too many results superseded by
+    /// committed but unpublished work) and is safe to retry after the index
+    /// worker publishes outstanding operations.
+    IndexBackpressure,
+    /// A write would saturate the queued work of a blocked hidden index
+    /// build. Its generation publishes nothing until the build activates, so
+    /// retrying the same write cannot succeed until the blocked build
+    /// operation is retried (after repairing what its blocker names) or
+    /// aborted.
+    IndexBuildBlocked,
+    /// One transaction staged more queued index work than a single transaction
+    /// may carry (an operand above the durable write-ahead-log entry limit, or
+    /// a per-index backlog limit exceeded on its own); retrying the same write
+    /// cannot succeed.
+    IndexOperationBatchTooLarge,
     /// Existing graph data cannot satisfy an index source contract.
     InvalidIndexSourceData,
     /// A value cannot satisfy the current index model.
@@ -189,6 +211,44 @@ pub enum QueryErrorCode {
 }
 
 impl QueryErrorCode {
+    /// Whether database execution rejected caller-controlled input or mutation size.
+    ///
+    /// This is the shared classification for typed vector validation and active-text
+    /// admission errors. It excludes persisted-data corruption and storage failures;
+    /// request syntax and planner errors have their own transport classifications.
+    ///
+    /// ```
+    /// use helix_ast::error_code::QueryErrorCode;
+    /// assert!(QueryErrorCode::ActiveTextMutationLimitExceeded.is_invalid_database_input());
+    /// assert!(!QueryErrorCode::StorageError.is_invalid_database_input());
+    /// ```
+    #[must_use]
+    pub const fn is_invalid_database_input(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidVectorDimension
+                | Self::InvalidVectorComponent
+                | Self::VectorComponentMagnitudeExceeded
+                | Self::ZeroNormCosineVector
+                | Self::ActiveTextMutationLimitExceeded
+                | Self::IndexOperationBatchTooLarge
+        )
+    }
+
+    /// Whether the database rejected the whole request (a write before
+    /// commit, or a strong search) because asynchronous index work is
+    /// saturated, so an unchanged retry may succeed.
+    ///
+    /// ```
+    /// use helix_ast::error_code::QueryErrorCode;
+    /// assert!(QueryErrorCode::IndexBackpressure.is_retryable_backpressure());
+    /// assert!(!QueryErrorCode::TransactionConflict.is_retryable_backpressure());
+    /// ```
+    #[must_use]
+    pub const fn is_retryable_backpressure(self) -> bool {
+        matches!(self, Self::IndexBackpressure)
+    }
+
     /// Every code in the stable public catalog.
     pub const ALL: &'static [Self] = &[
         Self::InvalidRequest,
@@ -233,6 +293,8 @@ impl QueryErrorCode {
         Self::TransactionConflict,
         Self::RequestReadViewChanged,
         Self::QueryDeadlineExceeded,
+        Self::QueryMemoryLimitExceeded,
+        Self::QueryCancelledByReaderRetirement,
         Self::InvalidNodeId,
         Self::NodeNotFound,
         Self::EdgeNotFound,
@@ -242,6 +304,9 @@ impl QueryErrorCode {
         Self::SecondaryLifecycleSteppingRequiresDisabledMode,
         Self::MigrationSteppingRequiresDisabledMode,
         Self::ActiveTextMutationLimitExceeded,
+        Self::IndexBackpressure,
+        Self::IndexBuildBlocked,
+        Self::IndexOperationBatchTooLarge,
         Self::InvalidIndexSourceData,
         Self::InvalidIndexModel,
         Self::InvalidSecondaryIndexValue,
@@ -322,6 +387,8 @@ impl QueryErrorCode {
             Self::TransactionConflict => "transaction_conflict",
             Self::RequestReadViewChanged => "request_read_view_changed",
             Self::QueryDeadlineExceeded => "query_deadline_exceeded",
+            Self::QueryMemoryLimitExceeded => "query_memory_limit_exceeded",
+            Self::QueryCancelledByReaderRetirement => "query_cancelled_by_reader_retirement",
             Self::InvalidNodeId => "invalid_node_id",
             Self::NodeNotFound => "node_not_found",
             Self::EdgeNotFound => "edge_not_found",
@@ -335,6 +402,9 @@ impl QueryErrorCode {
                 "migration_stepping_requires_disabled_mode"
             }
             Self::ActiveTextMutationLimitExceeded => "active_text_mutation_limit_exceeded",
+            Self::IndexBackpressure => "index_backpressure",
+            Self::IndexBuildBlocked => "index_build_blocked",
+            Self::IndexOperationBatchTooLarge => "index_operation_batch_too_large",
             Self::InvalidIndexSourceData => "invalid_index_source_data",
             Self::InvalidIndexModel => "invalid_index_model",
             Self::InvalidSecondaryIndexValue => "invalid_secondary_index_value",
@@ -420,12 +490,33 @@ mod tests {
             assert!(strings.insert(code.as_str()), "duplicate code {code}");
             assert_eq!(code.to_string(), code.as_str());
             assert_eq!(code.as_str().parse(), Ok(*code));
-            assert_eq!(sonic_rs::to_string(code).unwrap(), format!("\"{code}\""));
+            assert_eq!(simd_json::to_string(code).unwrap(), format!("\"{code}\""));
             assert_eq!(
-                sonic_rs::from_str::<QueryErrorCode>(&format!("\"{code}\"")).unwrap(),
+                simd_json::from_reader::<_, QueryErrorCode>(format!("\"{code}\"").as_bytes())
+                    .unwrap(),
                 *code
             );
         }
+    }
+
+    #[test]
+    fn database_input_classification_is_a_closed_subset_of_the_catalog() {
+        let classified: Vec<_> = QueryErrorCode::ALL
+            .iter()
+            .copied()
+            .filter(|code| code.is_invalid_database_input())
+            .collect();
+        assert_eq!(
+            classified,
+            vec![
+                QueryErrorCode::ActiveTextMutationLimitExceeded,
+                QueryErrorCode::IndexOperationBatchTooLarge,
+                QueryErrorCode::InvalidVectorDimension,
+                QueryErrorCode::InvalidVectorComponent,
+                QueryErrorCode::VectorComponentMagnitudeExceeded,
+                QueryErrorCode::ZeroNormCosineVector,
+            ]
+        );
     }
 
     #[test]

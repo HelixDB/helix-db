@@ -1,4 +1,4 @@
-//! Residual-free edge access source contract.
+//! Edge access source contract: any edge access except `ScanThenFilter`.
 
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -7,7 +7,7 @@ use crate::ir;
 
 use super::{analysis, EdgeAccessPlan};
 
-/// Residual-free edge candidate source.
+/// Edge candidate source that is not a `ScanThenFilter`.
 ///
 /// This is the edge-access counterpart to [`crate::ir::NodeAccessSourcePlan`].
 ///
@@ -32,7 +32,7 @@ pub struct EdgeAccessSourcePlan {
 }
 
 impl EdgeAccessSourcePlan {
-    /// Build a source plan, rejecting residual filter wrappers.
+    /// Build a source plan, rejecting `ScanThenFilter` wrappers.
     pub fn new(plan: EdgeAccessPlan) -> Option<Self> {
         match plan {
             EdgeAccessPlan::ScanThenFilter { .. } => None,
@@ -80,6 +80,7 @@ impl EdgeAccessSourcePlan {
     ///     label: label.clone(),
     /// }).unwrap();
     /// let right = EdgeAccessSourcePlan::new(EdgeAccessPlan::RangeIndex {
+    ///     iteration: helix_planner::ir::RangeScanIteration::Forward,
     ///     index: EdgeRangeIndexMeta::try_new("likes_weight").unwrap(),
     ///     key: ScopedPropertyDirectionKey::try_new(
     ///         "LIKES",

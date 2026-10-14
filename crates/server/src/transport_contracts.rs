@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request as HttpRequest, StatusCode};
+use axum::routing::post;
 use db::encoding::keys::scope::{DataScope, TenantId};
 use db::encoding::property::Property as DbProperty;
 use db::execution::interpreter::{
@@ -97,8 +100,8 @@ struct HttpAdapter {
 impl QueryCorpusAdapter for HttpAdapter {
     async fn execute_query(&mut self, request: QueryRequest) -> TestkitResult<serde_json::Value> {
         let is_write = request.request_type() == QueryRequestType::Write;
-        let body =
-            sonic_rs::to_vec(&request).map_err(|error| TestkitError::Adapter(error.to_string()))?;
+        let body = simd_json::to_vec(&request)
+            .map_err(|error| TestkitError::Adapter(error.to_string()))?;
         let request = HttpRequest::post("/v2/query")
             .header("content-type", "application/json")
             .header("x-helix-await-durable", is_write.to_string())
@@ -183,8 +186,8 @@ impl GrpcAdapter {
 impl QueryCorpusAdapter for GrpcAdapter {
     async fn execute_query(&mut self, request: QueryRequest) -> TestkitResult<serde_json::Value> {
         let is_write = request.request_type() == QueryRequestType::Write;
-        let body =
-            sonic_rs::to_vec(&request).map_err(|error| TestkitError::Adapter(error.to_string()))?;
+        let body = simd_json::to_vec(&request)
+            .map_err(|error| TestkitError::Adapter(error.to_string()))?;
         let response = self
             .raw_query(QueryJsonRequest {
                 body: body.into(),
@@ -388,6 +391,176 @@ fn vector_input_errors_are_client_failures_but_physical_errors_are_internal() {
     }
 }
 
+#[tokio::test]
+async fn active_text_limits_preserve_the_shared_code_message_and_input_classification() {
+    use db::error::{ActiveTextMutationResource, HelixDbError};
+    for resource in [
+        ActiveTextMutationResource::Entities,
+        ActiveTextMutationResource::AnalysisBytes,
+        ActiveTextMutationResource::InputBytes,
+        ActiveTextMutationResource::OutputOperations,
+        ActiveTextMutationResource::OutputBytes,
+        ActiveTextMutationResource::SplitBytes,
+        ActiveTextMutationResource::RetainedSplitBytes,
+        ActiveTextMutationResource::ManifestPageBytes,
+    ] {
+        let error = || {
+            QueryServiceError::Db(HelixDbError::ActiveTextMutationLimitExceeded {
+                resource,
+                observed: 513,
+                limit: 512,
+            })
+        };
+        let code = helix_ast::error_code::QueryErrorCode::ActiveTextMutationLimitExceeded.as_str();
+        let message = format!("db error: Active text mutation exceeds {resource}: observed 513, limit 512. This is a hard per-document limit; shorten the indexed text.");
+        let response = http::service_error_response(error());
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!response.headers().contains_key("retry-after"));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"error": code, "msg": message})
+        );
+        let status = grpc::status_from_service_error(error());
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.metadata().get("helix-error-code").unwrap(), code);
+        assert_eq!(status.message(), message);
+    }
+}
+
+#[test]
+fn query_service_control_errors_preserve_public_classification() {
+    let deadline = QueryServiceError::Db(db::error::HelixDbError::QueryDeadlineExceeded);
+    assert!(deadline.is_deadline_exceeded());
+    assert!(!deadline.is_cancelled_by_reader_retirement());
+    assert_eq!(
+        deadline.error_code(),
+        helix_ast::error_code::QueryErrorCode::QueryDeadlineExceeded
+    );
+    assert_eq!(deadline.index_error_code(), None);
+    let deadline: db::error::HelixDbError = deadline.into();
+    assert!(matches!(
+        deadline,
+        db::error::HelixDbError::QueryDeadlineExceeded
+    ));
+
+    let cancelled =
+        QueryServiceError::Db(db::error::HelixDbError::QueryCancelledByReaderRetirement);
+    assert!(cancelled.is_cancelled_by_reader_retirement());
+    assert!(!cancelled.is_deadline_exceeded());
+    assert_eq!(
+        cancelled.error_code(),
+        helix_ast::error_code::QueryErrorCode::QueryCancelledByReaderRetirement
+    );
+
+    let conflict = QueryServiceError::Db(db::error::HelixDbError::TransactionConflict(
+        "retry the transaction".to_string(),
+    ));
+    assert!(conflict.is_transaction_conflict());
+    assert_eq!(
+        conflict.error_code(),
+        helix_ast::error_code::QueryErrorCode::TransactionConflict
+    );
+
+    let invalid = QueryServiceError::InvalidRequest("missing query".to_string());
+    assert_eq!(
+        invalid.error_code(),
+        helix_ast::error_code::QueryErrorCode::InvalidRequest
+    );
+    assert_eq!(invalid.index_error_code(), None);
+    let invalid: db::error::HelixDbError = invalid.into();
+    assert!(matches!(invalid, db::error::HelixDbError::Query(_)));
+}
+
+#[tokio::test]
+async fn fenced_commit_outcome_crosses_http_once_and_is_terminal_to_the_rust_sdk() {
+    let object_store = Arc::new(slatedb::object_store::memory::InMemory::new());
+    let old_writer = slatedb::Db::builder("server-real-fenced-write-outcome", object_store.clone())
+        .with_writer_epoch(NonZeroU64::new(20).unwrap())
+        .build()
+        .await
+        .expect("epoch 20 writer opens");
+    let old_transaction = old_writer
+        .begin(slatedb::IsolationLevel::Snapshot)
+        .await
+        .expect("old transaction begins before fencing");
+    old_transaction
+        .put(b"business-id", b"exactly-once")
+        .expect("old transaction stages a write");
+    let new_writer = slatedb::Db::builder("server-real-fenced-write-outcome", object_store)
+        .with_writer_epoch(NonZeroU64::new(21).unwrap())
+        .build()
+        .await
+        .expect("epoch 21 writer fences epoch 20");
+    let storage_error = old_transaction
+        .commit()
+        .await
+        .expect_err("the old transaction cannot commit after fencing");
+    assert_eq!(
+        storage_error.kind(),
+        slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)
+    );
+    let terminal_error = db::error::HelixDbError::from_storage_commit(storage_error);
+    assert!(matches!(
+        terminal_error,
+        db::error::HelixDbError::WriterFencedCommitOutcomeUnknown
+    ));
+    new_writer.close().await.expect("new writer closes cleanly");
+
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let handler_count = Arc::clone(&request_count);
+    let terminal_error = Arc::new(std::sync::Mutex::new(Some(terminal_error)));
+    let handler_error = Arc::clone(&terminal_error);
+    let router = axum::Router::new().route(
+        "/v2/query",
+        post(move || {
+            let handler_count = Arc::clone(&handler_count);
+            let handler_error = Arc::clone(&handler_error);
+            async move {
+                handler_count.fetch_add(1, Ordering::SeqCst);
+                let error = handler_error
+                    .lock()
+                    .expect("terminal error lock is not poisoned")
+                    .take()
+                    .expect("the Rust SDK sends exactly one request");
+                http::service_error_response(QueryServiceError::Db(error))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+    });
+
+    let client = helix_db::Client::new(Some(&format!("http://{address}"))).unwrap();
+    let error = client
+        .query::<serde_json::Value>(QueryRequest::write(batch::write_batch()))
+        .send()
+        .await
+        .expect_err("fenced commit outcome must be terminal");
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(error.status_code(), Some(503));
+    assert_eq!(
+        error.remote_code(),
+        Some("writer_fenced_commit_outcome_unknown")
+    );
+    assert_eq!(error.retryable(), Some(false));
+    assert!(!error.is_conflict());
+    assert!(!error.is_retryable());
+
+    shutdown_tx.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn embedded_service_http_and_grpc_match_the_shared_model_corpus() {
     let expected = expected_transport_observations();
@@ -455,26 +628,305 @@ async fn query_service_scoped_entry_points_execute_the_same_tenant_read() {
 }
 
 #[tokio::test]
+async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
+    use db::error::HelixDbError;
+    use db::query_service::QueryFailureClass;
+    use helix_planner::error::PlannerError;
+
+    struct Case {
+        class: QueryFailureClass,
+        error: fn() -> QueryServiceError,
+        http_status: StatusCode,
+        retryable: Option<bool>,
+        grpc_code: tonic::Code,
+        code: &'static str,
+    }
+
+    let cases = [
+        Case {
+            class: QueryFailureClass::CommitOutcomeUnknown,
+            error: || QueryServiceError::Db(HelixDbError::WriterFencedCommitOutcomeUnknown),
+            http_status: StatusCode::SERVICE_UNAVAILABLE,
+            retryable: Some(false),
+            grpc_code: tonic::Code::Unavailable,
+            code: "writer_fenced_commit_outcome_unknown",
+        },
+        Case {
+            class: QueryFailureClass::Conflict,
+            error: || QueryServiceError::Db(HelixDbError::TransactionConflict("retry".to_string())),
+            http_status: StatusCode::CONFLICT,
+            retryable: None,
+            grpc_code: tonic::Code::Aborted,
+            code: "transaction_conflict",
+        },
+        Case {
+            class: QueryFailureClass::Backpressure,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexBackpressure {
+                    scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    resource: db::error::IndexBackpressureResource::PendingMembers,
+                    requested: 250_001,
+                    limit: 250_000,
+                })
+            },
+            http_status: StatusCode::TOO_MANY_REQUESTS,
+            retryable: Some(true),
+            grpc_code: tonic::Code::ResourceExhausted,
+            code: "index_backpressure",
+        },
+        // A strong search, in a read request too, is rejected the same way.
+        Case {
+            class: QueryFailureClass::Backpressure,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexBackpressure {
+                    scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    resource: db::error::IndexBackpressureResource::SuppressedSearchResults,
+                    requested: 810,
+                    limit: 800,
+                })
+            },
+            http_status: StatusCode::TOO_MANY_REQUESTS,
+            retryable: Some(true),
+            grpc_code: tonic::Code::ResourceExhausted,
+            code: "index_backpressure",
+        },
+        Case {
+            class: QueryFailureClass::InvalidRequest,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexOperationBatchTooLarge {
+                    index_id: 4,
+                    resource: db::error::IndexOperationBatchResource::OperandBytes,
+                    observed: 9 * 1024 * 1024,
+                    limit: 8 * 1024 * 1024,
+                })
+            },
+            http_status: StatusCode::BAD_REQUEST,
+            retryable: None,
+            grpc_code: tonic::Code::InvalidArgument,
+            code: "index_operation_batch_too_large",
+        },
+        // Waiting cannot clear a blocked build's saturation, so it is not
+        // retryable backpressure.
+        Case {
+            class: QueryFailureClass::Execution,
+            error: || {
+                QueryServiceError::Db(HelixDbError::IndexBuildBlocked {
+                    scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
+                    index_id: 4,
+                    operation_id: "0b6f4c1e-5d0a-4a43-9e57-3f2d1c0b9a87".to_string(),
+                    resource: db::error::IndexBackpressureResource::PendingMembers,
+                    requested: 250_001,
+                    limit: 250_000,
+                })
+            },
+            http_status: StatusCode::INTERNAL_SERVER_ERROR,
+            retryable: None,
+            grpc_code: tonic::Code::Internal,
+            code: "index_build_blocked",
+        },
+        Case {
+            class: QueryFailureClass::InvalidRequest,
+            error: || QueryServiceError::InvalidRequest("bad request".to_string()),
+            http_status: StatusCode::BAD_REQUEST,
+            retryable: None,
+            grpc_code: tonic::Code::InvalidArgument,
+            code: "invalid_request",
+        },
+        Case {
+            class: QueryFailureClass::Planning,
+            error: || QueryServiceError::Planner(PlannerError::UnsupportedEdgeAllTarget),
+            http_status: StatusCode::BAD_REQUEST,
+            retryable: None,
+            grpc_code: tonic::Code::InvalidArgument,
+            code: "unsupported_edge_all_target",
+        },
+        Case {
+            class: QueryFailureClass::WriterModeRequired,
+            error: || QueryServiceError::Db(HelixDbError::WriterModeRequired { actual: "reader" }),
+            http_status: StatusCode::SERVICE_UNAVAILABLE,
+            retryable: None,
+            grpc_code: tonic::Code::FailedPrecondition,
+            code: "writer_mode_required",
+        },
+        Case {
+            class: QueryFailureClass::Execution,
+            error: || QueryServiceError::Db(HelixDbError::IndexNotFound("documents".to_string())),
+            http_status: StatusCode::INTERNAL_SERVER_ERROR,
+            retryable: None,
+            grpc_code: tonic::Code::Internal,
+            code: "index_not_found",
+        },
+        Case {
+            class: QueryFailureClass::Internal,
+            error: || {
+                QueryServiceError::Serialize(
+                    simd_json::from_reader::<_, u8>("not-json".as_bytes())
+                        .expect_err("invalid JSON should fail"),
+                )
+            },
+            http_status: StatusCode::INTERNAL_SERVER_ERROR,
+            retryable: None,
+            grpc_code: tonic::Code::Internal,
+            code: "response_serialization_error",
+        },
+    ];
+
+    for Case {
+        class,
+        error,
+        http_status,
+        retryable,
+        grpc_code,
+        code,
+    } in cases
+    {
+        assert_eq!(error().classify(), class);
+        let message = error().to_string();
+
+        let response = http::service_error_response(error());
+        assert_eq!(response.status(), http_status, "{class:?}");
+        let body = to_bytes(response.into_body(), MAX_QUERY_BODY_BYTES)
+            .await
+            .unwrap();
+        let mut expected_body = serde_json::json!({"error": code, "msg": message});
+        if let Some(retryable) = retryable {
+            expected_body["retryable"] = serde_json::Value::Bool(retryable);
+        }
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            expected_body,
+            "{class:?}"
+        );
+
+        let status = grpc::status_from_service_error(error());
+        assert_eq!(status.code(), grpc_code, "{class:?}");
+        assert_eq!(
+            status.metadata().get("helix-error-code").unwrap(),
+            code,
+            "{class:?}"
+        );
+        assert_eq!(status.message(), message, "{class:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_text_index_preserves_the_public_error_code() {
+    use helix_ast::error_code::QueryErrorCode;
+
     let db = fresh_database("transport-query-service-missing-text-index").await;
     let service = HelixQueryService::new(Arc::clone(&db));
-    let request = QueryRequest::read(
-        batch::read_batch()
-            .var_as(
-                "matches",
-                traversal::g().text_search_nodes("Document", "body", "needle", 5, None),
-            )
-            .returning(["matches"]),
+    let request = || {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as(
+                    "matches",
+                    traversal::g().text_search_nodes("Document", "body", "needle", 5, None),
+                )
+                .returning(["matches"]),
+        )
+    };
+
+    let service_error = service.execute_query(request()).await.unwrap_err();
+    assert_eq!(service_error.error_code(), QueryErrorCode::IndexNotFound);
+    assert_eq!(service_error.index_error_code(), Some("index_not_found"));
+    let expected_message = service_error.to_string();
+
+    let embedded_error = db.query(request()).await.unwrap_err();
+    assert!(matches!(
+        embedded_error,
+        db::error::HelixDbError::Planner(_)
+    ));
+    assert_eq!(embedded_error.error_code(), QueryErrorCode::IndexNotFound);
+    assert_eq!(embedded_error.index_error_code(), Some("index_not_found"));
+    assert_eq!(embedded_error.to_string(), expected_message);
+
+    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    let response = router
+        .oneshot(
+            HttpRequest::post("/v2/query")
+                .header("content-type", "application/json")
+                .body(Body::from(simd_json::to_vec(&request()).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), MAX_QUERY_BODY_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({"error": "index_not_found", "msg": expected_message})
     );
 
-    let error = service.execute_query(request).await.unwrap_err();
-    assert_eq!(error.index_error_code(), Some("index_not_found"));
-    let db_error: db::error::HelixDbError = error.into();
-    assert!(matches!(
-        db_error,
-        db::error::HelixDbError::IndexNotFound(_)
-    ));
-    db.close().await.unwrap();
+    let mut grpc = GrpcAdapter::start(db).await;
+    let status = grpc
+        .raw_query(QueryJsonRequest {
+            body: simd_json::to_vec(&request()).unwrap().into(),
+            warm_only: false,
+            require_writer: false,
+            await_durable: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        status.metadata().get("helix-error-code").unwrap(),
+        "index_not_found"
+    );
+    assert_eq!(status.message(), expected_message);
+    grpc.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn grpc_routes_native_and_cypher_rpcs_on_one_service() {
+    let db = fresh_database("transport-cypher-grpc").await;
+    let mut grpc = GrpcAdapter::start(db).await;
+    let cypher = |query: &str| QueryJsonRequest {
+        body: serde_json::json!({ "query": query })
+            .to_string()
+            .into_bytes()
+            .into(),
+        warm_only: false,
+        require_writer: false,
+        await_durable: false,
+    };
+    let body = |response: QueryJsonResponse| {
+        serde_json::from_slice::<serde_json::Value>(&response.body).expect("response body is JSON")
+    };
+
+    let created = grpc
+        .client
+        .execute_cypher(cypher("CREATE (n:Routed) RETURN count(n) AS created"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(body(created)["rows"], serde_json::json!([[1]]));
+    let plan = grpc
+        .client
+        .explain_cypher(cypher("MATCH (n:Routed) RETURN n"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(body(plan)["operators"].is_array());
+    let count = QueryRequest::read(
+        batch::read_batch()
+            .var_as("count", traversal::g().n_with_label("Routed").count())
+            .returning(["count"]),
+    );
+    let native = grpc
+        .raw_query(QueryJsonRequest {
+            body: simd_json::to_vec(&count).unwrap().into(),
+            warm_only: false,
+            require_writer: false,
+            await_durable: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(body(native)["count"], 1);
+    grpc.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -551,6 +1003,27 @@ async fn http_rejects_malformed_oversized_and_incompatible_options() {
         .starts_with("invalid query JSON:"));
     assert_eq!(malformed_json.get("code"), None);
 
+    // A deeply nested value under an unknown key is rejected before parsing
+    // rather than skipped recursively on the handler's stack.
+    let nested = router
+        .clone()
+        .oneshot(
+            HttpRequest::post("/v2/query")
+                .body(Body::from(format!("{{\"x\":{}", "[".repeat(100_000))))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(nested.status(), StatusCode::BAD_REQUEST);
+    let nested_json: serde_json::Value =
+        serde_json::from_slice(&to_bytes(nested.into_body(), 4_096).await.unwrap())
+            .expect("nesting error is JSON");
+    assert_eq!(nested_json["error"], "invalid_query_json");
+    assert!(nested_json["msg"]
+        .as_str()
+        .expect("error message is a string")
+        .contains("nesting"));
+
     let oversized = router
         .clone()
         .oneshot(
@@ -576,7 +1049,7 @@ async fn http_rejects_malformed_oversized_and_incompatible_options() {
         .oneshot(
             HttpRequest::post("/v2/query")
                 .header("x-helix-warm", "true")
-                .body(Body::from(sonic_rs::to_vec(&write).unwrap()))
+                .body(Body::from(simd_json::to_vec(&write).unwrap()))
                 .unwrap(),
         )
         .await
@@ -617,6 +1090,7 @@ async fn transport_readiness_reports_direct_text_storage_as_ready() {
     assert_eq!(liveness_json["ready"], true);
     assert_eq!(liveness_json["index_runtime"], "ready");
     assert_eq!(liveness_json.get("text_index_runtime"), None);
+    assert_eq!(liveness_json["blocked_index_entity_count"], 0);
 
     let readiness = router
         .clone()
@@ -638,7 +1112,7 @@ async fn transport_readiness_reports_direct_text_storage_as_ready() {
         .oneshot(
             HttpRequest::post("/v2/query")
                 .header("content-type", "application/json")
-                .body(Body::from(sonic_rs::to_vec(&create).unwrap()))
+                .body(Body::from(simd_json::to_vec(&create).unwrap()))
                 .unwrap(),
         )
         .await
@@ -667,6 +1141,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
         let health = client.health(HealthRequest {}).await.unwrap().into_inner();
         assert!(health.ready);
         assert_eq!(health.index_runtime, "ready");
+        assert_eq!(health.blocked_index_entity_count, 0);
     }
 
     let mut expired = tonic::Request::new(QueryJsonRequest {
@@ -730,7 +1205,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
             )
             .returning(["count"]),
     );
-    let body = sonic_rs::to_vec(&count).unwrap();
+    let body = simd_json::to_vec(&count).unwrap();
     let require_writer = read_transport
         .raw_query(QueryJsonRequest {
             body: body.into(),
@@ -753,7 +1228,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
 
     let write_on_reader = read_transport
         .raw_query(QueryJsonRequest {
-            body: sonic_rs::to_vec(&QueryRequest::write(batch::write_batch()))
+            body: simd_json::to_vec(&QueryRequest::write(batch::write_batch()))
                 .unwrap()
                 .into(),
             warm_only: false,
@@ -775,4 +1250,206 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
 
     read_transport.close().await.unwrap();
     writer.close().await.unwrap();
+}
+
+/// `count` space-separated distinct terms tagged `tag`.
+fn distinct_terms(tag: &str, count: usize) -> String {
+    (0..count)
+        .map(|index| format!("{tag}x{index}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Returns the operation ID named anywhere in a DDL receipt.
+fn operation_id(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => object
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| object.values().find_map(operation_id)),
+        serde_json::Value::Array(values) => values.iter().find_map(operation_id),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => None,
+    }
+}
+
+/// Writes `request`, retrying transaction conflicts with the index worker.
+async fn write_retrying(db: &HelixDB, request: impl Fn() -> QueryRequest) -> serde_json::Value {
+    for _ in 0..100 {
+        match db.query(request()).await {
+            Ok(result) => return result,
+            Err(error) if error.is_transaction_conflict() => {}
+            Err(error) => panic!("write failed: {error}"),
+        }
+    }
+    panic!("write kept conflicting")
+}
+
+/// Waits up to a minute for `ready`.
+async fn wait_until(why: &str, mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(why);
+}
+
+/// Health responses over both transports count the entities the index worker
+/// holds back, here a document indexed under doubled limits that no
+/// publication under today's limits can replace with the one queued for it,
+/// without naming any: the health routes are unauthenticated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_counts_the_index_entities_the_worker_holds_back() {
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    let defaults = db::config::SearchIndexBackfillLimits::default();
+    let batch = defaults.batch();
+    let doubled = db::config::SearchIndexBackfillLimits::try_new(
+        db::config::SearchIndexBatchLimits::try_new(
+            batch.max_entities(),
+            batch.max_input_bytes(),
+            NonZeroU64::new(2 * batch.max_output_operations().get()).unwrap(),
+            NonZeroU64::new(2 * batch.max_output_bytes().get()).unwrap(),
+            batch.max_single_vector_output_bytes(),
+        )
+        .unwrap(),
+        defaults.edge_property_read_batch(),
+        defaults.text_artifacts(),
+        defaults.text_compaction(),
+    )
+    .unwrap();
+    let db = HelixDB::open_with_object_store_and_config(
+        "health-blocked",
+        Arc::clone(&store),
+        db::DbConfig::new().with_search_index_backfill_limits(doubled),
+    )
+    .await
+    .unwrap();
+    // The document is published from the queue, not scanned by the build.
+    let receipt = write_retrying(&db, || {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "index",
+                    traversal::g().create_index_if_not_exists(IndexSpec::node_text(
+                        "Doc",
+                        "body",
+                        None::<&str>,
+                    )),
+                )
+                .returning(["index"]),
+        )
+    })
+    .await;
+    let operation = operation_id(&receipt).expect("the index build was accepted");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let status = db
+                .query(QueryRequest::read(
+                    batch::read_batch()
+                        .var_as("status", traversal::g().get_index_operation(&operation))
+                        .returning(["status"]),
+                ))
+                .await
+                .unwrap();
+            match status["status"]["status"].as_str() {
+                Some("succeeded") => break,
+                Some("queued" | "running") => tokio::time::sleep(Duration::from_millis(10)).await,
+                other => panic!("the build did not succeed: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the index activates");
+    let created = write_retrying(&db, || {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(
+                        "Doc",
+                        vec![(
+                            "body",
+                            helix_ast::value::PropertyInput::from(distinct_terms("old", 24_000)),
+                        )],
+                    ),
+                )
+                .returning(["created"]),
+        )
+    })
+    .await;
+    let id = created["created"][0]["$id"].as_u64().unwrap();
+    wait_until("the document publishes under doubled limits", || {
+        db.index_operation_queue_stats().pending_operations == 0
+    })
+    .await;
+    db.close().await.unwrap();
+
+    let db = Arc::new(
+        HelixDB::open_with_object_store_and_config("health-blocked", store, db::DbConfig::new())
+            .await
+            .unwrap(),
+    );
+    write_retrying(&db, || {
+        QueryRequest::write(
+            batch::write_batch().var_as(
+                "updated",
+                traversal::g()
+                    .n(helix_ast::graph::NodeRef::from(id))
+                    .set_property("body", distinct_terms("new", 10_000)),
+            ),
+        )
+    })
+    .await;
+    wait_until("the worker holds the replacement back", || {
+        !db.blocked_index_entities().is_empty()
+    })
+    .await;
+    let blocked = db.blocked_index_entities();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(
+        (blocked[0].kind, blocked[0].id.get()),
+        (db::index_lifecycle::IndexElementKind::Node, id)
+    );
+    assert_eq!(db.blocked_index_entity_count(), 1);
+
+    let response = http::router(ServerState::new(Arc::clone(&db), None))
+        .oneshot(HttpRequest::get("/healthz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let health: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4_096).await.unwrap()).unwrap();
+    assert_eq!(health["blocked_index_entity_count"], 1);
+    assert_eq!(
+        health
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "blocked_index_entity_count",
+            "index_runtime",
+            "mode",
+            "ready"
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>(),
+        "health names no tenant or entity"
+    );
+
+    let mut grpc = GrpcAdapter::start(Arc::clone(&db)).await;
+    let health = grpc
+        .client
+        .health(HealthRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(health.blocked_index_entity_count, 1);
+    grpc.close().await.unwrap();
 }

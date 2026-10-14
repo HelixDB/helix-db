@@ -37,6 +37,7 @@ use crate::index_lifecycle::{
 };
 use crate::{
     DbConfig, HelixDB, HelixDbMode, HelixDbSource, HelixStorage, IndexLifecycleScheduling,
+    WriterOpenMode,
 };
 
 mod contracts;
@@ -155,6 +156,24 @@ pub async fn run_deterministic_lifecycle_mutation_contracts() {
     contracts::run_mutations().await;
 }
 
+/// Runs late-mutation convergence for every supported managed index shape.
+pub async fn run_deterministic_all_index_validation_contracts() {
+    let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;
+    contracts::run_all_index_validation_mutations().await;
+}
+
+/// Runs text builds whose scanned entities change before partition construction.
+pub async fn run_deterministic_text_build_reconciliation_contracts() {
+    let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;
+    contracts::run_text_build_reconciliation().await;
+}
+
+/// Runs public secondary/vector writes at every exact build boundary.
+pub async fn run_secondary_vector_public_boundary_contracts() {
+    let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;
+    contracts::run_secondary_vector_public_boundaries().await;
+}
+
 /// Runs retry-safe concurrent CREATE convergence for every family.
 pub async fn run_deterministic_lifecycle_race_contracts() {
     let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;
@@ -189,6 +208,20 @@ pub fn inject_index_outbox_error_once(name: &str) -> Result<()> {
         )));
     };
     crate::index_lifecycle::failpoints::inject_once(failpoint)
+}
+
+/// Injects one recoverable error that only the named operation can consume.
+pub fn inject_index_outbox_error_once_for_operation(
+    name: &str,
+    operation_id: IndexOperationId,
+) -> Result<()> {
+    let Some(failpoint) = crate::index_lifecycle::failpoints::IndexOutboxFailpoint::parse(name)
+    else {
+        return Err(HelixDbError::Config(format!(
+            "unknown Index V2 outbox failpoint {name}"
+        )));
+    };
+    crate::index_lifecycle::failpoints::inject_for_operation_once(failpoint, operation_id)
 }
 
 /// Reports whether the most recently injected one-shot error fired.
@@ -1544,6 +1577,7 @@ impl HelixDB {
             path,
             object_store,
             config,
+            WriterOpenMode::Embedded,
             scheduling.internal(),
         )
         .await
@@ -1564,6 +1598,7 @@ impl HelixDB {
             database.into(),
             object_store,
             config,
+            WriterOpenMode::Embedded,
             scheduling.internal(),
         )
         .await

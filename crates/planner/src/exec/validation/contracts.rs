@@ -6,6 +6,19 @@ use crate::exec::{ExecCondition, ExecCountDependency, ExecOp, ExecPlanError, Exe
 
 pub(super) fn validate_step_contracts(index: &ValidatedStepIndex<'_>) -> Result<(), ExecPlanError> {
     for step in index.steps() {
+        if let (ExecOp::Access { plan }, crate::properties::DeliveredOrdering::ByKeys(ordering)) =
+            (&step.op, &step.delivered.ordering)
+            && !step
+                .delivered
+                .cardinality
+                .upper()
+                .is_some_and(|upper| upper <= 1)
+            && !crate::exec::executable_range_ordering(plan).satisfies(
+                &crate::properties::RequiredOrdering::ByKeys(ordering.clone()),
+            )
+        {
+            return Err(ExecPlanError::InvalidAccessOrdering { step: step.id });
+        }
         if let ExecOp::Count { plan } = &step.op {
             plan.validate()
                 .map_err(|reason| ExecPlanError::InvalidCountProgram {

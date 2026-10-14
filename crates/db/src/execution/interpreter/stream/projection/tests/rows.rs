@@ -257,6 +257,10 @@ async fn general_projection_mixes_stored_properties_and_expressions() {
             alias: name("omitted"),
         },
         ir::ProjectionItem::Expr {
+            alias: name("explicit_null"),
+            expr: ir::ExprPlan::new(Expr::prop("missing")).expect("valid property expression"),
+        },
+        ir::ProjectionItem::Expr {
             alias: name("constant"),
             expr: ir::ExprPlan::new(Expr::val(42)).expect("valid constant expression"),
         },
@@ -288,8 +292,12 @@ async fn general_projection_mixes_stored_properties_and_expressions() {
                     DbPropertyValue::String("ada".to_string()),
                 ),
                 ("constant".to_string(), DbPropertyValue::I64(42)),
+                ("explicit_null".to_string(), DbPropertyValue::Null),
             ]),
-            BTreeMap::from([("constant".to_string(), DbPropertyValue::I64(42))]),
+            BTreeMap::from([
+                ("constant".to_string(), DbPropertyValue::I64(42)),
+                ("explicit_null".to_string(), DbPropertyValue::Null),
+            ]),
         ]
     );
 }
@@ -448,9 +456,11 @@ async fn inline_and_virtual_projection_fields_do_not_load_stored_properties() {
     assert_projection_reads(&ctx, 0, 0, 0);
 }
 
+/// A projection reads each element's record once per record batch, however
+/// many rows and items of the batch resolve against it, missing or not.
 #[tokio::test]
-async fn missing_property_blobs_are_cached_only_for_the_current_row() {
-    let db = test_support::open_db("projection-missing-blob-row-scope").await;
+async fn missing_property_blobs_are_cached_for_the_record_batch() {
+    let db = test_support::open_db("projection-missing-blob-batch-scope").await;
     let projection = ir::ProjectionPlan::Project(projection_items(vec![
         ir::ProjectionItem::Property {
             source: name("first"),
@@ -461,31 +471,30 @@ async fn missing_property_blobs_are_cached_only_for_the_current_row() {
             alias: name("second"),
         },
     ]));
-    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let batch = crate::execution::interpreter::stream::RECORD_BATCH_ROWS;
+    for (rows, reads) in [(2, 1), (batch, 1), (batch + 1, 2)] {
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let result = ctx
+            .project(
+                ExecutionValue::Stream(vec![
+                    ExecutionRow::current(ElementRef::Node(u64::MAX));
+                    rows
+                ]),
+                &projection,
+            )
+            .await
+            .expect("missing properties remain a valid projection");
 
-    let result = ctx
-        .project(
-            ExecutionValue::Stream(vec![
-                ExecutionRow::current(ElementRef::Node(u64::MAX)),
-                ExecutionRow::current(ElementRef::Node(u64::MAX)),
-            ]),
-            &projection,
-        )
-        .await
-        .expect("missing properties remain a valid projection");
-
-    assert_eq!(
-        result,
-        ExecutionValue::Scalars(vec![
-            ExecutionScalar::Object(BTreeMap::new()),
-            ExecutionScalar::Object(BTreeMap::new()),
-        ])
-    );
-    assert_projection_reads(&ctx, 2, 0, 0);
+        assert_eq!(
+            result,
+            ExecutionValue::Scalars(vec![ExecutionScalar::Object(BTreeMap::new()); rows])
+        );
+        assert_projection_reads(&ctx, reads, 0, 0);
+    }
 }
 
 #[tokio::test]
-async fn missing_edge_endpoints_are_negative_cached_for_the_current_row() {
+async fn missing_edge_endpoints_are_negative_cached_within_a_record_batch() {
     let db = test_support::open_db("projection-missing-endpoint-row-scope").await;
     let projection = ir::ProjectionPlan::Project(projection_items(
         [
@@ -905,6 +914,67 @@ async fn binding_projection_dedup_is_stream_local() {
     );
 }
 
+/// Distinct binding projections use the engine's numeric identity (`total_order`, the
+/// same identity `WHERE`, `ORDER BY` and GROUP BY use), so a property stored as I64
+/// `42` and one stored as F64 `42.0` project to one distinct row.
+#[tokio::test]
+async fn binding_projection_distinct_unifies_numerically_equal_property_values() {
+    let db = test_support::open_db("projection-binding-distinct-numeric-identity").await;
+    let integral = test_support::add_node_with_properties(
+        &db,
+        "Metric",
+        vec![("score", PropertyValue::I64(42))],
+    )
+    .await;
+    let fractional = test_support::add_node_with_properties(
+        &db,
+        "Metric",
+        vec![("score", PropertyValue::F64(42.0))],
+    )
+    .await;
+    let other = test_support::add_node_with_properties(
+        &db,
+        "Metric",
+        vec![("score", PropertyValue::I64(7))],
+    )
+    .await;
+    let binding = name("metric");
+    let bound = |id: u64| {
+        let mut row = ExecutionRow::empty();
+        row.bindings.insert(binding.clone(), ElementRef::Node(id));
+        row
+    };
+    let rows = vec![bound(integral), bound(fractional), bound(other)];
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+    let result = ctx
+        .project(
+            ExecutionValue::Stream(rows),
+            &ir::ProjectionPlan::ProjectBindings {
+                projections: binding_projection_items(vec![ir::BindingProjectionPlan::Property {
+                    target: ir::BindingTargetPlan::Binding(binding),
+                    source: name("score"),
+                    alias: name("score"),
+                }]),
+                dedup: ir::ProjectionDedupMode::Distinct,
+            },
+        )
+        .await
+        .expect("binding projection succeeds");
+
+    let score_row = |value: DbPropertyValue| {
+        ExecutionScalar::Object(BTreeMap::from([("score".to_string(), value)]))
+    };
+    assert_eq!(
+        result,
+        ExecutionValue::Scalars(vec![
+            score_row(DbPropertyValue::I64(42)),
+            score_row(DbPropertyValue::I64(7)),
+        ]),
+        "distinct binding projection must collapse I64(42) and F64(42.0) into one row"
+    );
+}
+
 #[tokio::test]
 async fn edge_properties_projection_includes_system_fields_and_skips_invalid_rows() {
     let db = test_support::open_db("projection-edge-properties-filter").await;
@@ -973,4 +1043,330 @@ async fn project_rejects_folded_stream_inputs() {
         .expect_err("folded stream projection is rejected")
         .to_string()
         .contains("project expected stream input, got folded stream"));
+}
+
+/// A coalesce prefetches only its first bound reference and reads a later
+/// reference on demand when earlier values are null. A row binding none of
+/// its references projects no column, and a corrupt fallback record fails
+/// the projection only once it is reached.
+#[tokio::test]
+async fn coalesce_bindings_read_fallback_records_on_demand() {
+    use crate::encoding::keys;
+    let db = test_support::open_db("projection-coalesce-fallback").await;
+    let named = test_support::add_user(&db, "ada").await;
+    let unnamed = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![("nickname", PropertyValue::from("anon"))],
+    )
+    .await;
+    let corrupt = test_support::add_user(&db, "corrupt").await;
+    db.inner_db()
+        .put(
+            keys::DataKey::Data {
+                scope: keys::scope::DataScope::LegacyUnscoped,
+                kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(corrupt)),
+            }
+            .to_bytes(),
+            bytes::Bytes::from_static(b"corrupt fallback record"),
+        )
+        .await
+        .unwrap();
+    let (first, second) = (name("first"), name("second"));
+    let projection = ir::ProjectionPlan::ProjectBindings {
+        projections: binding_projection_items(vec![ir::BindingProjectionPlan::Coalesce {
+            refs: binding_refs(vec![
+                ir::BindingValueRefPlan {
+                    target: ir::BindingTargetPlan::Binding(first.clone()),
+                    source: name("name"),
+                },
+                ir::BindingValueRefPlan {
+                    target: ir::BindingTargetPlan::Binding(second.clone()),
+                    source: name("name"),
+                },
+            ]),
+            alias: name("display"),
+        }]),
+        dedup: ir::ProjectionDedupMode::All,
+    };
+    let mut named_first = ExecutionRow::empty();
+    named_first
+        .bindings
+        .insert(first.clone(), ElementRef::Node(named));
+    named_first
+        .bindings
+        .insert(second.clone(), ElementRef::Node(corrupt));
+    let mut unnamed_first = ExecutionRow::empty();
+    unnamed_first
+        .bindings
+        .insert(first, ElementRef::Node(unnamed));
+    unnamed_first
+        .bindings
+        .insert(second, ElementRef::Node(corrupt));
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+
+    let ExecutionValue::Scalars(scalars) = ctx
+        .project(
+            ExecutionValue::Stream(vec![named_first, ExecutionRow::empty()]),
+            &projection,
+        )
+        .await
+        .expect("the corrupt fallback is never reached")
+    else {
+        panic!("binding projection emits scalars");
+    };
+    assert_eq!(
+        scalars.into_iter().map(object).collect::<Vec<_>>(),
+        vec![
+            BTreeMap::from([(
+                "display".to_string(),
+                DbPropertyValue::String("ada".to_string()),
+            )]),
+            BTreeMap::new(),
+        ]
+    );
+    assert!(ctx
+        .project(ExecutionValue::Stream(vec![unnamed_first]), &projection)
+        .await
+        .is_err());
+    db.close().await.unwrap();
+}
+
+/// Property projections over many rows load each record batch with one
+/// multi-get and no per-row reads, keep row order and each row's own virtual
+/// values, and read nothing for row-local items.
+#[tokio::test]
+async fn projections_prefetch_each_record_batch_with_one_multi_get() {
+    let db = test_support::open_db("projection-batch-prefetch").await;
+    let batch = crate::execution::interpreter::stream::RECORD_BATCH_ROWS;
+    let mut users = Vec::new();
+    for index in 0..batch + 20 {
+        users.push(test_support::add_user(&db, &format!("user-{index}")).await);
+    }
+    // Newest first, each user twice, plus a missing node.
+    let distance = name("$distance");
+    let rows = users
+        .iter()
+        .rev()
+        .flat_map(|id| [*id, *id])
+        .chain([u64::MAX])
+        .enumerate()
+        .map(|(rank, id)| {
+            ExecutionRow::current_with_virtual_properties(
+                ElementRef::Node(id),
+                RowVirtualProperties::from_one(distance.clone(), DbPropertyValue::F64(rank as f64)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let username = |id: u64| {
+        users
+            .iter()
+            .position(|user| *user == id)
+            .map(|index| DbPropertyValue::from(format!("user-{index}")))
+    };
+
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let projected = ctx
+        .project(
+            ExecutionValue::Stream(rows.clone()),
+            &ir::ProjectionPlan::Project(projection_items(vec![
+                ir::ProjectionItem::Property {
+                    source: name("$id"),
+                    alias: name("id"),
+                },
+                ir::ProjectionItem::Property {
+                    source: name("name"),
+                    alias: name("name"),
+                },
+                ir::ProjectionItem::Property {
+                    source: distance.clone(),
+                    alias: name("distance"),
+                },
+            ])),
+        )
+        .await
+        .unwrap();
+    let expected = rows
+        .iter()
+        .enumerate()
+        .map(|(rank, row)| {
+            let Some(ElementRef::Node(id)) = row.current else {
+                unreachable!("every row is a node row");
+            };
+            let mut object = BTreeMap::from([
+                (
+                    "id".to_string(),
+                    DbPropertyValue::I64(id.try_into().unwrap_or(i64::MAX)),
+                ),
+                ("distance".to_string(), DbPropertyValue::F64(rank as f64)),
+            ]);
+            if let Some(name) = username(id) {
+                object.insert("name".to_string(), name);
+            }
+            ExecutionScalar::Object(object)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(projected, ExecutionValue::Scalars(expected));
+    let work = ctx.pull_work.snapshot();
+    assert_eq!(work.raw_gets, 0, "no per-row record reads");
+    // One read per distinct element per batch; a user's two rows may straddle
+    // the batch boundary.
+    assert!((users.len() + 1..=users.len() + 2).contains(&work.multi_get_keys));
+
+    // Values drops rows with no value; a selected value map keeps them.
+    let names = |row: &ExecutionRow| {
+        let Some(ElementRef::Node(id)) = row.current else {
+            unreachable!("every row is a node row");
+        };
+        username(id).map(|name| BTreeMap::from([("name".to_string(), name)]))
+    };
+    for (plan, keeps_empty) in [
+        (
+            ir::ProjectionPlan::Values(property_names(vec!["name"])),
+            false,
+        ),
+        (
+            ir::ProjectionPlan::ValueMap(ir::PropertySelection::Selected(property_names(vec![
+                "name",
+            ]))),
+            true,
+        ),
+    ] {
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let expected = rows
+            .iter()
+            .filter_map(|row| match (names(row), keeps_empty) {
+                (Some(object), _) => Some(ExecutionScalar::Object(object)),
+                (None, true) => Some(ExecutionScalar::Object(BTreeMap::new())),
+                (None, false) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ctx.project(ExecutionValue::Stream(rows.clone()), &plan)
+                .await
+                .unwrap(),
+            ExecutionValue::Scalars(expected),
+            "{plan:?}"
+        );
+        let work = ctx.pull_work.snapshot();
+        assert_eq!(work.raw_gets, 0, "{plan:?}");
+        assert!(
+            (users.len() + 1..=users.len() + 2).contains(&work.multi_get_keys),
+            "{plan:?}"
+        );
+    }
+
+    let before = ctx.pull_work.snapshot();
+    ctx.project(
+        ExecutionValue::Stream(rows),
+        &ir::ProjectionPlan::Project(projection_items(vec![
+            ir::ProjectionItem::Property {
+                source: name("$id"),
+                alias: name("id"),
+            },
+            ir::ProjectionItem::Property {
+                source: distance,
+                alias: name("distance"),
+            },
+        ])),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ctx.pull_work.snapshot(),
+        before,
+        "row-local items read no record"
+    );
+}
+
+/// `record_read` names exactly the current-element record per-row
+/// resolution reads: none for `$id`, a virtual value the row carries, or an
+/// edge's endpoint paths, and the current element for anything else.
+#[tokio::test]
+async fn record_read_matches_the_current_record_row_property_reads() {
+    let db = test_support::open_db("projection-record-read").await;
+    let ada = test_support::add_user(&db, "ada").await;
+    let bob = test_support::add_user(&db, "bob").await;
+    let edge = test_support::add_edge(&db, ada, bob, "KNOWS").await;
+    let distance = name("$distance");
+    let scored = ExecutionRow::current_with_virtual_properties(
+        ElementRef::Node(ada),
+        RowVirtualProperties::from_one(distance.clone(), DbPropertyValue::F64(0.5)),
+    );
+    let node = ExecutionRow::current(ElementRef::Node(ada));
+    let edge_row = ExecutionRow::current(ElementRef::Edge(edge));
+    let empty = ExecutionRow::empty();
+    for (row, property, reads_current) in [
+        (&node, "$id", false),
+        (&node, "name", true),
+        (&node, "missing", true),
+        (&node, "$distance", true),
+        (&scored, "$distance", false),
+        (&scored, "name", true),
+        (&edge_row, "$from", false),
+        (&edge_row, "$to", false),
+        (&edge_row, "$from.name", false),
+        (&edge_row, "$to.$id", false),
+        (&edge_row, "since", true),
+        (&empty, "name", false),
+    ] {
+        let property = name(property);
+        assert_eq!(
+            eval::record_read(
+                row.current.as_ref(),
+                Some(&row.virtual_properties),
+                &property
+            ),
+            reads_current.then_some(row.current.as_ref()).flatten(),
+            "{property:?}"
+        );
+        // Per-row resolution reads a record only where the classifier says,
+        // apart from endpoint paths, which read the endpoint's record.
+        let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        ctx.row_property(row, &property).await.unwrap();
+        let endpoint_record = property.as_ref().starts_with("$from.name");
+        assert_eq!(
+            ctx.projection_read_snapshot().property_gets,
+            usize::from(reads_current || endpoint_record),
+            "{property:?}"
+        );
+    }
+}
+
+/// Batched projections check the deadline before their prefetch and again for
+/// every row, so an expired deadline fails them at the first check whether
+/// that is the prefetch or a later row.
+#[tokio::test]
+async fn batched_projections_respect_the_deadline() {
+    let db = test_support::open_db("projection-batch-deadline").await;
+    let ada = test_support::add_user(&db, "ada").await;
+    let bob = test_support::add_user(&db, "bob").await;
+    let rows = vec![
+        ExecutionRow::current(ElementRef::Node(ada)),
+        ExecutionRow::current(ElementRef::Node(bob)),
+    ];
+    let plans = [
+        ir::ProjectionPlan::Values(property_names(vec!["name"])),
+        ir::ProjectionPlan::ValueMap(ir::PropertySelection::Selected(property_names(vec![
+            "name",
+        ]))),
+        ir::ProjectionPlan::Project(projection_items(vec![ir::ProjectionItem::Property {
+            source: name("name"),
+            alias: name("name"),
+        }])),
+    ];
+    for plan in &plans {
+        for successful_checks in [0, 1, 2, 3] {
+            let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+            ctx.fail_deadline_after(successful_checks);
+            assert!(
+                matches!(
+                    ctx.project(ExecutionValue::Stream(rows.clone()), plan)
+                        .await,
+                    Err(crate::error::HelixDbError::QueryDeadlineExceeded)
+                ),
+                "{plan:?} after {successful_checks} checks"
+            );
+        }
+    }
 }

@@ -566,7 +566,10 @@ fn flush_events(
     let _ = spool::prune(root);
     let _ = delivery_tx.try_send(());
     if contains_install && !config.install_event_sent {
-        let mut updated = config.clone();
+        // A CLI command can change metrics preferences while this worker still
+        // holds the startup snapshot. Reload before setting the install marker
+        // so shutdown cannot restore stale privacy settings.
+        let mut updated = config::load_metrics_config_from(root).unwrap_or_else(|_| config.clone());
         updated.install_event_sent = true;
         if config::save_metrics_config_to(root, &updated).is_ok() {
             *config = updated;
@@ -848,6 +851,37 @@ mod tests {
                 .expect("saved config")
                 .install_event_sent
         );
+    }
+
+    #[test]
+    fn install_marker_preserves_preferences_changed_after_worker_start() {
+        let root = tempfile::tempdir().expect("root");
+        let mut worker_config = MetricsConfig::default();
+        config::save_metrics_config_to(root.path(), &worker_config).expect("startup config");
+        let updated = MetricsConfig {
+            level: MetricsLevel::Full,
+            email: Some("user@example.com".to_owned()),
+            ..worker_config.clone()
+        };
+        config::save_metrics_config_to(root.path(), &updated).expect("updated preferences");
+        let client = telemetry_client(&worker_config).expect("client");
+        let (delivery_tx, _delivery_rx) = flume::bounded(1);
+        let mut events = vec![queued(Event::CliInstall)];
+
+        flush_events(
+            root.path(),
+            &client,
+            &mut worker_config,
+            &delivery_tx,
+            &mut events,
+        )
+        .expect("flush install event");
+
+        let saved = config::load_metrics_config_from(root.path()).expect("saved config");
+        assert_eq!(saved.level, MetricsLevel::Full);
+        assert_eq!(saved.email.as_deref(), Some("user@example.com"));
+        assert!(saved.install_event_sent);
+        assert_eq!(worker_config, saved);
     }
 
     #[test]

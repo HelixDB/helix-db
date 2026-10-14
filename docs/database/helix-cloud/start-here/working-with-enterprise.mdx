@@ -1,7 +1,7 @@
 ---
 title: "Connect to Helix Cloud"
-description: "Send dynamic requests through a managed gateway"
-sidebarTitle: "Overview"
+description: "Connect an SDK or HTTP client to a Helix Cloud database and control request routing"
+sidebarTitle: "Connect an application"
 pageType: "Guide"
 ---
 
@@ -9,13 +9,14 @@ pageType: "Guide"
 
 Helix Cloud runs a dedicated writer and horizontally scalable readers behind a routing
 gateway. Applications send the same dynamic operation-tree request used in local and
-embedded modes.
+embedded modes, or a Cypher statement to `POST /v2/cypher`, which the gateway routes
+by whether the statement writes.
 
 ## Request flow
 
 ```text
 application
-   │ POST /v2/query
+   │ POST /v2/query or POST /v2/cypher
    ▼
 gateway
    ├── read request ──► reader
@@ -62,8 +63,18 @@ client = Client.managed(
 
 </CodeGroup>
 
-Each client sends the database ID in the canonical `x-helix-database-id` header and the
-same operation-tree request body:
+These SDK examples target a database-specific cluster-mode gateway URL. Such an
+endpoint authenticates the API key but rejects `X-Helix-Database-Id` and
+`X-Helix-Tenant-Id`. A GA shared gateway instead requires
+`X-Helix-Database-Id`.
+
+`Client.managed` (TypeScript), `Client::managed` (Rust), `Client.managed` and
+`AsyncClient.managed` (Python), and `NewManagedClient` (Go) require a non-blank
+database ID and send it in the canonical `x-helix-database-id` header.
+`withDatabaseId`, `with_database_id`, and `WithDatabaseID` set the same header
+on an existing client.
+
+Each client sends the same operation-tree request body:
 
 ```json JSON
 {

@@ -1926,7 +1926,9 @@ async fn run_row_contracts() {
         sources_by_layer: BTreeMap::new(),
         locator_keys: Vec::new(),
     };
-    assert!(writes.delete_reverse_sources(&foreign_reverse).is_err());
+    assert!(writes
+        .delete_reverse_sources(&foreign_reverse, |_, _| false)
+        .is_err());
     let foreign_cleanup = VectorCleanupRow {
         keyspace: foreign.clone(),
         physical_key: foreign.key(VectorKey::IndexMetadata(VectorIndexMetadataKey::new(
@@ -1935,7 +1937,13 @@ async fn run_row_contracts() {
         input_bytes: 1,
     };
     assert!(writes.delete_cleanup_row(&foreign_cleanup).is_err());
-    writes.delete_reverse_sources(&reverse).unwrap();
+    // An owned locator outlives the cleanup; the rest go.
+    writes
+        .delete_reverse_sources(&reverse, |layer, source| (layer, source) == (2, 1))
+        .unwrap();
+    let remaining = writes.reverse_sources_for_target(9).await.unwrap();
+    assert_eq!(remaining.sources_at(2), &[1]);
+    assert!(remaining.sources_at(1).is_empty());
     writes.delete_entry_candidate_sorted(2, 1).unwrap();
     writes.delete_entry_candidate_node(1).unwrap();
     writes.delete_entry_candidate_node(2).unwrap();
@@ -2097,6 +2105,58 @@ async fn run_read_fault_contracts() {
 }
 
 /// Exercises scoped keys, typed row codecs, opaque tokens, and lane cleanup.
+/// Proves the concurrent batch policy returns the same rows, in caller order,
+/// as one `multi_get` when a batch spans more runs than run at once.
+async fn run_batch_read_contracts() {
+    let db = Db::open("production-vector-batch-reads", Arc::new(InMemory::new()))
+        .await
+        .unwrap();
+    let keyspace = VectorRowKeyspace::new(
+        "production-vector-batch-reads".into(),
+        DataScope::LegacyUnscoped,
+    );
+    // Long enough for 33 runs of 32 keys, more than the 16 in flight.
+    let batch_len = 1_029;
+    let present = |node_id: NodeId| !node_id.is_multiple_of(3);
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    (1..=batch_len as NodeId)
+        .filter(|node_id| present(*node_id))
+        .for_each(|node_id| {
+            transaction
+                .put(
+                    keyspace.key(VectorKey::SimHash(VectorSimHashKey::new(
+                        keyspace.index_id(),
+                        node_id,
+                    ))),
+                    encode_simhash(node_id),
+                )
+                .unwrap();
+        });
+    transaction.commit().await.unwrap();
+
+    // Descending order is the opposite of physical key order.
+    let node_ids = (1..=batch_len as NodeId).rev().collect::<Vec<_>>();
+    let expected = node_ids
+        .iter()
+        .map(|node_id| match present(*node_id) {
+            true => SimHashRow::Present(SimHash::from_bits(*node_id)),
+            false => SimHashRow::Missing,
+        })
+        .collect::<Vec<_>>();
+    for batch_reads in [
+        crate::batch_reads::BatchReads::Single,
+        crate::batch_reads::BatchReads::Concurrent,
+    ] {
+        let keyspace = keyspace.clone().with_batch_reads(batch_reads);
+        let rows = VectorRows::new(&db, &keyspace)
+            .simhash_rows(&node_ids)
+            .await
+            .unwrap();
+        assert_eq!(rows, expected, "{batch_reads:?}");
+    }
+    db.close().await.unwrap();
+}
+
 pub(crate) async fn run() {
     run_legacy_validation_codec_contracts();
     run_legacy_migration_read_contracts().await;
@@ -2106,6 +2166,7 @@ pub(crate) async fn run() {
     run_legacy_validation_entry_point_contracts().await;
     run_keyspace_contracts();
     run_row_contracts().await;
+    run_batch_read_contracts().await;
     run_corruption_contracts().await;
     run_read_fault_contracts().await;
 }

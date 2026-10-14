@@ -1,8 +1,12 @@
 //! SlateDB merge operator for Helix-owned keyspaces.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
 use bytes::Bytes;
 use roaring::RoaringTreemap;
-use slatedb::{MergeOperator, MergeOperatorError};
+use serde::Serialize;
+use slatedb::{MergeOperator, MergeOperatorError, MergeResult};
 
 use crate::encoding::keys::scope::DataScope;
 use crate::encoding::v2::keys::indexes::vector::{
@@ -10,8 +14,9 @@ use crate::encoding::v2::keys::indexes::vector::{
 };
 use crate::encoding::v2::keys::{DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{ManagedIndexKey as V2Key, ScopedKey as V2ScopedKey};
-use crate::encoding::v2::values::SecondaryEqualityBitmapValue;
+use crate::encoding::v2::values::indexes::operation_queue;
 use crate::encoding::v2::values::{adjacency as edges, indexes::vector as vectors};
+use crate::encoding::v2::values::{BitmapMembershipDelta, SecondaryEqualityBitmapValue};
 use crate::encoding::NodeId;
 
 const EDGE_DELTA_MIN_LEN: usize = core::mem::size_of::<u8>();
@@ -34,6 +39,7 @@ const BITMAP_DELTA_LEN: usize =
     BITMAP_DELTA_MAGIC.len() + BITMAP_DELTA_OP_LEN + BITMAP_DELTA_ID_LEN;
 const BITMAP_ADD: u8 = 0x00;
 
+#[cfg(any(test, feature = "fuzzing"))]
 pub(crate) fn encode_bitmap_add(id: u64) -> Bytes {
     let mut bytes = Vec::with_capacity(BITMAP_DELTA_LEN);
     bytes.extend_from_slice(BITMAP_DELTA_MAGIC);
@@ -61,14 +67,19 @@ fn decode_bitmap_add(bytes: &[u8]) -> Option<u64> {
 struct BitmapMergeOperator;
 
 impl BitmapMergeOperator {
-    fn apply(bitmap: &mut RoaringTreemap, bytes: &[u8]) -> Result<(), MergeOperatorError> {
+    fn decode_operand(bytes: &[u8]) -> Result<BitmapMembershipDelta, MergeOperatorError> {
         if let Some(id) = decode_bitmap_add(bytes) {
-            bitmap.insert(id);
-            return Ok(());
+            let mut delta = BitmapMembershipDelta::default();
+            delta.add(id);
+            return Ok(delta);
+        }
+        if let Some(delta) =
+            BitmapMembershipDelta::decode_if_delta(bytes).map_err(merge_decode_error)?
+        {
+            return Ok(delta);
         }
         let decoded = SecondaryEqualityBitmapValue::decode(bytes).map_err(merge_decode_error)?;
-        *bitmap |= decoded.ids();
-        Ok(())
+        Ok(BitmapMembershipDelta::from_additions(decoded.into_ids()))
     }
 
     fn encode(bitmap: &RoaringTreemap) -> Result<Bytes, MergeOperatorError> {
@@ -87,15 +98,20 @@ impl MergeOperator for BitmapMergeOperator {
         existing_value: Option<Bytes>,
         operand: Bytes,
     ) -> Result<Bytes, MergeOperatorError> {
-        let mut bitmap = RoaringTreemap::new();
-        if let Some(existing) = existing_value {
-            Self::apply(&mut bitmap, &existing)?;
+        let operand = Self::decode_operand(&operand)?;
+        let Some(existing) = existing_value else {
+            return Ok(operand.encode());
+        };
+        if let Some(mut delta) =
+            BitmapMembershipDelta::decode_if_delta(&existing).map_err(merge_decode_error)?
+        {
+            delta.compose(&operand);
+            return Ok(delta.encode());
         }
-        if let Some(id) = decode_bitmap_add(&operand) {
-            bitmap.insert(id);
-        } else {
-            Self::apply(&mut bitmap, &operand)?;
-        }
+        let mut bitmap = SecondaryEqualityBitmapValue::decode(&existing)
+            .map_err(merge_decode_error)?
+            .into_ids();
+        operand.apply_to(&mut bitmap);
         Self::encode(&bitmap)
     }
 
@@ -105,14 +121,62 @@ impl MergeOperator for BitmapMergeOperator {
         existing_value: Option<Bytes>,
         operands: &[Bytes],
     ) -> Result<Bytes, MergeOperatorError> {
-        let mut bitmap = RoaringTreemap::new();
-        if let Some(existing) = existing_value {
-            Self::apply(&mut bitmap, &existing)?;
+        let mut delta = BitmapMembershipDelta::default();
+        for operand in operands {
+            delta.compose(&Self::decode_operand(operand)?);
         }
-        for operand in operands.iter().rev() {
-            Self::apply(&mut bitmap, operand)?;
+        let Some(existing) = existing_value else {
+            return Ok(delta.encode());
+        };
+        if let Some(mut existing_delta) =
+            BitmapMembershipDelta::decode_if_delta(&existing).map_err(merge_decode_error)?
+        {
+            existing_delta.compose(&delta);
+            return Ok(existing_delta.encode());
         }
+        let mut bitmap = SecondaryEqualityBitmapValue::decode(&existing)
+            .map_err(merge_decode_error)?
+            .into_ids();
+        delta.apply_to(&mut bitmap);
         Self::encode(&bitmap)
+    }
+
+    fn merge_batch_with_base(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<MergeResult, MergeOperatorError> {
+        let mut bitmap = existing_value
+            .as_deref()
+            .map(SecondaryEqualityBitmapValue::decode)
+            .transpose()
+            .map_err(merge_decode_error)?
+            .map(SecondaryEqualityBitmapValue::into_ids)
+            .unwrap_or_default();
+        for operand in operands {
+            Self::decode_operand(operand)?.apply_to(&mut bitmap);
+        }
+        if bitmap.is_empty() {
+            Ok(MergeResult::Tombstone)
+        } else {
+            Self::encode(&bitmap).map(MergeResult::Value)
+        }
+    }
+
+    fn validate_merge_with_base(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<(), MergeOperatorError> {
+        if let Some(existing) = existing_value {
+            SecondaryEqualityBitmapValue::decode(&existing).map_err(merge_decode_error)?;
+        }
+        for operand in operands {
+            Self::decode_operand(operand)?;
+        }
+        Ok(())
     }
 }
 
@@ -168,6 +232,7 @@ fn is_edge_delta(data: &[u8]) -> bool {
 struct EdgeMergeOperator;
 
 impl EdgeMergeOperator {
+    #[cfg(test)]
     fn apply_delta(edges: &mut edges::Edges, op: EdgeDeltaOp, node_id: NodeId) {
         match op {
             EdgeDeltaOp::AddOut => edges.add_out(node_id),
@@ -182,14 +247,31 @@ impl EdgeMergeOperator {
         }
     }
 
-    fn apply_operand(edges: &mut edges::Edges, operand: &[u8]) {
+    fn decode_operand(
+        operand: &[u8],
+    ) -> Result<edges::AdjacencyMembershipDelta, MergeOperatorError> {
+        if let Some(delta) =
+            edges::AdjacencyMembershipDelta::decode_if_delta(operand).map_err(merge_decode_error)?
+        {
+            return Ok(delta);
+        }
         if let Some((op, node_id)) = decode_edge_delta(operand) {
-            Self::apply_delta(edges, op, node_id);
-            return;
+            let mut delta = edges::AdjacencyMembershipDelta::default();
+            match op {
+                EdgeDeltaOp::AddOut => delta.add_out(node_id),
+                EdgeDeltaOp::RemoveOut => delta.remove_out(node_id),
+                EdgeDeltaOp::AddIn => delta.add_in(node_id),
+                EdgeDeltaOp::RemoveIn => delta.remove_in(node_id),
+                EdgeDeltaOp::ResetOut => delta.reset_out(),
+            }
+            return Ok(delta);
         }
-        if let Ok(other) = edges::decode_edges(operand) {
-            edges.merge(&other);
+        if is_edge_delta(operand) {
+            return Err(merge_decode_error("malformed adjacency delta"));
         }
+        edges::decode_edges(operand)
+            .map(|edges| edges::AdjacencyMembershipDelta::from_edges(&edges))
+            .map_err(merge_decode_error)
     }
 }
 
@@ -200,20 +282,23 @@ impl MergeOperator for EdgeMergeOperator {
         existing_value: Option<Bytes>,
         operand: Bytes,
     ) -> Result<Bytes, MergeOperatorError> {
-        let mut merged = existing_value
-            .as_deref()
-            .filter(|value| !is_edge_delta(value))
-            .map(edges::decode_edges)
-            .transpose()
+        let operand = Self::decode_operand(&operand)?;
+        let Some(existing) = existing_value else {
+            return Ok(operand.encode());
+        };
+        if let Some(mut delta) = edges::AdjacencyMembershipDelta::decode_if_delta(&existing)
             .map_err(merge_decode_error)?
-            .unwrap_or_default();
-        if let Some(existing) = existing_value
-            .as_deref()
-            .filter(|value| is_edge_delta(value))
         {
-            Self::apply_operand(&mut merged, existing);
+            delta.compose(&operand);
+            return Ok(delta.encode());
         }
-        Self::apply_operand(&mut merged, &operand);
+        if is_edge_delta(&existing) {
+            let mut delta = Self::decode_operand(&existing)?;
+            delta.compose(&operand);
+            return Ok(delta.encode());
+        }
+        let mut merged = edges::decode_edges(&existing).map_err(merge_decode_error)?;
+        operand.apply_to(&mut merged);
         Ok(edges::encode_edges(&merged))
     }
 
@@ -223,23 +308,65 @@ impl MergeOperator for EdgeMergeOperator {
         existing_value: Option<Bytes>,
         operands: &[Bytes],
     ) -> Result<Bytes, MergeOperatorError> {
+        let mut delta = edges::AdjacencyMembershipDelta::default();
+        for operand in operands {
+            delta.compose(&Self::decode_operand(operand)?);
+        }
+        let Some(existing) = existing_value else {
+            return Ok(delta.encode());
+        };
+        if let Some(mut existing_delta) =
+            edges::AdjacencyMembershipDelta::decode_if_delta(&existing)
+                .map_err(merge_decode_error)?
+        {
+            existing_delta.compose(&delta);
+            return Ok(existing_delta.encode());
+        }
+        if is_edge_delta(&existing) {
+            let mut existing_delta = Self::decode_operand(&existing)?;
+            existing_delta.compose(&delta);
+            return Ok(existing_delta.encode());
+        }
+        let mut merged = edges::decode_edges(&existing).map_err(merge_decode_error)?;
+        delta.apply_to(&mut merged);
+        Ok(edges::encode_edges(&merged))
+    }
+
+    fn merge_batch_with_base(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<MergeResult, MergeOperatorError> {
         let mut merged = existing_value
             .as_deref()
-            .filter(|value| !is_edge_delta(value))
             .map(edges::decode_edges)
             .transpose()
             .map_err(merge_decode_error)?
             .unwrap_or_default();
-        if let Some(existing) = existing_value
-            .as_deref()
-            .filter(|value| is_edge_delta(value))
-        {
-            Self::apply_operand(&mut merged, existing);
+        for operand in operands {
+            Self::decode_operand(operand)?.apply_to(&mut merged);
         }
-        for operand in operands.iter().rev() {
-            Self::apply_operand(&mut merged, operand);
+        if merged.is_empty() {
+            Ok(MergeResult::Tombstone)
+        } else {
+            Ok(MergeResult::Value(edges::encode_edges(&merged)))
         }
-        Ok(edges::encode_edges(&merged))
+    }
+
+    fn validate_merge_with_base(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<(), MergeOperatorError> {
+        if let Some(existing) = existing_value {
+            edges::decode_edges(&existing).map_err(merge_decode_error)?;
+        }
+        for operand in operands {
+            Self::decode_operand(operand)?;
+        }
+        Ok(())
     }
 }
 
@@ -393,18 +520,249 @@ impl MergeOperator for CounterMergeOperator {
     }
 }
 
+/// Process-wide cost of one kind of operation-queue merge call.
+///
+/// SlateDB never hands a whole merge chain to one call: it folds raw operands
+/// in batches of at most 100 without a base, then resolves only those batch
+/// results against the base. No field measures merge-chain length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct QueueMergeCost {
+    /// Merge invocations that succeeded.
+    pub merges: u64,
+    /// Operands folded across those merges: raw operands for partial folds,
+    /// batch results for resolutions.
+    pub operands: u64,
+    /// Largest operand count folded by one call: at most SlateDB's batch of
+    /// 100 for partial folds, the batch count for resolutions.
+    pub max_operands: u64,
+    /// Encoded bytes read: the base value plus every operand. A resolution's
+    /// operands are partial outputs, so summing both kinds double-counts them.
+    pub input_bytes: u64,
+    /// Encoded bytes produced (zero for an empty-queue tombstone).
+    pub output_bytes: u64,
+    /// Wall-clock nanoseconds spent merging.
+    pub nanos: u64,
+}
+
+/// Process-wide operation-queue merge costs since process start.
+///
+/// Merges run wherever SlateDB folds operands (reads, flushes, and
+/// compaction) in every database handle of the process. Queue writes stage
+/// blind operands and never validate a merge. Counters are cumulative, so a
+/// window is a difference of samples.
+///
+/// ```
+/// let before = db::operation_queue_merge_stats();
+/// let after = db::operation_queue_merge_stats();
+/// assert!(after.partial.merges >= before.partial.merges);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct OperationQueueMergeStats {
+    /// Folds without a known base: every read, flush, and compaction folds
+    /// raw operands this way in batches of at most 100, and flushes and upper
+    /// compactions also fold chains whose base is not yet known.
+    pub partial: QueueMergeCost,
+    /// Resolutions of batch results against a known base (reads, bottom
+    /// compaction).
+    pub resolved: QueueMergeCost,
+}
+
+/// Returns the process-wide operation-queue merge costs.
+pub fn operation_queue_merge_stats() -> OperationQueueMergeStats {
+    QUEUE_MERGES.stats()
+}
+
+struct QueueMergeCounters {
+    merges: AtomicU64,
+    operands: AtomicU64,
+    max_operands: AtomicU64,
+    input_bytes: AtomicU64,
+    output_bytes: AtomicU64,
+    nanos: AtomicU64,
+}
+
+impl QueueMergeCounters {
+    const fn new() -> Self {
+        Self {
+            merges: AtomicU64::new(0),
+            operands: AtomicU64::new(0),
+            max_operands: AtomicU64::new(0),
+            input_bytes: AtomicU64::new(0),
+            output_bytes: AtomicU64::new(0),
+            nanos: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, base: Option<&Bytes>, operands: &[Bytes], output: usize, started: Instant) {
+        let input = base.map_or(0, Bytes::len) + operands.iter().map(Bytes::len).sum::<usize>();
+        self.merges.fetch_add(1, Ordering::Relaxed);
+        self.operands
+            .fetch_add(operands.len() as u64, Ordering::Relaxed);
+        self.max_operands
+            .fetch_max(operands.len() as u64, Ordering::Relaxed);
+        self.input_bytes.fetch_add(input as u64, Ordering::Relaxed);
+        self.output_bytes
+            .fetch_add(output as u64, Ordering::Relaxed);
+        self.nanos.fetch_add(
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn load(&self) -> QueueMergeCost {
+        QueueMergeCost {
+            merges: self.merges.load(Ordering::Relaxed),
+            operands: self.operands.load(Ordering::Relaxed),
+            max_operands: self.max_operands.load(Ordering::Relaxed),
+            input_bytes: self.input_bytes.load(Ordering::Relaxed),
+            output_bytes: self.output_bytes.load(Ordering::Relaxed),
+            nanos: self.nanos.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Partial and resolved queue merge counters.
+pub(crate) struct QueueMerges {
+    partial: QueueMergeCounters,
+    resolved: QueueMergeCounters,
+}
+
+impl QueueMerges {
+    pub(crate) const fn new() -> Self {
+        Self {
+            partial: QueueMergeCounters::new(),
+            resolved: QueueMergeCounters::new(),
+        }
+    }
+
+    pub(crate) fn stats(&self) -> OperationQueueMergeStats {
+        OperationQueueMergeStats {
+            partial: self.partial.load(),
+            resolved: self.resolved.load(),
+        }
+    }
+}
+
+/// Process-wide because merge operators are constructed per storage handle
+/// while compaction and reads share the stored queues.
+static QUEUE_MERGES: QueueMerges = QueueMerges::new();
+
+/// Immutable index-operation queue algebra.
+///
+/// Partial merges cancel each acknowledgement against its own enqueue and
+/// keep the removals whose insert lies below them, and unconditional sets,
+/// so an unresolved older base cannot defeat them; resolution against a
+/// known base yields the ordered retained operations or a tombstone for the
+/// empty queue.
+struct OperationQueueMergeOperator {
+    /// Cost counters: the process-wide set outside tests.
+    merges: &'static QueueMerges,
+}
+
+impl Default for OperationQueueMergeOperator {
+    fn default() -> Self {
+        Self {
+            merges: &QUEUE_MERGES,
+        }
+    }
+}
+
+impl OperationQueueMergeOperator {
+    fn partial(
+        &self,
+        existing_value: Option<&Bytes>,
+        operands: &[Bytes],
+    ) -> Result<Bytes, MergeOperatorError> {
+        let started = Instant::now();
+        let merged =
+            operation_queue::merge_partial(existing_value.map(|value| &value[..]), operands)
+                .map_err(merge_decode_error)?;
+        self.merges
+            .partial
+            .record(existing_value, operands, merged.len(), started);
+        Ok(merged)
+    }
+}
+
+impl MergeOperator for OperationQueueMergeOperator {
+    fn merge(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        value: Bytes,
+    ) -> Result<Bytes, MergeOperatorError> {
+        self.partial(existing_value.as_ref(), std::slice::from_ref(&value))
+    }
+
+    fn merge_batch(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<Bytes, MergeOperatorError> {
+        self.partial(existing_value.as_ref(), operands)
+    }
+
+    fn merge_batch_with_base(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<MergeResult, MergeOperatorError> {
+        let started = Instant::now();
+        let resolved = match operation_queue::merge_with_base(existing_value.as_deref(), operands)
+            .map_err(merge_decode_error)?
+        {
+            operation_queue::QueueMergeResult::Value(value) => MergeResult::Value(value),
+            operation_queue::QueueMergeResult::Empty => MergeResult::Tombstone,
+        };
+        let output = match &resolved {
+            MergeResult::Value(value) => value.len(),
+            MergeResult::Tombstone => 0,
+        };
+        self.merges
+            .resolved
+            .record(existing_value.as_ref(), operands, output, started);
+        Ok(resolved)
+    }
+
+    /// Validates without counting: queue writes stage blind operands, so only
+    /// a checked merge a caller adds for a queue key reaches this.
+    fn validate_merge_with_base(
+        &self,
+        _key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<(), MergeOperatorError> {
+        operation_queue::merge_with_base(existing_value.as_deref(), operands)
+            .map(|_| ())
+            .map_err(merge_decode_error)
+    }
+}
+
 /// Combined merge operator for durable Helix storage keyspaces.
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub(crate) struct HelixMergeOperator {
     edge: EdgeMergeOperator,
     bitmap: BitmapMergeOperator,
     layer0: Layer0NeighborMergeOperator,
     counter: CounterMergeOperator,
+    operation_queue: OperationQueueMergeOperator,
 }
 
 impl HelixMergeOperator {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Counts queue merges into `merges` instead of the process-wide set, so
+    /// a test observes only its own database's merges.
+    #[cfg(test)]
+    pub(crate) fn with_queue_merges(merges: &'static QueueMerges) -> Self {
+        Self {
+            operation_queue: OperationQueueMergeOperator { merges },
+            ..Self::default()
+        }
     }
 
     fn is_hnsw_layer0_key(key: &[u8]) -> bool {
@@ -414,8 +772,16 @@ impl HelixMergeOperator {
     }
 
     fn key_type(key: &[u8]) -> MergeKeyType {
-        if is_v4_secondary_equality_bitmap_key(key) {
-            return MergeKeyType::Bitmap;
+        match V2Key::parse_data_from_slice(key) {
+            Ok(V2Key::Data {
+                kind: V2ScopedKey::SecondaryEqualityBitmap(_),
+                ..
+            }) => return MergeKeyType::Bitmap,
+            Ok(V2Key::Data {
+                kind: V2ScopedKey::IndexOperationQueue(_),
+                ..
+            }) => return MergeKeyType::OperationQueue,
+            Ok(_) | Err(_) => {}
         }
         let logical = logical_key(key);
         if Self::is_hnsw_layer0_key(logical) {
@@ -439,16 +805,6 @@ impl HelixMergeOperator {
     }
 }
 
-fn is_v4_secondary_equality_bitmap_key(key: &[u8]) -> bool {
-    matches!(
-        V2Key::parse_data_from_slice(key),
-        Ok(V2Key::Data {
-            kind: V2ScopedKey::SecondaryEqualityBitmap(_),
-            ..
-        })
-    )
-}
-
 impl MergeOperator for HelixMergeOperator {
     fn merge(
         &self,
@@ -461,6 +817,9 @@ impl MergeOperator for HelixMergeOperator {
             MergeKeyType::Bitmap => self.bitmap.merge(key, existing_value, operand),
             MergeKeyType::Layer0 => self.layer0.merge(key, existing_value, operand),
             MergeKeyType::Counter => self.counter.merge(key, existing_value, operand),
+            MergeKeyType::OperationQueue => {
+                self.operation_queue.merge(key, existing_value, operand)
+            }
             MergeKeyType::Other => Ok(operand),
         }
     }
@@ -476,10 +835,83 @@ impl MergeOperator for HelixMergeOperator {
             MergeKeyType::Bitmap => self.bitmap.merge_batch(key, existing_value, operands),
             MergeKeyType::Layer0 => self.layer0.merge_batch(key, existing_value, operands),
             MergeKeyType::Counter => self.counter.merge_batch(key, existing_value, operands),
+            MergeKeyType::OperationQueue => {
+                self.operation_queue
+                    .merge_batch(key, existing_value, operands)
+            }
             MergeKeyType::Other => operands
                 .first()
                 .cloned()
                 .or(existing_value)
+                .ok_or(MergeOperatorError::EmptyBatch),
+        }
+    }
+
+    fn merge_batch_with_base(
+        &self,
+        key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<MergeResult, MergeOperatorError> {
+        match Self::key_type(key) {
+            MergeKeyType::Edge => self
+                .edge
+                .merge_batch_with_base(key, existing_value, operands),
+            MergeKeyType::Bitmap => {
+                self.bitmap
+                    .merge_batch_with_base(key, existing_value, operands)
+            }
+            MergeKeyType::Layer0 => self
+                .layer0
+                .merge_batch(key, existing_value, operands)
+                .map(MergeResult::Value),
+            MergeKeyType::Counter => self
+                .counter
+                .merge_batch(key, existing_value, operands)
+                .map(MergeResult::Value),
+            MergeKeyType::OperationQueue => {
+                self.operation_queue
+                    .merge_batch_with_base(key, existing_value, operands)
+            }
+            MergeKeyType::Other => operands
+                .first()
+                .cloned()
+                .or(existing_value)
+                .map(MergeResult::Value)
+                .ok_or(MergeOperatorError::EmptyBatch),
+        }
+    }
+
+    fn validate_merge_with_base(
+        &self,
+        key: &Bytes,
+        existing_value: Option<Bytes>,
+        operands: &[Bytes],
+    ) -> Result<(), MergeOperatorError> {
+        match Self::key_type(key) {
+            MergeKeyType::Edge => self
+                .edge
+                .validate_merge_with_base(key, existing_value, operands),
+            MergeKeyType::Bitmap => {
+                self.bitmap
+                    .validate_merge_with_base(key, existing_value, operands)
+            }
+            MergeKeyType::Layer0 => {
+                self.layer0
+                    .validate_merge_with_base(key, existing_value, operands)
+            }
+            MergeKeyType::Counter => {
+                self.counter
+                    .validate_merge_with_base(key, existing_value, operands)
+            }
+            MergeKeyType::OperationQueue => {
+                self.operation_queue
+                    .validate_merge_with_base(key, existing_value, operands)
+            }
+            MergeKeyType::Other => operands
+                .first()
+                .or(existing_value.as_ref())
+                .map(|_| ())
                 .ok_or(MergeOperatorError::EmptyBatch),
         }
     }
@@ -491,6 +923,7 @@ enum MergeKeyType {
     Bitmap,
     Layer0,
     Counter,
+    OperationQueue,
     Other,
 }
 
@@ -592,8 +1025,9 @@ mod tests {
     }
 
     fn decode_bitmap(bytes: Bytes) -> Vec<u64> {
-        RoaringTreemap::deserialize_from(Cursor::new(bytes))
+        SecondaryEqualityBitmapValue::decode(&bytes)
             .expect("merged bitmap decodes")
+            .into_ids()
             .iter()
             .collect()
     }
@@ -618,7 +1052,7 @@ mod tests {
             )
             .expect("merge succeeds");
         let edges = edges::decode_edges(&merged).expect("edges decode");
-        assert_eq!(edges.iter_out().collect::<Vec<_>>(), vec![7]);
+        assert_eq!(edges.iter_out().collect::<Vec<_>>(), vec![5, 7]);
     }
 
     #[test]
@@ -640,10 +1074,175 @@ mod tests {
                 &[base, encode_bitmap_add(42), encode_bitmap_add(42)],
             )
             .expect("bitmap operands merge");
-        let bitmap =
-            RoaringTreemap::deserialize_from(Cursor::new(merged)).expect("merged bitmap decodes");
+        assert_eq!(decode_bitmap(merged), vec![41, 42]);
+    }
 
-        assert_eq!(bitmap.iter().collect::<Vec<_>>(), vec![41, 42]);
+    #[test]
+    fn bitmap_delta_preserves_removals_across_intermediate_merge_batches() {
+        let key = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 3)),
+        }
+        .to_bytes();
+        let operator = HelixMergeOperator::new();
+        let mut older = BitmapMembershipDelta::default();
+        older.remove(1);
+        older.add(3);
+        let mut newer = BitmapMembershipDelta::default();
+        newer.remove(2);
+        newer.add(4);
+        let intermediate = operator
+            .merge_batch(&key, None, &[older.encode(), newer.encode()])
+            .expect("intermediate bitmap delta merges");
+        assert!(BitmapMembershipDelta::decode_if_delta(&intermediate)
+            .unwrap()
+            .is_some());
+
+        let resolved = operator
+            .merge_batch_with_base(&key, Some(portable_bitmap([1, 2, 5])), &[intermediate])
+            .expect("intermediate bitmap delta resolves against its base");
+        let MergeResult::Value(resolved) = resolved else {
+            panic!("non-empty bitmap resolves to a value")
+        };
+        assert_eq!(decode_bitmap(resolved), vec![3, 4, 5]);
+
+        let mut remove_last = BitmapMembershipDelta::default();
+        remove_last.remove(9);
+        assert_eq!(
+            operator
+                .merge_batch_with_base(&key, Some(portable_bitmap([9])), &[remove_last.encode()],)
+                .unwrap(),
+            MergeResult::Tombstone
+        );
+    }
+
+    #[test]
+    fn shared_row_validation_matches_full_resolution_acceptance() {
+        let bitmap_key = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 3)),
+        }
+        .to_bytes();
+        let adjacency_key = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
+        }
+        .to_bytes();
+        let operator = HelixMergeOperator::new();
+
+        let mut bitmap_delta = BitmapMembershipDelta::default();
+        bitmap_delta.remove(1);
+        bitmap_delta.add(2);
+        let bitmap_operand = bitmap_delta.encode();
+        let malformed_bitmap_delta = Bytes::copy_from_slice(b"HLXRBM2\0");
+        for (base, operand) in [
+            (Some(portable_bitmap([1, 3])), bitmap_operand.clone()),
+            (None, bitmap_operand),
+            (Some(Bytes::from_static(b"corrupt")), portable_bitmap([2])),
+            (Some(portable_bitmap([1])), malformed_bitmap_delta),
+        ] {
+            assert_eq!(
+                operator
+                    .validate_merge_with_base(
+                        &bitmap_key,
+                        base.clone(),
+                        std::slice::from_ref(&operand),
+                    )
+                    .is_ok(),
+                operator
+                    .merge_batch_with_base(&bitmap_key, base, std::slice::from_ref(&operand))
+                    .is_ok(),
+            );
+        }
+
+        let mut base_edges = edges::Edges::new();
+        base_edges.add_out(1);
+        let mut adjacency_delta = edges::AdjacencyMembershipDelta::default();
+        adjacency_delta.remove_out(1);
+        adjacency_delta.add_in(2);
+        let adjacency_operand = adjacency_delta.encode();
+        let malformed_adjacency_delta = Bytes::copy_from_slice(b"HLXADJ2\0");
+        for (base, operand) in [
+            (
+                Some(edges::encode_edges(&base_edges)),
+                adjacency_operand.clone(),
+            ),
+            (None, adjacency_operand),
+            (
+                Some(Bytes::from_static(b"corrupt")),
+                edges::AdjacencyMembershipDelta::default().encode(),
+            ),
+            (
+                Some(edges::encode_edges(&base_edges)),
+                malformed_adjacency_delta,
+            ),
+        ] {
+            assert_eq!(
+                operator
+                    .validate_merge_with_base(
+                        &adjacency_key,
+                        base.clone(),
+                        std::slice::from_ref(&operand),
+                    )
+                    .is_ok(),
+                operator
+                    .merge_batch_with_base(&adjacency_key, base, std::slice::from_ref(&operand))
+                    .is_ok(),
+            );
+        }
+    }
+
+    #[test]
+    fn adjacency_delta_preserves_directional_removals_and_tombstones() {
+        let key = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
+        }
+        .to_bytes();
+        let operator = HelixMergeOperator::new();
+        let mut base = edges::Edges::new();
+        base.add_out(1);
+        base.add_out(2);
+        base.add_in(3);
+        let mut older = edges::AdjacencyMembershipDelta::default();
+        older.remove_out(1);
+        older.add_in(4);
+        let mut newer = edges::AdjacencyMembershipDelta::default();
+        newer.remove_in(3);
+        newer.add_out(5);
+        let intermediate = operator
+            .merge_batch(&key, None, &[older.encode(), newer.encode()])
+            .expect("intermediate adjacency delta merges");
+        assert!(
+            edges::AdjacencyMembershipDelta::decode_if_delta(&intermediate)
+                .unwrap()
+                .is_some()
+        );
+
+        let resolved = operator
+            .merge_batch_with_base(&key, Some(edges::encode_edges(&base)), &[intermediate])
+            .expect("intermediate adjacency delta resolves against its base");
+        let MergeResult::Value(resolved) = resolved else {
+            panic!("non-empty adjacency resolves to a value")
+        };
+        let resolved = edges::decode_edges(&resolved).unwrap();
+        assert_eq!(resolved.iter_out().collect::<Vec<_>>(), vec![2, 5]);
+        assert_eq!(resolved.iter_in().collect::<Vec<_>>(), vec![4]);
+
+        let mut remove_last = edges::AdjacencyMembershipDelta::default();
+        remove_last.remove_out(7);
+        let mut last = edges::Edges::new();
+        last.add_out(7);
+        assert_eq!(
+            operator
+                .merge_batch_with_base(
+                    &key,
+                    Some(edges::encode_edges(&last)),
+                    &[remove_last.encode()],
+                )
+                .unwrap(),
+            MergeResult::Tombstone
+        );
     }
 
     #[test]
@@ -777,8 +1376,7 @@ mod tests {
             let merged = HelixMergeOperator::new()
                 .merge_batch(&key, None, &[encode_bitmap_add(5), encode_bitmap_add(8)])
                 .unwrap();
-            let bitmap = RoaringTreemap::deserialize_from(Cursor::new(merged)).unwrap();
-            assert_eq!(bitmap, RoaringTreemap::from_iter([5, 8]));
+            assert_eq!(decode_bitmap(merged), vec![5, 8]);
         }
     }
 
@@ -910,6 +1508,58 @@ mod tests {
             .expect("reopened bitmap database closes");
     }
 
+    #[tokio::test]
+    async fn batched_bitmap_removals_survive_cold_reopen_without_empty_rows() {
+        const MEMBERS: u64 = 250;
+
+        let store = Arc::new(InMemory::new());
+        let path = "merge-operator-batched-removals";
+        let db = slatedb::Db::builder(path, store.clone())
+            .with_merge_operator(Arc::new(HelixMergeOperator::new()))
+            .build()
+            .await
+            .expect("batched removal database opens");
+        let key = v4_bitmap_key(DataScope::LegacyUnscoped);
+        db.put(&key, portable_bitmap(0..MEMBERS))
+            .await
+            .expect("bitmap base persists");
+
+        let transaction = db
+            .begin(slatedb::IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("batched removal transaction begins");
+        for id in 0..MEMBERS {
+            let mut delta = BitmapMembershipDelta::default();
+            delta.remove(id);
+            transaction
+                .merge_disjoint(&key, [id.to_be_bytes()], delta.encode())
+                .expect("batched removal stages");
+        }
+        transaction
+            .commit()
+            .await
+            .expect("batched removal transaction commits");
+        assert_eq!(db.get(&key).await.expect("removed bitmap reads"), None);
+
+        db.close().await.expect("batched removal database closes");
+        let reopened = slatedb::Db::builder(path, store)
+            .with_merge_operator(Arc::new(HelixMergeOperator::new()))
+            .build()
+            .await
+            .expect("batched removal database reopens");
+        assert_eq!(
+            reopened
+                .get(&key)
+                .await
+                .expect("reopened removed bitmap reads"),
+            None
+        );
+        reopened
+            .close()
+            .await
+            .expect("reopened removal database closes");
+    }
+
     #[test]
     fn bitmap_add_operands_commute_for_every_existing_bitmap() {
         let key = DataKey::Data {
@@ -989,8 +1639,10 @@ mod tests {
         let mut encoded = edges::Edges::new();
         encoded.add_out(17);
         encoded.add_in(19);
-        EdgeMergeOperator::apply_operand(&mut state, &edges::encode_edges(&encoded));
-        EdgeMergeOperator::apply_operand(&mut state, b"not-an-edge-value");
+        EdgeMergeOperator::decode_operand(&edges::encode_edges(&encoded))
+            .unwrap()
+            .apply_to(&mut state);
+        assert!(EdgeMergeOperator::decode_operand(b"not-an-edge-value").is_err());
         assert!(state.contains_out(17));
         assert!(state.contains_in(19));
     }
@@ -1015,7 +1667,7 @@ mod tests {
             )
             .expect("batch deltas merge from oldest to newest");
         let decoded = edges::decode_edges(&batch).expect("batch edges decode");
-        assert_eq!(decoded.iter_out().collect::<Vec<_>>(), Vec::<u64>::new());
+        assert_eq!(decoded.iter_out().collect::<Vec<_>>(), vec![9]);
 
         assert!(operator
             .merge(

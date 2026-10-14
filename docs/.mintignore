@@ -1,1 +1,5 @@
 archive/
+
+# Contributor and internal engineering notes; published pages are .mdx.
+*.md
+text_transaction_batching_benchmark_results.json

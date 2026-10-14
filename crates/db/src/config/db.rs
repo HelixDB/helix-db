@@ -15,7 +15,7 @@ use crate::encoding::v2::values::adjacency::{
     EDGE_UPDATE_ADAPTIVE, EDGE_UPDATE_EAGER, EDGE_UPDATE_LAZY, ENCODING_TYPE_EFP,
     ENCODING_TYPE_NONE,
 };
-use crate::id_allocator::DEFAULT_LEASE_SIZE;
+use crate::id_allocator::{DEFAULT_LEASE_REFILL_THRESHOLD, DEFAULT_LEASE_SIZE};
 
 const MIB: u64 = 1024 * 1024;
 const EMBEDDED_VECTOR_MEMORY_BYTES: u64 = 64 * MIB;
@@ -168,12 +168,22 @@ impl HelixConfig {
     }
 }
 
+/// Embedded query telemetry is inherited only when explicitly allowed by this
+/// policy. Disabling it takes precedence over persisted and environment settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryTelemetry {
+    FromEnvironment,
+    Disabled,
+}
+
 /// User/runtime DB settings.
 ///
 /// Indexes are deliberately excluded. Dynamic index definitions live in runtime
 /// metadata and are loaded into the DB runtime state when the DB opens.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
+    /// Per-handle embedded telemetry policy; never stored in the database.
+    query_telemetry: QueryTelemetry,
     /// Default encoding type for edges (0 = none, 1 = EFP)
     default_encoding_type: EdgeEncoding,
 
@@ -193,8 +203,16 @@ pub struct DbConfig {
     /// Number of IDs to lease at a time for automatic ID allocation
     ///
     /// Higher values reduce storage operations but may "waste" IDs on restart.
-    /// Default: 1000
+    /// The configured size is applied independently to both node and edge ID
+    /// allocators whenever a writer is opened.
+    /// Default: 10,000
     id_lease_size: NonZeroU64,
+
+    /// Remaining durable IDs at which a proactive lease refill begins.
+    ///
+    /// This is an absolute count and does not scale with `id_lease_size`.
+    /// Default: 5,000
+    id_lease_refill_threshold: u64,
 
     /// SlateDB runtime settings.
     slate: SlateRuntimeConfig,
@@ -214,6 +232,9 @@ pub struct DbConfig {
     /// Durable graph and catalog migration policy.
     migrations: MigrationTuning,
 
+    /// Queued asynchronous vector/text operation policy.
+    index_operation_queue: super::IndexOperationQueueTuning,
+
     /// Optional attribution fields for the current open attempt.
     pub(crate) open_attribution: Option<OpenAttribution>,
 }
@@ -222,6 +243,7 @@ impl DbConfig {
     /// Create a new configuration with default tuning.
     pub fn new() -> Self {
         Self {
+            query_telemetry: QueryTelemetry::FromEnvironment,
             default_encoding_type: EdgeEncoding::None,
             enable_wal: true,
             max_concurrent_reads: NonZeroUsize::new(64)
@@ -230,14 +252,34 @@ impl DbConfig {
             high_degree_threshold: 1000, // Vertices with >1000 edges use lazy updates
             id_lease_size: NonZeroU64::new(DEFAULT_LEASE_SIZE)
                 .expect("default lease size is nonzero"),
+            id_lease_refill_threshold: DEFAULT_LEASE_REFILL_THRESHOLD,
             slate: SlateRuntimeConfig::new(),
             cache: CacheConfig::default(),
             secondary_index_lifecycle: SecondaryIndexLifecycleTuning::default(),
             search_index_backfill: SearchIndexBackfillLimits::default(),
             index_lifecycle_throughput: IndexLifecycleThroughputTuning::default(),
             migrations: MigrationTuning::default(),
+            index_operation_queue: super::IndexOperationQueueTuning::default(),
             open_attribution: None,
         }
+    }
+
+    /// Override embedded query telemetry for this handle. Disabled never reads
+    /// persisted telemetry settings and never starts a telemetry transport.
+    ///
+    /// ```
+    /// use db::{DbConfig, config::QueryTelemetry};
+    /// let config = DbConfig::new().with_query_telemetry(QueryTelemetry::Disabled);
+    /// assert_eq!(config.query_telemetry(), QueryTelemetry::Disabled);
+    /// assert_eq!(DbConfig::new().query_telemetry(), QueryTelemetry::FromEnvironment);
+    /// ```
+    pub fn with_query_telemetry(mut self, policy: QueryTelemetry) -> Self {
+        self.query_telemetry = policy;
+        self
+    }
+
+    pub const fn query_telemetry(&self) -> QueryTelemetry {
+        self.query_telemetry
     }
 
     /// Build source-specific local defaults for an embedded handle.
@@ -310,6 +352,11 @@ impl DbConfig {
     /// Number of IDs to lease at a time for automatic ID allocation.
     pub const fn id_lease_size(&self) -> u64 {
         self.id_lease_size.get()
+    }
+
+    /// Remaining durable IDs at which a proactive lease refill begins.
+    pub const fn id_lease_refill_threshold(&self) -> u64 {
+        self.id_lease_refill_threshold
     }
 
     /// SlateDB runtime settings.
@@ -417,8 +464,10 @@ impl DbConfig {
     ///
     /// Higher values reduce storage operations but may "waste" IDs when
     /// the database is closed before the lease is exhausted.
+    /// The configured size is applied independently to both node and edge ID
+    /// allocators whenever a writer is opened.
     ///
-    /// Default: 1000
+    /// Default: 10,000
     pub fn with_id_lease_size(mut self, size: NonZeroU64) -> Self {
         self.id_lease_size = size;
         self
@@ -429,6 +478,17 @@ impl DbConfig {
         self.id_lease_size = NonZeroU64::new(size)
             .ok_or_else(|| ConfigError::new("id lease size must be nonzero"))?;
         Ok(self)
+    }
+
+    /// Set the absolute remaining-ID threshold for proactive lease refill.
+    ///
+    /// A threshold of zero starts renewal after the final ID in the current
+    /// lease is claimed. Thresholds larger than the lease size are supported;
+    /// the allocator reserves enough whole lease chunks to restore the
+    /// requested headroom.
+    pub fn with_id_lease_refill_threshold(mut self, remaining_ids: u64) -> Self {
+        self.id_lease_refill_threshold = remaining_ids;
+        self
     }
 }
 
@@ -470,6 +530,20 @@ impl DbConfig {
         tuning: IndexLifecycleThroughputTuning,
     ) -> Self {
         self.index_lifecycle_throughput = tuning;
+        self
+    }
+
+    /// Returns the queued asynchronous vector/text operation policy.
+    pub const fn index_operation_queue(&self) -> super::IndexOperationQueueTuning {
+        self.index_operation_queue
+    }
+
+    /// Replaces the queued asynchronous vector/text operation policy.
+    pub const fn with_index_operation_queue_tuning(
+        mut self,
+        tuning: super::IndexOperationQueueTuning,
+    ) -> Self {
+        self.index_operation_queue = tuning;
         self
     }
 

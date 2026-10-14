@@ -73,7 +73,7 @@ impl<'db> ExecutionContext<'db> {
         }
     }
 
-    async fn repeat_should_stop(
+    pub(in crate::execution::interpreter) async fn repeat_should_stop(
         &mut self,
         rows: &[ExecutionRow],
         stop: &ir::RepeatStopPlan,

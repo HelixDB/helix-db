@@ -8,7 +8,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use db::query_service::{QueryMode, QueryResponse, QueryServiceError};
+use db::query_service::{QueryFailureClass, QueryMode, QueryResponse, QueryServiceError};
 use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use serde::Serialize;
@@ -38,10 +38,14 @@ pub async fn serve(
 }
 
 pub(crate) fn router(state: ServerState) -> Router {
+    // Paths stay literal: docs/scripts/check-openapi.mjs reads them from this
+    // file. The Cypher paths equal `helix_cypher::api::{HTTP_PATH, HTTP_EXPLAIN_PATH}`.
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v2/query", post(execute_query))
+        .route("/v2/cypher", post(execute_cypher))
+        .route("/v2/cypher/explain", post(explain_cypher))
         .with_state(state)
 }
 
@@ -65,6 +69,7 @@ fn health_response(status: StatusCode, state: ServerState) -> Response {
             "ready": state.index_readiness().is_ready(),
             "mode": state.db_mode().as_str(),
             "index_runtime": state.index_readiness().code(),
+            "blocked_index_entity_count": state.blocked_index_entity_count(),
         }),
     )
 }
@@ -82,7 +87,14 @@ async fn execute_query(
         Ok(bytes) => bytes,
         Err(response) => return *response,
     };
-    let request = match sonic_rs::from_slice::<QueryRequest>(&bytes) {
+    // simd-json parses a uniquely owned body in place and copies a shared
+    // one. The request owns everything it needs, so the body is freed here
+    // rather than held through planning and execution.
+    let parsed = match bytes.try_into_mut() {
+        Ok(mut body) => QueryRequest::from_json_slice_mut(&mut body),
+        Err(shared) => QueryRequest::from_json_slice(&shared),
+    };
+    let request = match parsed {
         Ok(request) => request,
         Err(error) => {
             return error_response(
@@ -127,6 +139,109 @@ async fn read_body(body: Body) -> Result<Bytes, Box<Response>> {
     })
 }
 
+async fn read_cypher_request(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<(RequestOptions, db::cypher::Request), Box<Response>> {
+    let options =
+        RequestOptions::from_headers(headers).map_err(|error| Box::new(error.into_response()))?;
+    let bytes = read_body(body).await?;
+    let request = serde_json::from_slice::<db::cypher::Request>(&bytes).map_err(|error| {
+        Box::new(error_response(
+            StatusCode::BAD_REQUEST,
+            error_code::QueryErrorCode::InvalidQueryJson,
+            error.to_string(),
+        ))
+    })?;
+    Ok((options, request))
+}
+
+async fn explain_cypher(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (options, request) = match read_cypher_request(&headers, body).await {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    if let Err(error) = options.validate_for_request_type(QueryRequestType::Read, state.db_mode()) {
+        return error.into_response();
+    }
+    match state
+        .query_service()
+        .explain_cypher_scoped_controlled(
+            request,
+            db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
+            db::cypher::Limits::default(),
+        )
+        .await
+    {
+        Ok(explanation) => json_response(StatusCode::OK, &explanation),
+        Err(error) => cypher_error_response(error),
+    }
+}
+
+async fn execute_cypher(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let (options, request) = match read_cypher_request(&headers, body).await {
+        Ok(request) => request,
+        Err(response) => return *response,
+    };
+    let request = match request.compile() {
+        Ok(request) => request,
+        Err(error) => return cypher_error_response(error.into()),
+    };
+    if let Err(error) = options.validate_for_request_type(request.request_type(), state.db_mode()) {
+        return error.into_response();
+    }
+    let result = state
+        .query_service()
+        .execute_compiled_cypher_json_scoped_controlled(
+            request,
+            options.query_mode(),
+            db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
+            db::cypher::Limits::default(),
+            options.metrics_tenant_id.clone(),
+        )
+        .await;
+    match result {
+        Ok(response) => {
+            if options.await_durable == Some(true)
+                && let Err(error) = state.flush_writer().await
+            {
+                return service_error_response(error.into());
+            }
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                response.into_bytes(),
+            )
+                .into_response()
+        }
+        Err(error) => cypher_error_response(error),
+    }
+}
+
+fn cypher_error_response(error: db::cypher::Error) -> Response {
+    match error {
+        db::cypher::Error::Query(error) => json_response(
+            StatusCode::from_u16(helix_cypher::api::ErrorClass::of(&error).http_status())
+                .expect("Cypher error classes use valid HTTP statuses"),
+            &helix_cypher::api::ErrorBody::from(&error),
+        ),
+        db::cypher::Error::Storage(error) => service_error_response(QueryServiceError::Db(error)),
+        db::cypher::Error::Json(error) => {
+            service_error_response(QueryServiceError::JsonSerialize(error))
+        }
+    }
+}
+
 fn query_response(response: QueryResponse) -> Response {
     match response.to_json_bytes() {
         Ok(body) => (
@@ -140,33 +255,41 @@ fn query_response(response: QueryResponse) -> Response {
 }
 
 pub(super) fn service_error_response(error: QueryServiceError) -> Response {
-    let status = if error.is_transaction_conflict() {
-        StatusCode::CONFLICT
-    } else {
-        match &error {
-            QueryServiceError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-            QueryServiceError::Planner(_) => StatusCode::BAD_REQUEST,
-            QueryServiceError::Db(error) if error.is_invalid_vector_input() => {
-                StatusCode::BAD_REQUEST
-            }
-            QueryServiceError::Db(db::error::HelixDbError::WriterModeRequired { .. }) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            QueryServiceError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            QueryServiceError::JsonSerialize(_) | QueryServiceError::Serialize(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+    let class = error.classify();
+    let status = match class {
+        QueryFailureClass::CommitOutcomeUnknown | QueryFailureClass::WriterModeRequired => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        QueryFailureClass::Conflict => StatusCode::CONFLICT,
+        QueryFailureClass::Backpressure => StatusCode::TOO_MANY_REQUESTS,
+        QueryFailureClass::InvalidRequest | QueryFailureClass::Planning => StatusCode::BAD_REQUEST,
+        QueryFailureClass::Execution | QueryFailureClass::Internal => {
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     };
-    let code = error.error_code();
-    let message = error.to_string();
-    error_response(status, code, message)
+    error_response_with_retryable(
+        status,
+        error.error_code(),
+        error.to_string(),
+        match class {
+            QueryFailureClass::CommitOutcomeUnknown => Some(false),
+            QueryFailureClass::Backpressure => Some(true),
+            QueryFailureClass::Conflict
+            | QueryFailureClass::InvalidRequest
+            | QueryFailureClass::Planning
+            | QueryFailureClass::WriterModeRequired
+            | QueryFailureClass::Execution
+            | QueryFailureClass::Internal => None,
+        },
+    )
 }
 
 #[derive(Serialize)]
 struct QueryErrorEnvelope<'a> {
     error: error_code::QueryErrorCode,
     msg: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retryable: Option<bool>,
 }
 
 fn error_response(
@@ -174,12 +297,22 @@ fn error_response(
     code: error_code::QueryErrorCode,
     message: impl Into<String>,
 ) -> Response {
+    error_response_with_retryable(status, code, message, None)
+}
+
+fn error_response_with_retryable(
+    status: StatusCode,
+    code: error_code::QueryErrorCode,
+    message: impl Into<String>,
+    retryable: Option<bool>,
+) -> Response {
     let message = message.into();
     json_response(
         status,
         &QueryErrorEnvelope {
             error: code,
             msg: &message,
+            retryable,
         },
     )
 }
@@ -371,5 +504,85 @@ mod tests {
             .expect("error message is a string")
             .contains("Index operation not found"));
         assert_eq!(json.get("code"), None);
+        assert_eq!(json.get("retryable"), None);
+    }
+
+    #[tokio::test]
+    async fn cypher_errors_follow_the_shared_error_contract() {
+        let query = |category| {
+            db::cypher::Error::Query(
+                helix_cypher::QueryError::runtime(category, "detail", "msg")
+                    .at(helix_cypher::Span { start: 1, end: 2 }),
+            )
+        };
+        let cases = [
+            (
+                query("syntax_error"),
+                StatusCode::BAD_REQUEST,
+                "syntax_error",
+            ),
+            (
+                query("resource_limit"),
+                StatusCode::TOO_MANY_REQUESTS,
+                "resource_limit",
+            ),
+            (
+                query("access_mode_error"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "access_mode_error",
+            ),
+            (
+                query("internal_planner_error"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_planner_error",
+            ),
+            (
+                db::cypher::Error::Storage(db::error::HelixDbError::TransactionConflict(
+                    "retry".to_string(),
+                )),
+                StatusCode::CONFLICT,
+                "transaction_conflict",
+            ),
+            (
+                db::cypher::Error::Json(serde_json::from_str::<u8>("x").expect_err("invalid JSON")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "response_serialization_error",
+            ),
+        ];
+        for (error, expected_status, expected_error) in cases {
+            let is_query = matches!(error, db::cypher::Error::Query(_));
+            let response = cypher_error_response(error);
+            assert_eq!(response.status(), expected_status);
+            let body = to_bytes(response.into_body(), 4_096)
+                .await
+                .expect("Cypher error body is bounded");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("Cypher error body is JSON");
+            assert_eq!(json["error"], expected_error);
+            if is_query {
+                assert_eq!(
+                    json["details"],
+                    serde_json::json!({"detail":"detail","phase":"runtime","span":{"start":1,"end":2}})
+                );
+            } else {
+                assert_eq!(json.get("details"), None);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_write_outcomes_are_503_and_explicitly_not_retryable() {
+        let response = service_error_response(QueryServiceError::Db(
+            db::error::HelixDbError::WriterFencedCommitOutcomeUnknown,
+        ));
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 4_096)
+            .await
+            .expect("terminal write error body is bounded");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("terminal write error body is JSON");
+        assert_eq!(json["error"], "writer_fenced_commit_outcome_unknown");
+        assert_eq!(json["retryable"], false);
+        assert!(json["msg"].is_string());
     }
 }

@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -383,6 +384,24 @@ func TestPublicQueryRequestSurface(t *testing.T) {
 	VarMinSize("users", -1)
 }
 
+func TestBoundLiteralValidatesNonNegative(t *testing.T) {
+	bound := BoundLiteral(10)
+	payload, err := json.Marshal(bound)
+	if err != nil {
+		t.Fatalf("unexpected json marshal error: %v", err)
+	}
+	if string(payload) != `{"literal":10}` {
+		t.Fatalf("expected {\"literal\":10}, got %s", string(payload))
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected negative bound literal construction to panic")
+		}
+	}()
+	BoundLiteral(-1)
+}
+
 func TestQueryParamTypesCoverEveryValidAndInvalidState(t *testing.T) {
 	valid := []QueryParamType{
 		{},
@@ -534,6 +553,97 @@ func TestAtomicTypedAndExplicitUntypedParameterStates(t *testing.T) {
 	}
 }
 
+func TestFloatParametersAcceptEveryIntegerWidth(t *testing.T) {
+	request := NewReadQueryRequest(Read())
+	values := []struct {
+		name  string
+		value any
+	}{
+		{"i", int(-2)}, {"i8", int8(-3)}, {"i16", int16(-4)}, {"i32", int32(-5)}, {"i64", int64(-6)},
+		{"u", uint(7)}, {"u8", uint8(8)}, {"u16", uint16(9)}, {"u32", uint32(10)}, {"u64", uint64(11)},
+	}
+	for _, value := range values {
+		request.ParamF64("f64_"+value.name, value.value)
+		request.ParamF32("f32_"+value.name, value.value)
+	}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("integer-width float parameters failed: %v", err)
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"f64_i":-2`, `"f32_u64":11`} {
+		if !strings.Contains(string(body), expected) {
+			t.Fatalf("float parameter missing %s: %s", expected, body)
+		}
+	}
+
+	rejected := NewReadQueryRequest(Read())
+	rejected.ParamF64("text", "not-a-number")
+	if !errors.Is(rejected.Validate(), ErrInvalidParameterType) {
+		t.Fatal("non-numeric float parameter unexpectedly accepted")
+	}
+}
+
+func TestTypedDateTimeParameterAcceptsSameValuesAsConvenienceHelper(t *testing.T) {
+	// The convenience helper ParamDateTime accepts DateTime, time.Time, RFC3339
+	// strings and epoch-millis ints. The low-level typed insertion path
+	// (WithTypedParameter / InsertTypedParameter with ParamTypeDateTime) must
+	// accept the same values so both insertion styles serialize identically.
+	millis := int64(1_776_000_000_000)
+	expected, err := DateTimeFromMillis(millis).RFC3339()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	convenience := NewReadQueryRequest(Read())
+	convenience.ParamDateTime("t", millis)
+
+	typed := NewReadQueryRequest(Read())
+	typed.WithTypedParameter("t_millis", ParamTypeDateTime(), QueryI64(millis))
+	typed.WithTypedParameter("t_rfc3339", ParamTypeDateTime(), QueryString(expected))
+	typed.WithTypedParameter("t_time", ParamTypeDateTime(), time.UnixMilli(millis))
+	typed.WithTypedParameter("t_datetime", ParamTypeDateTime(), DateTimeFromMillis(millis))
+
+	if err := typed.Validate(); err != nil {
+		t.Fatalf("typed datetime parameters failed: %v", err)
+	}
+	convenienceBody, err := json.Marshal(convenience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	typedBody, err := json.Marshal(typed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conveniencePayload struct {
+		Parameters map[string]string `json:"parameters"`
+	}
+	if err := json.Unmarshal(convenienceBody, &conveniencePayload); err != nil {
+		t.Fatal(err)
+	}
+	if got := conveniencePayload.Parameters["t"]; got != expected {
+		t.Fatalf("convenience datetime parameter unexpected value: got %s want %s", got, expected)
+	}
+	var typedPayload struct {
+		Parameters map[string]string `json:"parameters"`
+	}
+	if err := json.Unmarshal(typedBody, &typedPayload); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"t_millis", "t_rfc3339", "t_time", "t_datetime"} {
+		if got := typedPayload.Parameters[name]; got != expected {
+			t.Fatalf("typed datetime parameter %s serialized as %s, want %s", name, got, expected)
+		}
+	}
+
+	rejected := NewReadQueryRequest(Read())
+	rejected.WithTypedParameter("bad", ParamTypeDateTime(), QueryBool(true))
+	if !errors.Is(rejected.Validate(), ErrInvalidDateTimeParameter) {
+		t.Fatal("non-date typed datetime parameter unexpectedly accepted")
+	}
+}
 func TestBatchDecodersCoverClosedVariantsAndMalformedShapes(t *testing.T) {
 	for _, input := range []string{
 		`"prev_not_empty"`,
@@ -751,6 +861,182 @@ func TestClientExecWarmNoContentIsSuccess(t *testing.T) {
 	}
 	if warmHeader != "true" {
 		t.Fatalf("expected warm header, got %q", warmHeader)
+	}
+}
+
+func TestClientUnknownWriteOutcomeIsTerminalAndSentOnce(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		body string
+		code QueryErrorCode
+	}{
+		{
+			name: "direct server",
+			body: `{"error":"writer_fenced_commit_outcome_unknown","msg":"write outcome is unknown","retryable":false}`,
+			code: QueryErrorCode("writer_fenced_commit_outcome_unknown"),
+		},
+		{
+			name: "hosted gateway",
+			body: `{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}`,
+			code: QueryErrorCode("WRITE_OUTCOME_UNKNOWN"),
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			requestCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(testCase.body))
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			request := WriteQuery("create_user").
+				VarAs("created", G().AddN("User", Props{Prop("name", "Ada")})).
+				Returning("created")
+			err = client.Exec(context.Background(), request, nil)
+			var helixErr *HelixError
+			if !errors.As(err, &helixErr) {
+				t.Fatalf("expected HelixError, got %T", err)
+			}
+			if requestCount != 1 {
+				t.Fatalf("write executed %d times, want exactly once", requestCount)
+			}
+			if helixErr.Code != testCase.code {
+				t.Fatalf("unexpected error code %q", helixErr.Code)
+			}
+			if helixErr.Retryable == nil || *helixErr.Retryable {
+				t.Fatalf("retryable = %v, want explicit false", helixErr.Retryable)
+			}
+			if IsRetryable(err) {
+				t.Fatal("unknown write outcome must not be retryable")
+			}
+		})
+	}
+}
+
+func TestLostResponseGatewayProbe(t *testing.T) {
+	baseURL := os.Getenv("HELIX_LOST_RESPONSE_GATEWAY_URL")
+	if baseURL == "" {
+		t.Skip("real lost-response gateway fixture is not configured")
+	}
+	probeID := os.Getenv("HELIX_LOST_RESPONSE_PROBE_ID")
+	if probeID == "" {
+		t.Fatal("HELIX_LOST_RESPONSE_PROBE_ID is required")
+	}
+	client, err := NewClient(baseURL, WithAPIKey(os.Getenv("HELIX_LOST_RESPONSE_API_KEY")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := WriteQuery("lost_response_probe").
+		VarAs(
+			"created",
+			G().AddN("LostResponseProbe", Props{Prop("business_id", probeID)}),
+		).
+		Returning("created")
+	err = client.Exec(context.Background(), request, nil)
+	var helixErr *HelixError
+	if !errors.As(err, &helixErr) {
+		t.Fatalf("expected HelixError, got %T", err)
+	}
+	if helixErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", helixErr.StatusCode)
+	}
+	if helixErr.Code != QueryErrorCode("WRITE_OUTCOME_UNKNOWN") {
+		t.Fatalf("code = %q, want WRITE_OUTCOME_UNKNOWN", helixErr.Code)
+	}
+	if helixErr.Retryable == nil || *helixErr.Retryable {
+		t.Fatalf("retryable = %v, want explicit false", helixErr.Retryable)
+	}
+	if IsConflict(err) || IsRetryable(err) {
+		t.Fatal("unknown write outcome must be terminal and non-retryable")
+	}
+}
+
+func TestSearchConsistencySerializesOnlyWhenEventual(t *testing.T) {
+	read := func() *QueryRequest { return NewReadQueryRequest(Read().Returning()) }
+	if read().SearchConsistency() != SearchConsistencyStrong {
+		t.Fatal("requests default to strong search")
+	}
+	strong, err := MarshalRequest(read().WithSearchConsistency(SearchConsistencyStrong))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(strong), "search_consistency") {
+		t.Fatalf("strong search must be omitted: %s", strong)
+	}
+	eventual, err := MarshalRequest(read().WithSearchConsistency(SearchConsistencyEventual))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(eventual), `"search_consistency":"eventual"`) {
+		t.Fatalf("eventual search must serialize: %s", eventual)
+	}
+	write := NewWriteQueryRequest(Write().Returning())
+	if err := write.SetSearchConsistency(SearchConsistencyEventual); !errors.Is(err, ErrEventualWriteSearchConsistency) {
+		t.Fatalf("write eventual error = %v", err)
+	}
+	if _, err := MarshalRequest(NewWriteQueryRequest(Write().Returning()).WithSearchConsistency(SearchConsistencyEventual)); !errors.Is(err, ErrEventualWriteSearchConsistency) {
+		t.Fatalf("write eventual marshal error = %v", err)
+	}
+	if err := read().SetSearchConsistency("sometimes"); !errors.Is(err, ErrUnknownSearchConsistency) {
+		t.Fatalf("unknown consistency error = %v", err)
+	}
+}
+
+func TestIndexBackpressureIsRetryable(t *testing.T) {
+	err := decodeRemoteError([]byte(`{"error":"index_backpressure","msg":"index backpressure","retryable":true}`), "fallback", http.StatusTooManyRequests)
+	if !IsRetryable(err) || !IsIndexBackpressure(err) || IsConflict(err) {
+		t.Fatalf("remote backpressure classification: %v", err)
+	}
+	embedded := &HelixError{Kind: ErrorEmbedded, Code: QueryErrorCodeIndexBackpressure}
+	if !IsRetryable(embedded) || !IsIndexBackpressure(embedded) {
+		t.Fatal("embedded backpressure is retryable")
+	}
+	if IsRetryable(&HelixError{Kind: ErrorEmbedded, Code: "invalid_query"}) {
+		t.Fatal("other embedded errors are not retryable")
+	}
+}
+
+func TestRemoteRetryabilityRequiresExplicitBooleanTrue(t *testing.T) {
+	for _, testCase := range []struct {
+		body     string
+		expected bool
+	}{
+		{`{"error":"busy","retryable":true}`, true},
+		{`{"error":"unknown","retryable":false}`, false},
+		{`{"error":"malformed","retryable":"true"}`, false},
+		{`{"error":"missing"}`, false},
+	} {
+		err := decodeRemoteError([]byte(testCase.body), "fallback", http.StatusServiceUnavailable)
+		if IsRetryable(err) != testCase.expected {
+			t.Fatalf("body %s retryable = %t, want %t", testCase.body, IsRetryable(err), testCase.expected)
+		}
+	}
+}
+
+// Structured server details are kept as raw JSON text, so HelixError stays
+// comparable and equal errors compare equal.
+func TestRemoteErrorsKeepServerDetailsAndStayComparable(t *testing.T) {
+	for _, testCase := range []struct {
+		body    string
+		details string
+	}{
+		{`{"error":"cypher_error","msg":"failed","details":{"line":1}}`, `{"line":1}`},
+		{`{"error":"legacy","details":[1]}`, `[1]`},
+		{`{"error":"cypher_error","msg":"failed"}`, ""},
+	} {
+		first := decodeRemoteError([]byte(testCase.body), "fallback", http.StatusBadRequest)
+		second := decodeRemoteError([]byte(testCase.body), "fallback", http.StatusBadRequest)
+		if first.ServerDetails != testCase.details {
+			t.Fatalf("body %s details = %q, want %q", testCase.body, first.ServerDetails, testCase.details)
+		}
+		if *first != *second {
+			t.Fatalf("body %s decoded to unequal errors", testCase.body)
+		}
 	}
 }
 

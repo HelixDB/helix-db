@@ -585,12 +585,12 @@ async fn preflight<D: Distance>(
         }
     };
     transaction.put(job_key(scope), encode_json(&job)?)?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPreflightCommitBefore,
     )?;
     transaction.commit().await?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPreflightCommitAfter,
     )?;
@@ -704,12 +704,12 @@ async fn backfill<D: Distance>(
         }
     };
     transaction.put(job_key(scope), encode_json(&job)?)?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryBackfillCommitBefore,
     )?;
     transaction.commit().await?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(super::MigrationFailpoint::VectorDirectoryBackfillCommitAfter)?;
     log_batch(
         &target,
@@ -800,12 +800,12 @@ async fn verify<D: Distance>(
         }
     };
     transaction.put(job_key(scope), encode_json(&job)?)?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryVerificationCommitBefore,
     )?;
     transaction.commit().await?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryVerificationCommitAfter,
     )?;
@@ -889,12 +889,12 @@ async fn publish(db: &Db, scope: DataScope, mut job: MigrationJob) -> Result<()>
     )?;
     transaction.put(operation_key, encode_operation_record(&next_operation))?;
     transaction.put(job_key(scope), encode_json(&job)?)?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPublicationCommitBefore,
     )?;
     transaction.commit().await?;
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPublicationCommitAfter,
     )?;
@@ -1265,8 +1265,8 @@ pub(super) async fn run_measured_for_scale(
     }
 }
 
-/// Projects the dedicated job into migration-parity status without exposing raw cursors.
-#[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+/// Projects the dedicated job into migration status without exposing raw cursors.
+#[cfg(feature = "production-coverage")]
 pub(super) async fn parity_status(
     db: &Db,
     scope: DataScope,
@@ -1939,7 +1939,7 @@ mod tests {
         writer.close().await.expect("writer closes");
     }
 
-    #[cfg(any(feature = "migration-parity", feature = "production-coverage"))]
+    #[cfg(feature = "production-coverage")]
     #[tokio::test]
     async fn every_directory_commit_boundary_recovers_without_duplicate_writes() {
         let _failpoint_guard = migration_test_guard().await;

@@ -115,6 +115,22 @@ pub(in crate::rules::tests) fn logical_access_path(
     access
 }
 
+pub(in crate::rules::tests) fn ordered_logical_access_path(
+    result: optimizer::RuleResult,
+) -> logical::AccessPath {
+    let optimizer::RuleResult::Applied(optimizer::RuleEffect::Logical(expressions)) = result else {
+        panic!("expected ordered logical rewrite");
+    };
+    let Some(logical::LogicalExpr::AccessOrder(order)) = expressions.into_iter().next() else {
+        panic!("logical ORDER BY must remain after driver selection");
+    };
+    assert!(crate::exec::access_delivers_order(
+        order.access(),
+        order.ordering()
+    ));
+    order.access().clone()
+}
+
 pub(in crate::rules::tests) fn logical_access_window(
     result: optimizer::RuleResult,
 ) -> logical::AccessWindow {
@@ -349,6 +365,7 @@ pub(in crate::rules::tests) fn node_range_source_with_direction(
     range: ir::IndexRange,
 ) -> ir::NodeAccessSourcePlan {
     ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::NodeRangeIndexMeta::try_new(format!("node_range_{label}_{property}"))
             .unwrap(),
         key: range_key(label, property, direction),
@@ -405,6 +422,7 @@ pub(in crate::rules::tests) fn edge_range_source_with_direction(
     range: ir::IndexRange,
 ) -> ir::EdgeAccessSourcePlan {
     ir::EdgeAccessSourcePlan::new(ir::EdgeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::EdgeRangeIndexMeta::try_new(format!("edge_range_{label}_{property}"))
             .unwrap(),
         key: range_key(label, property, direction),

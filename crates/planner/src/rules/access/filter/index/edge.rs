@@ -1,7 +1,6 @@
 //! Edge access-filter index derivation.
 
 use super::contracts::AccessFilterIndexApplication;
-use super::contracts::PartialIndexFilterApplication;
 use super::shared;
 use crate::{analysis, catalog, context, ir, logical};
 
@@ -13,22 +12,6 @@ pub(super) fn index_filter(
     planner_limits: &context::PlannerLimits,
 ) -> AccessFilterIndexApplication<logical::EdgeAccessPath> {
     shared::index_filter::<EdgeIndexFamily>(
-        path,
-        predicate,
-        predicate_label,
-        indexes,
-        planner_limits,
-    )
-}
-
-pub(super) fn partial_index_filter(
-    path: &logical::EdgeAccessPath,
-    predicate: &helix_ast::expr::Predicate,
-    predicate_label: &analysis::FeasibleLabelScope,
-    indexes: &catalog::IndexCatalogSnapshot,
-    planner_limits: &context::PlannerLimits,
-) -> PartialIndexFilterApplication<ir::EdgeAccessSourcePlan> {
-    shared::partial_index_filter::<EdgeIndexFamily>(
         path,
         predicate,
         predicate_label,
@@ -59,16 +42,25 @@ impl shared::AccessFilterIndexFamily for EdgeIndexFamily {
 
     fn equality_index(
         indexes: &catalog::IndexCatalogSnapshot,
-        key: &catalog::ScopedPropertyKey,
+        label: &str,
+        property: &str,
     ) -> Option<Self::EqualityIndex> {
-        indexes.edge_eq.get(key).cloned()
+        indexes
+            .edge_eq
+            .get(&(label, property) as &dyn catalog::ScopedPropertyKeyView)
+            .cloned()
     }
 
     fn range_index(
         indexes: &catalog::IndexCatalogSnapshot,
-        key: &catalog::ScopedPropertyDirectionKey,
+        label: &str,
+        property: &str,
+        direction: helix_ast::index::RangeIndexDirection,
     ) -> Option<Self::RangeIndex> {
-        indexes.edge_range.get(key).cloned()
+        indexes
+            .edge_range
+            .get(&(label, property, direction) as &dyn catalog::ScopedPropertyDirectionKeyView)
+            .cloned()
     }
 
     fn equality_source(
@@ -89,6 +81,7 @@ impl shared::AccessFilterIndexFamily for EdgeIndexFamily {
         range: ir::IndexRange,
     ) -> Self::Source {
         ir::EdgeAccessSourcePlan::from_unfiltered(ir::EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index,
             key,
             range,
@@ -112,6 +105,18 @@ impl shared::AccessFilterIndexFamily for EdgeIndexFamily {
             source.as_ref(),
             ir::EdgeAccessPlan::AllScan | ir::EdgeAccessPlan::LabelScan { .. }
         )
+    }
+
+    fn branch_residual_union(
+        branches: Vec<(Self::Source, Option<ir::PredicatePlan>)>,
+    ) -> Option<Self::Source> {
+        ir::EdgeAccessPlan::branch_residual_union(
+            branches
+                .into_iter()
+                .map(|(source, residual)| ir::EdgeResidualBranch::new(source, residual))
+                .collect(),
+        )
+        .map(ir::EdgeAccessSourcePlan::from_unfiltered)
     }
 
     fn intersect_pair(left: Self::Source, right: Self::Source) -> Self::Source {

@@ -92,6 +92,7 @@ fn direct_label_helpers_cover_index_and_search_families() {
 
     for plan in [
         ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "User",
@@ -124,6 +125,7 @@ fn direct_label_helpers_cover_index_and_search_families() {
             value: literal(1),
         },
         ir::EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::EdgeRangeIndexMeta::try_new("likes_created").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "LIKES",

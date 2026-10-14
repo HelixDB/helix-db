@@ -45,10 +45,6 @@ fn prepared_batches_require_contiguous_observations_and_measure_final_writes() {
             },
         ],
     };
-    let (input, operations, output) = first.measurements();
-    assert!(input > 0);
-    assert_eq!(operations, 2);
-    assert!(output > 0);
     assert_eq!(first.rows().len(), 3);
 
     let mut batch = PreparedTextStatisticsBatch::default();
@@ -137,8 +133,10 @@ async fn build_active_source_and_query_statistics_share_one_exact_persisted_mode
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .unwrap();
-    let prepared = prepare_build_mutation(
+    let mut batch = PreparedTextStatisticsBatch::default();
+    let scanned = prepare_source_scan_in_batch(
         &transaction,
+        &batch,
         scope,
         index_id,
         generation,
@@ -146,9 +144,11 @@ async fn build_active_source_and_query_statistics_share_one_exact_persisted_mode
         present.clone(),
     )
     .await
-    .unwrap();
-    validate(&transaction, &prepared).await.unwrap();
-    stage_validated(&transaction, &prepared).unwrap();
+    .unwrap()
+    .expect("an unaccounted entity records its first contribution");
+    batch.push(scanned).unwrap();
+    batch.validate(&transaction).await.unwrap();
+    batch.stage_validated(&transaction).unwrap();
     transaction.commit().await.unwrap();
     assert_eq!(
         load_entity_contribution(&db, scope, index_id, generation, entity)
@@ -162,10 +162,10 @@ async fn build_active_source_and_query_statistics_share_one_exact_persisted_mode
         .await
         .unwrap();
     let mut batch = PreparedTextStatisticsBatch::default();
-    let removal = prepare_active_in_batch(
+    let removal = prepare_mutation_in_batch(
         &transaction,
         &batch,
-        ActiveTextStatisticsMutation::new(
+        TextStatisticsMutation::new(
             scope,
             index_id,
             generation,

@@ -26,7 +26,7 @@ impl<'db> ExecutionContext<'db> {
         match input {
             ir::PropertyInputPlan::Value(value) => Ok(ast_to_db_value(value.clone())),
             ir::PropertyInputPlan::Expr(expr) => {
-                self.eval_expr(&search_eval_row(), expr.expr().expr()).await
+                self.eval_expr_plan(&search_eval_row(), expr.expr()).await
             }
         }
     }

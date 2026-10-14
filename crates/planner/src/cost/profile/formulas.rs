@@ -1,11 +1,25 @@
 //! Cost formulas derived from `StorageCostProfile`.
 
+use helix_ast::expr::Predicate;
+
 use crate::properties::{KeyLocality, PositiveUsize};
 
 use super::{
     parallel, ByteEstimate, CostVector, EstimatedRows, LatencyEstimate, StorageCostProfile,
     UniqueEqualityRows,
 };
+
+/// Label domain of an index membership whose nodes outside the set label
+/// evaluate the whole predicate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MembershipLabelDomain<'p> {
+    /// Reading the label bitmap, alongside the set.
+    pub read: CostVector,
+    /// Nodes carrying the set label.
+    pub label_rows: EstimatedRows,
+    /// Whole filter predicate, evaluated by nodes of other labels.
+    pub predicate: &'p Predicate,
+}
 
 impl StorageCostProfile {
     /// Estimate rows for a unique equality lookup.
@@ -94,6 +108,61 @@ impl StorageCostProfile {
         }
     }
 
+    /// Cost a label bitmap followed by row construction.
+    ///
+    /// Deletes remove label memberships in the same transaction, so the
+    /// executor trusts the bitmap like any index set and reads no graph row
+    /// to emit its IDs. Charge row construction even when statistics are
+    /// missing; residual predicates are charged separately.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let cost = profile.label_scan(EstimatedRows::rows(1000));
+    /// assert_eq!(cost.object_reads, 1);
+    /// assert_eq!(cost.authoritative_graph_reads, 0);
+    /// assert_eq!(cost.range_nexts, 0);
+    /// ```
+    pub fn label_scan(&self, rows: EstimatedRows) -> CostVector {
+        self.bitmap_equality_lookup(rows)
+            .serial(self.secondary_row_materialization(rows))
+    }
+
+    /// Cost an element-ID scan followed by graph-row reads and row construction.
+    /// This is distinct from an index range scan, whose driver may defer graph
+    /// verification until after membership filtering.
+    pub fn element_scan(&self, rows: EstimatedRows) -> CostVector {
+        self.range_scan(rows)
+            .serial(self.authoritative_verification(rows))
+            .serial(self.secondary_row_materialization(rows))
+    }
+
+    /// Estimate traversal independently of the physical index direction.
+    /// This charges every estimated visited entry, never just the output limit.
+    pub fn ordered_range_scan(
+        &self,
+        rows: EstimatedRows,
+        iteration: crate::ir::RangeScanIteration,
+    ) -> CostVector {
+        let mut cost = self.range_scan(rows);
+        if iteration == crate::ir::RangeScanIteration::Reverse {
+            let extra = u128::from(self.reverse_range_per_1000.as_micros())
+                * u128::from(rows.as_rows())
+                / 1_000;
+            cost.latency = cost.latency.saturating_add(LatencyEstimate::micros(
+                extra.min(u128::from(u64::MAX)) as u64,
+            ));
+        }
+        cost
+    }
+
+    /// Cost property sort-key reads followed by the existing comparator sort.
+    /// Property decoding uses the same per-row estimate as authoritative checks.
+    pub fn property_sort(&self, rows: EstimatedRows) -> CostVector {
+        self.authoritative_verification(rows)
+            .serial(self.explicit_sort(rows))
+    }
+
     /// Cost an equality-index lookup over an estimated result count.
     pub fn equality_index_lookup(&self, estimated_rows: EstimatedRows) -> CostVector {
         self.bitmap_equality_lookup(estimated_rows)
@@ -116,14 +185,31 @@ impl StorageCostProfile {
         }
     }
 
-    /// Cost one close-key `multi_get` and decode for batched V4 bitmaps.
+    /// Cost the close-key `multi_get`s and decode of batched V4 bitmaps.
+    ///
+    /// The executor reads the bitmaps in serial `multi_get`s of at most
+    /// [`crate::cost::RECORD_BATCH_ROWS`] keys, so every further batch pays
+    /// one more call setup.
+    ///
+    /// ```
+    /// use helix_planner::{cost, properties};
+    /// let profile = cost::StorageCostProfile::default();
+    /// let batch = |values| {
+    ///     profile.bitmap_equality_batch(
+    ///         properties::PositiveUsize::at_least_one(values),
+    ///         cost::EstimatedRows::rows(10),
+    ///     )
+    /// };
+    /// assert_eq!(batch(256).multi_get_calls, 1);
+    /// assert_eq!(batch(600).multi_get_calls, 3);
+    /// ```
     pub fn bitmap_equality_batch(
         &self,
         values: PositiveUsize,
         estimated_rows: EstimatedRows,
     ) -> CostVector {
         let rows = estimated_rows.as_rows();
-        self.multi_get(values, KeyLocality::Close)
+        self.record_batched_multi_get(values, KeyLocality::Close)
             .serial(CostVector {
                 latency: self.bitmap_decode_per_id.saturating_mul(rows),
                 cpu_units: rows,
@@ -139,14 +225,74 @@ impl StorageCostProfile {
             .serial(self.authoritative_verification(estimated_rows))
     }
 
-    /// Cost an authoritative graph scan used for null equality.
-    pub fn null_equality_scan(&self, scanned_rows: EstimatedRows) -> CostVector {
-        self.range_scan(scanned_rows)
-            .serial(self.predicate_eval(scanned_rows))
-            .serial(CostVector {
-                authoritative_graph_reads: scanned_rows.as_rows(),
-                ..CostVector::ZERO
-            })
+    /// Cost unique owner multi-gets and same-snapshot authoritative checks.
+    ///
+    /// Owners are read in serial `multi_get`s of at most
+    /// [`crate::cost::RECORD_BATCH_ROWS`] keys, each paying its own setup.
+    ///
+    /// ```
+    /// use helix_planner::{cost, properties};
+    /// let profile = cost::StorageCostProfile::default();
+    /// let batch = profile.unique_equality_batch(
+    ///     properties::PositiveUsize::at_least_one(5), cost::EstimatedRows::rows(5));
+    /// assert_eq!(batch.multi_get_calls, 1);
+    /// assert_eq!(batch.authoritative_graph_reads, 5);
+    /// assert_eq!(batch.object_reads, 10);
+    /// let wide = profile.unique_equality_batch(
+    ///     properties::PositiveUsize::at_least_one(10_000), cost::EstimatedRows::rows(5));
+    /// assert_eq!(wide.multi_get_calls, 40);
+    /// ```
+    pub fn unique_equality_batch(&self, values: PositiveUsize, rows: EstimatedRows) -> CostVector {
+        self.record_batched_multi_get(values, KeyLocality::Close)
+            .serial(self.authoritative_verification(rows))
+            .serial(self.secondary_set_operation(rows))
+    }
+
+    /// Cost null equality over a label of `label_rows` rows.
+    ///
+    /// The executor reads the label bitmap, scans the equality lane (at most
+    /// one entry per label row), subtracts it, and verifies only the label
+    /// rows left outside the lane, which the default equality estimate bounds.
+    /// No row outside the label is ever read.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let cost = profile.null_equality_scan(EstimatedRows::rows(1_000_000));
+    /// assert_eq!(cost.range_seeks, 1);
+    /// assert_eq!(
+    ///     cost.authoritative_graph_reads,
+    ///     profile.default_equality_index_rows.as_rows()
+    /// );
+    /// let tiny = profile.null_equality_scan(EstimatedRows::rows(2));
+    /// assert_eq!(tiny.authoritative_graph_reads, 2);
+    /// ```
+    pub fn null_equality_scan(&self, label_rows: EstimatedRows) -> CostVector {
+        let candidates = EstimatedRows::rows(
+            label_rows
+                .as_rows()
+                .min(self.default_equality_index_rows.as_rows()),
+        );
+        self.bitmap_equality_lookup(label_rows)
+            .serial(self.range_scan(label_rows))
+            .serial(self.secondary_set_operation(label_rows))
+            .serial(self.authoritative_verification(candidates))
+    }
+
+    /// Cost `keys` read in serial `multi_get`s of at most
+    /// [`crate::cost::RECORD_BATCH_ROWS`] keys, as the executor reads
+    /// equality batches: one [`Self::multi_get`] whose setup is paid once per
+    /// call.
+    fn record_batched_multi_get(&self, keys: PositiveUsize, locality: KeyLocality) -> CostVector {
+        let calls = (keys.get() as u64).div_ceil(crate::cost::RECORD_BATCH_ROWS);
+        let read = self.multi_get(keys, locality);
+        CostVector {
+            latency: read
+                .latency
+                .saturating_add(self.multi_get_setup.saturating_mul(calls - 1)),
+            multi_get_calls: calls,
+            ..read
+        }
     }
 
     /// Cost a V2 range scan plus authoritative verification of every candidate.
@@ -191,6 +337,99 @@ impl StorageCostProfile {
             peak_memory: self.default_materialized_row_bytes.saturating_mul(rows),
             ..CostVector::ZERO
         }
+    }
+
+    /// Cost a residual filter whose predicate reads each row's stored record.
+    ///
+    /// Every input row pays one authoritative record read and decode before
+    /// the predicate is evaluated, so the cost grows with the input stream.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let cost = profile.stored_predicate_filter(EstimatedRows::rows(1_000));
+    /// assert_eq!(cost.authoritative_graph_reads, 1_000);
+    /// assert_eq!(cost.object_reads, 1_000);
+    /// ```
+    pub fn stored_predicate_filter(&self, rows: EstimatedRows) -> CostVector {
+        self.authoritative_verification(rows)
+            .serial(self.predicate_eval(rows))
+    }
+
+    /// Cost a row-preserving node index membership filter.
+    ///
+    /// The interpreter reads `set` once per request, concurrently with the
+    /// label bitmap of a `label_domain` when outside-label nodes need it,
+    /// probes the set once per stream row, and evaluates `residual` only for
+    /// the `matches` rows the set keeps, never for more than the `rows` it
+    /// sees. Under a label domain, nodes of other labels evaluate the whole
+    /// predicate and read their records: at least `rows - label_rows` of the
+    /// stream carry another label, so that many rows are priced as a residual
+    /// filter of the whole predicate. A stream no longer than the label is
+    /// priced as label rows, which the bitmap decides.
+    ///
+    /// ```
+    /// use helix_ast::expr::Predicate;
+    /// use helix_planner::cost::{EstimatedRows, MembershipLabelDomain, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let rows = EstimatedRows::rows;
+    /// let set = profile.bitmap_equality_lookup(rows(10));
+    /// let kind = Predicate::eq("kind", "B");
+    /// let label = MembershipLabelDomain {
+    ///     read: profile.bitmap_equality_lookup(rows(1_000)),
+    ///     label_rows: rows(1_000),
+    ///     predicate: &kind,
+    /// };
+    ///
+    /// // Without a residual no record is read, however long the stream.
+    /// for n in [1, 257, 1_000_000] {
+    ///     let scoped = profile.index_membership_filter(set, None, None, rows(n), rows(10));
+    ///     assert_eq!(scoped.authoritative_graph_reads, 0);
+    ///     assert_eq!(scoped.object_reads, 1);
+    /// }
+    ///
+    /// // Under a label domain, rows beyond the label evaluate the predicate.
+    /// for (n, outside) in [(1, 0), (1_000, 0), (1_000_000, 999_000)] {
+    ///     let unscoped = profile.index_membership_filter(set, Some(label), None, rows(n), rows(10));
+    ///     assert_eq!(unscoped.authoritative_graph_reads, outside);
+    ///     assert_eq!(unscoped.object_reads, 2 + outside);
+    /// }
+    ///
+    /// // The label domain is read alongside the set: the slower read, not both.
+    /// let both = profile.index_membership_filter(set, Some(label), None, rows(1), rows(10));
+    /// assert!(
+    ///     both.latency.as_micros() < set.latency.as_micros() + label.read.latency.as_micros()
+    /// );
+    ///
+    /// // A residual reads the records of set matches only, at most the stream.
+    /// let title = Predicate::contains("title", "x");
+    /// let fused = profile.index_membership_filter(set, None, Some(&title), rows(1_000), rows(10));
+    /// assert_eq!(fused.authoritative_graph_reads, 10);
+    /// let short = profile.index_membership_filter(set, None, Some(&title), rows(3), rows(10));
+    /// assert_eq!(short.authoritative_graph_reads, 3);
+    /// ```
+    pub fn index_membership_filter(
+        &self,
+        set: CostVector,
+        label_domain: Option<MembershipLabelDomain<'_>>,
+        residual: Option<&Predicate>,
+        rows: EstimatedRows,
+        matches: EstimatedRows,
+    ) -> CostVector {
+        let (sets, outside) = label_domain.map_or((set, CostVector::ZERO), |domain| {
+            (
+                self.parallel(&[set, domain.read], PositiveUsize::at_least_one(2)),
+                self.residual_filter(
+                    domain.predicate,
+                    EstimatedRows::rows(rows.as_rows().saturating_sub(domain.label_rows.as_rows())),
+                ),
+            )
+        });
+        sets.serial(self.secondary_set_operation(rows))
+            .serial(residual.map_or(CostVector::ZERO, |residual| {
+                self.residual_filter(residual, matches.min(rows))
+            }))
+            .serial(outside)
     }
 
     /// Cost residual predicate evaluation for a row estimate.
@@ -287,6 +526,47 @@ impl StorageCostProfile {
             peak_memory,
             parallel_width,
             ..total
+        }
+    }
+
+    /// Cost reading the children of one secondary-set operation concurrently,
+    /// within `max_parallel_kv_reads`, the way the executor reads
+    /// intersection, union, and ordered-intersection filter children.
+    ///
+    /// Children that cost nothing, such as statically empty sets, read
+    /// nothing and schedule no task. No remaining child costs nothing and one
+    /// costs exactly itself, with no task overhead. Two or more pay their
+    /// critical path plus the task overhead of the parallel width, and every
+    /// read still counts.
+    ///
+    /// ```
+    /// use helix_planner::cost::{CostVector, LatencyEstimate, StorageCostProfile};
+    ///
+    /// let profile = StorageCostProfile::default();
+    /// let read = |micros| CostVector {
+    ///     latency: LatencyEstimate::micros(micros),
+    ///     object_reads: 1,
+    ///     ..CostVector::ZERO
+    /// };
+    ///
+    /// assert_eq!(profile.parallel_reads(&[]), CostVector::ZERO);
+    /// assert_eq!(profile.parallel_reads(&[read(40)]), read(40));
+    /// assert_eq!(profile.parallel_reads(&[read(40), CostVector::ZERO]), read(40));
+    /// let both = profile.parallel_reads(&[read(5_000), read(7_000)]);
+    /// assert_eq!(both.object_reads, 2);
+    /// assert_eq!(both.parallel_width, 2);
+    /// assert_eq!(both.latency.as_micros(), 7_000 + 2 * 25);
+    /// ```
+    pub fn parallel_reads(&self, children: &[CostVector]) -> CostVector {
+        let reads = children
+            .iter()
+            .copied()
+            .filter(|child| *child != CostVector::ZERO)
+            .collect::<Vec<_>>();
+        match reads.as_slice() {
+            [] => CostVector::ZERO,
+            [one] => *one,
+            _ => self.parallel(&reads, self.max_parallel_kv_reads),
         }
     }
 

@@ -9,6 +9,10 @@ use crate::properties;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhysicalExpr {
+    /// Selected common row pipeline implementation.
+    Rows(crate::relational::RowPipeline),
+    /// Selected common graph pattern traversal order.
+    GraphPattern(crate::relational::GraphPatternOrder),
     /// Identity operator used for proven no-op logical rewrites.
     NoOp,
     /// Empty stream used for proven impossible pure predicates.

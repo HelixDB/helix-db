@@ -14,6 +14,7 @@ import (
 	"time"
 
 	helix "github.com/helixdb/helix-db/sdks/go"
+	"github.com/helixdb/helix-db/sdks/go/internal/paritycypher"
 )
 
 type fixture struct {
@@ -33,6 +34,9 @@ func main() {
 }
 
 func run() error {
+	if url := os.Getenv("HELIX_CYPHER_PARITY_URL"); url != "" {
+		return paritycypher.RunHTTP(url, os.Getenv("HELIX_CYPHER_PARITY_RESULTS"), os.Getenv("HELIX_CYPHER_PARITY_PHASE"))
+	}
 	out := "../tests/parity/generated/go"
 	if len(os.Args) > 1 {
 		out = os.Args[1]
@@ -75,8 +79,8 @@ func run() error {
 		}
 	}
 
-	if runtimeCount != 233 {
-		return fmt.Errorf("generated %d runtime fixtures, expected 233", runtimeCount)
+	if runtimeCount != 234 {
+		return fmt.Errorf("generated %d runtime fixtures, expected 234", runtimeCount)
 	}
 	if jsonOnlyCount != 15 {
 		return fmt.Errorf("generated %d json-only fixtures, expected 15", jsonOnlyCount)
@@ -209,11 +213,15 @@ func executeEmbeddedFixtures(fixtures []fixture, results string) error {
 		if err == nil {
 			return fmt.Errorf("%s unexpectedly succeeded after index DROP", search.name)
 		}
-		if !strings.Contains(err.Error(), "index_not_found") {
+		var helixErr *helix.HelixError
+		if !errors.As(err, &helixErr) || helixErr.Code != helix.QueryErrorCode("index_not_found") {
 			return fmt.Errorf("%s returned the wrong post-DROP error: %w", search.name, err)
 		}
 	}
-	return nil
+	if err := client.Close(); err != nil {
+		return err
+	}
+	return paritycypher.RunEmbedded(source, cache, results)
 }
 
 func requiredFixture(fixtures []fixture, name string) (fixture, error) {
@@ -558,6 +566,17 @@ func runtimeFixtures() []fixture {
 			read().VarAs("edge_vector_hits", helix.G().VectorSearchEdges("FOLLOWS", "embedding", []float32{1.0, 0.0}, 5).EdgeProperties()).Returning("edge_vector_hits"),
 		),
 		runtime(
+			"028a-read-eventual-search",
+			read().
+				WithSearchConsistency(helix.SearchConsistencyEventual).
+				VarAs("text_hits", helix.G().TextSearchNodes("ParityUser", "bio", "graph", 5).ValueMap("externalId", "bio", "$distance")).
+				VarAs("vector_hits", helix.G().VectorSearchNodes("ParityUser", "embedding", []float32{1.0, 0.0, 0.0}, 3).Project(
+					helix.ProjectPropAs("externalId", "externalId"),
+					helix.ProjectPropAs("$distance", "distance"),
+				)).
+				Returning("text_hits", "vector_hits"),
+		),
+		runtime(
 			"029-write-drop-temp-node",
 			write().VarAs("temp", helix.G().AddN("ParityTemp", helix.Props{helix.Prop("name", "temp")})).VarAs("dropped", helix.G().N(helix.NodeVar("temp")).Drop().Count()).Returning("dropped"),
 		),
@@ -632,7 +651,7 @@ func runtimeFixtures() []fixture {
 			"906-write-drop-indexed-items",
 			write().
 				VarAs("edge_matches", helix.G().EWithLabel("FOLLOWS").Where(helix.PredEq("note", "dropitemedge"))).
-				VarAs("edges", helix.G().DropEdgeByID(helix.EdgeVar("edge_matches")).Count()).
+				VarAs("edges", helix.G().E(helix.EdgeVar("edge_matches")).Drop().Count()).
 				VarAs("source", helix.G().NWithLabel("ParityUser").Where(helix.PredEq("externalId", "drop-text-source")).Drop().Count()).
 				VarAs("target", helix.G().NWithLabel("ParityUser").Where(helix.PredEq("externalId", "drop-text-target")).Drop().Count()).
 				VarAs("active_source", helix.G().NWithLabel("ParityUser").Where(helix.PredEq("externalId", "active-text-source")).Drop().Count()).

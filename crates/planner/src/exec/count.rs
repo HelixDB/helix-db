@@ -7,7 +7,7 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{catalog, ir};
+use crate::{catalog, exec, ir};
 
 /// Failure to construct a physical equality contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -804,6 +804,16 @@ pub enum ExecCountCursorPlan {
         /// Authoritative verification.
         verification: ExecNodeAuthoritativeVerificationPlan,
     },
+    /// Verified unique node owners of several literals, read and verified
+    /// in batched multi-gets, as a row read of the same literal set is.
+    NodeUniqueBatch {
+        /// The required unique index lane.
+        index: ExecNodeUniqueEqualityIndex,
+        /// One label-scoped property shared by every value.
+        key: catalog::ScopedPropertyKey,
+        /// Finite indexed literals; duplicates have set semantics.
+        values: ir::AtLeast<ExecIndexedEqualityValue, 2>,
+    },
     /// Verified node range IDs.
     NodeRange(ExecNodeVerifiedRangeScanPlan),
     /// Verified edge range IDs.
@@ -930,6 +940,13 @@ pub enum ExecCountCursorPlan {
         input: Box<Self>,
         /// Predicate.
         predicate: ir::PredicatePlan,
+    },
+    /// Row-preserving node secondary-index membership filter.
+    IndexMembership {
+        /// Input cursor.
+        input: Box<Self>,
+        /// Membership set, label, and fallback predicate.
+        plan: Box<exec::ExecNodeIndexMembershipPlan>,
     },
     /// Positioned canonical window that could not cross a semantic barrier.
     Window {
@@ -1228,6 +1245,7 @@ fn validate_cursor(cursor: &ExecCountCursorPlan) -> Result<(), ExecCountValidati
             rest.iter().try_for_each(validate_cursor)
         }
         ExecCountCursorPlan::Filter { input, .. }
+        | ExecCountCursorPlan::IndexMembership { input, .. }
         | ExecCountCursorPlan::Order { input, .. }
         | ExecCountCursorPlan::Expand { input, .. }
         | ExecCountCursorPlan::VectorSearch { input, .. }
@@ -1243,6 +1261,7 @@ fn validate_cursor(cursor: &ExecCountCursorPlan) -> Result<(), ExecCountValidati
         | ExecCountCursorPlan::NodeBitmap(_)
         | ExecCountCursorPlan::EdgeBitmap(_)
         | ExecCountCursorPlan::NodeUnique { .. }
+        | ExecCountCursorPlan::NodeUniqueBatch { .. }
         | ExecCountCursorPlan::NodeRange(_)
         | ExecCountCursorPlan::EdgeRange(_)
         | ExecCountCursorPlan::NodeAuthoritativeScan(_)
@@ -1294,6 +1313,7 @@ fn cursor_row_input_count(cursor: &ExecCountCursorPlan) -> Result<usize, ExecCou
             count
         }
         ExecCountCursorPlan::Filter { input, .. }
+        | ExecCountCursorPlan::IndexMembership { input, .. }
         | ExecCountCursorPlan::Window { input, .. }
         | ExecCountCursorPlan::Order { input, .. }
         | ExecCountCursorPlan::Expand { input, .. }
@@ -1305,6 +1325,7 @@ fn cursor_row_input_count(cursor: &ExecCountCursorPlan) -> Result<usize, ExecCou
         | ExecCountCursorPlan::NodeBitmap(_)
         | ExecCountCursorPlan::EdgeBitmap(_)
         | ExecCountCursorPlan::NodeUnique { .. }
+        | ExecCountCursorPlan::NodeUniqueBatch { .. }
         | ExecCountCursorPlan::NodeRange(_)
         | ExecCountCursorPlan::EdgeRange(_)
         | ExecCountCursorPlan::NodeAuthoritativeScan(_)
@@ -1466,6 +1487,15 @@ mod tests {
             ExecCountCursorPlan::InputRows,
             ExecCountCursorPlan::NodeBitmap(node_point("active")),
             ExecCountCursorPlan::EdgeBitmap(edge_point("active")),
+            ExecCountCursorPlan::NodeUniqueBatch {
+                index: lookup.index.clone(),
+                key: lookup.key.clone(),
+                values: ir::AtLeast::try_from_vec(vec![
+                    lookup.value.clone(),
+                    indexed("bob@example.test"),
+                ])
+                .unwrap(),
+            },
             ExecCountCursorPlan::NodeUnique {
                 lookup,
                 verification,

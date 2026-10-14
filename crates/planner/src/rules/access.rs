@@ -13,9 +13,15 @@ mod sources;
 mod window;
 
 pub(in crate::rules) use self::filter::{
-    index_access_filter, label_domain_has_candidate, simplify_access_filter, AccessFilterRewrite,
+    access_filter_alternatives, index_access_filter, label_domain_has_candidate,
+    AccessFilterRewrite,
 };
-pub(crate) use self::filter::{missing_index_candidates, CandidateIndexKind};
+pub(crate) use self::filter::{
+    missing_index_candidates, with_index_rewrite_cache, CandidateIndexKind,
+};
+pub(in crate::rules) use self::pipeline::required_filter_rewrite_pending;
+#[cfg(test)]
+pub(in crate::rules) use self::pipeline::{membership_rewrite, source_index_rewrite};
 pub(in crate::rules) use self::sets::{
     access_path_has_contradiction_candidate as access_path_has_contradiction_proof_candidate,
     access_path_has_equality_range_intersection_candidate as access_path_has_equality_range_intersection_proof_candidate,
@@ -32,12 +38,18 @@ pub use self::{
     },
     path::AccessPathImplementationRule,
     pipeline::{
-        AccessPipelineFilterRule, AccessPipelineImplementationRule, AccessPipelineOrderRule,
-        AccessPipelineSimplificationRule,
+        AccessPipelineFilterRule, AccessPipelineImplementationRule,
+        AccessPipelineMembershipFilterRule, AccessPipelineOrderRule,
+        AccessPipelineSimplificationRule, AccessSourceIndexFilterRule,
     },
     sets::{
         AccessContradictionRule, AccessEqualityRangeIntersectionRule, AccessEqualityRangeUnionRule,
         AccessRangeIntersectionRule, AccessSetSimplificationRule, AccessSubsumptionRule,
     },
     window::{AccessWindowImplementationRule, AccessWindowRule},
+};
+
+pub(in crate::rules) use order::{
+    access_order_satisfaction, rewrite_access_order_range_direction,
+    AccessOrderRangeDirectionRewrite, AccessOrderSatisfaction,
 };

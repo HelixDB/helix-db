@@ -14,8 +14,9 @@ pub enum OptimizerGuardrail {
     RuleFires,
     /// Physical alternatives-per-group limit reached.
     AlternativesPerGroup,
-    /// Optimization time budget reached.
-    TimeBudget,
+    /// Exploration rule-fire budget reached; optional exploration stopped
+    /// while implementation and required rewrites continued.
+    ExplorationBudget,
     /// Memo ownership or identity invariant failed during exploration.
     MemoIntegrity,
 }

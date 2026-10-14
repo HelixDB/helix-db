@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn access_order_rule_elides_matching_range_index_order_and_singletons() {
+fn access_order_implementation_proves_matching_range_order_and_singletons() {
     let rule = AccessOrderRule::default();
     let storage = cost::StorageCostProfile::default();
     let range = node_access_order_expr(
@@ -15,32 +15,34 @@ fn access_order_rule_elides_matching_range_index_order_and_singletons() {
         desc_order_keys(),
     );
 
-    let range = logical_access_path(rule.apply(optimizer::RuleInput {
-        expr: &range,
-        storage: &storage,
-        indexes: empty_indexes(),
-        planner_limits: default_planner_limits(),
-        stats: default_stats(),
-    }));
-    let singleton = logical_access_path(rule.apply(optimizer::RuleInput {
-        expr: &singleton,
-        storage: &storage,
-        indexes: empty_indexes(),
-        planner_limits: default_planner_limits(),
-        stats: default_stats(),
-    }));
-
-    assert_eq!(rule.metadata().id.as_ref(), "access_order");
-    assert!(matches!(
-        range,
-        logical::AccessPath::Node(path)
-            if matches!(path.source().as_ref(), ir::NodeAccessPlan::RangeIndex { .. })
-    ));
-    assert!(matches!(
-        singleton,
-        logical::AccessPath::Edge(path)
-            if matches!(path.source().as_ref(), ir::EdgeAccessPlan::PointIds { .. })
-    ));
+    for expr in [range, singleton] {
+        assert_eq!(
+            rule.apply(optimizer::RuleInput {
+                expr: &expr,
+                storage: &storage,
+                indexes: empty_indexes(),
+                planner_limits: default_planner_limits(),
+                stats: default_stats(),
+            }),
+            optimizer::RuleResult::NotApplicable
+        );
+        let alternative = physical_alternative(AccessOrderImplementationRule::default().apply(
+            optimizer::RuleInput {
+                expr: &expr,
+                storage: &storage,
+                indexes: empty_indexes(),
+                planner_limits: default_planner_limits(),
+                stats: default_stats(),
+            },
+        ));
+        let physical::PhysicalExpr::Pipeline(pipeline) = alternative.expr else {
+            panic!("expected pipeline");
+        };
+        assert!(matches!(
+            pipeline.ops().last(),
+            Some(physical::PhysicalPipelineOp::OrderSatisfiedByAccess { .. })
+        ));
+    }
 }
 
 #[test]
@@ -55,7 +57,7 @@ fn access_order_rule_promotes_the_requested_direct_node_range_driver() {
         order_keys_for("score", helix_ast::traversal::Order::Asc),
     );
 
-    let rewritten = logical_access_path(rule.apply(optimizer::RuleInput {
+    let rewritten = ordered_logical_access_path(rule.apply(optimizer::RuleInput {
         expr: &expr,
         storage: &storage,
         indexes: empty_indexes(),
@@ -102,7 +104,7 @@ fn access_order_rule_preserves_non_range_filters_during_driver_promotion() {
         order_keys_for("score", helix_ast::traversal::Order::Asc),
     );
 
-    let rewritten = logical_access_path(rule.apply(optimizer::RuleInput {
+    let rewritten = ordered_logical_access_path(rule.apply(optimizer::RuleInput {
         expr: &expr,
         storage: &storage,
         indexes: empty_indexes(),
@@ -117,11 +119,11 @@ fn access_order_rule_preserves_non_range_filters_during_driver_promotion() {
     };
 
     assert!(matches!(
-        children[0].as_ref(),
+        children[1].as_ref(),
         ir::NodeAccessPlan::EqualityIndex { key, .. } if key.property == "tenant"
     ));
     assert!(matches!(
-        children[1].as_ref(),
+        children[0].as_ref(),
         ir::NodeAccessPlan::RangeIndex { key, .. } if key.property == "score"
     ));
     assert!(matches!(
@@ -153,7 +155,7 @@ fn access_order_rule_keeps_the_first_matching_direct_range_driver() {
         order_keys_for("score", helix_ast::traversal::Order::Asc),
     );
 
-    let rewritten = logical_access_path(rule.apply(optimizer::RuleInput {
+    let rewritten = ordered_logical_access_path(rule.apply(optimizer::RuleInput {
         expr: &expr,
         storage: &storage,
         indexes: empty_indexes(),
@@ -163,7 +165,8 @@ fn access_order_rule_keeps_the_first_matching_direct_range_driver() {
 
     assert!(matches!(
         rewritten,
-        logical::AccessPath::Node(path) if path.source().as_ref() == &source
+        logical::AccessPath::Node(path) if matches!(path.source().as_ref(), ir::NodeAccessPlan::Intersect(children)
+            if children.len() == 4 && children[0] == match &source { ir::NodeAccessPlan::Intersect(original) => original[1].clone(), _ => unreachable!() })
     ));
 }
 
@@ -189,7 +192,7 @@ fn access_order_rule_promotes_the_requested_direct_edge_range_driver() {
         order_keys_for("score", helix_ast::traversal::Order::Desc),
     );
 
-    let rewritten = logical_access_path(rule.apply(optimizer::RuleInput {
+    let rewritten = ordered_logical_access_path(rule.apply(optimizer::RuleInput {
         expr: &expr,
         storage: &storage,
         indexes: empty_indexes(),
@@ -214,7 +217,7 @@ fn access_order_rule_promotes_the_requested_direct_edge_range_driver() {
 }
 
 #[test]
-fn access_order_rule_rejects_nested_only_range_drivers() {
+fn access_order_rule_flattens_nested_range_drivers() {
     let rule = AccessOrderRule::default();
     let storage = cost::StorageCostProfile::default();
     let node_nested = node_access_order_expr(
@@ -246,16 +249,13 @@ fn access_order_rule_rejects_nested_only_range_drivers() {
     );
 
     for expr in [node_nested, edge_nested] {
-        assert_eq!(
-            rule.apply(optimizer::RuleInput {
-                expr: &expr,
-                storage: &storage,
-                indexes: empty_indexes(),
-                planner_limits: default_planner_limits(),
-                stats: default_stats(),
-            }),
-            optimizer::RuleResult::NotApplicable
-        );
+        ordered_logical_access_path(rule.apply(optimizer::RuleInput {
+            expr: &expr,
+            storage: &storage,
+            indexes: empty_indexes(),
+            planner_limits: default_planner_limits(),
+            stats: default_stats(),
+        }));
     }
 }
 
@@ -269,7 +269,7 @@ fn access_order_rule_rejects_unsafe_intersection_order_requests() {
             node_eq_source("User", "active", equality_literal(1)),
             matching_range.clone(),
         )),
-        order_keys_for("score", helix_ast::traversal::Order::Desc),
+        order_keys_for("missing", helix_ast::traversal::Order::Desc),
     );
     let multikey = node_access_order_expr(
         ir::NodeAccessPlan::Intersect(ir::AtLeast::from_pair(
@@ -306,7 +306,7 @@ fn access_order_rule_declines_mismatch_multikey_unknown_and_non_candidates() {
     let storage = cost::StorageCostProfile::default();
     let mismatched_direction = node_access_order_expr(
         ir::NodeAccessPlan::from(node_range_source("User", "age", lower_range(18))),
-        desc_order_keys(),
+        order_keys_for("missing", helix_ast::traversal::Order::Desc),
     );
     let multikey = node_access_order_expr(
         ir::NodeAccessPlan::from(node_range_source("User", "age", lower_range(18))),
@@ -384,7 +384,9 @@ fn access_order_implementation_rule_keeps_explicit_sort_in_cascades() {
     let rows = storage.default_unknown_scan_rows;
     assert_eq!(
         alternative.cost,
-        storage.range_scan(rows).serial(storage.explicit_sort(rows))
+        storage
+            .element_scan(rows)
+            .serial(storage.property_sort(rows))
     );
 
     let already_satisfied = node_access_order_expr(
@@ -393,14 +395,18 @@ fn access_order_implementation_rule_keeps_explicit_sort_in_cascades() {
         },
         order_keys(),
     );
-    assert_eq!(
-        rule.apply(optimizer::RuleInput {
-            expr: &already_satisfied,
-            storage: &storage,
-            indexes: empty_indexes(),
-            planner_limits: default_planner_limits(),
-            stats: default_stats(),
-        }),
-        optimizer::RuleResult::NotApplicable
-    );
+    let alternative = physical_alternative(rule.apply(optimizer::RuleInput {
+        expr: &already_satisfied,
+        storage: &storage,
+        indexes: empty_indexes(),
+        planner_limits: default_planner_limits(),
+        stats: default_stats(),
+    }));
+    let physical::PhysicalExpr::Pipeline(pipeline) = alternative.expr else {
+        panic!("expected pipeline");
+    };
+    assert!(matches!(
+        pipeline.ops().last(),
+        Some(physical::PhysicalPipelineOp::OrderSatisfiedByAccess { .. })
+    ));
 }

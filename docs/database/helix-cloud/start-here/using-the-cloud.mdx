@@ -1,13 +1,11 @@
 ---
-title: "Using the Cloud"
+title: "Get started with Helix Cloud"
 description: "Sign in, create a workspace and choose its plan, provision a database, and test the connection"
-sidebarTitle: "Using the Cloud"
+sidebarTitle: "Get started"
 pageType: "Tutorial"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
-
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
 
 Use Helix Cloud to create a workspace, choose a monthly plan shared by its
 databases, provision a database, and create API keys.
@@ -36,7 +34,9 @@ databases, provision a database, and create API keys.
   <Step title="Create a database">
     Enter a database name and select **Create Database**. Helix Cloud generates
     its URL slug. The database has isolated data and uses the workspace's shared
-    monthly allowance.
+    monthly allowance. Database creation creates a default read-write API key
+    and displays its token once. Save it immediately in the application's
+    secrets manager; Helix cannot show it again.
 
     <Frame>
       <img src="/images/helix-cloud/dashboard/03-create-database.png" alt="Create a Database form with a database name field" />
@@ -45,8 +45,9 @@ databases, provision a database, and create API keys.
 
   <Step title="Copy the connection details">
     Wait for the database status to become **Active**, then open it. In
-    **Connect**, copy the endpoint and database ID. In **API Keys**, create a key
-    or use an existing one and copy its value when it is shown.
+    **Connect**, copy the endpoint and database ID. To connect an application
+    directly to the gateway, use **API Keys** to explicitly create a read-only
+    or read-write key and copy its value when it is shown once.
 
     <Frame>
       <img src="/images/helix-cloud/dashboard/04-database-details.png" alt="Active database details page with connection details, workspace plan, API keys, and query insights" />
@@ -99,7 +100,7 @@ to source control.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Helix Cloud overview" icon="cloud" href="/database/helix-cloud/start-here/working-with-enterprise">
+  <Card title="Connect an application" icon="plug" href="/database/helix-cloud/start-here/working-with-enterprise">
     Connect from an SDK and understand Cloud request routing.
   </Card>
   <Card title="Security" icon="lock" href="/database/helix-cloud/operate/security">

@@ -98,6 +98,7 @@ mod tests {
         direction: helix_ast::index::RangeIndexDirection,
     ) -> ir::NodeAccessSourcePlan {
         node_source(ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new("User", property, direction).unwrap(),
             range: lower_range(18),

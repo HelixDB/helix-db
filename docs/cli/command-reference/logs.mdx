@@ -1,67 +1,64 @@
 ---
 title: "helix logs"
 sidebarTitle: "logs"
+description: "View local logs or recent Cloud query errors"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-View logs for a local or Helix Cloud instance.
-
-- For **local** instances, logs come from `docker logs` / `podman logs`.
-- For **Helix Cloud** instances, logs are fetched over a time range from Helix Cloud and require `helix auth login`.
+Show container logs for a local instance, or list recent query errors for a Helix Cloud database.
+Local and Cloud.
 
 ## Usage
 
 ```bash
-helix logs [INSTANCE] [OPTIONS]
+helix logs [INSTANCE] [--follow]
+helix logs [CLOUD_INSTANCE] [--start <RFC3339>] [--end <RFC3339>]
 ```
 
 ## Arguments
 
 | Argument | Description |
-|----------|-------------|
-| `INSTANCE` | Instance name. If omitted in a TTY with multiple instances, the CLI prompts. Defaults to `dev` when present and no prompt is needed. |
+| --- | --- |
+| `INSTANCE` | Instance name from `helix.toml`. If omitted, the CLI uses `dev`, then the only instance, then a picker in a terminal; otherwise it fails and lists the instances. |
 
-## Available flags
+## Options
 
-| Flag | Type | Description | Default |
-|------|------|-------------|---------|
-| `-f`, `--follow` | Boolean | Stream live logs. **Local only** — rejected for Helix Cloud instances. | `false` |
-| `-r`, `--range` | Boolean | Query historical logs from Helix Cloud over a time range. **Helix Cloud only**. | `false` |
-| `--start` | RFC 3339 timestamp | Start of the range. Requires `--range`. | `--end` minus 1 hour |
-| `--end` | RFC 3339 timestamp | End of the range. Requires `--range`. | Now (UTC) |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-f`, `--follow` | Local only: keep streaming new log lines. | Off |
+| `--start <TIME>` | Cloud only: start of the window, as an RFC 3339 timestamp. | One hour before `--end` |
+| `--end <TIME>` | Cloud only: end of the window, as an RFC 3339 timestamp. | Now |
+| `--json` | Cloud only: print the query errors as a JSON array. | Off |
 
-`--range`, `--start`, and `--end` are rejected for local instances with:
+## Behavior
 
-```
---range, --start, and --end are only supported for Enterprise logs;
-local logs use docker/podman logs
-```
-
-`--follow` against a Helix Cloud instance is rejected with:
-
-```
-live Enterprise logs are not supported yet; use --range instead
-```
+- Local logs are plain text from Docker/Podman and may follow. `--start`, `--end`, and `--json` are rejected for local instances.
+- Cloud logs use the WorkOS session and the linked database's recent query-error endpoint on the Helix Cloud API; they never contact the database gateway that applications use.
+- Cloud errors print as a table with `TIME`, `QUERY`, and `ERROR` columns. An empty window prints a message naming the instance and time range.
+- `--start` must be before `--end`. Without either, the window is the last hour.
+- Cloud follow is not supported.
 
 ## Examples
 
 ```bash
-# Dump local container logs once
+# Print the logs of the local 'dev' instance
 helix logs dev
 
-# Stream local logs
+# Follow local logs
 helix logs dev --follow
 
-# Last hour of Helix Cloud logs (defaults: end=now, start=end-1h)
-helix logs production --range
+# Recent query errors for a Cloud instance (last hour)
+helix logs production
 
-# Fixed Helix Cloud log range
-helix logs production \
-  --range \
-  --start 2026-05-12T10:00:00Z \
-  --end   2026-05-12T11:00:00Z
+# Query errors in an explicit window, as JSON
+helix logs production --start 2026-01-01T00:00:00Z --end 2026-01-01T06:00:00Z --json
 ```
+
+## Related
+
+- [`helix status`](/cli/command-reference/status) — check whether an instance is running.
+- [`helix start`](/cli/command-reference/start) — start with `--foreground` to stream startup logs.
+- [Local workflow](/cli/workflows/local) — run and debug a local instance.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.

@@ -33,6 +33,8 @@ pub enum PhysicalAccess {
     SetIntersection,
     /// Set union of access paths.
     SetUnion,
+    /// Union of index-only sets, each filtered by its own residual.
+    BranchResidualUnion,
     /// Graph expansion.
     Expand,
 }

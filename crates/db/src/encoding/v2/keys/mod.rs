@@ -40,11 +40,14 @@ pub(crate) use indexes::{
     CanonicalSecondaryValue, SecondaryEntryKey, SecondaryEntryLane, SecondaryEqualityBitmapKey,
 };
 #[allow(unused_imports)]
-pub(crate) use lifecycle::{IndexEntity, IndexEntityStateKey, IndexOperationKey, IndexRecordKey};
+pub(crate) use lifecycle::{
+    IndexEntity, IndexEntityStateKey, IndexOperationKey, IndexOperationQueueKey,
+    IndexOperationRowKey, IndexRecordKey,
+};
 pub(crate) use managed_index::{
     decode_generation, decode_identity, decode_index_id, decode_operation_id, encode_identity,
     identity_encoded_len, model_key_error, KeyDecoder, ManagedIndexKey, RecordKind, ScopedKey,
-    HASH_LEN, KEY_MAX_LEN, KIND_LEN, U32_LEN, U64_LEN, UUID_LEN,
+    HASH_LEN, KEY_MAX_LEN, KIND_LEN, STORAGE_KEY_MAX_LEN, U32_LEN, U64_LEN, UUID_LEN,
 };
 pub(crate) use metadata::MetadataKey;
 pub use scope::{DataScope, TenantId};

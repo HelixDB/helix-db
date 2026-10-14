@@ -5,6 +5,11 @@ use std::num::NonZeroUsize;
 
 use crate::ir::NonEmptyString;
 
+/// Largest canonical secondary-equality value that storage indexes. Storage
+/// rejects indexing a larger value, so no indexed element can equal one. The
+/// database codec asserts that this equals its own bound.
+pub const MAX_INDEXED_EQUALITY_BYTES: usize = 1024 * 1024 - 64;
+
 /// Invalid literal payload for a secondary index lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecondaryIndexLiteralError {
@@ -75,12 +80,59 @@ pub struct SecondaryIndexLiteral {
 impl SecondaryIndexLiteral {
     /// Build a secondary-index literal, rejecting nested array/object values.
     pub fn new(value: PropertyValue) -> Result<Self, SecondaryIndexLiteralError> {
+        Self::validate_value(&value)?;
+        Ok(Self { value })
+    }
+
+    /// Borrowed eligibility shared by scheduling and owned literal construction.
+    pub(crate) fn validate_value(value: &PropertyValue) -> Result<(), SecondaryIndexLiteralError> {
         match value {
             PropertyValue::Array(_) | PropertyValue::Object(_) => {
                 Err(SecondaryIndexLiteralError::NestedValue)
             }
-            value => Ok(Self { value }),
+            _ => Ok(()),
         }
+    }
+
+    /// Whether this value's canonical encoding may exceed
+    /// [`MAX_INDEXED_EQUALITY_BYTES`]. The estimate allows 64 bytes for the
+    /// value header and 16 bytes per array item, which covers every number and
+    /// string length prefix, so a lookup of any other value fits a key.
+    ///
+    /// ```
+    /// use helix_ast::value::PropertyValue;
+    /// use helix_planner::ir::{SecondaryIndexLiteral, MAX_INDEXED_EQUALITY_BYTES};
+    ///
+    /// let literal = |value| SecondaryIndexLiteral::new(value).unwrap();
+    /// assert!(!literal(PropertyValue::from("alice")).may_exceed_index_key());
+    /// assert!(literal(PropertyValue::from("x".repeat(MAX_INDEXED_EQUALITY_BYTES)))
+    ///     .may_exceed_index_key());
+    /// assert!(literal(PropertyValue::I64Array(vec![0; MAX_INDEXED_EQUALITY_BYTES / 16]))
+    ///     .may_exceed_index_key());
+    /// ```
+    pub fn may_exceed_index_key(&self) -> bool {
+        let items = |count: usize| count.saturating_mul(16);
+        let payload = match &self.value {
+            PropertyValue::String(value) => value.len(),
+            PropertyValue::Bytes(value) => value.len(),
+            PropertyValue::StringArray(values) => {
+                values.iter().fold(items(values.len()), |bytes, value| {
+                    bytes.saturating_add(value.len())
+                })
+            }
+            PropertyValue::I64Array(values) => items(values.len()),
+            PropertyValue::F64Array(values) => items(values.len()),
+            PropertyValue::F32Array(values) => items(values.len()),
+            PropertyValue::Null
+            | PropertyValue::Bool(_)
+            | PropertyValue::I64(_)
+            | PropertyValue::F64(_)
+            | PropertyValue::F32(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::Array(_)
+            | PropertyValue::Object(_) => 0,
+        };
+        payload.saturating_add(64) > MAX_INDEXED_EQUALITY_BYTES
     }
 
     /// Borrow the validated literal value.
@@ -160,29 +212,127 @@ pub enum IndexValue {
     Param(NonEmptyString),
     /// Runtime parameter interpreted as a bounded equality domain.
     ParamSet(RuntimeEqualitySet),
+    /// Finite literal equality domain wider than one index union; read as
+    /// batched multi-gets.
+    ///
+    /// It stays one source however many values it holds, so set rules never
+    /// compare its members pairwise.
+    LiteralSet(super::super::AtLeast<SecondaryIndexLiteral, 2>),
 }
 
 impl IndexValue {
     /// Return the statically known storage behavior for this lookup value.
+    ///
+    /// A literal set is `AuthoritativeNull` when any member is null,
+    /// `Indexed` when another member is indexed, and `NonReflexive` only when
+    /// every member is non-reflexive; non-reflexive members match nothing.
+    ///
+    /// ```
+    /// use helix_ast::value::PropertyValue;
+    /// use helix_planner::ir::{
+    ///     AtLeast, EqualityIndexValueSemantics, IndexValue, SecondaryIndexLiteral,
+    /// };
+    ///
+    /// let literal = |value| SecondaryIndexLiteral::new(value).unwrap();
+    /// let set = |values: Vec<PropertyValue>| {
+    ///     IndexValue::LiteralSet(
+    ///         AtLeast::try_from_vec(values.into_iter().map(literal).collect()).unwrap(),
+    ///     )
+    /// };
+    /// assert_eq!(
+    ///     set(vec![PropertyValue::from(1), PropertyValue::F64(f64::NAN)]).semantics(),
+    ///     EqualityIndexValueSemantics::Indexed
+    /// );
+    /// assert_eq!(
+    ///     set(vec![PropertyValue::from(1), PropertyValue::Null]).semantics(),
+    ///     EqualityIndexValueSemantics::AuthoritativeNull
+    /// );
+    /// assert_eq!(
+    ///     set(vec![PropertyValue::F64(f64::NAN), PropertyValue::F32(f32::NAN)]).semantics(),
+    ///     EqualityIndexValueSemantics::NonReflexive
+    /// );
+    /// ```
     pub fn semantics(&self) -> EqualityIndexValueSemantics {
+        let literal = |value: &SecondaryIndexLiteral| match value.semantics() {
+            LiteralEqualityIndexValueSemantics::Indexed => EqualityIndexValueSemantics::Indexed,
+            LiteralEqualityIndexValueSemantics::AuthoritativeNull => {
+                EqualityIndexValueSemantics::AuthoritativeNull
+            }
+            LiteralEqualityIndexValueSemantics::NonReflexive => {
+                EqualityIndexValueSemantics::NonReflexive
+            }
+        };
         match self {
-            Self::Literal(value) => match value.semantics() {
-                LiteralEqualityIndexValueSemantics::Indexed => EqualityIndexValueSemantics::Indexed,
-                LiteralEqualityIndexValueSemantics::AuthoritativeNull => {
-                    EqualityIndexValueSemantics::AuthoritativeNull
-                }
-                LiteralEqualityIndexValueSemantics::NonReflexive => {
-                    EqualityIndexValueSemantics::NonReflexive
-                }
-            },
+            Self::Literal(value) => literal(value),
+            Self::LiteralSet(values) => values.iter().map(literal).fold(
+                EqualityIndexValueSemantics::NonReflexive,
+                |set, member| match (set, member) {
+                    (EqualityIndexValueSemantics::AuthoritativeNull, _)
+                    | (_, EqualityIndexValueSemantics::AuthoritativeNull) => {
+                        EqualityIndexValueSemantics::AuthoritativeNull
+                    }
+                    (EqualityIndexValueSemantics::Indexed, _)
+                    | (_, EqualityIndexValueSemantics::Indexed) => {
+                        EqualityIndexValueSemantics::Indexed
+                    }
+                    (set, _) => set,
+                },
+            ),
             Self::Param(_) | Self::ParamSet(_) => EqualityIndexValueSemantics::RuntimeDependent,
+        }
+    }
+
+    /// Hard upper bound on the elements a unique equality index read of this
+    /// value can return.
+    ///
+    /// Each indexed literal has at most one owner and a non-reflexive literal
+    /// none, so a literal or literal set is bounded by its indexed members.
+    /// Null is not held by the unique lane: the read returns every label row
+    /// whose property is null or missing, so a null literal, or a set holding
+    /// one, has no bound. Neither does a runtime parameter or domain, which
+    /// may bind null.
+    ///
+    /// ```
+    /// use helix_ast::value::PropertyValue;
+    /// use helix_planner::ir::{AtLeast, IndexValue, NonEmptyString, SecondaryIndexLiteral};
+    ///
+    /// let literal = |value| SecondaryIndexLiteral::new(value).unwrap();
+    /// let set = |values: Vec<PropertyValue>| {
+    ///     IndexValue::LiteralSet(
+    ///         AtLeast::try_from_vec(values.into_iter().map(literal).collect()).unwrap(),
+    ///     )
+    /// };
+    /// assert_eq!(IndexValue::Literal(literal("a".into())).unique_hard_upper_bound(), Some(1));
+    /// assert_eq!(
+    ///     set(vec!["a".into(), "b".into(), PropertyValue::F64(f64::NAN)]).unique_hard_upper_bound(),
+    ///     Some(2)
+    /// );
+    /// assert_eq!(set(vec!["a".into(), PropertyValue::Null]).unique_hard_upper_bound(), None);
+    /// assert_eq!(
+    ///     IndexValue::Param(NonEmptyString::new("email").unwrap()).unique_hard_upper_bound(),
+    ///     None
+    /// );
+    /// ```
+    pub fn unique_hard_upper_bound(&self) -> Option<usize> {
+        let indexed = |literal: &SecondaryIndexLiteral| match literal.semantics() {
+            LiteralEqualityIndexValueSemantics::Indexed => Some(1),
+            LiteralEqualityIndexValueSemantics::NonReflexive => Some(0),
+            LiteralEqualityIndexValueSemantics::AuthoritativeNull => None,
+        };
+        match self {
+            Self::Literal(literal) => indexed(literal),
+            Self::LiteralSet(literals) => literals.iter().try_fold(0usize, |sum, literal| {
+                Some(sum.saturating_add(indexed(literal)?))
+            }),
+            Self::Param(_) | Self::ParamSet(_) => None,
         }
     }
 }
 
 /// Genuinely late-bound, bounded equality-domain parameter.
 ///
-/// The positive limit makes an unbounded runtime index union unrepresentable.
+/// The positive limit bounds each runtime index union, so a domain of any size
+/// is read as unions of at most that many values.
 ///
 /// ```
 /// use helix_planner::ir::{NonEmptyString, RuntimeEqualitySet};
@@ -212,7 +362,9 @@ impl RuntimeEqualitySet {
         &self.param
     }
 
-    /// Maximum distinct equality values eligible for the index path.
+    /// Distinct equality values read by one index union: the batch width of
+    /// one multi-get. A wider domain is read as several unions, never by a
+    /// scan.
     pub const fn max_values(&self) -> NonZeroUsize {
         self.max_values
     }

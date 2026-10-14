@@ -1,51 +1,50 @@
-use crate::config::InstanceInfo;
+use crate::errors::CliError;
 use crate::local_runtime::LocalRuntime;
-use crate::output::Operation;
+use crate::output::{self, Operation};
 use crate::project::ProjectContext;
-use crate::prompts;
-use eyre::{eyre, Result};
+use eyre::Result;
+use serde_json::json;
 
 pub async fn run(instance: Option<String>) -> Result<()> {
     let project = ProjectContext::find_and_load(None)?;
-    let instance = resolve_local_instance(&project, instance)?;
-    if !matches!(
-        project.config.get_instance(&instance)?,
-        InstanceInfo::Local(_)
-    ) {
-        return Err(eyre!("'{instance}' is not a local v2 instance"));
-    }
+    let instance = project.resolve_local_instance(instance, "Stop which local instance?")?;
     let op = Operation::new("Stopping", &instance);
-    if LocalRuntime::new(&project).stop(&instance)? {
+    let runtime = LocalRuntime::new(&project);
+    let was_running = runtime.stop(&instance)?;
+    // The Explorer only reads this instance, so it stops too. Best effort: a
+    // failure to remove it never fails the stop, but it is reported.
+    let (explorer_stopped, explorer_error) = match runtime.remove_explorer(&instance) {
+        Ok(stopped) => (stopped, None),
+        Err(error) => {
+            let cause = one_line(&CliError::from_report(&error).to_string());
+            output::warning(&format!(
+                "Could not stop the {instance} Explorer ({cause}); retry with \
+                 `helix explorer {instance} --stop`"
+            ));
+            (false, Some(cause))
+        }
+    };
+    if explorer_stopped {
+        output::step(&format!("Stopped the {instance} Explorer"));
+    }
+    if was_running {
         op.success();
     } else {
-        crate::output::info(&format!("Instance '{instance}' was not running"));
+        output::outro(&format!("{instance} was not running"));
     }
-    Ok(())
+    let mut report = json!({
+        "instance": instance,
+        "wasRunning": was_running,
+        "explorerStopped": explorer_stopped,
+    });
+    if let Some(error) = explorer_error {
+        report["explorerError"] = error.into();
+    }
+    output::emit(&report, |_| Ok(()))
 }
 
-fn resolve_local_instance(project: &ProjectContext, instance: Option<String>) -> Result<String> {
-    if let Some(instance) = instance {
-        return Ok(instance);
-    }
-    if prompts::is_interactive() && project.config.local.len() > 1 {
-        return prompts::select_instance(&local_instances(project), "Stop which local instance?");
-    }
-    if project.config.local.contains_key("dev") {
-        return Ok("dev".to_string());
-    }
-    if project.config.local.len() == 1 {
-        return Ok(project.config.local.keys().next().unwrap().clone());
-    }
-    Err(eyre!("No local instance specified"))
-}
-
-fn local_instances(project: &ProjectContext) -> Vec<(String, String)> {
-    let mut instances: Vec<(String, String)> = project
-        .config
-        .local
-        .iter()
-        .map(|(name, config)| (name.clone(), format!("http://localhost:{}", config.port)))
-        .collect();
-    instances.sort_by(|a, b| a.0.cmp(&b.0));
-    instances
+/// Runtime errors carry the runtime's multi-line stderr; a warning reads
+/// best on one line.
+fn one_line(message: &str) -> String {
+    message.split_whitespace().collect::<Vec<_>>().join(" ")
 }

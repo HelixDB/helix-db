@@ -1,46 +1,72 @@
 ---
 title: "helix auth"
 sidebarTitle: "auth"
+description: "Log in to Helix Cloud, check the session, or log out"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-Manage Helix Cloud authentication. Credentials are stored in `~/.helix/credentials`.
+Manage the WorkOS login session that every Helix Cloud command uses. Cloud only; local commands
+never need it.
 
 ## Usage
 
 ```bash
-helix auth <SUBCOMMAND>
+helix auth login
+helix auth status
+helix auth logout
 ```
 
-## Available sub-commands
+## Subcommands
 
-| Sub-command | Description |
-|-------------|-------------|
-| `login` | Authenticate with Helix Cloud via a browser-based GitHub device flow. |
-| `logout` | Remove `~/.helix/credentials`. |
-| `create-key <CLUSTER>` | Rotate the API key for a specific Helix Cloud cluster. The new key prints once. |
+| Subcommand | Description |
+| --- | --- |
+| `login` | Sign in through WorkOS in your browser and store the session. |
+| `status` | Verify the session and show the signed-in email and your workspaces by name. |
+| `logout` | Revoke the session when possible and delete the local credential file. |
 
-### `helix auth create-key`
+## Options
 
-| Argument | Description |
-|----------|-------------|
-| `CLUSTER` | Cluster ID to rotate. Find one with [`helix cluster list`](/cli/command-reference/cluster). |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print the result as JSON on stdout and never prompt. `status` prints `{"email":"...","workspaces":[{"id":"...","name":"..."}]}`. | Off |
 
-`helix auth create-key` requires you to already be logged in. The new key replaces any previous keys for that cluster. Update `HELIX_API_KEY` (or whatever `query_auth_env` resolves to for the instance) with the raw key before running [`helix query`](/cli/command-reference/query) again. Bearer mode adds the prefix automatically.
+## Behavior
+
+### Login
+
+- `login` requires an interactive terminal, so it fails with `--json`.
+- It starts WorkOS PKCE in a browser (and prints the URL in case the browser does not open), then shows a spinner while it waits for the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
+- If WorkOS requires email verification, the CLI prompts for the code.
+- It hydrates all current workspace memberships and stores only the rotating WorkOS session in `~/.helix/credentials` (or `$HELIX_HOME/credentials`).
+
+### Session handling
+
+- The CLI refreshes tokens within 60 seconds of expiry and serializes refreshes across processes.
+- The credential file is mode `0600` and rejects old key fields.
+- Cloud commands do not accept environment API keys, service credentials, legacy user/admin keys, or custom authorization headers.
+
+### Status and logout
+
+- `status` verifies the session by listing your workspaces through the Helix Cloud API, then prints `Email` and `Workspaces` (by name).
+- `logout` asks the Helix Cloud API to revoke the session when possible and always deletes the local file.
 
 ## Examples
 
 ```bash
-# Login (opens a browser device flow)
+# Sign in (opens a browser)
 helix auth login
 
-# Logout (clears ~/.helix/credentials)
-helix auth logout
+# Check who is signed in
+helix auth status
 
-# Rotate a cluster API key
-helix auth create-key ec_01HX...
+# Sign out and delete the local session
+helix auth logout
 ```
+
+## Related
+
+- [CLI configuration](/cli/configuration) — where the session file lives.
+- [`helix workspace`](/cli/command-reference/workspace) — list the workspaces your session can access.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.

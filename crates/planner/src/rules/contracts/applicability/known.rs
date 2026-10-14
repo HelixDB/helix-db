@@ -7,6 +7,10 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
     use logical::LogicalExprKind as Kind;
     use logical::PureLogicalOpKind as PureKind;
     match id {
+        KnownRuleId::SeedRows => RuleApplicability::only(Kind::Rows),
+        KnownRuleId::SeedGraphPattern | KnownRuleId::GraphPatternOrder => {
+            RuleApplicability::only(Kind::GraphPattern)
+        }
         KnownRuleId::FilterPushdown => RuleApplicability::only(Kind::FilterPushdown),
         KnownRuleId::PurePipelineSimplification => {
             RuleApplicability::pure_pipeline_local_simplification()
@@ -71,6 +75,10 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
         KnownRuleId::AccessPipelineFilter => {
             RuleApplicability::access_pipeline_head_only(logical::StreamPipelineOpKind::Filter)
         }
+        KnownRuleId::AccessSourceIndexFilter => RuleApplicability::stream_source_index_candidate(),
+        KnownRuleId::AccessPipelineMembershipFilter => {
+            RuleApplicability::stream_membership_candidate()
+        }
         KnownRuleId::AccessPipelineOrder => {
             RuleApplicability::access_pipeline_head_any_of(ir::AtLeast::<_, 1>::from_one_and_rest(
                 logical::StreamPipelineOpKind::Order,
@@ -110,5 +118,37 @@ pub(super) fn for_known_rule(id: KnownRuleId) -> RuleApplicability {
         KnownRuleId::StreamWindowComposition => {
             RuleApplicability::pure_pipeline_static_window_composition()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_rewrites_match_implementation_rule_deferrals() {
+        // Each required rewrite is paired with an implementation rule that
+        // returns `NotApplicable` for the shapes the rewrite matches, so the
+        // rewrite must keep running after the exploration budget. Pinning
+        // the set makes a new implementation-rule deferral update it
+        // deliberately.
+        let required = KnownRuleId::ALL
+            .iter()
+            .copied()
+            .filter(|id| for_known_rule(*id).is_required_rewrite())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            required,
+            [
+                KnownRuleId::AccessWindow,
+                KnownRuleId::AccessFilterSimplification,
+                KnownRuleId::AccessDistinct,
+                KnownRuleId::AccessSourceIndexFilter,
+                KnownRuleId::AccessPipelineMembershipFilter,
+                KnownRuleId::AccessPipelineSimplification,
+                KnownRuleId::RootControlFlowEmpty,
+            ]
+        );
     }
 }

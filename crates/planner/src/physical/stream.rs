@@ -13,6 +13,8 @@ pub enum PhysicalStreamOp {
     Range,
     /// Distinct.
     Distinct,
+    /// Row-preserving node secondary-index membership.
+    IndexMembership,
     /// Graph expansion.
     Expand,
     /// Traversal-scoped vector ranking.

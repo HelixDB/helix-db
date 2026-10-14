@@ -177,6 +177,12 @@ impl IndexLifecycleConcurrency {
     pub const fn text_tasks(self) -> NonZeroUsize {
         self.text_tasks
     }
+
+    /// Returns how many queue publication attempts may run at once: one per
+    /// vector and per text task.
+    pub(crate) const fn publication_tasks(self) -> NonZeroUsize {
+        self.vector_tasks.saturating_add(self.text_tasks.get())
+    }
 }
 
 impl Default for IndexLifecycleConcurrency {

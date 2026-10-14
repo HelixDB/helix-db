@@ -158,7 +158,10 @@ use helix_db::Client;
 // Defaults to http://localhost:6969 when `url` is None.
 let client = Client::new(None)?;
 
-// Or point at Helix Cloud with an API key and dashboard database ID:
+// Or point at Helix Cloud with an API key and dashboard database ID.
+// `Client::managed` requires the ID. `with_database_id` sets the same
+// `x-helix-database-id` header on an existing client; Helix Cloud selects
+// the database from that header on every query route.
 let client = Client::managed(
     Some("https://11e2fc88c410fa5eb13e.cluster.helix-db.com"),
     "db_your_database_id",
@@ -247,9 +250,16 @@ payload instead.
 ### Query functions
 
 Annotate a query builder with `#[query]` to get a callable helper that builds a
-`QueryRequest` directly from typed arguments. The generated function returns the request
-value itself (not a `Result`) — parameter coercion that can fail (e.g. `DateTime`, bytes) panics
-with a descriptive message rather than returning an error.
+`QueryRequest` directly from typed arguments. The generated function returns
+`Result<QueryRequest, QueryError>`. Parameter coercion that can fail (e.g.
+`DateTime`, unsupported bytes) returns `QueryError` rather than panicking, so a
+failed conversion cannot leave a partially populated request.
+
+The compile-tested end-to-end examples are:
+
+- [`examples/basic_query.rs`](./examples/basic_query.rs) — root README journey
+- [`examples/readme_sdk_query.rs`](./examples/readme_sdk_query.rs) — this section
+- [`examples/readme_macros_query.rs`](./examples/readme_macros_query.rs) — macros README usage
 
 ```rust
 use helix_db::dsl::prelude::*;
@@ -276,8 +286,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?
         .with_api_key(Some("hx_your_api_key"));
 
-    // Building the request is infallible — no `?` needed here.
-    let request = add_user("John".to_string());
+    // Handle QueryError from parameter coercion / request construction.
+    let request = add_user("John".to_string())?;
 
     let response: AddUserResponse = client.query(request).send().await?;
     println!("created user {}", response.user_id);
@@ -682,3 +692,37 @@ spring layout through the storage-independent Rust crate.
 ## License
 
 Licensed under Apache-2.0.
+
+## Cypher
+
+Cypher runs beside the native DSL on the same database, over HTTP or embedded:
+
+```rust
+use std::collections::BTreeMap;
+
+let rows = client
+    .cypher("MATCH (u:User) WHERE u.age >= $min RETURN u.name AS name",
+        BTreeMap::from([("min".to_string(), serde_json::json!(30))]),
+        Some("adults"))
+    .await?;               // CypherResponse { columns, rows }
+
+// Plan without executing; explaining a write writes nothing. Planning
+// checks parameters too, so supply every parameter the statement uses.
+let params = BTreeMap::from([("name".to_string(), serde_json::json!("Ada"))]);
+let plan = client
+    .explain_cypher("CREATE (:User {name: $name})", params.clone(), None)
+    .await?;
+
+// Request options use the builder, like native queries.
+let created = client
+    .request_builder::<()>()
+    .should_await_durability(true)
+    .cypher("CREATE (u:User {name: $name}) RETURN u", params, None)
+    .send()               // or .explain()
+    .await?;
+```
+
+The API key and database ID apply to Cypher as they do to native queries. A
+warm-only read that Helix Cloud answers with `204 No Content` returns no rows.
+Embedded clients reject request options. See the [Cypher reference](../../docs/cypher.md)
+for the language profile, parameters, lossless values, errors and transaction behavior.

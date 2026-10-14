@@ -214,6 +214,317 @@ pub async fn run_request_mode_and_isolated_mutation_contracts() {
     db.close().await.expect("isolated mutation fixture closes");
 }
 
+/// Proves membership retention decisions the public planner cannot reach.
+///
+/// One operation's writes are homogeneous, so only a transaction's sequence
+/// of transitions shows a label's property footprint growing and being
+/// absorbed by a node write. Validated plans never carry a range set, but a
+/// hand-built one resolves per row, is stored, and is forgotten by every
+/// write to its label, since it reads more than point indexes; its rows stay
+/// equal to the per-row filter's, including after the write that drops the
+/// row. A request that executes more distinct sets than the cache holds
+/// keeps only the newest ones.
+pub async fn run_membership_retention_contracts() {
+    use crate::index_lifecycle::graph_mutation::{
+        CanonicalPropertyRow, GraphEntity, GraphMutationTransition, PropertyEdit,
+        PropertyEditOutcome,
+    };
+
+    let row = CanonicalPropertyRow::new(vec![Property::string("$label", "Item")]);
+    let replace = |property: &str| {
+        let PropertyEditOutcome::Changed(transition) = GraphMutationTransition::edit(
+            DataScope::LegacyUnscoped,
+            GraphEntity::node(1),
+            row.clone(),
+            PropertyEdit::set(Property::string(property, "v")),
+        ) else {
+            panic!("the edit changes the row");
+        };
+        transition
+    };
+    let mut writes = mutation::NodeIndexWrites::default();
+    writes.record(&replace("title"));
+    writes.record(&replace("kind"));
+    assert_eq!(
+        writes.label("Item"),
+        Some(&mutation::LabelWrites::Properties(
+            ["kind".into(), "title".into()].into()
+        ))
+    );
+    writes.record(&GraphMutationTransition::create(
+        DataScope::LegacyUnscoped,
+        GraphEntity::node(2),
+        row.clone(),
+    ));
+    writes.record(&replace("status"));
+    assert_eq!(writes.label("Item"), Some(&mutation::LabelWrites::Nodes));
+
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("production-membership-retention-range")
+            .with_range_index("Item", "rank"),
+    )
+    .await;
+    let item = test_support::add_node_with_properties(
+        &db,
+        "Item",
+        vec![("rank", helix_ast::value::PropertyValue::I64(5))],
+    )
+    .await;
+    let key =
+        catalog::ScopedPropertyDirectionKey::try_new("Item", "rank", RangeIndexDirection::Asc)
+            .expect("range key is valid");
+    let predicate = ir::PredicatePlan::new(helix_ast::expr::Predicate::gte("rank", 3_i64))
+        .expect("range predicate is valid");
+    let range = exec::ExecOp::IndexMembership {
+        plan: Box::new(exec::ExecNodeIndexMembershipPlan {
+            set: exec::ExecNodeMembershipSet::Index {
+                set: exec::ExecNodeSecondarySetPlan::Range(exec::ExecNodeSecondaryRangePlan {
+                    index: catalog::IndexCatalogSnapshot::default()
+                        .with_node_range(key.clone())
+                        .node_range[&key]
+                        .clone(),
+                    key,
+                    range: ir::IndexRange::All,
+                    iteration: ir::RangeScanIteration::Forward,
+                }),
+                label: test_support::name("Item"),
+                outside_label: ir::NodeMembershipOutsideLabel::Evaluate,
+            },
+            predicate: predicate.clone(),
+            residual: None,
+        }),
+    };
+    let mut execution = ExecutionContext::new(&db, context::ParamBindings::default());
+    execution
+        .enable_request_write_scope()
+        .await
+        .expect("request transaction opens");
+    let kept = ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(item))]);
+    // The row has rank 5, then 4, then 2: kept, kept, dropped.
+    for (write, kept_rows) in [(Some(4), 1), (Some(2), 1), (None, 0)] {
+        execution
+            .flush_active_index_mutations()
+            .await
+            .expect("pending writes flush");
+        let membership = execution
+            .execute_op(&range, kept.clone())
+            .await
+            .expect("range membership evaluates rows");
+        let filter = execution
+            .execute_op(
+                &exec::ExecOp::Filter {
+                    predicate: predicate.clone(),
+                },
+                kept.clone(),
+            )
+            .await
+            .expect("per-row filter evaluates rows");
+        assert_eq!(membership, filter);
+        let ExecutionValue::Stream(rows) = membership else {
+            panic!("membership returns rows");
+        };
+        assert_eq!(rows.len(), kept_rows);
+        assert_eq!(execution.prepared_memberships.len(), 1);
+        let Some(rank) = write else {
+            break;
+        };
+        execution
+            .execute_op(
+                &exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::SetProperty {
+                        name: test_support::name("rank"),
+                        value: ir::PropertyInputPlan::Value(helix_ast::value::PropertyValue::I64(
+                            rank,
+                        )),
+                    },
+                },
+                kept.clone(),
+            )
+            .await
+            .expect("rank update succeeds");
+        assert_eq!(execution.prepared_memberships.len(), 0);
+    }
+
+    // One more distinct `$label` set than the cache holds evicts the oldest.
+    let capacity = super::stream::PreparedMemberships::MAX_ENTRIES;
+    for label in 0..=capacity {
+        let label = test_support::name(&format!("L{label}"));
+        execution
+            .execute_op(
+                &exec::ExecOp::IndexMembership {
+                    plan: Box::new(exec::ExecNodeIndexMembershipPlan {
+                        set: exec::ExecNodeMembershipSet::Labels(ir::AtLeast::from_one(
+                            label.clone(),
+                        )),
+                        predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq(
+                            "$label",
+                            label.to_string(),
+                        ))
+                        .expect("label predicate is valid"),
+                        residual: None,
+                    }),
+                },
+                kept.clone(),
+            )
+            .await
+            .expect("label membership resolves");
+    }
+    assert_eq!(execution.prepared_memberships.len(), capacity);
+    execution.abort_request_write_scope();
+    drop(execution);
+    db.close().await.expect("range retention fixture closes");
+}
+
+/// Proves index status stays on the open graph write and does not publish it.
+pub async fn run_get_operation_keeps_open_graph_write() {
+    let status = exec::ExecOp::IndexDdl {
+        plan: ir::IndexDdlPlan::GetOperation {
+            operation_id: ir::IndexOperationId::try_new("07070707-0707-0707-0707-070707070707")
+                .expect("canonical lowercase operation ID"),
+        },
+    };
+    let first = exec::ExecStepId::new(1).expect("positive step id");
+    let plan = test_support::executable(
+        ir::PlanKind::Write,
+        vec![
+            test_support::step(
+                1,
+                Vec::new(),
+                exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::AddNodeSource {
+                        label: test_support::name("User"),
+                        properties: test_support::assignments(Vec::new()),
+                    },
+                },
+            ),
+            test_support::step(2, vec![first], status.clone()),
+        ],
+        2,
+    );
+    assert_eq!(
+        RequestSideEffects::operation(&status),
+        RequestSideEffects::None
+    );
+    assert_eq!(
+        RequestExecutionMode::try_from(&plan).expect("status is a graph-write companion"),
+        RequestExecutionMode::GraphWrite
+    );
+
+    let db = test_support::open_db("production-get-op-keeps-write").await;
+    let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
+    let created = context
+        .execute_step(
+            &test_support::step(
+                1,
+                Vec::new(),
+                exec::ExecOp::IndexDdl {
+                    plan: ir::IndexDdlPlan::Create {
+                        spec: ir::IndexDdlCreateSpec::NodeEquality {
+                            key: catalog::ScopedPropertyKey::try_new("User", "email")
+                                .expect("scoped key"),
+                            uniqueness: catalog::IndexUniqueness::NonUnique,
+                        },
+                        mode: ir::IndexCreateMode::ErrorIfExists,
+                    },
+                },
+            ),
+            None,
+        )
+        .await
+        .expect("create enqueues a durable operation");
+    let ExecutionValue::IndexDdlReceipt(crate::index_lifecycle::IndexDdlReceipt::Accepted {
+        operation_id,
+        ..
+    }) = created
+    else {
+        panic!("new index create must be accepted");
+    };
+    let operation_id = ir::IndexOperationId::try_new(operation_id.as_uuid().to_string())
+        .expect("receipt UUID is a canonical lowercase operation ID");
+
+    context
+        .enable_request_write_scope()
+        .await
+        .expect("request write opens");
+    let added = context
+        .execute_step(
+            &test_support::step(
+                2,
+                Vec::new(),
+                exec::ExecOp::Mutation {
+                    plan: exec::ExecMutationPlan::AddNodeSource {
+                        label: test_support::name("User"),
+                        properties: test_support::assignments(vec![(
+                            "email",
+                            AstPropertyValue::from("uncommitted@example.com"),
+                        )]),
+                    },
+                },
+            ),
+            None,
+        )
+        .await
+        .expect("graph write stays on the request transaction");
+    let ExecutionValue::Stream(rows) = added else {
+        panic!("node write should return a stream");
+    };
+    let Some(ExecutionRow {
+        current: Some(ElementRef::Node(id)),
+        ..
+    }) = rows.first()
+    else {
+        panic!("node write should return a node row");
+    };
+    let node_key = DataKey::Data {
+        scope: DataScope::LegacyUnscoped,
+        kind: DataKeyKind::NodeProperty(NodePropertyKey::new(*id)),
+    }
+    .to_bytes();
+    assert!(
+        writer_db(&db).get(&node_key).await.expect("peek").is_none(),
+        "uncommitted graph write must not be visible on a snapshot"
+    );
+
+    let got = context
+        .execute_step(
+            &test_support::step(
+                3,
+                Vec::new(),
+                exec::ExecOp::IndexDdl {
+                    plan: ir::IndexDdlPlan::GetOperation { operation_id },
+                },
+            ),
+            None,
+        )
+        .await
+        .expect("status read stays on the open graph write");
+    assert!(matches!(got, ExecutionValue::IndexOperationStatus(_)));
+    assert!(context.has_request_write_scope());
+    assert!(writer_db(&db).get(&node_key).await.expect("peek").is_none());
+
+    let missing = context
+        .execute_step(&test_support::step(4, Vec::new(), status), None)
+        .await
+        .expect_err("unknown operation ID is a status miss, not a commit");
+    assert!(matches!(
+        missing,
+        HelixDbError::IndexOperationNotFound { .. }
+    ));
+    assert!(context.has_request_write_scope());
+    assert!(writer_db(&db).get(&node_key).await.expect("peek").is_none());
+
+    context
+        .commit_request_write_scope()
+        .await
+        .expect("request write commits");
+    assert!(writer_db(&db)
+        .get(&node_key)
+        .await
+        .expect("committed read")
+        .is_some());
+    db.close().await.expect("production get-op fixture closes");
+}
+
 /// Encodes one unscoped V2 logical key through the canonical V1 boundary.
 fn scoped_key(logical: index_keys::ScopedKey) -> Bytes {
     index_keys::ManagedIndexKey::Data {
@@ -255,7 +566,8 @@ async fn text_blob_paths(object_store: &Arc<dyn ObjectStore>) -> BTreeSet<String
 }
 
 async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
-    let index = VectorIndex::<D>::new(name);
+    // The directory makes the filtered walk probe it through the request view.
+    let index = VectorIndex::<D>::new(name).with_simhash_directory();
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     index
         .create(
@@ -289,9 +601,11 @@ async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
         .unwrap();
     assert_eq!(exact_results.len(), 2);
 
-    let filtered = RestrictedVectorCandidates::from_ids(1..=257).unwrap();
-    let filtered_results = index
-        .search_restricted(
+    // One past the restricted exact-scan cardinality cap (8,192) routes the
+    // request view through the filtered graph walk.
+    let filtered = RestrictedVectorCandidates::from_ids(1..=8_193).unwrap();
+    let (filtered_results, filtered_stats) = index
+        .search_restricted_with_stats(
             &view,
             &[1.0, 0.0],
             &SearchParams::new(2).unwrap(),
@@ -299,6 +613,11 @@ async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
         )
         .await
         .unwrap();
+    assert_eq!(
+        filtered_stats.strategy,
+        Some(crate::search::vector::RestrictedSearchStrategy::FilteredGraph)
+    );
+    assert!(filtered_stats.directory_scan_calls > 0);
     assert!(!filtered_results.is_empty());
     assert!(filtered_results
         .iter()
@@ -328,7 +647,10 @@ async fn run_stable_vector_read_contracts() {
     exercise_stable_restricted_metric::<Manhattan>(&db, "stable-vector-manhattan").await;
 
     let snapshot = db.snapshot().await.unwrap();
-    let view = read_view::StableRequestReadView::ReaderSnapshot(snapshot);
+    let view = read_view::StableRequestReadView::ReaderSnapshot {
+        snapshot,
+        compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+    };
     let mut rows = view.scan_prefix(Bytes::new(), ..).await.unwrap();
     assert!(rows.next().await.unwrap().is_some());
     drop(rows);
@@ -547,17 +869,28 @@ async fn run_value_dependency_and_row_contracts() {
         context.row_property(&empty_row, &label).await.unwrap(),
         None
     );
-    assert!(context.row_properties(&empty_row).await.unwrap().is_empty());
     let missing_node = ExecutionRow::current(ElementRef::Node(u64::MAX));
     assert_eq!(
         context.row_property(&missing_node, &label).await.unwrap(),
         None
     );
-    assert!(context
-        .row_properties(&missing_node)
-        .await
-        .unwrap()
-        .is_empty());
+    // Neither an empty row nor a missing record has stored properties.
+    assert_eq!(
+        context
+            .project(
+                ExecutionValue::Stream(vec![empty_row, missing_node]),
+                &ir::ProjectionPlan::ValueMap(ir::PropertySelection::All),
+            )
+            .await
+            .unwrap(),
+        ExecutionValue::Scalars(vec![
+            ExecutionScalar::Object(std::collections::BTreeMap::new()),
+            ExecutionScalar::Object(std::collections::BTreeMap::from([(
+                "$id".to_string(),
+                DbPropertyValue::I64(i64::MAX),
+            )])),
+        ])
+    );
     let missing_edge = ExecutionRow::current(ElementRef::Edge(u64::MAX));
     for property in ["$from", "$to", "$from.$id", "$to.$label"] {
         let property = ir::NonEmptyString::new(property).unwrap();
@@ -623,7 +956,12 @@ pub(crate) async fn run_scheduler_and_projection_contracts() {
     ));
     let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
     context
-        .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+        .execute_steps(
+            plan.steps(),
+            plan.execution_order(),
+            plan.root(),
+            plan.execution_program(),
+        )
         .await
         .expect("fan-out/fan-in plan executes");
     assert!(context.step_outputs.get(&id(4)).is_some());
@@ -645,7 +983,12 @@ pub(crate) async fn run_scheduler_and_projection_contracts() {
     .expect("wide scheduler plan validates");
     let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
     context
-        .execute_steps(plan.steps(), plan.execution_order(), plan.root())
+        .execute_steps(
+            plan.steps(),
+            plan.execution_order(),
+            plan.root(),
+            plan.execution_program(),
+        )
         .await
         .expect("wide scheduler plan executes");
     assert!(context.step_outputs.get(&id(6)).is_some());
@@ -746,6 +1089,215 @@ pub(crate) async fn run_scheduler_and_projection_contracts() {
     db.close().await.expect("projection fixture closes");
 }
 
+/// Runs filtered node vector searches through the public request path, where
+/// the scheduler fuses each index-set access into its search, beside shapes
+/// that must run unfused, and proves the pairing rejects every pair that is
+/// not an exclusive node ID set feeding a node search.
+pub(crate) async fn run_fused_vector_search_contracts() {
+    use helix_ast::{batch, expr::Predicate, query::QueryRequest, traversal, value::PropertyInput};
+
+    let db = test_support::open_db_with_config(
+        test_support::in_memory_config("production-fused-vector-search")
+            .with_node_vector_index(
+                "Doc",
+                "embedding",
+                2,
+                crate::search::vector::VectorDistanceMetric::Euclidean,
+            )
+            .with_equality_index("Doc", "category")
+            .with_equality_index("Doc", "status")
+            .with_range_index("Doc", "rank"),
+    )
+    .await;
+    // The node of rank r sits at [r, 0], is in category a when r is even
+    // and open while r < 3.
+    let seed = (0..6_i64)
+        .fold(batch::write_batch(), |write, rank| {
+            write.var_as(
+                &format!("d{rank}"),
+                traversal::g().add_n(
+                    "Doc",
+                    vec![
+                        ("embedding", PropertyInput::from(vec![rank as f32, 0.0])),
+                        (
+                            "category",
+                            PropertyInput::from(if rank % 2 == 0 { "a" } else { "b" }),
+                        ),
+                        (
+                            "status",
+                            PropertyInput::from(if rank < 3 { "open" } else { "closed" }),
+                        ),
+                        ("rank", PropertyInput::from(rank)),
+                    ],
+                ),
+            )
+        })
+        .returning((0..6).map(|rank| format!("d{rank}")));
+    let created = db
+        .query(QueryRequest::write(seed))
+        .await
+        .expect("fixture nodes are written");
+    let ids = (0..6)
+        .map(|rank| {
+            created[format!("d{rank}")][0]["$id"]
+                .as_u64()
+                .expect("node ID")
+        })
+        .collect::<Vec<_>>();
+    let hit_ids = |response: &serde_json::Value| {
+        response["hits"]
+            .as_array()
+            .expect("hits are rows")
+            .iter()
+            .map(|hit| hit["$id"].as_u64().expect("hit ID"))
+            .collect::<Vec<_>>()
+    };
+    let search = |source: traversal::Traversal<traversal::OnNodes>| {
+        batch::read_batch()
+            .var_as(
+                "hits",
+                source.vector_search("Doc", "embedding", vec![0.0, 0.0], 2, None),
+            )
+            .returning(["hits"])
+    };
+    let docs = |predicate| traversal::g().n_with_label_where("Doc", predicate);
+    // Label, equality bitmap, secondary set and an empty set fuse; a range
+    // scan and a residual filter do not.
+    for (source, fused, ranks) in [
+        (traversal::g().n_with_label("Doc"), true, &[0, 1][..]),
+        (docs(Predicate::eq("category", "a")), true, &[0, 2][..]),
+        (
+            docs(Predicate::and(vec![
+                Predicate::eq("category", "a"),
+                Predicate::eq("status", "open"),
+            ])),
+            true,
+            &[0, 2][..],
+        ),
+        (docs(Predicate::eq("category", "none")), true, &[][..]),
+        (docs(Predicate::gt("rank", 3_i64)), false, &[4, 5][..]),
+        (docs(Predicate::eq("unindexed", "x")), false, &[][..]),
+    ] {
+        let read = search(source);
+        let prepared = db
+            .planner_context_scoped_prepared(
+                context::ParamBindings::default(),
+                DataScope::LegacyUnscoped,
+            )
+            .await
+            .expect("planner context opens");
+        let plan = helix_planner::planning::plan_read_batch(&read, prepared.context())
+            .expect("read plans");
+        assert_eq!(
+            super::scheduler::fusion::plan(
+                &plan.steps().iter().map(|step| (step.id, step)).collect(),
+                &super::scheduler::output_uses(plan.steps(), plan.root()).expect("use plan"),
+                plan.execution_program(),
+            )
+            .len(),
+            if fused { 2 } else { 0 },
+            "{:#?}",
+            plan.steps()
+        );
+        let response = db
+            .query(QueryRequest::read(read))
+            .await
+            .expect("search executes");
+        assert_eq!(
+            hit_ids(&response),
+            ranks.iter().map(|rank| ids[*rank]).collect::<Vec<_>>()
+        );
+    }
+
+    // A request that writes reads its set when its access runs.
+    let response = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "created",
+                    traversal::g().add_n(
+                        "Doc",
+                        vec![
+                            ("embedding", PropertyInput::from(vec![0.5_f32, 0.0])),
+                            ("category", PropertyInput::from("a")),
+                        ],
+                    ),
+                )
+                .var_as(
+                    "hits",
+                    docs(Predicate::eq("category", "a")).vector_search(
+                        "Doc",
+                        "embedding",
+                        vec![0.0, 0.0],
+                        2,
+                        None,
+                    ),
+                )
+                .returning(["created", "hits"]),
+        ))
+        .await
+        .expect("write executes");
+    assert_eq!(
+        hit_ids(&response),
+        vec![
+            ids[0],
+            response["created"][0]["$id"].as_u64().expect("created ID")
+        ]
+    );
+
+    // A search over two inputs, an edge search and an edge set never pair.
+    let prepared = db
+        .planner_context_scoped_prepared(
+            context::ParamBindings::default(),
+            DataScope::LegacyUnscoped,
+        )
+        .await
+        .expect("planner context opens");
+    let plan = helix_planner::planning::plan_read_batch(
+        &search(docs(Predicate::eq("category", "a"))),
+        prepared.context(),
+    )
+    .expect("read plans");
+    let mut steps = plan.steps().to_vec();
+    steps.push(test_support::step(3, Vec::new(), exec::ExecOp::Noop));
+    steps[1]
+        .dependencies
+        .push(exec::ExecStepId::new(3).expect("positive step ID"));
+    assert!(super::scheduler::fusion::plan(
+        &steps.iter().map(|step| (step.id, step)).collect(),
+        &super::scheduler::output_uses(&steps, plan.root()).expect("use plan"),
+        plan.execution_program(),
+    )
+    .is_empty());
+    let (exec::ExecOp::Access { plan: access }, exec::ExecOp::VectorSearch { plan: search }) =
+        (&steps[0].op, &steps[1].op)
+    else {
+        panic!("planned an access feeding a search: {steps:#?}");
+    };
+    assert!(super::access::IdSetVectorSearch::new(access, search).is_some());
+    let ir::RestrictedVectorSearchPlan::Nodes {
+        index,
+        query_vector,
+        k,
+        ..
+    } = search.as_ref()
+    else {
+        panic!("planned a node search: {search:?}");
+    };
+    let edge_search = ir::RestrictedVectorSearchPlan::Edges {
+        key: catalog::EdgeSearchIndexKey::try_new("Doc", "embedding").expect("edge key"),
+        index: index.clone(),
+        query_vector: query_vector.clone(),
+        k: k.clone(),
+    };
+    assert!(super::access::IdSetVectorSearch::new(access, &edge_search).is_none());
+    let edge_set = exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::LabelScan {
+        label: test_support::name("Doc"),
+    });
+    assert!(super::access::IdSetVectorSearch::new(&edge_set, search).is_none());
+    db.close().await.expect("fused search fixture closes");
+}
+
 /// Seeds one canonical Active text generation before the runtime opens.
 async fn seed_active_text_generation(
     database: &str,
@@ -835,7 +1387,10 @@ async fn seed_active_text_generation_with(
     root
 }
 
-/// Runs a real serializable graph conflict through Active-text resolution.
+/// Runs a real serializable graph conflict through a queued Active-text write.
+///
+/// The losing transaction staged a text operation: nothing is uploaded, no
+/// queue operand or index row commits, and its admission charge is released.
 pub(crate) async fn run_active_text_graph_conflict() {
     let database = "production-interpreter-active-text-conflict";
     let token = ProcessLocalDatabaseToken::new(database).expect("process-local token validates");
@@ -878,19 +1433,10 @@ pub(crate) async fn run_active_text_graph_conflict() {
         created,
         ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(0))])
     );
-    execution
-        .flush_active_index_mutations()
-        .await
-        .expect("the explicit read barrier publishes the pending text epoch");
-    let blobs_after_upload = text_blob_paths(&object_store).await;
-    let uploaded_orphans = blobs_after_upload
-        .difference(&blobs_before)
-        .cloned()
-        .collect::<BTreeSet<_>>();
     assert_eq!(
-        uploaded_orphans.len(),
-        1,
-        "the prepared Active mutation uploads exactly one immutable blob"
+        text_blob_paths(&object_store).await,
+        blobs_before,
+        "staging a queued Active-text write uploads nothing"
     );
 
     let graph_key = DataKey::Data {
@@ -940,15 +1486,24 @@ pub(crate) async fn run_active_text_graph_conflict() {
         v2_before,
         "the losing transaction must not change any scoped Index V2 lane"
     );
+    let stats = db.index_operation_queue_stats();
+    assert_eq!(
+        (
+            stats.pending_operations,
+            stats.uncertain_operations,
+            stats.committed_operations
+        ),
+        (0, 0, 0),
+        "a definite conflict commits no operation and releases its charge"
+    );
     db.close()
         .await
         .expect("Active-text production fixture closes");
     assert_eq!(
         text_blob_paths(&object_store).await,
-        blobs_after_upload,
-        "database close must not delete the conflict orphan"
+        blobs_before,
+        "a losing graph transaction never leaves text blobs"
     );
-    assert!(uploaded_orphans.is_subset(&blobs_after_upload));
 }
 
 /// Proves internal storage and index reads fail closed without a request view.
@@ -1006,6 +1561,25 @@ pub(crate) async fn run_request_read_view_guards() {
                 .expect_err("prefix scans require a request view"),
             "storage prefix scan escaped its request read view",
         ),
+        (
+            context
+                .open_raw_range(
+                    Bytes::from_static(b"guard-range-start"),
+                    Bytes::from_static(b"guard-range-end"),
+                )
+                .await
+                .err()
+                .expect("resumable range scans require a request view"),
+            "storage range scan escaped its request read view",
+        ),
+        (
+            context
+                .open_raw_prefix(Bytes::from_static(b"guard-prefix"))
+                .await
+                .err()
+                .expect("resumable prefix scans require a request view"),
+            "storage prefix scan escaped its request read view",
+        ),
     ] {
         let HelixDbError::InvariantViolation(message) = error else {
             panic!("request-view guard returned the wrong error: {error}");
@@ -1053,23 +1627,25 @@ pub(crate) async fn run_request_read_view_guards() {
         ),
         (
             exec::ExecAccessPlan::Node(exec::ExecNodeAccessPlan::RangeIndex {
+                iteration: helix_planner::ir::RangeScanIteration::Forward,
                 index: catalog::NodeRangeIndexMeta::new(
                     ir::NonEmptyString::new("guard-node-range").expect("index ID is non-empty"),
                 ),
                 key: range_key.clone(),
                 range: ir::IndexRange::All,
             }),
-            "node secondary range lookup escaped its request read view",
+            "range cursor escaped request read view",
         ),
         (
             exec::ExecAccessPlan::Edge(exec::ExecEdgeAccessPlan::RangeIndex {
+                iteration: helix_planner::ir::RangeScanIteration::Forward,
                 index: catalog::EdgeRangeIndexMeta::new(
                     ir::NonEmptyString::new("guard-edge-range").expect("index ID is non-empty"),
                 ),
                 key: range_key,
                 range: ir::IndexRange::All,
             }),
-            "edge secondary range lookup escaped its request read view",
+            "range cursor escaped request read view",
         ),
     ] {
         let error = context
@@ -2217,7 +2793,15 @@ mod text_transaction_benchmark {
         }
     }
 
-    /// Proves destination batching, delete-only publication, versions, partitions, and barriers.
+    /// Publishes every queued text operation, as the automatic worker would.
+    async fn publish(db: &crate::HelixDB) {
+        db.publish_index_queues_for_lifecycle_testing()
+            .await
+            .expect("queued text operations publish");
+    }
+
+    /// Proves queued publication batches by destination, delete-only publication,
+    /// versions, partitions, and in-request read-your-writes without barriers.
     pub async fn run_text_transaction_batching_contracts() {
         let temporary = tempfile::tempdir().expect("batching contract directory creates");
         let local: Arc<dyn ObjectStore> = Arc::new(
@@ -2244,6 +2828,12 @@ mod text_transaction_benchmark {
         db.execute(&insert_plan(100), context::ParamBindings::default())
             .await
             .expect("one hundred inserts commit");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 1);
         let inserted_root = manifest_root(writer_db(&db), root)
             .await
@@ -2284,6 +2874,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("two updates for one entity coalesce");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 1);
         let updated_root = manifest_root(writer_db(&db), root)
             .await
@@ -2313,6 +2909,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("create/delete net-zero epoch commits");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 0);
         assert_eq!(
             manifest_root(writer_db(&db), root)
@@ -2325,6 +2927,12 @@ mod text_transaction_benchmark {
         db.execute(&delete_all_plan(), context::ParamBindings::default())
             .await
             .expect("delete-only epoch commits");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 0);
         let deleted_root = manifest_root(writer_db(&db), root)
             .await
@@ -2356,19 +2964,31 @@ mod text_transaction_benchmark {
         measured.reset_fts_uploads();
         db.execute(&write_read_write_plan(), context::ParamBindings::default())
             .await
-            .expect("write/read/write request commits both flush epochs");
-        assert_eq!(measured.fts_uploads().0, 2);
+            .expect("write/read/write request commits one queued transaction");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
+        // The in-request read saw the first write through the overlay; both
+        // writes publish in one epoch.
+        assert_eq!(measured.fts_uploads().0, 1);
         let barrier_root = manifest_root(writer_db(&db), root)
             .await
             .expect("barrier root reads");
-        assert_eq!(barrier_root.split_count(), 4);
+        assert_eq!(barrier_root.split_count(), 3);
+        assert_eq!(
+            barrier_root.revision().get(),
+            deleted_root.revision().get() + 1
+        );
         assert_eq!(
             entity_state(writer_db(&db), root, 101)
                 .await
                 .expect("pre-read entity state reads")
                 .logical_version
                 .get(),
-            deleted_root.revision().get() + 1
+            barrier_root.revision().get()
         );
         assert_eq!(
             entity_state(writer_db(&db), root, 102)
@@ -2390,11 +3010,17 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("update/delete coalesces to a retirement");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 0);
         let update_delete_root = manifest_root(writer_db(&db), root)
             .await
             .expect("update/delete root reads");
-        assert_eq!(update_delete_root.split_count(), 4);
+        assert_eq!(update_delete_root.split_count(), 3);
         assert_eq!(
             update_delete_root.revision().get(),
             barrier_root.revision().get() + 1
@@ -2463,6 +3089,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("dual-index inserts commit");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 2);
         let body_value = manifest_root(writer_db(&db), body_root)
             .await
@@ -2542,6 +3174,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("two-partition inserts commit");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 2);
         for (entity_id, tenant) in [(0, "acme"), (1, "globex")] {
             let root = tenant_root(tenant);
@@ -2570,6 +3208,12 @@ mod text_transaction_benchmark {
         )
         .await
         .expect("two tenant changes coalesce to one partition move");
+        assert_eq!(
+            measured.fts_uploads().0,
+            0,
+            "graph transactions never upload text splits"
+        );
+        publish(&db).await;
         assert_eq!(measured.fts_uploads().0, 1);
         let acme_after = manifest_root(writer_db(&db), acme_root)
             .await

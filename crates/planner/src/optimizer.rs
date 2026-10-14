@@ -8,7 +8,7 @@
 mod config;
 mod driver;
 mod memoize;
-mod ordering;
+pub(crate) mod ordering;
 mod provenance;
 mod registry;
 mod result;
@@ -26,6 +26,9 @@ pub use self::{
     },
     rule::{OptimizerRule, RuleEffect, RuleInput, RuleResult},
 };
+
+#[cfg(test)]
+pub(crate) use ordering::cost_key;
 
 #[cfg(test)]
 mod tests;

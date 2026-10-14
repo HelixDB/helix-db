@@ -110,7 +110,7 @@ fn selected_logical_run_root_reconstructs_control_flow_from_memo_child_plans() {
     assert_eq!(selected.metrics.memo_groups, 3);
     assert_eq!(selected.metrics.alternatives_considered, 3);
     let profile = cost::StorageCostProfile::default();
-    let access_cost = profile.range_scan(profile.default_unknown_scan_rows);
+    let access_cost = profile.element_scan(profile.default_unknown_scan_rows);
     assert_eq!(
         selected.metrics.selected_cost,
         profile
@@ -178,6 +178,6 @@ fn selected_logical_run_root_reconstructs_input_mutation_from_memo_child_plan() 
         selected.metrics.selected_cost,
         profile
             .barrier()
-            .serial(profile.range_scan(profile.default_unknown_scan_rows))
+            .serial(profile.element_scan(profile.default_unknown_scan_rows))
     );
 }

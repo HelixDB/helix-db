@@ -4,28 +4,37 @@
 //! through stable contract functions while the analysis internals live in
 //! focused modules:
 //!
-//! - `labels`: label-scope proofs.
+//! - `labels`: label-scope proofs and finite label domains.
 //! - `prune`: static branch pruning.
 //! - `scalar`: scalar tautology/contradiction and finite literal-set proofs.
 //! - `index_atoms`: equality and range atoms suitable for secondary indexes.
 
 mod index_atoms;
 mod labels;
+mod literal_set;
 mod prune;
 mod scalar;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use self::index_atoms::{
-    equality_atom, range_atom, EqualityIndexAtom, EqualityIndexDomain, RangeIndexAtom,
+    distinct_equality_literals, equality_atom, literal_equality_domain, range_atom,
+    EqualityIndexAtom, EqualityIndexDomain, RangeIndexAtom,
 };
-pub(crate) use self::labels::{label_equality_atom, label_scope, FeasibleLabelScope, LabelScope};
-pub(crate) use self::prune::{prune_statically_impossible_branches, PrunedPredicate};
+pub(crate) use self::labels::{
+    conjunctive_label_domain, domain_contains, domain_labels, label_equality_atom, label_scope,
+    FeasibleLabelScope, FiniteLabelDomain, LabelScope,
+};
+#[cfg(test)]
+pub(crate) use self::prune::prune_statically_impossible_branches;
+pub(crate) use self::prune::{prune_borrowed, PrunedPredicate};
 pub(crate) use self::scalar::{
-    literal_in_values, predicate_is_statically_tautological,
-    scalar_property_conjunction_is_impossible,
+    predicate_is_statically_tautological, scalar_property_conjunction_is_impossible,
 };
+
+#[cfg(test)]
+pub(crate) use self::scalar::literal_in_values;
 
 /// Whether a predicate is tautological for rows whose label is already known.
 ///
@@ -37,7 +46,7 @@ pub(crate) fn predicate_is_tautological_for_label(
     label: &crate::ir::NonEmptyString,
 ) -> bool {
     predicate_is_statically_tautological(predicate)
-        || label_equality_atom(predicate).as_deref() == Some(label.as_ref())
+        || label_equality_atom(predicate) == Some(label.as_ref())
         || match predicate {
             helix_ast::expr::Predicate::And { predicates } => predicates
                 .iter()
@@ -71,7 +80,7 @@ pub(crate) fn predicate_is_tautological_for_label(
 /// filter index rule remains the authoritative boundary for property
 /// validation, branch limits, catalog lookup, and full predicate coverage.
 pub(crate) fn predicate_has_index_atom_candidate(predicate: &helix_ast::expr::Predicate) -> bool {
-    if literal_in_values(predicate).is_some() {
+    if scalar::has_literal_in_values(predicate) {
         return true;
     }
     match predicate {
@@ -79,15 +88,7 @@ pub(crate) fn predicate_has_index_atom_candidate(predicate: &helix_ast::expr::Pr
         | helix_ast::expr::Predicate::Or { predicates } => {
             predicates.iter().any(predicate_has_index_atom_candidate)
         }
-        predicate => {
-            matches!(
-                equality_atom(predicate),
-                Ok(EqualityIndexAtom::Atom { .. }) | Err(_)
-            ) || matches!(
-                range_atom(predicate),
-                Ok(RangeIndexAtom::Atom { .. }) | Err(_)
-            )
-        }
+        predicate => index_atoms::has_candidate(predicate),
     }
 }
 

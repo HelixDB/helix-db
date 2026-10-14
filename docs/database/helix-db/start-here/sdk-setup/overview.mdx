@@ -1,0 +1,40 @@
+---
+title: "SDK setup"
+description: "Choose a HelixDB SDK and connect it to a local or Cloud server"
+sidebarTitle: "Overview"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Every HelixDB SDK builds the same operation-tree request and sends it to
+`POST /v2/query`, so the query guides apply to all four languages. Pick the SDK for
+your application's language:
+
+| SDK | Package | HTTP client | Embedded runtime |
+| --- | --- | --- | --- |
+| Rust | `helix-db` (imported as `helix_db`) | Async | Yes, behind the `embedded` feature |
+| TypeScript | `@helix-db/helix-db` (ESM, Node.js 20+) | Async | Yes |
+| Go | `github.com/helixdb/helix-db/sdks/go` | Yes | Not yet |
+| Python | `helix-db` (imported as `helixdb`) | Sync and async | Yes, with `helix-db-embedded` |
+
+<CardGroup cols={2}>
+  <Card title="Rust" icon="rust" href="/database/helix-db/start-here/sdk-setup/rust-project-setup">
+    Typed DSL, `#[query]` macro, and async HTTP client.
+  </Card>
+  <Card title="TypeScript" icon="square-js" href="/database/helix-db/start-here/sdk-setup/typescript-project-setup">
+    Typed DSL and async client for Node.js 20 or newer.
+  </Card>
+  <Card title="Go" icon="golang" href="/database/helix-db/start-here/sdk-setup/go-project-setup">
+    Query builder and HTTP client.
+  </Card>
+  <Card title="Python" icon="python" href="/database/helix-db/start-here/sdk-setup/python-project-setup">
+    Synchronous and asynchronous clients.
+  </Card>
+</CardGroup>
+
+## Next steps
+
+After setup, the [query walkthrough](/database/helix-db/core-concepts/overview) builds
+and runs a first query, and the query guides cover reads, writes, traversals,
+filtering, projections, parameters, and search in every language.

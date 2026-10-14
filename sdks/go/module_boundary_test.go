@@ -22,7 +22,7 @@ go 1.22
 
 require github.com/helixdb/helix-db/sdks/go v0.0.0
 
-replace github.com/helixdb/helix-db/sdks/go => %s
+replace github.com/helixdb/helix-db/sdks/go => %q
 `, moduleDir)
 	if err := os.WriteFile(filepath.Join(consumer, "go.mod"), []byte(goMod), 0o600); err != nil {
 		t.Fatal(err)

@@ -1,7 +1,23 @@
 use super::support::*;
 
-#[tokio::test]
-async fn foreach_executes_body_once_per_parameter_item() {
+#[test]
+fn foreach_executes_body_once_per_parameter_item() {
+    std::thread::Builder::new()
+        .name("foreach-parameter-items".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("foreach test runtime builds")
+                .block_on(foreach_executes_body_once_per_parameter_item_contract());
+        })
+        .expect("foreach test thread starts")
+        .join()
+        .expect("foreach test thread completes");
+}
+
+async fn foreach_executes_body_once_per_parameter_item_contract() {
     let db = test_support::open_db("control-foreach-side-effects").await;
     let alice = test_support::add_user(&db, "alice").await;
     let bob = test_support::add_user(&db, "bob").await;

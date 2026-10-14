@@ -29,12 +29,16 @@ use super::outbox::{
     self, ClaimPermission, IndexOperationDriver, OperationPointerObservation,
     OperationQueuePageSize, SameEpochRecoveryProof,
 };
+use super::queue::publication::{NextTarget, PublicationOutcome, QueuePublisher};
+use super::queue::QueueTarget;
 use super::{ClaimSequence, IndexOperationFamily, IndexOperationId, WriterEpoch};
 
 const DEFAULT_OPERATION_PAGE_SIZE: usize = 64;
 const SUPERVISOR_RESTART_DELAY: Duration = Duration::from_millis(10);
 const IDLE_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
-const IDLE_DISPATCH_ATTEMPTS: usize = OPERATION_FAMILIES.len();
+/// Operation-family lanes plus the queued-publication lane.
+const DISPATCH_LANES: usize = OPERATION_FAMILIES.len() + 1;
+const IDLE_DISPATCH_ATTEMPTS: usize = DISPATCH_LANES;
 
 /// Installed runtime service for one physical index family.
 #[derive(Clone)]
@@ -196,6 +200,7 @@ const OPERATION_FAMILIES: [IndexOperationFamily; 3] = [
 enum InFlightTarget {
     Operation(IndexOperationId),
     TextCompaction,
+    Publication(QueueTarget),
 }
 
 /// Global plus family/lane permits retained until one task is fully joined.
@@ -210,6 +215,7 @@ struct WorkerPermits {
     secondary: Arc<Semaphore>,
     vector: Arc<Semaphore>,
     text: Arc<Semaphore>,
+    publication: Arc<Semaphore>,
 }
 
 impl WorkerPermits {
@@ -219,6 +225,7 @@ impl WorkerPermits {
             secondary: Arc::new(Semaphore::new(concurrency.secondary_tasks().get())),
             vector: Arc::new(Semaphore::new(concurrency.vector_tasks().get())),
             text: Arc::new(Semaphore::new(concurrency.text_tasks().get())),
+            publication: Arc::new(Semaphore::new(concurrency.publication_tasks().get())),
         }
     }
 
@@ -256,6 +263,11 @@ enum InFlightTask {
         driver: Arc<dyn ActiveTextCompactionDriver>,
         _permits: InFlightPermits,
     },
+    Publication {
+        target: QueueTarget,
+        publisher: Arc<QueuePublisher>,
+        _permits: InFlightPermits,
+    },
 }
 
 impl InFlightTask {
@@ -263,6 +275,7 @@ impl InFlightTask {
         match self {
             Self::Operation { target, .. } => InFlightTarget::Operation(*target),
             Self::TextCompaction { .. } => InFlightTarget::TextCompaction,
+            Self::Publication { target, .. } => InFlightTarget::Publication(*target),
         }
     }
 
@@ -317,6 +330,23 @@ impl InFlightTask {
                 let did_work = driver.compact_active_text_once(db.as_ref()).await?;
                 (None, did_work)
             }
+            Self::Publication {
+                target,
+                publisher,
+                _permits,
+            } => {
+                let outcome = publisher.publish_once(target).await?;
+                (
+                    None,
+                    matches!(
+                        outcome,
+                        PublicationOutcome::Published { .. }
+                            | PublicationOutcome::Discarded { .. }
+                            | PublicationOutcome::Trimmed
+                            | PublicationOutcome::Blocked
+                    ),
+                )
+            }
         };
         Ok(InFlightCompletion {
             target,
@@ -342,6 +372,8 @@ enum DispatchAttempt {
 struct WorkerSupervisorContext {
     db: Arc<slatedb::Db>,
     capabilities: IndexFamilyCapabilities,
+    publisher: Option<Arc<QueuePublisher>>,
+    sweep_interval: Duration,
     concurrency: IndexLifecycleConcurrency,
     claim_sequences: Arc<ClaimSequenceAllocator>,
     #[cfg(feature = "index-lifecycle-testing")]
@@ -360,34 +392,53 @@ pub(crate) struct IndexWorkerSupervisor {
 }
 
 /// Cloneable lock-free notification capability for the lifecycle worker.
-#[derive(Clone)]
+///
+/// Created before the worker so the operation ledger can wake it too; a
+/// handle whose worker never starts (a reader) wakes nothing.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct IndexWorkerWakeHandle {
     wake: Arc<Notify>,
 }
 
 impl IndexWorkerWakeHandle {
+    /// Wakes the worker, or its next wait if it is busy.
     pub(crate) fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// Consumes a pending wake, returning whether there was one.
+    #[cfg(test)]
+    pub(crate) fn take_wake(&self) -> bool {
+        futures::FutureExt::now_or_never(self.wake.notified()).is_some()
     }
 }
 
 impl IndexWorkerSupervisor {
     /// Starts one supervised global worker after writer fencing succeeds.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the supervisor owns every lifecycle and publication dependency"
+    )]
     pub(crate) fn start(
         db: Arc<slatedb::Db>,
         capabilities: IndexFamilyCapabilities,
+        publisher: Option<Arc<QueuePublisher>>,
+        sweep_interval: Duration,
         concurrency: IndexLifecycleConcurrency,
         claim_sequences: Arc<ClaimSequenceAllocator>,
+        wake: IndexWorkerWakeHandle,
         #[cfg(feature = "index-lifecycle-testing")] lifecycle_metrics: Arc<
             crate::index_lifecycle_testing::AutomaticLifecycleMetrics,
         >,
     ) -> Self {
         let writer_epoch = WriterEpoch::new_v4();
-        let wake = Arc::new(Notify::new());
+        let IndexWorkerWakeHandle { wake } = wake;
         let (shutdown, shutdown_rx) = watch::channel(false);
         let handle = tokio::spawn(supervise_worker(WorkerSupervisorContext {
             db,
             capabilities,
+            publisher,
+            sweep_interval,
             concurrency,
             claim_sequences,
             #[cfg(feature = "index-lifecycle-testing")]
@@ -407,13 +458,6 @@ impl IndexWorkerSupervisor {
     /// Writer epoch used to fence every claim emitted by this runtime.
     pub(crate) const fn writer_epoch(&self) -> WriterEpoch {
         self.writer_epoch
-    }
-
-    /// Returns a notification-only handle with no supervisor ownership.
-    pub(crate) fn wake_handle(&self) -> IndexWorkerWakeHandle {
-        IndexWorkerWakeHandle {
-            wake: Arc::clone(&self.wake),
-        }
     }
 
     /// Idempotently requests shutdown and joins before storage is closed.
@@ -509,6 +553,8 @@ async fn supervise_worker(context: WorkerSupervisorContext) {
             WorkerCycleContext {
                 db: &context.db,
                 capabilities: &context.capabilities,
+                publisher: context.publisher.as_ref(),
+                sweep_interval: context.sweep_interval,
                 concurrency: context.concurrency,
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_metrics: &context.lifecycle_metrics,
@@ -556,6 +602,8 @@ enum WorkerCycleExit {
 struct WorkerCycleContext<'a> {
     db: &'a Arc<slatedb::Db>,
     capabilities: &'a IndexFamilyCapabilities,
+    publisher: Option<&'a Arc<QueuePublisher>>,
+    sweep_interval: Duration,
     concurrency: IndexLifecycleConcurrency,
     #[cfg(feature = "index-lifecycle-testing")]
     lifecycle_metrics: &'a Arc<crate::index_lifecycle_testing::AutomaticLifecycleMetrics>,
@@ -595,6 +643,8 @@ async fn dispatch_worker_cycle(
     let WorkerCycleContext {
         db,
         capabilities,
+        publisher,
+        sweep_interval,
         concurrency,
         #[cfg(feature = "index-lifecycle-testing")]
         lifecycle_metrics,
@@ -627,9 +677,53 @@ async fn dispatch_worker_cycle(
         if *shutdown.borrow() {
             return Ok(WorkerCycleExit::Shutdown);
         }
-        let family = OPERATION_FAMILIES[operation_family_index];
-        let cursor = &mut operation_cursors[operation_family_index];
-        operation_family_index = (operation_family_index + 1) % OPERATION_FAMILIES.len();
+        let lane = operation_family_index;
+        operation_family_index = (operation_family_index + 1) % DISPATCH_LANES;
+        let Some(&family) = OPERATION_FAMILIES.get(lane) else {
+            let attempt =
+                schedule_publication_task(publisher, &permits, targets, &mut earliest_delay);
+            match attempt {
+                DispatchAttempt::Scheduled(task) => {
+                    lanes_without_work = 0;
+                    let target = task.target();
+                    assert!(
+                        targets.insert(target),
+                        "one durable index target cannot execute twice"
+                    );
+                    let task_db = Arc::clone(db);
+                    tasks.spawn(async move {
+                        JoinedInFlightTask {
+                            target,
+                            result: (*task).execute(task_db).await,
+                        }
+                    });
+                }
+                DispatchAttempt::Continue => lanes_without_work = 0,
+                DispatchAttempt::Idle => {
+                    lanes_without_work = lanes_without_work.saturating_add(1);
+                }
+            }
+            if lanes_without_work >= IDLE_DISPATCH_ATTEMPTS {
+                lanes_without_work = 0;
+                if wait_for_work(
+                    shutdown,
+                    tasks,
+                    targets,
+                    wake,
+                    &mut earliest_delay,
+                    publisher.is_some_and(|publisher| publisher.has_outstanding_work()),
+                    sweep_interval,
+                    #[cfg(feature = "index-lifecycle-testing")]
+                    lifecycle_metrics,
+                )
+                .await?
+                {
+                    return Ok(WorkerCycleExit::Shutdown);
+                }
+            }
+            continue;
+        };
+        let cursor = &mut operation_cursors[lane];
         let mut attempt = schedule_operation_task(
             db,
             capabilities,
@@ -680,47 +774,130 @@ async fn dispatch_worker_cycle(
             continue;
         }
         lanes_without_work = 0;
-        if !tasks.is_empty() {
-            tokio::select! {
-                result = shutdown.changed() => {
-                    if result.is_err() || *shutdown.borrow() {
-                        return Ok(WorkerCycleExit::Shutdown);
-                    }
-                }
-                joined = tasks.join_next() => {
-                    let Some(joined) = joined else {
-                        return Err(HelixDbError::InvariantViolation(
-                            "non-empty index task set returned no task".to_string(),
-                        ));
-                    };
-                    if finish_joined_task(
-                        joined,
-                        targets,
-                        &mut earliest_delay,
-                        #[cfg(feature = "index-lifecycle-testing")]
-                        lifecycle_metrics,
-                    )? {
-                        earliest_delay = None;
-                    }
-                }
-                () = wake.notified() => {}
-            }
-            continue;
+        if wait_for_work(
+            shutdown,
+            tasks,
+            targets,
+            wake,
+            &mut earliest_delay,
+            publisher.is_some_and(|publisher| publisher.has_outstanding_work()),
+            sweep_interval,
+            #[cfg(feature = "index-lifecycle-testing")]
+            lifecycle_metrics,
+        )
+        .await?
+        {
+            return Ok(WorkerCycleExit::Shutdown);
         }
-        let delay = earliest_delay
-            .take()
-            .map(Duration::from_millis)
-            .unwrap_or(IDLE_DELAY);
+    }
+}
+
+/// Waits for a wake, a joined task, the earliest delay, or the recovery sweep.
+///
+/// Returns `true` when shutdown was requested. Outstanding queued work caps
+/// the wait at the recovery sweep interval so a lost commit notification or a
+/// restart delays publication by at most one sweep. Both timers apply while
+/// tasks are in flight too: a long step never holds back a backed-off target.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the idle wait observes every wake source of one worker cycle"
+)]
+async fn wait_for_work(
+    shutdown: &mut watch::Receiver<bool>,
+    tasks: &mut JoinSet<JoinedInFlightTask>,
+    targets: &mut HashSet<InFlightTarget>,
+    wake: &Notify,
+    earliest_delay: &mut Option<u64>,
+    queued_work: bool,
+    sweep_interval: Duration,
+    #[cfg(feature = "index-lifecycle-testing")] lifecycle_metrics: &Arc<
+        crate::index_lifecycle_testing::AutomaticLifecycleMetrics,
+    >,
+) -> Result<bool> {
+    let mut delay = earliest_delay
+        .take()
+        .map(Duration::from_millis)
+        .unwrap_or(IDLE_DELAY);
+    if queued_work {
+        delay = delay.min(sweep_interval);
+    }
+    if !tasks.is_empty() {
         tokio::select! {
             result = shutdown.changed() => {
                 if result.is_err() || *shutdown.borrow() {
-                    return Ok(WorkerCycleExit::Shutdown);
+                    return Ok(true);
+                }
+            }
+            joined = tasks.join_next() => {
+                let Some(joined) = joined else {
+                    return Err(HelixDbError::InvariantViolation(
+                        "non-empty index task set returned no task".to_string(),
+                    ));
+                };
+                if finish_joined_task(
+                    joined,
+                    targets,
+                    earliest_delay,
+                    #[cfg(feature = "index-lifecycle-testing")]
+                    lifecycle_metrics,
+                )? {
+                    *earliest_delay = None;
                 }
             }
             () = wake.notified() => {}
             () = tokio::time::sleep(delay) => {}
         }
+        return Ok(false);
     }
+    tokio::select! {
+        result = shutdown.changed() => {
+            if result.is_err() || *shutdown.borrow() {
+                return Ok(true);
+            }
+        }
+        () = wake.notified() => {}
+        () = tokio::time::sleep(delay) => {}
+    }
+    Ok(false)
+}
+
+fn schedule_publication_task(
+    publisher: Option<&Arc<QueuePublisher>>,
+    permits: &WorkerPermits,
+    targets: &HashSet<InFlightTarget>,
+    earliest_delay: &mut Option<u64>,
+) -> DispatchAttempt {
+    let Some(publisher) = publisher else {
+        return DispatchAttempt::Idle;
+    };
+    let in_flight = targets
+        .iter()
+        .filter_map(|target| match target {
+            InFlightTarget::Publication(target) => Some(*target),
+            InFlightTarget::Operation(_) | InFlightTarget::TextCompaction => None,
+        })
+        .collect::<HashSet<_>>();
+    let now = std::time::Instant::now();
+    let target = match publisher.next_target(&in_flight, now) {
+        NextTarget::Ready(target) => target,
+        NextTarget::Delayed(not_before) => {
+            let delay_millis = u64::try_from(not_before.saturating_duration_since(now).as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1);
+            *earliest_delay =
+                Some(earliest_delay.map_or(delay_millis, |current| current.min(delay_millis)));
+            return DispatchAttempt::Idle;
+        }
+        NextTarget::Idle => return DispatchAttempt::Idle,
+    };
+    let Some(task_permits) = permits.try_pair(&permits.publication) else {
+        return DispatchAttempt::Idle;
+    };
+    DispatchAttempt::Scheduled(Box::new(InFlightTask::Publication {
+        target,
+        publisher: Arc::clone(publisher),
+        _permits: task_permits,
+    }))
 }
 
 async fn schedule_text_compaction_task(

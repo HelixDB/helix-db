@@ -191,7 +191,7 @@ jobs:
           mkdir npm-smoke
           cd npm-smoke
           npm init --yes
-          npm install ../npm-dist/helix-db-helix-db-3.0.4.tgz ../npm-dist/helix-db-helix-db-embedded-0.3.3.tgz
+          npm install ../npm-dist/*.tgz
           cp ../bindings/uniffi/smoke-node.mjs .
           node smoke-node.mjs
       - uses: actions/upload-artifact@v4

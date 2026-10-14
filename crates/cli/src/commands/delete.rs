@@ -2,24 +2,32 @@ use crate::config::InstanceInfo;
 use crate::local_runtime::LocalRuntime;
 use crate::output::Operation;
 use crate::project::ProjectContext;
-use crate::utils::{print_confirm, print_warning};
+use crate::{errors::CliError, output, prompts};
 use eyre::{eyre, Result};
-use std::io::IsTerminal;
 
 pub async fn run(instance: String, yes: bool) -> Result<()> {
     let mut project = ProjectContext::find_and_load(None)?;
     let info = project.config.get_instance(&instance)?;
-    print_warning(&format!(
-        "This will remove instance '{instance}' from helix.toml and clean local runtime state, including Helix-managed on-disk storage volumes if present. Remote S3 object-store data is not deleted."
-    ));
-    if !yes && !std::io::stdin().is_terminal() {
+    if project.config.local.len() + project.config.enterprise.len() == 1 {
         return Err(eyre!(
-            "Refusing to delete '{instance}' non-interactively. Re-run with --yes to confirm."
+            "Cannot delete the final instance '{instance}'. Add a replacement instance first."
         ));
     }
-    if !yes && !print_confirm("Continue?")? {
-        crate::output::info("Deletion cancelled");
-        return Ok(());
+    if !yes {
+        if !prompts::is_interactive() {
+            return Err(CliError::new(format!(
+                "refusing to delete '{instance}' without confirmation"
+            ))
+            .with_hint("re-run with --yes to confirm")
+            .into());
+        }
+        output::warning(&format!(
+            "This removes '{instance}' from helix.toml and cleans its local runtime state, including Helix-managed on-disk storage volumes. Remote S3 object-store data is not deleted."
+        ));
+        if !prompts::confirm(&format!("Delete instance '{instance}'?"))? {
+            output::info("Deletion cancelled");
+            return Ok(());
+        }
     }
 
     let op = Operation::new("Deleting", &instance);
@@ -33,11 +41,12 @@ pub async fn run(instance: String, yes: bool) -> Result<()> {
         .config
         .save_to_file(&project.root.join("helix.toml"))?;
 
+    project.assert_safe_helix_dir()?;
     let workspace = project.instance_workspace(&instance);
     if workspace.exists() {
         std::fs::remove_dir_all(workspace)?;
     }
 
     op.success();
-    Ok(())
+    output::emit(&serde_json::json!({"deleted": instance}), |_| Ok(()))
 }

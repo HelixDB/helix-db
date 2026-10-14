@@ -274,6 +274,7 @@ fn distinct_helpers_preserve_index_pushdown_and_order_proofs() {
         ScopedPropertyDirectionKey::try_new("User", "age", RangeIndexDirection::Asc).unwrap();
     let mut input = PhysicalOp::Distinct {
         input: Box::new(PhysicalOp::NodeAccess(NodeAccessPlan::RangeIndex {
+iteration: crate::ir::RangeScanIteration::Forward,
             index: NodeRangeIndexMeta::new("node_range:User:age:Asc"),
             key: range_key,
             range: IndexRange::lower(IndexBound::Inclusive(
@@ -933,9 +934,15 @@ fn singleton_sources_skip_distinct_plans() {
         run_op(&unique_index),
         PhysicalOp::NodeAccess(NodeAccessPlan::EqualityIndex { .. })
     ));
+    // Null equality scans every owner lacking the property, so the unique
+    // index does not make it a singleton source.
     assert!(matches!(
         run_op(&unique_null),
-        PhysicalOp::NodeAccess(NodeAccessPlan::EqualityIndex { .. })
+        PhysicalOp::Distinct { input }
+            if matches!(
+                input.as_ref(),
+                PhysicalOp::NodeAccess(NodeAccessPlan::EqualityIndex { .. })
+            )
     ));
     assert!(matches!(
         run_op(&search),
@@ -947,7 +954,6 @@ fn singleton_sources_skip_distinct_plans() {
         &edge_point,
         &stored_singleton,
         &unique_index,
-        &unique_null,
         &search,
     ] {
         assert!(

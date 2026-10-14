@@ -1,149 +1,136 @@
-use super::super::sources::{
-    edge_source_hard_cardinality_upper_bound, node_source_hard_cardinality_upper_bound,
-};
-use super::direction::order_for_range_direction;
-use crate::{catalog, ir, logical};
+//! Ordered range alternatives retain the logical ORDER BY contract.
+use crate::{ir, logical};
 
-/// Result of proving that an access path delivers a requested ordering.
-///
-/// A successful proof owns the access path whose executable direct range
-/// driver provides that ordering. This prevents order elision from becoming
-/// detached from the driver selected during secondary-set lowering.
 #[derive(Debug, Clone, PartialEq)]
-pub(in crate::rules::access) enum AccessOrderSatisfaction {
+pub(in crate::rules) enum AccessOrderSatisfaction {
     NotSatisfied,
     Satisfied(logical::AccessPath),
 }
 
-impl AccessOrderSatisfaction {
-    pub(in crate::rules::access) fn is_satisfied(&self) -> bool {
-        matches!(self, Self::Satisfied(_))
-    }
-}
-
-pub(in crate::rules::access) fn access_order_satisfaction(
+pub(in crate::rules) fn access_order_satisfaction(
     order: &logical::AccessOrder,
 ) -> AccessOrderSatisfaction {
-    match order.access() {
-        logical::AccessPath::Node(path) => node_access_order_satisfaction(path, order.ordering()),
-        logical::AccessPath::Edge(path) => edge_access_order_satisfaction(path, order.ordering()),
+    if order
+        .access()
+        .hard_cardinality_upper_bound()
+        .is_some_and(|upper| upper <= 1)
+    {
+        return AccessOrderSatisfaction::Satisfied(order.access().clone());
+    }
+    let [required] = order.ordering().as_ref() else {
+        return AccessOrderSatisfaction::NotSatisfied;
+    };
+    let access = match order.access() {
+        logical::AccessPath::Node(path) => ordered_node_source(path.source().as_ref(), required)
+            .map(|source| {
+                logical::AccessPath::Node(logical::NodeAccessPath::new(
+                    ir::NodeAccessSourcePlan::from_unfiltered(source),
+                ))
+            }),
+        logical::AccessPath::Edge(path) => ordered_edge_source(path.source().as_ref(), required)
+            .map(|source| {
+                logical::AccessPath::Edge(logical::EdgeAccessPath::new(
+                    ir::EdgeAccessSourcePlan::from_unfiltered(source),
+                ))
+            }),
+    };
+    match access {
+        Some(access) => AccessOrderSatisfaction::Satisfied(access),
+        None => AccessOrderSatisfaction::NotSatisfied,
     }
 }
 
-fn node_access_order_satisfaction(
-    path: &logical::NodeAccessPath,
-    ordering: &ir::OrderKeys,
-) -> AccessOrderSatisfaction {
-    if node_source_hard_cardinality_upper_bound(path.source()).is_some_and(|upper| upper <= 1) {
-        return AccessOrderSatisfaction::Satisfied(logical::AccessPath::Node(path.clone()));
+fn iteration_for(
+    key: &crate::catalog::ScopedPropertyDirectionKey,
+    required: &ir::OrderKey,
+) -> ir::RangeScanIteration {
+    let physical_order = match key.direction {
+        helix_ast::index::RangeIndexDirection::Asc => helix_ast::traversal::Order::Asc,
+        helix_ast::index::RangeIndexDirection::Desc => helix_ast::traversal::Order::Desc,
+    };
+    if physical_order == required.order {
+        ir::RangeScanIteration::Forward
+    } else {
+        ir::RangeScanIteration::Reverse
     }
-    let source = path.source().as_ref();
+}
+
+fn ordered_node_source(
+    source: &ir::NodeAccessPlan,
+    required: &ir::OrderKey,
+) -> Option<ir::NodeAccessPlan> {
     match source {
-        ir::NodeAccessPlan::RangeIndex { key, .. }
-            if range_index_satisfies_order(key, ordering) =>
-        {
-            AccessOrderSatisfaction::Satisfied(logical::AccessPath::Node(path.clone()))
-        }
+        ir::NodeAccessPlan::RangeIndex {
+            index, key, range, ..
+        } if key.property == required.property => Some(ir::NodeAccessPlan::RangeIndex {
+            index: index.clone(),
+            key: key.clone(),
+            range: range.clone(),
+            iteration: iteration_for(key, required),
+        }),
         ir::NodeAccessPlan::Intersect(children) if source.is_secondary_set_eligible() => {
-            let Some(children) = promote_node_range_driver(children, ordering) else {
-                return AccessOrderSatisfaction::NotSatisfied;
-            };
-            AccessOrderSatisfaction::Satisfied(logical::AccessPath::Node(
-                logical::NodeAccessPath::new(ir::NodeAccessSourcePlan::from_unfiltered(
-                    ir::NodeAccessPlan::Intersect(children),
-                )),
+            fn flatten(source: &ir::NodeAccessSourcePlan, out: &mut Vec<ir::NodeAccessSourcePlan>) {
+                match source.as_ref() {
+                    ir::NodeAccessPlan::Intersect(children) => {
+                        for child in children {
+                            flatten(child, out);
+                        }
+                    }
+                    _ => out.push(source.clone()),
+                }
+            }
+            let mut flattened = Vec::new();
+            for child in children {
+                flatten(child, &mut flattened);
+            }
+            let selected = flattened.iter().position(|child| matches!(child.as_ref(), ir::NodeAccessPlan::RangeIndex { key, .. } if key.property == required.property))?;
+            let driver = ordered_node_source(flattened.remove(selected).as_ref(), required)?;
+            flattened.insert(0, ir::NodeAccessSourcePlan::from_unfiltered(driver));
+            Some(ir::NodeAccessPlan::Intersect(
+                ir::AtLeast::try_from_vec(flattened)
+                    .expect("flattening preserves intersection arity"),
             ))
         }
-        _ => AccessOrderSatisfaction::NotSatisfied,
+        _ => None,
     }
 }
 
-fn edge_access_order_satisfaction(
-    path: &logical::EdgeAccessPath,
-    ordering: &ir::OrderKeys,
-) -> AccessOrderSatisfaction {
-    if edge_source_hard_cardinality_upper_bound(path.source()).is_some_and(|upper| upper <= 1) {
-        return AccessOrderSatisfaction::Satisfied(logical::AccessPath::Edge(path.clone()));
-    }
-    let source = path.source().as_ref();
+fn ordered_edge_source(
+    source: &ir::EdgeAccessPlan,
+    required: &ir::OrderKey,
+) -> Option<ir::EdgeAccessPlan> {
     match source {
-        ir::EdgeAccessPlan::RangeIndex { key, .. }
-            if range_index_satisfies_order(key, ordering) =>
-        {
-            AccessOrderSatisfaction::Satisfied(logical::AccessPath::Edge(path.clone()))
-        }
+        ir::EdgeAccessPlan::RangeIndex {
+            index, key, range, ..
+        } if key.property == required.property => Some(ir::EdgeAccessPlan::RangeIndex {
+            index: index.clone(),
+            key: key.clone(),
+            range: range.clone(),
+            iteration: iteration_for(key, required),
+        }),
         ir::EdgeAccessPlan::Intersect(children) if source.is_secondary_set_eligible() => {
-            let Some(children) = promote_edge_range_driver(children, ordering) else {
-                return AccessOrderSatisfaction::NotSatisfied;
-            };
-            AccessOrderSatisfaction::Satisfied(logical::AccessPath::Edge(
-                logical::EdgeAccessPath::new(ir::EdgeAccessSourcePlan::from_unfiltered(
-                    ir::EdgeAccessPlan::Intersect(children),
-                )),
+            fn flatten(source: &ir::EdgeAccessSourcePlan, out: &mut Vec<ir::EdgeAccessSourcePlan>) {
+                match source.as_ref() {
+                    ir::EdgeAccessPlan::Intersect(children) => {
+                        for child in children {
+                            flatten(child, out);
+                        }
+                    }
+                    _ => out.push(source.clone()),
+                }
+            }
+            let mut flattened = Vec::new();
+            for child in children {
+                flatten(child, &mut flattened);
+            }
+            let selected = flattened.iter().position(|child| matches!(child.as_ref(), ir::EdgeAccessPlan::RangeIndex { key, .. } if key.property == required.property))?;
+            let driver = ordered_edge_source(flattened.remove(selected).as_ref(), required)?;
+            flattened.insert(0, ir::EdgeAccessSourcePlan::from_unfiltered(driver));
+            Some(ir::EdgeAccessPlan::Intersect(
+                ir::AtLeast::try_from_vec(flattened)
+                    .expect("flattening preserves intersection arity"),
             ))
         }
-        _ => AccessOrderSatisfaction::NotSatisfied,
+        _ => None,
     }
-}
-
-fn promote_node_range_driver(
-    children: &ir::AtLeast<ir::NodeAccessSourcePlan, 2>,
-    ordering: &ir::OrderKeys,
-) -> Option<ir::AtLeast<ir::NodeAccessSourcePlan, 2>> {
-    let first_range = children
-        .iter()
-        .position(|child| matches!(child.as_ref(), ir::NodeAccessPlan::RangeIndex { .. }))?;
-    let selected = children.iter().position(|child| {
-        matches!(
-            child.as_ref(),
-            ir::NodeAccessPlan::RangeIndex { key, .. }
-                if range_index_satisfies_order(key, ordering)
-        )
-    })?;
-    let mut promoted = children.clone().into_iter().collect::<Vec<_>>();
-    if selected != first_range {
-        let driver = promoted.remove(selected);
-        promoted.insert(first_range, driver);
-    }
-    Some(
-        ir::AtLeast::try_from_vec(promoted)
-            .expect("driver promotion preserves node intersection cardinality"),
-    )
-}
-
-fn promote_edge_range_driver(
-    children: &ir::AtLeast<ir::EdgeAccessSourcePlan, 2>,
-    ordering: &ir::OrderKeys,
-) -> Option<ir::AtLeast<ir::EdgeAccessSourcePlan, 2>> {
-    let first_range = children
-        .iter()
-        .position(|child| matches!(child.as_ref(), ir::EdgeAccessPlan::RangeIndex { .. }))?;
-    let selected = children.iter().position(|child| {
-        matches!(
-            child.as_ref(),
-            ir::EdgeAccessPlan::RangeIndex { key, .. }
-                if range_index_satisfies_order(key, ordering)
-        )
-    })?;
-    let mut promoted = children.clone().into_iter().collect::<Vec<_>>();
-    if selected != first_range {
-        let driver = promoted.remove(selected);
-        promoted.insert(first_range, driver);
-    }
-    Some(
-        ir::AtLeast::try_from_vec(promoted)
-            .expect("driver promotion preserves edge intersection cardinality"),
-    )
-}
-
-fn range_index_satisfies_order(
-    key: &catalog::ScopedPropertyDirectionKey,
-    ordering: &ir::OrderKeys,
-) -> bool {
-    matches!(
-        ordering.as_ref(),
-        [required]
-            if required.property == key.property
-                && required.order == order_for_range_direction(key.direction)
-    )
 }

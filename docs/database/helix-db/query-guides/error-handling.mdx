@@ -1,15 +1,38 @@
 ---
-title: "Handle query errors"
-description: "Branch on stable error codes while retaining diagnostic messages"
-sidebarTitle: "Error handling"
+title: "Query error reference"
+description: "Branch on stable error codes, apply retry rules, and look up every HelixDB query error"
+sidebarTitle: "Error codes"
 pageType: "Reference"
 ---
 
-<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Reference</Badge></div>
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
 Helix query failures expose a stable machine-readable code separately from the
 human-readable diagnostic. Branch on the code; log or display the message.
 Messages can gain context over time and are not a compatibility contract.
+
+This page covers errors raised by the HelixDB engine in every run mode. A Helix Cloud
+gateway can also return its own codes, such as `rate_limited` and `unauthorized`; see
+[Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling).
+
+## TypeScript release compatibility
+
+`@helix-db/helix-db` **3.1.0** exposes `HelixError.code`, `statusCode`,
+`serverMessage`, `rawBody`, and explicit `retryable` metadata. The published
+**3.0.4** package lacks these structured fields. Docker **v0.0.5** already
+returns a confirmed transaction conflict as HTTP **409** with
+`{"error":"transaction_conflict","msg":"<diagnostic>"}`.
+
+Use both `error.code === "transaction_conflict"` and `error.statusCode === 409`
+to recognize that condition. Reload the asset before rebuilding the mutation;
+do not match diagnostic wording. A dropped connection after sending a write is
+a `Network` failure with an unknown commit outcome, not proof that the write
+was aborted. An explicit `writer_fenced_commit_outcome_unknown` response is also
+distinct from a conflict and carries `retryable: false`. Reconcile state before
+resubmitting such writes. The SDK does not automatically replay mutations.
+
+This compatibility statement concerns transaction conflicts; it does not claim
+that v0.0.5 implements every newer error classification in the reference below.
 
 ## HTTP error envelope
 
@@ -27,6 +50,43 @@ The response never adds a separate `code` field. HTTP status classifications
 are unchanged, so use both the status and static code when deciding whether to
 retry. A non-JSON response from an older proxy or intermediary is still exposed
 by each SDK as readable details with no code.
+
+## Cypher errors
+
+`POST /v2/cypher` and `POST /v2/cypher/explain` report a failed statement with the
+same `error` and `msg` fields and a `details` object:
+
+```json
+{
+  "error": "resource_limit",
+  "msg": "expression temporaries exceed the query memory budget",
+  "details": { "detail": "memory_limit", "phase": "runtime", "span": null }
+}
+```
+
+`error` is the category and `details.detail` the specific condition. Both are lower
+snake case, like every code on this page. `details.phase` is `compile` (nothing ran)
+or `runtime`, and `span` locates the failing statement text when it is known. A
+failed statement commits nothing. gRPC carries the same JSON in the status details.
+Embedded SDK errors join the three parts into one code,
+`category:phase:detail`, such as `syntax_error:compile:undefined_variable`.
+
+Request, storage, and transaction failures on the Cypher routes keep the native
+envelope and the codes below.
+
+| Category | Meaning | HTTP | Retry |
+| --- | --- | --- | --- |
+| `syntax_error` | The statement is not valid Cypher, for example `undefined_variable`, `unexpected_syntax`, or `invalid_parameter_use`. | 400 | After fixing the statement |
+| `unsupported_feature` | Valid openCypher outside the supported profile, for example `merge`, `variable_length_pattern`, or `function` (an openCypher function this profile lacks; `msg` names it). | 400 | After rewriting the statement |
+| `type_error` | A value has the wrong type for its use, for example `expected_node` or `invalid_property_type`. | 400 | After fixing the statement or data |
+| `argument_error` | A function argument is invalid, for example `number_out_of_range`. | 400 | After fixing the argument |
+| `arithmetic_error` | Arithmetic failed, for example `division_by_zero`. | 400 | After fixing the expression or data |
+| `parameter_missing` | A referenced parameter was not supplied (`missing_parameter`). | 400 | After supplying it |
+| `entity_not_found` | A statement read a node or relationship it had deleted (`deleted_entity_access`). | 400 | After fixing the statement |
+| `constraint_verification_failed` | A plain `DELETE` targeted a node that still has relationships (`delete_connected_node`). | 400 | After using `DETACH DELETE` or removing the relationships |
+| `resource_limit` | A per-query budget was exceeded, for example `memory_limit`, `result_limit`, `collection_limit`, or `expression_depth`. | 429 | Not unchanged; reduce the work. Distinct from the gateway's `rate_limited` |
+| `access_mode_error` | A modifying statement reached a reader or a warm-only request (`writer_required`). | 503 | On the writer |
+| `internal_planner_error` | The planner broke one of its own invariants. | 500 | No automatic retry |
 
 ## Access the code in an SDK
 
@@ -92,8 +152,9 @@ being collapsed or rejected.
 ## Other query boundaries
 
 For gRPC, the status message remains human-readable and the same static code is
-attached as ASCII metadata under `helix-error-code`. gRPC status classes are
-unchanged.
+attached as ASCII metadata under `helix-error-code`. Active-text mutation admission
+failures use `InvalidArgument`, matching their HTTP 400 classification, and
+`index_backpressure` uses `ResourceExhausted`, matching HTTP 429.
 
 Embedded Rust errors expose `error_code()`. UniFFI errors carry two explicit
 fields named `error` and `msg`; generated Python, Node, and Go bindings pass
@@ -109,6 +170,9 @@ code from exception text.
   idempotency key.
 - `transaction_conflict` is the only HTTP conflict classification and is
   normally retryable with bounded backoff.
+- `index_backpressure` (HTTP 429) rejects the whole request before it takes
+  effect and carries `retryable: true`. Retry it unchanged with bounded backoff;
+  see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - Availability and lifecycle failures should be retried only after the named
   condition changes. Validation and planning failures require a corrected
   request or schema/index configuration.
@@ -174,6 +238,7 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 500 | With a larger deadline or less work | Sometimes |
+| `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `resource_limit` / `memory_limit` with HTTP 429. | 500 (native), 429 (Cypher) | After reducing retained data or increasing the embedded query budget | Sometimes |
 | `invalid_node_id` | A supplied node ID is invalid. | 500 | After fixing the ID | Yes |
 | `node_not_found` | A requested node does not exist. | 500 | After fixing state or ID | Yes |
 | `edge_not_found` | A requested edge does not exist. | 500 | After fixing state or endpoints | Yes |
@@ -185,13 +250,38 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 | `vector_component_magnitude_exceeded` | A component exceeds the score-safe magnitude. | 400 | After normalizing the vector | Yes |
 | `zero_norm_cosine_vector` | A cosine vector has zero norm. | 400 | After supplying a nonzero vector | Yes |
 
+### Active-text mutation limits
+
+`active_text_mutation_limit_exceeded` reports a deterministic rejection before the
+write transaction commits: one indexed text document is too large. The request's graph
+changes are not committed. The error is caller-correctable and uses HTTP 400, gRPC
+`InvalidArgument`, or the embedded `InvalidRequest` binding category. It is not a
+transient rate limit or an unknown write outcome; retrying the identical mutation does
+not resolve the limit.
+
+For example, the HTTP query service returns:
+
+```json
+{
+  "error": "active_text_mutation_limit_exceeded",
+  "msg": "db error: Active text mutation exceeds output_operations: observed 20006, limit 16384. This is a hard per-document limit; shorten the indexed text."
+}
+```
+
+Branch on `error`, not the wording in `msg`. The diagnostic identifies the resource,
+the document's usage and its allowance. See [active-text admission limits](/database/helix-cloud/operate/limits#active-text-mutation-admission)
+for the default allowances. The same engine policy applies to standalone databases;
+embedded configurations may override it.
+
 ### Index lifecycle
 
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
 | `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
-| `active_text_mutation_limit_exceeded` | An active text mutation exceeded an admission limit. | 500 | With a smaller mutation | Yes |
+| `active_text_mutation_limit_exceeded` | One indexed text document exceeded a hard per-document admission limit. | 400 | Shorten the text before retrying | Yes |
+| `index_operation_batch_too_large` | One write staged more queued vector/text index work than a single transaction can carry, or a text search in it would analyze more of its own text than a `strong` text search may (512 MiB of analysis by default). | 400 | Split the write before retrying | Yes |
+| `index_build_blocked` | A write would exceed a vector or text index's unpublished-work limit while the index's build is blocked; nothing publishes that work until the build is retried or aborted. | 500 | After retrying or aborting the blocked build | Yes |
 | `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
 | `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
 | `invalid_secondary_index_value` | A value violates a secondary-index contract. | 500 | After fixing the value | Yes |
@@ -213,6 +303,7 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
 | `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
+| `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes, or a `strong` text search would analyze more unpublished text in its partition than its bound allows (512 MiB of analysis by default), or a `strong` vector search would score more unpublished vector work than its bound allows (by default the index's retained-byte limit, which writes reach first). | 429 | Yes, bounded backoff | No request change required |
 | `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
 | `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
 | `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |
@@ -223,11 +314,13 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 | --- | --- | --- | --- | --- |
 | `database_closed` | The database handle is closed. | 500 | After reopening | Operational |
 | `invalid_configuration` | Database configuration is invalid. | 500 | After fixing configuration | Operational |
+| `migration_stepping_requires_disabled_mode` | Explicit migration stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
 | `migration_required` | Existing storage requires an explicit migration. | 500 | After migration | Operational |
 | `writer_migration_required` | A writer must open and migrate existing storage. | 500 | After writer migration | Operational |
 | `unsupported_index_storage_version` | Stored index data is newer than this binary supports. | 500 | After upgrading the binary | Operational |
 | `writer_mode_required` | The operation requires a writer handle. | 503 | On a writer | Operational |
 | `reader_mode_required` | The operation requires a standalone reader handle. | 500 | On a reader | Operational |
+| `query_cancelled_by_reader_retirement` | Reader retirement cancelled the query before the reader closed. | 500 | After routing to another reader | Operational |
 
 ### Internal failures
 

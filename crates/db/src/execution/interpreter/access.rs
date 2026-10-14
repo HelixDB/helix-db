@@ -1,7 +1,10 @@
 mod dispatch;
-mod expand;
+mod edge_candidates;
+pub(super) mod expand;
+pub(in crate::execution::interpreter) use edge_candidates::Cursor as EdgeCursor;
+pub(in crate::execution::interpreter) use edge_candidates::IdBatch as EdgeIdBatch;
 mod indexes;
-mod kv;
+pub(super) mod kv;
 mod membership;
 mod params;
 mod range;
@@ -11,7 +14,11 @@ mod rows;
 mod search;
 mod secondary_set;
 
-pub(in crate::execution::interpreter) use search::SearchReadLimit;
+pub(in crate::execution::interpreter) use restricted_vector::IdSetVectorSearch;
+pub(in crate::execution::interpreter) use search::{PendingSets, SearchReadLimit};
+pub(in crate::execution::interpreter) use secondary_set::{
+    intersection, union, LabelVerifiedLeaf, SharedIndexReads, PARALLEL_INDEX_READS,
+};
 
 #[cfg(any(test, feature = "production-coverage"))]
 #[cfg_attr(

@@ -14,8 +14,26 @@ pub use rules::{
 };
 
 pub(crate) use self::diagnostics::{missing_index_candidates, CandidateIndexKind};
-pub(in crate::rules) use index::{index_access_filter, label_domain_has_candidate};
+pub(crate) use index::with_run_cache as with_index_rewrite_cache;
+pub(in crate::rules) use index::{
+    index_access_filter, index_membership_filter, label_domain_has_candidate,
+    required_index_access_filter,
+};
 pub(in crate::rules) use simplify::simplify_access_filter;
+
+/// Explore the simplified filter or its index rewrite (full, partial, or
+/// label-domain), preserving every residual and any caller-owned pipeline
+/// suffix. Equality seeds that read one index and evaluate other indexed
+/// conjuncts per record are never offered.
+pub(in crate::rules) fn access_filter_alternatives(
+    filter: &logical::AccessFilter,
+    input: &optimizer::RuleInput<'_>,
+    suffix: &[logical::StreamPipelineOp],
+) -> Vec<logical::AccessStream> {
+    let rewrite = simplify_access_filter(filter)
+        .or_else(|| index_access_filter(filter, input.indexes, input.planner_limits));
+    rewrite.into_stream(suffix).into_iter().collect()
+}
 
 /// Access-filter rewrite outcome at the rule boundary.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +51,29 @@ impl AccessFilterRewrite {
         match self {
             Self::NotApplicable => rewrite(),
             Self::Rewritten(_) | Self::RewrittenPipeline(_) => self,
+        }
+    }
+
+    /// The rewritten access followed by its residual operators and then
+    /// `suffix`, as one access stream: a bare path when no operator remains,
+    /// or `None` when the filter was not rewritten.
+    pub(in crate::rules) fn into_stream(
+        self,
+        suffix: &[logical::StreamPipelineOp],
+    ) -> Option<logical::AccessStream> {
+        let (access, mut ops) = match self {
+            Self::NotApplicable => return None,
+            Self::Rewritten(access) => (access, Vec::new()),
+            Self::RewrittenPipeline(pipeline) => {
+                (pipeline.access().clone(), pipeline.ops().to_vec())
+            }
+        };
+        ops.extend_from_slice(suffix);
+        match ir::AtLeast::<_, 1>::try_from_vec(ops) {
+            Some(ops) => {
+                logical::AccessPipeline::new(access, ops).map(logical::AccessStream::Pipeline)
+            }
+            None => Some(logical::AccessStream::Path(access)),
         }
     }
 

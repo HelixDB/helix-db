@@ -161,8 +161,9 @@ impl Graph {
                     "a settled shortest-path node has at least one path"
                 );
                 let coefficient = (1.0 + dependencies[node]) / state.path_counts[node];
-                for (predecessor, _edge) in &state.predecessors[node] {
-                    dependencies[*predecessor] += state.path_counts[*predecessor] * coefficient;
+                for parallel in state.predecessors[node].chunk_by(|left, right| left.0 == right.0) {
+                    let predecessor = parallel[0].0;
+                    dependencies[predecessor] += state.path_counts[predecessor] * coefficient;
                 }
                 if node != source {
                     scores[node] += dependencies[node] + f64::from(options.endpoints);
@@ -204,10 +205,15 @@ impl Graph {
                     "a settled shortest-path node has at least one path"
                 );
                 let coefficient = (1.0 + dependencies[node]) / state.path_counts[node];
-                for (predecessor, edge) in &state.predecessors[node] {
-                    let contribution = state.path_counts[*predecessor] * coefficient;
-                    scores[*edge] += contribution;
-                    dependencies[*predecessor] += contribution;
+                // Parallel edges from one predecessor share its path count, and
+                // NetworkX splits that share evenly across the parallel keys.
+                for parallel in state.predecessors[node].chunk_by(|left, right| left.0 == right.0) {
+                    let predecessor = parallel[0].0;
+                    let contribution = state.path_counts[predecessor] * coefficient;
+                    dependencies[predecessor] += contribution;
+                    for (_, edge) in parallel {
+                        scores[*edge] += contribution / parallel.len() as f64;
+                    }
                 }
             }
         }
@@ -258,7 +264,7 @@ impl Graph {
 
     fn single_source_unweighted(&self, source: usize) -> SingleSourceState {
         let mut stack = Vec::new();
-        let mut predecessors = vec![Vec::new(); self.node_count()];
+        let mut predecessors = vec![Vec::<(usize, usize)>::new(); self.node_count()];
         let mut path_counts = vec![0.0; self.node_count()];
         let mut distance = vec![usize::MAX; self.node_count()];
         path_counts[source] = 1.0;
@@ -272,7 +278,13 @@ impl Graph {
                     queue.push_back(arc.neighbor);
                 }
                 if distance[arc.neighbor] == distance[node] + 1 {
-                    path_counts[arc.neighbor] += path_counts[node];
+                    // A parallel edge is not a new shortest path through `node`.
+                    if predecessors[arc.neighbor]
+                        .last()
+                        .is_none_or(|&(previous, _)| previous != node)
+                    {
+                        path_counts[arc.neighbor] += path_counts[node];
+                    }
                     predecessors[arc.neighbor].push((node, arc.edge));
                 }
             }
@@ -286,7 +298,7 @@ impl Graph {
 
     fn single_source_weighted(&self, source: usize) -> SingleSourceState {
         let mut stack = Vec::new();
-        let mut predecessors = vec![Vec::new(); self.node_count()];
+        let mut predecessors = vec![Vec::<(usize, usize)>::new(); self.node_count()];
         let mut path_counts = vec![0.0; self.node_count()];
         let mut distance = vec![f64::INFINITY; self.node_count()];
         let mut settled = vec![false; self.node_count()];
@@ -317,7 +329,12 @@ impl Graph {
                     });
                     order += 1;
                 } else if next_distance == distance[arc.neighbor] {
-                    path_counts[arc.neighbor] += path_counts[state.node];
+                    if predecessors[arc.neighbor]
+                        .last()
+                        .is_none_or(|&(previous, _)| previous != state.node)
+                    {
+                        path_counts[arc.neighbor] += path_counts[state.node];
+                    }
                     predecessors[arc.neighbor].push((state.node, arc.edge));
                 }
             }
@@ -594,6 +611,74 @@ mod tests {
         assert_abs_diff_eq!(by_id[&crate::EdgeId::from("one")], 1.0);
         assert_abs_diff_eq!(by_id[&crate::EdgeId::from("two")], 1.0);
         assert_abs_diff_eq!(by_id[&crate::EdgeId::from("bc")], 2.0);
+    }
+
+    #[test]
+    fn parallel_edges_do_not_multiply_shortest_paths_like_networkx_3_4_2() {
+        // A square whose a-b side is doubled. NetworkX 3.4.2 counts a->c as two
+        // shortest paths (via b and via d) and splits each a-b path share evenly
+        // across the parallel keys, so b and d stay symmetric.
+        for (kind, node_scores, edge_scores) in [
+            (
+                GraphKind::MultiGraph,
+                [0.5, 0.5, 0.5, 0.5],
+                [
+                    ("one", 1.0),
+                    ("two", 1.0),
+                    ("ad", 2.0),
+                    ("bc", 2.0),
+                    ("dc", 2.0),
+                ],
+            ),
+            (
+                GraphKind::MultiDiGraph,
+                [0.0, 0.5, 0.0, 0.5],
+                [
+                    ("one", 0.75),
+                    ("two", 0.75),
+                    ("ad", 1.5),
+                    ("bc", 1.5),
+                    ("dc", 1.5),
+                ],
+            ),
+        ] {
+            let graph = Graph::new(
+                kind,
+                ["a", "b", "c", "d"].into_iter().map(Node::new),
+                [
+                    Edge::new("one", "a", "b").with_weight(1.0),
+                    Edge::new("two", "a", "b").with_weight(1.0),
+                    Edge::new("bc", "b", "c").with_weight(1.0),
+                    Edge::new("ad", "a", "d").with_weight(1.0),
+                    Edge::new("dc", "d", "c").with_weight(1.0),
+                ],
+            )
+            .unwrap();
+            for weight in [PathWeight::Unweighted, PathWeight::Weighted] {
+                let options = BetweennessOptions {
+                    normalized: false,
+                    weight,
+                    ..BetweennessOptions::default()
+                };
+                let nodes = graph.betweenness_centrality(options).unwrap();
+                for (node, expected) in nodes.iter().zip(node_scores) {
+                    assert_abs_diff_eq!(node.score, expected, epsilon = 1e-12);
+                }
+                let by_id = graph
+                    .edge_betweenness_centrality(options)
+                    .unwrap()
+                    .into_iter()
+                    .map(|edge| (edge.edge_id, edge.score))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                for (edge, expected) in edge_scores {
+                    assert_abs_diff_eq!(
+                        by_id[&crate::EdgeId::from(edge)],
+                        expected,
+                        epsilon = 1e-12
+                    );
+                }
+            }
+        }
     }
 
     #[test]

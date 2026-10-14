@@ -18,7 +18,7 @@ use crate::encoding::v2::keys::indexes::vector::{
 };
 use crate::encoding::v2::values::indexes::vector::entry_candidate::encode_entry_candidate_layer;
 use crate::search::vector::distance::{Cosine, Distance};
-use crate::search::vector::mutation::VectorInsertContract;
+use crate::search::vector::hnsw::mutation::VectorInsertContract;
 use crate::search::vector::read_fault_production_support::{FaultingRead, ReadFault};
 use crate::search::vector::storage::{VectorRows, VectorWriteRows};
 use crate::search::vector::{
@@ -120,6 +120,17 @@ fn run_helper_contracts() {
     SearchObserver::disabled().publish(completed.clone());
     SearchObserver::collecting(&mut destination).publish(completed);
     assert_eq!(destination.expansion_steps, 7);
+
+    let unbound = score_exact_in_memory::<UnboundSearchDistance>(
+        &[1.0, 0.0, 0.0],
+        VectorDimension::try_new(3).unwrap(),
+        [(1, &[1.0, 0.0, 0.0][..])],
+    )
+    .expect_err("a metric without a durable semantic identity cannot score overlays");
+    assert!(
+        matches!(&unbound, HelixDbError::Config(message) if message.contains("production-unbound-search-distance")),
+        "{unbound}"
+    );
 }
 
 /// Verifies validation, empty state, typed layer reads, and populated search.

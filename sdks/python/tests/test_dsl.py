@@ -4,6 +4,7 @@ import json
 import math
 import unittest
 from dataclasses import FrozenInstanceError
+from datetime import datetime, timezone
 
 from helixdb import (
     BatchCondition,
@@ -26,13 +27,17 @@ from helixdb import (
     RangeIndexDirection,
     ReadBatch,
     RepeatConfig,
+    SearchConsistency,
     ShortestPathDirection,
     SourcePredicate,
+    StreamBound,
     VectorDistanceMetric,
     WhenThen,
     WriteBatch,
+    bytes_,
     define_params,
     g,
+    i64,
     param,
     parse_index_ddl_receipt,
     parse_index_operation_status,
@@ -46,6 +51,15 @@ from helixdb import (
 
 def parsed(value: object) -> object:
     return json.loads(stringify_json(value))
+
+
+class EdgeDropTests(unittest.TestCase):
+    def test_drop_preserves_element_state(self):
+        dropped = g().e([1, 2]).drop()
+        self.assertEqual(dropped.state, "edges")
+        self.assertEqual(dropped.mode, "write")
+        self.assertEqual(g().n(1).drop().state, "nodes")
+        self.assertEqual(dropped.into_ast(), {"drop": {"input": g().e([1, 2]).into_ast()}})
 
 
 class DslAstTests(unittest.TestCase):
@@ -230,7 +244,20 @@ class DslAstTests(unittest.TestCase):
             structural_json_equal(b'{"n":9223372036854775807}', b'{"n":9223372036854775807}')
         )
         self.assertEqual(parsed(PropertyValue.null()), "null")
-        self.assertEqual(parsed(PropertyValue.bytes(b"\x01\x02")), {"bytes": [1, 2]})
+        self.assertEqual(parsed(PropertyValue.bytes(bytes([0, 255]))), {"bytes": [0, 255]})
+        self.assertEqual(
+            parsed(PropertyValue.from_value(bytes_(bytearray([0, 255])))),
+            {"bytes": [0, 255]},
+        )
+        for value in (-1, 1.5, 256, "7", True):
+            with self.assertRaisesRegex(
+                TypeError, "byte at index 0 must be an integer from 0 to 255"
+            ):
+                PropertyValue.bytes([value])
+            with self.assertRaisesRegex(
+                TypeError, "byte at index 0 must be an integer from 0 to 255"
+            ):
+                PropertyValue.from_value(bytes_([value]))
         self.assertEqual(parsed(PropertyInput.param("limit")), {"expr": {"param": "limit"}})
         self.assertEqual(parsed(NodeRef.param("node_ids")), {"param": "node_ids"})
         self.assertEqual(
@@ -238,10 +265,74 @@ class DslAstTests(unittest.TestCase):
             {"array": {"array": "f64"}},
         )
         self.assertEqual(PropertyValue.string("x").as_str(), "x")
+        i64_min = -(1 << 63)
+        i64_max = (1 << 63) - 1
+        for value in (i64_min, i64_max):
+            self.assertEqual(parsed(PropertyValue.i64(value)), {"i64": value})
+            self.assertEqual(parsed(PropertyValue.from_value(i64(value))), {"i64": value})
+            self.assertEqual(QueryValue.i64(value), value)
+        for value in (i64_min - 1, i64_max + 1):
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                i64(value)
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                PropertyValue.i64(value)
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                PropertyValue.i64_array([value])
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                QueryValue.i64(value)
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                QueryRequest.read(read_batch()).with_typed_parameter(
+                    "value", QueryParamType.i64(), value
+                )
+            with self.assertRaisesRegex(TypeError, "signed 64-bit range"):
+                read_batch().to_query_json(define_params({"value": param.i64()}), {"value": value})
         self.assertEqual(
             DateTime.parse_rfc3339("1969-12-31T23:59:59.999-00:00").to_rfc3339(),
             "1969-12-31T23:59:59.999Z",
         )
+        self.assertEqual(
+            DateTime.parse_rfc3339("2026-04-05t12:34:56z").to_rfc3339(),
+            "2026-04-05T12:34:56.000Z",
+        )
+        self.assertEqual(
+            DateTime.parse_rfc3339("2026-04-05T12:34:56+23:59").to_rfc3339(),
+            "2026-04-04T12:35:56.000Z",
+        )
+        self.assertEqual(
+            DateTime.parse_rfc3339("2026-04-05T12:34:56-23:59").to_rfc3339(),
+            "2026-04-06T12:33:56.000Z",
+        )
+        for value in [
+            "2026-04-05",
+            "2026-04-05T12:34:56",
+            "2026-04-05T12:34:56+00:60",
+            "2026-04-05T12:34:56-00:60",
+            "2026-04-05T12:34:56+24:00",
+            "2026-04-05T12:34:56-24:00",
+        ]:
+            with self.assertRaisesRegex(TypeError, "invalid RFC3339 datetime"):
+                DateTime.parse_rfc3339(value)
+
+        # Python datetimes cover years 1 through 9999. The edges render exactly, and
+        # the first millisecond past either edge is the SDK's datetime QueryError.
+        self.assertEqual(
+            DateTime.from_millis(253_402_300_799_999).to_rfc3339(), "9999-12-31T23:59:59.999Z"
+        )
+        self.assertEqual(
+            DateTime.from_millis(-62_135_596_800_000).to_rfc3339(), "0001-01-01T00:00:00.000Z"
+        )
+        self.assertEqual(
+            DateTime.from_millis(-29_776_524_133_441).to_rfc3339(), "1026-06-03T07:17:46.559Z"
+        )
+        for millis in [253_402_300_800_000, -62_135_596_800_001]:
+            with self.assertRaises(QueryError) as raised:
+                DateTime.from_millis(millis).to_rfc3339()
+            self.assertEqual(raised.exception.kind, "InvalidDateTimeParameter")
+            self.assertEqual(raised.exception.millis, millis)
+            with self.assertRaises(QueryError):
+                read_batch().to_query_json(
+                    define_params({"at": param.date_time()}), {"at": DateTime.from_millis(millis)}
+                )
 
         self.assertEqual(
             parsed(Expr.prop("a").add(Expr.val(1)).neg()),
@@ -357,6 +448,29 @@ class DslAstTests(unittest.TestCase):
             BindingProjection.coalesce([], "workload_id")
         with self.assertRaises(ValueError):
             g().n_with_label("Service").project_bindings([])
+
+    def test_datetime_millis_are_exact_for_millisecond_inputs(self) -> None:
+        # Binary floating point cannot hold these instants in seconds exactly, so
+        # `timestamp() * 1000` lands just below the millisecond and truncates.
+        for text, millis in [
+            ("2004-08-03T14:44:13.199Z", 1_091_544_253_199),
+            ("1987-05-10T10:40:21.915Z", 547_641_621_915),
+            ("2039-01-12T23:59:04.595Z", 2_178_489_544_595),
+        ]:
+            self.assertEqual(DateTime.parse_rfc3339(text).millis(), millis)
+            self.assertEqual(DateTime.parse_rfc3339(text).to_rfc3339(), text)
+            self.assertEqual(
+                DateTime.from_datetime(
+                    datetime.fromisoformat(text.replace("Z", "+00:00"))
+                ).millis(),
+                millis,
+            )
+        self.assertEqual(
+            DateTime.from_datetime(
+                datetime(1969, 12, 31, 23, 59, 59, 999_500, tzinfo=timezone.utc)
+            ).millis(),
+            -1,
+        )
 
     def test_batches_emit_entries_and_nested_roots(self) -> None:
         read = (
@@ -694,11 +808,48 @@ class DslAstTests(unittest.TestCase):
         self.assertEqual(write_request_json["query"]["write"]["returns"], ["created"])
         self.assertEqual(QueryValue.i64(9223372036854775807), 9223372036854775807)
 
+        self.assertIs(QueryRequest.read(read_batch()).search_consistency, SearchConsistency.STRONG)
+        self.assertNotIn("search_consistency", QueryRequest.read(read_batch()).to_json_string())
+        eventual = QueryRequest.read(read_batch()).with_search_consistency(
+            SearchConsistency.EVENTUAL
+        )
+        self.assertEqual(json.loads(eventual.to_json_string())["search_consistency"], "eventual")
+        self.assertNotIn(
+            "search_consistency",
+            QueryRequest.read(read_batch())
+            .with_search_consistency(SearchConsistency.STRONG)
+            .to_json_string(),
+        )
+        self.assertEqual(
+            json.loads(
+                read_query(params).to_query_json(
+                    params,
+                    {"tenant_id": "acme", "limit": 1},
+                    search_consistency=SearchConsistency.EVENTUAL,
+                )
+            )["search_consistency"],
+            "eventual",
+        )
+        with self.assertRaisesRegex(TypeError, "only valid for read requests"):
+            QueryRequest.write(write_batch()).with_search_consistency(SearchConsistency.EVENTUAL)
+        with self.assertRaisesRegex(TypeError, "only valid for read requests"):
+            write_query(write_params).to_query_json(
+                write_params, {"data": []}, search_consistency=SearchConsistency.EVENTUAL
+            )
+        with self.assertRaisesRegex(TypeError, "unknown search consistency"):
+            QueryRequest.read(read_batch()).with_search_consistency("eventual")  # type: ignore[arg-type]
+
         bytes_params = define_params({"payload": param.bytes()})
         with self.assertRaises(QueryError):
             read_batch().to_query_json(bytes_params, {"payload": b"abc"})
         with self.assertRaises(TypeError):
             read_batch().var_as("bad", g().add_n("User", {"name": "Alice"}))
+
+    def test_stream_bound_literal(self) -> None:
+        bound = StreamBound.literal(10)
+        self.assertEqual(bound.to_json(), {"literal": 10})
+        with self.assertRaises(ValueError):
+            StreamBound.literal(-1)
 
 
 if __name__ == "__main__":

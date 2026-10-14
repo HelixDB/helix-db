@@ -63,7 +63,7 @@ fn pipeline_rule_implements_serial_cost_and_delivered_properties() {
     let rows = storage.default_unknown_scan_rows;
     let expected = storage
         .range_scan(rows)
-        .serial(storage.predicate_eval(rows))
+        .serial(storage.stored_predicate_filter(rows))
         .serial(storage.explicit_sort(rows))
         .serial(storage.stream_operator(cost::EstimatedRows::rows(2)));
     assert_eq!(alternative.cost, expected);

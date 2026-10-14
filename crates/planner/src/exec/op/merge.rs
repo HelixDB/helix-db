@@ -9,6 +9,13 @@ pub enum ExecMergeMode {
     Concat,
     /// Set-union dependency outputs.
     Union,
+    /// Set-union element streams, emitted in ascending element order.
+    ///
+    /// Index-served sources and label scans deliver their elements in ID
+    /// order, so a union of index sets each filtered by its own residual uses
+    /// this mode to deliver the same order a scan of the label would, however
+    /// its branches order their rows.
+    OrderedUnion,
     /// Set-intersect dependency outputs.
     Intersect,
 }

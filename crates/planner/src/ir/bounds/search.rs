@@ -109,6 +109,11 @@ impl SearchLimitExprPlan {
     pub fn expr(&self) -> &Expr {
         self.expr.expr()
     }
+
+    /// Borrow the resolved expression contract for execution.
+    pub fn expression_plan(&self) -> &ExprPlan {
+        &self.expr
+    }
 }
 
 impl<'de> Deserialize<'de> for SearchLimitExprPlan {

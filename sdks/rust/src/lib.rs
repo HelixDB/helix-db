@@ -45,6 +45,31 @@
 //! use helix_db::dsl::prelude::*;
 //! ```
 //!
+//! ## Query helpers
+//!
+//! Annotate a builder with [`query`] to get a callable function that returns
+//! [`Result<QueryRequest, QueryError>`]. Parameter coercion failures surface as
+//! [`QueryError`] instead of panicking:
+//!
+//! ```
+//! #![recursion_limit = "256"]
+//! use helix_db::dsl::prelude::*;
+//!
+//! #[query]
+//! fn find_user(name: String) -> ReadBatch {
+//!     read_batch()
+//!         .var_as(
+//!             "user",
+//!             g().n_where(SourcePredicate::eq("username", name)),
+//!         )
+//!         .returning(["user"])
+//! }
+//!
+//! let request = find_user("alice".to_string())?;
+//! assert_eq!(request.query_name(), Some("find_user"));
+//! # Ok::<(), helix_db::QueryError>(())
+//! ```
+//!
 //! ## Running queries
 //!
 //! Build a [`Client`], then send a [`QueryRequest`] to `/v2/query`:
@@ -58,18 +83,31 @@
 //! #[derive(Deserialize)]
 //! struct Friends { friends: Vec<u64> }
 //!
-//! # async fn run(request: QueryRequest) -> Result<(), helix_db::HelixError> {
+//! #[query]
+//! fn friends_of(name: String) -> ReadBatch {
+//!     read_batch()
+//!         .var_as(
+//!             "friends",
+//!             g().n_where(SourcePredicate::eq("username", name))
+//!                 .out(Some("FOLLOWS")),
+//!         )
+//!         .returning(["friends"])
+//! }
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::new(Some("https://cluster.helix-db.com"))?
 //!     .with_api_key(Some("hx_your_api_key"))
 //!     .with_database_id(Some("db_your_database_id"));
 //!
-//! let response: Friends = client.query(request).send().await?;
+//! let response: Friends = client.query(friends_of("alice".to_string())?).send().await?;
 //! # let _ = response.friends;
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! See [`Client`] for the full request-building surface and error handling.
+//! Compile-tested README mirrors live under `examples/`:
+//! `basic_query`, `readme_sdk_query`, and `readme_macros_query`.
 
 pub mod dsl;
 pub mod graph;
@@ -103,8 +141,6 @@ use reqwest::{Client as ReqwestClient, StatusCode};
 use serde::Deserialize;
 use thiserror::Error;
 
-const DATABASE_ID_HEADER: &str = "x-helix-database-id";
-
 /// Async HTTP client for running queries against a Helix instance.
 ///
 /// A thin async wrapper over [`reqwest`] that knows how to reach a Helix
@@ -127,7 +163,7 @@ const DATABASE_ID_HEADER: &str = "x-helix-database-id";
 /// // Defaults to http://localhost:6969 when the URL is `None`.
 /// let local = Client::new(None)?;
 ///
-/// // Or point at a remote cluster and attach an API key.
+/// // Or point at Helix Cloud with an API key and dashboard database ID.
 /// let remote = Client::managed(
 ///     Some("https://cluster.helix-db.com"),
 ///     "db_your_database_id",
@@ -158,6 +194,28 @@ struct ServerClient {
     require_database_id: bool,
 }
 
+impl ServerClient {
+    /// Start a `POST` carrying the request options, the bearer key and the
+    /// database ID that every query route expects.
+    fn post(
+        &self,
+        url: reqwest::Url,
+        headers: &[Option<(&str, &str)>; 4],
+    ) -> reqwest::RequestBuilder {
+        let mut request = self.client.post(url);
+        for (key, value) in headers.iter().flatten() {
+            request = request.header(*key, *value);
+        }
+        if let Some(api_key) = &self.api_key {
+            request = request.bearer_auth(api_key);
+        }
+        if let Some(database_id) = &self.database_id {
+            request = request.header("x-helix-database-id", database_id);
+        }
+        request
+    }
+}
+
 impl fmt::Debug for Client {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.backend {
@@ -180,6 +238,162 @@ impl fmt::Debug for Client {
 /// Backwards-compatible alias for [`Client`].
 pub type HelixDBClient = Client;
 
+/// Lossless Cypher result. Graph IDs and integers outside the JSON safe range
+/// use tagged values; applications may retain these envelopes unchanged.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CypherResponse {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+}
+
+impl Client {
+    /// Execute one Cypher statement against a server or embedded handle.
+    ///
+    /// A modifying statement commits atomically. To set request options, use
+    /// [`Client::request_builder`] and [`QueryBuilder::cypher`].
+    pub async fn cypher(
+        &self,
+        query: &str,
+        parameters: std::collections::BTreeMap<String, serde_json::Value>,
+        query_name: Option<&str>,
+    ) -> Result<CypherResponse, HelixError> {
+        self.request_builder::<()>()
+            .cypher(query, parameters, query_name)
+            .send()
+            .await
+    }
+
+    /// Plan one Cypher statement without executing it, returning the
+    /// `POST /v2/cypher/explain` JSON. Planning a modifying statement writes nothing.
+    /// Planning checks parameters, so supply every parameter the statement uses.
+    ///
+    /// ```no_run
+    /// # async fn example(client: helix_db::Client) -> Result<(), helix_db::HelixError> {
+    /// let params = std::collections::BTreeMap::from([("name".to_string(), serde_json::json!("Ada"))]);
+    /// let plan = client
+    ///     .explain_cypher("CREATE (:User {name: $name})", params, None)
+    ///     .await?;
+    /// assert_eq!(plan["effect"], "Write");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn explain_cypher(
+        &self,
+        query: &str,
+        parameters: std::collections::BTreeMap<String, serde_json::Value>,
+        query_name: Option<&str>,
+    ) -> Result<serde_json::Value, HelixError> {
+        self.request_builder::<()>()
+            .cypher(query, parameters, query_name)
+            .explain()
+            .await
+    }
+}
+
+/// A Cypher statement ready to [`send`](Self::send) or [`explain`](Self::explain),
+/// produced by [`QueryBuilder::cypher`]. Request options toggled on the builder
+/// apply to either route.
+pub struct CypherExecutionRequest<'hlx, 'a> {
+    client: &'hlx HelixDBClient,
+    headers: [Option<(&'a str, &'a str)>; 4],
+    body: serde_json::Value,
+}
+
+impl CypherExecutionRequest<'_, '_> {
+    /// Execute the statement (`POST /v2/cypher`). A modifying statement commits
+    /// atomically; the request is sent once and never retried. A warm-only read
+    /// that Helix Cloud answers with `204 No Content` returns no columns or rows.
+    pub async fn send(self) -> Result<CypherResponse, HelixError> {
+        let mut bytes = match &self.client.backend {
+            ClientBackend::Server(server) => {
+                let Some(bytes) = self.post(server, "/v2/cypher").await? else {
+                    return Ok(CypherResponse {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                    });
+                };
+                bytes
+            }
+            #[cfg(feature = "embedded")]
+            ClientBackend::Embedded(database) => {
+                let response = database
+                    .cypher(self.embedded_request()?)
+                    .await
+                    .map_err(embedded_cypher_error)?;
+                serde_json::to_vec(&response)?
+            }
+        };
+        Ok(simd_json::from_slice(&mut bytes)?)
+    }
+
+    /// Plan the statement without executing it (`POST /v2/cypher/explain`). A
+    /// warm-only request that Helix Cloud answers with `204 No Content` returns
+    /// [`serde_json::Value::Null`].
+    pub async fn explain(self) -> Result<serde_json::Value, HelixError> {
+        let mut bytes = match &self.client.backend {
+            ClientBackend::Server(server) => {
+                let Some(bytes) = self.post(server, "/v2/cypher/explain").await? else {
+                    return Ok(serde_json::Value::Null);
+                };
+                bytes
+            }
+            #[cfg(feature = "embedded")]
+            ClientBackend::Embedded(database) => {
+                let explanation = database
+                    .explain_cypher(self.embedded_request()?)
+                    .await
+                    .map_err(embedded_cypher_error)?;
+                serde_json::to_vec(&explanation)?
+            }
+        };
+        Ok(simd_json::from_slice(&mut bytes)?)
+    }
+
+    /// The successful response body, or `None` for a warm `204 No Content`.
+    async fn post(&self, server: &ServerClient, path: &str) -> Result<Option<Vec<u8>>, HelixError> {
+        validate_database_id(server.database_id.as_deref(), server.require_database_id)?;
+        let url = server
+            .url
+            .join(path)
+            .map_err(|e| HelixError::InvalidURL(e.to_string()))?;
+        let response = server
+            .post(url, &self.headers)
+            .body(serde_json::to_vec(&self.body)?)
+            .send()
+            .await?;
+        match response.status() {
+            StatusCode::OK => Ok(Some(response.bytes().await?.to_vec())),
+            StatusCode::NO_CONTENT => Ok(None),
+            code => Err(remote_error(
+                code,
+                response.text().await.unwrap_or_default(),
+            )),
+        }
+    }
+
+    #[cfg(feature = "embedded")]
+    fn embedded_request(&self) -> Result<db::cypher::Request, HelixError> {
+        if self.headers.iter().skip(1).any(Option::is_some) {
+            return Err(HelixError::InvalidRequest {
+                details: "request options require server mode".to_string(),
+            });
+        }
+        Ok(serde_json::from_value(self.body.clone())?)
+    }
+}
+
+#[cfg(feature = "embedded")]
+fn embedded_cypher_error(error: db::cypher::Error) -> HelixError {
+    HelixError::EmbeddedError {
+        code: match &error {
+            db::cypher::Error::Query(e) => e.code(),
+            db::cypher::Error::Storage(e) => e.error_code().to_string(),
+            db::cypher::Error::Json(_) => "response_serialization_error".into(),
+        },
+        details: error.to_string(),
+    }
+}
+
 /// Metadata returned when the server responds with a status other than `200`
 /// or the Cloud warm-success status `204`.
 #[derive(Debug)]
@@ -187,6 +401,7 @@ pub struct RemoteError {
     status_code: u16,
     code: Option<String>,
     message: String,
+    retryable: Option<bool>,
     details: Option<serde_json::Value>,
     raw_body: String,
 }
@@ -205,6 +420,16 @@ impl RemoteError {
     /// Return the server-provided message or fallback message.
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Return the server's explicit retry classification, when present.
+    pub fn retryable(&self) -> Option<bool> {
+        self.retryable
+    }
+
+    /// Return true only when the server explicitly marked the result retryable.
+    pub fn is_retryable(&self) -> bool {
+        self.retryable == Some(true)
     }
 
     /// Return structured server details, when present.
@@ -246,7 +471,7 @@ pub enum HelixError {
     RemoteError(Box<RemoteError>),
     /// Failed to (de)serialize a request body or response payload.
     #[error("Error serializing data: {0}")]
-    SerializationError(#[from] sonic_rs::Error),
+    SerializationError(#[from] simd_json::Error),
     /// The base URL passed to [`Client::new`] could not be parsed, or the
     /// resolved query route was not a valid URL.
     #[error("Invalid URL: {0}")]
@@ -266,6 +491,15 @@ pub enum HelixError {
         /// Error text from the embedded DB layer.
         details: String,
     },
+}
+
+/// Requests are written with serde_json, which keeps each `f32` in its
+/// shortest form; responses are read with simd-json. Both failures are
+/// serialization errors.
+impl From<serde_json::Error> for HelixError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::SerializationError(<simd_json::Error as serde::ser::Error>::custom(error))
+    }
 }
 
 impl HelixError {
@@ -291,6 +525,42 @@ impl HelixError {
             return None;
         };
         Some(error.message())
+    }
+
+    /// Return the server's explicit retry classification for a remote error.
+    pub fn retryable(&self) -> Option<bool> {
+        let Self::RemoteError(error) = self else {
+            return None;
+        };
+        error.retryable()
+    }
+
+    /// Return true when the failure is explicitly retryable.
+    ///
+    /// Remote failures are retryable only when the server says so. Embedded
+    /// `index_backpressure` failures are retryable because the whole request
+    /// was rejected without effect: a write before commit, or a strong search.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::RemoteError(error) => error.is_retryable(),
+            #[cfg(feature = "embedded")]
+            Self::EmbeddedError { .. } => self.is_index_backpressure(),
+            Self::ReqwestError(_)
+            | Self::SerializationError(_)
+            | Self::InvalidURL(_)
+            | Self::InvalidRequest { .. } => false,
+        }
+    }
+
+    /// Return whether asynchronous vector/text index work rejected the request.
+    ///
+    /// Either a write was rejected before commit because the index backlog is
+    /// full, or a strong search's answer lies behind more than 800 unpublished
+    /// changes; eventual searches are never rejected this way. The whole
+    /// request was rejected (HTTP 429, gRPC resource-exhausted); retry it
+    /// unchanged after a backoff.
+    pub fn is_index_backpressure(&self) -> bool {
+        self.error_code() == Some(QueryErrorCode::IndexBackpressure.as_str())
     }
 
     /// Return structured server details for a remote error.
@@ -375,11 +645,15 @@ fn remote_error(status: StatusCode, raw_body: String) -> HelixError {
             }
         });
     let details = object.and_then(|body| body.get("details")).cloned();
+    let retryable = object
+        .and_then(|body| body.get("retryable"))
+        .and_then(serde_json::Value::as_bool);
 
     HelixError::RemoteError(Box::new(RemoteError {
         status_code: status.as_u16(),
         code,
         message,
+        retryable,
         details,
         raw_body,
     }))
@@ -428,11 +702,16 @@ impl Client {
     /// contains only whitespace, or [`HelixError::InvalidURL`] for an invalid
     /// endpoint URL.
     pub fn managed(url: Option<&str>, database_id: &str) -> Result<Self, HelixError> {
-        let mut client = Self::server(url)?;
         validate_database_id(Some(database_id), true)?;
-        let ClientBackend::Server(server) = &mut client.backend;
-        server.database_id = Some(database_id.to_string());
-        server.require_database_id = true;
+        let mut client = Self::server(url)?;
+        match &mut client.backend {
+            ClientBackend::Server(server) => {
+                server.database_id = Some(database_id.to_string());
+                server.require_database_id = true;
+            }
+            #[cfg(feature = "embedded")]
+            ClientBackend::Embedded(_) => {}
+        }
         Ok(client)
     }
 
@@ -504,13 +783,21 @@ impl Client {
         self
     }
 
-    /// Attach (or clear) the managed database ID sent as `x-helix-database-id`.
+    /// Attach (or clear) the database ID sent with every request.
     ///
-    /// An empty value is rejected when the first server request is sent. Use
-    /// [`Client::managed`] when the endpoint must always have a database ID.
+    /// Passing `Some(id)` sets the `x-helix-database-id` header, which Helix
+    /// Cloud requires to select a database; passing `None` clears it. An empty
+    /// or whitespace-only value is rejected when the next server request is
+    /// sent. Use [`Client::managed`] when the endpoint must always have a
+    /// database ID.
     pub fn with_database_id(mut self, database_id: Option<&str>) -> Self {
-        let ClientBackend::Server(server) = &mut self.backend;
-        server.database_id = database_id.map(str::to_string);
+        match &mut self.backend {
+            ClientBackend::Server(server) => {
+                server.database_id = database_id.map(|id| id.to_string());
+            }
+            #[cfg(feature = "embedded")]
+            ClientBackend::Embedded(_) => {}
+        }
         self
     }
 
@@ -580,7 +867,6 @@ fn embedded_error(error: db::error::HelixDbError) -> HelixError {
     }
 }
 
-
 fn validate_database_id(database_id: Option<&str>, required: bool) -> Result<(), HelixError> {
     if required && database_id.is_none() {
         return Err(HelixError::InvalidRequest {
@@ -595,7 +881,7 @@ fn validate_database_id(database_id: Option<&str>, required: bool) -> Result<(),
     Ok(())
 }
 
-
+/// Fluent builder for a single request, produced by [`Client::query`].
 ///
 /// Optional server header toggles ([`writer_only`](Self::writer_only),
 /// [`warm_only`](Self::warm_only),
@@ -669,6 +955,23 @@ impl<'hlx, 'a, R> QueryBuilder<'hlx, 'a, R> {
             _phantom: PhantomData,
         }
     }
+
+    /// Target the Cypher routes with one statement and its lossless JSON
+    /// parameters, then [`send`](CypherExecutionRequest::send) or
+    /// [`explain`](CypherExecutionRequest::explain) it.
+    #[must_use]
+    pub fn cypher(
+        self,
+        query: &str,
+        parameters: std::collections::BTreeMap<String, serde_json::Value>,
+        query_name: Option<&str>,
+    ) -> CypherExecutionRequest<'hlx, 'a> {
+        CypherExecutionRequest {
+            client: self.client,
+            headers: self.headers,
+            body: serde_json::json!({"query": query, "parameters": parameters, "query_name": query_name}),
+        }
+    }
 }
 
 /// A fully addressed request, ready to [`send`](Self::send).
@@ -691,17 +994,11 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
         match &self.client.backend {
             ClientBackend::Server(server) => {
                 validate_database_id(server.database_id.as_deref(), server.require_database_id)?;
-                let mut request = server.client.post(server.url.clone());
-                for (key, value) in self.headers.into_iter().flatten() {
-                    request = request.header(key, value);
-                }
-                if let Some(api_key) = &server.api_key {
-                    request = request.bearer_auth(api_key);
-                }
-                if let Some(database_id) = &server.database_id {
-                    request = request.header(DATABASE_ID_HEADER, database_id);
-                }
-                let response = request.body(sonic_rs::to_vec(&self.query)?).send().await?;
+                let response = server
+                    .post(server.url.clone(), &self.headers)
+                    .body(serde_json::to_vec(&self.query)?)
+                    .send()
+                    .await?;
                 match response.status() {
                     status @ (StatusCode::OK | StatusCode::NO_CONTENT) => {
                         let body = response.bytes().await?.to_vec();
@@ -720,7 +1017,7 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
                         details: "request options require server mode".to_string(),
                     });
                 }
-                let request = sonic_rs::to_vec(&self.query)?;
+                let request = serde_json::to_vec(&self.query)?;
                 db.query_json(&request)
                     .await
                     .map(|body| QueryResponse {
@@ -771,11 +1068,11 @@ impl<'hlx, 'a, R: for<'de> Deserialize<'de>> QueryExecutionRequest<'hlx, 'a, R> 
     /// # }
     /// ```
     pub async fn send(self) -> Result<R, HelixError> {
-        let response = self.execute().await?;
+        let mut response = self.execute().await?;
         if response.status == StatusCode::NO_CONTENT {
-            sonic_rs::from_slice::<R>(b"null").map_err(Into::into)
+            simd_json::from_reader::<_, R>(&b"null"[..]).map_err(Into::into)
         } else {
-            sonic_rs::from_slice::<R>(&response.body).map_err(Into::into)
+            simd_json::from_slice::<R>(&mut response.body).map_err(Into::into)
         }
     }
 }
@@ -1031,15 +1328,15 @@ mod tests {
     #[test]
     fn predicate_literal_json_uses_ast_shape() {
         assert_eq!(
-            sonic_rs::to_string(&Predicate::eq("username", "alice")).unwrap(),
+            simd_json::to_string(&Predicate::eq("username", "alice")).unwrap(),
             r#"{"eq":{"left":{"property":"username"},"right":{"constant":{"string":"alice"}}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&Predicate::gt("score", 10i64)).unwrap(),
+            simd_json::to_string(&Predicate::gt("score", 10i64)).unwrap(),
             r#"{"gt":{"left":{"property":"score"},"right":{"constant":{"i64":10}}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&Predicate::between("age", 18i64, 65i64)).unwrap(),
+            simd_json::to_string(&Predicate::between("age", 18i64, 65i64)).unwrap(),
             r#"{"between":{"value":{"property":"age"},"min":{"constant":{"i64":18}},"max":{"constant":{"i64":65}}}}"#
         );
     }
@@ -1047,15 +1344,15 @@ mod tests {
     #[test]
     fn predicate_param_json_uses_param_exprs() {
         assert_eq!(
-            sonic_rs::to_string(&Predicate::eq("username", Expr::param("name"))).unwrap(),
+            simd_json::to_string(&Predicate::eq("username", Expr::param("name"))).unwrap(),
             r#"{"eq":{"left":{"property":"username"},"right":{"param":"name"}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&Predicate::lte("score", Expr::param("max"))).unwrap(),
+            simd_json::to_string(&Predicate::lte("score", Expr::param("max"))).unwrap(),
             r#"{"lte":{"left":{"property":"score"},"right":{"param":"max"}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&Predicate::between("age", Expr::param("lo"), 65i64)).unwrap(),
+            simd_json::to_string(&Predicate::between("age", Expr::param("lo"), 65i64)).unwrap(),
             r#"{"between":{"value":{"property":"age"},"min":{"param":"lo"},"max":{"constant":{"i64":65}}}}"#
         );
     }
@@ -1067,8 +1364,8 @@ mod tests {
             Predicate::eq("username", Expr::param("name")),
             Predicate::between("age", Expr::param("lo"), 65i64),
         ] {
-            let json = sonic_rs::to_string(&predicate).unwrap();
-            let back: Predicate = sonic_rs::from_str(&json).unwrap();
+            let json = simd_json::to_string(&predicate).unwrap();
+            let back: Predicate = simd_json::from_reader(json.as_bytes()).unwrap();
             assert_eq!(predicate, back);
         }
     }
@@ -1078,15 +1375,15 @@ mod tests {
     #[test]
     fn source_predicate_literal_json_uses_ast_shape() {
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::eq("username", "alice")).unwrap(),
+            simd_json::to_string(&SourcePredicate::eq("username", "alice")).unwrap(),
             r#"{"eq":{"left":{"property":"username"},"right":{"constant":{"string":"alice"}}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::gt("score", 10i64)).unwrap(),
+            simd_json::to_string(&SourcePredicate::gt("score", 10i64)).unwrap(),
             r#"{"gt":{"left":{"property":"score"},"right":{"constant":{"i64":10}}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::between("age", 18i64, 65i64)).unwrap(),
+            simd_json::to_string(&SourcePredicate::between("age", 18i64, 65i64)).unwrap(),
             r#"{"between":{"value":{"property":"age"},"min":{"constant":{"i64":18}},"max":{"constant":{"i64":65}}}}"#
         );
     }
@@ -1094,15 +1391,15 @@ mod tests {
     #[test]
     fn source_predicate_param_json_uses_param_exprs() {
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::eq("username", Expr::param("name"))).unwrap(),
+            simd_json::to_string(&SourcePredicate::eq("username", Expr::param("name"))).unwrap(),
             r#"{"eq":{"left":{"property":"username"},"right":{"param":"name"}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::lte("score", Expr::param("max"))).unwrap(),
+            simd_json::to_string(&SourcePredicate::lte("score", Expr::param("max"))).unwrap(),
             r#"{"lte":{"left":{"property":"score"},"right":{"param":"max"}}}"#
         );
         assert_eq!(
-            sonic_rs::to_string(&SourcePredicate::between("age", Expr::param("lo"), 65i64))
+            simd_json::to_string(&SourcePredicate::between("age", Expr::param("lo"), 65i64))
                 .unwrap(),
             r#"{"between":{"value":{"property":"age"},"min":{"param":"lo"},"max":{"constant":{"i64":65}}}}"#
         );
@@ -1115,8 +1412,8 @@ mod tests {
             SourcePredicate::eq("username", Expr::param("name")),
             SourcePredicate::between("age", Expr::param("lo"), 65i64),
         ] {
-            let json = sonic_rs::to_string(&sp).unwrap();
-            let back: SourcePredicate = sonic_rs::from_str(&json).unwrap();
+            let json = simd_json::to_string(&sp).unwrap();
+            let back: SourcePredicate = simd_json::from_reader(json.as_bytes()).unwrap();
             assert_eq!(sp, back);
         }
     }
@@ -1131,7 +1428,7 @@ mod tests {
                 g().n_where(SourcePredicate::eq("username", "alice")),
             )
             .returning(["user"]);
-        let literal_json = sonic_rs::to_string(&literal).unwrap();
+        let literal_json = simd_json::to_string(&literal).unwrap();
         assert!(
             literal_json.contains(r#""root":{"nodes_where":{"predicate":{"eq":{"left":{"property":"username"},"right":{"constant":{"string":"alice"}}}}}}"#),
             "literal nodes_where AST changed shape: {literal_json}"
@@ -1144,7 +1441,7 @@ mod tests {
                 g().n_where(SourcePredicate::eq("username", Expr::param("name"))),
             )
             .returning(["user"]);
-        let param_json = sonic_rs::to_string(&param).unwrap();
+        let param_json = simd_json::to_string(&param).unwrap();
         assert!(
             param_json.contains(r#""root":{"nodes_where":{"predicate":{"eq":{"left":{"property":"username"},"right":{"param":"name"}}}}}}"#),
             "param nodes_where AST missing param expression: {param_json}"
@@ -1178,7 +1475,7 @@ mod tests {
             )
             .returning(["workloads"]);
 
-        let json = sonic_rs::to_string(&query).unwrap();
+        let json = simd_json::to_string(&query).unwrap();
         assert!(json.contains(r#""project_bindings""#));
         assert!(json.contains(r#""bind":{"input""#));
         assert!(json.contains(r#""name":"service""#));
@@ -1217,7 +1514,7 @@ mod tests {
                 .value_map(Some(vec!["metadata.externalID"])),
             )
             .returning(["updated"]);
-        let write_json = sonic_rs::to_string(&write).unwrap();
+        let write_json = simd_json::to_string(&write).unwrap();
         assert!(
             write_json
                 .contains(r#""metadata",{"value":{"object":{"externalID":{"string":"some_id"}"#),
@@ -1257,7 +1554,7 @@ mod tests {
                 g().n_with_label("User").values(vec!["metadata.externalID"]),
             )
             .returning(["users", "external_ids"]);
-        let read_json = sonic_rs::to_string(&read).unwrap();
+        let read_json = simd_json::to_string(&read).unwrap();
         assert!(
             read_json.contains(r#""eq":{"left":{"property":"metadata.externalID"},"right":{"constant":{"string":"some_id"}}}"#),
             "dotted SourcePredicate changed shape: {read_json}"
@@ -1321,7 +1618,6 @@ mod client_tests {
         )
     }
 
-    #[cfg(feature = "embedded")]
     fn write_request() -> QueryRequest {
         QueryRequest::write(
             write_batch()
@@ -1350,6 +1646,7 @@ mod client_tests {
         assert_eq!(server.url.as_str(), "http://localhost:6969/v2/query");
         assert!(server.api_key.is_none());
         assert!(server.database_id.is_none());
+        assert!(!server.require_database_id);
     }
 
     #[test]
@@ -1368,6 +1665,32 @@ mod client_tests {
     }
 
     #[test]
+    fn with_database_id_sets_and_clears() {
+        let client = Client::new(None).unwrap().with_database_id(Some("db_123"));
+        assert_eq!(
+            server_backend(&client).database_id.as_deref(),
+            Some("db_123")
+        );
+
+        let cleared = client.with_database_id(None);
+        assert!(server_backend(&cleared).database_id.is_none());
+    }
+
+    #[test]
+    fn managed_requires_a_non_empty_database_id() {
+        for database_id in ["", "   "] {
+            let error =
+                Client::managed(Some("https://cluster.helix-db.com"), database_id).unwrap_err();
+            assert!(matches!(error, HelixError::InvalidRequest { .. }));
+        }
+
+        let client = Client::managed(Some("https://cluster.helix-db.com"), "db_123").unwrap();
+        let server = server_backend(&client);
+        assert_eq!(server.database_id.as_deref(), Some("db_123"));
+        assert!(server.require_database_id);
+    }
+
+    #[test]
     fn with_api_key_sets_and_clears() {
         let client = Client::new(None).unwrap().with_api_key(Some("hx_secret"));
         assert_eq!(
@@ -1377,33 +1700,6 @@ mod client_tests {
 
         let cleared = client.with_api_key(None);
         assert!(server_backend(&cleared).api_key.is_none());
-    }
-
-    #[test]
-    fn managed_requires_a_non_empty_database_id() {
-        for database_id in ["", "   "] {
-            let error = Client::managed(Some("https://cluster.helix-db.com"), database_id)
-                .unwrap_err();
-            assert!(matches!(error, HelixError::InvalidRequest { .. }));
-        }
-
-        let client = Client::managed(
-            Some("https://cluster.helix-db.com"),
-            "db_123",
-        )
-        .unwrap();
-        let server = server_backend(&client);
-        assert_eq!(server.database_id.as_deref(), Some("db_123"));
-        assert!(server.require_database_id);
-    }
-
-    #[test]
-    fn with_database_id_sets_and_clears() {
-        let client = Client::new(None).unwrap().with_database_id(Some("db_123"));
-        assert_eq!(server_backend(&client).database_id.as_deref(), Some("db_123"));
-
-        let cleared = client.with_database_id(None);
-        assert!(server_backend(&cleared).database_id.is_none());
     }
 
     #[test]
@@ -1442,6 +1738,21 @@ mod client_tests {
             let error = remote_error(StatusCode::BAD_REQUEST, body.to_string());
             assert_eq!(error.error_code(), expected_code);
             assert_eq!(error.remote_message(), Some(expected_details));
+        }
+    }
+
+    #[test]
+    fn remote_retryability_requires_an_explicit_boolean_true() {
+        for (body, expected) in [
+            (r#"{"error":"busy","retryable":true}"#, true),
+            (r#"{"error":"unknown","retryable":false}"#, false),
+            (r#"{"error":"malformed","retryable":"true"}"#, false),
+            (r#"{"error":"missing"}"#, false),
+        ] {
+            assert_eq!(
+                remote_error(StatusCode::SERVICE_UNAVAILABLE, body.to_owned()).is_retryable(),
+                expected
+            );
         }
     }
 
@@ -1496,11 +1807,12 @@ mod client_tests {
     struct EmptyResp {}
 
     /// Spawn a one-shot HTTP server on a random port. Returns its base URL and a
-    /// handle that resolves to the raw captured request bytes as a String.
+    /// handle that resolves to the request-target (path) of the first request
+    /// and its lowercased head.
     async fn spawn_capture_server(
         status: u16,
         body: &str,
-    ) -> (String, tokio::task::JoinHandle<String>) {
+    ) -> (String, tokio::task::JoinHandle<(String, String)>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1509,22 +1821,172 @@ mod client_tests {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
-            // Accumulate bytes until the full HTTP header block has arrived.
+            // A single read can return only part of the request. Accumulate
+            // until the header block is complete before asserting on it.
             loop {
                 let n = socket.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
                 buf.extend_from_slice(&tmp[..n]);
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                if buf.windows(4).any(|window| window == b"\r\n\r\n") {
                     break;
                 }
             }
+            let head = String::from_utf8_lossy(&buf).to_lowercase();
+            let request_line = head.lines().next().unwrap().to_string();
+            // `METHOD <target> HTTP/1.1` -> the target.
+            let target = request_line.split_whitespace().nth(1).unwrap().to_string();
             let resp = format!(
                 "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             socket.write_all(resp.as_bytes()).await.unwrap();
-            String::from_utf8_lossy(&buf).into_owned()
+            (target, head)
         });
         (base, handle)
+    }
+
+    #[tokio::test]
+    async fn cypher_routes_and_preserves_lossless_values() {
+        let (base, handle) = spawn_capture_server(
+            200,
+            r#"{"columns":["x"],"rows":[[{"$type":"integer","value":"9223372036854775807"}]]}"#,
+        )
+        .await;
+        let result = Client::new(Some(&base))
+            .unwrap()
+            .cypher(
+                "RETURN $x AS x",
+                std::collections::BTreeMap::from([("x".into(), serde_json::json!(i64::MAX))]),
+                Some("parameter"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(handle.await.unwrap().0, "/v2/cypher");
+        assert_eq!(result.columns, vec!["x"]);
+        assert_eq!(result.rows[0][0]["value"], "9223372036854775807");
+    }
+
+    #[tokio::test]
+    async fn cypher_sends_request_options_api_key_and_database_id() {
+        let (base, handle) = spawn_capture_server(200, r#"{"columns":[],"rows":[]}"#).await;
+        let client = Client::new(Some(&base))
+            .unwrap()
+            .with_api_key(Some("hx_key"))
+            .with_database_id(Some("db_123"));
+        client
+            .request_builder::<()>()
+            .writer_only()
+            .should_await_durability(true)
+            .cypher("CREATE (:N)", std::collections::BTreeMap::new(), None)
+            .send()
+            .await
+            .unwrap();
+        let (target, head) = handle.await.unwrap();
+        assert_eq!(target, "/v2/cypher");
+        for header in [
+            "authorization: bearer hx_key",
+            "x-helix-database-id: db_123",
+            "x-helix-require-writer: true",
+            "x-helix-await-durable: true",
+        ] {
+            assert!(head.contains(header), "missing {header}: {head}");
+        }
+    }
+
+    #[tokio::test]
+    async fn explain_cypher_posts_to_the_explain_route() {
+        let (base, handle) =
+            spawn_capture_server(200, r#"{"effect":"Write","operators":[]}"#).await;
+        let plan = Client::new(Some(&base))
+            .unwrap()
+            .with_database_id(Some("db_123"))
+            .explain_cypher(
+                "CREATE (:N)",
+                std::collections::BTreeMap::new(),
+                Some("plan"),
+            )
+            .await
+            .unwrap();
+        let (target, head) = handle.await.unwrap();
+        assert_eq!(target, "/v2/cypher/explain");
+        assert!(head.contains("x-helix-database-id: db_123"), "{head}");
+        assert_eq!(plan, serde_json::json!({"effect":"Write","operators":[]}));
+    }
+
+    #[tokio::test]
+    async fn warm_cypher_no_content_is_success() {
+        for explain in [false, true] {
+            let (base, handle) = spawn_capture_server(204, "").await;
+            let client = Client::new(Some(&base)).unwrap();
+            let request = client.request_builder::<()>().warm_only().cypher(
+                "MATCH (n) RETURN n",
+                std::collections::BTreeMap::new(),
+                None,
+            );
+            if explain {
+                assert_eq!(request.explain().await.unwrap(), serde_json::Value::Null);
+            } else {
+                let response = request.send().await.unwrap();
+                assert!(response.columns.is_empty() && response.rows.is_empty());
+            }
+            let (_, head) = handle.await.unwrap();
+            assert!(head.contains("x-helix-warm: true"), "{head}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cypher_diagnostics_are_remote_errors() {
+        let body = r#"{"error":"syntax_error","msg":"unexpected end","details":{"detail":"unexpected_end","phase":"compile","span":null}}"#;
+        let (base, handle) = spawn_capture_server(400, body).await;
+        let error = Client::new(Some(&base))
+            .unwrap()
+            .cypher("RETURN (", std::collections::BTreeMap::new(), None)
+            .await
+            .expect_err("a Cypher diagnostic is a remote error");
+        assert_eq!(handle.await.unwrap().0, "/v2/cypher");
+        assert_eq!(error.status_code(), Some(400));
+        assert_eq!(error.remote_code(), Some("syntax_error"));
+        assert_eq!(error.remote_message(), Some("unexpected end"));
+    }
+
+    #[tokio::test]
+    async fn native_queries_send_the_database_id() {
+        let (base, handle) = spawn_capture_server(200, "{}").await;
+        let client = Client::new(Some(&base))
+            .unwrap()
+            .with_database_id(Some("db_123"));
+        let _: EmptyResp = client.query(sample_request()).send().await.unwrap();
+        let (target, head) = handle.await.unwrap();
+        assert_eq!(target, "/v2/query");
+        assert!(head.contains("x-helix-database-id: db_123"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn managed_query_sends_database_id_header() {
+        let (base, handle) = spawn_capture_server(200, "{}").await;
+        let client = Client::managed(Some(&base), "db_123")
+            .unwrap()
+            .with_api_key(Some("hx_secret"));
+        let _: EmptyResp = client.query(sample_request()).send().await.unwrap();
+        let (target, head) = handle.await.unwrap();
+        assert_eq!(target, "/v2/query");
+        assert!(head.contains("x-helix-database-id: db_123"), "{head}");
+        assert!(head.contains("authorization: bearer hx_secret"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn empty_database_id_is_rejected_before_sending() {
+        let client = Client::new(Some("http://127.0.0.1:1"))
+            .unwrap()
+            .with_database_id(Some(" "));
+        let error = client
+            .query::<EmptyResp>(sample_request())
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(error, HelixError::InvalidRequest { .. }));
     }
 
     async fn request_remote_error(status: u16, body: &str) -> HelixError {
@@ -1535,17 +1997,7 @@ mod client_tests {
             .send()
             .await
             .expect_err("non-success response should return a remote error");
-        let captured = handle.await.unwrap();
-        // Extract `METHOD <target> HTTP/1.1` from the first line of the raw buffer.
-        let target = captured
-            .lines()
-            .next()
-            .unwrap()
-            .split_whitespace()
-            .nth(1)
-            .unwrap()
-            .to_string();
-        assert_eq!(target, "/v2/query");
+        assert_eq!(handle.await.unwrap().0, "/v2/query");
         error
     }
 
@@ -1554,26 +2006,7 @@ mod client_tests {
         let (base, handle) = spawn_capture_server(200, "{}").await;
         let client = Client::new(Some(&base)).unwrap();
         let _: EmptyResp = client.query(sample_request()).send().await.unwrap();
-        assert!(handle.await.unwrap().contains("POST /v2/query HTTP/1.1"));
-    }
-
-    #[tokio::test]
-    async fn managed_query_sends_database_id_header() {
-        let (base, handle) = spawn_capture_server(200, "{}").await;
-        let client = Client::managed(Some(&base), "db_123")
-            .unwrap()
-            .with_api_key(Some("hx_secret"));
-        let _: EmptyResp = client.query(sample_request()).send().await.unwrap();
-        let captured = handle.await.unwrap();
-        assert!(captured.contains("x-helix-database-id: db_123"));
-        assert!(captured.contains("authorization: Bearer hx_secret"));
-    }
-
-    #[tokio::test]
-    async fn empty_database_id_is_rejected_before_sending() {
-        let client = Client::new(Some("http://127.0.0.1:1")).unwrap().with_database_id(Some(" "));
-        let error = client.query::<EmptyResp>(sample_request()).send().await.unwrap_err();
-        assert!(matches!(error, HelixError::InvalidRequest { .. }));
+        assert_eq!(handle.await.unwrap().0, "/v2/query");
     }
 
     #[tokio::test]
@@ -1587,7 +2020,7 @@ mod client_tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(handle.await.unwrap(), "/v2/query");
+        assert_eq!(handle.await.unwrap().0, "/v2/query");
     }
 
     #[tokio::test]
@@ -1600,7 +2033,7 @@ mod client_tests {
             .await
             .expect_err("an empty 200 response must not decode as JSON null");
         assert!(matches!(error, HelixError::SerializationError(_)));
-        assert_eq!(handle.await.unwrap(), "/v2/query");
+        assert_eq!(handle.await.unwrap().0, "/v2/query");
     }
 
     #[tokio::test]
@@ -1619,6 +2052,70 @@ mod client_tests {
         assert_eq!(error.raw_response_body(), Some(body));
         assert!(error.is_conflict());
         assert!(!error.is_rate_limited());
+        assert_eq!(error.retryable(), None);
+        assert!(!error.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn direct_and_hosted_unknown_write_outcomes_are_terminal_and_sent_once() {
+        for (body, expected_code) in [
+            (
+                r#"{"error":"writer_fenced_commit_outcome_unknown","msg":"write outcome is unknown","retryable":false}"#,
+                "writer_fenced_commit_outcome_unknown",
+            ),
+            (
+                r#"{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}"#,
+                "WRITE_OUTCOME_UNKNOWN",
+            ),
+        ] {
+            let (base, handle) = spawn_capture_server(503, body).await;
+            let client = Client::new(Some(&base)).unwrap();
+            let error = client
+                .query::<serde_json::Value>(write_request())
+                .send()
+                .await
+                .expect_err("unknown write outcome must be terminal");
+
+            assert_eq!(handle.await.unwrap().0, "/v2/query");
+            assert_eq!(error.remote_code(), Some(expected_code));
+            assert_eq!(error.retryable(), Some(false));
+            assert!(!error.is_conflict());
+            assert!(!error.is_retryable());
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_response_gateway_probe() {
+        let Ok(base_url) = std::env::var("HELIX_LOST_RESPONSE_GATEWAY_URL") else {
+            return;
+        };
+        let probe_id =
+            std::env::var("HELIX_LOST_RESPONSE_PROBE_ID").expect("lost-response probe ID");
+        let request = QueryRequest::write(
+            write_batch()
+                .var_as(
+                    "created",
+                    g().add_n(
+                        "LostResponseProbe",
+                        vec![("business_id", PropertyInput::from(probe_id))],
+                    ),
+                )
+                .returning(["created"]),
+        );
+        let api_key = std::env::var("HELIX_LOST_RESPONSE_API_KEY").ok();
+        let error = Client::new(Some(&base_url))
+            .unwrap()
+            .with_api_key(api_key.as_deref())
+            .query::<serde_json::Value>(request)
+            .send()
+            .await
+            .expect_err("lost response must be terminal");
+
+        assert_eq!(error.status_code(), Some(503));
+        assert_eq!(error.remote_code(), Some("WRITE_OUTCOME_UNKNOWN"));
+        assert_eq!(error.retryable(), Some(false));
+        assert!(!error.is_conflict());
+        assert!(!error.is_retryable());
     }
 
     #[tokio::test]
@@ -1637,6 +2134,37 @@ mod client_tests {
             assert_eq!(error.is_conflict(), status == 409);
             assert_eq!(error.is_rate_limited(), status == 429);
         }
+    }
+
+    #[tokio::test]
+    async fn index_backpressure_is_retryable_rate_limiting() {
+        let body = r#"{"error":"index_backpressure","msg":"index backpressure","retryable":true}"#;
+        let error = request_remote_error(429, body).await;
+
+        assert_eq!(error.remote_code(), Some("index_backpressure"));
+        assert!(error.is_rate_limited());
+        assert!(error.is_retryable());
+        assert!(error.is_index_backpressure());
+        assert!(!error.is_conflict());
+    }
+
+    #[test]
+    fn search_consistency_serializes_only_when_eventual() {
+        let strong = QueryRequest::read(read_batch());
+        assert!(!strong
+            .to_json_string()
+            .unwrap()
+            .contains("search_consistency"));
+        let eventual = QueryRequest::read(read_batch())
+            .with_search_consistency(SearchConsistency::Eventual)
+            .unwrap();
+        assert!(eventual
+            .to_json_string()
+            .unwrap()
+            .contains(r#""search_consistency":"eventual""#));
+        assert!(QueryRequest::write(write_batch())
+            .with_search_consistency(SearchConsistency::Eventual)
+            .is_err());
     }
 
     #[tokio::test]
@@ -1691,6 +2219,41 @@ mod client_tests {
             .expect("embedded query should execute");
 
         assert_eq!(response.users, 0);
+    }
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn embedded_cypher_explains_without_writing_and_rejects_server_options() {
+        let client = Client::open(HelixDbSource::InMemory {
+            database: "rust-sdk-embedded-cypher".to_string(),
+        })
+        .await
+        .expect("embedded client should open");
+
+        let plan = client
+            .explain_cypher("CREATE (:Planned)", std::collections::BTreeMap::new(), None)
+            .await
+            .expect("embedded explain should plan");
+        assert!(plan["operators"].is_array());
+        let count = client
+            .cypher(
+                "MATCH (n:Planned) RETURN count(n) AS n",
+                std::collections::BTreeMap::new(),
+                None,
+            )
+            .await
+            .expect("embedded Cypher should execute");
+        assert_eq!(count.rows, vec![vec![serde_json::json!(0)]]);
+
+        let error = client
+            .request_builder::<()>()
+            .writer_only()
+            .cypher("RETURN 1", std::collections::BTreeMap::new(), None)
+            .send()
+            .await
+            .expect_err("server options need a server");
+        assert!(matches!(error, HelixError::InvalidRequest { .. }));
+        client.close().await.unwrap();
     }
 
     #[cfg(feature = "embedded")]

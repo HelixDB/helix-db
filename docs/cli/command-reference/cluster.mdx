@@ -1,75 +1,70 @@
 ---
 title: "helix cluster"
 sidebarTitle: "cluster"
+description: "List and inspect Helix Cloud clusters and their active indexes"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-List Helix Cloud clusters available to the active workspace or a specific project.
+Discover the Helix Cloud clusters you can access and inspect the active indexes of a dedicated
+cluster. Cloud only; these commands are read-only.
 
 ## Usage
 
 ```bash
-helix cluster <SUBCOMMAND>
+helix cluster [list] [--workspace <workspace>] [--project <project>]
+helix cluster get [CLUSTER] [--workspace <workspace>] [--project <project>]
+helix cluster indexes [CLUSTER] [--workspace <workspace>] [--project <project>]
 ```
 
-## Available sub-commands
+## Subcommands
 
-| Sub-command | Description |
-|-------------|-------------|
-| `list` | List Helix Cloud clusters. |
-| `indexes` (alias `indices`) | List the indexes in a cluster. |
+| Subcommand | Description |
+| --- | --- |
+| `list` | List clusters in a project or workspace. The default when no subcommand is given. |
+| `get` | Show one cluster. |
+| `indexes` | List the active indexes in a cluster. Alias: `indices`. |
 
-### `helix cluster list`
+## Arguments
 
-| Flag | Type | Description | Default |
-|------|------|-------------|---------|
-| `--workspace-id` | String | List clusters for a specific workspace. | Active workspace from `~/.helix/config` |
-| `--project-id` | String | Limit results to a specific project. | Linked project from `helix.toml`, if any |
-| `--format` | `human` \| `json` | Output format. | `human` |
+| Argument | Description |
+| --- | --- |
+| `CLUSTER` | `get`, `indexes`: cluster ID (or `cluster:<id>`), slug, or name. Defaults to the one linked `cluster:<id>` database, then the project's only cluster. |
 
-### `helix cluster indexes`
+## Options
 
-List the indexes defined in a cluster. Alias: `helix cluster indices`.
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--workspace <WORKSPACE>` | Workspace ID, slug, or name. `list` lists the whole workspace when it is given without `--project`. | Linked workspace, then the only workspace |
+| `--project <PROJECT>` | Project ID, slug, or name to list or search in. | Project linked in `helix.toml` |
+| `--json` | Print the result as JSON on stdout and never prompt. | Off |
 
-| Flag | Type | Description | Default |
-|------|------|-------------|---------|
-| `--cluster-id` | String | Cluster to inspect. | The current project's Enterprise instance, from `helix.toml` |
-| `--format` | `human` \| `json` | Output format. | `human` |
+## Behavior
+
+- Arguments and defaults resolve as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
+- `list` shows the clusters of `--project` or the linked project. Without either, it lists the workspace's clusters.
+- `list` prints `NAME`, `ACCESS` (shared or dedicated), `STATUS`, and `ID`.
+- Dedicated-cluster create/delete, networking, regions/SKUs, branches, and backups are outside the CLI.
 
 ## Examples
 
 ```bash
-# List clusters in the active workspace
-helix cluster list
+# List clusters for the linked project
+helix cluster
 
-# List clusters scoped to a specific project
-helix cluster list --project-id prj_01HX...
+# List every cluster in a workspace
+helix cluster list --workspace <workspace>
 
-# List clusters in a non-active workspace
-helix cluster list --workspace-id ws_01HX...
+# Show one cluster by name as JSON
+helix cluster get <cluster> --json
 
-# Emit machine-readable JSON
-helix cluster list --format json
-
-# List indexes for the current project's Enterprise cluster
+# List the active indexes of the linked dedicated cluster
 helix cluster indexes
-
-# List indexes for a specific cluster as JSON
-helix cluster indexes --cluster-id ec_01HX... --format json
 ```
-
-Use the resulting cluster ID with [`helix init cloud`](/cli/command-reference/init), [`helix add cloud`](/cli/command-reference/add), or [`helix auth create-key`](/cli/command-reference/auth).
-
-<Note>
-`helix cluster` requires Helix Cloud authentication. Run `helix auth login` first.
-</Note>
 
 ## Related
 
-- [`helix workspace`](/cli/command-reference/workspace) — manage the active workspace
-- [`helix project`](/cli/command-reference/project) — manage the linked project
-- [`helix sync`](/cli/command-reference/sync) — refresh Helix Cloud instance metadata
+- [`helix database`](/cli/command-reference/database) — manage databases and application keys.
+- [`helix project`](/cli/command-reference/project) — find and link the owning project.
+- [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.

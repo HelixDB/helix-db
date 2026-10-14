@@ -1,9 +1,9 @@
 // Public entry point for the Helix TypeScript SDK.
 //
 // The query DSL lives in `./dsl.ts` and is re-exported wholesale here. This file
-// adds the network client (`Client`, `QueryBuilder`, `QueryExecutionRequest`, `HelixError`),
-// mirroring the Rust SDK layout where the DSL lives in `dsl.rs` and the client in
-// `lib.rs`.
+// adds the network client (`Client`, `QueryBuilder`, `QueryExecutionRequest`,
+// `CypherExecutionRequest`, `HelixError`), mirroring the Rust SDK layout where the
+// DSL lives in `dsl.rs` and the client in `lib.rs`.
 
 export * from "./dsl.js";
 export * from "./graph.js";
@@ -13,13 +13,50 @@ import { GraphSelection, NativeGraph, loadGraph } from "./graph.js";
 
 const DEFAULT_URL = "http://localhost:6969";
 const QUERY_PATH = "/v2/query";
-const DATABASE_ID_HEADER = "x-helix-database-id";
+
+/** Graph IDs and large integers are lossless tagged values within each row. */
+export interface CypherResponse {
+  columns: string[];
+  rows: unknown[][];
+}
+
+/**
+ * Planning diagnostics from `POST /v2/cypher/explain`; the statement is not executed.
+ *
+ * Only the top-level effect and operator list are typed. Operator contracts,
+ * bindings, returns, planner metrics, and notices are planner diagnostics whose
+ * shape may grow between server versions. Integers outside JavaScript's safe
+ * range are `bigint`.
+ */
+export interface CypherExplanation {
+  effect: "Read" | "Write";
+  operators: unknown[];
+  [field: string]: unknown;
+}
+
+/** A Cypher route: its server path, and the native method serving it in embedded mode. */
+interface CypherRoute {
+  path: string;
+  native: "cypher_json" | "explain_cypher_json";
+  unavailable: string;
+}
+
+const CYPHER_EXECUTE: CypherRoute = {
+  path: "/v2/cypher",
+  native: "cypher_json",
+  unavailable: "rebuild native bindings with Cypher support",
+};
+const CYPHER_EXPLAIN: CypherRoute = {
+  path: "/v2/cypher/explain",
+  native: "explain_cypher_json",
+  unavailable: "rebuild native bindings with Cypher explain support",
+};
 
 /**
  * Error raised by the network {@link Client}.
  *
  * Strict port of the Rust `HelixError` enum:
- * - `Network` ↔ `ReqwestError` (the request failed to reach the server)
+ * - `Network` ↔ `ReqwestError` (transport failure; a write may already have committed)
  * - `Remote` ↔ `RemoteError` (the server returned neither query success `200`
  *   nor Cloud warm success `204`)
  * - `Serialization` ↔ `SerializationError` (request/response (de)serialization failed)
@@ -32,6 +69,7 @@ export class HelixError extends Error {
   readonly statusCode?: number;
   readonly code?: string;
   readonly serverMessage?: string;
+  readonly retryable?: boolean;
   readonly serverDetails?: unknown;
   readonly rawBody?: string;
 
@@ -43,6 +81,7 @@ export class HelixError extends Error {
     remote?: {
       statusCode: number;
       serverMessage: string;
+      retryable?: boolean;
       serverDetails?: unknown;
       rawBody: string;
     },
@@ -54,6 +93,7 @@ export class HelixError extends Error {
     this.statusCode = remote?.statusCode;
     this.code = code;
     this.serverMessage = remote?.serverMessage;
+    this.retryable = remote?.retryable;
     this.serverDetails = remote?.serverDetails;
     this.rawBody = remote?.rawBody;
   }
@@ -76,6 +116,7 @@ export class HelixError extends Error {
     const rawBody = rawBodyOrCode;
     let code: string | undefined;
     let serverMessage: string | undefined;
+    let retryable: boolean | undefined;
     let serverDetails: unknown;
     try {
       const parsed: unknown = JSON.parse(rawBody);
@@ -96,6 +137,7 @@ export class HelixError extends Error {
           serverMessage = messageField ?? errorField;
         }
         if (Object.prototype.hasOwnProperty.call(body, "details")) serverDetails = body.details;
+        if (typeof body.retryable === "boolean") retryable = body.retryable;
       }
     } catch {}
 
@@ -104,6 +146,7 @@ export class HelixError extends Error {
     return new HelixError("Remote", `got error from server: ${serverMessage}`, details, code, {
       statusCode,
       serverMessage,
+      retryable,
       serverDetails,
       rawBody,
     });
@@ -136,6 +179,31 @@ export class HelixError extends Error {
   isRateLimited(): boolean {
     return this.kind === "Remote" && this.statusCode === 429;
   }
+
+  /**
+   * Returns true when the failure is explicitly retryable.
+   *
+   * Remote failures are retryable only when the server says so. Embedded
+   * `index_backpressure` failures are retryable because the whole request was
+   * rejected without effect: a write before commit, or a strong search.
+   */
+  isRetryable(): boolean {
+    if (this.kind === "Embedded") return this.isIndexBackpressure();
+    return this.kind === "Remote" && this.retryable === true;
+  }
+
+  /**
+   * Returns whether asynchronous vector/text index work rejected the request.
+   *
+   * Either a write was rejected before commit because the index backlog is
+   * full, or a strong search's answer lies behind more than 800 unpublished
+   * changes; eventual searches are never rejected this way. The whole request
+   * was rejected (HTTP 429, gRPC resource-exhausted); retry it unchanged after
+   * a backoff.
+   */
+  isIndexBackpressure(): boolean {
+    return (this.kind === "Remote" || this.kind === "Embedded") && this.code === "index_backpressure";
+  }
 }
 
 function embeddedError(error: unknown): HelixError {
@@ -161,6 +229,15 @@ interface RequestParts {
   backend: ClientBackend;
   headers: Record<string, string>;
   query: QueryRequest;
+}
+
+/** Complete Cypher request handed from {@link QueryBuilder} to {@link CypherExecutionRequest}. */
+interface CypherRequestParts {
+  backend: ClientBackend;
+  headers: Record<string, string>;
+  query: string;
+  parameters: Record<string, unknown>;
+  queryName?: string;
 }
 
 interface QueryResponse {
@@ -191,6 +268,8 @@ export type EmbeddedCacheConfig = {
 
 type NativeHelixDB = {
   query_json(request: Uint8Array): Promise<Uint8Array>;
+  cypher_json?(request: Uint8Array): Promise<Uint8Array>;
+  explain_cypher_json?(request: Uint8Array): Promise<Uint8Array>;
   graph?(request: Uint8Array, spec: unknown): Promise<unknown>;
   close(): Promise<void>;
 };
@@ -310,7 +389,7 @@ export class Client {
     return this;
   }
 
-  /** Set (or clear) the managed database ID sent as `x-helix-database-id`. */
+  /** Set (or, with `null`/`undefined`, clear) the database ID header sent on every request. */
   withDatabaseId(databaseId?: string | null): Client {
     if (this.backend.kind === "server") this.backend.databaseId = databaseId ?? undefined;
     return this;
@@ -319,6 +398,19 @@ export class Client {
   /** Execute an SDK-built query. */
   query<R = unknown>(request: QueryRequest): QueryExecutionRequest<R> {
     return new QueryBuilder<R>(this.backend).query(request);
+  }
+
+  /** Execute Cypher, retaining tagged lossless values in the response. */
+  cypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): Promise<CypherResponse> {
+    return this.requestBuilder().cypher(query, parameters, queryName).send();
+  }
+
+  /** Plan Cypher without executing it, including modifying statements. */
+  async explainCypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): Promise<CypherExplanation> {
+    const explanation = await this.requestBuilder().cypher(query, parameters, queryName).explain();
+    // Only a warm-only request succeeds with 204 No Content, and this one sends no options.
+    if (explanation === undefined) throw HelixError.remote(204, "", "No Content");
+    return explanation;
   }
 
   /** Begin building an advanced server request whose 200 response body deserializes into `R`. */
@@ -390,6 +482,17 @@ export class QueryBuilder<R = unknown> {
       query,
     });
   }
+
+  /** Attach one Cypher statement and target `POST /v2/cypher` or `POST /v2/cypher/explain`. */
+  cypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): CypherExecutionRequest {
+    return new CypherExecutionRequest({
+      backend: snapshotBackend(this.backend),
+      headers: { ...this.headers },
+      query,
+      parameters,
+      queryName,
+    });
+  }
 }
 
 function snapshotBackend(backend: ClientBackend): ClientBackend {
@@ -426,7 +529,7 @@ export class QueryExecutionRequest<R = unknown> {
     validateDatabaseId(backend.databaseId, backend.requireDatabaseId);
     const requestHeaders: Record<string, string> = { ...headers };
     if (backend.apiKey !== undefined) requestHeaders["Authorization"] = `Bearer ${backend.apiKey}`;
-    if (backend.databaseId !== undefined) requestHeaders[DATABASE_ID_HEADER] = backend.databaseId;
+    if (backend.databaseId !== undefined) requestHeaders["x-helix-database-id"] = backend.databaseId;
 
     let response: Response;
     try {
@@ -459,6 +562,90 @@ export class QueryExecutionRequest<R = unknown> {
       return parseJson(new TextDecoder().decode(response.body)) as R;
     } catch (error) {
       throw HelixError.serialization(error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
+/**
+ * One Cypher statement with the request options of the {@link QueryBuilder} that created it.
+ *
+ * ```ts
+ * const rows = await client.requestBuilder().writerOnly().cypher("CREATE (n:User {name: $name}) RETURN n", { name: "Ada" }).send();
+ * const plan = await client.requestBuilder().cypher("MATCH (n:User) RETURN n").explain();
+ * ```
+ */
+export class CypherExecutionRequest {
+  constructor(private readonly parts: CypherRequestParts) {}
+
+  /**
+   * Execute the statement (`POST /v2/cypher`), retaining tagged lossless values in the response.
+   * A Helix Cloud warm-only read answers `204 No Content`, which resolves to no columns and no rows.
+   */
+  async send(): Promise<CypherResponse> {
+    const response = await this.execute(CYPHER_EXECUTE);
+    return response === undefined ? { columns: [], rows: [] } : (response as CypherResponse);
+  }
+
+  /**
+   * Plan the statement without executing it (`POST /v2/cypher/explain`). The server applies options as a read.
+   * Resolves to `undefined` only when a Helix Cloud warm-only request answers `204 No Content`.
+   */
+  async explain(): Promise<CypherExplanation | undefined> {
+    return (await this.execute(CYPHER_EXPLAIN)) as CypherExplanation | undefined;
+  }
+
+  /** Resolves to the decoded JSON body, or `undefined` for a `204 No Content` warm success. */
+  private async execute(route: CypherRoute): Promise<unknown> {
+    const { backend, headers, query, parameters, queryName } = this.parts;
+
+    // Integers outside the JavaScript safe range and non-finite floats have no
+    // plain JSON form, so they travel as the server's lossless tagged values.
+    let body: string;
+    try {
+      body = JSON.stringify({ query, parameters, query_name: queryName }, (_key, value: unknown) =>
+        typeof value === "bigint"
+          ? { $type: "integer", value: value.toString() }
+          : typeof value === "number" && !Number.isFinite(value)
+            ? { $type: "float", value: String(value) }
+            : value,
+      );
+    } catch (error) {
+      throw HelixError.serialization(String(error));
+    }
+
+    if (backend.kind === "embedded") {
+      const serverOptions = Object.keys(headers).filter((name) => name.toLowerCase() !== "content-type");
+      if (serverOptions.length > 0) {
+        throw HelixError.invalidRequest(`embedded queries do not support server request options: ${serverOptions.join(", ")}`);
+      }
+      // Older native packages predate these methods; call through the handle to keep its `this`.
+      const run = backend.native[route.native];
+      if (run === undefined) throw HelixError.embeddedUnavailable(route.unavailable);
+      try {
+        return parseJson(new TextDecoder().decode(await run.call(backend.native, new TextEncoder().encode(body))));
+      } catch (error) {
+        throw embeddedError(error);
+      }
+    }
+
+    const url = new URL(route.path, backend.url);
+    validateDatabaseId(backend.databaseId, backend.requireDatabaseId);
+    const requestHeaders: Record<string, string> = { ...headers };
+    if (backend.apiKey !== undefined) requestHeaders["Authorization"] = `Bearer ${backend.apiKey}`;
+    if (backend.databaseId !== undefined) requestHeaders["x-helix-database-id"] = backend.databaseId;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "POST", headers: requestHeaders, body });
+    } catch (error) {
+      throw HelixError.network(String(error), url.toString());
+    }
+    const text = await response.text();
+    if (response.status === 204) return undefined;
+    if (response.status !== 200) throw HelixError.remote(response.status, text, response.statusText);
+    try {
+      return parseJson(text);
+    } catch (error) {
+      throw HelixError.serialization(String(error));
     }
   }
 }

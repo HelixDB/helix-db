@@ -19,7 +19,8 @@ pub(super) fn simplify(
         | ir::EdgeAccessPlan::RangeIndex { .. }
         | ir::EdgeAccessPlan::VectorSearch { .. }
         | ir::EdgeAccessPlan::TextSearch { .. }
-        | ir::EdgeAccessPlan::ScanThenFilter { .. } => {
+        | ir::EdgeAccessPlan::ScanThenFilter { .. }
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => {
             normalization::SourceSetSimplification::NotASet
         }
     }
@@ -70,7 +71,8 @@ fn nested_union(
         | ir::EdgeAccessPlan::VectorSearch { .. }
         | ir::EdgeAccessPlan::TextSearch { .. }
         | ir::EdgeAccessPlan::ScanThenFilter { .. }
-        | ir::EdgeAccessPlan::Intersect(_) => None,
+        | ir::EdgeAccessPlan::Intersect(_)
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => None,
     }
 }
 
@@ -90,6 +92,7 @@ fn nested_intersection(
         | ir::EdgeAccessPlan::VectorSearch { .. }
         | ir::EdgeAccessPlan::TextSearch { .. }
         | ir::EdgeAccessPlan::ScanThenFilter { .. }
-        | ir::EdgeAccessPlan::Union(_) => None,
+        | ir::EdgeAccessPlan::Union(_)
+        | ir::EdgeAccessPlan::BranchResidualUnion(_) => None,
     }
 }

@@ -11,7 +11,13 @@ pub use self::{
     access::*, cardinality::*, contracts::*, core::*, registry::SeedRuleSet, root::*, stream::*,
 };
 
-pub(crate) use self::access::{missing_index_candidates, CandidateIndexKind};
+pub(crate) use self::access::{
+    missing_index_candidates, with_index_rewrite_cache, CandidateIndexKind,
+};
+
+use self::access::required_filter_rewrite_pending;
+#[cfg(test)]
+use self::access::{membership_rewrite, source_index_rewrite};
 
 use self::physical_contracts::*;
 use crate::{ir, logical, optimizer, physical};
@@ -20,6 +26,10 @@ fn physical_result(alternative: physical::PhysicalAlternative) -> optimizer::Rul
     optimizer::RuleResult::Applied(optimizer::RuleEffect::Physical(
         ir::AtLeast::<_, 1>::from_one(alternative),
     ))
+}
+
+fn logical_result(expr: logical::LogicalExpr) -> optimizer::RuleResult {
+    optimizer::RuleResult::Applied(optimizer::RuleEffect::Logical(ir::AtLeast::from_one(expr)))
 }
 
 fn access_path_result(access: logical::AccessPath) -> optimizer::RuleResult {

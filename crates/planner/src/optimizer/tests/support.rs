@@ -155,6 +155,22 @@ pub(super) fn edge_source() -> logical::LogicalExpr {
     })
 }
 
+pub(super) fn node_access_path(plan: ir::NodeAccessPlan) -> logical::AccessPath {
+    logical::AccessPath::Node(logical::NodeAccessPath::new(
+        ir::NodeAccessSourcePlan::new(plan).unwrap(),
+    ))
+}
+
+pub(super) fn node_access(plan: ir::NodeAccessPlan) -> logical::LogicalExpr {
+    logical::LogicalExpr::AccessPath(node_access_path(plan))
+}
+
+pub(super) fn edge_access(plan: ir::EdgeAccessPlan) -> logical::LogicalExpr {
+    logical::LogicalExpr::AccessPath(logical::AccessPath::Edge(logical::EdgeAccessPath::new(
+        ir::EdgeAccessSourcePlan::new(plan).unwrap(),
+    )))
+}
+
 pub(super) fn limit() -> logical::LogicalExpr {
     logical::LogicalExpr::Pure(logical::PureLogicalOp::Limit {
         count: ir::StreamBoundPlan::Literal(1),
@@ -243,7 +259,7 @@ pub(super) fn alternative_with_element(
     )
 }
 
-pub(super) fn config() -> optimizer::OptimizerConfig {
+pub(super) fn config() -> optimizer::OptimizerConfig<'static> {
     optimizer::OptimizerConfig {
         params: Default::default(),
         late_bound_params: Default::default(),
@@ -252,11 +268,11 @@ pub(super) fn config() -> optimizer::OptimizerConfig {
             memo_expressions: properties::PositiveUsize::new(8).unwrap(),
             rule_fires: properties::PositiveUsize::new(16).unwrap(),
             alternatives_per_group: properties::PositiveUsize::new(8).unwrap(),
-            optimization_micros: properties::PositiveUsize::new(1_000_000).unwrap(),
+            exploration_rule_fires: properties::PositiveUsize::new(16).unwrap(),
         },
         planner_limits: context::PlannerLimits::default(),
-        stats: context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     }
 }

@@ -1,63 +1,72 @@
-use crate::{errors::ConfigError, paths};
-use serde::{Deserialize, Serialize};
+use crate::errors::ConfigError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::{fmt, str::FromStr};
 
 pub const DEFAULT_LOCAL_PORT: u16 = 6969;
 pub const DEFAULT_LOCAL_IMAGE: &str = "ghcr.io/helixdb/helixdb";
-pub const DEFAULT_LOCAL_IMAGE_TAG: &str = "v0.0.4";
-pub const DEFAULT_QUERY_AUTH_HEADER: &str = "Authorization";
-pub const DEFAULT_QUERY_AUTH_ENV: &str = "HELIX_API_KEY";
+pub const DEFAULT_LOCAL_IMAGE_TAG: &str = "v0.0.12";
+/// Repository of the graph Explorer image that `helix explorer` runs.
+pub const DEFAULT_EXPLORER_IMAGE: &str = "ghcr.io/helixdb/helix-explorer";
+/// Explorer tag `helix explorer` runs by default. It stays `latest` until CI
+/// publishes a `v<semver>` tag to pin, as [`DEFAULT_LOCAL_IMAGE_TAG`] pins the
+/// server.
+pub const DEFAULT_EXPLORER_IMAGE_TAG: &str = "v0.1.0";
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
 pub const DEFAULT_S3_PREFIX: &str = "db/";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct WorkspaceConfig {
-    pub workspace_id: Option<String>,
+/// The single length cap on an instance name, everywhere one is accepted:
+/// interactively (`prompts::input_name`), on the command line (`prune`, `add
+/// --name`, `init --name`), and loaded from `helix.toml`
+/// ([`HelixConfig::validate`]). One shared constant so those can't drift apart —
+/// a name the CLI validator accepts but the interactive prompt would have
+/// rejected (or vice versa) can be saved to `helix.toml` and then fail later
+/// during directory or container creation instead of at input time.
+pub const MAX_INSTANCE_NAME_LEN: usize = 32;
+
+/// Whether `name` uses only characters safe to build a container name or a
+/// `.helix/<name>` state directory from: ASCII letters, digits, `-`, and `_`.
+///
+/// This is shared by [`HelixConfig::validate`] and by every command that turns a
+/// raw CLI argument into an instance name before it reaches the filesystem
+/// (`prune`, `add`, `init`). TOML lets a quoted table key contain arbitrary
+/// characters (including `..` and `/`), and a CLI arg is any string, so both
+/// sources need the same charset check before the name is used to build a path.
+pub fn has_valid_instance_name_charset(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-impl WorkspaceConfig {
-    pub fn config_path() -> Result<PathBuf, ConfigError> {
-        paths::helix_home_dir()
-            .map(|home| home.join("config"))
-            .map_err(|_| ConfigError::HomeDirNotFound)
+/// Validates a name supplied directly on the command line (`prune <name>`,
+/// `add --name <name>`, `init --name <name>`) against the same charset and
+/// length limit [`HelixConfig::validate`] enforces on names loaded from
+/// `helix.toml`, and that the interactive prompt (`prompts::input_name`) enforces
+/// on typed input. All three go through this one function (or its charset/length
+/// primitives) so none of them can drift out of agreement with the others.
+///
+/// Returns a human-readable message on failure; commands wrap it in whatever
+/// error type they use (`eyre`, `CliError`, ...).
+pub fn validate_instance_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("instance name cannot be empty".to_string());
     }
-
-    pub fn load() -> Result<Self, ConfigError> {
-        let path = Self::config_path()?;
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-
-        let content =
-            fs::read_to_string(&path).map_err(|source| ConfigError::ReadWorkspaceConfig {
-                path: path.clone(),
-                source,
-            })?;
-
-        toml::from_str(&content)
-            .map_err(|source| ConfigError::ParseWorkspaceConfig { path, source })
+    if name.len() > MAX_INSTANCE_NAME_LEN {
+        return Err(format!(
+            "instance name '{name}' must be at most {MAX_INSTANCE_NAME_LEN} characters"
+        ));
     }
-
-    pub fn save(&self) -> Result<(), ConfigError> {
-        let path = Self::config_path()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigError::CreateWorkspaceDir {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-
-        let content = toml::to_string_pretty(self)
-            .map_err(|source| ConfigError::SerializeWorkspaceConfig { source })?;
-        fs::write(&path, content)
-            .map_err(|source| ConfigError::WriteWorkspaceConfig { path, source })?;
-        Ok(())
+    if !has_valid_instance_name_charset(name) {
+        return Err(format!(
+            "instance name '{name}' must contain only ASCII letters, digits, '-', or '_'"
+        ));
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HelixConfig {
     pub project: ProjectConfig,
     #[serde(default)]
@@ -67,6 +76,7 @@ pub struct HelixConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -118,7 +128,9 @@ pub struct LocalInstanceConfig {
     #[serde(default = "default_local_image")]
     pub image: String,
     #[serde(default = "default_local_image_tag")]
-    pub tag: String,
+    pub tag: crate::image::ImageVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull: Option<crate::image::PullPolicy>,
     #[serde(default, skip_serializing_if = "is_default_local_storage")]
     pub storage: LocalStorageMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -342,8 +354,10 @@ fn default_local_image() -> String {
     DEFAULT_LOCAL_IMAGE.to_string()
 }
 
-fn default_local_image_tag() -> String {
-    DEFAULT_LOCAL_IMAGE_TAG.to_string()
+fn default_local_image_tag() -> crate::image::ImageVersion {
+    DEFAULT_LOCAL_IMAGE_TAG
+        .parse()
+        .expect("valid default image tag")
 }
 
 fn default_s3_region() -> String {
@@ -386,7 +400,8 @@ impl Default for LocalInstanceConfig {
         Self {
             port: DEFAULT_LOCAL_PORT,
             image: DEFAULT_LOCAL_IMAGE.to_string(),
-            tag: DEFAULT_LOCAL_IMAGE_TAG.to_string(),
+            tag: default_local_image_tag(),
+            pull: None,
             storage: LocalStorageMode::Memory,
             s3: None,
         }
@@ -395,97 +410,91 @@ impl Default for LocalInstanceConfig {
 
 impl LocalInstanceConfig {
     pub fn image_ref(&self) -> String {
-        format!("{}:{}", self.image, self.tag)
+        self.tag.reference(&self.image)
     }
 }
 
-/// How the CLI turns an environment value into a query authentication header.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum QueryAuthScheme {
-    /// Add the `Bearer` authorization scheme to the configured key.
-    Bearer,
-    /// Send the configured value without adding a scheme.
-    Raw,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DatabaseReference {
+    Cluster(String),
+    Tenant(String),
 }
 
-impl QueryAuthScheme {
-    pub(crate) fn inferred_from_header(header: &str) -> Self {
-        if header.eq_ignore_ascii_case(DEFAULT_QUERY_AUTH_HEADER) {
-            Self::Bearer
-        } else {
-            Self::Raw
-        }
-    }
-
-    pub(crate) fn format_header_value(self, value: &str) -> Option<String> {
-        if value.trim().is_empty() || value.chars().any(char::is_control) {
-            return None;
-        }
+impl DatabaseReference {
+    pub fn id(&self) -> &str {
         match self {
-            Self::Raw => Some(value.to_string()),
-            Self::Bearer => {
-                let trimmed = value.trim();
-                let mut parts = trimmed.splitn(2, char::is_whitespace);
-                let prefix = parts.next().unwrap_or_default();
-                if prefix.eq_ignore_ascii_case("bearer") {
-                    let token = parts.next().unwrap_or_default().trim();
-                    (!token.is_empty()).then(|| format!("Bearer {token}"))
-                } else {
-                    Some(format!("Bearer {trimmed}"))
-                }
-            }
+            Self::Cluster(id) | Self::Tenant(id) => id,
         }
+    }
+
+    pub fn query_request(&self) -> serde_json::Value {
+        match self {
+            Self::Cluster(id) => serde_json::json!({"clusterId": id}),
+            Self::Tenant(id) => serde_json::json!({"tenantId": id}),
+        }
+    }
+}
+
+impl fmt::Display for DatabaseReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cluster(id) => write!(formatter, "cluster:{id}"),
+            Self::Tenant(id) => write!(formatter, "tenant:{id}"),
+        }
+    }
+}
+
+impl FromStr for DatabaseReference {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (kind, id) = value
+            .split_once(':')
+            .ok_or_else(|| "database must be cluster:<id> or tenant:<id>".to_owned())?;
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("database ID is invalid".to_owned());
+        }
+        match kind {
+            "cluster" => Ok(Self::Cluster(id.to_owned())),
+            "tenant" => Ok(Self::Tenant(id.to_owned())),
+            _ => Err("database must be cluster:<id> or tenant:<id>".to_owned()),
+        }
+    }
+}
+
+impl Serialize for DatabaseReference {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for DatabaseReference {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnterpriseInstanceConfig {
-    pub cluster_id: String,
+    pub database: DatabaseReference,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gateway_url: Option<String>,
-    #[serde(default = "default_query_auth_header")]
-    pub query_auth_header: String,
-    #[serde(default = "default_query_auth_env")]
-    pub query_auth_env: String,
-    /// Explicit query authentication scheme. Legacy configs infer it from the header.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub query_auth_scheme: Option<QueryAuthScheme>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub availability_mode: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gateway_node_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub db_node_type: Option<String>,
-    #[serde(default = "default_min_instances")]
-    pub min_instances: u64,
-    #[serde(default = "default_min_instances")]
-    pub max_instances: u64,
-    #[serde(flatten)]
-    pub db_config: DbConfig,
-}
-
-impl EnterpriseInstanceConfig {
-    pub(crate) fn resolved_query_auth_scheme(&self) -> QueryAuthScheme {
-        self.query_auth_scheme
-            .unwrap_or_else(|| QueryAuthScheme::inferred_from_header(&self.query_auth_header))
-    }
-}
-
-fn default_min_instances() -> u64 {
-    1
-}
-
-fn default_query_auth_header() -> String {
-    DEFAULT_QUERY_AUTH_HEADER.to_string()
-}
-
-fn default_query_auth_env() -> String {
-    DEFAULT_QUERY_AUTH_ENV.to_string()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -499,10 +508,10 @@ impl InstanceInfo<'_> {
         matches!(self, Self::Local(_))
     }
 
-    pub fn cluster_id(&self) -> Option<&str> {
+    pub fn database(&self) -> Option<&DatabaseReference> {
         match self {
             Self::Local(_) => None,
-            Self::Enterprise(config) => Some(&config.cluster_id),
+            Self::Enterprise(config) => Some(&config.database),
         }
     }
 }
@@ -570,6 +579,19 @@ impl HelixConfig {
                     path: relative_path.clone(),
                 });
             }
+            if !has_valid_instance_name_charset(name) {
+                return Err(ConfigError::InvalidInstanceName {
+                    name: name.clone(),
+                    path: relative_path.clone(),
+                });
+            }
+            if name.len() > MAX_INSTANCE_NAME_LEN {
+                return Err(ConfigError::InstanceNameTooLong {
+                    name: name.clone(),
+                    path: relative_path.clone(),
+                    max_len: MAX_INSTANCE_NAME_LEN,
+                });
+            }
         }
 
         for (name, config) in &self.local {
@@ -616,15 +638,6 @@ impl HelixConfig {
                     });
                 }
                 _ => {}
-            }
-        }
-
-        for (name, config) in &self.enterprise {
-            if config.cluster_id.trim().is_empty() {
-                return Err(ConfigError::MissingClusterId {
-                    name: name.clone(),
-                    path: relative_path.clone(),
-                });
             }
         }
 
@@ -688,112 +701,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn old_enterprise_config_defaults_queries_and_runtime_fields() {
-        let config: HelixConfig = toml::from_str(
+    fn obsolete_enterprise_cloud_fields_are_rejected() {
+        let error = toml::from_str::<HelixConfig>(
             r#"
 [project]
 name = "demo"
 
 [enterprise.production]
 cluster_id = "cluster-123"
-availability_mode = "ha"
-gateway_node_type = "GW-40"
-db_node_type = "HLX-160"
-min_instances = 2
-max_instances = 4
 "#,
         )
-        .expect("old enterprise config should deserialize");
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
 
-        assert_eq!(config.project.queries, PathBuf::from("db"));
-        let enterprise = config.enterprise.get("production").unwrap();
-        assert_eq!(enterprise.availability_mode.as_deref(), Some("ha"));
-        assert_eq!(enterprise.gateway_node_type.as_deref(), Some("GW-40"));
-        assert_eq!(enterprise.db_node_type.as_deref(), Some("HLX-160"));
-        assert_eq!(enterprise.min_instances, 2);
-        assert_eq!(enterprise.max_instances, 4);
-        assert_eq!(enterprise.db_config.vector_config.db_max_size_gb, 20);
-        assert_eq!(
-            enterprise.resolved_query_auth_scheme(),
-            QueryAuthScheme::Bearer
-        );
-    }
-
-    #[test]
-    fn query_auth_scheme_supports_legacy_and_explicit_configs() {
-        let legacy_raw: HelixConfig = toml::from_str(
+        let valid: HelixConfig = toml::from_str(
             r#"
 [project]
 name = "demo"
 
 [enterprise.production]
-cluster_id = "cluster-123"
-query_auth_header = "x-api-key"
+database = "cluster:cluster-123"
 "#,
         )
         .unwrap();
+        assert_eq!(valid.project.queries, PathBuf::from("db"));
         assert_eq!(
-            legacy_raw
-                .enterprise
-                .get("production")
-                .unwrap()
-                .resolved_query_auth_scheme(),
-            QueryAuthScheme::Raw
+            valid.enterprise["production"].database,
+            DatabaseReference::Cluster("cluster-123".into())
         );
 
-        let explicit: HelixConfig = toml::from_str(
+        let obsolete_query_auth = format!(
+            "\n[project]\nname = \"demo\"\n{}_{} = \"{}_{}\"\n\n[local.dev]\n",
+            "query", "auth_env", "HELIX", "API_KEY"
+        );
+        for obsolete in [
+            obsolete_query_auth.as_str(),
             r#"
 [project]
 name = "demo"
 
-[enterprise.production]
-cluster_id = "cluster-123"
-query_auth_header = "Authorization"
-query_auth_scheme = "bearer"
+[sync]
+snapshot = "obsolete"
+
+[local.dev]
 "#,
-        )
-        .unwrap();
-        assert_eq!(
-            explicit
-                .enterprise
-                .get("production")
-                .unwrap()
-                .query_auth_scheme,
-            Some(QueryAuthScheme::Bearer)
-        );
-
-        let invalid = toml::from_str::<HelixConfig>(
-            r#"
-[project]
-name = "demo"
-
-[enterprise.production]
-cluster_id = "cluster-123"
-query_auth_scheme = "token"
-"#,
-        );
-        assert!(invalid.is_err());
-    }
-
-    #[test]
-    fn query_auth_scheme_formats_header_values() {
-        assert_eq!(
-            QueryAuthScheme::Bearer.format_header_value("secret"),
-            Some("Bearer secret".to_string())
-        );
-        assert_eq!(
-            QueryAuthScheme::Bearer.format_header_value("bearer secret"),
-            Some("Bearer secret".to_string())
-        );
-        assert_eq!(
-            QueryAuthScheme::Raw.format_header_value("secret"),
-            Some("secret".to_string())
-        );
-        assert_eq!(QueryAuthScheme::Bearer.format_header_value("  "), None);
-        assert_eq!(
-            QueryAuthScheme::Bearer.format_header_value("Bearer\r\nsecret"),
-            None
-        );
+        ] {
+            assert!(toml::from_str::<HelixConfig>(obsolete).is_err());
+        }
     }
 
     #[test]
@@ -819,7 +773,7 @@ tag = "latest"
     fn local_config_defaults_to_published_standalone_image() {
         let config = LocalInstanceConfig::default();
 
-        assert_eq!(config.image_ref(), "ghcr.io/helixdb/helixdb:v0.0.4");
+        assert_eq!(config.image_ref(), "ghcr.io/helixdb/helixdb:v0.0.12");
     }
 
     #[test]
@@ -844,6 +798,49 @@ name = "demo"
     }
 
     #[test]
+    fn instance_name_with_path_traversal_characters_is_rejected() {
+        // Instance names are joined onto `.helix/` to build each instance's state
+        // directory (see `ProjectContext::instance_workspace`), which `prune`/`delete`
+        // then recursively remove. A name containing `..` or `/` must never reach
+        // that join unsanitized, so it's rejected here at config-validation time
+        // instead of at every path-building call site.
+        let config: HelixConfig = toml::from_str(
+            r#"
+[project]
+name = "demo"
+
+[local."../../evil"]
+"#,
+        )
+        .expect("TOML allows arbitrary quoted table keys");
+
+        let path = Path::new("helix.toml");
+        assert!(matches!(
+            config.validate(path, true),
+            Err(ConfigError::InvalidInstanceName { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_instance_name_rejects_path_traversal_and_empty_names() {
+        // This is the same guard `HelixConfig::validate` runs on names loaded from
+        // `helix.toml`, but callable directly by commands (`prune`, `add`, `init`)
+        // that build a path from a raw CLI argument instead of a config key.
+        for bad in ["../../evil", "a/b", "a\\b", "", "   ", "a.b"] {
+            assert!(
+                validate_instance_name(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+        for good in ["dev", "prod-1", "my_instance", "A1"] {
+            assert!(
+                validate_instance_name(good).is_ok(),
+                "expected {good:?} to be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn lenient_validation_still_enforces_other_checks() {
         let path = Path::new("helix.toml");
 
@@ -860,21 +857,17 @@ name = "  "
             Err(ConfigError::EmptyProjectName { .. })
         ));
 
-        // Enterprise instance without a cluster_id is rejected even leniently.
-        let no_cluster: HelixConfig = toml::from_str(
+        // Invalid database references are rejected during deserialization.
+        let no_database = toml::from_str::<HelixConfig>(
             r#"
 [project]
 name = "demo"
 
 [enterprise.production]
-cluster_id = ""
+database = "cluster:"
 "#,
-        )
-        .unwrap();
-        assert!(matches!(
-            no_cluster.validate(path, false),
-            Err(ConfigError::MissingClusterId { .. })
-        ));
+        );
+        assert!(no_database.is_err());
     }
 
     #[test]

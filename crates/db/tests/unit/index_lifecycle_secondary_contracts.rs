@@ -32,6 +32,20 @@ fn equality(value: &str) -> CanonicalSecondaryValue {
     CanonicalSecondaryValue::equality_string(value)
 }
 
+fn entity_state_key(
+    definition: &ValidatedSecondaryIndexDefinition,
+    entity_id: IndexEntityId,
+) -> IndexEntityStateKey {
+    IndexEntityStateKey {
+        index_id: IndexId::initial(),
+        generation: IndexGenerationId::initial(),
+        entity: IndexEntity {
+            kind: definition.element_kind(),
+            id: entity_id,
+        },
+    }
+}
+
 fn applied_key(
     scope: DataScope,
     definition: &ValidatedSecondaryIndexDefinition,
@@ -39,14 +53,7 @@ fn applied_key(
 ) -> Bytes {
     scoped_index_key(
         scope,
-        ScopedKey::AppliedState(IndexEntityStateKey {
-            index_id: IndexId::initial(),
-            generation: IndexGenerationId::initial(),
-            entity: IndexEntity {
-                kind: definition.element_kind(),
-                id: entity_id,
-            },
-        }),
+        ScopedKey::AppliedState(entity_state_key(definition, entity_id)),
     )
 }
 
@@ -77,6 +84,95 @@ fn encoded_owner(
 }
 
 #[tokio::test]
+async fn repeated_build_deltas_preserve_the_first_secondary_value() {
+    let db = tests::test_db("secondary-build-delta-first-value").await;
+    let scope = DataScope::LegacyUnscoped;
+    let definition = validated(SecondaryIndexDefinition::node_equality("User", "email").unwrap());
+    let target = SecondaryMutationTarget {
+        index_id: IndexId::initial(),
+        generation: IndexGenerationId::initial(),
+        definition,
+        mode: SecondaryMutationMode::RecordBuildDelta,
+    };
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+
+    for (entity_id, first, second) in [
+        (
+            IndexEntityId::new(7),
+            Some(equality("original@example.com")),
+            Some(equality("intermediate@example.com")),
+        ),
+        (
+            IndexEntityId::new(8),
+            None,
+            Some(equality("created@example.com")),
+        ),
+    ] {
+        let entity = IndexEntity {
+            kind: IndexElementKind::Node,
+            id: entity_id,
+        };
+        stage_secondary_build_delta(&transaction, scope, &target, entity, first.clone())
+            .await
+            .unwrap();
+        stage_secondary_build_delta(&transaction, scope, &target, entity, second)
+            .await
+            .unwrap();
+
+        let key = scoped_index_key(
+            scope,
+            ScopedKey::BuildDelta(IndexEntityStateKey {
+                index_id: target.index_id,
+                generation: target.generation,
+                entity,
+            }),
+        );
+        let (_, delta) =
+            decode_delta(scope, &key, &transaction.get(&key).await.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            delta.state,
+            CoalescedBuildDeltaState::SecondaryBefore(first)
+        );
+    }
+
+    transaction.rollback();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_secondary_marker_without_applied_state_fails_closed() {
+    let db = tests::test_db("secondary-legacy-marker-fails-closed").await;
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    let definition = validated(SecondaryIndexDefinition::node_equality("User", "email").unwrap());
+    let entity = IndexEntity {
+        kind: definition.element_kind(),
+        id: IndexEntityId::new(7),
+    };
+
+    assert!(matches!(
+        reconciliation_plan(
+            &transaction,
+            DataScope::LegacyUnscoped,
+            entity_state_key(&definition, entity.id),
+            &definition,
+            &CoalescedBuildDeltaState::Marker,
+            Some(equality("current@example.com")),
+        )
+        .await,
+        Err(HelixDbError::IndexCatalogCorruption(_))
+    ));
+
+    transaction.rollback();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     let db = tests::test_db("secondary-reconciliation-bitmap-contracts").await;
     let transaction = db
@@ -86,15 +182,18 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     let scope = DataScope::LegacyUnscoped;
     let definition = validated(SecondaryIndexDefinition::node_equality("User", "email").unwrap());
     let entity_id = IndexEntityId::new(7);
+    let entity = IndexEntity {
+        kind: definition.element_kind(),
+        id: entity_id,
+    };
     let value = equality("first@example.com");
 
     let ReconciliationPlan::Writes(add) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
+        &CoalescedBuildDeltaState::SecondaryBefore(None),
         Some(value.clone()),
     )
     .await
@@ -112,10 +211,9 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     let ReconciliationPlan::Writes(noop) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
+        &CoalescedBuildDeltaState::Marker,
         Some(value),
     )
     .await
@@ -128,10 +226,9 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     let ReconciliationPlan::Writes(remove) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
+        &CoalescedBuildDeltaState::Marker,
         None,
     )
     .await
@@ -160,6 +257,10 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
     let definition =
         validated(SecondaryIndexDefinition::node_unique_equality("User", "email").unwrap());
     let entity_id = IndexEntityId::new(7);
+    let entity = IndexEntity {
+        kind: definition.element_kind(),
+        id: entity_id,
+    };
     let foreign_id = IndexEntityId::new(9);
     let previous = equality("previous@example.com");
     let next = equality("next@example.com");
@@ -196,10 +297,9 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
     }) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
+        &CoalescedBuildDeltaState::Marker,
         Some(next.clone()),
     )
     .await
@@ -221,10 +321,9 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
     }) = reconciliation_plan(
         &transaction,
         scope,
-        IndexId::initial(),
-        IndexGenerationId::initial(),
+        entity_state_key(&definition, entity.id),
         &definition,
-        entity_id,
+        &CoalescedBuildDeltaState::Marker,
         Some(next),
     )
     .await
@@ -569,42 +668,6 @@ fn value_error_and_property_type_contracts_cover_every_closed_variant() {
         ),
         HelixDbError::SecondaryIndexValue(_)
     ));
-
-    let values = [
-        PropertyValue::Null,
-        PropertyValue::Bool(false),
-        PropertyValue::I64(0),
-        PropertyValue::DateTime(0),
-        PropertyValue::F64(0.0),
-        PropertyValue::F32(0.0),
-        PropertyValue::String(String::new()),
-        PropertyValue::Bytes(Vec::new()),
-        PropertyValue::I64Array(Vec::new()),
-        PropertyValue::F64Array(Vec::new()),
-        PropertyValue::F32Array(Vec::new()),
-        PropertyValue::StringArray(Vec::new()),
-        PropertyValue::Array(Vec::new()),
-        PropertyValue::Object(BTreeMap::new()),
-    ];
-    assert_eq!(
-        values.map(|value| property_value_type_name(&value)),
-        [
-            "Null",
-            "Bool",
-            "I64",
-            "DateTime",
-            "F64",
-            "F32",
-            "String",
-            "Bytes",
-            "I64Array",
-            "F64Array",
-            "F32Array",
-            "StringArray",
-            "Array",
-            "Object",
-        ]
-    );
 }
 
 #[test]
@@ -656,18 +719,18 @@ fn range_bounds_and_predicates_cover_direction_inclusion_and_invalid_domains() {
         }
     }
 
-    assert!(matches!(
-        secondary_range_scan_bounds(
-            StorageRangeIndexDirection::Asc,
-            &SecondaryRangeQuery::Between {
-                lower: PropertyValue::Bool(false),
-                lower_inclusive: true,
-                upper: PropertyValue::String("z".to_string()),
-                upper_inclusive: true,
-            },
-        ),
-        Err(HelixDbError::SecondaryIndexValue(_))
-    ));
+    // Bounds of no range domain, or of different domains, are empty ranges.
+    assert!(secondary_range_scan_bounds(
+        StorageRangeIndexDirection::Asc,
+        &SecondaryRangeQuery::Between {
+            lower: PropertyValue::Bool(false),
+            lower_inclusive: true,
+            upper: PropertyValue::String("z".to_string()),
+            upper_inclusive: true,
+        },
+    )
+    .unwrap()
+    .is_none());
     for query in [
         SecondaryRangeQuery::Between {
             lower: PropertyValue::I64(9),
@@ -693,7 +756,7 @@ fn range_bounds_and_predicates_cover_direction_inclusion_and_invalid_domains() {
             &PropertyValue::F64(f64::NAN),
             StorageRangeIndexDirection::Asc,
         ),
-        Err(HelixDbError::SecondaryIndexValue(_))
+        Ok(None)
     ));
     assert!(!secondary_range_query_matches(
         &SecondaryRangeQuery::Lower {
@@ -728,6 +791,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         &equality_definition,
         entity_id,
         &PropertyValue::I64(7),
+        None,
     )
     .await
     .unwrap());
@@ -746,6 +810,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         &equality_definition,
         entity_id,
         &PropertyValue::I64(7),
+        None,
     )
     .await
     .unwrap());
@@ -764,6 +829,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         &equality_definition,
         entity_id,
         &PropertyValue::I64(7),
+        None,
     )
     .await
     .unwrap());
@@ -773,6 +839,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         &equality_definition,
         entity_id,
         &PropertyValue::I64(8),
+        None,
     )
     .await
     .unwrap());
@@ -796,6 +863,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         StorageRangeIndexDirection::Asc,
         &key_value,
         None,
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());
@@ -816,6 +884,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         StorageRangeIndexDirection::Asc,
         &different,
         None,
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());
@@ -830,6 +899,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
             value: PropertyValue::I64(8),
             inclusive: true,
         }),
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());
@@ -848,6 +918,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         StorageRangeIndexDirection::Asc,
         &key_value,
         None,
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());
@@ -868,6 +939,7 @@ async fn authoritative_equality_and_range_verification_reject_every_stale_shape(
         StorageRangeIndexDirection::Asc,
         &key_value,
         None,
+        &exact::UnobservedRangeScan,
     )
     .await
     .unwrap());
@@ -915,6 +987,7 @@ fn typed_secondary_decoders_reject_wrong_kind_family_and_ownership() {
         generation: IndexGenerationId::initial(),
         entity_kind: entity.kind,
         entity_id: entity.id,
+        state: CoalescedBuildDeltaState::SecondaryBefore(None),
     };
     assert_eq!(
         decode_delta(scope, &delta_key, &encode_build_delta(&delta))

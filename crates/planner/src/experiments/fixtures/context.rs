@@ -8,7 +8,7 @@ pub(super) fn context_for(
     shape: PlanningScalabilityShape,
     scale: properties::PositiveUsize,
 ) -> context::PlannerContext {
-    let mut ctx = match shape {
+    match shape {
         PlanningScalabilityShape::WideBooleanPredicates
         | PlanningScalabilityShape::ManyAvailableIndexes
         | PlanningScalabilityShape::BatchedRootReuse
@@ -26,11 +26,7 @@ pub(super) fn context_for(
         }
         PlanningScalabilityShape::DeepTraversalChain
         | PlanningScalabilityShape::BranchHeavyQueries => indexed_context(4),
-    };
-    // Coverage instrumentation makes wall-clock budgets noisy; memo/rule
-    // thresholds remain the deterministic scalability signal for fixtures.
-    ctx.optimizer_limits.optimization_micros = properties::PositiveUsize::at_least_one(1_000_000);
-    ctx
+    }
 }
 
 fn mutation_context() -> context::PlannerContext {

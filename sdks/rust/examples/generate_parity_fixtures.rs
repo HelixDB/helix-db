@@ -11,6 +11,10 @@ use std::path::Path;
 use helix_db::dsl::prelude::*;
 use helix_db::{Empty, OnNodes, QueryParamType, ReadOnly, Traversal};
 
+#[cfg(feature = "embedded")]
+#[path = "support/cypher_parity.rs"]
+mod cypher_parity;
+
 struct Fixture {
     bucket: &'static str,
     name: String,
@@ -30,6 +34,19 @@ struct UserProps {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "embedded")]
+    match env::var("HELIX_CYPHER_PARITY_URL") {
+        Ok(url) => {
+            return cypher_parity::run_http(
+                &url,
+                Path::new(&env::var("HELIX_CYPHER_PARITY_RESULTS")?),
+                &env::var("HELIX_CYPHER_PARITY_PHASE")?,
+            )
+            .await;
+        }
+        Err(env::VarError::NotPresent) => {}
+        Err(error) => return Err(error.into()),
+    }
     let out = env::args()
         .nth(1)
         .unwrap_or_else(|| "tests/parity/generated/rust".to_string());
@@ -155,7 +172,7 @@ async fn execute_embedded_fixtures(
             .send()
             .await
             .expect_err("search after index DROP must fail");
-        if !error.to_string().contains("index_not_found") {
+        if error.error_code() != Some("index_not_found") {
             return Err(format!(
                 "{} returned the wrong post-DROP error: {error}",
                 search.name
@@ -164,6 +181,7 @@ async fn execute_embedded_fixtures(
         }
     }
     client.close().await?;
+    cypher_parity::run(source(), results).await?;
     Ok(())
 }
 
@@ -311,6 +329,16 @@ fn validate_fixture_coverage(fixtures: &[Fixture]) {
             .iter()
             .filter(|fixture| fixture.bucket == "json-only" && fixture.name.starts_with('9')),
     ));
+    // Request options are not AST nodes, so the executable corpus alone must
+    // exercise every search consistency.
+    let consistencies = fixtures
+        .iter()
+        .map(|fixture| match fixture.request.search_consistency() {
+            SearchConsistency::Strong => "Strong",
+            SearchConsistency::Eventual => "Eventual",
+        })
+        .collect::<BTreeSet<_>>();
+    assert_variants("SearchConsistency", &consistencies, &["Strong", "Eventual"]);
 }
 
 fn fixture_coverage<'a>(fixtures: impl Iterator<Item = &'a Fixture>) -> FixtureCoverage {
@@ -2202,6 +2230,34 @@ fn runtime_fixtures() -> Vec<Fixture> {
             ),
         ),
         runtime(
+            "028a-read-eventual-search",
+            read_request(
+                read_batch()
+                    .var_as(
+                        "text_hits",
+                        g().text_search_nodes("ParityUser", "bio", "graph", 5, None)
+                            .value_map(Some(vec!["externalId", "bio", "$distance"])),
+                    )
+                    .var_as(
+                        "vector_hits",
+                        g().vector_search_nodes(
+                            "ParityUser",
+                            "embedding",
+                            vec![1.0, 0.0, 0.0],
+                            3,
+                            None,
+                        )
+                        .project(vec![
+                            Projection::property("externalId", "externalId"),
+                            Projection::property("$distance", "distance"),
+                        ]),
+                    )
+                    .returning(["text_hits", "vector_hits"]),
+            )
+            .with_search_consistency(SearchConsistency::Eventual)
+            .expect("read requests accept eventual search"),
+        ),
+        runtime(
             "029-write-drop-temp-node",
             write_request(
                 write_batch()
@@ -2419,10 +2475,7 @@ fn runtime_fixtures() -> Vec<Fixture> {
                         g().e_with_label("FOLLOWS")
                             .where_(Predicate::eq("note", "dropitemedge")),
                     )
-                    .var_as(
-                        "edges",
-                        g().drop_edge_by_id(EdgeRef::var("edge_matches")).count(),
-                    )
+                    .var_as("edges", g().e(EdgeRef::var("edge_matches")).drop().count())
                     .var_as(
                         "source",
                         g().n_with_label("ParityUser")

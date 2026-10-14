@@ -76,6 +76,11 @@ fn collect_missing(
             .iter()
             .flat_map(|atoms| atoms.as_ref())
             .for_each(|atom| collect_missing_atom(element, label, atom, indexes, candidates)),
+        AccessFilterIndexPlan::ConjunctionWithDisjunction { shared, branches } => shared
+            .as_ref()
+            .iter()
+            .chain(branches.as_ref().iter().flat_map(|atoms| atoms.as_ref()))
+            .for_each(|atom| collect_missing_atom(element, label, atom, indexes, candidates)),
     }
 }
 
@@ -181,6 +186,33 @@ mod tests {
             &context::PlannerContext::default(),
         )
         .is_empty());
+    }
+
+    #[test]
+    fn shared_conjunction_and_union_report_all_missing_indexes() {
+        let label = ir::NonEmptyString::new("Resource").unwrap();
+        let predicate = Predicate::and(vec![
+            Predicate::eq("tenant", "one"),
+            Predicate::or(vec![
+                Predicate::eq("type", "pod"),
+                Predicate::eq("type", "service"),
+            ]),
+        ]);
+        for element in [catalog::ElementKind::Node, catalog::ElementKind::Edge] {
+            let missing = missing_index_candidates(
+                element,
+                &label,
+                &predicate,
+                &context::PlannerContext::default(),
+            );
+            assert_eq!(
+                missing
+                    .into_iter()
+                    .map(|candidate| candidate.property.as_ref().to_owned())
+                    .collect::<Vec<_>>(),
+                ["tenant", "type"]
+            );
+        }
     }
 
     #[test]
@@ -332,9 +364,11 @@ mod tests {
             Predicate::eq("username", "alice"),
             Predicate::eq("email", "alice@example.com"),
         ]);
-        for max_index_union_branches in [
-            context::IndexUnionBranchLimit::Disabled,
-            context::IndexUnionBranchLimit::limited(1).unwrap(),
+        // Disabled unions keep the filter; a union past its limit still
+        // uses both indexes, so both are candidates.
+        for (max_index_union_branches, candidates) in [
+            (context::IndexUnionBranchLimit::Disabled, 0),
+            (context::IndexUnionBranchLimit::limited(1).unwrap(), 2),
         ] {
             let ctx = context::PlannerContext {
                 limits: context::PlannerLimits {
@@ -342,9 +376,9 @@ mod tests {
                 },
                 ..context::PlannerContext::default()
             };
-            assert!(
-                missing_index_candidates(catalog::ElementKind::Node, &label, &union, &ctx,)
-                    .is_empty()
+            assert_eq!(
+                missing_index_candidates(catalog::ElementKind::Node, &label, &union, &ctx).len(),
+                candidates
             );
         }
 

@@ -1,13 +1,12 @@
 ---
 title: 'Security'
+description: "Authenticate requests, handle API keys, and review encryption and enterprise security features"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
-
-## Authentication
+## Direct gateway authentication
 
 All API requests to Helix Cloud are authenticated with a Bearer token. Tokens are managed
 through the Helix dashboard. Include the token in the `Authorization` header of every request:
@@ -26,18 +25,27 @@ See the
 Requests without a valid token are rejected at the gateway before reaching any database node.
 Token rotation and revocation take immediate effect from the dashboard.
 
+The Helix CLI does not use these application keys. Cloud CLI operations authenticate with a rotating
+WorkOS session, and Cloud CLI queries execute through the backend broker. Interactive MCP uses WorkOS
+OAuth for human sessions and the WorkOS agent registration flow for agents. The unified MCP endpoint
+also accepts workspace-owned service credentials with explicit project grants for query and customer administration tools. These sessions do not receive Cloud discovery
+or observability tools. Service credentials also support headless HTTP API calls. See the
+[MCP access matrix](/database/helix-cloud/connect/mcp).
+
 ## Encryption
 
 All traffic between clients and the gateway is encrypted in transit via TLS. Data at rest in
 object storage is encrypted using the storage provider's server-side encryption.
 
-## Enterprise features
+## Coming soon
 
-The following are available for enterprise clusters. Contact
-[founders@helix-db.com](mailto:founders@helix-db.com) to enable them for your deployment.
+These enterprise security features are on the [roadmap](/database/helix-db/start-here/roadmap)
+and are not yet available. Contact [founders@helix-db.com](mailto:founders@helix-db.com)
+if your deployment depends on one of them.
 
-- **Role-based access control.** Scoped API keys with read-only, read-write, or operation-restricted
-  permissions for least-privilege credentials per service or environment.
+- **Role-based access control.** Fine-grained API key permissions beyond today's
+  read-only and read-write keys, for least-privilege credentials per service or
+  environment.
 - **SSO / SAML.** Dashboard access through your identity provider (Okta, Azure AD, Google Workspace)
   with centralized provisioning and deprovisioning.
 - **Audit logs.** Per-request logging (timestamp, token identity, query name, source IP, response

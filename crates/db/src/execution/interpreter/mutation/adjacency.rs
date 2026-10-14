@@ -1,9 +1,6 @@
 //! Mutation-maintained adjacency index contracts.
 
 #[cfg(test)]
-use slatedb::DbTransaction;
-
-#[cfg(test)]
 use super::contracts::decode_stored_edges;
 use super::*;
 
@@ -11,7 +8,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn add_adjacency(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node: u64,
         neighbor: u64,
         direction: ir::ExpandDirection,
@@ -33,7 +30,7 @@ impl<'db> ExecutionContext<'db> {
     #[cfg(test)]
     pub(super) async fn remove_adjacency(
         &self,
-        txn: &DbTransaction,
+        txn: &impl crate::transaction::Mutation,
         node: u64,
         neighbor: u64,
         direction: ir::ExpandDirection,

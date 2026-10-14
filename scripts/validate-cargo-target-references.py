@@ -15,7 +15,7 @@ from typing import Iterable
 
 
 REFERENCE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?P<flag>--package|--test|--bench|--bin|-p)"
+    r"(?<![A-Za-z0-9_-])(?P<flag>--package|--test|--bench|--bin|--example|-p)"
     r"(?:=|\s+)(?P<name>[A-Za-z0-9_.-]+)"
 )
 INVENTORY_ROW = re.compile(
@@ -27,8 +27,8 @@ MATRIX_FUZZ = re.compile(
     re.MULTILINE,
 )
 MATRIX_TEST = re.compile(r"^\s+test:\s*(?P<test>[A-Za-z0-9_:.-]+)\s*$", re.MULTILINE)
-FLAG_KIND = {"--test": "test", "--bench": "bench", "--bin": "bin"}
-TARGET_KIND_ORDER = ("lib", "test", "bench", "bin")
+FLAG_KIND = {"--test": "test", "--bench": "bench", "--bin": "bin", "--example": "example"}
+TARGET_KIND_ORDER = ("lib", "test", "bench", "bin", "example")
 CODEC_OWNERS = {
     "legacy/tenant_envelope.rs": "struct LegacyTenantEnvelope",
     "legacy/edge_property_pair.rs": "struct LegacyEdgePropertyPairKey",
@@ -46,7 +46,7 @@ CODEC_OWNERS = {
     "keys/indexes/vector/metadata.rs": "struct VectorPartitionMappingKey",
     "values/global.rs": "fn encode_metadata_value",
     "values/lifecycle/index_record.rs": "fn encode_index_record",
-    "values/indexes/equality.rs": "struct SecondaryEqualityBitmapValue",
+    "values/indexes/equality/mod.rs": "struct SecondaryEqualityBitmapValue",
     "values/indexes/range.rs": "fn encode_entry",
     "values/indexes/text.rs": "fn encode_manifest_root",
     "values/indexes/vector/generation.rs": "fn encode_partition_mapping",
@@ -101,7 +101,10 @@ V2_SOURCE_FILES = {
     "values/mod.rs",
     "values/codec.rs",
     "values/global.rs",
-    "values/adjacency.rs",
+    "values/adjacency/mod.rs",
+    "values/adjacency/encoding.rs",
+    "values/adjacency/prepared.rs",
+    "values/delta_encoding_tests.rs",
     "values/edge_endpoints.rs",
     "values/id_allocation.rs",
     "values/property/mod.rs",
@@ -109,7 +112,15 @@ V2_SOURCE_FILES = {
     "values/property/property.rs",
     "values/property/property_value.rs",
     "values/property/canonical_number.rs",
-    "values/property/equality_index_value.rs",
+    "values/property/equality_index_value/mod.rs",
+    "values/property/equality_index_value/prepare.rs",
+    "values/property/prepared/mod.rs",
+    "values/property/prepared/tests.rs",
+    "values/property/prepared/validation.rs",
+    "values/property/view/mod.rs",
+    "values/property/view/tests.rs",
+    "values/property/write/mod.rs",
+    "values/property/write/tests.rs",
     "values/property/range_index_value.rs",
     "values/lifecycle/mod.rs",
     "values/lifecycle/common.rs",
@@ -118,9 +129,14 @@ V2_SOURCE_FILES = {
     "values/lifecycle/operation_record.rs",
     "values/indexes/mod.rs",
     "values/indexes/secondary_entry.rs",
-    "values/indexes/equality.rs",
+    "values/indexes/equality/mod.rs",
+    "values/indexes/equality/admission.rs",
+    "values/indexes/equality/encoding.rs",
     "values/indexes/range.rs",
     "values/indexes/text.rs",
+    "values/indexes/operation_queue/mod.rs",
+    "values/indexes/operation_queue/algebra.rs",
+    "values/indexes/operation_queue/tests.rs",
     "values/indexes/vector/mod.rs",
     "values/indexes/vector/generation.rs",
     "values/indexes/vector/layer0.rs",
@@ -575,16 +591,16 @@ def validate_codec_architecture(root: Path) -> list[str]:
                 "crates/db/src/fuzzing.rs",
                 "crates/db/src/index_lifecycle/cursor_contracts.rs",
                 "crates/db/src/index_lifecycle/tenant_envelope_migration.rs",
-                "crates/db/src/index_lifecycle/vector.rs",
                 "crates/db/src/index_lifecycle/vector/driver.rs",
+                "crates/db/src/index_lifecycle/vector/publication.rs",
                 "crates/db/src/index_lifecycle_testing.rs",
                 "crates/db/src/migration_parity.rs",
                 "crates/db/src/migrations.rs",
                 "crates/db/src/search/mod.rs",
                 "crates/db/src/search/text/mod.rs",
-                "crates/db/src/search/vector/index.rs",
+                "crates/db/src/search/vector/hnsw/index.rs",
                 "crates/db/src/search/vector/mod.rs",
-                "crates/db/src/search/vector/storage.rs",
+                "crates/db/src/search/vector/storage/mod.rs",
             }
             or relative_path.startswith("crates/db/src/migrations/")
             or relative_path.startswith("crates/db/tests/")

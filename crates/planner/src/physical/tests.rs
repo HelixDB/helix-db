@@ -23,8 +23,8 @@ fn physical_alternative_preserves_delivered_properties_and_cost() {
 
     assert_eq!(alternative.cost, cost::CostVector::ZERO);
     assert_eq!(
-        alternative.digest,
-        digest::PlanDigest::for_tagged_value(
+        alternative.digest(),
+        digest::PlanDigest::for_tie_break(
             "physical_alternative:v1",
             &(
                 PhysicalExpr::Sort,
@@ -93,6 +93,6 @@ fn physical_alternative_digest_is_stable_and_ignores_cost_profile_changes() {
         cost::CostVector::ZERO,
     );
 
-    assert_eq!(first.digest, second.digest);
-    assert_ne!(first.digest, different.digest);
+    assert_eq!(first.digest(), second.digest());
+    assert_ne!(first.digest(), different.digest());
 }

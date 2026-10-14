@@ -5,6 +5,8 @@ use super::*;
 mod aggregate;
 mod bounds;
 mod eval;
+mod filter;
+mod membership_cache;
 mod order;
 mod projection;
 mod sets;
@@ -13,26 +15,20 @@ mod values;
 #[cfg(test)]
 mod tests;
 
+/// Rows evaluated per stored-record batch. This bounds the decoded records an
+/// operator holds at once while amortizing one multi-get over many rows, and
+/// sizes the multi-get batches of every row-preserving filter.
+///
+/// The value comes from `helix_planner::cost::RECORD_BATCH_ROWS`, so pricing
+/// and execution batch alike.
+const RECORD_BATCH_ROWS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
+
 pub(super) use self::eval::property_value_is_in;
+pub(super) use self::filter::{MembershipCursor, RowDecision};
+pub(super) use self::membership_cache::PreparedMemberships;
 pub(super) use self::values::ast_to_db_value;
 
 impl<'db> ExecutionContext<'db> {
-    pub(super) async fn filter(
-        &mut self,
-        input: ExecutionValue,
-        predicate: &ir::PredicatePlan,
-    ) -> Result<ExecutionValue> {
-        let rows = self.stream_rows(input, "filter")?;
-        let mut filtered = Vec::new();
-        for row in rows {
-            self.check_execution_deadline()?;
-            if self.eval_predicate(&row, predicate.predicate()).await? {
-                filtered.push(row);
-            }
-        }
-        Ok(ExecutionValue::Stream(filtered))
-    }
-
     pub(super) fn stream_rows(
         &self,
         value: ExecutionValue,
@@ -53,3 +49,8 @@ impl<'db> ExecutionContext<'db> {
         }
     }
 }
+
+pub(in crate::execution::interpreter) use bounds::eval_stream_bound;
+
+pub(in crate::execution::interpreter) use sets::RowDistinctKey;
+pub(in crate::execution::interpreter) use values::DistinctKey;

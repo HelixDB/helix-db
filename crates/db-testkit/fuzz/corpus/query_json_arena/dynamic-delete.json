@@ -1,0 +1,29 @@
+{
+  "request_type": "write",
+  "query": {
+    "write": {
+      "entries": [
+        {
+          "query": {
+            "name": "deleted",
+            "root": {
+              "drop": {
+                "input": {
+                  "nodes_where": {
+                    "predicate": {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "DockerImageSmokeUser" } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "returns": []
+    }
+  }
+}

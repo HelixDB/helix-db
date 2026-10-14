@@ -17,7 +17,11 @@ pub(in crate::rules::access::filter) enum AccessFilterIndexAtom {
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::rules::access::filter) enum AccessEqualityDomain {
     One(ir::IndexValue),
+    /// At most the index union branch limit: one union of equality sources.
     Many(ir::AtLeast<ir::IndexValue, 2>),
+    /// Wider than one index union: one literal-set source read as batched
+    /// multi-gets.
+    Batch(ir::AtLeast<ir::SecondaryIndexLiteral, 2>),
     Runtime(ir::RuntimeEqualitySet),
 }
 
@@ -57,6 +61,12 @@ impl AsRef<[AccessFilterIndexAtom]> for AccessFilterIndexAtoms {
 pub(in crate::rules::access::filter) enum AccessFilterIndexPlan {
     Conjunction(AccessFilterIndexAtoms),
     Disjunction(AccessFilterIndexBranches),
+    /// Evaluate shared conjuncts once and intersect them with a bounded union.
+    /// Both the shared conjunction and every union branch are nonempty.
+    ConjunctionWithDisjunction {
+        shared: AccessFilterIndexAtoms,
+        branches: AccessFilterIndexBranches,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,7 +108,6 @@ pub(in crate::rules::access::filter) enum AccessFilterIndexPlanRejection {
     EmptyIndexAtoms,
     TooFewIndexBranches,
     BranchLimitDisabled,
-    BranchLimitExceeded,
     BranchNotIndexable,
     LabelScopeMismatch,
 }

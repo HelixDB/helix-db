@@ -77,6 +77,31 @@ impl CliFixture {
         }
     }
 
+    /// Points the runtime seam at a path that does not exist, so every runtime
+    /// command fails to spawn exactly as it does on a host without Docker.
+    #[allow(dead_code)]
+    pub fn with_missing_runtime(mut self) -> Self {
+        self.test_runtime_bin = Some(self.root.join("bin").join("missing-runtime"));
+        self
+    }
+
+    /// Points the runtime seam at a file that exists but cannot be executed, so
+    /// spawning fails for a reason other than the runtime being absent.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub fn with_unspawnable_runtime(mut self) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = self.root.join("bin");
+        fs::create_dir_all(&directory).expect("create runtime fixture directory");
+        let binary = directory.join("unspawnable-runtime");
+        fs::write(&binary, "not an executable\n").expect("write runtime fixture");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o644))
+            .expect("drop execute permission on runtime fixture");
+        self.test_runtime_bin = Some(binary);
+        self
+    }
+
     #[allow(dead_code)]
     pub fn with_http_base(mut self, base_url: impl Into<String>) -> Self {
         self.http_base_url = Some(base_url.into());
@@ -103,12 +128,18 @@ impl CliFixture {
     }
 
     #[allow(dead_code)]
-    pub fn write_credentials(&self, user_id: &str, api_key: &str) {
+    pub fn write_credentials(&self, email: &str, access_token: &str) {
         let directory = &self.helix_home;
         fs::create_dir_all(directory).expect("create credentials directory");
         fs::write(
             directory.join("credentials"),
-            format!("helix_user_id={user_id}\nhelix_user_key={api_key}"),
+            serde_json::to_vec(&serde_json::json!({
+                "access_token": access_token,
+                "refresh_token": "refresh-token",
+                "expires_at": i64::MAX,
+                "email": email,
+            }))
+            .unwrap(),
         )
         .expect("write credentials");
     }
@@ -123,6 +154,7 @@ impl CliFixture {
         fs::read_to_string(&self.tool_log).unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -181,12 +213,16 @@ impl CliFixture {
     }
 }
 
+/// The tools [`CliFixture::with_fake_tools`] installs.
+#[allow(dead_code)]
+pub const FAKE_TOOLS: [&str; 8] = [
+    "cargo", "node", "npm", "npx", "curl", "claude", "codex", "opencode",
+];
+
 #[allow(dead_code)]
 fn install_fake_tools(directory: &Path) {
     fs::create_dir_all(directory).expect("create fake tool directory");
-    for tool in [
-        "cargo", "node", "npm", "npx", "curl", "claude", "codex", "opencode",
-    ] {
+    for tool in FAKE_TOOLS {
         install_fake_tool(directory, tool);
     }
 }
@@ -194,18 +230,28 @@ fn install_fake_tools(directory: &Path) {
 #[cfg(windows)]
 #[allow(dead_code)]
 fn install_fake_tool(directory: &Path, tool: &str) {
-    let script = directory.join(format!("{tool}.cmd"));
+    fs::write(
+        directory.join(format!("{tool}.cmd")),
+        windows_fake_tool(tool),
+    )
+    .expect("write fake Windows tool");
+}
+
+/// The Windows fake for `tool`, which the CLI runs as `cmd /C call <tool>.cmd`.
+///
+/// It logs its arguments the way [`WINDOWS_FAKE_DOCKER`] does, and for the
+/// same reason: the redirection comes first and `%*` ends the line.
+#[allow(dead_code)]
+pub fn windows_fake_tool(tool: &str) -> String {
     let log_command = if tool == "node" {
-        r#"if "%~1"=="--input-type" if defined HELIX_TEST_TOOL_LOG echo node --input-type=module>>"%HELIX_TEST_TOOL_LOG%"
-if not "%~1"=="--input-type" if defined HELIX_TEST_TOOL_LOG echo node %*>>"%HELIX_TEST_TOOL_LOG%""#
+        r#"if "%~1"=="--input-type" if defined HELIX_TEST_TOOL_LOG >>"%HELIX_TEST_TOOL_LOG%" echo(node --input-type=module
+if not "%~1"=="--input-type" if defined HELIX_TEST_TOOL_LOG >>"%HELIX_TEST_TOOL_LOG%" echo(node %*"#
             .to_owned()
     } else {
-        format!(r#"if defined HELIX_TEST_TOOL_LOG echo {tool} %*>>"%HELIX_TEST_TOOL_LOG%""#)
+        format!(r#"if defined HELIX_TEST_TOOL_LOG >>"%HELIX_TEST_TOOL_LOG%" echo({tool} %*"#)
     };
-    fs::write(
-        script,
-        format!(
-            r#"@echo off
+    format!(
+        r#"@echo off
 {log_command}
 set "HELIX_TEST_TOOL_FIRST_ARGUMENT=%~1"
 if "{tool}"=="node" if "%~1"=="--input-type" set "HELIX_TEST_TOOL_FIRST_ARGUMENT=--input-type=module"
@@ -215,11 +261,8 @@ if defined HELIX_TEST_TOOL_FAIL_COMMAND if "%HELIX_TEST_TOOL_FIRST_ARGUMENT%"=="
 )
 if "{tool}"=="npm" if "%1"=="install" (
   mkdir "node_modules\@helix-db\helix-db\dist" 2>nul
-  >"node_modules\@helix-db\helix-db\package.json" echo {{"name":"@helix-db/helix-db","version":"3.0.4","type":"module","exports":"./dist/index.js"}}
+  >"node_modules\@helix-db\helix-db\package.json" echo {{"name":"@helix-db/helix-db","version":"3.1.0","type":"module","exports":"./dist/index.js"}}
   >"node_modules\@helix-db\helix-db\dist\index.js" echo export const g = ^(^) =^> ({{}}^); export const readBatch = ^(^) =^> ({{}}^); export const writeBatch = ^(^) =^> ({{}}^);
-)
-if "{tool}"=="cargo" if "%1"=="run" (
-  >"queries.json" echo {{"queries":[]}}
 )
 if "{tool}"=="node" if not "%~1"=="--input-type" if defined HELIX_TEST_TOOL_FAIL_NODE_QUERY (
   if defined HELIX_TEST_TOOL_STDERR echo %HELIX_TEST_TOOL_STDERR% 1>&2
@@ -230,9 +273,7 @@ if defined HELIX_TEST_TOOL_STDERR echo %HELIX_TEST_TOOL_STDERR% 1>&2
 if defined HELIX_TEST_TOOL_EXIT_CODE exit /b %HELIX_TEST_TOOL_EXIT_CODE%
 exit /b 0
 "#
-        ),
     )
-    .expect("write fake Windows tool");
 }
 
 #[cfg(not(windows))]
@@ -254,11 +295,8 @@ if [ "$1" = "$HELIX_TEST_TOOL_FAIL_COMMAND" ]; then
 fi
 if [ '{tool}' = 'npm' ] && [ "$1" = 'install' ]; then
   mkdir -p 'node_modules/@helix-db/helix-db/dist'
-  printf '%s\n' '{{"name":"@helix-db/helix-db","version":"3.0.4","type":"module","exports":"./dist/index.js"}}' > 'node_modules/@helix-db/helix-db/package.json'
+  printf '%s\n' '{{"name":"@helix-db/helix-db","version":"3.1.0","type":"module","exports":"./dist/index.js"}}' > 'node_modules/@helix-db/helix-db/package.json'
   printf '%s\n' 'export const g = () => ({{}}); export const readBatch = () => ({{}}); export const writeBatch = () => ({{}});' > 'node_modules/@helix-db/helix-db/dist/index.js'
-fi
-if [ '{tool}' = 'cargo' ] && [ "$1" = 'run' ]; then
-  printf '%s\n' '{{"queries":[]}}' > 'queries.json'
 fi
 if [ '{tool}' = 'node' ] && [ "$1" != '--input-type=module' ] && [ -n "$HELIX_TEST_TOOL_FAIL_NODE_QUERY" ]; then
   printf '%s\n' "${{HELIX_TEST_TOOL_STDERR:-simulated Node failure}}" >&2
@@ -280,19 +318,43 @@ exit "${{HELIX_TEST_TOOL_EXIT_CODE:-0}}"
     fs::set_permissions(script, permissions).unwrap();
 }
 
-fn install_fake_docker(bin: &Path) -> PathBuf {
-    fs::create_dir_all(bin).expect("create fake docker bin");
-
-    #[cfg(windows)]
-    {
-        let script = bin.join("docker.cmd");
-        fs::write(
-            &script,
-            r#"@echo off
-if defined HELIX_TEST_RUNTIME_LOG echo %*>>"%HELIX_TEST_RUNTIME_LOG%"
+/// The Windows fake runtime, which the CLI runs as `cmd /C call docker.cmd`.
+///
+/// `cmd` expands every `%N` in a parenthesized block before it evaluates the
+/// block's condition, so an argument holding quotes, spaces, or parentheses
+/// aborts the whole script even when the block is skipped. `exec` forwards an
+/// arbitrary in-container command, so it must return before the first block
+/// that reads a positional argument past `%1`.
+///
+/// Nothing may follow `%*` on a line. `cmd` reads a digit that sits between a
+/// delimiter (whitespace, `,`, `;`, or `=`) and `>` as a handle number, so
+/// `echo %*>>log` with a last argument of `-s3.port.lance=0` redirects stdin
+/// (handle 0) to the log and echoes the arguments to stdout instead. With the
+/// redirection first, the arguments end the line just as they ended the
+/// `cmd /C call` line that delivered them, so whatever survived that line
+/// survives this one. `echo(` also prints a first argument such as `off` or
+/// `/?` instead of acting on it.
+///
+/// An Explorer that `run` starts (a `--name` ending in `.explorer`) is saved
+/// as `<log>.<name>` in the shape `inspect` reports it: identity and role
+/// labels, image ID, image, then its environment. `cmd` splits `KEY=value`
+/// arguments at the `=`, so the value is the token after its key.
+#[allow(dead_code)]
+pub const WINDOWS_FAKE_DOCKER: &str = r#"@echo off
+if defined HELIX_TEST_RUNTIME_LOG >>"%HELIX_TEST_RUNTIME_LOG%" echo(%*
 if /I "%1"=="%HELIX_TEST_RUNTIME_FAIL_COMMAND%" (
   echo simulated runtime failure 1>&2
   exit /b 42
+)
+if "%1"=="exec" exit /b 0
+if "%1"=="inspect" goto :inspect
+if "%1"=="port" goto :port
+if "%1"=="run" goto :run
+if "%1"=="rm" goto :rm
+if "%1"=="image" goto :image
+if "%1"=="pull" (
+  if "%2"=="%HELIX_TEST_RUNTIME_FAIL_IMAGE%" exit /b 42
+  type nul > "%HELIX_TEST_RUNTIME_LOG%.pulled"
 )
 if "%1"=="info" exit /b 0
 if "%1"=="ps" (
@@ -303,18 +365,64 @@ if "%1"=="logs" (
   echo fake logs
   exit /b 0
 )
-if "%1"=="rm" (
-  if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
-  echo No such container 1>&2
-  exit /b 1
+if "%1"=="container" (
+  if "%2"=="inspect" (
+    if defined HELIX_TEST_RUNTIME_CONTAINER_LABEL (
+      if "%HELIX_TEST_RUNTIME_CONTAINER_LABEL%"=="missing" (
+        echo No such object 1>&2
+        exit /b 1
+      )
+      if not "%HELIX_TEST_RUNTIME_CONTAINER_LABEL%"=="" if not "%HELIX_TEST_RUNTIME_CONTAINER_LABEL%"=="unlabeled" echo %HELIX_TEST_RUNTIME_CONTAINER_LABEL%
+      exit /b 0
+    )
+    if "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="missing" (
+      echo No such object 1>&2
+      exit /b 1
+    )
+    if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="" if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="unlabeled" echo %HELIX_TEST_RUNTIME_LABEL_PROBE%
+    exit /b 0
+  )
+  exit /b 0
 )
 if "%1"=="network" (
+  if "%2"=="inspect" if "%3"=="--format" (
+    if defined HELIX_TEST_RUNTIME_NETWORK_LABEL (
+      if "%HELIX_TEST_RUNTIME_NETWORK_LABEL%"=="missing" (
+        echo not found 1>&2
+        exit /b 1
+      )
+      if not "%HELIX_TEST_RUNTIME_NETWORK_LABEL%"=="" if not "%HELIX_TEST_RUNTIME_NETWORK_LABEL%"=="unlabeled" echo %HELIX_TEST_RUNTIME_NETWORK_LABEL%
+      exit /b 0
+    )
+    if "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="missing" (
+      echo not found 1>&2
+      exit /b 1
+    )
+    if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="" if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="unlabeled" echo %HELIX_TEST_RUNTIME_LABEL_PROBE%
+    exit /b 0
+  )
   if "%2"=="create" exit /b 0
   if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
   echo not found 1>&2
   exit /b 1
 )
 if "%1"=="volume" (
+  if "%2"=="inspect" if "%3"=="--format" (
+    if defined HELIX_TEST_RUNTIME_VOLUME_LABEL (
+      if "%HELIX_TEST_RUNTIME_VOLUME_LABEL%"=="missing" (
+        echo not found 1>&2
+        exit /b 1
+      )
+      if not "%HELIX_TEST_RUNTIME_VOLUME_LABEL%"=="" if not "%HELIX_TEST_RUNTIME_VOLUME_LABEL%"=="unlabeled" echo %HELIX_TEST_RUNTIME_VOLUME_LABEL%
+      exit /b 0
+    )
+    if "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="missing" (
+      echo not found 1>&2
+      exit /b 1
+    )
+    if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="" if not "%HELIX_TEST_RUNTIME_LABEL_PROBE%"=="unlabeled" echo %HELIX_TEST_RUNTIME_LABEL_PROBE%
+    exit /b 0
+  )
   if "%HELIX_TEST_RUNTIME_VOLUME_MODE%"=="existing" exit /b 0
   if "%HELIX_TEST_RUNTIME_VOLUME_MODE%"=="raced" (
     if "%2"=="create" (
@@ -338,9 +446,102 @@ if "%1"=="volume" (
   exit /b 1
 )
 exit /b 0
-"#,
-        )
-        .expect("write fake docker cmd");
+
+:image
+if "%HELIX_TEST_RUNTIME_IMAGE_MISSING%"=="1" if not exist "%HELIX_TEST_RUNTIME_LOG%.pulled" exit /b 1
+if "%~5"=="" goto :image_server
+if "%~5"=="ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882" (
+  echo sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  exit /b 0
+)
+set "HELIX_TEST_IMAGE=%~5"
+if "%HELIX_TEST_IMAGE:helix-explorer=%"=="%HELIX_TEST_IMAGE%" goto :image_server
+if defined HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID (
+  echo %HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID%
+  exit /b 0
+)
+echo sha256:%HELIX_TEST_IMAGE%
+exit /b 0
+:image_server
+echo sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+exit /b 0
+
+:inspect
+set "HELIX_TEST_CONTAINER=%~6"
+if "%HELIX_TEST_CONTAINER%"=="" goto :inspect_missing
+if not "%HELIX_TEST_CONTAINER:~-9%"==".explorer" goto :inspect_missing
+if not exist "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%" goto :inspect_missing
+type "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%"
+exit /b 0
+:inspect_missing
+echo Error: No such object: %HELIX_TEST_CONTAINER% 1>&2
+exit /b 1
+
+:port
+set "HELIX_TEST_CONTAINER=%~2"
+if not "%HELIX_TEST_CONTAINER:~-9%"==".explorer" goto :port_instance
+if not exist "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%" exit /b 0
+if defined HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT echo %HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT%
+exit /b 0
+:port_instance
+if defined HELIX_TEST_RUNTIME_PORT_OUTPUT echo %HELIX_TEST_RUNTIME_PORT_OUTPUT%
+exit /b 0
+
+:run
+if "%~1"=="" exit /b 0
+if "%~1"=="--name" goto :run_name
+shift
+goto :run
+:run_name
+set "HELIX_TEST_CONTAINER=%~2"
+if not "%HELIX_TEST_CONTAINER:~-9%"==".explorer" exit /b 0
+set "HELIX_TEST_EXPLORER_IDENTITY="
+set "HELIX_TEST_EXPLORER_ROLE="
+set "HELIX_TEST_EXPLORER_URL="
+set "HELIX_TEST_EXPLORER_INSTANCE="
+set "HELIX_TEST_EXPLORER_IMAGE="
+shift
+shift
+:run_explorer_argument
+if "%~1"=="" goto :run_explorer
+if "%~1"=="helixdb.identity" set "HELIX_TEST_EXPLORER_IDENTITY=%~2"
+if "%~1"=="helixdb.role" set "HELIX_TEST_EXPLORER_ROLE=%~2"
+if "%~1"=="HELIX_URL" set "HELIX_TEST_EXPLORER_URL=%~2"
+if "%~1"=="HELIX_INSTANCE_NAME" set "HELIX_TEST_EXPLORER_INSTANCE=%~2"
+set "HELIX_TEST_EXPLORER_IMAGE=%~1"
+shift
+goto :run_explorer_argument
+:run_explorer
+set "HELIX_TEST_EXPLORER_STATE=%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%"
+set "HELIX_TEST_EXPLORER_ID=sha256:%HELIX_TEST_EXPLORER_IMAGE%"
+if defined HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID set "HELIX_TEST_EXPLORER_ID=%HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID%"
+>"%HELIX_TEST_EXPLORER_STATE%" echo(%HELIX_TEST_EXPLORER_IDENTITY%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(%HELIX_TEST_EXPLORER_ROLE%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(%HELIX_TEST_EXPLORER_ID%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(%HELIX_TEST_EXPLORER_IMAGE%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(HELIX_URL=%HELIX_TEST_EXPLORER_URL%
+>>"%HELIX_TEST_EXPLORER_STATE%" echo(HELIX_INSTANCE_NAME=%HELIX_TEST_EXPLORER_INSTANCE%
+exit /b 0
+
+:rm
+set "HELIX_TEST_CONTAINER=%~3"
+if not "%HELIX_TEST_CONTAINER:~-9%"==".explorer" goto :rm_resource
+if not exist "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%" goto :rm_resource
+del "%HELIX_TEST_RUNTIME_LOG%.%HELIX_TEST_CONTAINER%"
+exit /b 0
+:rm_resource
+if "%HELIX_TEST_RUNTIME_RESOURCES_EXIST%"=="1" exit /b 0
+echo No such container 1>&2
+exit /b 1
+"#;
+
+fn install_fake_docker(bin: &Path) -> PathBuf {
+    fs::create_dir_all(bin).expect("create fake docker bin");
+
+    #[cfg(windows)]
+    {
+        let script = bin.join("docker.cmd");
+        fs::write(&script, WINDOWS_FAKE_DOCKER).expect("write fake docker cmd");
         script
     }
 
@@ -360,6 +561,76 @@ if [ "$1" = "$HELIX_TEST_RUNTIME_FAIL_COMMAND" ]; then
   exit 42
 fi
 case "$1" in
+  exec) exit 0 ;;
+  inspect)
+    for argument in "$@"; do name="$argument"; done
+    case "$name" in
+      *.explorer)
+        if [ -f "$HELIX_TEST_RUNTIME_LOG.$name" ]; then
+          cat "$HELIX_TEST_RUNTIME_LOG.$name"
+          exit 0
+        fi
+        ;;
+    esac
+    echo "Error: No such object: $name" >&2
+    exit 1
+    ;;
+  port)
+    case "$2" in
+      *.explorer)
+        # An Explorer publishes its port only while `run` has started one.
+        if [ -f "$HELIX_TEST_RUNTIME_LOG.$2" ]; then
+          printf '%s\n' "$HELIX_TEST_RUNTIME_EXPLORER_PORT_OUTPUT"
+        fi
+        exit 0
+        ;;
+    esac
+    printf '%s\n' "$HELIX_TEST_RUNTIME_PORT_OUTPUT"; exit 0 ;;
+  run)
+    name="" identity="" role="" helix_url="" instance="" previous=""
+    for argument in "$@"; do
+      case "$previous" in
+        --name) name="$argument" ;;
+        --label)
+          case "$argument" in
+            helixdb.identity=*) identity="${argument#helixdb.identity=}" ;;
+            helixdb.role=*) role="${argument#helixdb.role=}" ;;
+          esac
+          ;;
+        -e)
+          case "$argument" in
+            HELIX_URL=*) helix_url="$argument" ;;
+            HELIX_INSTANCE_NAME=*) instance="$argument" ;;
+          esac
+          ;;
+      esac
+      previous="$argument"
+    done
+    case "$name" in
+      *.explorer)
+        # Saved as `inspect` reports it: identity and role labels, image ID,
+        # image (the last argument), then the environment.
+        printf '%s\n' "$identity" "$role" \
+          "${HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID:-sha256:$previous}" "$previous" \
+          "$helix_url" "$instance" > "$HELIX_TEST_RUNTIME_LOG.$name"
+        ;;
+    esac
+    exit 0
+    ;;
+  image)
+    if [ "$HELIX_TEST_RUNTIME_IMAGE_MISSING" = "1" ] && [ ! -f "$HELIX_TEST_RUNTIME_LOG.pulled" ]; then exit 1; fi
+    case "$5" in
+      ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882) echo sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; exit 0 ;;
+      # Each Explorer image gets its own ID, as distinct images do.
+      *helix-explorer*) echo "${HELIX_TEST_RUNTIME_EXPLORER_IMAGE_ID:-sha256:$5}"; exit 0 ;;
+    esac
+    echo sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    exit 0
+    ;;
+  pull)
+    if [ "$2" = "$HELIX_TEST_RUNTIME_FAIL_IMAGE" ]; then exit 42; fi
+    touch "$HELIX_TEST_RUNTIME_LOG.pulled"; exit 0 ;;
+
   info) exit 0 ;;
   ps)
     if [ -n "$HELIX_TEST_RUNTIME_PS_OUTPUT" ]; then
@@ -368,12 +639,47 @@ case "$1" in
     exit 0
     ;;
   logs) echo "fake logs"; exit 0 ;;
+  container)
+    if [ "$2" = "inspect" ]; then
+      label="${HELIX_TEST_RUNTIME_CONTAINER_LABEL:-$HELIX_TEST_RUNTIME_LABEL_PROBE}"
+      if [ "$label" = "missing" ]; then
+        echo "No such object" >&2
+        exit 1
+      fi
+      case "$label" in
+        "" | unlabeled) ;;
+        *) printf '%s\n' "$label" ;;
+      esac
+      exit 0
+    fi
+    exit 0
+    ;;
   rm)
+    case "$3" in
+      *.explorer)
+        if [ -f "$HELIX_TEST_RUNTIME_LOG.$3" ]; then
+          rm -f "$HELIX_TEST_RUNTIME_LOG.$3"
+          exit 0
+        fi
+        ;;
+    esac
     if [ "$HELIX_TEST_RUNTIME_RESOURCES_EXIST" = "1" ]; then exit 0; fi
     echo "No such container" >&2
     exit 1
     ;;
   network)
+    if [ "$2" = "inspect" ] && [ "$3" = "--format" ]; then
+      label="${HELIX_TEST_RUNTIME_NETWORK_LABEL:-$HELIX_TEST_RUNTIME_LABEL_PROBE}"
+      if [ "$label" = "missing" ]; then
+        echo "not found" >&2
+        exit 1
+      fi
+      case "$label" in
+        "" | unlabeled) ;;
+        *) printf '%s\n' "$label" ;;
+      esac
+      exit 0
+    fi
     if [ "$2" = "create" ] || [ "$HELIX_TEST_RUNTIME_RESOURCES_EXIST" = "1" ]; then
       exit 0
     fi
@@ -381,6 +687,18 @@ case "$1" in
     exit 1
     ;;
   volume)
+    if [ "$2" = "inspect" ] && [ "$3" = "--format" ]; then
+      label="${HELIX_TEST_RUNTIME_VOLUME_LABEL:-$HELIX_TEST_RUNTIME_LABEL_PROBE}"
+      if [ "$label" = "missing" ]; then
+        echo "not found" >&2
+        exit 1
+      fi
+      case "$label" in
+        "" | unlabeled) ;;
+        *) printf '%s\n' "$label" ;;
+      esac
+      exit 0
+    fi
     case "${HELIX_TEST_RUNTIME_VOLUME_MODE:-fresh}" in
       existing)
         # inspect succeeds, so ensure_volume returns before ever creating

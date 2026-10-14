@@ -1,286 +1,46 @@
 ---
-title: "Troubleshooting"
-description: "Solutions to common issues and error messages in the Helix CLI 3.x release line"
-sidebarTitle: "Troubleshooting"
-icon: "wrench"
-mode: "wide"
+title: "CLI troubleshooting"
+description: "Recover local and WorkOS-authenticated Cloud CLI operations"
 pageType: "Troubleshooting"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Troubleshooting</Badge></div>
 
-> For the complete documentation index optimized for AI agents, see [llms.txt](/llms.txt).
+## Authentication required
 
-This guide helps you resolve common issues with the Helix CLI 3.x release line.
+Run `helix auth login`. The CLI refreshes a nearly expired session automatically
+through the Helix Cloud API. It retries once only when the API rejects the expired
+token before running the command; a normal authorization denial or any failure after
+the command runs is not retried.
 
-## Installation issues
+Old credential/config fields are intentionally rejected. Remove legacy user/admin keys, arbitrary
+authorization headers, gateway URLs, and query-key fields. Service credentials and application keys
+cannot be used to log the CLI in.
 
-### `command not found: helix`
+## Ambiguous Cloud target
 
-On macOS and Linux, the CLI installs to `~/.local/bin/helix`. If your shell can't
-find it after running the installer:
+Without a terminal, or with `--json`, the CLI cannot prompt, so it fails and lists the candidates.
+Pass one by ID, slug, or name, for example `--workspace <workspace>`, `--project <project>`, or a
+database as `tenant:<id>`. If a name matches several resources, use the ID or slug instead.
+Alternatively run `helix project link` and `helix add cloud` to persist stable project/database
+linkage in `helix.toml`.
 
-```bash
-# Bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
+## Confirmation required
 
-# Zsh
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
+Destructive Cloud commands fail with `this action needs confirmation` when they cannot prompt. Re-run
+with `--yes` after checking the target.
 
-Verify the binary exists with `ls -la ~/.local/bin/helix`.
+## Query permission denied
 
-On Windows, the PowerShell installer writes
-`%LOCALAPPDATA%\Helix\bin\helix.exe` and adds that directory to your user `PATH`.
-Restart PowerShell after the first install, then verify it with:
+Project `read`/`write` does not grant database-data access. Ask an owner/admin to grant independent
+`query_read` and, if required, `query_write` for the selected project. Members default to neither.
 
-```powershell
-& "$env:LOCALAPPDATA\Helix\bin\helix.exe" --version
-```
+## Local connection refused
 
-### Updating the CLI
+Run `helix start <instance>`, verify with `helix status <instance>`, or pass local-only `--host` and
+`--port` overrides.
 
-```bash
-helix update          # update to the latest release
-helix update --force  # reinstall even if already on the latest version
-helix update --v1     # update to v2.3.5 for v1 projects
-```
+## Cloud logs
 
-### Update check fails or hangs on a restricted network
-
-On its first run, the CLI checks `https://api.github.com` (once, then cached for 24h) for a newer release. This never fails a command — network errors are ignored — but in sandboxes, CI, or rate-limited/offline environments the check can add a few seconds of latency. Skip it entirely with:
-
-```bash
-export HELIX_NO_UPDATE_CHECK=1   # also accepts HELIX_DISABLE_UPDATE_CHECK
-```
-
-## Unrecognized commands
-
-### `helix compile` / `helix check`
-
-These commands do **not** exist in the Helix CLI 3.x release line. There is no client-side compile or validation step — queries are validated **server-side** when you send them to a running instance. Author a JSON dynamic query and run it:
-
-```bash
-helix query dev --file examples/request.json
-```
-
-See [`helix query`](/cli/command-reference/query) for the request shape.
-
-### `helix deploy`
-
-Use [`helix push <instance>`](/cli/command-reference/push) to deploy a Helix Cloud instance.
-
-### `--path` reported as an unexpected argument
-
-`--path` is valid on [`helix init`](/cli/command-reference/init) and [`helix add`](/cli/command-reference/add), in either position (`helix init --path ./app local` or `helix init local --path ./app`). Older CLI versions only accepted `--path` *before* the subcommand — if you hit this error there, run [`helix update`](/cli/command-reference/update) or move the flag. Other commands locate the project by walking up from the current directory to find `helix.toml`; `cd` into the project instead.
-
-## Project configuration issues
-
-### `Not in a Helix project directory`
-
-```
-Not in a Helix project directory. Run 'helix init' to create one.
-```
-
-Either run `helix init` to scaffold a new project, or `cd` into a directory that contains `helix.toml`.
-
-### `helix.toml` validation errors
-
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `project name is empty in <path>` | `[project] name` is blank. | Set a non-empty `name`. |
-| `<path> has no instances configured` | No `[local.*]` or `[enterprise.*]` blocks. | Run [`helix add local`](/cli/command-reference/add) or `helix add cloud`. |
-| `instance name is empty in <path>` | Empty key like `[local.""]`. | Give the instance a name. |
-| `cluster_id is empty for '<name>' in <path>` | Missing required Helix Cloud field. | Set `cluster_id` under `[enterprise.<name>]`. |
-| `Failed to parse helix.toml: invalid type` | Numbers quoted as strings. | Use bare numbers — `port = 6969`, not `port = "6969"`. |
-
-### `Instance '<name>' not found`
-
-The instance is not listed in `helix.toml`. Check with `helix status` and add it with [`helix add`](/cli/command-reference/add).
-
-## Docker / Podman issues
-
-### Docker not installed or daemon not running
-
-```
-Docker is not installed (`docker` not found on PATH)
-Docker is not running
-```
-
-(Older CLI versions print `Docker is not available. Install/start docker and try again` for both cases.)
-
-A container runtime must be both **installed and running** — installing Docker is not enough if the daemon is stopped. `helix start` attempts to start an installed-but-stopped daemon for you, and surfaces these errors when it can't. If Docker is missing but Podman is installed, the CLI suggests switching: set `[project] container_runtime = "podman"` in `helix.toml`.
-
-To install a runtime: macOS — `brew install --cask docker` (Docker Desktop) or `brew install colima docker && colima start`; Linux — `curl -fsSL https://get.docker.com | sh`, or `apt-get install -y podman`.
-
-To start an installed runtime:
-
-- **macOS:** `open -a Docker`, or `colima start` / `podman machine start`.
-- **Linux:** `sudo systemctl start docker`.
-- **Headless / sandbox (no init system):** start the daemon directly, e.g. `sudo dockerd > /tmp/dockerd.log 2>&1 &`, then verify with `docker info`. Many sandboxes ship the Docker binary but do not start `dockerd` for you.
-- **Podman:** ensure `podman` is on `PATH` and set `[project] container_runtime = "podman"` in `helix.toml`. **Rootless Podman** needs `newuidmap`/`subuid`/`subgid` set up and frequently fails in restricted or rootless containers (namespace/mount errors) — install Docker or use a privileged container there instead.
-
-### Permission denied on Docker socket
-
-```
-permission denied while trying to connect to the Docker daemon socket
-```
-
-```bash
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-### Port already in use
-
-```
-bind: address already in use
-```
-
-```bash
-lsof -i :6969
-```
-
-Either stop the conflicting process or override the port for this run:
-
-```bash
-helix start dev --port 9090
-```
-
-Or change `[local.<instance>] port` in `helix.toml` permanently.
-
-### Container name conflict
-
-The CLI names containers `helix-<project>-<instance>`. If a stale container exists, remove it:
-
-```bash
-docker rm -f helix-my-helix-app-dev
-```
-
-`helix start` removes prior containers with the same name automatically, but a foreign container outside the CLI's control may need manual cleanup.
-
-### Local runtime did not become ready in time
-
-```
-local Helix did not become ready in time
-hint: check logs with 'helix logs' or verify port 6969 is reachable
-```
-
-The `helixdb` container started but `GET /healthz` did not report ready within ~30 seconds. Tail the container with `helix logs <instance> --follow` to investigate.
-
-## Authentication issues
-
-### `Authentication required`
-
-```
-Authentication required. Run 'helix auth login' first.
-```
-
-Run [`helix auth login`](/cli/command-reference/auth). Credentials are stored in `~/.helix/credentials`.
-
-### Stale credentials
-
-```bash
-helix auth logout
-helix auth login
-```
-
-## Helix Cloud query issues
-
-### `gateway_url is not configured`
-
-```
-Enterprise gateway URL is not configured for '<instance>'.
-Run 'helix sync <instance>' or set gateway_url in helix.toml.
-```
-
-Run [`helix sync <instance>`](/cli/command-reference/sync) to fetch the latest metadata. If `helix sync` reports `gateway_url is still missing`, the cluster's gateway hasn't been published yet — set `gateway_url` manually under `[enterprise.<instance>]` once you know it.
-
-### `Environment variable HELIX_API_KEY is required`
-
-The auth env var named by `query_auth_env` is unset.
-
-```bash
-export HELIX_API_KEY="..."
-```
-
-Set the raw key only. With the default `Authorization` header, an omitted
-`query_auth_scheme` infers `bearer` and adds the `Bearer` prefix. Headers such
-as `x-api-key` infer `raw`.
-
-### `--warm is only valid for read requests`
-
-`helix query --warm` is rejected for write requests before any backend executes.
-Remove `--warm` or change `request_type` to `"read"`.
-
-### `request_type must be lowercase 'read' or 'write'`
-
-`request_type` must be either `"read"` or `"write"`. Capitalized or alternative values are rejected.
-
-### `dynamic query request must include query`
-
-The JSON file is missing the top-level `query` object. See [`helix query`](/cli/command-reference/query) for the request shape.
-
-## Logs issues
-
-### `--range, --start, and --end are only supported for Enterprise logs`
-
-Range queries are Helix Cloud-only. For local instances, use `helix logs <instance> --follow` to tail the container.
-
-### `live Enterprise logs are not supported yet`
-
-`helix logs --follow` on a Helix Cloud instance is rejected. Use `--range --start <rfc3339> --end <rfc3339>` instead.
-
-## Destructive command issues
-
-### `Refusing to delete '<instance>' non-interactively`
-
-```bash
-helix delete <instance> --yes
-```
-
-### `Refusing to prune all instances non-interactively`
-
-```bash
-helix prune --all --yes
-```
-
-[`helix prune`](/cli/command-reference/prune) only removes Helix-owned containers, networks, disk-mode volumes, and per-instance workspace directories — it never runs a broad `docker/podman system prune`.
-
-## Interactive vs scripted use
-
-The CLI uses `cliclack` prompts when stdin is a TTY and a required choice is missing — for example, `helix init` with no subcommand, or `helix start` when multiple local instances exist and no instance is passed.
-
-In non-interactive contexts (CI, pipes, scripts):
-
-- Pass subcommands and required flags explicitly.
-- Use `--yes` for [`helix delete`](/cli/command-reference/delete) and [`helix prune --all`](/cli/command-reference/prune).
-- The CLI fails clearly when a required choice cannot be resolved — it never silently picks a default.
-
-## Quick checks before reporting an issue
-
-<Accordion title="Run these first">
-  - [ ] Update the CLI: `helix update`
-  - [ ] Check instances and runtime state: `helix status`
-  - [ ] Tail container logs: `helix logs <instance> --follow`
-  - [ ] Restart Docker / Podman
-  - [ ] Clean up Helix-owned resources: `helix prune`
-  - [ ] Check disk space: `df -h`
-  - [ ] Confirm `helix.toml` parses: re-run the failing command — config errors print the offending path
-</Accordion>
-
-## Getting help
-
-- Documentation: [docs.helix-db.com](https://docs.helix-db.com)
-- GitHub issues: [github.com/HelixDB/helix-db/issues](https://github.com/HelixDB/helix-db/issues)
-- Discord: [discord.gg/2stgMPr5BD](https://discord.gg/2stgMPr5BD)
-- Email: founders@helix-db.com
-
-When reporting an issue, include:
-
-- `helix --version`
-- Operating system + container runtime version
-- The exact command and full error output
-- A scrubbed `helix.toml` (remove cluster IDs, gateway URLs, auth env names if sensitive)
+Cloud `--follow` is not supported. Use an RFC 3339 `--start`/`--end` range or omit both for the last
+hour of query errors.

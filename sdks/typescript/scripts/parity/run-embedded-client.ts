@@ -2,6 +2,8 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Client, g, HelixError, QueryRequest, readBatch, stringifyJson, structuralJsonEqual, type HelixDbSource } from "../../src/index.js";
 import { nodePermutationFixtures, runtimeFixtures, type Fixture } from "./generate-fixtures.js";
+import { runCypherEmbedded } from "./cypher-client.js";
+import { parityProgress } from "./progress.js";
 
 const TRANSACTION_CONFLICT_ATTEMPTS = 8;
 const TRANSACTION_CONFLICT_MESSAGE = "Storage error: Transaction error: transaction conflict";
@@ -23,9 +25,11 @@ const source = (): HelixDbSource => {
 };
 const cache = { vectorMemoryBytes: 256 * 1024 * 1024, mode: { kind: "memory" as const } };
 const fixtures = [...runtimeFixtures(), ...nodePermutationFixtures()].sort((left, right) => left.name.localeCompare(right.name));
+parityProgress(`DSL ${storage}: opening writer`);
 let client = await Client.embedded(source(), cache);
 try {
   for (const fixture of fixtures) {
+    parityProgress(`DSL ${storage}: ${fixture.name}`);
     if (storage === "disk" && fixture.name === "900-write-active-text-items") {
       await client.close();
       const reader = await Client.embeddedReader(source(), cache);
@@ -54,14 +58,18 @@ try {
       throw new Error(`${search.name} unexpectedly succeeded after index DROP`);
     } catch (error) {
       if (error instanceof Error && error.message.includes("unexpectedly succeeded")) throw error;
-      if (!(error instanceof Error) || !error.message.includes("index_not_found")) {
+      if (!(error instanceof HelixError) || error.code !== "index_not_found") {
         throw new Error(`${search.name} returned the wrong post-DROP error: ${String(error)}`);
       }
     }
   }
 } finally {
+  parityProgress(`DSL ${storage}: closing writer`);
   await client.close();
 }
+parityProgress(`DSL ${storage}: closed writer`);
+await runCypherEmbedded(source(), cache, results);
+parityProgress(`${storage}: client complete`);
 
 function requiredFixture(fixtures: Fixture[], name: string): Fixture {
   const fixture = fixtures.find((candidate) => candidate.name === name);

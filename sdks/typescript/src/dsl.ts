@@ -231,11 +231,25 @@ export type EdgeId = number | bigint;
 export type ParamValue = PropertyValue;
 export type ParamObject = Record<string, PropertyValue | PropertyValueInput>;
 
+const rfc3339Pattern = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$/;
+
 function intToJson(value: number | bigint): number | bigint {
   if (typeof value === "bigint") return value;
   if (!Number.isInteger(value)) throw new TypeError(`expected integer, got ${value}`);
   if (!Number.isSafeInteger(value)) throw new TypeError(`unsafe integer number: ${value}`);
   return value;
+}
+
+const I64_MIN = -(1n << 63n);
+const I64_MAX = (1n << 63n) - 1n;
+
+function i64ToJson(value: number | bigint): number | bigint {
+  const integer = intToJson(value);
+  const exact = typeof integer === "bigint" ? integer : BigInt(integer);
+  if (exact < I64_MIN || exact > I64_MAX) {
+    throw new RangeError("integer outside signed 64-bit range");
+  }
+  return integer;
 }
 
 export class DateTime {
@@ -250,6 +264,22 @@ export class DateTime {
   }
 
   static parseRfc3339(input: string): DateTime {
+    const match = rfc3339Pattern.exec(input);
+    if (match === null) throw new TypeError(`invalid RFC3339 datetime: ${input}`);
+    const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+    const date = new Date(0);
+    date.setUTCFullYear(year, month - 1, day);
+    date.setUTCHours(hour, minute, second, 0);
+    if (
+      date.getUTCFullYear() !== year ||
+      date.getUTCMonth() !== month - 1 ||
+      date.getUTCDate() !== day ||
+      date.getUTCHours() !== hour ||
+      date.getUTCMinutes() !== minute ||
+      date.getUTCSeconds() !== second
+    ) {
+      throw new TypeError(`invalid RFC3339 datetime: ${input}`);
+    }
     const parsed = Date.parse(input);
     if (Number.isNaN(parsed)) throw new TypeError(`invalid RFC3339 datetime: ${input}`);
     return DateTime.fromMillis(parsed);
@@ -268,7 +298,9 @@ function dateTimeToRfc3339(value: DateTime, path: string): string {
   const millis = value.millis();
   const asNumber = Number(millis);
   if (!Number.isSafeInteger(asNumber)) throw QueryError.invalidDatetime(path, millis);
-  return new Date(asNumber).toISOString();
+  const date = new Date(asNumber);
+  if (Number.isNaN(date.getTime())) throw QueryError.invalidDatetime(path, millis);
+  return date.toISOString();
 }
 
 class I64Literal {
@@ -288,7 +320,7 @@ class DateTimeLiteral {
 }
 
 export function i64(value: number | bigint): I64Literal {
-  return new I64Literal(value);
+  return new I64Literal(i64ToJson(value));
 }
 export function f32(value: number): F32Literal {
   return new F32Literal(value);
@@ -338,7 +370,7 @@ export class PropertyValue implements Encodable {
     return new PropertyValue("Bool", value);
   }
   static i64(value: number | bigint): PropertyValue {
-    return new PropertyValue("I64", intToJson(value));
+    return new PropertyValue("I64", i64ToJson(value));
   }
   static dateTime(value: DateTime | number | bigint): PropertyValue {
     return new PropertyValue("DateTime", value instanceof DateTime ? value.millis() : intToJson(value));
@@ -353,10 +385,16 @@ export class PropertyValue implements Encodable {
     return new PropertyValue("String", value);
   }
   static bytes(value: Uint8Array | number[]): PropertyValue {
-    return new PropertyValue("Bytes", Array.from(value));
+    const normalized = Array.from(value);
+    for (const [index, byte] of normalized.entries()) {
+      if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+        throw new TypeError(`byte at index ${index} must be an integer from 0 to 255: ${byte}`);
+      }
+    }
+    return new PropertyValue("Bytes", normalized);
   }
   static i64Array(values: (number | bigint)[]): PropertyValue {
-    return new PropertyValue("I64Array", values.map(intToJson));
+    return new PropertyValue("I64Array", values.map(i64ToJson));
   }
   static f64Array(values: number[]): PropertyValue {
     return new PropertyValue("F64Array", values);
@@ -646,6 +684,9 @@ export class StreamBound implements Encodable {
     readonly payload: unknown,
   ) {}
   static literal(value: number | bigint): StreamBound {
+    if ((typeof value === "number" && value < 0) || (typeof value === "bigint" && value < 0n)) {
+      throw new TypeError("stream bound literal must be non-negative");
+    }
     const safe = intToJson(value);
     if (typeof safe === "bigint") {
       if (safe > BigInt(Number.MAX_SAFE_INTEGER)) throw new TypeError(`stream bound exceeds JavaScript safe integer range: ${safe}`);
@@ -1157,8 +1198,7 @@ export type IndexErrorCode =
   | "index_generation_exhausted"
   | "index_revision_exhausted"
   | "index_operation_revision_exhausted"
-  | "stale_index_generation"
-  | "writer_fenced_commit_outcome_unknown";
+  | "stale_index_generation";
 
 /** Decimal-string bounded-work counters. */
 export interface IndexOperationProgress {
@@ -2364,8 +2404,9 @@ export class Traversal<S extends TraversalState = "nodes", M extends MutationMod
   removeProperty(name: string): Traversal<"nodes", "write"> {
     return this.push(Step.removeProperty(name), "nodes", "write") as Traversal<"nodes", "write">;
   }
-  drop(): Traversal<"nodes", "write"> {
-    return this.push(Step.drop(), "nodes", "write") as Traversal<"nodes", "write">;
+  /** Delete current edges, or current nodes and their incident edges. Returns an empty stream. */
+  drop(): Traversal<S, "write"> {
+    return this.push(Step.drop(), this.state, "write") as Traversal<S, "write">;
   }
   dropEdge(to: NodeRef | NodeId | NodeId[] | string): Traversal<"nodes", "write"> {
     return this.push(Step.dropEdge(NodeRef.from(to)), "nodes", "write") as Traversal<"nodes", "write">;
@@ -2879,7 +2920,7 @@ function convertParamValue(schema: ParamSchema, value: unknown, path: string): J
       if (typeof value !== "boolean") throw new TypeError(`parameter '${path}' must be boolean`);
       return value;
     case "I64":
-      return intToJson(value as number | bigint);
+      return i64ToJson(value as number | bigint);
     case "F64":
       if (typeof value !== "number") throw new TypeError(`parameter '${path}' must be number`);
       return finiteNumber(value, path);
@@ -2944,7 +2985,7 @@ function normalizeTypedQueryValue(type: QueryParamType, value: JsonValue, path: 
       return value;
     case "I64":
       if (typeof value !== "number" && typeof value !== "bigint") throw new TypeError(`parameter '${path}' must be an integer`);
-      return intToJson(value);
+      return i64ToJson(value);
     case "F64":
       if (typeof value !== "number") throw new TypeError(`parameter '${path}' must be number`);
       return finiteNumber(value, path);
@@ -3010,11 +3051,22 @@ export enum QueryRequestType {
   Read = "read",
   Write = "write",
 }
+/**
+ * Request-level visibility of committed but not yet indexed vector/text data.
+ *
+ * `Strong` (the default) searches every committed graph change. `Eventual`
+ * overlays a bounded budget of unpublished changes and is valid only for read
+ * requests; write batches always search strongly.
+ */
+export enum SearchConsistency {
+  Strong = "strong",
+  Eventual = "eventual",
+}
 export type QueryValue = JsonValue;
 export const QueryValue = {
   null: (): JsonValue => null,
   bool: (value: boolean): JsonValue => value,
-  i64: (value: number | bigint): JsonValue => intToJson(value),
+  i64: (value: number | bigint): JsonValue => i64ToJson(value),
   f64: (value: number): JsonValue => finiteNumber(value, "value"),
   f32: (value: number): JsonValue => normalizeF32(value, "value"),
   string: (value: string): JsonValue => value,
@@ -3022,7 +3074,7 @@ export const QueryValue = {
   object: (values: Record<string, JsonValue>): JsonValue => values,
 };
 export type BatchQuery = ReadBatch | WriteBatch;
-export type QueryOptions = { queryName?: string | null };
+export type QueryOptions = { queryName?: string | null; searchConsistency?: SearchConsistency };
 
 type QueryRequestState =
   | { readonly requestType: QueryRequestType.Read; readonly query: ReadBatch }
@@ -3038,6 +3090,7 @@ type QueryParameterState =
 export class QueryRequest implements Encodable {
   private queryName: string | null = null;
   private parameterState?: QueryParameterState;
+  private consistency: SearchConsistency = SearchConsistency.Strong;
   private constructor(
     private readonly state: QueryRequestState,
     queryName: string | null = null,
@@ -3093,6 +3146,23 @@ export class QueryRequest implements Encodable {
     this.setQueryName(name);
     return this;
   }
+  get searchConsistency(): SearchConsistency {
+    return this.consistency;
+  }
+  /** Selects search visibility; eventual search is rejected for write requests. */
+  setSearchConsistency(consistency: SearchConsistency): void {
+    if (consistency !== SearchConsistency.Strong && consistency !== SearchConsistency.Eventual) {
+      throw new TypeError(`unknown search consistency: ${String(consistency)}`);
+    }
+    if (consistency === SearchConsistency.Eventual && this.state.requestType === QueryRequestType.Write) {
+      throw new TypeError('search consistency "eventual" is only valid for read requests; write batches always search strongly');
+    }
+    this.consistency = consistency;
+  }
+  withSearchConsistency(consistency: SearchConsistency): QueryRequest {
+    this.setSearchConsistency(consistency);
+    return this;
+  }
   toJSON(): JsonValue {
     const parameters = this.parameterState?.values;
     const parameterTypes = this.parameterState?.mode === "typed" ? this.parameterState.types : undefined;
@@ -3102,6 +3172,8 @@ export class QueryRequest implements Encodable {
       query: this.state.requestType === QueryRequestType.Read ? { read: this.state.query } : { write: this.state.query },
       parameters,
       parameter_types: parameterTypes,
+      // Omitted for the strong default so existing request bytes are unchanged.
+      search_consistency: this.consistency === SearchConsistency.Eventual ? this.consistency : undefined,
     };
   }
   toJsonBytes(): Uint8Array {
@@ -3141,7 +3213,9 @@ function isDefinedParams(value: unknown): value is DefinedParams<ParamShape> {
 }
 
 function applyQueryOptions(request: QueryRequest, options?: QueryOptions): QueryRequest {
-  if (!options || !("queryName" in options)) return request;
+  if (!options) return request;
+  if (options.searchConsistency !== undefined) request.setSearchConsistency(options.searchConsistency);
+  if (!("queryName" in options)) return request;
   if (options.queryName === null || options.queryName === undefined) {
     request.clearQueryName();
   } else {
@@ -3174,6 +3248,7 @@ export const prelude = {
   QueryError,
   QueryRequest,
   QueryRequestType,
+  SearchConsistency,
   QueryValue,
   PropertyValue,
   PropertyInput,

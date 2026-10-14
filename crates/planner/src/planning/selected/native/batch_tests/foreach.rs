@@ -125,7 +125,7 @@ fn native_batch_boundary_charges_foreach_wrapper_in_selected_metrics() {
         metrics.selected_cost,
         profile
             .foreach_wrapper()
-            .serial(profile.range_scan(profile.default_unknown_scan_rows))
+            .serial(profile.element_scan(profile.default_unknown_scan_rows))
     );
 }
 

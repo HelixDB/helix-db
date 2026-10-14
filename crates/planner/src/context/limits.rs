@@ -22,7 +22,9 @@ impl Default for PlannerLimits {
 /// Cascades optimizer guardrails.
 ///
 /// These limits keep planner work bounded and deterministic while allowing
-/// experiments to tune the search envelope.
+/// experiments to tune the search envelope. Every limit counts planner work,
+/// never elapsed time, so the same query and context always produce the same
+/// plan regardless of host speed or load.
 ///
 /// ```
 /// use helix_planner::context::OptimizerLimits;
@@ -30,6 +32,7 @@ impl Default for PlannerLimits {
 /// let limits = OptimizerLimits::default();
 /// assert!(limits.memo_groups.get() > 0);
 /// assert!(limits.rule_fires.get() > limits.memo_groups.get());
+/// assert!(limits.exploration_rule_fires.get() < limits.rule_fires.get());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OptimizerLimits {
@@ -41,8 +44,11 @@ pub struct OptimizerLimits {
     pub rule_fires: properties::PositiveUsize,
     /// Maximum alternatives retained per group/property requirement.
     pub alternatives_per_group: properties::PositiveUsize,
-    /// Optimization time budget in microseconds.
-    pub optimization_micros: properties::PositiveUsize,
+    /// Rule fires after which optional exploration stops. Implementation
+    /// rules and required rewrites keep running for every queued expression,
+    /// so each memo group still reaches selection with a physical
+    /// alternative. `rule_fires` remains the hard stop.
+    pub exploration_rule_fires: properties::PositiveUsize,
 }
 
 impl Default for OptimizerLimits {
@@ -52,7 +58,7 @@ impl Default for OptimizerLimits {
             memo_expressions: properties::PositiveUsize::at_least_one(100_000),
             rule_fires: properties::PositiveUsize::at_least_one(250_000),
             alternatives_per_group: properties::PositiveUsize::at_least_one(32),
-            optimization_micros: properties::PositiveUsize::at_least_one(50_000),
+            exploration_rule_fires: properties::PositiveUsize::at_least_one(50_000),
         }
     }
 }
@@ -137,7 +143,7 @@ mod tests {
         assert!(limits.memo_expressions.get() > limits.memo_groups.get());
         assert!(limits.rule_fires.get() > limits.memo_groups.get());
         assert!(limits.alternatives_per_group.get() > 0);
-        assert!(limits.optimization_micros.get() > 0);
+        assert!(limits.exploration_rule_fires.get() < limits.rule_fires.get());
     }
 
     #[test]

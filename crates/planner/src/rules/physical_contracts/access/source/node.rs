@@ -10,7 +10,8 @@ pub(in crate::rules) fn node_access_contract(
     storage: &cost::StorageCostProfile,
     stats: &context::StatsSnapshot,
 ) -> AccessPhysicalContract {
-    let contract = shared::access_contract::<NodeAccessFamily>(plan, storage, stats);
+    let mut contract = shared::access_contract::<NodeAccessFamily>(plan, storage, stats);
+    contract.delivered.ordering = exec::node_range_ordering(plan);
     let exact = match plan {
         ir::NodeAccessPlan::Union(_) | ir::NodeAccessPlan::Intersect(_) => {
             exec::node_secondary_set(plan).map(|set| exec::ExecNodeAccessPlan::SecondarySet { set })
@@ -25,7 +26,8 @@ pub(in crate::rules) fn node_access_contract(
         | ir::NodeAccessPlan::RangeIndex { .. }
         | ir::NodeAccessPlan::VectorSearch { .. }
         | ir::NodeAccessPlan::TextSearch { .. }
-        | ir::NodeAccessPlan::ScanThenFilter { .. } => None,
+        | ir::NodeAccessPlan::ScanThenFilter { .. }
+        | ir::NodeAccessPlan::BranchResidualUnion(_) => None,
     };
     match exact {
         Some(exact) => {
@@ -79,10 +81,24 @@ impl shared::AccessSourceFamily for NodeAccessFamily {
                         catalog::IndexUniqueness::NonUnique => shared::EqualityIndexKind::NonUnique,
                     },
                     semantics: value.semantics(),
+                    indexed_values: match value {
+                        ir::IndexValue::LiteralSet(values) => values
+                            .iter()
+                            .filter(|value| {
+                                value.semantics() == ir::LiteralEqualityIndexValueSemantics::Indexed
+                            })
+                            .count(),
+                        ir::IndexValue::Literal(_)
+                        | ir::IndexValue::Param(_)
+                        | ir::IndexValue::ParamSet(_) => 1,
+                    },
                 }
             }
-            ir::NodeAccessPlan::RangeIndex { key, .. } => {
-                shared::AccessSourceParts::RangeIndex { key }
+            ir::NodeAccessPlan::RangeIndex { key, iteration, .. } => {
+                shared::AccessSourceParts::RangeIndex {
+                    key,
+                    iteration: *iteration,
+                }
             }
             ir::NodeAccessPlan::VectorSearch { k, .. } => {
                 shared::AccessSourceParts::VectorSearch { k }
@@ -94,12 +110,21 @@ impl shared::AccessSourceFamily for NodeAccessFamily {
             ir::NodeAccessPlan::Union(plans) => {
                 shared::AccessSourceParts::Union(plans.iter().map(|plan| plan.as_ref()).collect())
             }
-            ir::NodeAccessPlan::ScanThenFilter {
-                source,
-                residual: _,
-            } => shared::AccessSourceParts::ScanThenFilter {
-                source: source.as_ref(),
-            },
+            ir::NodeAccessPlan::ScanThenFilter { source, residual } => {
+                shared::AccessSourceParts::ScanThenFilter {
+                    source: source.as_ref(),
+                    residual,
+                }
+            }
+            ir::NodeAccessPlan::BranchResidualUnion(branches) => {
+                shared::AccessSourceParts::BranchResidualUnion(
+                    branches
+                        .as_ref()
+                        .iter()
+                        .map(|branch| (branch.source().as_ref(), branch.residual()))
+                        .collect(),
+                )
+            }
         }
     }
 

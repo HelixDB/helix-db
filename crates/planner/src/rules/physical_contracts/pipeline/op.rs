@@ -27,9 +27,9 @@ pub(super) fn physical_pipeline_op_contract(
             },
             storage.range_scan(storage.default_unknown_scan_rows),
         ),
-        logical::PureLogicalOp::Filter { .. } => (
+        logical::PureLogicalOp::Filter { predicate } => (
             physical::PhysicalPipelineOp::ResidualFilter,
-            storage.predicate_eval(rows),
+            storage.residual_filter(predicate.as_ref(), rows),
         ),
         logical::PureLogicalOp::Order { .. } => (
             physical::PhysicalPipelineOp::Sort,

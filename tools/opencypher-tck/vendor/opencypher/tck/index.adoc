@@ -1,0 +1,319 @@
+= TCK Index
+
+The TCK is split into categories based on language constructs.
+The two main groups are clauses and expressions.
+Each group enumerates its members.
+Within each member, there are additional categories.
+
+
+== Clauses
+
+
+=== Call
+
+* Call1 - Basic procedure calling
+* Call2 - Procedure arguments
+* Call3 - Assignable-type arguments
+* Call4 - Null Arguments
+* Call5 - Results projection
+* Call6 - Call clause interoperation with other clauses
+
+=== Create
+
+* Create1 - Creating nodes
+* Create2 - Creating relationships
+* Create3 - Interoperation with other clauses
+* Create4 - Large Create Query
+* Create5 - Multiple hops create patterns
+* Create6 - Persistence of create clause side effects
+
+=== Delete
+
+* Delete1 - Deleting nodes
+* Delete2 - Deleting relationships
+* Delete3 - Deleting named paths
+* Delete4 - Delete clause interoperation with other clauses
+* Delete5 - Delete clause interoperation with built-in data types
+* Delete6 - Persistence of delete clause side effects
+
+=== Match
+
+* Match1 - Match nodes
+* Match2 - Match relationships
+* Match3 - Match fixed length patterns
+* Match4 - Match variable length patterns scenarios
+* Match5 - Match variable length patterns over given graphs scenarios
+* Match6 - Match named paths scenarios
+* Match7 - Optional match
+* Match8 - Match clause interoperation with other clauses
+* Match9 - Match deprecated scenarios
+
+=== Match-where
+
+* MatchWhere1 - Filter single variable
+* MatchWhere2 - Filter multiple variables
+* MatchWhere3 - Equi-Joins on variables
+* MatchWhere4 - Non-Equi-Joins on variables
+* MatchWhere5 - Filter on predicate resulting in null
+* MatchWhere6 - Filter optional matches
+
+=== Merge
+
+* Merge1 - Merge node
+* Merge2 - Merge node - on create
+* Merge3 - Merge node - on match
+* Merge4 - Merge node - on match and on create
+* Merge5 - Merge relationships
+* Merge6 - Merge relationships - on create
+* Merge7 - Merge relationships - on match
+* Merge8 - Merge relationships - on match and on create
+* Merge9 - Merge clause interoperation with other clauses
+
+=== Remove
+
+* Remove1 - Remove a Property
+* Remove2 - Remove a Label
+* Remove3 - Persistence of remove clause side effects
+
+=== Return
+
+* Return1 - Return single variable (correct return of values according to their type)
+* Return2 - Return single expression (correctly projecting an expression)
+* Return3 - Return multiple expressions (if column order correct)
+* Return4 - Column renaming
+* Return5 - Implicit grouping with distinct
+* Return6 - Implicit grouping with aggregates
+* Return7 - Return all variables
+* Return8 - Return clause interoperation with other clauses
+
+=== Return-orderby
+
+* ReturnOrderBy1 - Order by a single variable (correct order of values according to their type)
+* ReturnOrderBy2 - Order by a single expression (order of projection)
+* ReturnOrderBy3 - Order by multiple expressions (order obey priority of expressions)
+* ReturnOrderBy4 - Order by in combination with projection
+* ReturnOrderBy5 - Order by in combination with column renaming
+* ReturnOrderBy6 - Aggregation expressions in order by
+
+=== Return-skip-limit
+
+* ReturnSkipLimit1 - Skip
+* ReturnSkipLimit2 - Limit
+* ReturnSkipLimit3 - Skip and limit
+
+=== Set
+
+* Set1 - Set a Property
+* Set2 - Set a Property to Null
+* Set3 - Set a Label
+* Set4 - Set all properties with a map
+* Set5 - Set multiple properties with a map
+* Set6 - Persistence of set clause side effects
+
+=== Union
+
+* Union1 - Union
+* Union2 - Union All
+* Union3 - Union in combination with Union All
+
+=== Unwind
+
+* Unwind1
+
+=== With
+
+* With1 - Forward single variable
+* With2 - Forward single expression
+* With3 - Forward multiple expressions
+* With4 - Variable aliasing
+* With5 - Implicit grouping with DISTINCT
+* With6 - Implicit grouping with aggregates
+* With7 - WITH on WITH
+
+=== With-order By
+
+* WithOrderBy1 - Order by a single variable
+* WithOrderBy2 - Order by a single expression
+* WithOrderBy3 - Order by multiple expressions
+* WithOrderBy4 - Order by in combination with projection and aliasing
+
+=== With-skip-limit
+
+* WithSkipLimit1 - Skip
+* WithSkipLimit2 - Limit
+* WithSkipLimit3 - Skip and limit
+
+=== With-where
+
+* WithWhere1 - Filter single variable
+* WithWhere2 - Filter multiple variables
+* WithWhere3 - Equi-Joins on variables
+* WithWhere4 - Non-Equi-Joins on variables
+* WithWhere5 - Filter on predicate resulting in null
+* WithWhere6 - Filter on aggregates
+* WithWhere7 - Variable visibility under aliasing
+
+== Expressions
+
+
+=== Aggregation
+
+* Aggregation1 - Count
+* Aggregation2 - Min and Max
+* Aggregation3 - Sum
+* Aggregation5 - Collect
+* Aggregation6 - Percentiles
+* Aggregation8 - DISTINCT
+
+=== Boolean
+
+* Boolean1 - And logical operations
+* Boolean2 - OR logical operations
+* Boolean3 - XOR logical operations
+* Boolean4 - NOT logical operations
+* Boolean5 - Interop of logical operations
+
+=== Comparison
+
+* Comparison1 - Equality
+* Comparison2 - Half-bounded Range
+* Comparison3 - Full-Bound Range
+* Comparison4 - Combination of Comparisons
+
+=== Conditional
+
+* Conditional1 - Coalesce expression
+* Conditional2 - Case Expression
+
+=== Existential Subqueries
+
+* ExistentialSubquery1 - Simple existential subquery
+* ExistentialSubquery2 - Full existential subquery
+* ExistentialSubquery3 - Nested existential subquery
+
+=== Graph
+
+* Graph3 - Node labels
+* Graph4 - Edge relationship type
+* Graph5 - Node and edge label expressions
+* Graph6 - Static property access
+* Graph7 - Dynamic property access
+* Graph8 - Property keys function
+* Graph9 - Retrieve all properties as a property map
+
+=== List
+
+* List1 - Dynamic Element Access
+* List2 - List Slicing
+* List3 - List Equality
+* List4 - List Concatenation
+* List5 - List Membership Validation - IN Operator
+* List6 - List size
+* List9 - List Tail
+* List11 - Create a list from a range
+* List12 - List Comprehension
+
+=== Literals
+
+* Literals1 - Boolean and Null
+* Literals2 - Decimal integer
+* Literals3 - Hexadecimal integer
+* Literals4 - Octal integer
+* Literals5 - Float
+* Literals6 - String
+* Literals7 - List
+* Literals8 - Maps
+
+=== Map
+
+* Map1 - Static value access
+* Map2 - Dynamic Value Access
+* Map3 - Keys function
+
+=== Mathematical
+
+* Mathematical2 - Addition
+* Mathematical3 - Subtraction
+* Mathematical8 - Arithmetic precedence
+* Mathematical11 - Signed numbers functions
+* Mathematical13 - Square root
+
+=== Null
+
+* Null1 - IS NULL validation
+* Null2 - IS NOT NULL validation
+* Null3 - Null evaluation
+
+=== Path
+
+* Path1 - Nodes of a path
+* Path2 - Relationships of a path
+* Path3 - Length of a path
+
+=== Pattern
+
+* Pattern1 - Pattern predicate
+* Pattern2 - Pattern Comprehension
+
+=== Precedence
+
+* Precedence1 - On boolean values
+* Precedence2 - On numeric values
+* Precedence3 - On list values
+* Precedence4 - On null value
+
+=== Quantifier
+
+* Quantifier1 - None quantifier
+* Quantifier2 - Single quantifier
+* Quantifier3 - Any quantifier
+* Quantifier4 - All quantifier
+* Quantifier5 - None quantifier interop
+* Quantifier6 - Single quantifier interop
+* Quantifier7 - Any quantifier interop
+* Quantifier8 - All quantifier interop
+* Quantifier9 - None quantifier invariants
+* Quantifier10 - Single quantifier invariants
+* Quantifier11 - Any quantifier invariants
+* Quantifier12 - All quantifier invariants
+
+=== String
+
+* String1 - Substring extraction
+* String3 - String Reversal
+* String4 - String Splitting
+* String8 - Exact String Prefix Search
+* String9 - Exact String Suffix Search
+* String10 - Exact Substring Search
+* String11 - Combining Exact String Search
+
+=== Temporal
+
+* Temporal1 - Create Temporal Values from a Map
+* Temporal2 - Create Temporal Values from a String
+* Temporal3 - Project Temporal Values from other Temporal Values
+* Temporal4 - Store Temporal Values
+* Temporal5 - Access Components of Temporal Values
+* Temporal6 - Render Temporal Values as a String
+* Temporal7 - Compare Temporal Values
+* Temporal8 - Compute Arithmetic Operations on Temporal Values
+* Temporal9 - Truncate Temporal Values
+* Temporal10 - Compute Durations Between two Temporal Values
+
+=== Type Conversion
+
+* TypeConversion1 - To Boolean
+* TypeConversion2 - To Integer
+* TypeConversion3 - To Float
+* TypeConversion4 - To String
+
+== Use Cases
+
+
+=== Counting Subgraph Matches
+
+* CountingSubgraphMatches1 - Matching subgraph patterns and count the number of matches
+
+=== Triadic Selection
+
+* TriadicSelection1 - Query three related nodes on binary-tree graphs

@@ -1,9 +1,10 @@
 //! Exact deferred-index visibility requirements for executable operations.
 //!
-//! Graph rows are staged eagerly in the request transaction. Topology,
-//! secondary, vector, and text maintenance may be retained in family-local
-//! runtimes, so only operations that consume one of those physical families
-//! request its flush.
+//! Graph rows are staged eagerly in the request transaction. Topology and
+//! secondary maintenance may be retained in family-local runtimes, so only
+//! operations that consume one of those physical families request its flush.
+//! Vector and text maintenance is queued, never staged physically; searches
+//! overlay the transaction's own queued state directly and need no flush.
 
 use helix_planner::exec;
 
@@ -12,8 +13,6 @@ use helix_planner::exec;
 pub(super) enum DeferredMutationFamily {
     Topology,
     Secondary,
-    Vector,
-    Text,
 }
 
 /// Closed set of deferred families required before one executable operation.
@@ -22,19 +21,19 @@ pub(in crate::execution::interpreter) struct RequiredMutationVisibility(u8);
 
 impl RequiredMutationVisibility {
     const SECONDARY: u8 = 1 << 0;
-    const VECTOR: u8 = 1 << 1;
-    const TEXT: u8 = 1 << 2;
-    const TOPOLOGY: u8 = 1 << 3;
+    const TOPOLOGY: u8 = 1 << 1;
 
     const NONE: Self = Self(0);
-    const ALL: Self = Self(Self::TOPOLOGY | Self::SECONDARY | Self::VECTOR | Self::TEXT);
+    const ALL: Self = Self(Self::TOPOLOGY | Self::SECONDARY);
+    /// A secondary read that may also read a label bitmap: an index
+    /// membership, or an equality whose null or unencodable value is answered
+    /// by the label rows outside the equality lane.
+    const SECONDARY_WITH_LABELS: Self = Self(Self::SECONDARY | Self::TOPOLOGY);
 
     const fn one(family: DeferredMutationFamily) -> Self {
         match family {
             DeferredMutationFamily::Topology => Self(Self::TOPOLOGY),
             DeferredMutationFamily::Secondary => Self(Self::SECONDARY),
-            DeferredMutationFamily::Vector => Self(Self::VECTOR),
-            DeferredMutationFamily::Text => Self(Self::TEXT),
         }
     }
 
@@ -61,12 +60,6 @@ pub(in crate::execution::interpreter) fn required_for(
 ) -> RequiredMutationVisibility {
     match op {
         exec::ExecOp::Access { plan } => required_for_access(plan),
-        exec::ExecOp::VectorSearch { .. } => {
-            RequiredMutationVisibility::one(DeferredMutationFamily::Vector)
-        }
-        exec::ExecOp::TextSearch { .. } => {
-            RequiredMutationVisibility::one(DeferredMutationFamily::Text)
-        }
         exec::ExecOp::Count { .. }
         | exec::ExecOp::KvRead(_)
         | exec::ExecOp::Reserved { .. }
@@ -75,7 +68,50 @@ pub(in crate::execution::interpreter) fn required_for(
         exec::ExecOp::Expand { .. } | exec::ExecOp::ShortestPath { .. } => {
             RequiredMutationVisibility::one(DeferredMutationFamily::Topology)
         }
-        exec::ExecOp::Filter { .. }
+        // Membership reads the secondary set and the node-label bitmap.
+        exec::ExecOp::IndexMembership { .. } => RequiredMutationVisibility::SECONDARY_WITH_LABELS,
+        exec::ExecOp::Branch { plan } => {
+            let subplan = |plan: &exec::ExecutableSubplan| {
+                plan.steps()
+                    .iter()
+                    .fold(RequiredMutationVisibility::NONE, |mask, step| {
+                        RequiredMutationVisibility(mask.0 | required_for(&step.op).0)
+                    })
+            };
+            match plan {
+                exec::ExecBranchPlan::Union(branches) => branches
+                    .as_ref()
+                    .iter()
+                    .fold(RequiredMutationVisibility::NONE, |mask, plan| {
+                        RequiredMutationVisibility(mask.0 | subplan(plan).0)
+                    }),
+                exec::ExecBranchPlan::Coalesce(branches) => branches
+                    .as_ref()
+                    .iter()
+                    .fold(RequiredMutationVisibility::NONE, |mask, plan| {
+                        RequiredMutationVisibility(mask.0 | subplan(plan).0)
+                    }),
+                exec::ExecBranchPlan::Optional(plan)
+                | exec::ExecBranchPlan::Choose {
+                    then_plan: plan, ..
+                } => subplan(plan),
+                exec::ExecBranchPlan::ChooseElse {
+                    then_plan,
+                    else_plan,
+                    ..
+                } => RequiredMutationVisibility(subplan(then_plan).0 | subplan(else_plan).0),
+            }
+        }
+        exec::ExecOp::Repeat { plan } => plan
+            .body
+            .steps()
+            .iter()
+            .fold(RequiredMutationVisibility::NONE, |mask, step| {
+                RequiredMutationVisibility(mask.0 | required_for(&step.op).0)
+            }),
+        exec::ExecOp::VectorSearch { .. }
+        | exec::ExecOp::TextSearch { .. }
+        | exec::ExecOp::Filter { .. }
         | exec::ExecOp::Limit { .. }
         | exec::ExecOp::Skip { .. }
         | exec::ExecOp::Range { .. }
@@ -84,13 +120,49 @@ pub(in crate::execution::interpreter) fn required_for(
         | exec::ExecOp::Project { .. }
         | exec::ExecOp::Aggregate { .. }
         | exec::ExecOp::Variable { .. }
-        | exec::ExecOp::Branch { .. }
-        | exec::ExecOp::Repeat { .. }
         | exec::ExecOp::Mutation { .. }
         | exec::ExecOp::Merge { .. }
         | exec::ExecOp::ForEach { .. }
         | exec::ExecOp::Noop => RequiredMutationVisibility::NONE,
     }
+}
+
+/// A row pipeline may suspend several MATCH operators while borrowing one read
+/// view. Flush their selected physical families before opening any continuation.
+/// No mutation is allowed inside such a pipeline.
+pub(in crate::execution::interpreter) fn required_for_pattern(
+    plan: &helix_planner::relational::MatchPlan,
+) -> RequiredMutationVisibility {
+    use helix_planner::relational::MatchStep;
+    plan.steps
+        .iter()
+        .fold(RequiredMutationVisibility::NONE, |mut required, step| {
+            match step {
+                MatchStep::Scan(slot) | MatchStep::HashJoin { slot, .. } => {
+                    let source = plan
+                        .sources
+                        .iter()
+                        .find(|source| source.slot == *slot)
+                        .expect("planned scan has a source");
+                    for step in source.access.steps() {
+                        required.0 |= required_for(&step.op).0;
+                    }
+                }
+                MatchStep::IndexLookup(lookup) => {
+                    required.0 |= RequiredMutationVisibility::SECONDARY;
+                    let source = plan
+                        .sources
+                        .iter()
+                        .find(|source| source.slot == lookup.slot)
+                        .expect("planned lookup has a fallback source");
+                    for step in source.access.steps() {
+                        required.0 |= required_for(&step.op).0;
+                    }
+                }
+                MatchStep::Expand { .. } => required.0 |= RequiredMutationVisibility::TOPOLOGY,
+            }
+            required
+        })
 }
 
 fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibility {
@@ -99,19 +171,18 @@ fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibilit
         exec::ExecAccessPlan::Node(plan) => match plan {
             exec::ExecNodeAccessPlan::Bitmap { .. }
             | exec::ExecNodeAccessPlan::Unique { .. }
-            | exec::ExecNodeAccessPlan::DynamicEquality { .. }
-            | exec::ExecNodeAccessPlan::DynamicMembership { .. }
-            | exec::ExecNodeAccessPlan::RangeIndex { .. }
-            | exec::ExecNodeAccessPlan::SecondarySet { .. } => {
+            | exec::ExecNodeAccessPlan::RangeIndex { .. } => {
                 RequiredMutationVisibility::one(DeferredMutationFamily::Secondary)
             }
-            exec::ExecNodeAccessPlan::VectorSearch { .. } => {
-                RequiredMutationVisibility::one(DeferredMutationFamily::Vector)
-            }
-            exec::ExecNodeAccessPlan::TextSearch { .. } => {
-                RequiredMutationVisibility::one(DeferredMutationFamily::Text)
-            }
-            exec::ExecNodeAccessPlan::Empty
+            exec::ExecNodeAccessPlan::DynamicEquality { .. }
+            | exec::ExecNodeAccessPlan::DynamicMembership { .. }
+            | exec::ExecNodeAccessPlan::SecondarySet { .. }
+            | exec::ExecNodeAccessPlan::AuthoritativeScan {
+                predicate: exec::ExecNodeAuthoritativeScanPredicate::NullEquality { .. },
+            } => RequiredMutationVisibility::SECONDARY_WITH_LABELS,
+            exec::ExecNodeAccessPlan::VectorSearch { .. }
+            | exec::ExecNodeAccessPlan::TextSearch { .. }
+            | exec::ExecNodeAccessPlan::Empty
             | exec::ExecNodeAccessPlan::FromParam { .. }
             | exec::ExecNodeAccessPlan::FromVar { .. }
             | exec::ExecNodeAccessPlan::AllScan
@@ -124,19 +195,18 @@ fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibilit
         },
         exec::ExecAccessPlan::Edge(plan) => match plan {
             exec::ExecEdgeAccessPlan::Bitmap { .. }
-            | exec::ExecEdgeAccessPlan::DynamicEquality { .. }
-            | exec::ExecEdgeAccessPlan::DynamicMembership { .. }
-            | exec::ExecEdgeAccessPlan::RangeIndex { .. }
-            | exec::ExecEdgeAccessPlan::SecondarySet { .. } => {
+            | exec::ExecEdgeAccessPlan::RangeIndex { .. } => {
                 RequiredMutationVisibility::one(DeferredMutationFamily::Secondary)
             }
-            exec::ExecEdgeAccessPlan::VectorSearch { .. } => {
-                RequiredMutationVisibility::one(DeferredMutationFamily::Vector)
-            }
-            exec::ExecEdgeAccessPlan::TextSearch { .. } => {
-                RequiredMutationVisibility::one(DeferredMutationFamily::Text)
-            }
-            exec::ExecEdgeAccessPlan::Empty
+            exec::ExecEdgeAccessPlan::DynamicEquality { .. }
+            | exec::ExecEdgeAccessPlan::DynamicMembership { .. }
+            | exec::ExecEdgeAccessPlan::SecondarySet { .. }
+            | exec::ExecEdgeAccessPlan::AuthoritativeScan {
+                predicate: exec::ExecEdgeAuthoritativeScanPredicate::NullEquality { .. },
+            } => RequiredMutationVisibility::SECONDARY_WITH_LABELS,
+            exec::ExecEdgeAccessPlan::VectorSearch { .. }
+            | exec::ExecEdgeAccessPlan::TextSearch { .. }
+            | exec::ExecEdgeAccessPlan::Empty
             | exec::ExecEdgeAccessPlan::FromParam { .. }
             | exec::ExecEdgeAccessPlan::FromVar { .. }
             | exec::ExecEdgeAccessPlan::AllScan
@@ -175,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn search_accesses_require_only_their_physical_family() {
+    fn secondary_accesses_flush_secondary_and_searches_flush_nothing() {
         let secondary = exec::ExecOp::Access {
             plan: Box::new(exec::ExecAccessPlan::Node(
                 exec::ExecNodeAccessPlan::exact_equality(
@@ -192,8 +262,7 @@ mod tests {
         };
         let required = required_for(&secondary);
         assert!(required.contains(DeferredMutationFamily::Secondary));
-        assert!(!required.contains(DeferredMutationFamily::Vector));
-        assert!(!required.contains(DeferredMutationFamily::Text));
+        assert!(!required.contains(DeferredMutationFamily::Topology));
 
         let vector = required_for(&exec::ExecOp::VectorSearch {
             plan: Box::new(helix_planner::ir::RestrictedVectorSearchPlan::Nodes {
@@ -212,9 +281,47 @@ mod tests {
                 ),
             }),
         });
-        assert!(!vector.contains(DeferredMutationFamily::Secondary));
-        assert!(vector.contains(DeferredMutationFamily::Vector));
-        assert!(!vector.contains(DeferredMutationFamily::Text));
+        // Searches overlay transaction-local queued state instead of flushing.
+        assert_eq!(vector, RequiredMutationVisibility::NONE);
+    }
+
+    #[test]
+    fn index_membership_requires_secondary_and_label_topology() {
+        let key = helix_planner::catalog::ScopedPropertyKey::try_new("Item", "kind").unwrap();
+        let plan = helix_planner::ir::NodeIndexMembershipPlan::new(
+            helix_planner::ir::NodeAccessSourcePlan::new(
+                helix_planner::ir::NodeAccessPlan::EqualityIndex {
+                    index: helix_planner::catalog::IndexCatalogSnapshot::default()
+                        .with_node_eq(key.clone())
+                        .node_eq[&key]
+                        .clone(),
+                    key,
+                    value: helix_planner::ir::IndexValue::Literal(
+                        helix_planner::ir::SecondaryIndexLiteral::new(
+                            helix_ast::value::PropertyValue::from("B"),
+                        )
+                        .unwrap(),
+                    ),
+                },
+            )
+            .unwrap(),
+            helix_planner::ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("kind", "B"))
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        let required = required_for(&exec::ExecOp::IndexMembership {
+            plan: Box::new(exec::ExecNodeIndexMembershipPlan::from(&plan)),
+        });
+
+        assert!(required.contains(DeferredMutationFamily::Secondary));
+        assert!(required.contains(DeferredMutationFamily::Topology));
+        assert_eq!(
+            required_for(&exec::ExecOp::Filter {
+                predicate: plan.predicate().clone(),
+            }),
+            RequiredMutationVisibility::NONE
+        );
     }
 
     #[test]
@@ -225,8 +332,6 @@ mod tests {
         for family in [
             DeferredMutationFamily::Topology,
             DeferredMutationFamily::Secondary,
-            DeferredMutationFamily::Vector,
-            DeferredMutationFamily::Text,
         ] {
             assert!(required.contains(family));
         }

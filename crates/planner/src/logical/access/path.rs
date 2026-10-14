@@ -67,6 +67,37 @@ impl AccessPath {
         self.source_kind() == AccessSourceKind::Empty
     }
 
+    /// Whether this path may emit one element more than once.
+    ///
+    /// IDs read from a parameter or a saved stream keep their repeats, while
+    /// point IDs are distinct by construction and every index or scan source
+    /// emits each element once. A filter over a repeating path must keep
+    /// every repeated row it accepts, so it cannot become a set intersection.
+    ///
+    /// ```
+    /// use helix_planner::ir::{
+    ///     AtLeast, ElementIds, NodeAccessPlan, NodeAccessSourcePlan, NonEmptyString,
+    /// };
+    /// use helix_planner::logical::{AccessPath, NodeAccessPath};
+    ///
+    /// let path = |plan| {
+    ///     AccessPath::Node(NodeAccessPath::new(NodeAccessSourcePlan::new(plan).unwrap()))
+    /// };
+    /// let param = NodeAccessPlan::FromParam {
+    ///     param: NonEmptyString::new("ids").unwrap(),
+    /// };
+    /// let points = NodeAccessPlan::PointIds {
+    ///     ids: ElementIds::new(AtLeast::<_, 1>::from_one_and_rest(7, vec![9])).unwrap(),
+    /// };
+    ///
+    /// assert!(path(param).may_repeat_elements());
+    /// assert!(!path(points).may_repeat_elements());
+    /// assert!(!path(NodeAccessPlan::AllScan).may_repeat_elements());
+    /// ```
+    pub fn may_repeat_elements(&self) -> bool {
+        self.source_kind() == AccessSourceKind::Runtime
+    }
+
     /// Whether access-set canonicalization can rewrite this path.
     ///
     /// ```

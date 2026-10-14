@@ -9,6 +9,7 @@ mod defaults;
 mod formulas;
 mod overrides;
 mod parallel;
+mod residual;
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,7 @@ use super::{
     vector::CostVector,
 };
 
+pub use formulas::MembershipLabelDomain;
 pub use overrides::StorageCostProfileOverrides;
 
 /// Tunable object-storage-backed LSM cost profile.
@@ -40,6 +42,9 @@ pub struct StorageCostProfile {
     pub range_seek: LatencyEstimate,
     /// Per-row range scan step cost.
     pub range_next: LatencyEstimate,
+    /// Additional reverse traversal work per 1,000 visited entries. Batched units
+    /// preserve sub-microsecond calibration without changing latency units.
+    pub reverse_range_per_1000: LatencyEstimate,
     /// Per-row residual predicate CPU cost.
     pub cpu_predicate_eval: LatencyEstimate,
     /// Per-row generic stream operator CPU cost.

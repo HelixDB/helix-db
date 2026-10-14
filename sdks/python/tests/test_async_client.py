@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import unittest
 from unittest.mock import patch
@@ -20,6 +21,7 @@ from helixdb import (
     QueryRequest,
     g,
     read_batch,
+    write_batch,
 )
 
 
@@ -71,6 +73,32 @@ class SequencedTransport(httpx.AsyncBaseTransport):
 
 
 class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lost_response_gateway_probe(self) -> None:
+        base_url = os.environ.get("HELIX_LOST_RESPONSE_GATEWAY_URL")
+        if base_url is None:
+            self.skipTest("real lost-response gateway fixture is not configured")
+        probe_id = os.environ["HELIX_LOST_RESPONSE_PROBE_ID"]
+        request = QueryRequest.write(
+            write_batch()
+            .var_as(
+                "created",
+                g().add_n("LostResponseProbe", {"business_id": probe_id}),
+            )
+            .returning(["created"])
+        )
+
+        async with AsyncClient(
+            base_url,
+            api_key=os.environ.get("HELIX_LOST_RESPONSE_API_KEY"),
+        ) as client:
+            with self.assertRaises(HelixError) as ctx:
+                await client.query(request)
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.code, "WRITE_OUTCOME_UNKNOWN")
+        self.assertIs(ctx.exception.retryable, False)
+        self.assertFalse(ctx.exception.is_retryable())
+
     async def test_public_async_client_api_is_explicitly_accounted_for(self) -> None:
         self.assertEqual(
             public_api_members(AsyncClient),
@@ -83,6 +111,8 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
                 "with_database_id",
                 "request_builder",
                 "query",
+                "cypher",
+                "explain_cypher",
                 "execute",
                 "base_url",
                 "close",
@@ -210,6 +240,39 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1].headers["x-helix-warm"], "true")
         self.assertEqual(calls[1].headers["x-helix-await-durable"], "true")
 
+    async def test_database_id_header_is_sent_on_native_queries_until_cleared(self) -> None:
+        calls: list[httpx.Request] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return httpx.Response(200, json={"ok": True})
+
+        client = AsyncClient.server(
+            api_key="hx_secret", database_id="db-1", transport=httpx.MockTransport(handler)
+        )
+        snapshot = client.request_builder().query(read_request())
+        self.assertIs(client.with_database_id("db-2"), client)
+
+        await snapshot.send()
+        await client.execute(read_request(), writer_only=True)
+        client.with_database_id()
+        await client.query(read_request())
+        await client.close()
+
+        self.assertEqual(
+            [call.headers.get("x-helix-database-id") for call in calls],
+            ["db-1", "db-2", None],
+        )
+        self.assertEqual(calls[1].headers["authorization"], "Bearer hx_secret")
+        self.assertEqual(calls[1].headers["x-helix-require-writer"], "true")
+
+    async def test_embedded_with_database_id_is_a_no_op(self) -> None:
+        with patch.dict(sys.modules, {"helixdb_uniffi": fake_native_module()}):
+            client = await AsyncClient.embedded(InMemory("async-database-id"))
+            self.assertIs(client.with_database_id("db-1"), client)
+            self.assertEqual(await client.query(read_request()), {"users": 0})
+            await client.close()
+
     async def test_empty_invalid_remote_and_network_responses_match_sync_contract(
         self,
     ) -> None:
@@ -246,6 +309,48 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
                 await client.query(read_request())
         self.assertEqual(network.exception.kind, "Network")
         self.assertIsInstance(network.exception.__cause__, httpx.ConnectError)
+
+    async def test_unknown_write_outcome_is_terminal_and_sent_once(self) -> None:
+        request = QueryRequest.write(
+            write_batch()
+            .var_as("created", g().add_n("User", {"name": "Ada"}))
+            .returning(["created"])
+        )
+        cases = [
+            (
+                {
+                    "error": "writer_fenced_commit_outcome_unknown",
+                    "msg": "write outcome is unknown",
+                    "retryable": False,
+                },
+                "writer_fenced_commit_outcome_unknown",
+            ),
+            (
+                {
+                    "code": "WRITE_OUTCOME_UNKNOWN",
+                    "error": "write outcome is unknown",
+                    "retryable": False,
+                },
+                "WRITE_OUTCOME_UNKNOWN",
+            ),
+        ]
+        for body, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                calls = 0
+
+                async def handler(request: httpx.Request) -> httpx.Response:
+                    nonlocal calls
+                    calls += 1
+                    return httpx.Response(503, json=body)
+
+                async with AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                    with self.assertRaises(HelixError) as ctx:
+                        await client.query(request)
+
+                self.assertEqual(calls, 1)
+                self.assertEqual(ctx.exception.code, expected_code)
+                self.assertIs(ctx.exception.retryable, False)
+                self.assertFalse(ctx.exception.is_retryable())
 
     async def test_timeout_closes_response_and_client_is_reusable(self) -> None:
         stream = ControlledStream(b"", fail=True)
@@ -318,6 +423,7 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
         for operation in (
             lambda: client.request_builder(),
             lambda: client.with_api_key("closed"),
+            lambda: client.with_database_id("closed"),
             lambda: client.base_url,
         ):
             with self.assertRaises(HelixError) as closed:

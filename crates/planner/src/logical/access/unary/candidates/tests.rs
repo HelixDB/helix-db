@@ -52,6 +52,7 @@ fn range_source(
     direction: helix_ast::index::RangeIndexDirection,
 ) -> ir::NodeAccessPlan {
     ir::NodeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
         key: catalog::ScopedPropertyDirectionKey::try_new("User", property, direction).unwrap(),
         range: ir::IndexRange::All,
@@ -63,6 +64,7 @@ fn edge_range_source(
     direction: helix_ast::index::RangeIndexDirection,
 ) -> ir::EdgeAccessPlan {
     ir::EdgeAccessPlan::RangeIndex {
+        iteration: crate::ir::RangeScanIteration::Forward,
         index: catalog::EdgeRangeIndexMeta::try_new("edge_range").unwrap(),
         key: catalog::ScopedPropertyDirectionKey::try_new("LIKES", property, direction).unwrap(),
         range: ir::IndexRange::All,
@@ -164,7 +166,7 @@ fn access_order_predicates_cover_elision_and_range_direction_candidates() {
         )),
         order_keys("age", helix_ast::traversal::Order::Desc),
     );
-    assert!(!opposite_range_order.has_order_elision_candidate());
+    assert!(opposite_range_order.has_order_elision_candidate());
     assert!(opposite_range_order.has_range_direction_candidate());
 
     let already_satisfied_range_order = AccessOrder::new(
@@ -184,7 +186,7 @@ fn access_order_predicates_cover_elision_and_range_direction_candidates() {
         )),
         order_keys("weight", helix_ast::traversal::Order::Asc),
     );
-    assert!(!edge_opposite_range_order.has_order_elision_candidate());
+    assert!(edge_opposite_range_order.has_order_elision_candidate());
     assert!(edge_opposite_range_order.has_range_direction_candidate());
 
     let edge_satisfied_range_order = AccessOrder::new(

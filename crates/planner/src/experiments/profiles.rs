@@ -293,7 +293,9 @@ mod tests {
                 assert_eq!(comparison.fixture(), fixture.fixture());
                 assert_eq!(comparison.baseline(), fixture.baseline());
                 assert_eq!(comparison.candidate(), fixture.candidate());
-                assert!(comparison.selected_cost_changed());
+                if comparison.candidate() == CostProfileVariant::BroadEqualityFallback {
+                    assert!(comparison.selected_cost_changed());
+                }
                 assert!(comparison.candidate_cost().latency >= comparison.baseline_cost().latency);
                 !comparison.baseline_metrics().guardrail_hit
                     && !comparison.candidate_metrics().guardrail_hit

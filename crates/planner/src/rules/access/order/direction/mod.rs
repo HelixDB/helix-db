@@ -9,11 +9,11 @@ mod edge;
 mod node;
 mod source;
 
-pub(in crate::rules::access) use contracts::AccessOrderRangeDirectionRewrite;
+pub(in crate::rules) use contracts::AccessOrderRangeDirectionRewrite;
 
 use crate::{catalog, logical};
 
-pub(in crate::rules::access) fn rewrite_access_order_range_direction(
+pub(in crate::rules) fn rewrite_access_order_range_direction(
     order: &logical::AccessOrder,
     indexes: &catalog::IndexCatalogSnapshot,
 ) -> AccessOrderRangeDirectionRewrite {
@@ -26,15 +26,6 @@ pub(in crate::rules::access) fn rewrite_access_order_range_direction(
             edge::rewrite_access_order_range_direction(path.source(), order.ordering(), indexes),
             |source| logical::AccessPath::Edge(logical::EdgeAccessPath::new(source)),
         ),
-    }
-}
-
-pub(super) fn order_for_range_direction(
-    direction: helix_ast::index::RangeIndexDirection,
-) -> helix_ast::traversal::Order {
-    match direction {
-        helix_ast::index::RangeIndexDirection::Asc => helix_ast::traversal::Order::Asc,
-        helix_ast::index::RangeIndexDirection::Desc => helix_ast::traversal::Order::Desc,
     }
 }
 
@@ -80,6 +71,7 @@ mod tests {
         direction: helix_ast::index::RangeIndexDirection,
     ) -> ir::NodeAccessSourcePlan {
         node_source(ir::NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new("User", property, direction).unwrap(),
             range: lower_range(18),
@@ -91,6 +83,7 @@ mod tests {
         direction: helix_ast::index::RangeIndexDirection,
     ) -> ir::EdgeAccessSourcePlan {
         edge_source(ir::EdgeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::EdgeRangeIndexMeta::try_new("edge_range").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new("LIKES", property, direction)
                 .unwrap(),
@@ -114,13 +107,17 @@ mod tests {
         );
 
         assert_eq!(rewrite, AccessOrderRangeDirectionRewrite::NotApplicable);
-        assert!(!rewrite.is_rewritten());
     }
 
     #[test]
     fn range_direction_rewrite_converts_not_applicable_to_rule_result() {
         assert_eq!(
-            AccessOrderRangeDirectionRewrite::NotApplicable.into_rule_result(),
+            AccessOrderRangeDirectionRewrite::NotApplicable.into_rule_result(ir::OrderKeys::from(
+                ir::OrderKey {
+                    property: ir::NonEmptyString::new("value").unwrap(),
+                    order: helix_ast::traversal::Order::Asc
+                }
+            )),
             optimizer::RuleResult::NotApplicable
         );
     }

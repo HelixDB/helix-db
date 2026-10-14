@@ -148,6 +148,42 @@ pub enum IndexDdlPlan {
     },
 }
 
+impl IndexDdlPlan {
+    /// CREATE/DROP/RETRY/ABORT own a catalog transaction and must not share an
+    /// open graph write. [`Self::GetOperation`] is a status read and stays on
+    /// the request transaction already open.
+    ///
+    /// ```
+    /// use helix_planner::catalog::{IndexUniqueness, ScopedPropertyKey};
+    /// use helix_planner::ir::{IndexCreateMode, IndexDdlCreateSpec, IndexDdlPlan, IndexOperationId};
+    ///
+    /// let operation_id =
+    ///     IndexOperationId::try_new("07070707-0707-0707-0707-070707070707").unwrap();
+    /// assert!(!IndexDdlPlan::GetOperation {
+    ///     operation_id: operation_id.clone()
+    /// }
+    /// .requires_isolated_catalog_transaction());
+    /// assert!(IndexDdlPlan::RetryOperation { operation_id }.requires_isolated_catalog_transaction());
+    /// assert!(IndexDdlPlan::Create {
+    ///     spec: IndexDdlCreateSpec::NodeEquality {
+    ///         key: ScopedPropertyKey::try_new("User", "email").unwrap(),
+    ///         uniqueness: IndexUniqueness::NonUnique,
+    ///     },
+    ///     mode: IndexCreateMode::ErrorIfExists,
+    /// }
+    /// .requires_isolated_catalog_transaction());
+    /// ```
+    pub const fn requires_isolated_catalog_transaction(&self) -> bool {
+        match self {
+            Self::GetOperation { .. } => false,
+            Self::Create { .. }
+            | Self::Drop { .. }
+            | Self::RetryOperation { .. }
+            | Self::AbortOperation { .. } => true,
+        }
+    }
+}
+
 /// Index creation spec with validated labels, properties, and create-time
 /// attributes.
 ///

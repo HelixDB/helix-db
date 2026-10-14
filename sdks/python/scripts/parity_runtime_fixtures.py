@@ -19,6 +19,7 @@ from helixdb import (
     QueryParamType,
     QueryRequest,
     RepeatConfig,
+    SearchConsistency,
     SourcePredicate,
     Traversal,
     VectorDistanceMetric,
@@ -753,6 +754,32 @@ def base_runtime_fixtures() -> list[RuntimeFixture]:
             ),
         ),
         (
+            "028a-read-eventual-search",
+            QueryRequest.read(
+                read_batch()
+                .var_as(
+                    "text_hits",
+                    g()
+                    .text_search_nodes("ParityUser", "bio", "graph", 5, None)
+                    .value_map(["externalId", "bio", "$distance"]),
+                )
+                .var_as(
+                    "vector_hits",
+                    g()
+                    .vector_search_nodes(
+                        "ParityUser", "embedding", [1.0, 0.0, 0.0], 3, None
+                    )
+                    .project(
+                        [
+                            Projection.property("externalId", "externalId"),
+                            Projection.property("$distance", "distance"),
+                        ]
+                    ),
+                )
+                .returning(["text_hits", "vector_hits"])
+            ).with_search_consistency(SearchConsistency.EVENTUAL),
+        ),
+        (
             "029-write-drop-temp-node",
             QueryRequest.write(
                 write_batch()
@@ -1013,7 +1040,7 @@ def base_runtime_fixtures() -> list[RuntimeFixture]:
                 )
                 .var_as(
                     "edges",
-                    g().drop_edge_by_id(EdgeRef.var("edge_matches")).count(),
+                    g().e(EdgeRef.var("edge_matches")).drop().count(),
                 )
                 .var_as(
                     "source",

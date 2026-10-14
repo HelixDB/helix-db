@@ -1,6 +1,8 @@
 //! Node access-plan contracts.
 
 mod analysis;
+mod branch;
+mod membership;
 mod source;
 
 use serde::{Deserialize, Serialize};
@@ -9,6 +11,11 @@ use crate::catalog;
 
 use crate::ir;
 
+pub use branch::{NodeResidualBranch, NodeResidualBranches};
+pub use membership::{
+    NodeIndexMembershipError, NodeIndexMembershipPlan, NodeMembershipOutsideLabel,
+    NodeMembershipSet,
+};
 pub use source::NodeAccessSourcePlan;
 
 /// Node access plan.
@@ -56,6 +63,9 @@ pub enum NodeAccessPlan {
         key: catalog::ScopedPropertyDirectionKey,
         /// Range bounds.
         range: ir::IndexRange,
+        /// Traversal within the physical lane.
+        #[serde(default)]
+        iteration: ir::RangeScanIteration,
     },
     /// Vector search.
     VectorSearch {
@@ -92,6 +102,10 @@ pub enum NodeAccessPlan {
         /// Residual predicate.
         residual: ir::PredicatePlan,
     },
+    /// Rows of each branch's index set that its residual accepts; a row
+    /// matches when some branch holds and accepts it. Every branch reads an
+    /// index-only set, so no branch scans.
+    BranchResidualUnion(NodeResidualBranches),
 }
 
 impl AsRef<NodeAccessPlan> for NodeAccessPlan {
@@ -101,6 +115,13 @@ impl AsRef<NodeAccessPlan> for NodeAccessPlan {
 }
 
 impl NodeAccessPlan {
+    /// Union of index-only sets, each filtered by its own residual, or `None`
+    /// unless there are at least two branches, at least one has a residual,
+    /// and every branch source is an index-only set.
+    pub fn branch_residual_union(branches: Vec<NodeResidualBranch>) -> Option<Self> {
+        NodeResidualBranches::new(branches).map(Self::BranchResidualUnion)
+    }
+
     /// Whether every leaf can participate in one executable secondary ID set.
     pub(crate) fn is_secondary_set_eligible(&self) -> bool {
         analysis::secondary_set_eligible(self)
@@ -177,6 +198,7 @@ mod tests {
     #[test]
     fn secondary_set_eligibility_covers_nested_and_mixed_node_trees() {
         let range = NodeAccessPlan::RangeIndex {
+            iteration: crate::ir::RangeScanIteration::Forward,
             index: catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
             key: catalog::ScopedPropertyDirectionKey::try_new(
                 "User",
@@ -216,6 +238,7 @@ mod tests {
                 value: equality_value(),
             },
             NodeAccessPlan::RangeIndex {
+                iteration: crate::ir::RangeScanIteration::Forward,
                 index: catalog::NodeRangeIndexMeta::try_new("user_age").unwrap(),
                 key: catalog::ScopedPropertyDirectionKey::try_new(
                     "User",
@@ -313,6 +336,36 @@ mod tests {
         assert_eq!(
             source(vector_search(literal_limit(4))).hard_cardinality_upper_bound(),
             Some(4)
+        );
+    }
+
+    #[test]
+    fn node_source_unique_equality_bound_depends_on_lookup_value() {
+        let unique = |value| {
+            source(NodeAccessPlan::EqualityIndex {
+                index: catalog::NodeEqualityIndexMeta::try_new("user_email")
+                    .unwrap()
+                    .with_uniqueness(catalog::IndexUniqueness::Unique),
+                key: catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
+                value,
+            })
+            .hard_cardinality_upper_bound()
+        };
+        let literal =
+            |value| ir::IndexValue::Literal(ir::SecondaryIndexLiteral::new(value).unwrap());
+        let param = || ir::NonEmptyString::new("email").unwrap();
+
+        assert_eq!(unique(literal(PropertyValue::F64(f64::NAN))), Some(0));
+        // Null equality is an authoritative scan of every owner lacking the
+        // property, and a runtime parameter can bind null or many values.
+        assert_eq!(unique(literal(PropertyValue::Null)), None);
+        assert_eq!(unique(ir::IndexValue::Param(param())), None);
+        assert_eq!(
+            unique(ir::IndexValue::ParamSet(ir::RuntimeEqualitySet::new(
+                param(),
+                NonZeroUsize::new(64).unwrap(),
+            ))),
+            None
         );
     }
 
@@ -434,5 +487,47 @@ mod tests {
         assert!(union.has_set_subsumption_candidate());
         assert!(intersection.has_set_subsumption_candidate());
         assert!(!ordinary.has_set_subsumption_candidate());
+    }
+
+    /// Sets wider than the digest threshold find the same candidates.
+    #[test]
+    fn wide_sets_find_duplicate_and_structural_subsumption_candidates() {
+        let lookup = |value: PropertyValue| {
+            source(NodeAccessPlan::EqualityIndex {
+                index: catalog::NodeEqualityIndexMeta::try_new("user_email").unwrap(),
+                key: catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
+                value: ir::IndexValue::Literal(ir::SecondaryIndexLiteral::new(value).unwrap()),
+            })
+        };
+        let email = |value: i64| lookup(PropertyValue::I64(value));
+        let distinct = (0..12).map(email).collect::<Vec<_>>();
+        let set = |sources: Vec<NodeAccessSourcePlan>| {
+            let union = source(NodeAccessPlan::Union(
+                ir::AtLeast::<_, 2>::try_from_vec(sources.clone()).unwrap(),
+            ));
+            let intersection = source(NodeAccessPlan::Intersect(
+                ir::AtLeast::<_, 2>::try_from_vec(sources).unwrap(),
+            ));
+            (
+                union.has_set_subsumption_candidate(),
+                intersection.has_set_subsumption_candidate(),
+            )
+        };
+
+        assert_eq!(set(distinct.clone()), (false, false));
+        let duplicated = [distinct.clone(), vec![email(5)]].concat();
+        assert_eq!(set(duplicated), (true, true));
+        let covered = [distinct.clone(), vec![label_scan("User")]].concat();
+        assert_eq!(set(covered), (true, true));
+        // `==` treats the two zeros as equal, though their bits differ.
+        let signed_zeros = [
+            distinct,
+            vec![
+                lookup(PropertyValue::F64(0.0)),
+                lookup(PropertyValue::F64(-0.0)),
+            ],
+        ]
+        .concat();
+        assert_eq!(set(signed_zeros), (true, true));
     }
 }

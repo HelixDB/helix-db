@@ -3,7 +3,7 @@
 //! Every fixture creates graph data before its dynamic index, waits for retroactive
 //! activation, and then deletes a label-matching entity that has no indexed property.
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::{future::Future, num::NonZeroUsize, time::Duration};
 
 use db::{HelixDB, HelixDbSource};
 use helix_ast::batch;
@@ -25,6 +25,26 @@ const BULK_DELETE_TARGETS: usize = 513;
 const BULK_DELETE_PROPERTY: &str = "delete_group";
 const BULK_DELETE_VALUE: &str = "bulk";
 const BULK_SEED_BATCH: usize = 64;
+
+fn run_high_stack_contract<F, Fut>(name: &'static str, contract: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("index delete contract runtime builds")
+                .block_on(contract());
+        })
+        .expect("index delete contract thread starts")
+        .join()
+        .expect("index delete contract thread completes");
+}
 
 /// Every valid public index shape with a behaviorally distinct delete path.
 #[derive(Debug, Clone, Copy)]
@@ -115,7 +135,12 @@ impl DeleteCase {
                 tenant_partitioned: true,
             } => Some(512),
             Self::NodeVector { .. } | Self::EdgeVector { .. } => Some(2),
-            _ => None,
+            Self::NodeEquality { .. }
+            | Self::EdgeEquality
+            | Self::NodeRange { .. }
+            | Self::EdgeRange { .. }
+            | Self::NodeText { .. }
+            | Self::EdgeText { .. } => None,
         }
     }
 
@@ -610,6 +635,45 @@ async fn deletes_edge_omitted_from_equality_index() {
 }
 
 #[tokio::test]
+async fn deletes_indexed_node_and_edge_equality_members_through_disjoint_deltas() {
+    for case in [
+        DeleteCase::NodeEquality { unique: false },
+        DeleteCase::EdgeEquality,
+    ] {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: format!("production-index-delete-disjoint-{}", case.name()),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("{} database opens: {error}", case.name()));
+        let seeded = seed_case(&db, case).await;
+        create_index(&db, case).await;
+        assert_eq!(control_ids(&db, case).await, vec![seeded.control_id]);
+
+        let delete = if case.is_node() {
+            traversal::g().n(NodeRef::id(seeded.control_id)).drop()
+        } else {
+            traversal::g().drop_edge_by_id(EdgeRef::id(seeded.control_id))
+        };
+        db.query(QueryRequest::write(
+            batch::write_batch()
+                .var_as("deleted", delete)
+                .returning(Vec::<String>::new()),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("{} indexed delete succeeds: {error}", case.name()));
+
+        assert!(control_ids(&db, case).await.is_empty());
+        assert_eq!(
+            entity_ids(&db, case, seeded.target_id).await,
+            vec![seeded.target_id]
+        );
+        db.close()
+            .await
+            .unwrap_or_else(|error| panic!("{} database closes: {error}", case.name()));
+    }
+}
+
+#[tokio::test]
 async fn deletes_node_omitted_from_ascending_range_index() {
     run_direct_delete_case(DeleteCase::NodeRange {
         direction: RangeIndexDirection::Asc,
@@ -705,8 +769,15 @@ async fn deletes_edge_omitted_from_tenant_text_index() {
     .await;
 }
 
-#[tokio::test]
-async fn active_node_text_index_ignores_unindexed_bulk_delete_limit() {
+#[test]
+fn active_node_text_index_ignores_unindexed_bulk_delete_limit() {
+    run_high_stack_contract(
+        "active-node-text-delete",
+        active_node_text_index_ignores_unindexed_bulk_delete_limit_contract,
+    );
+}
+
+async fn active_node_text_index_ignores_unindexed_bulk_delete_limit_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-index-delete-text-node-bulk".to_owned(),
     })
@@ -758,8 +829,15 @@ async fn active_node_text_index_ignores_unindexed_bulk_delete_limit() {
     db.close().await.expect("bulk node database closes");
 }
 
-#[tokio::test]
-async fn active_tenant_edge_text_index_ignores_unindexed_bulk_delete_limit() {
+#[test]
+fn active_tenant_edge_text_index_ignores_unindexed_bulk_delete_limit() {
+    run_high_stack_contract(
+        "active-tenant-edge-text-delete",
+        active_tenant_edge_text_index_ignores_unindexed_bulk_delete_limit_contract,
+    );
+}
+
+async fn active_tenant_edge_text_index_ignores_unindexed_bulk_delete_limit_contract() {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "production-index-delete-text-edge-bulk".to_owned(),
     })

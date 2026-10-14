@@ -27,10 +27,6 @@ impl PublishedActiveTextEpoch {
     pub(super) const fn prepared(&self) -> &super::active_batch::PreparedActiveTextEpoch {
         &self.prepared
     }
-
-    pub(crate) const fn has_destination_work(&self) -> bool {
-        self.prepared.has_destination_work()
-    }
 }
 
 /// Uploads the optional split from every live epoch destination.

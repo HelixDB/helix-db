@@ -15,7 +15,8 @@ fn identity(dimension: usize, seed: u64) -> SimHashIdentity {
     SimHashIdentity::new(
         NonZeroUsize::new(dimension).unwrap(),
         seed,
-        NonZeroU16::new(super::super::generation::CURRENT_SIMHASH_ALGORITHM_VERSION).unwrap(),
+        NonZeroU16::new(crate::search::vector::generation::CURRENT_SIMHASH_ALGORITHM_VERSION)
+            .unwrap(),
     )
 }
 
@@ -84,7 +85,7 @@ fn run_identity_contracts() {
     assert_eq!(current.seed(), 42);
 
     let registry = SimHasherRegistry::default();
-    let unknown_version = super::super::generation::CURRENT_SIMHASH_ALGORITHM_VERSION + 1;
+    let unknown_version = crate::search::vector::generation::CURRENT_SIMHASH_ALGORITHM_VERSION + 1;
     let unknown = SimHashIdentity::new(
         NonZeroUsize::MIN,
         42,

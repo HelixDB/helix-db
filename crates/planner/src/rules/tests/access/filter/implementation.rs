@@ -51,8 +51,8 @@ fn access_filter_implementation_rule_preserves_residual_filter_pipeline() {
     assert_eq!(
         alternative.cost,
         storage
-            .range_scan(rows)
-            .serial(storage.predicate_eval(rows))
+            .label_scan(rows)
+            .serial(storage.stored_predicate_filter(rows))
     );
 
     let empty_expr = node_access_filter_expr(

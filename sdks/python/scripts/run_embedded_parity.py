@@ -10,6 +10,7 @@ from time import monotonic, sleep
 PYTHON_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PYTHON_ROOT / "src"))
 
+import cypher_parity  # noqa: E402
 from parity_runtime_fixtures import (  # noqa: E402
     base_runtime_fixtures,
     node_permutation_fixtures,
@@ -126,7 +127,7 @@ def main() -> None:
             try:
                 client.query(_required_fixture(fixtures, search_name))
             except HelixError as error:
-                if "index_not_found" not in str(error):
+                if error.code != "index_not_found":
                     raise RuntimeError(
                         f"{search_name} returned the wrong post-DROP error: {error}"
                     ) from error
@@ -155,6 +156,7 @@ def main() -> None:
         _native_graph_acceptance(client)
     finally:
         client.close()
+    cypher_parity.run_embedded(source, cache, results)
 
 
 async def async_main() -> None:
@@ -223,7 +225,7 @@ async def async_main() -> None:
             try:
                 await client.query(_required_fixture(fixtures, search_name))
             except HelixError as error:
-                if "index_not_found" not in str(error):
+                if error.code != "index_not_found":
                     raise RuntimeError(
                         f"{search_name} returned the wrong post-DROP error: {error}"
                     ) from error
@@ -237,6 +239,7 @@ async def async_main() -> None:
     finally:
         await client.close()
 
+    await cypher_parity.run_embedded_async(source, cache, results)
     concurrency_client = await AsyncClient.embedded(InMemory(f"{database}-concurrency"))
     try:
         writes = [

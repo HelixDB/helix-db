@@ -25,6 +25,11 @@ impl AccessWindow {
         &self.access
     }
 
+    /// The access path and window, moved out.
+    pub fn into_parts(self) -> (AccessPath, AccessWindowRange) {
+        (self.access, self.window)
+    }
+
     /// Static window.
     pub const fn window(&self) -> AccessWindowRange {
         self.window
@@ -76,6 +81,11 @@ impl AccessOrder {
         &self.access
     }
 
+    /// The access path and ordering, moved out.
+    pub fn into_parts(self) -> (AccessPath, ir::OrderKeys) {
+        (self.access, self.ordering)
+    }
+
     /// Required non-empty ordering.
     pub const fn ordering(&self) -> &ir::OrderKeys {
         &self.ordering
@@ -92,6 +102,7 @@ impl AccessOrder {
     /// use helix_planner::{catalog, ir, logical};
     ///
     /// let source = ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::RangeIndex {
+    ///     iteration: helix_planner::ir::RangeScanIteration::Forward,
     ///     index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
     ///     key: catalog::ScopedPropertyDirectionKey::try_new(
     ///         "User",
@@ -125,6 +136,7 @@ impl AccessOrder {
     /// use helix_planner::{catalog, ir, logical};
     ///
     /// let source = ir::NodeAccessSourcePlan::new(ir::NodeAccessPlan::RangeIndex {
+    ///     iteration: helix_planner::ir::RangeScanIteration::Forward,
     ///     index: catalog::NodeRangeIndexMeta::try_new("node_range").unwrap(),
     ///     key: catalog::ScopedPropertyDirectionKey::try_new(
     ///         "User",
@@ -164,6 +176,11 @@ impl AccessDistinct {
         &self.access
     }
 
+    /// The access path, moved out.
+    pub fn into_access(self) -> AccessPath {
+        self.access
+    }
+
     /// Whether access-distinct exploration can prove this distinct is a no-op.
     ///
     /// ```
@@ -198,6 +215,11 @@ impl AccessFilter {
     /// Access path being filtered.
     pub const fn access(&self) -> &AccessPath {
         &self.access
+    }
+
+    /// The access path and residual predicate, moved out.
+    pub fn into_parts(self) -> (AccessPath, ir::PredicatePlan) {
+        (self.access, self.predicate)
     }
 
     /// Residual predicate applied to the access path.

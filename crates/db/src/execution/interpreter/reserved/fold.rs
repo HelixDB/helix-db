@@ -14,13 +14,14 @@ impl<'db> ExecutionContext<'db> {
         match input {
             ExecutionValue::FoldedStream(folded) => Ok(ExecutionValue::Stream(folded.into_rows())),
             ExecutionValue::Stream(rows) => Ok(ExecutionValue::Stream(rows)),
-            other @ (ExecutionValue::Count(_)
+            ExecutionValue::Count(_)
             | ExecutionValue::Bool(_)
             | ExecutionValue::Scalars(_)
             | ExecutionValue::IndexDdlReceipt(_)
-            | ExecutionValue::IndexOperationStatus(_)) => Err(HelixDbError::Query(format!(
-                "unfold expected stream or folded stream input, got {other:?}"
-            ))),
+            | ExecutionValue::IndexOperationStatus(_) => Err(HelixDbError::Query(
+                // Report the type contract without evaluating or exposing input values.
+                "unfold expected stream or folded stream input".into(),
+            )),
         }
     }
 }

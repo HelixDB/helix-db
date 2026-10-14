@@ -17,19 +17,23 @@ enum ProjectDirectoryChoice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StatusSelection {
-    All,
-    Instance(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PruneSelection {
     All,
     Instance(String),
 }
 
+/// Whether prompts may be shown. Prompts render on stderr, so a piped stdout
+/// (`helix database list | jq`) can still prompt; `--json` never prompts.
 pub fn is_interactive() -> bool {
-    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+    interactive(
+        crate::output::OutputMode::current(),
+        std::io::stdin().is_terminal(),
+        std::io::stderr().is_terminal(),
+    )
+}
+
+fn interactive(mode: crate::output::OutputMode, stdin_tty: bool, stderr_tty: bool) -> bool {
+    !mode.is_json() && stdin_tty && stderr_tty
 }
 
 /// Asks where a new project should be created.
@@ -74,31 +78,23 @@ pub fn confirm(message: &str) -> Result<bool> {
 }
 
 pub fn input_instance_name(default: &str) -> Result<String> {
-    input_name("Instance name", default, 32)
+    input_name("Instance name", default)
 }
 
 fn input_project_instance_name(default: &str) -> Result<String> {
-    input_name("Instance name", default, 32)
+    input_name("Instance name", default)
 }
 
-fn input_name(label: &str, default: &str, max_len: usize) -> Result<String> {
+/// Prompts for a name, enforcing the exact same charset and length limit
+/// [`crate::config::validate_instance_name`] enforces on a `--name` passed on the
+/// command line and [`crate::config::HelixConfig::validate`] enforces on a name
+/// loaded from `helix.toml`. All three sources go through one shared validator so
+/// a name typed here can never be rejected later, after it's already been saved.
+fn input_name(label: &str, default: &str) -> Result<String> {
     let name: String = cliclack::input(label)
         .default_input(default)
         .placeholder(default)
-        .validate(move |input: &String| {
-            if input.trim().is_empty() {
-                Err("name cannot be empty")
-            } else if input.len() > max_len {
-                Err("name is too long")
-            } else if !input
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                Err("name can only contain letters, numbers, hyphens, and underscores")
-            } else {
-                Ok(())
-            }
-        })
+        .validate(|input: &String| crate::config::validate_instance_name(input))
         .interact()?;
     Ok(name)
 }
@@ -126,7 +122,7 @@ pub fn select_local_disk_mode() -> Result<bool> {
         .item(
             true,
             "On-disk",
-            "Persists local data with a MinIO-backed disk volume",
+            "Persists local data with a SeaweedFS-backed disk volume",
         )
         .interact()?)
 }
@@ -161,12 +157,12 @@ fn select_instance_kind(prompt: &str) -> Result<InstanceKind> {
         .item(
             InstanceKind::Local,
             "Local",
-            "Run a local v2 Enterprise dev instance",
+            "Run a local Helix instance in Docker or Podman",
         )
         .item(
             InstanceKind::Enterprise,
-            "Enterprise Cloud",
-            "Link an Enterprise Cloud runtime",
+            "Helix Cloud",
+            "Link a Helix Cloud database",
         )
         .interact()?)
 }
@@ -189,10 +185,9 @@ pub fn select_init_target() -> Result<InitTarget> {
         }
         InstanceKind::Enterprise => Ok(InitTarget::Enterprise {
             name: input_project_instance_name("production")?,
-            // Leave the cluster (and gateway URL) unset so the handler lists the
-            // available clusters and lets the user pick one.
-            cluster_id: None,
-            gateway_url: None,
+            database: None,
+            project: None,
+            workspace: None,
             skills: false,
             no_skills: false,
         }),
@@ -214,10 +209,9 @@ pub fn select_add_target() -> Result<AddTarget> {
         }
         InstanceKind::Enterprise => Ok(AddTarget::Enterprise {
             name: input_instance_name("production")?,
-            // Leave the cluster (and gateway URL) unset so the handler lists the
-            // available clusters and lets the user pick one.
-            cluster_id: None,
-            gateway_url: None,
+            database: None,
+            project: None,
+            workspace: None,
         }),
     }
 }
@@ -235,28 +229,6 @@ pub fn select_instance(instances: &[(String, String)], prompt: &str) -> Result<S
         select = select.item(name.clone(), name.as_str(), hint.as_str());
     }
     Ok(select.interact()?)
-}
-
-pub fn select_status(instances: &[(String, String)]) -> Result<StatusSelection> {
-    if instances.is_empty() {
-        return Ok(StatusSelection::All);
-    }
-
-    let all = "__all__".to_string();
-    let mut select = cliclack::select("Show status for which instance?").item(
-        all.clone(),
-        "All instances",
-        "Show every local and Enterprise instance",
-    );
-    for (name, hint) in instances {
-        select = select.item(name.clone(), name.as_str(), hint.as_str());
-    }
-    let selected: String = select.interact()?;
-    if selected == all {
-        Ok(StatusSelection::All)
-    } else {
-        Ok(StatusSelection::Instance(selected))
-    }
 }
 
 pub fn select_prune(local_instances: &[(String, String)]) -> Result<PruneSelection> {
@@ -281,59 +253,19 @@ pub fn select_prune(local_instances: &[(String, String)]) -> Result<PruneSelecti
     }
 }
 
-pub fn select_workspace(workspaces: &[(String, String, String)]) -> Result<String> {
-    if workspaces.is_empty() {
-        return Err(eyre!("No workspaces found"));
-    }
-    if workspaces.len() == 1 {
-        return Ok(workspaces[0].0.clone());
-    }
-
-    let mut select = cliclack::select("Select a workspace");
-    for (id, name, slug) in workspaces {
-        select = select.item(id.clone(), name.as_str(), format!("slug: {slug}").as_str());
-    }
-    Ok(select.interact()?)
-}
-
-pub fn select_project(projects: &[(String, String)]) -> Result<String> {
-    if projects.is_empty() {
-        return Err(eyre!("No projects found in this workspace"));
-    }
-    if projects.len() == 1 {
-        return Ok(projects[0].0.clone());
-    }
-
-    let mut select = cliclack::select("Select a project");
-    for (id, name) in projects {
-        let short_id = if id.len() > 8 { &id[..8] } else { id.as_str() };
-        select = select.item(
-            id.clone(),
-            name.as_str(),
-            format!("id: {short_id}").as_str(),
-        );
-    }
-    Ok(select.interact()?)
-}
-
-pub fn select_cluster(clusters: &[(String, String, String)]) -> Result<String> {
-    if clusters.is_empty() {
-        return Err(eyre!("No Enterprise clusters found"));
-    }
-    if clusters.len() == 1 {
-        return Ok(clusters[0].0.clone());
-    }
-
-    let mut select = cliclack::select("Select an Enterprise cluster");
-    for (id, name, hint) in clusters {
-        select = select.item(id.clone(), name.as_str(), hint.as_str());
-    }
-    Ok(select.interact()?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompts_need_both_terminals_and_never_run_in_json_mode() {
+        use crate::output::{OutputMode, Verbosity};
+        let human = OutputMode::Human(Verbosity::Normal);
+        assert!(interactive(human, true, true));
+        assert!(!interactive(human, false, true));
+        assert!(!interactive(human, true, false));
+        assert!(!interactive(OutputMode::Json, true, true));
+    }
 
     #[test]
     fn current_project_directory_choice_uses_current_directory() {

@@ -23,8 +23,28 @@ fn selected_stream_pipeline_op_matches(
 ) -> bool {
     match (logical, physical) {
         (
+            logical::StreamPipelineOp::Order { ordering },
+            physical::PhysicalPipelineOp::OrderSatisfiedByAccess {
+                ordering: delivered,
+            },
+        ) => ordering == delivered,
+        (
+            logical::StreamPipelineOp::Limit { count },
+            physical::PhysicalPipelineOp::AccessReadLimit { count: pushed },
+        ) => count == pushed,
+        (
+            logical::StreamPipelineOp::Window { window },
+            physical::PhysicalPipelineOp::AccessReadLimit {
+                count: crate::ir::StreamBoundPlan::Literal(count),
+            },
+        ) => window.start() == 0 && window.end() == Some(*count),
+        (
             logical::StreamPipelineOp::Filter { .. },
             physical::PhysicalPipelineOp::ResidualFilter,
+        )
+        | (
+            logical::StreamPipelineOp::IndexMembership { .. },
+            physical::PhysicalPipelineOp::Stream(physical::PhysicalStreamOp::IndexMembership),
         )
         | (
             logical::StreamPipelineOp::Limit { .. },

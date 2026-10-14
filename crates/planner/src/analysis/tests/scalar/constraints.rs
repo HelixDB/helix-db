@@ -45,6 +45,17 @@ fn scalar_conjunction_detects_property_constraint_contradictions() {
             Predicate::eq("deleted_at", PropertyValue::Null),
         ]),
         Predicate::is_in("age", PropertyValue::I64Array(Vec::new())),
+        Predicate::and(vec![Predicate::eq("age", 42), Predicate::neq("age", 42.0)]),
+        Predicate::and(vec![Predicate::eq("age", 42), Predicate::eq("age", 43.0)]),
+        Predicate::and(vec![Predicate::eq("age", 42), Predicate::gt("age", 42.0)]),
+        Predicate::and(vec![Predicate::eq("age", 42), Predicate::eq("age", "42")]),
+        Predicate::and(vec![
+            Predicate::is_in(
+                "age",
+                PropertyValue::array([PropertyValue::from(20), PropertyValue::from(20.0)]),
+            ),
+            Predicate::neq("age", 20),
+        ]),
         Predicate::or(vec![
             Predicate::and(vec![Predicate::eq("age", 30), Predicate::neq("age", 30)]),
             Predicate::and(vec![
@@ -83,6 +94,15 @@ fn scalar_conjunction_keeps_feasible_property_constraints() {
             Predicate::eq("deleted_at", PropertyValue::Null),
             Predicate::is_null("deleted_at"),
         ]),
+        Predicate::and(vec![Predicate::eq("age", 42), Predicate::eq("age", 42.0)]),
+        Predicate::and(vec![Predicate::eq("age", 42), Predicate::neq("age", "42")]),
+        Predicate::and(vec![
+            Predicate::is_in(
+                "age",
+                PropertyValue::array([PropertyValue::from(20), PropertyValue::from(20.0)]),
+            ),
+            Predicate::eq("age", 20.0),
+        ]),
         Predicate::and(vec![
             Predicate::gt("age", 20),
             Predicate::lt("age_text", "30"),
@@ -103,4 +123,41 @@ fn scalar_conjunction_keeps_feasible_property_constraints() {
             PrunedPredicate::Feasible { .. }
         ));
     });
+}
+
+#[test]
+fn range_literals_without_an_ordered_domain_are_impossible() {
+    for predicate in [
+        Predicate::gt("age", PropertyValue::Null),
+        Predicate::gte("age", true),
+        Predicate::lt("age", PropertyValue::F64(f64::NAN)),
+        Predicate::lte("age", PropertyValue::I64Array(vec![1])),
+        Predicate::between("age", 1, "z"),
+        Predicate::between("age", PropertyValue::Null, 5),
+        Predicate::and(vec![
+            Predicate::eq("name", "a"),
+            Predicate::gt("age", false),
+        ]),
+    ] {
+        assert_eq!(
+            prune_statically_impossible_branches(&predicate).unwrap(),
+            PrunedPredicate::Impossible,
+            "{predicate:?}"
+        );
+    }
+    // Orderable bounds, and the negation of an impossible bound, stay.
+    for predicate in [
+        Predicate::gt("age", 3),
+        Predicate::between("age", 1, 2.5),
+        Predicate::between("name", "a", "z"),
+        Predicate::not(Predicate::gt("age", PropertyValue::Null)),
+    ] {
+        assert!(
+            matches!(
+                prune_statically_impossible_branches(&predicate).unwrap(),
+                PrunedPredicate::Feasible { .. } | PrunedPredicate::Tautology
+            ),
+            "{predicate:?}"
+        );
+    }
 }

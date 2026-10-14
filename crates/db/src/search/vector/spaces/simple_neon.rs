@@ -1,6 +1,8 @@
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use crate::search::vector::dimension::SameDimensionPair;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+use crate::search::vector::unaligned_vector;
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use std::arch::aarch64::*;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use std::ptr::read_unaligned;
@@ -88,6 +90,43 @@ pub(crate) unsafe fn dot_similarity_neon(pair: SameDimensionPair<'_>) -> f32 {
     }
 }
 
+/// Sum of squares in f64: each f32 lane is widened before an exact square is
+/// fused into one of eight f64x2 accumulators, sixteen components per step.
+#[inline(always)]
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+pub(crate) unsafe fn squared_norm_neon(vector: &unaligned_vector::UnalignedVector<f32>) -> f64 {
+    // SAFETY: The view holds exactly `n` f32 values. The caller guarantees NEON support.
+    // AArch64 permits unaligned loads, and every offset read stays below `n`.
+    unsafe {
+        let n = vector.len();
+        let m = n - (n % 16);
+        let ptr = vector.as_ptr() as *const f32;
+        let mut sums = [vdupq_n_f64(0.); 8];
+
+        let mut i: usize = 0;
+        while i < m {
+            for quad in 0..4 {
+                let values = vld1q_f32(ptr.add(i + 4 * quad));
+                let low = vcvt_f64_f32(vget_low_f32(values));
+                let high = vcvt_high_f64_f32(values);
+                sums[2 * quad] = vfmaq_f64(sums[2 * quad], low, low);
+                sums[2 * quad + 1] = vfmaq_f64(sums[2 * quad + 1], high, high);
+            }
+            i += 16;
+        }
+        let sum = vaddq_f64(
+            vaddq_f64(vaddq_f64(sums[0], sums[1]), vaddq_f64(sums[2], sums[3])),
+            vaddq_f64(vaddq_f64(sums[4], sums[5]), vaddq_f64(sums[6], sums[7])),
+        );
+        let mut result = vaddvq_f64(sum);
+        for i in m..n {
+            let value = f64::from(read_unaligned(ptr.add(i)));
+            result += value * value;
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
@@ -126,6 +165,66 @@ mod tests {
             // assert_eq!(cosine_simd, cosine);
         } else {
             println!("neon test skipped");
+        }
+    }
+
+    /// The fixed vectors above are small integers, so every intermediate is
+    /// exactly representable and the kernel cannot disagree with the scalar
+    /// reference no matter how it rounds. This covers the inputs that can.
+    #[test]
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    fn neon_kernels_agree_with_scalar_on_rounding_sensitive_input() {
+        use super::*;
+        use crate::search::vector::spaces::kernel_agreement::{
+            assert_agrees, dot_scale, TestRng, AGREEMENT_DIMENSIONS,
+        };
+        use crate::search::vector::spaces::simple::{
+            dot_product_non_optimized, euclidean_distance_non_optimized,
+        };
+        use crate::search::vector::unaligned_vector::UnalignedVector;
+
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            let mut rng = TestRng(0x2026_0904);
+            for dimension in AGREEMENT_DIMENSIONS {
+                let left_values = rng.vector(dimension);
+                let right_values = rng.vector(dimension);
+                let left = UnalignedVector::from_slice(&left_values[..]);
+                let right = UnalignedVector::from_slice(&right_values[..]);
+                let pair = SameDimensionPair::try_new(&left, &right).unwrap();
+
+                let euclid_kernel = unsafe { euclid_similarity_neon(pair) };
+                let euclid_scalar = euclidean_distance_non_optimized(&left, &right);
+                assert_agrees(
+                    euclid_kernel,
+                    euclid_scalar,
+                    euclid_scalar,
+                    "euclidean",
+                    dimension,
+                );
+
+                let dot_kernel = unsafe { dot_similarity_neon(pair) };
+                let dot_scalar = dot_product_non_optimized(&left, &right);
+                assert_agrees(
+                    dot_kernel,
+                    dot_scalar,
+                    dot_scale(&left_values, &right_values),
+                    "dot",
+                    dimension,
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    fn neon_squared_norm_agrees_with_scalar_reference() {
+        use crate::search::vector::spaces::kernel_agreement::assert_squared_norm_kernel;
+
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            assert_squared_norm_kernel(
+                |vector| unsafe { super::squared_norm_neon(vector) },
+                "neon squared norm",
+            );
         }
     }
 }
