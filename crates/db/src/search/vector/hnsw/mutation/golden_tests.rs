@@ -42,8 +42,14 @@ const NODES: NodeId = 120;
 const OPERATIONS: usize = 480;
 /// Operations committed together.
 const OPERATIONS_PER_COMMIT: usize = 24;
-/// Not a multiple of any SIMD width, so kernels take their remainder paths.
+/// Below every SIMD dispatch threshold (16 components for NEON and SSE, 32
+/// for AVX), so every distance and norm takes its scalar reference path.
 const DIMENSION: usize = 12;
+/// Past the widest SIMD stride (AVX's 32 components) and a multiple of none,
+/// so the distance and norm kernels this CPU selects run whole blocks and then
+/// a 5-component remainder (NEON and SSE two 16-component blocks, AVX one
+/// 32-component block).
+const SIMD_DIMENSION: usize = 37;
 
 /// How one workload plans its operations.
 #[derive(Debug, Clone, Copy)]
@@ -83,8 +89,8 @@ enum Operation {
     Delete(NodeId),
 }
 
-fn random_vector(rng: &mut StdRng) -> Vec<f32> {
-    (0..DIMENSION)
+fn random_vector(rng: &mut StdRng, dimension: usize) -> Vec<f32> {
+    (0..dimension)
         .map(|_| f32::from(rng.random_range(-3..=3_i8)))
         .collect()
 }
@@ -99,6 +105,7 @@ fn next_operation(
     rng: &mut StdRng,
     live: &mut BTreeMap<NodeId, (Vec<f32>, u16)>,
     fresh_only: bool,
+    dimension: usize,
 ) -> Operation {
     let pick_live = |rng: &mut StdRng, live: &BTreeMap<NodeId, (Vec<f32>, u16)>| {
         let nodes = live.keys().copied().collect::<Vec<_>>();
@@ -108,7 +115,7 @@ fn next_operation(
         let node = NodeId::try_from(live.len()).unwrap() + 1;
         Operation::Upsert {
             node,
-            vector: random_vector(rng),
+            vector: random_vector(rng, dimension),
             layer: random_layer(rng),
         }
     } else {
@@ -137,7 +144,7 @@ fn next_operation(
             },
             _ => Operation::Upsert {
                 node: rng.random_range(1..=NODES),
-                vector: random_vector(rng),
+                vector: random_vector(rng, dimension),
                 layer: random_layer(rng),
             },
         }
@@ -157,10 +164,16 @@ fn next_operation(
     operation
 }
 
-/// Creates the empty generation namespace `name`, of small degree, in `db`.
+/// Creates the empty generation namespace `name`, of small degree and
+/// `dimension` components, in `db`.
 ///
 /// `ordinal` distinguishes the namespaces of one database.
-async fn create<D: Distance>(db: &slatedb::Db, name: &str, ordinal: u64) -> VectorIndex<D> {
+async fn create<D: Distance>(
+    db: &slatedb::Db,
+    name: &str,
+    ordinal: u64,
+    dimension: usize,
+) -> VectorIndex<D> {
     let identity = VectorGenerationIdentity::try_new(
         DataScope::LegacyUnscoped,
         7 + ordinal,
@@ -169,7 +182,7 @@ async fn create<D: Distance>(db: &slatedb::Db, name: &str, ordinal: u64) -> Vect
         NonZeroU64::new(3).unwrap(),
         11,
         IndexElementKind::Node,
-        VectorDimension::try_new(DIMENSION).unwrap(),
+        VectorDimension::try_new(dimension).unwrap(),
     )
     .unwrap();
     let index = VectorIndex::<D>::from_generation(
@@ -179,7 +192,7 @@ async fn create<D: Distance>(db: &slatedb::Db, name: &str, ordinal: u64) -> Vect
     index
         .stage_create(
             &MeasuredVectorTransaction::new(&txn),
-            VectorIndexConfig::new(index.name(), "embedding", DIMENSION)
+            VectorIndexConfig::new(index.name(), "embedding", dimension)
                 .with_m(4)
                 .with_m0(8)
                 .with_ef_construction(24),
@@ -279,10 +292,11 @@ struct Namespace<D: Distance> {
     live: BTreeMap<NodeId, (Vec<f32>, u16)>,
 }
 
-/// Runs one seeded workload of a namespace per seed in one database, and
-/// returns its digests. Each step plans one operation per namespace, in seed
-/// order, through one build session shared by every namespace.
-async fn run<D: Distance>(seeds: &[u64], planner: Planner) -> Digests {
+/// Runs one seeded workload of a namespace per seed in one database, over
+/// vectors of `dimension` components, and returns its digests. Each step plans
+/// one operation per namespace, in seed order, through one build session
+/// shared by every namespace.
+async fn run<D: Distance>(dimension: usize, seeds: &[u64], planner: Planner) -> Digests {
     // Planners of one seed share a namespace, so their digests compare.
     let name = |seed: u64| format!("golden-{}-{seed}", D::name());
     let db = slatedb::Db::open(name(seeds[0]), Arc::new(InMemory::new()))
@@ -290,9 +304,9 @@ async fn run<D: Distance>(seeds: &[u64], planner: Planner) -> Digests {
         .unwrap();
     let mut namespaces = Vec::new();
     for (ordinal, &seed) in (0..).zip(seeds) {
-        let index = create::<D>(&db, &name(seed), ordinal).await;
+        let index = create::<D>(&db, &name(seed), ordinal, dimension).await;
         let mut rng = StdRng::seed_from_u64(seed);
-        let queries = (0..6).map(|_| random_vector(&mut rng)).collect();
+        let queries = (0..6).map(|_| random_vector(&mut rng, dimension)).collect();
         namespaces.push(Namespace {
             index,
             rng,
@@ -318,7 +332,7 @@ async fn run<D: Distance>(seeds: &[u64], planner: Planner) -> Digests {
                 index, rng, live, ..
             } in &mut namespaces
             {
-                let operation = next_operation(rng, live, fresh_only);
+                let operation = next_operation(rng, live, fresh_only, dimension);
                 match (planner, operation) {
                     (
                         Planner::Backfill,
@@ -406,14 +420,16 @@ fn assert_golden(kind: &str, actual: &[(&str, String)], expected: &[(&str, &str)
     );
 }
 
-/// Runs every `(label, seeds, planner)` workload and asserts its row digest,
-/// and its session cache digest when `cache` lists the label.
+/// Runs every `(label, seeds, planner)` workload over vectors of `dimension`
+/// components and asserts its row digest, and its session cache digest when
+/// `cache` lists the label.
 ///
 /// Only a cache that never evicts, or a workload that never deletes, has a
 /// deterministic cache digest: deletion relinking reads candidates in hash
 /// order, which orders their cache touches and so what a tight budget evicts
 /// (never what is stored, which the row digests pin).
 async fn assert_workloads<D: Distance>(
+    dimension: usize,
     workloads: &[(&str, &[u64], Planner)],
     rows: &[(&str, &str)],
     cache: &[(&str, &str)],
@@ -421,7 +437,7 @@ async fn assert_workloads<D: Distance>(
     let mut actual_rows = Vec::new();
     let mut actual_cache = Vec::new();
     for &(label, seeds, planner) in workloads {
-        let digests = run::<D>(seeds, planner).await;
+        let digests = run::<D>(dimension, seeds, planner).await;
         actual_rows.push((label, digests.rows));
         if cache.iter().any(|(cached, _)| *cached == label) {
             actual_cache.push((label, digests.cache));
@@ -438,6 +454,10 @@ const MANHATTAN_SEED_4: &str = "f0d2b874474a7b5e4c1df05e2b97447ee257eec8aaeb918d
 const COSINE_SEED_6: &str = "0d715c730a137e4d0c15e255e965c3f367a27c8e0100f7dcb34451ff0cc2d680";
 const EUCLIDEAN_SEEDS_1_8: &str =
     "2d11a658df45606174a74f6ff28e43ed3e0c829e23e036a430afa459c8c1890f";
+const EUCLIDEAN_SIMD_SEED_10: &str =
+    "881616a23421c37d6619b4ae302886678f9b45963209229d365e0e6e3c825285";
+const COSINE_SIMD_SEED_12: &str =
+    "3ac7f75723ee22d01aa8af38f18c87c43fbb6b27ce2bba8ca1bf3bc2d6ef80f4";
 
 /// Session cache behavior (hits, misses, evictions, flushes, and retained
 /// footprint after every operation) is pinned too, where it is deterministic:
@@ -445,6 +465,7 @@ const EUCLIDEAN_SEEDS_1_8: &str =
 #[tokio::test(flavor = "multi_thread")]
 async fn seeded_euclidean_workloads_keep_golden_rows_and_cache_behavior() {
     assert_workloads::<Euclidean>(
+        DIMENSION,
         &[
             ("tiny", &[1], Planner::TinySession),
             ("large", &[1], Planner::LargeSession),
@@ -482,6 +503,7 @@ async fn seeded_euclidean_workloads_keep_golden_rows_and_cache_behavior() {
 #[tokio::test(flavor = "multi_thread")]
 async fn seeded_manhattan_workloads_keep_golden_rows_and_cache_behavior() {
     assert_workloads::<Manhattan>(
+        DIMENSION,
         &[
             ("tiny", &[4], Planner::TinySession),
             ("one-off", &[4], Planner::OneOff),
@@ -506,6 +528,7 @@ async fn seeded_manhattan_workloads_keep_golden_rows_and_cache_behavior() {
 #[tokio::test(flavor = "multi_thread")]
 async fn seeded_cosine_workloads_keep_golden_rows_and_cache_behavior() {
     assert_workloads::<Cosine>(
+        DIMENSION,
         &[
             ("tiny", &[6], Planner::TinySession),
             ("large", &[6], Planner::LargeSession),
@@ -541,6 +564,7 @@ async fn seeded_cosine_workloads_keep_golden_rows_and_cache_behavior() {
 #[tokio::test(flavor = "multi_thread")]
 async fn namespaces_sharing_a_session_keep_golden_rows_and_cache_behavior() {
     assert_workloads::<Euclidean>(
+        DIMENSION,
         &[
             ("tiny", &[1, 8], Planner::TinySession),
             ("large", &[1, 8], Planner::LargeSession),
@@ -566,6 +590,49 @@ async fn namespaces_sharing_a_session_keep_golden_rows_and_cache_behavior() {
                 "b211ab321baf0a5a8f9e6f3f1a1f2fc02d03e0674307e6b053956bb3460cef12",
             ),
         ],
+    )
+    .await;
+}
+
+/// Vectors past every SIMD threshold store the same rows through a bounded
+/// session as through a cache per operation, so these digests pin the SIMD
+/// kernels this CPU selects, as the narrower workloads pin the scalar paths.
+#[tokio::test(flavor = "multi_thread")]
+async fn simd_width_workloads_keep_golden_rows() {
+    assert_workloads::<Euclidean>(
+        SIMD_DIMENSION,
+        &[
+            ("tiny", &[10], Planner::TinySession),
+            ("one-off", &[10], Planner::OneOff),
+            ("backfill", &[11], Planner::Backfill),
+        ],
+        &[
+            ("tiny", EUCLIDEAN_SIMD_SEED_10),
+            ("one-off", EUCLIDEAN_SIMD_SEED_10),
+            (
+                "backfill",
+                "85696f48959019e939f6dd4c343fd1acd430304ecadb392caf0e0df9980dca2c",
+            ),
+        ],
+        &[],
+    )
+    .await;
+    assert_workloads::<Cosine>(
+        SIMD_DIMENSION,
+        &[
+            ("tiny", &[12], Planner::TinySession),
+            ("one-off", &[12], Planner::OneOff),
+            ("backfill", &[13], Planner::Backfill),
+        ],
+        &[
+            ("tiny", COSINE_SIMD_SEED_12),
+            ("one-off", COSINE_SIMD_SEED_12),
+            (
+                "backfill",
+                "a167f027a60ab249915dc9492f21257f65c33adc6830974ac2ae9fce42ed7e98",
+            ),
+        ],
+        &[],
     )
     .await;
 }
