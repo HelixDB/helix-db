@@ -22,6 +22,7 @@ fn every_retained_command_renders_help() {
         &["stop", "--help"],
         &["restart", "--help"],
         &["status", "--help"],
+        &["doctor", "--help"],
         &["logs", "--help"],
         &["query", "--help"],
         &["shell", "--help"],

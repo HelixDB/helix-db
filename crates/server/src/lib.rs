@@ -5,6 +5,7 @@
 #[cfg(feature = "async-index-benchmark")]
 pub mod benchmark;
 mod config;
+mod diagnostics;
 mod grpc;
 mod http;
 mod state;
@@ -265,7 +266,7 @@ async fn run_open_database_until_shutdown(
 ) -> ServerResult<()> {
     let ServerDatabase { db, cache_lock } = database;
     let (query_metrics, query_metrics_runtime) = server_query_metrics();
-    let state = ServerState::new(Arc::clone(&db), query_metrics);
+    let state = ServerState::new(Arc::clone(&db), query_metrics, config.storage.clone());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let http_config = config.clone();

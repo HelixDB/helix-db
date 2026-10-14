@@ -5117,10 +5117,15 @@ Cloud, use the gateway URL and database ID shown in the dashboard. The
 `cluster.helix-db.com` hostname in the OpenAPI document is a placeholder, not a
 shared query endpoint.
 
-The root OpenAPI server and the `/healthz` and `/readyz` operations describe a
-local HelixDB server. The Helix Cloud gateway is advertised only for
-`POST /v2/query`; its separate `/health` and `/readyz` contracts are not part of
-this specification.
+The root OpenAPI server and the `/healthz`, `/readyz` and `/v2/diagnostics`
+operations describe a local HelixDB server. The Helix Cloud gateway is advertised
+only for `POST /v2/query`; its separate `/health` and `/readyz` contracts are not
+part of this specification.
+
+`GET /v2/diagnostics` returns read-only checks of the server's setup: storage,
+the S3 bucket's region, the disk cache's device and room, memory, index
+publication, and recent queries' index use.
+[`helix doctor`](/cli/command-reference/doctor) renders it.
 
 Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
 gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
@@ -7493,6 +7498,7 @@ They never accept or store application database keys or service credentials.
 | [`helix stop`](/cli/command-reference/stop) | Local | Stop a local instance and remove its containers |
 | [`helix restart`](/cli/command-reference/restart) | Local | Restart a local instance |
 | [`helix status`](/cli/command-reference/status) | Local, Cloud | Inspect runtime or database status |
+| [`helix doctor`](/cli/command-reference/doctor) | Local, Cloud | Check an instance's setup and recent queries' index use |
 | [`helix logs`](/cli/command-reference/logs) | Local, Cloud | Follow local logs or list Cloud query errors |
 | [`helix query`](/cli/command-reference/query) | Local, Cloud | Execute one v3 JSON/SDK query |
 | [`helix shell`](/cli/command-reference/shell) | Local, Cloud | Execute line-oriented v3 JSON queries |
@@ -8071,6 +8077,101 @@ helix delete staging --yes
 - [`helix prune`](/cli/command-reference/prune) — clean up local state but keep the instance in `helix.toml`.
 - [`helix add`](/cli/command-reference/add) — add a replacement instance.
 - [CLI configuration](/cli/configuration) — the `helix.toml` format.
+
+# helix doctor
+
+Page type: Reference
+
+Check how an instance is set up and what to change. Doctor checks what the CLI can see itself,
+then asks the server for its own checks: whether data is durable, whether the S3 bucket is in the
+server's region, whether the disk cache is on local NVMe rather than network block storage like
+EBS, whether caches fit in memory, and whether recent queries used indexes. Local, self-hosted,
+and Cloud.
+
+Doctor is read-only. It never changes the instance, its data, its caches, or `helix.toml`, and it
+never starts a container.
+
+## Usage
+
+```bash
+helix doctor [INSTANCE]
+helix doctor --url <URL>
+```
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Instance or typed database (`cluster:<id>`, `tenant:<id>`). Defaults to `dev`, else the only instance, else a prompt. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--url <URL>` | Diagnose the server at this base URL instead, e.g. a self-hosted server. No `helix.toml` is needed. Cannot be combined with `INSTANCE`. | — |
+| `--json` | Print the report as JSON on stdout. | Off |
+| `-v`, `--verbose` | Also print the details of passing checks. | Off |
+| `--quiet` | Print only warnings, failures, and the summary. | Off |
+
+## Checks
+
+Each check passes, warns, fails, or is skipped with its reason. A warning means the setup works
+but costs performance or money; a failure means it risks losing data or cannot work. Warnings and
+failures print a fix.
+
+| Check | What it looks at |
+| --- | --- |
+| `cli.version` | Whether a newer CLI is released. |
+| `runtime.daemon`, `runtime.container`, `runtime.image` | Local instances: Docker or Podman answers, the container is running, and its image is not older than the one this CLI ships with. |
+| `server.reachable` | The server answers `GET /healthz`. |
+| `storage.durability` | Data is in S3 or on disk, not in memory only. |
+| `storage.data_device` | `HELIX_DATA_DIR` is on persistent storage: not tmpfs, the container's writable layer, or ephemeral instance storage. |
+| `storage.s3_region` | The S3 bucket is in the server's AWS region. The server's region comes from EC2 or ECS metadata; in a container on EC2 that needs an IMDSv2 hop limit of 2. |
+| `storage.s3_latency` | The median of five S3 round trips from the server is under 50 ms. |
+| `cache.device` | The disk cache is on a local SSD or NVMe instance storage, not network block storage (EBS, Persistent Disk), a network filesystem, tmpfs, or the container's writable layer. |
+| `cache.space` | `HELIX_DISK_CACHE_BYTES` fits the cache's filesystem. |
+| `cache.warm` | S3 storage warms the disk cache after a restart. |
+| `resources.memory` | Cache budgets take at most 70% of the memory the server may use. |
+| `indexes.publication` | Vector and text index publication is caught up and holds back no entries. |
+| `queries.missing_indexes` | Recent queries filtered without the secondary index the planner recommends. The fix is the `helix query` command that creates each index. |
+| `queries.unbounded_scans` | Recent queries read every element of a label that no index would bound. |
+
+The query checks cover queries from the last 24 hours since the server started. A missing index
+stops being reported once the index is active. Queries that only count matches are not analyzed
+yet. Server checks need a server image with
+`GET /v2/diagnostics`; an older server reports `server.diagnostics` as skipped. Helix Cloud manages
+storage, caching, and regions, so a Cloud database reports `cloud.managed` as skipped.
+
+## Behavior
+
+- Prints `Helix doctor`, the target, and the server's uptime, then the checks grouped by area, and a
+  summary such as `Setup works, with room to improve · 2 warnings · 9 passed`.
+- Passing checks print one line; others also print their detail and fix.
+- Exits `1` when any check fails, after printing the report. Warnings alone exit `0`.
+- A local instance whose container is not running reports that, and skips the server checks.
+- `--json` prints an object with `target`, `uptime_secs` (when the server reported its checks),
+  `checks`, and `summary`. Each check has `id`, `category`, `status` (`pass`, `warn`, `fail`, or
+  `skip`), `summary`, and, when present, `detail` and `fix`. The server's own report is
+  [`GET /v2/diagnostics`](/database/helix-db/query-guides/http-api).
+
+## Examples
+
+```bash
+# Check the default instance
+helix doctor
+
+# Check a self-hosted server
+helix doctor --url http://10.0.1.5:8080
+
+# Machine-readable report for an agent or CI
+helix doctor --json
+```
+
+## Related
+
+- [`helix status`](/cli/command-reference/status) — show instance state.
+- [`helix logs`](/cli/command-reference/logs) — view server logs.
+- [Secondary indexes](/database/helix-db/query-guides/secondary-indexes) — create the indexes doctor recommends.
 
 # helix explorer
 

@@ -541,7 +541,11 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
         stats.fts_disk.state,
         db::CacheTierState::Ready { capacity_bytes: Some(bytes), .. } if bytes == 8 * MIB as u64
     ));
-    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        config.storage.clone(),
+    ));
     post_query(router.clone(), &write).await;
     assert_eq!(post_query(router, &read).await["count"], 1);
     db.close().await.unwrap();
@@ -562,7 +566,11 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
         db: reader,
         cache_lock,
     } = open_database(&config).await.unwrap();
-    let router = http::router(ServerState::new(Arc::clone(&reader), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&reader),
+        None,
+        config.storage.clone(),
+    ));
     assert_eq!(post_query(router, &read).await["count"], 1);
     reader.close().await.unwrap();
     drop(reader);
@@ -585,7 +593,11 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
         db: reopened,
         cache_lock,
     } = open_database(&config).await.unwrap();
-    let router = http::router(ServerState::new(Arc::clone(&reopened), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&reopened),
+        None,
+        config.storage.clone(),
+    ));
     assert_eq!(post_query(router, &read).await["count"], 1);
     reopened.close().await.unwrap();
     drop(reopened);
@@ -674,7 +686,11 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
     };
 
     let ServerDatabase { db, cache_lock } = open_database(&config).await.unwrap();
-    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        config.storage.clone(),
+    ));
     post_query(
         router.clone(),
         &query::QueryRequest::write(
@@ -745,7 +761,11 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
     );
 
     // A split searched twice is admitted to disk in the background.
-    let router = http::router(ServerState::new(Arc::clone(&reopened), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&reopened),
+        None,
+        config.storage.clone(),
+    ));
     for _ in 0..2 {
         assert_eq!(
             post_query(router.clone(), &search).await["ids"],

@@ -335,6 +335,11 @@ exit "${{HELIX_TEST_TOOL_EXIT_CODE:-0}}"
 /// survives this one. `echo(` also prints a first argument such as `off` or
 /// `/?` instead of acting on it.
 ///
+/// `ps` prints its canned output through delayed expansion. `%VAR%` expands
+/// before `cmd` parses the line, so the `->` in a published port such as
+/// `0.0.0.0:7777->8080/tcp` would become a redirection; `!VAR!` expands after
+/// parsing and prints verbatim.
+///
 /// An Explorer that `run` starts (a `--name` ending in `.explorer`) is saved
 /// as `<log>.<name>` in the shape `inspect` reports it: identity and role
 /// labels, image ID, image, then its environment. `cmd` splits `KEY=value`
@@ -358,7 +363,8 @@ if "%1"=="pull" (
 )
 if "%1"=="info" exit /b 0
 if "%1"=="ps" (
-  if defined HELIX_TEST_RUNTIME_PS_OUTPUT echo %HELIX_TEST_RUNTIME_PS_OUTPUT%
+  setlocal EnableDelayedExpansion
+  if defined HELIX_TEST_RUNTIME_PS_OUTPUT echo(!HELIX_TEST_RUNTIME_PS_OUTPUT!
   exit /b 0
 )
 if "%1"=="logs" (
