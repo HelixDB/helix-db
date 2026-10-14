@@ -2398,7 +2398,9 @@ impl HelixDB {
     ///
     /// Concurrent callers either perform the close or wait for the current
     /// attempt. Migration and outbox workers are always joined before SlateDB
-    /// or its cache closes, preserving their acyclic ownership contracts.
+    /// closes, preserving their acyclic ownership contracts. A memory cache
+    /// closes with SlateDB; a hybrid cache, shared by every handle on its disk
+    /// root, writes its memory tier to disk and stays open.
     pub async fn close(&self) -> Result<()> {
         loop {
             let wait = {
@@ -4026,7 +4028,7 @@ mod tests {
             fts: None,
         };
 
-        let cache = build_slate_db_cache(&mode)
+        build_slate_db_cache(&mode)
             .await
             .expect("Foyer cache builds")
             .expect("hybrid mode enables Foyer");
@@ -4037,11 +4039,10 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("foyer-storage-direct-fs-")
+                    .starts_with(slate_cache::FOYER_PARTITION_FILE_PREFIX)
             })
             .count();
         assert_eq!(partition_count, expected_partitions);
-        drop(cache);
     }
 
     /// A root a larger budget used, in an earlier process, keeps only the
@@ -4086,7 +4087,7 @@ mod tests {
             slate_warm: SlateWarmConfig::Off,
             fts: None,
         };
-        let cache = build_slate_db_cache(&mode)
+        build_slate_db_cache(&mode)
             .await
             .expect("Foyer cache builds")
             .expect("hybrid mode enables Foyer");
@@ -4105,7 +4106,6 @@ mod tests {
             .collect::<Vec<_>>();
         indexes.sort_unstable();
         assert_eq!(indexes, (0..partitions).collect::<Vec<_>>());
-        drop(cache);
     }
 
     #[test]

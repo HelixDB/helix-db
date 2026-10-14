@@ -11,22 +11,21 @@
 //! and role handoff, and two devices on one root would overwrite each other's
 //! blocks. One device per root bounds a process to one set.
 //!
-//! The engine's tasks run on [`ENGINE_RUNTIME`], which is never shut down.
-//! Dropping a busy engine's tasks can deadlock its block manager: a dropped
-//! reclaim schedules the next one while it holds the manager's lock, and a
-//! runtime that is shutting down drops that new task in place, which takes the
-//! same lock again. Keeping the tasks off the caller's runtime lets the caller
-//! shut down at any time. Disk I/O and cache-miss loads still run on the
-//! runtime that first opened the root, so that runtime must outlive every
-//! handle on the root, as the single runtime of the server, the managed
-//! service and the bindings does.
+//! Every task a hybrid cache spawns runs on [`cache_runtime`], which the
+//! process owns and never shuts down, like the caches themselves: the
+//! engine's flushers and reclaimers, its disk I/O and its cache-miss loads.
+//! Nothing then depends on the runtime that opened a root, and no runtime
+//! shutdown can drop the cache's tasks. Dropping them can deadlock Foyer: a
+//! dropped reclaim schedules the next one while it holds the block manager's
+//! lock, and a dropped cache-miss load reports its cancellation under the
+//! memory cache's lock, while a runtime that is shutting down drops each new
+//! task in place, which takes the same lock again.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use foyer::DeviceBuilder;
-use futures::future::BoxFuture;
 use slatedb::db_cache::{foyer_hybrid, CachedEntry, CachedKey, DbCache};
 
 use crate::config;
@@ -34,19 +33,6 @@ use crate::error::{HelixDbError, Result};
 
 /// File name prefix of Foyer's partition files, one per disk block.
 pub(crate) const FOYER_PARTITION_FILE_PREFIX: &str = "foyer-storage-direct-fs-";
-
-/// Runs the background tasks of every hybrid cache's disk engine.
-///
-/// Never shut down, so dropping the engine's tasks cannot deadlock it. One
-/// worker serves Foyer's default flusher and reclaimer, which await disk I/O
-/// the caller's runtime performs.
-static ENGINE_RUNTIME: LazyLock<std::io::Result<tokio::runtime::Runtime>> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .thread_name("helix-foyer-engine")
-        .enable_time()
-        .build()
-});
 
 /// The hybrid cache of each canonical disk root this process has opened.
 ///
@@ -63,24 +49,34 @@ pub(crate) enum SlateDbCache {
     Memory(Arc<dyn DbCache>),
     /// The process's hybrid cache for a disk root, shared with every other
     /// handle on that root and never closed.
-    Hybrid(Arc<dyn DbCache>),
+    Hybrid {
+        /// The cache SlateDB reads through.
+        cache: Arc<dyn DbCache>,
+        /// The Foyer cache under `cache`.
+        foyer: foyer::HybridCache<CachedKey, CachedEntry>,
+    },
 }
 
 impl SlateDbCache {
     /// The cache SlateDB reads through.
     pub(crate) fn cache(&self) -> &Arc<dyn DbCache> {
         match self {
-            Self::Memory(cache) | Self::Hybrid(cache) => cache,
+            Self::Memory(cache) | Self::Hybrid { cache, .. } => cache,
         }
     }
 
-    /// Closes a memory cache. A hybrid cache stays open: other handles on its
-    /// root may still read through it, and later opens of the root reuse it.
+    /// Closes a memory cache. A hybrid cache stays open, as other handles on
+    /// its root and later opens read through it: closing writes its memory
+    /// tier to disk and waits for the disk engine, as Foyer's own close would,
+    /// so a restart on the same root reads those blocks back.
     pub(crate) async fn close(&self) -> Result<()> {
-        let Self::Memory(cache) = self else {
-            return Ok(());
-        };
-        cache.close().await?;
+        match self {
+            Self::Memory(cache) => cache.close().await?,
+            Self::Hybrid { foyer, .. } => {
+                foyer.memory().flush().await;
+                foyer.storage().wait().await;
+            }
+        }
         Ok(())
     }
 }
@@ -91,10 +87,39 @@ impl SlateDbCache {
 struct SharedHybridCache {
     config: config::SlateHybridCacheConfig,
     cache: Arc<dyn DbCache>,
+    foyer: foyer::HybridCache<CachedKey, CachedEntry>,
+}
+
+/// The runtime every hybrid cache's tasks run on, started by the first build
+/// and never shut down. A failed start is retried by the next build.
+fn cache_runtime() -> Result<tokio::runtime::Handle> {
+    static RUNTIME: parking_lot::Mutex<Option<tokio::runtime::Handle>> =
+        parking_lot::Mutex::new(None);
+    let mut slot = RUNTIME.lock();
+    let handle = match slot.as_ref() {
+        Some(handle) => handle.clone(),
+        None => {
+            let started = tokio::runtime::Builder::new_multi_thread()
+                .thread_name("helix-foyer")
+                .enable_all()
+                .build()
+                .map_err(|err| {
+                    HelixDbError::Config(format!(
+                        "failed to start the Slate hybrid cache runtime: {err}"
+                    ))
+                })?;
+            // Leaked rather than dropped: it serves caches that live until
+            // the process exits.
+            slot.insert(Box::leak(Box::new(started)).handle().clone())
+                .clone()
+        }
+    };
+    Ok(handle)
 }
 
 /// The process's hybrid cache for `config`'s disk root, built by the first
-/// open of the root and shared with every later one.
+/// open of the root and shared with every later one, from any runtime, until
+/// the process exits.
 ///
 /// Every later open of the root must ask for the same capacities: the root
 /// holds one device, so resizing it takes a restart.
@@ -116,24 +141,27 @@ pub(crate) async fn shared_hybrid(config: &config::SlateHybridCacheConfig) -> Re
         config.disk().bytes(),
     )?;
     let cell = Arc::clone(HYBRID_CACHES.lock().entry(root.clone()).or_default());
-    // Built on a task of its own, so a cancelled open cannot drop a half-built
-    // device whose engine tasks would hold its files beside the next attempt's
-    // device.
-    let shared = tokio::spawn({
-        let config = config.clone();
-        async move {
-            cell.get_or_try_init(|| build_hybrid(&config))
-                .await
-                .cloned()
-        }
-    })
-    .await
-    .map_err(|err| {
-        HelixDbError::Config(format!(
-            "Slate hybrid cache build for '{}' did not finish: {err}",
-            root.display()
-        ))
-    })??;
+    let runtime = cache_runtime()?;
+    // Built on the cache runtime, so neither a cancelled open nor the opening
+    // runtime's shutdown can drop a half-built device whose engine tasks
+    // would hold its files beside the next attempt's device.
+    let shared = runtime
+        .spawn({
+            let config = config.clone();
+            let runtime = runtime.clone();
+            async move {
+                cell.get_or_try_init(|| build_hybrid(&config, runtime))
+                    .await
+                    .cloned()
+            }
+        })
+        .await
+        .map_err(|err| {
+            HelixDbError::Config(format!(
+                "Slate hybrid cache build for '{}' did not finish: {err}",
+                root.display()
+            ))
+        })??;
     if shared.config != config {
         return Err(HelixDbError::Config(format!(
             "Slate hybrid cache root '{}' is already open in this process as {:?}, not {config:?}",
@@ -141,12 +169,18 @@ pub(crate) async fn shared_hybrid(config: &config::SlateHybridCacheConfig) -> Re
             shared.config,
         )));
     }
-    Ok(SlateDbCache::Hybrid(shared.cache))
+    Ok(SlateDbCache::Hybrid {
+        cache: shared.cache,
+        foyer: shared.foyer,
+    })
 }
 
-/// Builds the hybrid cache for a canonical `config`, with its disk engine's
-/// tasks on [`ENGINE_RUNTIME`].
-async fn build_hybrid(config: &config::SlateHybridCacheConfig) -> Result<SharedHybridCache> {
+/// Builds the hybrid cache for a canonical `config`, with every task it
+/// spawns on `runtime`.
+async fn build_hybrid(
+    config: &config::SlateHybridCacheConfig,
+    runtime: tokio::runtime::Handle,
+) -> Result<SharedHybridCache> {
     let root = config.disk().root();
     remove_stale_foyer_partitions(root, config.disk_partitions(), config.disk_block_bytes())
         .map_err(|err| {
@@ -155,11 +189,6 @@ async fn build_hybrid(config: &config::SlateHybridCacheConfig) -> Result<SharedH
                 root.display()
             ))
         })?;
-    let engine_runtime = ENGINE_RUNTIME.as_ref().map_err(|err| {
-        HelixDbError::Config(format!(
-            "failed to start the Slate hybrid cache engine runtime: {err}"
-        ))
-    })?;
     let device = foyer::FsDeviceBuilder::new(root)
         .with_capacity(config.disk().bytes())
         .build()
@@ -167,18 +196,17 @@ async fn build_hybrid(config: &config::SlateHybridCacheConfig) -> Result<SharedH
             HelixDbError::Config(format!("failed to build Slate hybrid cache device: {err}"))
         })?;
     let metrics = foyer_hybrid::FoyerHybridCacheMetrics::new();
-    let cache = foyer::HybridCacheBuilder::new()
+    let foyer = foyer::HybridCacheBuilder::new()
         .with_name("helix-slate-hybrid")
         .with_metrics_registry(metrics.registry())
         .memory(config.memory_bytes())
         .with_weighter(|_, value: &CachedEntry| value.size())
         .storage()
         .with_io_engine_config(foyer::PsyncIoEngineConfig::new())
-        .with_engine_config(Box::new(EngineOnRuntime {
-            engine: foyer::BlockEngineConfig::new(device)
-                .with_block_size(config.disk_block_bytes()),
-            spawner: foyer::Spawner::from(engine_runtime.handle().clone()),
-        }) as Box<SlateEngineConfig>)
+        .with_engine_config(
+            foyer::BlockEngineConfig::new(device).with_block_size(config.disk_block_bytes()),
+        )
+        .with_spawner(foyer::Spawner::from(runtime))
         .build()
         .await
         .map_err(|err| {
@@ -187,8 +215,10 @@ async fn build_hybrid(config: &config::SlateHybridCacheConfig) -> Result<SharedH
     Ok(SharedHybridCache {
         config: config.clone(),
         cache: Arc::new(foyer_hybrid::FoyerHybridCache::new_with_cache_and_metrics(
-            cache, metrics,
+            foyer.clone(),
+            metrics,
         )),
+        foyer,
     })
 }
 
@@ -222,32 +252,6 @@ fn remove_stale_foyer_partitions(
         }
         std::fs::remove_file(entry.path())
     })
-}
-
-type SlateEngineConfig =
-    dyn foyer::EngineConfig<CachedKey, CachedEntry, foyer::HybridCacheProperties>;
-
-/// Builds Foyer's block engine with its tasks on [`ENGINE_RUNTIME`].
-#[derive(Debug)]
-struct EngineOnRuntime {
-    engine: foyer::BlockEngineConfig<CachedKey, CachedEntry, foyer::HybridCacheProperties>,
-    spawner: foyer::Spawner,
-}
-
-impl foyer::EngineConfig<CachedKey, CachedEntry, foyer::HybridCacheProperties> for EngineOnRuntime {
-    fn build(
-        self: Box<Self>,
-        context: foyer::EngineBuildContext,
-    ) -> BoxFuture<
-        'static,
-        foyer::Result<Arc<dyn foyer::Engine<CachedKey, CachedEntry, foyer::HybridCacheProperties>>>,
-    > {
-        let Self { engine, spawner } = *self;
-        foyer::EngineConfig::build(
-            Box::new(engine),
-            foyer::EngineBuildContext { spawner, ..context },
-        )
-    }
 }
 
 #[cfg(test)]
@@ -299,7 +303,8 @@ mod tests {
 
     /// The process's hybrid cache for `config`.
     async fn shared_cache(config: &config::SlateHybridCacheConfig) -> Arc<dyn DbCache> {
-        let SlateDbCache::Hybrid(cache) = shared_hybrid(config).await.expect("hybrid cache builds")
+        let SlateDbCache::Hybrid { cache, .. } =
+            shared_hybrid(config).await.expect("hybrid cache builds")
         else {
             panic!("a hybrid config builds a hybrid cache");
         };
@@ -422,16 +427,65 @@ mod tests {
         assert_one_device(root.path(), "concurrent opens");
     }
 
-    /// A cancelled open's build finishes on its own task, so the next open
-    /// reuses it rather than building a second device over the same files.
+    /// An open cancelled mid-build leaves the build running on the cache
+    /// runtime, so the next open reuses it rather than building a second
+    /// device over the same files.
     #[tokio::test]
-    async fn a_cancelled_open_still_leaves_one_cache() {
+    async fn a_cancelled_open_still_finishes_its_build() {
+        use futures::FutureExt;
+
         let root = tempfile::tempdir().expect("temporary cache root");
         let config = hybrid_slate_cache(root.path());
-        let _ = tokio::time::timeout(Duration::ZERO, shared_hybrid(&config)).await;
+        let _ = shared_hybrid(&config).now_or_never();
+        let cell = Arc::clone(
+            &HYBRID_CACHES.lock()[&root.path().canonicalize().expect("cache root resolves")],
+        );
+        let started = Instant::now();
+        while !cell.initialized() && started.elapsed() < RELEASE_DEADLINE {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let built = cell.get().expect("a cancelled open's build finishes");
+        assert!(Arc::ptr_eq(&built.cache, &shared_cache(&config).await));
+        assert_one_device(root.path(), "an open after a cancelled open");
+    }
+
+    /// A failed build leaves the root's cell empty, so the next open builds.
+    #[tokio::test]
+    async fn an_open_after_a_failed_build_builds_the_cache() {
+        let root = tempfile::tempdir().expect("temporary cache root");
+        let config = hybrid_slate_cache(root.path());
+        // A directory where a stale partition would be cannot be removed.
+        let blocker = root
+            .path()
+            .join(format!("{FOYER_PARTITION_FILE_PREFIX}{:08}", 999_999));
+        std::fs::create_dir(&blocker).expect("blocking directory");
+        let Err(HelixDbError::Config(message)) = shared_hybrid(&config).await else {
+            panic!("a build that cannot remove a stale partition must fail");
+        };
+        assert!(
+            message.contains("failed to remove stale Slate hybrid cache partitions"),
+            "{message}"
+        );
+
+        std::fs::remove_dir(&blocker).expect("blocking directory removes");
         let cache = shared_cache(&config).await;
         assert!(Arc::ptr_eq(&cache, &shared_cache(&config).await));
-        assert_one_device(root.path(), "an open after a cancelled open");
+        assert_one_device(root.path(), "an open after a failed build");
+    }
+
+    #[tokio::test]
+    async fn a_root_that_is_a_file_is_rejected() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let root = dir.path().join("cache");
+        std::fs::write(&root, b"").expect("a regular file");
+        let Err(HelixDbError::Config(message)) = shared_hybrid(&hybrid_slate_cache(&root)).await
+        else {
+            panic!("a regular file cannot be a cache root");
+        };
+        assert!(
+            message.contains("failed to resolve Slate hybrid cache root"),
+            "{message}"
+        );
     }
 
     #[tokio::test]
@@ -440,6 +494,7 @@ mod tests {
         let root = dir.path().join("nested").join("foyer");
         let cache = shared_cache(&hybrid_slate_cache(&root)).await;
 
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut aliases = vec![dir
             .path()
             .join("nested")
@@ -544,24 +599,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closing_closes_a_memory_cache_but_not_a_shared_hybrid_cache() {
+    async fn closing_closes_a_memory_cache() {
         let memory = Arc::new(CloseCountingCache::default());
         SlateDbCache::Memory(Arc::clone(&memory) as Arc<dyn DbCache>)
             .close()
             .await
             .expect("memory cache closes");
         assert_eq!(memory.0.load(Ordering::SeqCst), 1);
+    }
 
-        let hybrid = Arc::new(CloseCountingCache::default());
-        SlateDbCache::Hybrid(Arc::clone(&hybrid) as Arc<dyn DbCache>)
-            .close()
+    /// Closing a handle writes the shared cache's memory tier to disk, as
+    /// Foyer's own close would, and leaves the cache open for later opens.
+    #[tokio::test]
+    async fn closing_a_handle_writes_the_shared_memory_tier_to_disk() {
+        let root = tempfile::tempdir().expect("temporary cache root");
+        let token = ProcessLocalDatabaseToken::new("slate-cache-close-writes-memory-tier")
+            .expect("valid process-local database");
+        let source = || HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        };
+        let writer = HelixDB::open_managed_writer_with_config(
+            source(),
+            hybrid_db_config(root.path()),
+            NonZeroU64::MIN,
+            ManagedWriterOpenIntent::Bootstrap,
+        )
+        .await
+        .expect("managed bootstrap succeeds");
+        let storage = writer.inner_db();
+        let key = |index: u32| format!("slate-cache-close-{index:04}");
+        for index in 0..64 {
+            storage
+                .put(key(index), vec![7_u8; 1024])
+                .await
+                .expect("value writes");
+        }
+        storage
+            .flush_with_options(slatedb::config::FlushOptions {
+                flush_type: slatedb::config::FlushType::MemTable,
+            })
             .await
-            .expect("hybrid cache close is a no-op");
-        assert_eq!(
-            hybrid.0.load(Ordering::SeqCst),
-            0,
-            "a handle closed the process's cache"
+            .expect("memtable flushes to an SST");
+        for index in 0..64 {
+            storage
+                .get(key(index))
+                .await
+                .expect("value reads")
+                .expect("value exists");
+        }
+        let Some(SlateDbCache::Hybrid { foyer, .. }) = writer.inner.caches.slate_db.as_ref() else {
+            panic!("hybrid mode builds a hybrid cache");
+        };
+        let foyer = foyer.clone();
+        assert!(foyer.memory().usage() > 0, "reads cache blocks in memory");
+        let written = foyer.statistics().disk_write_bytes();
+
+        writer.close().await.expect("writer closes");
+        drop((storage, writer));
+        assert!(
+            foyer.statistics().disk_write_bytes() > written,
+            "close left the memory tier unwritten"
         );
+        let reader = HelixDB::open_reader_with_config(source(), hybrid_db_config(root.path()))
+            .await
+            .expect("a later open reads through the cache");
+        reader.close().await.expect("reader closes");
     }
 
     /// A managed reader and writer on one root, as during a role handoff,
