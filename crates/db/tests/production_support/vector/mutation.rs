@@ -919,6 +919,31 @@ async fn run_graph_delete_contracts(db: &Db) {
     }
     assert!(insert_read_reached_success);
 
+    // Below the top layer an insert first descends greedily, so failing each
+    // read in turn also fails the descent's entry item, neighbor, and batched
+    // item reads.
+    let mut descent_read_reached_success = false;
+    for successful_reads in 0..128 {
+        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let measured = MeasuredVectorTransaction::new(&txn);
+        measured.fail_read_after(successful_reads);
+        let result = index
+            .insert_with_measured_transaction(
+                &measured,
+                779,
+                &[0.5, 0.3, 0.2],
+                VectorInsertContract::Upsert,
+                Some(0),
+            )
+            .await;
+        txn.rollback();
+        if result.is_ok() {
+            descent_read_reached_success = true;
+            break;
+        }
+    }
+    assert!(descent_read_reached_success);
+
     let mut delete_reached_success = false;
     for successful_writes in 0..128 {
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
