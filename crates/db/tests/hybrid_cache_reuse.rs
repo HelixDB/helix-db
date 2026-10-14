@@ -1,8 +1,10 @@
-//! Closed hybrid-cache readers must release their disk-cache files.
+//! Reopened hybrid-cache readers must reuse one set of disk-cache files.
 //!
-//! A hybrid SlateDB cache holds one open file per Foyer disk block while it
-//! runs. A process that reopens readers must release those files on each
-//! close, or it exhausts `nofile` after a handful of reopens.
+//! A hybrid SlateDB cache holds one open file per Foyer disk block for the
+//! life of the process, shared by every handle on its disk root. A process
+//! that reopens readers must reuse that set rather than open one per reopen,
+//! or it exhausts `nofile` after a handful of reopens, and nothing else a
+//! closed reader opened may outlive it.
 //! Descriptors are counted through `/proc/self/fd`, so the test skips on
 //! platforms without procfs. It is its own target so no concurrent test opens
 //! or closes descriptors while it counts.
@@ -16,14 +18,25 @@ use db::HelixDB;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 
-const DATABASE: &str = "hybrid-cache-fd-release";
+const DATABASE: &str = "hybrid-cache-reuse";
 const REOPENS: usize = 8;
-/// Time allowed for dropped handles' spawned cleanup to finish.
+/// Time allowed for a closed reader's tasks to drop what they hold.
 const RELEASE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Descriptors this process holds.
 fn open_files() -> usize {
     std::fs::read_dir("/proc/self/fd")
         .expect("procfs lists this process's descriptors")
+        .count()
+}
+
+/// Descriptors this process holds on files directly in `dir`, which must be
+/// canonical, as procfs reports resolved paths.
+fn open_files_in(dir: &Path) -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .expect("procfs lists this process's descriptors")
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .filter(|target| target.parent() == Some(dir))
         .count()
 }
 
@@ -63,7 +76,7 @@ fn hybrid_config(root: &Path) -> config::DbConfig {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn closed_hybrid_readers_release_their_cache_files() {
+async fn reopened_hybrid_readers_reuse_one_set_of_cache_files() {
     if !Path::new("/proc/self/fd").is_dir() {
         eprintln!("skipping: /proc/self/fd is unavailable on this platform");
         return;
@@ -76,35 +89,47 @@ async fn closed_hybrid_readers_release_their_cache_files() {
     drop(writer);
 
     let cache_root = tempfile::tempdir().expect("temporary cache root");
-    let partitions = hybrid_slate_cache(cache_root.path()).disk_partitions();
-    let baseline = open_files();
+    let root = cache_root
+        .path()
+        .canonicalize()
+        .expect("cache root resolves");
+    let slate_root = root.join("slate");
+    let partitions = hybrid_slate_cache(&root).disk_partitions();
+    // Descriptors after the first close; later closes must not leave more.
+    let mut settled: Option<usize> = None;
     for reopen in 0..REOPENS {
         let reader = HelixDB::open_reader_with_object_store_and_config(
             DATABASE,
             Arc::clone(&object_store),
-            hybrid_config(cache_root.path()),
+            hybrid_config(&root),
         )
         .await
         .expect("hybrid reader opens");
-        let open = open_files();
-        assert!(
-            open >= baseline + partitions,
-            "reopen {reopen}: an open reader holds its {partitions} cache files, \
-             but only {open} descriptors are open over a baseline of {baseline}",
+        let held = open_files_in(&slate_root);
+        assert_eq!(
+            held, partitions,
+            "reopen {reopen}: {held} cache files are open, not one device's {partitions}"
         );
         reader.close().await.expect("hybrid reader closes");
         drop(reader);
 
         let started = Instant::now();
         let mut open = open_files();
-        while open >= baseline + partitions && started.elapsed() < RELEASE_DEADLINE {
+        while settled.is_some_and(|settled| open > settled) && started.elapsed() < RELEASE_DEADLINE
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
             open = open_files();
         }
+        let held = open_files_in(&slate_root);
+        assert_eq!(
+            held, partitions,
+            "reopen {reopen}: the shared cache holds {held} cache files after a close, not {partitions}"
+        );
+        let first = *settled.get_or_insert(open);
         assert!(
-            open < baseline + partitions,
-            "reopen {reopen}: {open} descriptors are still open {:?} after closing a \
-             reader over a baseline of {baseline}; its {partitions} cache files leaked",
+            open <= first,
+            "reopen {reopen}: {open} descriptors are open {:?} after closing a reader, \
+             {first} after the first close; reopens leak descriptors",
             started.elapsed(),
         );
     }

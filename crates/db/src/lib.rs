@@ -74,9 +74,6 @@ use config::ValidatedDynamicIndexDefinition;
 use config::{db::EmbeddedStorageProfile, runtime_catalog, CacheMode, RuntimeIndexCatalog};
 use error::{HelixDbError, Result};
 use execution::interpreter::{ExecutionResult, Interpreter};
-use foyer::{
-    BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig,
-};
 use futures::{stream, StreamExt};
 use helix_ast::query::QueryRequest;
 use helix_metrics::query::transport::OssQueryMetrics;
@@ -90,8 +87,7 @@ use id_allocator::{EdgeIdAllocator, NodeIdAllocator};
 use serde_json::Value as JsonValue;
 use slatedb::db_cache::{
     foyer::{FoyerCache, FoyerCacheOptions},
-    foyer_hybrid::{FoyerHybridCache, FoyerHybridCacheMetrics},
-    CacheUsageSnapshot, CachedEntry, DbCache, SplitCache,
+    CacheUsageSnapshot, DbCache, SplitCache,
 };
 #[cfg(test)]
 use slatedb::object_store::memory::InMemory;
@@ -1223,8 +1219,8 @@ impl HelixDB {
         let db = Arc::new(builder.build().await?);
         log_stage("slatedb_writer_open", stage_started);
         // Built before the storage checks so every failure below closes
-        // storage: an unclosed Db keeps its tasks, and the cache they read
-        // through, running for the life of the runtime.
+        // storage: an unclosed Db keeps its tasks running, and polling the
+        // object store, for the life of the runtime.
         let writer = HelixWriter::new(
             Arc::clone(&db),
             config.id_lease_size(),
@@ -1522,10 +1518,10 @@ impl HelixDB {
             Ok((compatibility, loaded_catalog, fts_cache))
         }
         .await;
-        // An unclosed reader's manifest poller runs for the life of the
-        // runtime, holding the cache it reads through and its disk files.
-        // Callers retry these errors, such as a reader awaiting a writer
-        // migration, so each would strand another set.
+        // An unclosed reader's manifest poller polls the object store for
+        // the life of the runtime. Callers retry these errors, such as a
+        // reader awaiting a writer migration, so each attempt would leave
+        // another poller running.
         let (compatibility, loaded_catalog, fts_cache) = match runtime_inputs {
             Ok(inputs) => inputs,
             Err(open_error) => {
@@ -3852,40 +3848,6 @@ fn build_fts_cache(
         .map(Some)
 }
 
-const FOYER_PARTITION_FILE_PREFIX: &str = "foyer-storage-direct-fs-";
-
-/// Removes Foyer partition files that the device about to open would not own.
-///
-/// Foyer opens partitions `0..partitions`, resizing reused files in place, and
-/// never looks at higher indexes. Files left by a larger earlier disk budget
-/// would stay on disk forever, and files of another block size would be
-/// recovered at the wrong block boundaries. Both are disposable cache data.
-fn remove_stale_foyer_partitions(
-    root: &std::path::Path,
-    partitions: usize,
-    block_bytes: usize,
-) -> std::io::Result<()> {
-    let entries = match std::fs::read_dir(root) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        entries => entries?,
-    };
-    entries.into_iter().try_for_each(|entry| {
-        let entry = entry?;
-        let Some(index) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_prefix(FOYER_PARTITION_FILE_PREFIX))
-            .and_then(|index| index.parse::<usize>().ok())
-        else {
-            return Ok(());
-        };
-        if index < partitions && entry.metadata()?.len() == block_bytes as u64 {
-            return Ok(());
-        }
-        std::fs::remove_file(entry.path())
-    })
-}
-
 async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<slate_cache::SlateDbCache>> {
     match config {
         CacheMode::VectorMemoryOnly => Ok(None),
@@ -3907,52 +3869,7 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<slate_cache::
                     .build(),
             ))))
         }
-        CacheMode::Hybrid { slate_db, .. } => {
-            remove_stale_foyer_partitions(
-                slate_db.disk().root(),
-                slate_db.disk_partitions(),
-                slate_db.disk_block_bytes(),
-            )
-            .map_err(|err| {
-                HelixDbError::Config(format!(
-                    "failed to remove stale Slate hybrid cache partitions in '{}': {err}",
-                    slate_db.disk().root().display()
-                ))
-            })?;
-            let disk_engine = slate_cache::DiskEngineRuntime::start()?;
-            let metrics = FoyerHybridCacheMetrics::new();
-            let cache = HybridCacheBuilder::new()
-                .with_name("helix-slate-hybrid")
-                .with_metrics_registry(metrics.registry())
-                .memory(slate_db.memory_bytes())
-                .with_weighter(|_, value: &CachedEntry| value.size())
-                .storage()
-                .with_io_engine_config(PsyncIoEngineConfig::new())
-                .with_engine_config(
-                    disk_engine.engine_config(
-                        BlockEngineConfig::new(
-                            FsDeviceBuilder::new(slate_db.disk().root())
-                                .with_capacity(slate_db.disk().bytes())
-                                .build()
-                                .map_err(|err| {
-                                    HelixDbError::Config(format!(
-                                        "failed to build Slate hybrid cache device: {err}"
-                                    ))
-                                })?,
-                        )
-                        .with_block_size(slate_db.disk_block_bytes()),
-                    ),
-                )
-                .build()
-                .await
-                .map_err(|err| {
-                    HelixDbError::Config(format!("failed to build Slate hybrid cache: {err}"))
-                })?;
-            Ok(Some(slate_cache::SlateDbCache::hybrid(
-                Arc::new(FoyerHybridCache::new_with_cache_and_metrics(cache, metrics)),
-                disk_engine,
-            )))
-        }
+        CacheMode::Hybrid { slate_db, .. } => slate_cache::shared_hybrid(slate_db).await.map(Some),
     }
 }
 
@@ -4124,9 +4041,11 @@ mod tests {
             })
             .count();
         assert_eq!(partition_count, expected_partitions);
-        cache.close().await.expect("Foyer cache closes");
+        drop(cache);
     }
 
+    /// A root a larger budget used, in an earlier process, keeps only the
+    /// partitions the new device owns.
     #[tokio::test]
     async fn slate_hybrid_cache_removes_partitions_beyond_a_smaller_budget() {
         use crate::config::{
@@ -4136,85 +4055,57 @@ mod tests {
 
         let root = tempfile::tempdir().expect("temporary cache root");
         let foyer_root = root.path().join("foyer");
-        let partition_indexes = || {
-            let mut indexes = std::fs::read_dir(&foyer_root)
-                .expect("Foyer cache directory exists")
-                .map(|entry| {
-                    entry
-                        .expect("readable cache entry")
-                        .file_name()
-                        .to_string_lossy()
-                        .strip_prefix(FOYER_PARTITION_FILE_PREFIX)
-                        .expect("only partition files")
-                        .parse::<usize>()
-                        .expect("numbered partition")
-                })
-                .collect::<Vec<_>>();
-            indexes.sort_unstable();
-            indexes
+        let earlier = SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, 16 * 1024 * 1024)
+            .expect("valid Slate hybrid cache");
+        std::fs::create_dir_all(&foyer_root).expect("cache root");
+        for index in 0..earlier.disk_partitions() {
+            std::fs::File::create(foyer_root.join(format!(
+                "{}{index:08}",
+                slate_cache::FOYER_PARTITION_FILE_PREFIX
+            )))
+            .and_then(|file| file.set_len(earlier.disk_block_bytes() as u64))
+            .expect("earlier partition file");
+        }
+
+        let slate_db = SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, 8 * 1024 * 1024)
+            .expect("valid Slate hybrid cache");
+        assert_eq!(slate_db.disk_block_bytes(), earlier.disk_block_bytes());
+        let partitions = slate_db.disk_partitions();
+        let mode = CacheMode::Hybrid {
+            slate_db,
+            object_store: SlateObjectStoreCacheSettings::try_new(
+                root.path().join("object-store"),
+                Some(1024 * 1024),
+                4096,
+                false,
+                ObjectStoreWarmLevel::Off,
+                None,
+                1,
+            )
+            .expect("valid object-store cache"),
+            slate_warm: SlateWarmConfig::Off,
+            fts: None,
         };
-        for (disk_bytes, partitions) in [(16 * 1024 * 1024, 256), (8 * 1024 * 1024, 128)] {
-            let mode = CacheMode::Hybrid {
-                slate_db: SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, disk_bytes)
-                    .expect("valid Slate hybrid cache"),
-                object_store: SlateObjectStoreCacheSettings::try_new(
-                    root.path().join("object-store"),
-                    Some(1024 * 1024),
-                    4096,
-                    false,
-                    ObjectStoreWarmLevel::Off,
-                    None,
-                    1,
-                )
-                .expect("valid object-store cache"),
-                slate_warm: SlateWarmConfig::Off,
-                fts: None,
-            };
-            let cache = build_slate_db_cache(&mode)
-                .await
-                .expect("Foyer cache builds")
-                .expect("hybrid mode enables Foyer");
-            assert_eq!(partition_indexes(), (0..partitions).collect::<Vec<_>>());
-            cache.close().await.expect("Foyer cache closes");
-        }
-    }
-
-    #[test]
-    fn stale_foyer_partitions_are_indexes_past_the_device_or_another_block_size() {
-        const BLOCK: u64 = 64 * 1024;
-        let root = tempfile::tempdir().expect("temporary cache root");
-        for (name, length) in [
-            ("foyer-storage-direct-fs-00000000", BLOCK),
-            ("foyer-storage-direct-fs-00000001", 2 * BLOCK),
-            ("foyer-storage-direct-fs-00000003", BLOCK),
-            ("foyer-storage-direct-fs-00000004", BLOCK),
-            ("foyer-storage-direct-fs-not-a-number", BLOCK),
-            ("unrelated", 2 * BLOCK),
-        ] {
-            std::fs::File::create(root.path().join(name))
-                .and_then(|file| file.set_len(length))
-                .expect("fixture file");
-        }
-
-        remove_stale_foyer_partitions(root.path(), 4, BLOCK as usize)
-            .expect("stale partitions are removed");
-        let mut remaining = std::fs::read_dir(root.path())
-            .expect("cache root exists")
-            .map(|entry| entry.expect("readable entry").file_name())
+        let cache = build_slate_db_cache(&mode)
+            .await
+            .expect("Foyer cache builds")
+            .expect("hybrid mode enables Foyer");
+        let mut indexes = std::fs::read_dir(&foyer_root)
+            .expect("Foyer cache directory exists")
+            .map(|entry| {
+                entry
+                    .expect("readable cache entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .strip_prefix(slate_cache::FOYER_PARTITION_FILE_PREFIX)
+                    .expect("only partition files")
+                    .parse::<usize>()
+                    .expect("numbered partition")
+            })
             .collect::<Vec<_>>();
-        remaining.sort();
-        assert_eq!(
-            remaining,
-            [
-                "foyer-storage-direct-fs-00000000",
-                "foyer-storage-direct-fs-00000003",
-                "foyer-storage-direct-fs-not-a-number",
-                "unrelated",
-            ]
-        );
-
-        remove_stale_foyer_partitions(&root.path().join("missing"), 4, BLOCK as usize)
-            .expect("a missing cache directory has nothing to remove");
+        indexes.sort_unstable();
+        assert_eq!(indexes, (0..partitions).collect::<Vec<_>>());
+        drop(cache);
     }
 
     #[test]
