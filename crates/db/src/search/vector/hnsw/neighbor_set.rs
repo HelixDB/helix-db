@@ -81,11 +81,14 @@ impl NeighborSet {
     /// Callers producing new graph state must sort explicitly before crossing
     /// this boundary. This makes accidental quadratic membership and unstable
     /// row ordering visible during development rather than hiding it in a codec.
+    /// The set owns `nodes` exactly: a boxed slice is kept as is, and a `Vec`
+    /// whose capacity exceeds its length is shrunk.
     pub(crate) fn try_from_canonical(
         owner: NodeId,
         degree_limit: NeighborDegreeLimit,
-        nodes: Vec<NodeId>,
+        nodes: impl Into<Box<[NodeId]>>,
     ) -> Result<Self, NeighborSetError> {
+        let nodes = nodes.into();
         if nodes.len() > degree_limit.get() {
             return Err(NeighborSetError::DegreeExceeded {
                 limit: degree_limit.get(),
@@ -107,7 +110,7 @@ impl NeighborSet {
         Ok(Self {
             owner,
             degree_limit,
-            nodes: nodes.into_boxed_slice(),
+            nodes,
         })
     }
 
@@ -141,22 +144,31 @@ impl NeighborSet {
         self.nodes.binary_search(&node_id).is_ok()
     }
 
-    /// Copies canonical IDs for algorithms that intentionally build a candidate superset.
-    pub(crate) fn to_vec(&self) -> Vec<NodeId> {
-        self.nodes.to_vec()
+    /// Returns this set without `node_id`, or `None` when it does not hold it.
+    ///
+    /// Removing a member keeps the set canonical and within its degree, so
+    /// the result needs no validation and owns one exactly sized allocation.
+    pub(crate) fn without(&self, node_id: NodeId) -> Option<Self> {
+        let position = self.nodes.binary_search(&node_id).ok()?;
+        Some(Self {
+            owner: self.owner,
+            degree_limit: self.degree_limit,
+            nodes: self.nodes[..position]
+                .iter()
+                .chain(&self.nodes[position + 1..])
+                .copied()
+                .collect(),
+        })
     }
 
-    /// Computes removed and added IDs with at most `old.len() + new.len()` comparisons.
-    pub(crate) fn difference(&self, next: &Self) -> Result<NeighborDifference, NeighborSetError> {
-        self.difference_counted(next)
-            .map(|(difference, _)| difference)
-    }
-
-    /// Shared two-pointer implementation, retaining comparison count for tests.
-    fn difference_counted(
-        &self,
-        next: &Self,
-    ) -> Result<(NeighborDifference, usize), NeighborSetError> {
+    /// Pairs two sets of the same owner and degree for linear differencing.
+    ///
+    /// Nothing is computed or allocated here: each side of the returned
+    /// difference is one merge pass of at most `old.len() + new.len()` steps.
+    pub(crate) fn difference<'set>(
+        &'set self,
+        next: &'set Self,
+    ) -> Result<NeighborDifference<'set>, NeighborSetError> {
         if self.owner != next.owner {
             return Err(NeighborSetError::OwnerMismatch {
                 expected: self.owner,
@@ -166,52 +178,78 @@ impl NeighborSet {
         if self.degree_limit != next.degree_limit {
             return Err(NeighborSetError::DegreeLimitMismatch);
         }
-
-        let mut removed = Vec::new();
-        let mut added = Vec::new();
-        let mut old_index = 0;
-        let mut new_index = 0;
-        let mut comparisons = 0;
-        while old_index < self.nodes.len() && new_index < next.nodes.len() {
-            comparisons += 1;
-            match self.nodes[old_index].cmp(&next.nodes[new_index]) {
-                std::cmp::Ordering::Less => {
-                    removed.push(self.nodes[old_index]);
-                    old_index += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    added.push(next.nodes[new_index]);
-                    new_index += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    old_index += 1;
-                    new_index += 1;
-                }
-            }
-        }
-        removed.extend_from_slice(&self.nodes[old_index..]);
-        added.extend_from_slice(&next.nodes[new_index..]);
-        Ok((NeighborDifference { removed, added }, comparisons))
+        Ok(NeighborDifference {
+            old: &self.nodes,
+            new: &next.nodes,
+        })
     }
 }
 
 /// Linear difference between two canonical sets owned by the same node.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NeighborDifference {
-    removed: Vec<NodeId>,
-    added: Vec<NodeId>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NeighborDifference<'set> {
+    old: &'set [NodeId],
+    new: &'set [NodeId],
 }
 
-impl NeighborDifference {
+impl<'set> NeighborDifference<'set> {
     /// Returns true when no physical neighbor or reverse-locator write is needed.
     #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) fn is_empty(&self) -> bool {
-        self.removed.is_empty() && self.added.is_empty()
+        self.old == self.new
     }
 
-    /// Moves both ordered sides into unchanged row/locator write planning.
+    /// Returns the IDs only the old set holds, ascending.
+    pub(crate) fn removed(&self) -> SortedDifference<'set> {
+        SortedDifference {
+            left: self.old,
+            right: self.new,
+        }
+    }
+
+    /// Returns the IDs only the new set holds, ascending.
+    pub(crate) fn added(&self) -> SortedDifference<'set> {
+        SortedDifference {
+            left: self.new,
+            right: self.old,
+        }
+    }
+
+    /// Collects both ordered sides.
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) fn into_parts(self) -> (Vec<NodeId>, Vec<NodeId>) {
-        (self.removed, self.added)
+        (self.removed().collect(), self.added().collect())
+    }
+}
+
+/// Members of one ascending, unique slice that another such slice lacks, in
+/// ascending order.
+///
+/// One merge pass over both slices yields them: every step consumes an
+/// element of `left`, `right`, or both.
+#[derive(Debug, Clone)]
+pub(crate) struct SortedDifference<'set> {
+    left: &'set [NodeId],
+    right: &'set [NodeId],
+}
+
+impl Iterator for SortedDifference<'_> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<NodeId> {
+        loop {
+            let (&candidate, left) = self.left.split_first()?;
+            self.left = left;
+            while let Some((&other, right)) = self.right.split_first()
+                && other < candidate
+            {
+                self.right = right;
+            }
+            match self.right.split_first() {
+                Some((&other, right)) if other == candidate => self.right = right,
+                _ => return Some(candidate),
+            }
+        }
     }
 }
 
@@ -302,14 +340,115 @@ mod tests {
     }
 
     #[test]
-    fn difference_is_linear_and_exact_at_boundaries() {
+    fn canonical_construction_accepts_slices_and_vectors_alike() {
+        let from_vec = NeighborSet::try_from_canonical(9, limit(3), vec![1, 2]).unwrap();
+        let from_slice = NeighborSet::try_from_canonical(9, limit(3), &[1_u64, 2][..]).unwrap();
+        assert_eq!(from_vec, from_slice);
+        assert_eq!(
+            NeighborSet::try_from_canonical(9, limit(3), &[2_u64, 1][..]),
+            Err(NeighborSetError::Unsorted)
+        );
+    }
+
+    #[test]
+    fn without_removes_exactly_one_member() {
+        let set = NeighborSet::try_from_canonical(9, limit(3), vec![1, 2, 3]).unwrap();
+        for (removed, rest) in [(1, vec![2, 3]), (2, vec![1, 3]), (3, vec![1, 2])] {
+            let next = set.without(removed).unwrap();
+            assert_eq!(next.as_slice(), rest.as_slice());
+            assert_eq!(
+                next,
+                NeighborSet::try_from_canonical(9, limit(3), rest).unwrap()
+            );
+        }
+        assert!(set.without(4).is_none());
+        assert!(set.without(9).is_none());
+        let single = NeighborSet::try_from_canonical(9, limit(3), vec![5]).unwrap();
+        assert_eq!(single.without(5).unwrap(), NeighborSet::empty(9, limit(3)));
+        assert!(NeighborSet::empty(9, limit(3)).without(5).is_none());
+    }
+
+    proptest::proptest! {
+        /// `without` equals validating the filtered canonical vector.
+        #[test]
+        fn without_matches_filtering_and_revalidating(
+            nodes in proptest::collection::btree_set(0_u64..64, 0..16),
+            removed in 0_u64..64,
+        ) {
+            let nodes = nodes.into_iter().filter(|node| *node != 99).collect::<Vec<_>>();
+            let set = NeighborSet::try_from_canonical(99, limit(16), nodes.clone()).unwrap();
+            let expected = nodes.contains(&removed).then(|| {
+                let rest = nodes.iter().copied().filter(|node| *node != removed).collect::<Vec<_>>();
+                NeighborSet::try_from_canonical(99, limit(16), rest).unwrap()
+            });
+            proptest::prop_assert_eq!(set.without(removed), expected);
+        }
+    }
+
+    #[test]
+    fn difference_is_exact_at_boundaries() {
         let old = NeighborSet::try_from_canonical(9, limit(5), vec![1, 3, 5]).unwrap();
         let new = NeighborSet::try_from_canonical(9, limit(5), vec![2, 3, 4]).unwrap();
-        let (difference, comparisons) = old.difference_counted(&new).unwrap();
-        assert!(comparisons <= old.as_slice().len() + new.as_slice().len());
+        let difference = old.difference(&new).unwrap();
         assert!(!difference.is_empty());
         assert_eq!(difference.into_parts(), (vec![1, 5], vec![2, 4]));
         assert!(old.difference(&old).unwrap().is_empty());
+        let empty = NeighborSet::empty(9, limit(5));
+        assert_eq!(
+            old.difference(&empty).unwrap().into_parts(),
+            (vec![1, 3, 5], vec![])
+        );
+        assert_eq!(
+            empty.difference(&old).unwrap().into_parts(),
+            (vec![], vec![1, 3, 5])
+        );
+        assert_eq!(
+            NeighborSet::empty(9, limit(1)).difference(&empty),
+            Err(NeighborSetError::DegreeLimitMismatch)
+        );
+    }
+
+    #[test]
+    fn sorted_difference_takes_one_merge_pass() {
+        let left = [1, 4, 6, 9];
+        let right = [0, 4, 5, 9, 12];
+        let mut difference = SortedDifference {
+            left: &left,
+            right: &right,
+        };
+        assert_eq!(difference.next(), Some(1));
+        assert_eq!(difference.next(), Some(6));
+        assert_eq!(difference.next(), None);
+        // Exhausting `left` consumed every `right` element up to its last.
+        assert!(difference.left.is_empty());
+        assert_eq!(difference.right, [12].as_slice());
+    }
+
+    proptest::proptest! {
+        /// Both sides equal ordered-set differences, and together with the
+        /// common members they partition the union.
+        #[test]
+        fn difference_matches_ordered_set_differences(
+            old in proptest::collection::btree_set(0_u64..48, 0..24),
+            new in proptest::collection::btree_set(0_u64..48, 0..24),
+        ) {
+            let old_set =
+                NeighborSet::try_from_canonical(99, limit(24), old.iter().copied().collect::<Vec<_>>())
+                    .unwrap();
+            let new_set =
+                NeighborSet::try_from_canonical(99, limit(24), new.iter().copied().collect::<Vec<_>>())
+                    .unwrap();
+            let difference = old_set.difference(&new_set).unwrap();
+            proptest::prop_assert_eq!(
+                difference.removed().collect::<Vec<_>>(),
+                old.difference(&new).copied().collect::<Vec<_>>()
+            );
+            proptest::prop_assert_eq!(
+                difference.added().collect::<Vec<_>>(),
+                new.difference(&old).copied().collect::<Vec<_>>()
+            );
+            proptest::prop_assert_eq!(difference.is_empty(), old == new);
+        }
     }
 
     #[test]

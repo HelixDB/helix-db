@@ -178,9 +178,10 @@ pub(crate) async fn lookup_active_unique_equality_batch_admitted(
                 }))
             })
             .transpose()?;
+        let mut scratch = view::Scratch::new();
         for ((owner, value), record) in found.into_iter().zip(records) {
             let matches = record
-                .map(|bytes| decode_properties(&bytes))
+                .map(|bytes| decode_indexed_source(definition, &bytes, &mut scratch))
                 .transpose()?
                 .is_some_and(|properties| {
                     properties_match_definition(definition, &properties)

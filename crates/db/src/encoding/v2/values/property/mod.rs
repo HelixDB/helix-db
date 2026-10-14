@@ -9,6 +9,7 @@ pub mod property;
 pub(crate) mod property_value;
 pub(crate) mod range_index_value;
 mod row;
+pub(crate) mod view;
 pub(crate) mod write;
 
 pub use property::Property;

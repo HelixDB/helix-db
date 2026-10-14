@@ -431,11 +431,55 @@ async fn collect_limited(
     Ok(rows)
 }
 
+/// Admits a storage-returned value to `budget`, when the request has one,
+/// for as long as the value is held.
 fn retain_read(bytes: Bytes, budget: Option<&super::rows::memory::Budget>) -> Result<Bytes> {
     let Some(budget) = budget else {
         return Ok(bytes);
     };
     budget.retain_read(bytes)
+}
+
+/// A stored record a scan of this request's view already returned: the full
+/// storage key and its value, held so the read of that key the scan would
+/// otherwise make next can use it instead of storage.
+pub(in crate::execution::interpreter) struct ScannedRecord {
+    pub(in crate::execution::interpreter) key: Bytes,
+    pub(in crate::execution::interpreter) value: Bytes,
+}
+
+impl<'db> ExecutionContext<'db> {
+    /// [`Self::get_raw`] of a key whose value `record` already holds: the same
+    /// deadline check, request read cache, row-budget admission and read
+    /// accounting, in the same order, without the storage read. Budget errors,
+    /// peak usage and `ResourceUsage` therefore match a storage read.
+    pub(in crate::execution::interpreter) fn read_scanned(
+        &self,
+        record: &ScannedRecord,
+    ) -> Result<Option<Bytes>> {
+        self.check_execution_deadline()?;
+        let cache = self.request_read_cache();
+        let Some(cached) = cache.and_then(|cache| cache.get(&record.key)) else {
+            let _request_memory = self
+                .row_memory
+                .as_ref()
+                .map(|budget| budget.reserve(record.key.len().saturating_add(size_of::<Bytes>())))
+                .transpose()?;
+            if let Some(budget) = &self.row_memory {
+                budget.record_reads(crate::cypher::StorageReadUsage {
+                    point_gets: 1,
+                    ..Default::default()
+                });
+            }
+            let value = Some(retain_read(record.value.clone(), self.row_memory.as_ref())?);
+            let Some(cache) = cache else {
+                return Ok(value);
+            };
+            cache.insert(&record.key, &value);
+            return Ok(value);
+        };
+        Ok(cached)
+    }
 }
 
 fn writer_from_storage(db: &HelixDB) -> std::result::Result<&HelixWriter, crate::HelixDbMode> {

@@ -101,10 +101,13 @@ impl Decoded {
         budget: Option<&Budget>,
     ) -> Result<Self> {
         let Some(budget) = budget else {
-            // Keep the legacy native decoder and its stored-value behavior.
-            // Retaining only selected fields does not allocate a second vector.
-            let mut properties = property::decode_properties(data)?;
-            properties.retain(|property| selection.contains(&property.name));
+            // Keep the native decoder's validation and errors, materializing
+            // only the selected fields.
+            let properties = property::view::decode_selected(
+                data,
+                &mut property::view::Scratch::new(),
+                |name| selection.contains(name),
+            )?;
             return Ok(Self {
                 properties,
                 _memory: None,

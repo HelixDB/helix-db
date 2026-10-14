@@ -279,3 +279,579 @@ async fn endpoint_property_lookup_propagates_corrupt_node_properties() {
         Err(HelixDbError::Encoding(_))
     ));
 }
+
+/// Stored rows covering every value variant, duplicate names, dotted names,
+/// empty rows and large payloads.
+fn stored_shapes() -> Vec<Vec<Property>> {
+    use std::collections::BTreeMap;
+    let object = |entries: Vec<(&str, DbPropertyValue)>| {
+        DbPropertyValue::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    };
+    vec![
+        Vec::new(),
+        vec![
+            Property::string("$label", "User"),
+            Property::new("null", DbPropertyValue::Null),
+            Property::bool("bool", true),
+            Property::i64("i64", i64::MIN),
+            Property::datetime_millis("datetime", -1),
+            Property::f64("f64", f64::NAN),
+            Property::f64("negative_zero", -0.0),
+            Property::new("f32", DbPropertyValue::F32(f64::from(f32::MAX))),
+            Property::string("string", "héllo \u{1F600}"),
+            Property::string("empty_string", ""),
+            Property::bytes("bytes", vec![0, 255, 7]),
+            Property::bytes("empty_bytes", Vec::new()),
+            Property::i64_array("i64_array", vec![i64::MAX, -1]),
+            Property::f64_array("f64_array", vec![f64::INFINITY, f64::NAN]),
+            Property::f32_array("f32_array", Vec::new()),
+            Property::string_array("string_array", vec![String::new(), "b".into()]),
+            Property::new(
+                "array",
+                DbPropertyValue::Array(vec![
+                    DbPropertyValue::I64(1),
+                    object(vec![("inner", DbPropertyValue::Bool(false))]),
+                ]),
+            ),
+            Property::new(
+                "meta",
+                object(vec![
+                    ("score", DbPropertyValue::I64(9)),
+                    (
+                        "deep",
+                        object(vec![("leaf", DbPropertyValue::String("x".into()))]),
+                    ),
+                    ("", DbPropertyValue::I64(0)),
+                ]),
+            ),
+            Property::i64("meta.exact", 4),
+        ],
+        vec![
+            Property::string("dup", "first"),
+            Property::string("$label", "Other"),
+            Property::string("dup", "second"),
+            Property::new("meta", DbPropertyValue::I64(1)),
+            Property::string("$label", "User"),
+            Property::new("meta", object(vec![("score", DbPropertyValue::I64(2))])),
+        ],
+        vec![
+            Property::string("$label", "Document"),
+            Property::f32_array(
+                "embedding",
+                (0..1536).map(|value| value as f32 * 0.25).collect(),
+            ),
+            Property::string("body", "word ".repeat(4096)),
+            Property::bytes("blob", vec![3; 70_000]),
+        ],
+    ]
+}
+
+/// The value the full-row decoder yields for `path`: an exact name first,
+/// then a dotted walk through nested objects.
+fn decoded_value(properties: &[Property], path: &str) -> Option<DbPropertyValue> {
+    if let Some(property) = properties.iter().find(|property| property.name == path) {
+        return Some(property.value.clone());
+    }
+    let mut segments = path.split('.');
+    let first = segments.next().filter(|_| path.contains('.'))?;
+    let mut value = properties
+        .iter()
+        .find(|property| !first.is_empty() && property.name == first)?
+        .value
+        .clone();
+    for segment in segments {
+        let DbPropertyValue::Object(values) = value else {
+            return None;
+        };
+        value = values.get(segment).filter(|_| !segment.is_empty())?.clone();
+    }
+    Some(value)
+}
+
+fn same_values(left: &Option<DbPropertyValue>, right: &Option<DbPropertyValue>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.same_v1_representation(right),
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
+}
+
+fn node_property_key(id: u64) -> bytes::Bytes {
+    crate::encoding::keys::DataKey::Data {
+        scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
+        kind: crate::encoding::keys::DataKeyKind::NodeProperty(
+            crate::encoding::keys::NodePropertyKey::new(id),
+        ),
+    }
+    .to_bytes()
+}
+
+#[tokio::test]
+async fn resolver_reads_every_stored_shape_exactly_as_the_full_row_decoder() {
+    let db = test_support::open_db("stream-eval-resolver-decoder-oracle").await;
+    let shapes = stored_shapes();
+    for (id, properties) in (1_u64..).zip(&shapes) {
+        db.inner_db()
+            .put(
+                node_property_key(id),
+                crate::encoding::property::encode_properties(properties),
+            )
+            .await
+            .unwrap();
+    }
+    let paths = [
+        "$label",
+        "null",
+        "bool",
+        "i64",
+        "datetime",
+        "f64",
+        "negative_zero",
+        "f32",
+        "string",
+        "empty_string",
+        "bytes",
+        "empty_bytes",
+        "i64_array",
+        "f64_array",
+        "f32_array",
+        "string_array",
+        "array",
+        "array.inner",
+        "meta",
+        "meta.score",
+        "meta.deep",
+        "meta.deep.leaf",
+        "meta.deep.missing",
+        "meta.",
+        "meta..x",
+        ".meta",
+        "meta.exact",
+        "meta.score.more",
+        "dup",
+        "embedding",
+        "body",
+        "blob",
+        "missing",
+        "missing.path",
+    ];
+    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let mut batch = RowValueResolver::new(&ctx);
+    let elements = (1..=shapes.len() as u64)
+        .map(ElementRef::Node)
+        .collect::<Vec<_>>();
+    batch.prefetch(&elements).await.unwrap();
+    for (id, properties) in (1_u64..).zip(&shapes) {
+        let stored = db
+            .inner_db()
+            .get(node_property_key(id))
+            .await
+            .unwrap()
+            .unwrap();
+        let decoded = crate::encoding::property::decode_properties(&stored).unwrap();
+        assert_eq!(decoded.len(), properties.len());
+        assert!(decoded
+            .iter()
+            .zip(properties)
+            .all(|(left, right)| left.same_v1_representation(right)));
+        let row = current_node(id);
+        for path in paths {
+            let expected = decoded_value(&decoded, path);
+            let alone = ctx.row_property(&row, &name(path)).await.unwrap();
+            let batched = batch.row_property(&row, &name(path)).await.unwrap();
+            assert!(same_values(&alone, &expected), "{id} {path}: {alone:?}");
+            assert!(same_values(&batched, &expected), "{id} {path}: {batched:?}");
+        }
+        for last_use in [false, true] {
+            let all = batch.row_properties(&row, last_use).await.unwrap();
+            assert_eq!(all.len(), decoded.len());
+            assert!(all
+                .iter()
+                .zip(&decoded)
+                .all(|(left, right)| left.same_v1_representation(right)));
+        }
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn resolver_rejects_corrupt_rows_lazily_with_the_decoder_error() {
+    let db = test_support::open_db("stream-eval-resolver-corruption-oracle").await;
+    let valid = crate::encoding::property::encode_properties(&[
+        Property::string("$label", "User"),
+        Property::string("name", "ada"),
+        Property::f32_array("embedding", vec![1.0; 64]),
+    ]);
+    let mut corrupt = vec![
+        bytes::Bytes::from_static(b"corrupt"),
+        bytes::Bytes::from_static(&[0]),
+        valid.slice(..valid.len() - 1),
+        valid.slice(1..),
+    ];
+    // Single-byte flips across the row: some still validate, most must not.
+    for position in (0..valid.len()).step_by(7) {
+        let mut flipped = valid.to_vec();
+        flipped[position] ^= 0xA5;
+        corrupt.push(bytes::Bytes::from(flipped));
+    }
+    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let mut rejected = 0;
+    for (id, bytes) in (100_u64..).zip(&corrupt) {
+        db.inner_db()
+            .put(node_property_key(id), bytes.clone())
+            .await
+            .unwrap();
+        let row = current_node(id);
+        let expected = crate::encoding::property::decode_properties(bytes);
+        // `$id` never reads the record, so corruption cannot surface.
+        assert_eq!(
+            ctx.row_property(&row, &name("$id")).await.unwrap(),
+            Some(DbPropertyValue::I64(id as i64))
+        );
+        for path in ["name", "embedding", "missing", "name.x"] {
+            let actual = ctx.row_property(&row, &name(path)).await;
+            match (&expected, actual) {
+                (Ok(decoded), Ok(actual)) => {
+                    assert!(same_values(&actual, &decoded_value(decoded, path)));
+                }
+                (
+                    Err(crate::encoding::error::EncodingError::Rkyv(expected)),
+                    Err(HelixDbError::Encoding(crate::encoding::error::EncodingError::Rkyv(
+                        actual,
+                    ))),
+                ) => assert_eq!(
+                    crate::encoding::v2::values::property::view::tests::masked(&actual),
+                    crate::encoding::v2::values::property::view::tests::masked(expected)
+                ),
+                (expected, actual) => panic!("{id} {path}: {expected:?} vs {actual:?}"),
+            }
+        }
+        let mut resolver = RowValueResolver::new(&ctx);
+        match (&expected, resolver.prefetch([&ElementRef::Node(id)]).await) {
+            (Ok(_), Ok(())) => {}
+            (Err(_), Err(HelixDbError::Encoding(_))) => rejected += 1,
+            (expected, actual) => panic!("{id}: {expected:?} vs {actual:?}"),
+        }
+    }
+    assert!(rejected >= 4, "most corruptions must be rejected");
+    // A batch fails as a whole before any row reads its own record.
+    db.inner_db()
+        .put(node_property_key(1), valid.clone())
+        .await
+        .unwrap();
+    let mut resolver = RowValueResolver::new(&ctx);
+    assert!(resolver
+        .prefetch([&ElementRef::Node(1), &ElementRef::Node(100)])
+        .await
+        .is_err());
+    // An empty stored row has no properties and is never validated.
+    db.inner_db()
+        .put(node_property_key(200), bytes::Bytes::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        ctx.row_property(&current_node(200), &name("name"))
+            .await
+            .unwrap(),
+        None
+    );
+    let mut resolver = RowValueResolver::new(&ctx);
+    assert_eq!(
+        resolver
+            .row_properties(&current_node(200), true)
+            .await
+            .unwrap(),
+        Vec::new()
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_scanned_record_replaces_the_storage_read_and_is_validated_only_when_read() {
+    let scanned_record = |value| crate::execution::interpreter::storage::ScannedRecord {
+        key: node_property_key(1),
+        value,
+    };
+    let db = test_support::open_db("stream-eval-resolver-scanned-record").await;
+    let stored =
+        crate::encoding::property::encode_properties(&[Property::string("name", "stored")]);
+    db.inner_db()
+        .put(node_property_key(1), stored)
+        .await
+        .unwrap();
+    db.inner_db()
+        .put(node_property_key(2), bytes::Bytes::from_static(b"corrupt"))
+        .await
+        .unwrap();
+    let scanned = crate::encoding::property::encode_properties(&[
+        Property::string("name", "scanned"),
+        Property::f32_array("embedding", vec![1.5; 8]),
+    ]);
+    // An unaligned copy of the record exercises the aligned scratch copy.
+    let mut padded = vec![0];
+    padded.extend_from_slice(&scanned);
+    let unaligned = bytes::Bytes::from(padded).slice(1..);
+    let ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let buffers = crate::encoding::v2::values::property::view::Buffers::default();
+    let alignment = std::mem::align_of::<rkyv::Archived<Property>>();
+    assert_ne!(unaligned.as_ptr().align_offset(alignment), 0);
+    for record in [scanned.clone(), unaligned] {
+        let record_is_unaligned = record.as_ptr().align_offset(alignment) != 0;
+        let mut resolver = RowValueResolver::with_record(
+            &ctx,
+            Some((ElementRef::Node(1), scanned_record(record))),
+            Default::default(),
+        );
+        let before = ctx.projection_read_snapshot();
+        assert_eq!(
+            resolver
+                .row_property(&current_node(1), &name("name"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::String("scanned".into()))
+        );
+        assert_eq!(
+            resolver
+                .row_property(&current_node(1), &name("embedding"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::F32Array(vec![1.5; 8]))
+        );
+        let after = ctx.projection_read_snapshot();
+        assert_eq!(after.property_gets, before.property_gets);
+        assert_eq!(after.property_decodes, before.property_decodes + 1);
+        // Another element still reads storage.
+        assert_eq!(
+            resolver
+                .row_property(&current_node(2), &name("$id"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::I64(2))
+        );
+        assert!(resolver
+            .row_property(&current_node(2), &name("name"))
+            .await
+            .is_err());
+        assert_eq!(
+            ctx.projection_read_snapshot().property_gets,
+            before.property_gets + 1
+        );
+        // Only the unaligned record needed an aligned copy, which returns
+        // to the buffers for the next row.
+        assert_eq!(
+            resolver.into_buffers().retained(),
+            usize::from(record_is_unaligned)
+        );
+    }
+    // A corrupt scanned record fails only when it is read.
+    let mut resolver = RowValueResolver::with_record(
+        &ctx,
+        Some((
+            ElementRef::Node(1),
+            scanned_record(bytes::Bytes::from_static(b"corrupt")),
+        )),
+        buffers,
+    );
+    let before = ctx.projection_read_snapshot();
+    assert_eq!(
+        resolver
+            .row_property(&current_node(1), &name("$id"))
+            .await
+            .unwrap(),
+        Some(DbPropertyValue::I64(1))
+    );
+    assert_eq!(ctx.projection_read_snapshot(), before);
+    // A rejected record stays cached: every read fails as a repeated storage
+    // read of it would, and none falls back to the valid stored row.
+    for _ in 0..2 {
+        assert!(matches!(
+            resolver.row_property(&current_node(1), &name("name")).await,
+            Err(HelixDbError::Encoding(
+                crate::encoding::error::EncodingError::Rkyv(_)
+            ))
+        ));
+    }
+    assert!(matches!(
+        resolver.row_properties(&current_node(1), true).await,
+        Err(HelixDbError::Encoding(
+            crate::encoding::error::EncodingError::Rkyv(_)
+        ))
+    ));
+    assert_eq!(
+        ctx.projection_read_snapshot().property_gets,
+        before.property_gets
+    );
+    // Without a record the resolver reads storage as a new one does.
+    let mut resolver = RowValueResolver::with_record(&ctx, None, Default::default());
+    assert_eq!(
+        resolver
+            .row_property(&current_node(1), &name("name"))
+            .await
+            .unwrap(),
+        Some(DbPropertyValue::String("stored".into()))
+    );
+    // The full row of a scanned record decodes like the stored decoder.
+    let mut resolver = RowValueResolver::with_record(
+        &ctx,
+        Some((ElementRef::Node(1), scanned_record(scanned.clone()))),
+        Default::default(),
+    );
+    assert_eq!(
+        resolver
+            .row_properties(&current_node(1), false)
+            .await
+            .unwrap(),
+        crate::encoding::property::decode_properties(&scanned).unwrap()
+    );
+    assert_eq!(
+        resolver
+            .row_properties(&current_node(1), true)
+            .await
+            .unwrap(),
+        crate::encoding::property::decode_properties(&scanned).unwrap()
+    );
+    // After its last use the record is read from storage again.
+    assert_eq!(
+        resolver
+            .row_properties(&current_node(1), true)
+            .await
+            .unwrap(),
+        vec![Property::string("name", "stored")]
+    );
+    db.close().await.unwrap();
+}
+
+/// A scanned record is read where the storage read it replaces was, and
+/// accounted for as that read: a read that needs no record charges and
+/// reports nothing, and the first read of the record charges the row budget,
+/// fails on it, and reports one point read, like `get_raw`.
+#[tokio::test]
+async fn a_scanned_record_is_accounted_for_as_a_storage_read_only_when_read() {
+    let db = test_support::open_db("stream-eval-resolver-scanned-budget").await;
+    let record = crate::encoding::property::encode_properties(&[
+        Property::string("name", "scanned"),
+        Property::bytes("blob", vec![1; 4096]),
+    ]);
+    let scanned = || {
+        Some((
+            ElementRef::Node(1),
+            crate::execution::interpreter::storage::ScannedRecord {
+                key: node_property_key(1),
+                value: record.clone(),
+            },
+        ))
+    };
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    let budget = crate::query_resources::Budget::new(1024);
+    ctx.row_memory = Some(budget.clone());
+    {
+        let mut resolver = RowValueResolver::with_record(&ctx, scanned(), Default::default());
+        // A read that needs no record charges and reports nothing.
+        assert_eq!(
+            resolver
+                .row_property(&current_node(1), &name("$id"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::I64(1))
+        );
+        assert_eq!(budget.reads(), Default::default());
+        // Each read retries the storage read it replaces, as `get_raw` does.
+        for _ in 0..2 {
+            assert!(matches!(
+                resolver.row_property(&current_node(1), &name("name")).await,
+                Err(HelixDbError::QueryMemoryLimitExceeded)
+            ));
+        }
+        assert!(matches!(
+            resolver.row_properties(&current_node(1), true).await,
+            Err(HelixDbError::QueryMemoryLimitExceeded)
+        ));
+        assert_eq!(budget.reads().point_gets, 3);
+    }
+    let limit = 1 << 20;
+    let budget = crate::query_resources::Budget::new(limit);
+    ctx.row_memory = Some(budget.clone());
+    let mut resolver = RowValueResolver::with_record(&ctx, scanned(), Default::default());
+    assert_eq!(budget.peak(), 0);
+    assert_eq!(
+        resolver
+            .row_properties(&current_node(1), false)
+            .await
+            .unwrap(),
+        crate::encoding::property::decode_properties(&record).unwrap()
+    );
+    assert!(budget.peak() >= record.len(), "{}", budget.peak());
+    // A cached record is read once, and holds no charge once validated.
+    assert_eq!(
+        resolver
+            .row_property(&current_node(1), &name("name"))
+            .await
+            .unwrap(),
+        Some(DbPropertyValue::String("scanned".into()))
+    );
+    assert_eq!(budget.available(), limit);
+    // The scanned bytes carry no charge, so an aligned record is still read
+    // in place under the budget.
+    let unaligned = record
+        .as_ptr()
+        .align_offset(std::mem::align_of::<rkyv::Archived<Property>>())
+        != 0;
+    assert_eq!(resolver.into_buffers().retained(), usize::from(unaligned));
+    assert_eq!(
+        budget.reads(),
+        crate::query_resources::StorageReadUsage {
+            point_gets: 1,
+            ..Default::default()
+        }
+    );
+    db.close().await.unwrap();
+}
+
+/// Under a row-memory budget a record the resolver caches holds no charge
+/// once loaded, as the decoded rows of the full decoder held none: prefetched
+/// and single reads release their charge right after validation, and the
+/// cached rows still read as stored.
+#[tokio::test]
+async fn budgeted_resolvers_release_record_charges_once_loaded() {
+    let db = test_support::open_db("stream-eval-resolver-budget-release").await;
+    for (id, stored) in [(1, "one"), (2, "two"), (3, "three")] {
+        db.inner_db()
+            .put(
+                node_property_key(id),
+                crate::encoding::property::encode_properties(&[
+                    Property::string("name", stored),
+                    Property::bytes("blob", vec![1; 4096]),
+                ]),
+            )
+            .await
+            .unwrap();
+    }
+    let limit = 1 << 20;
+    let budget = crate::query_resources::Budget::new(limit);
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(budget.clone());
+    let mut resolver = RowValueResolver::new(&ctx);
+    resolver
+        .prefetch(&[ElementRef::Node(1), ElementRef::Node(2)])
+        .await
+        .unwrap();
+    assert!(budget.peak() >= 2 * 4096, "{}", budget.peak());
+    assert_eq!(budget.available(), limit);
+    for (id, stored) in [(1, "one"), (2, "two"), (3, "three")] {
+        assert_eq!(
+            resolver
+                .row_property(&current_node(id), &name("name"))
+                .await
+                .unwrap(),
+            Some(DbPropertyValue::String(stored.into()))
+        );
+        assert_eq!(budget.available(), limit);
+    }
+    drop(resolver.into_buffers());
+    db.close().await.unwrap();
+}
