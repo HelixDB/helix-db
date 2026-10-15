@@ -1243,9 +1243,6 @@ async fn scoped_hits(
     )
     .await
     .expect("scoped search runs");
-    if result["hits"].is_null() {
-        return Vec::new();
-    }
     result["hits"]
         .as_array()
         .unwrap_or_else(|| panic!("search returned {result}"))

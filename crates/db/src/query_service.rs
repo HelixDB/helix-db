@@ -557,7 +557,6 @@ fn returned_value_to_json(
     match value {
         ReturnedValue::Present(value) => execution_value_to_json(value),
         ReturnedValue::EmptyList => Ok(JsonValue::Array(Vec::new())),
-        ReturnedValue::EmptyObject => Ok(JsonValue::Null),
     }
 }
 
