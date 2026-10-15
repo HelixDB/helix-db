@@ -1,6 +1,7 @@
 //! A count of a mutation's own rows reads no deferred index state, so it skips
 //! the mid-transaction flush. Index-backed counts and expansions later in the
-//! same batch must still observe every write staged before them.
+//! same batch must still observe every write staged before them, and a unique
+//! conflict between counted writes must still fail the commit.
 use std::time::Duration;
 
 use db::{HelixDB, HelixDbSource};
@@ -16,7 +17,7 @@ const LABEL: &str = "Item";
 const SEEDED: i64 = 20;
 const ADDED: i64 = 12;
 
-async fn seeded_db(name: &str) -> HelixDB {
+async fn indexed_db(name: &str, index: IndexSpec) -> HelixDB {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: name.to_owned(),
     })
@@ -27,8 +28,7 @@ async fn seeded_db(name: &str) -> HelixDB {
             batch::write_batch()
                 .var_as(
                     "operation",
-                    traversal::g()
-                        .create_index_if_not_exists(IndexSpec::node_equality(LABEL, "kind")),
+                    traversal::g().create_index_if_not_exists(index),
                 )
                 .returning(["operation"]),
         ))
@@ -53,7 +53,17 @@ async fn seeded_db(name: &str) -> HelixDB {
         }
     })
     .await
-    .expect("kind index activates");
+    .expect("index activates");
+    db
+}
+
+#[tokio::test]
+async fn mutation_counts_return_their_rows_and_index_counts_see_the_batch() {
+    let db = indexed_db(
+        "mutation-count-visibility",
+        IndexSpec::node_equality(LABEL, "kind"),
+    )
+    .await;
     db.query(QueryRequest::write(
         (0..SEEDED)
             .fold(batch::write_batch(), |batch, rank| {
@@ -72,12 +82,6 @@ async fn seeded_db(name: &str) -> HelixDB {
     ))
     .await
     .unwrap();
-    db
-}
-
-#[tokio::test]
-async fn mutation_counts_return_their_rows_and_index_counts_see_the_batch() {
-    let db = seeded_db("mutation-count-visibility").await;
     let new_items = || traversal::g().n_with_label_where(LABEL, Predicate::eq("kind", "new"));
     let added = (0..ADDED).map(|rank| format!("added{rank}"));
     let request = added
@@ -183,4 +187,54 @@ async fn mutation_counts_return_their_rows_and_index_counts_see_the_batch() {
         .collect::<Vec<_>>();
     ranks.sort_unstable();
     assert_eq!(ranks, (0..ADDED).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn counted_writes_that_conflict_on_a_unique_index_commit_nothing() {
+    let db = indexed_db(
+        "mutation-count-unique-conflict",
+        IndexSpec::node_unique_equality(LABEL, "email"),
+    )
+    .await;
+    let add = || {
+        traversal::g()
+            .add_n(
+                LABEL,
+                vec![("email", PropertyInput::from("taken@example.com"))],
+            )
+            .count()
+    };
+    let rejected = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as("first", add())
+                .var_as("second", add())
+                .returning(["first", "second"]),
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            rejected,
+            db::error::HelixDbError::UniqueConstraintViolation { .. }
+        ),
+        "{rejected:?}"
+    );
+
+    let committed = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as("label", traversal::g().n_with_label(LABEL).count())
+                .var_as(
+                    "owners",
+                    traversal::g()
+                        .n_with_label_where(LABEL, Predicate::eq("email", "taken@example.com"))
+                        .count(),
+                )
+                .returning(["label", "owners"]),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(committed["label"], json!(0));
+    assert_eq!(committed["owners"], json!(0));
 }
