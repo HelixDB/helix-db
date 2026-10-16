@@ -460,7 +460,7 @@ mod tests {
         );
         let mut edge_range_bytes = Vec::new();
         edge_range.encode_into(&mut edge_range_bytes);
-        assert_eq!(edge_range_bytes.len(), 43);
+        assert_eq!(edge_range_bytes.len(), 45);
         assert_eq!(
             &edge_range_bytes[0..2],
             &[KEY_SPACE_INDEX, INDEX_TYPE_VECTOR]

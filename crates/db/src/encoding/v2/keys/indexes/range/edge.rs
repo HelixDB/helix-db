@@ -1,7 +1,11 @@
 //! Edge ordered secondary-index key codecs.
 //!
-//! Ascending values retain their UTF-8 bytes. Descending values invert bytes,
-//! escape embedded zeroes, and end with a fixed terminator. V2 generation
+//! Ascending values escape embedded zeroes and end with a fixed terminator.
+//! Descending values additionally invert every byte. Both directions need
+//! the terminator: without it, a value that is a proper prefix of another
+//! value in the same index can compare incorrectly once the comparison
+//! reaches the trailing edge id, since nothing marks where the value ends
+//! and the id begins. V2 generation
 //! entries reuse this value encoding through [`decode_range_value`], keeping
 //! ordering and validation identical across both physical namespaces.
 
@@ -55,8 +59,8 @@ impl EdgeRangeIndexDirection {
 /// Edge range index: source+prop+value+edgeId -> presence
 ///
 /// ```text
-/// Out asc:  [0x03][0x03][0x00][source:8][prop_hash:4][value:var][edge_id:8]
-/// In asc:   [0x03][0x03][0x01][target:8][prop_hash:4][value:var][edge_id:8]
+/// Out asc:  [0x03][0x03][0x00][source:8][prop_hash:4][asc_value:var][edge_id:8]
+/// In asc:   [0x03][0x03][0x01][target:8][prop_hash:4][asc_value:var][edge_id:8]
 /// Out desc: [0x03][0x06][0x00][source:8][prop_hash:4][desc_value:var][edge_id:8]
 /// In desc:  [0x03][0x06][0x01][target:8][prop_hash:4][desc_value:var][edge_id:8]
 /// Value: empty/presence
@@ -120,11 +124,11 @@ impl<'a> EdgeRangeIndexKey<'a> {
 
     /// Parse the edge range key from a slice.
     ///
-    /// key is `[0x03][0x03][0x00][source:8][prop_hash:4][value:var][edge_id:8]`
+    /// key is `[0x03][0x03][0x00][source:8][prop_hash:4][asc_value:var][edge_id:8]`
     ///
     /// starts from the edge-range index prefix because the first byte is handled by `Key` parsing.
     ///
-    /// e.g. `[0x03][0x00][source:8][prop_hash:4][value:var][edge_id:8]` is what is parsed from the slice
+    /// e.g. `[0x03][0x00][source:8][prop_hash:4][asc_value:var][edge_id:8]` is what is parsed from the slice
     pub fn parse_from_slice(slice: &'a [u8]) -> Result<Self, EncodingError> {
         // Checks AT LEAST the expected length
         // Variable length value means `value` and `node_id` access should be checked
@@ -199,7 +203,34 @@ impl<'a> EdgeRangeIndexKey<'a> {
                 actual: slice.len(),
             })?;
         let value = match range_direction {
-            EdgeRangeIndexDirection::Asc => Cow::Borrowed(std::str::from_utf8(value_bytes)?),
+            EdgeRangeIndexDirection::Asc => {
+                if !value_bytes.ends_with(&[0x00, 0x00]) {
+                    return Err(EncodingError::InvalidIndexKey(
+                        "ascending range value missing terminator".to_string(),
+                    ));
+                }
+
+                let mut decoded = Vec::with_capacity(value_bytes.len().saturating_sub(2));
+                let mut index = 0;
+                let value_body_len = value_bytes.len() - 2;
+                while index < value_body_len {
+                    let byte = value_bytes[index];
+                    if byte == 0x00 {
+                        if value_bytes.get(index + 1) != Some(&0xFF) {
+                            return Err(EncodingError::InvalidIndexKey(
+                                "invalid ascending range value escape".to_string(),
+                            ));
+                        }
+                        decoded.push(0x00);
+                        index += 2;
+                    } else {
+                        decoded.push(byte);
+                        index += 1;
+                    }
+                }
+
+                Cow::Owned(std::str::from_utf8(&decoded)?.to_owned())
+            }
             EdgeRangeIndexDirection::Desc => {
                 if !value_bytes.ends_with(&[0xFF, 0xFE]) {
                     return Err(EncodingError::InvalidIndexKey(
@@ -244,6 +275,11 @@ impl<'a> EdgeRangeIndexKey<'a> {
 
     /// Encode the edge range key into a buffer.
     ///
+    /// For ascending direction, the value is encoded as follows:
+    /// - Each byte is written as-is
+    /// - If a byte is 0x00, it is escaped with 0x00 0xFF
+    /// - The final bytes are 0x00 0x00 to indicate the end of the value.
+    ///
     /// For descending direction, the value is encoded as follows:
     /// - Each byte is inverted (0x00 -> 0xFF, 0xFF -> 0x00)
     /// - If a byte is 0x00, it is escaped with 0xFF 0x00
@@ -254,7 +290,16 @@ impl<'a> EdgeRangeIndexKey<'a> {
         buf.put_u64(self.source);
         buf.put_slice(&self.property_hash);
         match self.range_direction {
-            EdgeRangeIndexDirection::Asc => buf.put_slice(self.value.as_bytes()),
+            EdgeRangeIndexDirection::Asc => {
+                for byte in self.value.as_bytes().iter() {
+                    buf.put_u8(*byte);
+                    if *byte == 0x00 {
+                        buf.put_u8(0xFF);
+                    }
+                }
+                buf.put_u8(0x00);
+                buf.put_u8(0x00);
+            }
             EdgeRangeIndexDirection::Desc => {
                 for byte in self.value.as_bytes().iter() {
                     buf.put_u8(!byte);
@@ -285,7 +330,7 @@ impl From<&EdgeRangeIndexKey<'_>> for IndexPrefix {
 /// Global edge range index: property+value+edgeId -> presence.
 ///
 /// ```text
-/// Asc:  [0x03][0x09][prop_hash:4][value:var][edge_id:8]
+/// Asc:  [0x03][0x09][prop_hash:4][asc_value:var][edge_id:8]
 /// Desc: [0x03][0x0a][prop_hash:4][desc_value:var][edge_id:8]
 /// Value: empty/presence
 /// ```
@@ -381,7 +426,34 @@ impl<'a> GlobalEdgeRangeIndexKey<'a> {
                 actual: slice.len(),
             })?;
         let value = match range_direction {
-            RangeIndexDirection::Asc => Cow::Borrowed(std::str::from_utf8(value_bytes)?),
+            RangeIndexDirection::Asc => {
+                if !value_bytes.ends_with(&[0x00, 0x00]) {
+                    return Err(EncodingError::InvalidIndexKey(
+                        "ascending global edge range value missing terminator".to_string(),
+                    ));
+                }
+
+                let mut decoded = Vec::with_capacity(value_bytes.len().saturating_sub(2));
+                let mut index = 0;
+                let value_body_len = value_bytes.len() - 2;
+                while index < value_body_len {
+                    let byte = value_bytes[index];
+                    if byte == 0x00 {
+                        if value_bytes.get(index + 1) != Some(&0xFF) {
+                            return Err(EncodingError::InvalidIndexKey(
+                                "invalid ascending global edge range value escape".to_string(),
+                            ));
+                        }
+                        decoded.push(0x00);
+                        index += 2;
+                    } else {
+                        decoded.push(byte);
+                        index += 1;
+                    }
+                }
+
+                Cow::Owned(std::str::from_utf8(&decoded)?.to_owned())
+            }
             RangeIndexDirection::Desc => {
                 if !value_bytes.ends_with(&[0xFF, 0xFE]) {
                     return Err(EncodingError::InvalidIndexKey(
@@ -421,7 +493,16 @@ impl<'a> GlobalEdgeRangeIndexKey<'a> {
         buf.put_slice(self.index_prefix().as_slice());
         buf.put_slice(&self.property_hash);
         match self.range_direction {
-            RangeIndexDirection::Asc => buf.put_slice(self.value.as_bytes()),
+            RangeIndexDirection::Asc => {
+                for byte in self.value.as_bytes().iter() {
+                    buf.put_u8(*byte);
+                    if *byte == 0x00 {
+                        buf.put_u8(0xFF);
+                    }
+                }
+                buf.put_u8(0x00);
+                buf.put_u8(0x00);
+            }
             RangeIndexDirection::Desc => {
                 for byte in self.value.as_bytes().iter() {
                     buf.put_u8(!byte);
@@ -469,6 +550,7 @@ mod tests {
         let mut expected = vec![0x03, 0x01];
         expected.extend_from_slice(&PROP);
         expected.extend_from_slice(b"az");
+        expected.extend_from_slice(&[0x00, 0x00]);
         expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
         assert_eq!(encoded.as_ref(), expected.as_slice());
 
@@ -540,6 +622,7 @@ mod tests {
         expected_in_asc.extend_from_slice(&7u64.to_be_bytes());
         expected_in_asc.extend_from_slice(&PROP);
         expected_in_asc.extend_from_slice(b"az");
+        expected_in_asc.extend_from_slice(&[0x00, 0x00]);
         expected_in_asc.extend_from_slice(&11u64.to_be_bytes());
 
         assert_eq!(out_desc.as_ref(), expected_out_desc.as_slice());
@@ -694,6 +777,47 @@ mod tests {
     }
 
     #[test]
+    fn ascending_range_index_key_round_trips_embedded_null() {
+        let key = DataKeyKind::PropertyIndex(PropertyIndexKey::Range(RangeIndexKey::new(
+            RangeIndexDirection::Asc,
+            PROP,
+            Cow::Borrowed("a\0z"),
+            1,
+        )));
+        let encoded = key.clone().to_bytes();
+
+        let DataKeyKind::PropertyIndex(PropertyIndexKey::Range(parsed)) =
+            DataKeyKind::parse_from_slice(&encoded).unwrap()
+        else {
+            panic!("expected range index key");
+        };
+        assert_eq!(parsed.value(), "a\0z");
+        assert_eq!(parsed.direction(), RangeIndexDirection::Asc);
+    }
+
+    #[test]
+    fn ascending_range_index_keys_sort_correctly_when_one_value_is_a_prefix_of_another() {
+        // regression test: a proper-prefix value must always sort before the longer
+        // value it prefixes, regardless of what bytes the trailing node id happens
+        // to contribute. before the ascending encoding gained a terminator, this
+        // could invert depending on the id's leading byte or an embedded null in
+        // the longer value.
+        let shorter = DataKeyKind::PropertyIndex(PropertyIndexKey::Range(RangeIndexKey::new(
+            RangeIndexDirection::Asc,
+            PROP,
+            Cow::Borrowed("a"),
+            5,
+        )))
+        .to_bytes();
+        let longer_with_embedded_null = DataKeyKind::PropertyIndex(PropertyIndexKey::Range(
+            RangeIndexKey::new(RangeIndexDirection::Asc, PROP, Cow::Borrowed("a\0"), 1),
+        ))
+        .to_bytes();
+
+        assert!(shorter < longer_with_embedded_null);
+    }
+
+    #[test]
     fn global_edge_range_index_key_has_exact_layout_and_round_trips() {
         let asc = DataKeyKind::PropertyIndex(PropertyIndexKey::GlobalEdgeRange(
             GlobalEdgeRangeIndexKey::new(
@@ -707,6 +831,7 @@ mod tests {
         let mut expected = vec![0x03, 0x09];
         expected.extend_from_slice(&PROP);
         expected.extend_from_slice(b"value");
+        expected.extend_from_slice(&[0x00, 0x00]);
         expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
         assert_eq!(encoded.as_ref(), expected.as_slice());
         assert_eq!(DataKeyKind::parse_from_slice(&encoded).unwrap(), asc);
@@ -771,6 +896,7 @@ mod tests {
         let mut invalid_utf8 = vec![0x03, 0x01];
         invalid_utf8.extend_from_slice(&PROP);
         invalid_utf8.push(0xFF);
+        invalid_utf8.extend_from_slice(&[0x00, 0x00]);
         invalid_utf8.extend_from_slice(&1u64.to_be_bytes());
         assert!(matches!(
             RangeIndexKey::parse_from_slice(&invalid_utf8),
@@ -837,6 +963,7 @@ mod tests {
         invalid_utf8.extend_from_slice(&1u64.to_be_bytes());
         invalid_utf8.extend_from_slice(&PROP);
         invalid_utf8.push(0xFF);
+        invalid_utf8.extend_from_slice(&[0x00, 0x00]);
         invalid_utf8.extend_from_slice(&2u64.to_be_bytes());
         assert!(matches!(
             EdgeRangeIndexKey::parse_from_slice(&invalid_utf8),
@@ -909,6 +1036,7 @@ mod tests {
         let mut invalid_utf8 = vec![0x03, 0x09];
         invalid_utf8.extend_from_slice(&PROP);
         invalid_utf8.push(0xFF);
+        invalid_utf8.extend_from_slice(&[0x00, 0x00]);
         invalid_utf8.extend_from_slice(&1u64.to_be_bytes());
         assert!(matches!(
             GlobalEdgeRangeIndexKey::parse_from_slice(&invalid_utf8),
