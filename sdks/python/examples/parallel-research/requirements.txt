@@ -1,0 +1,4 @@
+helix-db==0.3.4
+helix-db-embedded==0.3.3
+mcp==1.30.0
+httpx>=0.28.1,<1
