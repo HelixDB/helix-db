@@ -32,26 +32,31 @@ gateway
 <CodeGroup>
 
 ```rust Rust
-let client = helix_db::Client::new(Some("https://cluster.helix-db.com"))?
+let client = helix_db::Client::managed(
+    Some("https://cluster.helix-db.com"),
+    "db_your_database_id",
+)?
     .with_api_key(Some("hx_your_api_key"));
 ```
 
 ```ts TypeScript
 const client = Client
-  .server("https://cluster.helix-db.com")
+  .managed("https://cluster.helix-db.com", "db_your_database_id")
   .withApiKey("hx_your_api_key");
 ```
 
 ```go Go
-client, err := helix.NewClient(
+client, err := helix.NewManagedClient(
 	"https://cluster.helix-db.com",
+	"db_your_database_id",
 	helix.WithAPIKey("hx_your_api_key"),
 )
 ```
 
 ```python Python
-client = Client(
+client = Client.managed(
     "https://cluster.helix-db.com",
+    database_id="db_your_database_id",
     api_key="hx_your_api_key",
 )
 ```
@@ -61,10 +66,13 @@ client = Client(
 These SDK examples target a database-specific cluster-mode gateway URL. Such an
 endpoint authenticates the API key but rejects `X-Helix-Database-Id` and
 `X-Helix-Tenant-Id`. A GA shared gateway instead requires
-`X-Helix-Database-Id`. The TypeScript SDK (`@helix-db/helix-db` 3.2.0 and
-later) sends it after `client.withDatabaseId("<database-id>")`. The published
-Python, Rust, and Go SDKs do not expose that selection header, so use the
-direct HTTP contract for GA shared-gateway requests from those languages.
+`X-Helix-Database-Id`.
+
+`Client.managed` (TypeScript), `Client::managed` (Rust), `Client.managed` and
+`AsyncClient.managed` (Python), and `NewManagedClient` (Go) require a non-blank
+database ID and send it in the canonical `x-helix-database-id` header.
+`withDatabaseId`, `with_database_id`, and `WithDatabaseID` set the same header
+on an existing client.
 
 Each client sends the same operation-tree request body:
 

@@ -272,10 +272,20 @@ def prepare_request(
     headers: Mapping[str, str],
     query: QueryRequest,
     database_id: str | None = None,
+    *,
+    require_database_id: bool = False,
 ) -> PreparedRequest:
     """Serialize a query and resolve the common HelixDB HTTP request."""
 
-    return _prepare(base_url, QUERY_PATH, api_key, database_id, headers, serialize_query(query))
+    return _prepare(
+        base_url,
+        QUERY_PATH,
+        api_key,
+        database_id,
+        headers,
+        serialize_query(query),
+        require_database_id=require_database_id,
+    )
 
 
 def prepare_cypher_request(
@@ -285,6 +295,8 @@ def prepare_cypher_request(
     route: CypherRoute,
     body: bytes,
     options: ExecuteOptions,
+    *,
+    require_database_id: bool = False,
 ) -> PreparedRequest:
     """Resolve one serialized Cypher body into its server request.
 
@@ -312,7 +324,17 @@ def prepare_cypher_request(
         database_id,
         options.apply({"Content-Type": "application/json"}),
         body,
+        require_database_id=require_database_id,
     )
+
+
+def validate_database_id(database_id: str | None, *, required: bool = False) -> None:
+    """Validate a managed database ID before a request is sent."""
+
+    if required and database_id is None:
+        raise HelixError.invalid_request("managed clients require a database ID")
+    if database_id is not None and not database_id.strip():
+        raise HelixError.invalid_request("database ID must not be empty")
 
 
 def _prepare(
@@ -322,7 +344,10 @@ def _prepare(
     database_id: str | None,
     headers: Mapping[str, str],
     body: bytes,
+    *,
+    require_database_id: bool = False,
 ) -> PreparedRequest:
+    validate_database_id(database_id, required=require_database_id)
     try:
         url = urljoin(base_url.rstrip("/") + "/", path)
     except Exception as exc:

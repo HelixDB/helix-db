@@ -96,6 +96,10 @@ func (c *Client) postCypher(ctx context.Context, route cypherRoute, query Cypher
 		if c.baseURL == nil {
 			return &HelixError{Kind: ErrorInvalidURL, Details: "nil server client"}
 		}
+		databaseID, requireDatabaseID := c.getDatabaseConfig()
+		if err := validateDatabaseID(databaseID, requireDatabaseID); err != nil {
+			return err
+		}
 		endpoint := c.baseURL.ResolveReference(&url.URL{Path: string(route)})
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
 		if err != nil {
