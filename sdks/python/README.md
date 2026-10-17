@@ -7,8 +7,9 @@ sync API remains unchanged.
 
 ## Examples
 
-For a runnable example that stores web excerpts and source URLs through the embedded
-client, see [Store web research in HelixDB](examples/parallel-research/README.md).
+For a runnable example that stores web research as a `Run -[CITES]-> Source` graph
+through the embedded client and ranks past excerpts with a BM25 text index, see
+[Store web research as a HelixDB graph](examples/parallel-research/README.md).
 
 ## License
 
