@@ -1275,31 +1275,6 @@ impl IndexOperationRecord {
         )
     }
 
-    /// Persists a successful checkpoint and releases its claim after a deadline.
-    pub(crate) fn progressed_after(
-        &self,
-        progress: IndexOperationProgress,
-        not_before_unix_millis: u64,
-    ) -> Result<Self, IndexOperationModelError> {
-        if !matches!(
-            self.execution_state,
-            IndexOperationExecutionState::Claimed(_)
-        ) {
-            return Err(IndexOperationModelError::IllegalExecutionTransition {
-                from: self.execution_state.name(),
-                transition: "progress_after",
-            });
-        }
-        self.next(
-            self.index_record_revision,
-            progress,
-            self.attempt,
-            IndexOperationExecutionState::Queued {
-                not_before_unix_millis: Some(not_before_unix_millis),
-            },
-        )
-    }
-
     /// Releases a claim after a transient failure with a durable retry time.
     pub(crate) fn transient_failure(
         &self,
@@ -2422,15 +2397,6 @@ mod tests {
                 not_before_unix_millis: None
             }
         ));
-        let progressed_after = claimed
-            .progressed_after(secondary_constructing(), 20)
-            .unwrap();
-        assert_eq!(
-            progressed_after.queue_schedule(),
-            Some(IndexOperationQueueSchedule::DelayedAfterProgress {
-                not_before_unix_millis: 20
-            })
-        );
         let failed = claimed.transient_failure(30).unwrap();
         assert!(failed
             .queue_schedule()
@@ -2458,7 +2424,6 @@ mod tests {
 
         for transition in [
             queued.progressed(secondary_constructing()),
-            queued.progressed_after(secondary_constructing(), 1),
             queued.transient_failure(1),
             queued.block(IndexOperationBlocker::InvariantViolation),
             queued.complete(

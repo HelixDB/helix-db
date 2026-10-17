@@ -48,8 +48,9 @@ fn index_lifecycle_backfill_mutations_and_unique_retry_converge() {
 }
 
 /// Proves every shape converges after repeated late writes at each build
-/// boundary: secondary builds re-enter catch-up, while vector/text writes are
-/// queued operations published after activation.
+/// boundary: secondary validation and activation drain late deltas under
+/// their gate, while vector/text writes are queued operations published after
+/// activation.
 #[test]
 fn index_lifecycle_all_index_shapes_converge_after_late_writes_at_every_stage() {
     std::thread::Builder::new()

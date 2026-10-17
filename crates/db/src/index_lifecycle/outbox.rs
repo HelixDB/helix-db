@@ -10,7 +10,7 @@
 //! staged in that repository-owned transaction can commit with recoverable
 //! operation progress.
 
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::ops::Bound;
 use std::time::Instant;
 
@@ -145,11 +145,6 @@ pub(crate) struct ClaimedOperation {
 pub(crate) enum IndexOperationStepResult {
     /// Physical work and the supplied next checkpoint commit together.
     Progressed(IndexOperationProgress),
-    /// Physical work and checkpoint commit together, then wait before reclaiming.
-    ProgressedAfter {
-        progress: IndexOperationProgress,
-        delay_millis: NonZeroU64,
-    },
     /// No physical work commits; the exact checkpoint is durably backed off.
     TransientFailure,
     /// No further automatic retry is legal until an explicit retry/abort.
@@ -1118,33 +1113,6 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             IndexOperationStepResult::Progressed(progress) => {
                 let next = operation
                     .progressed(progress)
-                    .map_err(operation_model_error)?;
-                let next_pointer = pointer_for(claimed.scope, &next);
-                validate_link(claimed.scope, &index, &next, Some(&next_pointer))?;
-                transaction.put(operation_key, encode_operation_record(&next))?;
-                transaction.put(
-                    pointer_key,
-                    encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(
-                        next_pointer,
-                    )),
-                )?;
-                let after_status = IndexOperationStatus::from_record(&next);
-                (
-                    CommittedOperationStep::Progressed,
-                    after_status.common().stage,
-                    step_counter_resources(&before_status, &after_status)?,
-                )
-            }
-            IndexOperationStepResult::ProgressedAfter {
-                progress,
-                delay_millis,
-            } => {
-                let not_before_unix_millis =
-                    now_unix_millis.checked_add(delay_millis.get()).ok_or(
-                        HelixDbError::IdentifierExhausted("index operation scheduling deadline"),
-                    )?;
-                let next = operation
-                    .progressed_after(progress, not_before_unix_millis)
                     .map_err(operation_model_error)?;
                 let next_pointer = pointer_for(claimed.scope, &next);
                 validate_link(claimed.scope, &index, &next, Some(&next_pointer))?;
@@ -3368,68 +3336,6 @@ mod tests {
         .await
         .unwrap()
         .is_some());
-        db.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn successful_progress_can_persist_a_reclaim_deadline() {
-        let db = db("outbox-successful-progress-delay").await;
-        let (index, operation) = fixture(13);
-        enqueue_operation(
-            &db,
-            DataScope::LegacyUnscoped,
-            ExpectedCanonicalRevision::Absent,
-            &index,
-            &operation,
-        )
-        .await
-        .unwrap();
-        let epoch = WriterEpoch::from_bytes([14; 16]).unwrap();
-        let OperationPointerObservation::Eligible(eligible) =
-            observe_operation_pointer(&db, operation.operation_id(), epoch, 100)
-                .await
-                .unwrap()
-        else {
-            panic!("queued operation must be eligible");
-        };
-        let claimed = claim_operation(
-            &db,
-            &eligible,
-            epoch,
-            ClaimSequence::new(1).unwrap(),
-            100,
-            ClaimPermission::Normal,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            execute_claimed_step(
-                &db,
-                &claimed,
-                &StaticDriver(IndexOperationStepResult::ProgressedAfter {
-                    progress: claimed.record.progress().clone(),
-                    delay_millis: NonZeroU64::new(7).unwrap(),
-                }),
-                SearchIndexBackfillLimits::default().batch(),
-                100,
-            )
-            .await
-            .unwrap(),
-            CommittedOperationStep::Progressed
-        );
-        assert!(matches!(
-            observe_operation_pointer(&db, operation.operation_id(), epoch, 100)
-                .await
-                .unwrap(),
-            OperationPointerObservation::Delayed { delay_millis: 7 }
-        ));
-        assert!(matches!(
-            observe_operation_pointer(&db, operation.operation_id(), epoch, 107)
-                .await
-                .unwrap(),
-            OperationPointerObservation::Eligible(_)
-        ));
         db.close().await.unwrap();
     }
 

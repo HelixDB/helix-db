@@ -1682,9 +1682,9 @@ fn secondary_index_lifecycle_batch_rows_and_search_limits_are_explicit_contracts
     assert_eq!(
         DbConfig::new()
             .secondary_index_lifecycle()
-            .catch_up_tail_delay_millis()
+            .final_drain_entities()
             .get(),
-        1_000
+        1_024
     );
     assert_eq!(
         DbConfig::new().search_index_backfill(),

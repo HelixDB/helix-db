@@ -19,7 +19,6 @@ const DEFAULT_MAX_OUTPUT_OPERATIONS: u64 = 4_096;
 const DEFAULT_MAX_OUTPUT_BYTES: u64 = 8 * 1024 * 1024;
 const DEFAULT_FINAL_DRAIN_ENTITIES: u64 = 1_024;
 const DEFAULT_RECONCILE_INPUT_BYTES: u64 = 1024 * 1024;
-const DEFAULT_CATCH_UP_TAIL_DELAY_MILLIS: u64 = 1_000;
 const DEFAULT_ACTIVE_INTERVAL_MILLIS: u64 = 10;
 const DEFAULT_IDLE_INTERVAL_MILLIS: u64 = 1_000;
 
@@ -48,25 +47,6 @@ impl SecondaryIndexLifecycleBatchRows {
 
     /// Returns the positive entity limit.
     pub const fn get(self) -> usize {
-        self.0.get()
-    }
-}
-
-/// Positive delay used to coalesce a non-full secondary catch-up tail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SecondaryIndexLifecycleCatchUpTailDelayMillis(NonZeroU64);
-
-impl SecondaryIndexLifecycleCatchUpTailDelayMillis {
-    /// Creates a positive tail delay, returning `None` for zero.
-    pub const fn new(milliseconds: u64) -> Option<Self> {
-        match NonZeroU64::new(milliseconds) {
-            Some(milliseconds) => Some(Self(milliseconds)),
-            None => None,
-        }
-    }
-
-    /// Returns the positive tail delay in milliseconds.
-    pub const fn get(self) -> u64 {
         self.0.get()
     }
 }
@@ -119,7 +99,6 @@ pub struct SecondaryIndexLifecycleTuning {
     max_output_bytes: NonZeroU64,
     final_drain_entities: NonZeroU64,
     reconcile_input_bytes: NonZeroU64,
-    catch_up_tail_delay_millis: SecondaryIndexLifecycleCatchUpTailDelayMillis,
     active_interval_millis: SecondaryIndexLifecycleActiveIntervalMillis,
     idle_interval_millis: SecondaryIndexLifecycleIdleIntervalMillis,
 }
@@ -150,7 +129,12 @@ impl SecondaryIndexLifecycleTuning {
         self.max_output_bytes
     }
 
-    /// Returns the maximum delta entities admitted under the exclusive gate.
+    /// Returns the maximum pending deltas one Validate or Activate step
+    /// reconciles under the exclusive gate.
+    ///
+    /// The step stages this drain before its ordinary batch, so one write
+    /// window that dirties more indexed entities than this sends the build
+    /// back to catch-up instead of past it.
     pub const fn final_drain_entities(self) -> NonZeroU64 {
         self.final_drain_entities
     }
@@ -158,11 +142,6 @@ impl SecondaryIndexLifecycleTuning {
     /// Returns the operation and checkpoint bytes decoded by one reconciliation call.
     pub const fn reconcile_input_bytes(self) -> NonZeroU64 {
         self.reconcile_input_bytes
-    }
-
-    /// Returns the delay used to coalesce an exhausted live catch-up tail.
-    pub const fn catch_up_tail_delay_millis(self) -> SecondaryIndexLifecycleCatchUpTailDelayMillis {
-        self.catch_up_tail_delay_millis
     }
 
     /// Returns the delay between passes while a runnable job exists.
@@ -217,15 +196,6 @@ impl SecondaryIndexLifecycleTuning {
         self
     }
 
-    /// Replaces the positive catch-up tail coalescing delay.
-    pub const fn with_catch_up_tail_delay_millis(
-        mut self,
-        delay: SecondaryIndexLifecycleCatchUpTailDelayMillis,
-    ) -> Self {
-        self.catch_up_tail_delay_millis = delay;
-        self
-    }
-
     /// Replaces the positive delay between active passes.
     pub const fn with_active_interval_millis(
         mut self,
@@ -261,10 +231,6 @@ impl Default for SecondaryIndexLifecycleTuning {
                 .expect("default final drain is positive"),
             reconcile_input_bytes: NonZeroU64::new(DEFAULT_RECONCILE_INPUT_BYTES)
                 .expect("default reconcile bytes are positive"),
-            catch_up_tail_delay_millis: SecondaryIndexLifecycleCatchUpTailDelayMillis::new(
-                DEFAULT_CATCH_UP_TAIL_DELAY_MILLIS,
-            )
-            .expect("default catch-up tail delay is positive"),
             active_interval_millis: SecondaryIndexLifecycleActiveIntervalMillis::new(
                 DEFAULT_ACTIVE_INTERVAL_MILLIS,
             )
@@ -284,7 +250,6 @@ mod tests {
     #[test]
     fn zero_limits_and_intervals_are_unrepresentable() {
         assert_eq!(SecondaryIndexLifecycleBatchRows::new(0), None);
-        assert_eq!(SecondaryIndexLifecycleCatchUpTailDelayMillis::new(0), None);
         assert_eq!(SecondaryIndexLifecycleActiveIntervalMillis::new(0), None);
         assert_eq!(SecondaryIndexLifecycleIdleIntervalMillis::new(0), None);
     }
@@ -295,9 +260,7 @@ mod tests {
         let updated = defaults
             .with_worker_mode(SecondaryIndexLifecycleWorkerMode::Disabled)
             .with_batch_rows(SecondaryIndexLifecycleBatchRows::new(3).unwrap())
-            .with_catch_up_tail_delay_millis(
-                SecondaryIndexLifecycleCatchUpTailDelayMillis::new(11).unwrap(),
-            )
+            .with_final_drain_entities(NonZeroU64::new(11).unwrap())
             .with_active_interval_millis(
                 SecondaryIndexLifecycleActiveIntervalMillis::new(5).unwrap(),
             )
@@ -307,7 +270,7 @@ mod tests {
             SecondaryIndexLifecycleWorkerMode::Disabled
         );
         assert_eq!(updated.batch_rows().get(), 3);
-        assert_eq!(updated.catch_up_tail_delay_millis().get(), 11);
+        assert_eq!(updated.final_drain_entities().get(), 11);
         assert_eq!(updated.active_interval_millis().get(), 5);
         assert_eq!(updated.idle_interval_millis().get(), 7);
         assert_eq!(updated.max_input_bytes(), defaults.max_input_bytes());

@@ -410,16 +410,17 @@ async fn run_case(
         .common()
         .stage;
     match definition {
+        // Validation and activation drain late deltas under their own gate.
         ValidatedDynamicIndexDefinition::Secondary(_)
             if !matches!(
                 stage,
                 IndexOperationStage::Scan | IndexOperationStage::CatchUp
             ) =>
         {
-            assert_eq!(
+            assert_ne!(
                 reentered,
                 IndexOperationStage::CatchUp,
-                "{definition:?} must leave {stage:?} for catch-up after late mutations"
+                "{definition:?} must drain late mutations at {stage:?} without re-entering catch-up"
             );
         }
         ValidatedDynamicIndexDefinition::Secondary(_) => {}

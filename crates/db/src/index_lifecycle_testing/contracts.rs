@@ -323,16 +323,17 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                 .common()
                 .stage;
             match shape.family() {
+                // The gated step drains a write window's deltas itself.
                 PublicMutationFamily::Secondary
                     if matches!(
                         stage,
                         IndexOperationStage::Validate | IndexOperationStage::Activate
                     ) =>
                 {
-                    assert_eq!(
+                    assert_ne!(
                         resumed,
                         IndexOperationStage::CatchUp,
-                        "{shape:?} must re-enter CatchUp after a public write at {stage:?}"
+                        "{shape:?} must drain public writes at {stage:?} without re-entering CatchUp"
                     );
                 }
                 PublicMutationFamily::Secondary => {}
@@ -1488,18 +1489,20 @@ async fn run_unique_activation_conflict_repair() {
             },
         )
         .await
-        .expect("activation-boundary duplicate returns to catch-up");
+        .expect("activation drains the duplicate's delta");
     assert_monotonic_step(&evidence);
-    assert_eq!(
-        db.get_index_operation(scope, operation_id)
-            .await
-            .expect("activation unique operation remains readable")
-            .common()
-            .stage,
-        IndexOperationStage::CatchUp
-    );
-    let blocked = drive_to_terminal(&db, &controller, scope, operation_id).await;
+    assert_eq!(evidence.outcome, LifecycleStepOutcome::Blocked);
+    let blocked = db
+        .get_index_operation(scope, operation_id)
+        .await
+        .expect("activation unique operation remains readable");
     assert!(matches!(blocked, IndexOperationStatus::Blocked { .. }));
+    assert_eq!(
+        blocked.common().stage,
+        IndexOperationStage::Activate,
+        "the gated activation drain blocks the duplicate before activating"
+    );
+    assert_identity_hidden(&db, scope, &definition).await;
 
     let repaired = vec![
         Property::string("$label", "ActivationUnique"),

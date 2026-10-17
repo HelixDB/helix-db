@@ -163,6 +163,7 @@ async fn legacy_secondary_marker_without_applied_state_fails_closed() {
             &definition,
             &CoalescedBuildDeltaState::Marker,
             Some(equality("current@example.com")),
+            AppliedStateDisposition::Retain,
         )
         .await,
         Err(HelixDbError::IndexCatalogCorruption(_))
@@ -195,6 +196,7 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
         &definition,
         &CoalescedBuildDeltaState::SecondaryBefore(None),
         Some(value.clone()),
+        AppliedStateDisposition::Retain,
     )
     .await
     .unwrap() else {
@@ -214,7 +216,8 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
         entity_state_key(&definition, entity.id),
         &definition,
         &CoalescedBuildDeltaState::Marker,
-        Some(value),
+        Some(value.clone()),
+        AppliedStateDisposition::Retain,
     )
     .await
     .unwrap() else {
@@ -223,6 +226,23 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     assert_eq!(noop.writes.len(), 1);
     assert!(matches!(noop.writes[0], EntityWrite::Put { .. }));
 
+    // A gated drain releases the applied row instead of refreshing it.
+    let ReconciliationPlan::Writes(release) = reconciliation_plan(
+        &transaction,
+        scope,
+        entity_state_key(&definition, entity.id),
+        &definition,
+        &CoalescedBuildDeltaState::Marker,
+        Some(value),
+        AppliedStateDisposition::Release,
+    )
+    .await
+    .unwrap() else {
+        panic!("a released unchanged bitmap value produces writes");
+    };
+    assert_eq!(release.writes.len(), 1);
+    assert!(matches!(release.writes[0], EntityWrite::Delete(_)));
+
     let ReconciliationPlan::Writes(remove) = reconciliation_plan(
         &transaction,
         scope,
@@ -230,6 +250,7 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
         &definition,
         &CoalescedBuildDeltaState::Marker,
         None,
+        AppliedStateDisposition::Retain,
     )
     .await
     .unwrap() else {
@@ -301,6 +322,7 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
         &definition,
         &CoalescedBuildDeltaState::Marker,
         Some(next.clone()),
+        AppliedStateDisposition::Retain,
     )
     .await
     .unwrap()
@@ -325,6 +347,7 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
         &definition,
         &CoalescedBuildDeltaState::Marker,
         Some(next),
+        AppliedStateDisposition::Retain,
     )
     .await
     .unwrap()
