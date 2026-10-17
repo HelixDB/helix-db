@@ -91,6 +91,12 @@ pub enum VectorPartWarm {
 }
 
 /// Checked settings for SlateDB's block/meta Foyer hybrid cache.
+///
+/// A process builds one hybrid cache per disk root, at the first open that
+/// uses the root, and keeps it until the process exits: every database handle
+/// on the root, open at the same time or later, reads through it. Any later
+/// open of the root must use the same capacities, so resizing a root's cache
+/// takes a restart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlateHybridCacheConfig {
     memory_bytes: NonZeroUsize,
@@ -972,6 +978,9 @@ pub enum CacheMode {
         fts: Option<FtsMemoryCacheConfig>,
     },
     /// Use disk-backed cache tiers for SlateDB, object-store reads, and FTS.
+    ///
+    /// The SlateDB tier is shared by every handle on its disk root for the
+    /// life of the process; see [`SlateHybridCacheConfig`].
     Hybrid {
         /// SlateDB Foyer hybrid-cache settings.
         slate_db: SlateHybridCacheConfig,

@@ -19,6 +19,10 @@ pub enum EmbeddedCacheMode {
     /// Retain vector indexes and use SlateDB's default in-memory cache.
     Memory,
     /// Add bounded disk-backed SlateDB and object-store cache tiers.
+    ///
+    /// The process keeps the SlateDB disk tier at `slate_disk_path` until it
+    /// exits and shares it with every handle on that path, so later opens of
+    /// the path must use the same SlateDB capacities.
     Hybrid {
         slate_memory_bytes: u64,
         slate_disk_path: String,
