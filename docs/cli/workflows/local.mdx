@@ -59,6 +59,12 @@ Use the manual flow below when you want to scaffold and run each step yourself.
     The example counts `User` nodes. Try `--json` to print compact JSON only, or
     `--warm` to populate the standalone process caches while returning the normal
     response.
+
+    The same count in Cypher:
+
+    ```bash
+    helix cypher dev -e 'MATCH (u:User) RETURN count(u) AS users'
+    ```
   </Step>
 </Steps>
 
@@ -130,6 +136,9 @@ $EDITOR examples/request.json
 
 # Send the request
 helix query dev --file examples/request.json
+
+# Or run a Cypher statement from a file you write
+helix cypher dev --file examples/users.cypher
 
 # Tail container logs in another shell
 helix logs dev --follow

@@ -352,6 +352,6 @@ Embedded clients reject routing options with an `InvalidRequest` error.
 Embedded explain needs native bindings that expose `explain_cypher_json`. Older
 builds raise `HelixError` with kind `EmbeddedUnavailable`.
 
-See the [Cypher reference](../../docs/cypher.md) for the language profile,
+See the [Cypher guide](https://docs.helix-db.com/database/helix-db/query-guides/cypher) for the language profile,
 parameters, lossless values, and transaction behavior. Native DSL query methods
 keep their existing contract.

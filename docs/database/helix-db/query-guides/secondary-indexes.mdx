@@ -103,10 +103,25 @@ active before depending on indexed performance.
 
 ## Query indexed data
 
-Use `nWhere(SourcePredicate.eq("status", "active"))` (or the language-equivalent
-snake_case builder) for index push-down, then project the required fields. A general
-`.where(...)` remains useful after traversal but may filter a larger intermediate
-stream.
+Use `nWithLabelWhere("User", SourcePredicate.eq("status", "active"))` (or the
+language-equivalent snake_case builder) for index push-down, then project the required
+fields. The read must be scoped to the index's label: a source predicate without a label
+scans every node. A `.where(...)` directly after `nWithLabel("User")` is pushed down to
+the index too; later in a traversal it filters a possibly larger intermediate stream.
+
+Cypher statements use these indexes automatically, without naming them. An
+equality or `IN` match on a labeled node reads an equality index, and range
+comparisons and ordered `LIMIT` reads use a range index:
+
+```cypher
+// parameters: {"status": "active"}
+MATCH (u:User {status: $status})
+RETURN u.name AS name
+```
+
+Explain the statement to see which index the plan reads. See
+[Cypher indexes and performance](/database/helix-db/query-guides/cypher#indexes-and-performance)
+for the conditions that keep an index in use.
 
 ## Unique indexes
 

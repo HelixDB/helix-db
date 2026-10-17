@@ -145,6 +145,12 @@ helix.ReadQuery("friends").
 }
 ```
 
+```cypher Cypher
+MATCH (user {username: 'alice'})-[:FOLLOWS]->(friend)
+WITH DISTINCT friend LIMIT 25
+RETURN id(friend) AS id, friend.username AS username
+```
+
 </CodeGroup>
 
 ## Preserve correlated values
@@ -282,10 +288,17 @@ helix.ReadQuery("service_routes").
 }
 ```
 
+```cypher Cypher
+MATCH (s:Service)-[:ROUTES_TO]->(w)
+RETURN s.name AS service, w.name AS workload
+```
+
 </CodeGroup>
 
 Bindings are row-local, so each row pairs a workload with the service that reached it
-rather than joining unrelated paths. Branches can bind optional values and coalesce
+rather than joining unrelated paths. Cypher pattern variables, such as `s` in the
+Cypher tab, stay bound for the whole row in the same way, so the statement needs no
+`bind` step. Branches can bind optional values and coalesce
 them during projection; see [Project correlated bindings](/database/helix-db/query-guides/projections#project-correlated-bindings).
 
 ## Avoid accidental path growth

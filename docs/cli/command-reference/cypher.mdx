@@ -1,0 +1,107 @@
+---
+title: "helix cypher"
+sidebarTitle: "cypher"
+description: "Execute or explain one Cypher statement against a local instance"
+pageType: "Reference"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+Send one Cypher statement to a local instance and print the JSON response, or plan it
+without running it. Local only.
+
+## Usage
+
+```bash
+helix cypher [INSTANCE] -e '<statement>' [--parameters '<json-object>']
+helix cypher [INSTANCE] --file <statement.cypher> [--parameters '<json-object>']
+helix cypher [INSTANCE] -e '<statement>' --explain
+```
+
+Exactly one of `-e` and `--file` is required. See the [Cypher guide](/database/helix-db/query-guides/cypher)
+for the supported language profile.
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Local instance name from `helix.toml`. See [Target resolution](#target-resolution) for the default. |
+
+## Options
+
+### Input (pick one)
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-e`, `--query <QUERY>` | The Cypher statement. | — |
+| `-f`, `--file <FILE>` | Read one Cypher statement from a UTF-8 file. | — |
+
+### Statement
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--parameters <JSON>` | A JSON object of parameter values, such as `'{"name":"Ada"}'`. Lossless tagged values such as `{"$type":"integer","value":"9223372036854775807"}` pass through unchanged. | `{}` |
+| `--explain` | Plan the statement with `POST /v2/cypher/explain` instead of running it. Explaining a write changes nothing. | Off |
+
+### Connection
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--host <HOST>` | Override the host. | `localhost` |
+| `--port <PORT>` | Override the port. | The instance's port in `helix.toml` |
+
+### Output
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print the response as compact JSON. | Off (highlighted, pretty-printed) |
+
+## Behavior
+
+### Target resolution
+
+- With no `INSTANCE`, the CLI uses the `dev` instance, then the only instance, then a picker in
+  a terminal.
+- The instance must be local. A Cloud instance fails with
+  `Cypher CLI requests currently require a local instance`; send Cypher to Helix Cloud through an
+  SDK or `POST /v2/cypher`.
+
+### Requests
+
+- The statement posts to the local, auth-disabled `/v2/cypher`, or `/v2/cypher/explain` with
+  `--explain`.
+- `--parameters` must be a JSON object; any other JSON value fails before the request is sent.
+- A `404` means the server predates Cypher, and the error asks you to upgrade it. Cypher needs
+  the `ghcr.io/helixdb/helixdb:v0.0.13` image or later.
+
+### Output
+
+- A successful response goes to stdout as syntax-highlighted, pretty-printed JSON with
+  `columns` and `rows`, or the plan under `--explain`. `--json` prints compact JSON instead.
+- A non-2xx response fails with the HTTP status and the error body, including the Cypher error
+  `error`, `msg`, and `details`.
+
+## Examples
+
+```bash
+# Run a statement against the default local instance
+helix cypher -e 'MATCH (u:User) RETURN u.name AS name ORDER BY name LIMIT 10'
+
+# Pass parameters
+helix cypher -e 'MATCH (u:User {email: $email}) RETURN u.name AS name' --parameters '{"email":"ada@example.com"}'
+
+# Run a statement from a file against a named instance
+helix cypher dev --file queries/active-users.cypher --parameters '{"status":"active"}'
+
+# Show the selected plan without running the statement
+helix cypher --explain -e 'MATCH (u:User {email: $email}) RETURN u' --parameters '{"email":"ada@example.com"}'
+
+# Print one line of JSON for scripts
+helix cypher -e 'MATCH (n) RETURN count(n) AS nodes' --json
+```
+
+## Related
+
+- [Cypher guide](/database/helix-db/query-guides/cypher): supported clauses, functions, and limits.
+- [`helix query`](/cli/command-reference/query): send a native v3 JSON or TypeScript DSL query.
+- [`helix start`](/cli/command-reference/start): start the local instance you query.

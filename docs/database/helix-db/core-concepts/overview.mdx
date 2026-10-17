@@ -14,8 +14,11 @@ sends back. To run it, start a local instance as described in
 [Get started](/database/helix-db/start-here/quickstart).
 
 <Note>
-  Every tab builds the same request. The JSON tab is the body sent to `POST /v2/query`,
-  and the v3 SDKs are typed builders for exactly that body.
+  The Rust, TypeScript, Go, Python, and JSON tabs build the same request. The JSON tab is
+  the body sent to `POST /v2/query`, and the v3 SDKs are typed builders for exactly that
+  body. The Cypher tab is the equivalent statement for
+  [`POST /v2/cypher`](/database/helix-db/query-guides/cypher), and the steps below show
+  the clauses of that statement that do the same work.
 </Note>
 
 ## The whole query
@@ -205,6 +208,16 @@ query = (
 }
 ```
 
+```cypher Cypher
+CREATE (alice:User {name: 'Alice'})
+CREATE (bob:User {name: 'Bob'})
+CREATE (alice)-[:FOLLOWS {since: '2026-07-24'}]->(bob)
+WITH alice, bob
+MATCH (alice)-[:FOLLOWS]->(friend)
+WITH alice, bob, collect({id: id(friend), name: friend.name}) AS friends
+RETURN id(alice) AS alice, id(bob) AS bob, friends
+```
+
 </CodeGroup>
 
 Four named entries run in order, and later entries reuse earlier results by name:
@@ -254,7 +267,9 @@ batch at compile time, and Go and Python reject it while the request is being bu
 a stray write in a read path never reaches the server.
 
 All entries in one batch commit or roll back together, which is what lets entry 4 read
-the edge that entry 3 has only just created.
+the edge that entry 3 has only just created. Cypher has no batch type: the server works
+out whether a statement reads or writes, and runs a statement that writes in one
+transaction.
 
 ## 2. Create the two nodes
 
@@ -290,6 +305,10 @@ VarAs("alice", helix.G().AddN("User", helix.Props{helix.Prop("name", "Alice")}))
     }
   }
 }
+```
+
+```cypher Cypher
+CREATE (alice:User {name: 'Alice'})
 ```
 
 </CodeGroup>
@@ -368,6 +387,10 @@ VarAs(
 }
 ```
 
+```cypher Cypher
+CREATE (alice)-[:FOLLOWS {since: '2026-07-24'}]->(bob)
+```
+
 </CodeGroup>
 
 Unlike `addN`, `addE` needs an input stream: the nodes in that stream become the edge
@@ -441,6 +464,12 @@ VarAs(
 }
 ```
 
+```cypher Cypher
+WITH alice, bob
+MATCH (alice)-[:FOLLOWS]->(friend)
+WITH alice, bob, collect({id: id(friend), name: friend.name}) AS friends
+```
+
 </CodeGroup>
 
 This entry is a read inside a write batch. It starts at Alice again, walks out along
@@ -499,6 +528,10 @@ Returning("alice", "bob", "friends")
 
 ```json JSON
 { "returns": ["alice", "bob", "friends"] }
+```
+
+```cypher Cypher
+RETURN id(alice) AS alice, id(bob) AS bob, friends
 ```
 
 </CodeGroup>
@@ -778,6 +811,13 @@ helix.ReadQuery("alice_friends").
 }
 ```
 
+```cypher Cypher
+MATCH (alice:User {name: 'Alice'})
+WITH alice LIMIT 1
+MATCH (alice)-[:FOLLOWS]->(friend)
+RETURN DISTINCT id(friend) AS id, friend.name AS name
+```
+
 </CodeGroup>
 
 It returns the same rows the write batch already reported:
@@ -793,8 +833,9 @@ the multigraph case, where several `FOLLOWS` edges between the same pair would o
 yield the same node more than once.
 
 A label scan reads every `User`. Add a
-[secondary index](/database/helix-db/query-guides/secondary-indexes) on `name` and use
-`nWhere` instead, so the lookup is pushed down to the index.
+[secondary index](/database/helix-db/query-guides/secondary-indexes) on `User.name` and
+the same `nWithLabel("User")` source with a `name` filter, or `nWithLabelWhere`, reads the
+index instead.
 
 ## Next steps
 
