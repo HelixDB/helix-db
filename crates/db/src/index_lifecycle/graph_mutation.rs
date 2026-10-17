@@ -339,7 +339,11 @@ impl GraphMutationTransition {
     }
 
     /// Applies one edit and returns a replacement only when bytes must change.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(
+        test,
+        feature = "production-coverage",
+        feature = "index-lifecycle-testing"
+    ))]
     pub(crate) fn edit(
         scope: DataScope,
         entity: GraphEntity,
