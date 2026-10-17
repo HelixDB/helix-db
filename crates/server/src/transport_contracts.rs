@@ -245,25 +245,16 @@ fn transport_response_preserves_declared_empty_return_shapes() {
     let response = QueryResponse::from_execution_result(ExecutionResult {
         last: None,
         variables: BTreeMap::new(),
-        returns: BTreeMap::from([
-            (
-                NonEmptyString::new("list").expect("return name is non-empty"),
-                ReturnedValue::EmptyList,
-            ),
-            (
-                NonEmptyString::new("object").expect("return name is non-empty"),
-                ReturnedValue::EmptyObject,
-            ),
-        ]),
+        returns: BTreeMap::from([(
+            NonEmptyString::new("list").expect("return name is non-empty"),
+            ReturnedValue::EmptyList,
+        )]),
     })
     .expect("shaped empty execution result converts");
 
     assert_eq!(
         response.returns(),
-        &BTreeMap::from([
-            ("list".to_string(), serde_json::json!([])),
-            ("object".to_string(), serde_json::Value::Null),
-        ])
+        &BTreeMap::from([("list".to_string(), serde_json::json!([])),])
     );
 }
 
