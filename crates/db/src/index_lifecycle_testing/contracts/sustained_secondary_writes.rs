@@ -81,7 +81,7 @@ async fn run_explicit_batches_between_advances() {
         operation_id,
     };
 
-    let mut advances = None;
+    let mut activated = false;
     for batch in 0..MAXIMUM_EXPLICIT_ADVANCES {
         let ordinal = usize::try_from(batch).expect("explicit batch ordinal fits usize");
         commit_batch(&db, batch, Some((batch, seeds[ordinal])), &mut keys).await;
@@ -102,12 +102,12 @@ async fn run_explicit_batches_between_advances() {
             "sustained writes must not stop the build: {status:?}"
         );
         if matches!(status, IndexOperationStatus::Succeeded { .. }) {
-            advances = Some(batch + 1);
+            activated = true;
             break;
         }
     }
     assert!(
-        advances.is_some(),
+        activated,
         "the build must activate within {MAXIMUM_EXPLICIT_ADVANCES} advances while a batch lands before each"
     );
 
