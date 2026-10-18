@@ -7239,6 +7239,135 @@ mod tests {
         }
     }
 
+    /// A crash inside a gated step loses its uncommitted drain and nothing
+    /// else: after a restart every delta, applied row, and entry is as the
+    /// last committed step left it, and the build still activates under a
+    /// write before every step, with a restart after every commit too.
+    #[tokio::test]
+    async fn sustained_writes_converge_across_a_crash_inside_every_gated_step() {
+        let store = Arc::new(InMemory::new());
+        let path = "secondary-sustained-writes-crash";
+        let open = || {
+            Db::builder(path, store.clone())
+                .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+                .build()
+        };
+        let mut db = open().await.expect("crash test database opens");
+        bootstrap_writer(&db)
+            .await
+            .expect("crash test database bootstraps");
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let mut sources = BTreeMap::new();
+        for entity_id in 0..4 {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 3).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+
+        let mut activated = false;
+        for step in 0_u64..12 {
+            let inserted = 4 + step;
+            let properties = user_properties(&format!("inserted-{step}@example.com"));
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                inserted,
+                &[],
+                &properties,
+            )
+            .await
+            .expect("insert records a build delta");
+            sources.insert(inserted, properties);
+            let updated = step % 4;
+            let after = user_properties(&format!("updated-{step}@example.com"));
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                updated,
+                &sources[&updated],
+                &after,
+            )
+            .await
+            .expect("update records a build delta");
+            sources.insert(updated, after);
+
+            let mut lifecycle_rows = Vec::new();
+            for kind in [
+                RecordKind::BuildDelta,
+                RecordKind::AppliedState,
+                RecordKind::SecondaryEntry,
+            ] {
+                lifecycle_rows.push(generation_rows(&db, scope, kind, index_id, generation).await);
+            }
+            let operation = read_operation(&db, scope, operation_id)
+                .await
+                .expect("crash test operation is readable")
+                .expect("crash test operation exists");
+            let crashed = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .expect("crashing step transaction begins");
+            driver
+                .step(
+                    &db,
+                    &crashed,
+                    scope,
+                    &operation,
+                    SearchIndexBackfillLimits::default().batch(),
+                )
+                .await
+                .expect("the step stages before the crash");
+            drop(crashed);
+            db.close().await.expect("crashed database closes");
+            db = open()
+                .await
+                .expect("crash test database reopens after the crash");
+            let mut recovered = Vec::new();
+            for kind in [
+                RecordKind::BuildDelta,
+                RecordKind::AppliedState,
+                RecordKind::SecondaryEntry,
+            ] {
+                recovered.push(generation_rows(&db, scope, kind, index_id, generation).await);
+            }
+            assert_eq!(
+                recovered, lifecycle_rows,
+                "an uncommitted step leaves no trace"
+            );
+
+            let committed = drive_one(&db, &driver, operation_id, &mut claim_sequence).await;
+            db.close().await.expect("checkpoint flushes before restart");
+            db = open()
+                .await
+                .expect("crash test database reopens after the checkpoint");
+            match committed {
+                CommittedOperationStep::Progressed => {}
+                CommittedOperationStep::Completed => {
+                    activated = true;
+                    break;
+                }
+                step @ (CommittedOperationStep::TransientFailure
+                | CommittedOperationStep::Blocked) => {
+                    panic!("a restarted build must not stop under writes: {step:?}")
+                }
+            }
+        }
+        assert!(activated, "the build must activate across restarts");
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("crash test database closes");
+    }
+
     /// Writes inside the scanned range commit while a source batch is held
     /// between staging and commit. The batch was read outside the step's
     /// serializable transaction, so the step still commits on its first
