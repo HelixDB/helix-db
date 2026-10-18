@@ -7126,7 +7126,10 @@ mod tests {
                         activated = true;
                         break;
                     }
-                    step => panic!("sustained writes must not block the build: {step:?}"),
+                    step @ (CommittedOperationStep::TransientFailure
+                    | CommittedOperationStep::Blocked) => {
+                        panic!("sustained writes must not block the build: {step:?}")
+                    }
                 }
             }
             assert!(
@@ -7213,7 +7216,10 @@ mod tests {
                         activated = true;
                         break;
                     }
-                    step => panic!("a drained write must not block the build: {step:?}"),
+                    step @ (CommittedOperationStep::TransientFailure
+                    | CommittedOperationStep::Blocked) => {
+                        panic!("a drained write must not block the build: {step:?}")
+                    }
                 }
             }
             assert!(

@@ -180,7 +180,7 @@ async fn run_automatic_worker_under_a_writer_loop() {
                 IndexOperationStatus::Blocked { .. } | IndexOperationStatus::Aborted { .. } => {
                     panic!("sustained writes must not stop the build: {status:?}")
                 }
-                _ => {}
+                IndexOperationStatus::Queued { .. } | IndexOperationStatus::Running { .. } => {}
             }
             assert!(
                 started.elapsed() < AUTOMATIC_ACTIVATION_BOUND,
@@ -339,7 +339,9 @@ fn ids(response: &Value, variable: &str) -> Vec<u64> {
             .map(|value| value.as_u64().expect("sustained ID is unsigned"))
             .collect(),
         Value::Number(value) => vec![value.as_u64().expect("sustained ID is unsigned")],
-        other => panic!("{variable} is not an ID binding: {other}"),
+        other @ (Value::Null | Value::Bool(_) | Value::String(_) | Value::Object(_)) => {
+            panic!("{variable} is not an ID binding: {other}")
+        }
     }
 }
 
