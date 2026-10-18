@@ -1262,6 +1262,24 @@ async fn scan_source(
                     ReconciliationPlan::Writes(plan) => plan,
                     ReconciliationPlan::Blocked(blocker) => {
                         transaction.get(candidate.cursor.as_bytes()).await?;
+                        // The duplicate's owner joins the read set too, so a
+                        // write that moves either entity before this step
+                        // commits makes it retry.
+                        let IndexOperationBlocker::UniquenessViolation {
+                            first_entity_id, ..
+                        } = blocker
+                        else {
+                            return Ok(IndexOperationStepResult::Blocked(blocker));
+                        };
+                        transaction
+                            .get(authoritative_property_key(
+                                scope,
+                                IndexEntity {
+                                    kind: entity.kind,
+                                    id: first_entity_id,
+                                },
+                            ))
+                            .await?;
                         return Ok(IndexOperationStepResult::Blocked(blocker));
                     }
                 };
@@ -7460,6 +7478,91 @@ mod tests {
             .await;
             db.close().await.expect("secondary test database closes");
         }
+    }
+
+    /// A duplicate the source scan finds while either owner changes inside
+    /// the step's window must not commit as a durable blocker: both rows are
+    /// in the step's read set, so the step retries and sees the resolution.
+    #[tokio::test]
+    async fn a_scan_duplicate_resolved_inside_the_step_window_retries() {
+        let db = test_db("secondary-scan-duplicate-window").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let duplicate = user_properties("duplicate@example.com");
+        let mut sources = BTreeMap::new();
+        for entity_id in 0..2 {
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &duplicate).await;
+            sources.insert(entity_id, duplicate.clone());
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 1).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        let pause = crate::index_lifecycle::outbox::step_pause::StepPause::arm(&db, |progress| {
+            matches!(
+                progress,
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                    SecondaryBuildStage::Scan(_)
+                ))
+            )
+        });
+        // A writer epoch the later steps do not share, so they may reclaim
+        // the operation after this step fails.
+        let held_epoch = WriterEpoch::from_bytes([0x5B; 16]).expect("writer epoch is non-nil");
+        let OperationPointerObservation::Eligible(eligible) =
+            observe_operation_pointer(&db, operation_id, held_epoch, NOW_MILLIS)
+                .await
+                .expect("operation pointer is readable")
+        else {
+            panic!("the queued scan must be eligible");
+        };
+        let claimed = claim_operation(
+            &db,
+            &eligible,
+            held_epoch,
+            ClaimSequence::new(claim_sequence).expect("claim sequence is non-zero"),
+            NOW_MILLIS,
+            ClaimPermission::Normal,
+        )
+        .await
+        .expect("scan claim succeeds")
+        .expect("exact queued revision is claimable");
+        claim_sequence += 1;
+        let committed = {
+            let step = execute_claimed_step(
+                &db,
+                &claimed,
+                &driver,
+                SearchIndexBackfillLimits::default().batch(),
+                NOW_MILLIS,
+            );
+            tokio::pin!(step);
+            tokio::select! {
+                () = pause.reached() => {}
+                outcome = &mut step => panic!("the scan committed before its pause: {outcome:?}"),
+            }
+            // The first owner moves away while the blocked scan is held.
+            let moved = user_properties("moved@example.com");
+            mutate_source(&db, scope, IndexElementKind::Node, 0, &duplicate, &moved)
+                .await
+                .expect("the owner moves while the scan is held");
+            sources.insert(0, moved);
+            pause.release();
+            step.await
+        };
+        assert!(
+            committed.is_err_and(|error| error.is_transaction_conflict()),
+            "the stale duplicate must not commit"
+        );
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
     }
 
     /// A write window that dirties more entities than the final drain admits
