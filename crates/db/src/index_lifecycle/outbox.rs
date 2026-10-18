@@ -1503,11 +1503,7 @@ pub(crate) async fn read_operation(
 
 /// Convergently ensures a retained operation is runnable and returns its
 /// resulting public status source record.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn retry_operation(
     db: &Db,
     scope: DataScope,
@@ -1553,11 +1549,7 @@ pub(crate) async fn retry_operation_with_control(
 
 /// Converts a constructing BUILD into abort cleanup, or converges on an
 /// already-aborting/aborted BUILD with the same operation ID.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "production-coverage"))]
 pub(crate) async fn abort_operation(
     db: &Db,
     scope: DataScope,
