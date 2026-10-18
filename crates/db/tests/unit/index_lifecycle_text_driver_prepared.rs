@@ -1465,14 +1465,15 @@ async fn source_scan_step_commits_through_writes_to_its_source_range() {
 /// A write repairs the invalid graph row 0 after the ScanSource step reads it
 /// and before the step commits. The step reads its blocker's row through the
 /// serializable transaction, so the commit fails instead of blocking the
-/// build durably, and the retried step stages the repaired row.
+/// build durably: the claim returns to the queue after a delay, and the
+/// retried step stages the repaired row.
 #[tokio::test]
 async fn source_scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
     use crate::index_lifecycle::lifecycle::{create_index_operation, InitialBuildProgress};
     use crate::index_lifecycle::outbox::{
         claim_operation, execute_claimed_step, observe_operation_pointer, read_operation,
         ClaimPermission, CommittedOperationStep, OperationPointerObservation,
-        SameEpochRecoveryProof, WriteDuringStepDriver,
+        WriteDuringStepDriver,
     };
 
     let db = Db::open(
@@ -1537,32 +1538,43 @@ async fn source_scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
     .await
     .unwrap()
     .unwrap();
-    let error = execute_claimed_step(&db, &claimed, &racing, limits, 1)
-        .await
-        .expect_err("a blocker whose row was repaired does not commit");
-    assert!(error.is_transaction_conflict(), "{error}");
+    assert_eq!(
+        execute_claimed_step(&db, &claimed, &racing, limits, 1)
+            .await
+            .expect("a lost commit conflict releases the claim"),
+        CommittedOperationStep::TransientFailure,
+        "a blocker whose row was repaired does not commit"
+    );
 
-    // The supervisor rejoins its task and retries the same step.
-    let OperationPointerObservation::ClaimedByCurrentWriter(eligible) =
+    // The same step is queued again once its delay elapses.
+    let OperationPointerObservation::Delayed { delay_millis } =
         observe_operation_pointer(&db, operation_id, writer_epoch, 1)
             .await
             .unwrap()
     else {
-        panic!("the failed step leaves its claim with this writer");
+        panic!("the conflicting step is requeued after a delay");
+    };
+    let retry_at = 1 + delay_millis;
+    let OperationPointerObservation::Eligible(eligible) =
+        observe_operation_pointer(&db, operation_id, writer_epoch, retry_at)
+            .await
+            .unwrap()
+    else {
+        panic!("the requeued step is eligible after its delay");
     };
     let claimed = claim_operation(
         &db,
         &eligible,
         writer_epoch,
         ClaimSequence::new(2).unwrap(),
-        1,
-        ClaimPermission::SameEpochRecovery(SameEpochRecoveryProof::after_join(writer_epoch)),
+        retry_at,
+        ClaimPermission::Normal,
     )
     .await
     .unwrap()
     .unwrap();
     assert_eq!(
-        execute_claimed_step(&db, &claimed, &inner, limits, 1)
+        execute_claimed_step(&db, &claimed, &inner, limits, retry_at)
             .await
             .unwrap(),
         CommittedOperationStep::Progressed
