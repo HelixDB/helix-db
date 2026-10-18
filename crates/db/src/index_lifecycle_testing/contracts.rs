@@ -317,24 +317,28 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                 .await
                 .expect("public-boundary operation resumes after writes");
             assert_monotonic_step(&evidence);
-            let resumed = db
+            let resumed_status = db
                 .get_index_operation(scope, operation_id)
                 .await
-                .expect("public-boundary operation remains readable")
-                .common()
-                .stage;
+                .expect("public-boundary operation remains readable");
+            let resumed = resumed_status.common().stage;
             match shape.family() {
-                // The gated step drains a write window's deltas itself.
-                PublicMutationFamily::Secondary
-                    if matches!(
-                        stage,
-                        IndexOperationStage::Validate | IndexOperationStage::Activate
-                    ) =>
-                {
-                    assert_ne!(
-                        resumed,
-                        IndexOperationStage::CatchUp,
-                        "{shape:?} must drain public writes at {stage:?} without re-entering CatchUp"
+                // The gated step drains a write window's deltas itself:
+                // validation moves on with its releases, and activation
+                // completes in the same step.
+                PublicMutationFamily::Secondary if stage == IndexOperationStage::Validate => {
+                    assert!(
+                        matches!(
+                            resumed,
+                            IndexOperationStage::Validate | IndexOperationStage::Activate
+                        ),
+                        "{shape:?} must drain public writes at {stage:?} and stay past catch-up, resumed at {resumed:?}"
+                    );
+                }
+                PublicMutationFamily::Secondary if stage == IndexOperationStage::Activate => {
+                    assert!(
+                        matches!(resumed_status, IndexOperationStatus::Succeeded { .. }),
+                        "{shape:?} must drain public writes at {stage:?} and activate in that step: {resumed_status:?}"
                     );
                 }
                 PublicMutationFamily::Secondary => {}

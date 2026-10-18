@@ -37,8 +37,11 @@ const PROPERTY: &str = "entity_key";
 const INSERTS_PER_BATCH: u64 = 4;
 /// Explicit steps the build may take while a batch lands before each one.
 const MAXIMUM_EXPLICIT_ADVANCES: u64 = 16;
-/// Wall-clock bound for activation under the automatic worker.
-const AUTOMATIC_ACTIVATION_BOUND: Duration = Duration::from_secs(10);
+/// Wall-clock bound for activation under the automatic worker, the suite's
+/// timeout for automatic work. A build that cannot activate under sustained
+/// writes never does, so any finite bound detects it, and this one leaves
+/// room for slow and loaded CI hosts.
+const AUTOMATIC_ACTIVATION_BOUND: Duration = Duration::from_secs(120);
 
 /// Every key ever written, mapped to the nodes that hold it now.
 type ExpectedKeys = BTreeMap<String, BTreeSet<u64>>;
