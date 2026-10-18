@@ -4439,8 +4439,7 @@ mod tests {
     };
     use crate::index_lifecycle::outbox::{
         claim_operation, execute_claimed_step, observe_operation_pointer, ClaimPermission,
-        CommittedOperationStep, OperationPointerObservation, SameEpochRecoveryProof,
-        WriteDuringStepDriver,
+        CommittedOperationStep, OperationPointerObservation, WriteDuringStepDriver,
     };
     use crate::index_lifecycle::{
         ActiveIndexHandle, ClaimSequence, IndexDdlReceipt, IndexOperationId, IndexScopeGates,
@@ -4808,7 +4807,8 @@ mod tests {
     /// A write repairs the invalid source row 0 after the Scan step reads it
     /// and before the step commits. The step reads its blocker's row through
     /// the serializable transaction, so the commit fails instead of blocking
-    /// the build durably, and the retried step indexes the repaired row.
+    /// the build durably: the claim returns to the queue after a delay, and
+    /// the retried step indexes the repaired row.
     #[tokio::test]
     async fn scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
         let db = test_db("vector-driver-scan-repaired-blocker").await;
@@ -4851,32 +4851,43 @@ mod tests {
         .await
         .expect("vector claim succeeds")
         .expect("vector revision is claimable");
-        let error = execute_claimed_step(&db, &claimed, &racing, limits, NOW_MILLIS)
-            .await
-            .expect_err("a blocker whose row was repaired does not commit");
-        assert!(error.is_transaction_conflict(), "{error}");
+        assert_eq!(
+            execute_claimed_step(&db, &claimed, &racing, limits, NOW_MILLIS)
+                .await
+                .expect("a lost commit conflict releases the claim"),
+            CommittedOperationStep::TransientFailure,
+            "a blocker whose row was repaired does not commit"
+        );
 
-        // The supervisor rejoins its task and retries the same step.
-        let OperationPointerObservation::ClaimedByCurrentWriter(eligible) =
+        // The same step is queued again once its delay elapses.
+        let OperationPointerObservation::Delayed { delay_millis } =
             observe_operation_pointer(&db, build_id, writer_epoch, NOW_MILLIS)
                 .await
                 .expect("vector operation pointer is readable")
         else {
-            panic!("the failed step leaves its claim with this writer");
+            panic!("the conflicting step is requeued after a delay");
+        };
+        let retry_at = NOW_MILLIS + delay_millis;
+        let OperationPointerObservation::Eligible(eligible) =
+            observe_operation_pointer(&db, build_id, writer_epoch, retry_at)
+                .await
+                .expect("vector operation pointer is readable")
+        else {
+            panic!("the requeued step is eligible after its delay");
         };
         let claimed = claim_operation(
             &db,
             &eligible,
             writer_epoch,
             ClaimSequence::new(2).expect("claim sequence is non-zero"),
-            NOW_MILLIS,
-            ClaimPermission::SameEpochRecovery(SameEpochRecoveryProof::after_join(writer_epoch)),
+            retry_at,
+            ClaimPermission::Normal,
         )
         .await
-        .expect("vector recovery claim succeeds")
-        .expect("vector revision is reclaimable");
+        .expect("vector retry claim succeeds")
+        .expect("vector revision is claimable");
         assert_eq!(
-            execute_claimed_step(&db, &claimed, &inner, limits, NOW_MILLIS)
+            execute_claimed_step(&db, &claimed, &inner, limits, retry_at)
                 .await
                 .expect("the retried vector step commits"),
             CommittedOperationStep::Progressed

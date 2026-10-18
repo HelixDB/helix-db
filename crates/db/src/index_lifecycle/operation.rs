@@ -942,8 +942,11 @@ impl IndexOperationExecutionState {
 /// Private cause carried by one queued operation.
 ///
 /// The public execution state intentionally projects every variant as queued.
-/// Persistence retains the cause so blocking startup can distinguish ordinary
-/// delayed progress from a failure emitted by its own worker epoch.
+/// Persistence retains the cause so blocking startup can tell a failure its
+/// own worker epoch emitted from any other delay. Committed progress no
+/// longer delays an operation; `DelayedAfterProgress` stays decodable for
+/// records earlier releases wrote, and its deadline is honored like any
+/// other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum IndexOperationQueueSchedule {
     Immediate,
@@ -1463,11 +1466,15 @@ impl IndexOperationRecord {
             IndexOperationExecutionState::Queued {
                 not_before_unix_millis: None,
             } => Some(IndexOperationQueueSchedule::Immediate),
+            // A delayed requeue names its cause through
+            // `next_with_queue_schedule`.
             IndexOperationExecutionState::Queued {
-                not_before_unix_millis: Some(not_before_unix_millis),
-            } => Some(IndexOperationQueueSchedule::DelayedAfterProgress {
-                not_before_unix_millis: *not_before_unix_millis,
-            }),
+                not_before_unix_millis: Some(_),
+            } => {
+                return Err(IndexOperationModelError::InvalidQueueSchedule(
+                    "a delayed requeue must name its schedule",
+                ));
+            }
             IndexOperationExecutionState::Claimed(_)
             | IndexOperationExecutionState::Blocked(_)
             | IndexOperationExecutionState::Completed(_) => None,

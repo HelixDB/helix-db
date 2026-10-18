@@ -7552,8 +7552,9 @@ mod tests {
             pause.release();
             step.await
         };
-        assert!(
-            committed.is_err_and(|error| error.is_transaction_conflict()),
+        assert_eq!(
+            committed.expect("a lost conflict releases the claim"),
+            CommittedOperationStep::TransientFailure,
             "the stale duplicate must not commit"
         );
         assert_eq!(

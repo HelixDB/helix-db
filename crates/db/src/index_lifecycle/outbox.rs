@@ -1226,7 +1226,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
     })
     else {
         prepared.discard().await?;
-        release_transient_claim(db, claimed, now_unix_millis).await?;
+        release_transient_claim(db, claimed, now_unix_millis, TransientRetry::Backoff).await?;
         let stage = IndexOperationStatus::from_record(&claimed.record)
             .common()
             .stage;
@@ -1243,7 +1243,24 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         Ok(_) => {}
         Err(commit) => {
             prepared.discard().await?;
-            return Err(commit.into());
+            let error = HelixDbError::from(commit);
+            if !error.is_transaction_conflict() {
+                return Err(error);
+            }
+            // A step that lost a serializable conflict wrote nothing. Its
+            // claim goes back to the queue after a delay instead of failing
+            // the whole worker cycle.
+            release_transient_claim(db, claimed, now_unix_millis, TransientRetry::Conflict).await?;
+            let stage = IndexOperationStatus::from_record(&claimed.record)
+                .common()
+                .stage;
+            return Ok(CommittedOperationStepEvidence {
+                outcome: CommittedOperationStep::TransientFailure,
+                before_stage: stage,
+                after_stage: stage,
+                resources: StepResourceUsage::default(),
+                elapsed_micros: elapsed_micros(started),
+            });
         }
     }
     prepared.after_commit().await;
@@ -1297,7 +1314,12 @@ async fn record_driver_failure(
         "index operation driver failed"
     );
     let outcome = if retryable {
-        release_transient_claim(db, claimed, now_unix_millis).await?;
+        let retry = if error.is_transaction_conflict() {
+            TransientRetry::Conflict
+        } else {
+            TransientRetry::Backoff
+        };
+        release_transient_claim(db, claimed, now_unix_millis, retry).await?;
         CommittedOperationStep::TransientFailure
     } else {
         let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -1641,10 +1663,23 @@ fn operation_not_found(operation_id: IndexOperationId) -> HelixDbError {
     }
 }
 
+/// How long a released claim waits before it is runnable again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransientRetry {
+    /// Exponential in the operation's claim attempts.
+    Backoff,
+    /// The base delay: a commit lost a serializable conflict, which a later
+    /// attempt usually wins. The attempt counter counts every claim, so
+    /// scaling by it would stall a long build for the maximum delay after
+    /// one conflict.
+    Conflict,
+}
+
 async fn release_transient_claim(
     db: &Db,
     claimed: &ClaimedOperation,
     now_unix_millis: u64,
+    retry: TransientRetry,
 ) -> Result<()> {
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     let Some((index, operation, _)) =
@@ -1655,7 +1690,11 @@ async fn release_transient_claim(
     if operation.operation_revision() != claimed.record.operation_revision() {
         return Ok(());
     }
-    let deadline = now_unix_millis.saturating_add(backoff_millis(operation.attempt()));
+    let delay_millis = match retry {
+        TransientRetry::Backoff => backoff_millis(operation.attempt()),
+        TransientRetry::Conflict => BASE_OPERATION_BACKOFF_MILLIS,
+    };
+    let deadline = now_unix_millis.saturating_add(delay_millis);
     let next = operation
         .transient_failure(deadline)
         .map_err(operation_model_error)?;
@@ -2325,7 +2364,9 @@ mod tests {
                 before
             );
         }
-        release_transient_claim(&db, &claimed, 0).await.unwrap();
+        release_transient_claim(&db, &claimed, 0, TransientRetry::Backoff)
+            .await
+            .unwrap();
         let advanced = db
             .get(scoped_operation_key(scope, operation.operation_id()))
             .await
@@ -3328,6 +3369,204 @@ mod tests {
         .await
         .unwrap()
         .is_some());
+        db.close().await.unwrap();
+    }
+
+    /// Reads `probe` in its step transaction, then commits a write to it
+    /// outside, so the step's commit loses a serializable conflict.
+    struct ConflictingDriver {
+        probe: Bytes,
+    }
+
+    #[async_trait]
+    impl IndexOperationDriver for ConflictingDriver {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn step(
+            &self,
+            db: &Db,
+            transaction: &DbTransaction,
+            _scope: DataScope,
+            operation: &IndexOperationRecord,
+            _limits: SearchIndexBatchLimits,
+        ) -> Result<IndexOperationStepExecution> {
+            transaction.get(&self.probe).await?;
+            db.put(&self.probe, b"raced").await?;
+            Ok(IndexOperationStepExecution::new(
+                IndexOperationStepResult::Progressed(operation.progress().clone()),
+            ))
+        }
+    }
+
+    /// A step whose commit loses a serializable conflict requeues its claim
+    /// after the base delay, however many claims it took, instead of failing
+    /// the worker cycle with the error.
+    #[tokio::test]
+    async fn a_lost_commit_conflict_requeues_the_claim_after_the_base_delay() {
+        let db = db("outbox-commit-conflict").await;
+        let (index, operation) = fixture(15);
+        enqueue_operation(
+            &db,
+            DataScope::LegacyUnscoped,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let epoch = WriterEpoch::from_bytes([16; 16]).unwrap();
+        let mut claimed = None;
+        for sequence in 1..=6 {
+            let eligible =
+                match observe_operation_pointer(&db, operation.operation_id(), epoch, 100)
+                    .await
+                    .unwrap()
+                {
+                    OperationPointerObservation::Eligible(eligible)
+                    | OperationPointerObservation::ClaimedByCurrentWriter(eligible) => eligible,
+                    observation @ (OperationPointerObservation::Delayed { .. }
+                    | OperationPointerObservation::StalePointerRemoved) => {
+                        panic!("the operation stays claimable: {observation:?}")
+                    }
+                };
+            let permission = if claimed.is_none() {
+                ClaimPermission::Normal
+            } else {
+                ClaimPermission::SameEpochRecovery(SameEpochRecoveryProof::after_join(epoch))
+            };
+            claimed = claim_operation(
+                &db,
+                &eligible,
+                epoch,
+                ClaimSequence::new(sequence).unwrap(),
+                100,
+                permission,
+            )
+            .await
+            .unwrap();
+        }
+        let claimed = claimed.expect("the last claim succeeds");
+        assert_eq!(claimed.record.attempt(), 6);
+        assert_eq!(
+            execute_claimed_step(
+                &db,
+                &claimed,
+                &ConflictingDriver {
+                    probe: Bytes::from_static(b"outbox-commit-conflict-probe"),
+                },
+                SearchIndexBackfillLimits::default().batch(),
+                100,
+            )
+            .await
+            .expect("a lost conflict is not a worker failure"),
+            CommittedOperationStep::TransientFailure
+        );
+        let retained = read_operation(&db, DataScope::LegacyUnscoped, operation.operation_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.progress(), claimed.record.progress());
+        assert!(matches!(
+            observe_operation_pointer(&db, operation.operation_id(), epoch, 100)
+                .await
+                .unwrap(),
+            OperationPointerObservation::Delayed {
+                delay_millis: BASE_OPERATION_BACKOFF_MILLIS
+            }
+        ));
+        assert!(matches!(
+            observe_operation_pointer(
+                &db,
+                operation.operation_id(),
+                epoch,
+                100 + BASE_OPERATION_BACKOFF_MILLIS
+            )
+            .await
+            .unwrap(),
+            OperationPointerObservation::Eligible(_)
+        ));
+        db.close().await.unwrap();
+    }
+
+    /// Releases before this one could persist a successful step with a
+    /// reclaim deadline. Such a record still decodes, and its deadline holds.
+    #[tokio::test]
+    async fn a_persisted_delay_after_progress_is_honored() {
+        let db = db("outbox-persisted-progress-delay").await;
+        let scope = DataScope::LegacyUnscoped;
+        let (index, operation) = fixture(17);
+        enqueue_operation(
+            &db,
+            scope,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let delayed = IndexOperationRecord::try_new(
+            operation.operation_id(),
+            operation.index_id(),
+            operation.identity().clone(),
+            operation.generation(),
+            operation.index_record_revision(),
+            operation.operation_revision(),
+            operation.kind(),
+            operation.family(),
+            operation.progress().clone(),
+            operation.attempt(),
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: Some(107),
+            },
+        )
+        .unwrap();
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        transaction
+            .put(
+                scoped_operation_key(scope, delayed.operation_id()),
+                encode_operation_record(&delayed),
+            )
+            .unwrap();
+        transaction
+            .put(
+                global_operation_key(delayed.operation_id()),
+                encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer_for(
+                    scope, &delayed,
+                ))),
+            )
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let decoded = read_operation(&db, scope, delayed.operation_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decoded.queue_schedule(),
+            Some(
+                crate::index_lifecycle::IndexOperationQueueSchedule::DelayedAfterProgress {
+                    not_before_unix_millis: 107
+                }
+            )
+        );
+        let epoch = WriterEpoch::from_bytes([18; 16]).unwrap();
+        assert!(matches!(
+            observe_operation_pointer(&db, delayed.operation_id(), epoch, 100)
+                .await
+                .unwrap(),
+            OperationPointerObservation::Delayed { delay_millis: 7 }
+        ));
+        assert!(matches!(
+            observe_operation_pointer(&db, delayed.operation_id(), epoch, 107)
+                .await
+                .unwrap(),
+            OperationPointerObservation::Eligible(_)
+        ));
         db.close().await.unwrap();
     }
 
