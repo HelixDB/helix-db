@@ -627,10 +627,7 @@ pub(super) async fn run_multi_scope_discovery_contracts() {
 
 /// Creates a secondary lifecycle driver.
 fn secondary_driver() -> SecondaryIndexDriver {
-    SecondaryIndexDriver::with_final_drain_entities(
-        Arc::new(crate::index_lifecycle::IndexScopeGates::default()),
-        crate::config::SecondaryIndexLifecycleTuning::default().final_drain_entities(),
-    )
+    SecondaryIndexDriver::new(Arc::new(crate::index_lifecycle::IndexScopeGates::default()))
 }
 
 /// Builds one typed node-property key for the authoritative graph source.
