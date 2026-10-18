@@ -760,7 +760,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
 
     async fn step(
         &self,
-        _db: &slatedb::Db,
+        db: &slatedb::Db,
         transaction: &DbTransaction,
         scope: DataScope,
         operation: &IndexOperationRecord,
@@ -773,6 +773,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         let result = match operation.progress() {
             IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(stage)) => {
                 step_build(
+                    db,
                     transaction,
                     scope,
                     operation,
@@ -879,9 +880,10 @@ async fn prepare_secondary_catch_up(
 
 #[allow(
     clippy::too_many_arguments,
-    reason = "one build step needs its exact operation, definition, stage, batch limits, scan tuning, and final-drain bound"
+    reason = "one build step needs its storage, exact operation, definition, stage, batch limits, scan tuning, and final-drain bound"
 )]
 async fn step_build(
+    db: &slatedb::Db,
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
@@ -894,6 +896,7 @@ async fn step_build(
     match stage {
         SecondaryBuildStage::Scan(progress) => {
             scan_source(
+                db,
                 transaction,
                 scope,
                 operation,
@@ -1001,7 +1004,26 @@ enum ObservedSourceScanCandidateKind {
     },
 }
 
+/// Reconciles one bounded batch of source rows at or below the build's
+/// source upper bound.
+///
+/// The batch is read from a snapshot outside the step's serializable
+/// transaction, so a write inside the scanned range does not abort the step.
+/// Every write that commits after the build was created records a delta for
+/// its entity (a write whose catalog read predates the creation conflicts
+/// with it), and catch-up reconciles that delta from the applied value this
+/// step records, so the generation converges whichever snapshot the step
+/// read. Rows the build owns (canonical record, applied state, unique
+/// entries) stay in the transaction's read set. A blocker is durable, so a
+/// step that blocks on a source row first reads that row through the
+/// transaction: a write that repairs it before the step commits makes the
+/// step retry.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one source batch needs its storage, transaction, exact operation, definition, progress, limits, and scan tuning"
+)]
 async fn scan_source(
+    db: &slatedb::Db,
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
@@ -1032,7 +1054,8 @@ async fn scan_source(
     }
     let start = start.map_or(Bound::Unbounded, Bound::Excluded);
     let scan_options = scan_tuning.scan_options();
-    let mut rows = transaction
+    let source = db.begin(slatedb::IsolationLevel::Snapshot).await?;
+    let mut rows = source
         .scan_prefix_with_options(
             &source_prefix,
             (start, Bound::Included(upper)),
@@ -1052,6 +1075,7 @@ async fn scan_source(
             if candidates.is_empty() {
                 let entity_id = source_entity(scope, definition.element_kind(), &row.key)?
                     .unwrap_or(IndexEntityId::initial());
+                transaction.get(&row.key).await?;
                 return Ok(IndexOperationStepResult::Blocked(
                     IndexOperationBlocker::OversizedEntity {
                         entity_kind: definition.element_kind(),
@@ -1077,6 +1101,7 @@ async fn scan_source(
         let properties = match decode_indexed_source(definition, &row.value, &mut scratch) {
             Ok(properties) => properties,
             Err(_) => {
+                transaction.get(&row.key).await?;
                 return Ok(IndexOperationStepResult::Blocked(
                     IndexOperationBlocker::InvalidSourceData {
                         entity_kind: definition.element_kind(),
@@ -1095,6 +1120,7 @@ async fn scan_source(
         ) {
             Ok(value) => value,
             Err(_) => {
+                transaction.get(&row.key).await?;
                 return Ok(IndexOperationStepResult::Blocked(
                     IndexOperationBlocker::InvalidSourceData {
                         entity_kind: definition.element_kind(),
@@ -1235,11 +1261,13 @@ async fn scan_source(
                 )? {
                     ReconciliationPlan::Writes(plan) => plan,
                     ReconciliationPlan::Blocked(blocker) => {
+                        transaction.get(candidate.cursor.as_bytes()).await?;
                         return Ok(IndexOperationStepResult::Blocked(blocker));
                     }
                 };
                 if !accounting.can_admit_output(&plan) {
                     if accounting.is_empty() {
+                        transaction.get(candidate.cursor.as_bytes()).await?;
                         return Ok(IndexOperationStepResult::Blocked(
                             IndexOperationBlocker::OversizedEntity {
                                 entity_kind: entity.kind,
@@ -7191,6 +7219,100 @@ mod tests {
             assert!(
                 activated,
                 "{definition:?} must activate while each step waits for a write"
+            );
+            assert_generation_equals_source(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                &sources,
+            )
+            .await;
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// Writes inside the scanned range commit while a source batch is held
+    /// between staging and commit. The batch was read outside the step's
+    /// serializable transaction, so the step still commits on its first
+    /// attempt, and each write's delta carries its change into the generation.
+    #[tokio::test]
+    async fn source_scan_commits_through_writes_to_its_range() {
+        for (ordinal, definition) in [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+            SecondaryIndexDefinition::node_range("User", "email"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let db = test_db(&format!("secondary-scan-window-writes-{ordinal}")).await;
+            let scope = DataScope::LegacyUnscoped;
+            let definition = validated(definition.expect("test definition is valid"));
+            let mut sources = BTreeMap::new();
+            for entity_id in 0..4 {
+                let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+                put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+                sources.insert(entity_id, properties);
+            }
+            // Leased IDs 4..=7 lie inside the source bound without rows yet.
+            let (operation_id, index_id, generation) =
+                create_build(&db, scope, &definition, 7).await;
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+            let mut claim_sequence = 1;
+            let pause =
+                crate::index_lifecycle::outbox::step_pause::StepPause::arm(&db, |progress| {
+                    matches!(
+                        progress,
+                        IndexOperationProgress::SecondaryBuild(
+                            SecondaryBuildProgress::Constructing(SecondaryBuildStage::Scan(
+                                SourceScanProgress { cursor: None, .. }
+                            ))
+                        )
+                    )
+                });
+            let committed = {
+                let step = drive_one(&db, &driver, operation_id, &mut claim_sequence);
+                tokio::pin!(step);
+                tokio::select! {
+                    () = pause.reached() => {}
+                    outcome = &mut step => panic!("the scan committed before its pause: {outcome:?}"),
+                }
+                let updated = user_properties("updated-1@example.com");
+                mutate_source(
+                    &db,
+                    scope,
+                    IndexElementKind::Node,
+                    1,
+                    &sources[&1],
+                    &updated,
+                )
+                .await
+                .expect("a scanned entity updates while the scan is held");
+                sources.insert(1, updated);
+                mutate_source(&db, scope, IndexElementKind::Node, 2, &sources[&2], &[])
+                    .await
+                    .expect("a scanned entity is deleted while the scan is held");
+                sources.remove(&2);
+                let inserted = user_properties("inserted-5@example.com");
+                mutate_source(&db, scope, IndexElementKind::Node, 5, &[], &inserted)
+                    .await
+                    .expect("an entity inside the source bound is inserted while the scan is held");
+                sources.insert(5, inserted);
+                pause.release();
+
+                step.await
+            };
+            assert_eq!(committed, CommittedOperationStep::Progressed);
+            assert_eq!(pause.stagings(), 1, "the scan commits on its first attempt");
+            assert!(matches!(
+                build_stage(&db, operation_id).await,
+                SecondaryBuildStage::CatchUp(_)
+            ));
+            assert_eq!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
             );
             assert_generation_equals_source(
                 &db,
