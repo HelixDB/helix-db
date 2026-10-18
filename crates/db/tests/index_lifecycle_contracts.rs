@@ -76,6 +76,17 @@ fn index_lifecycle_all_index_shapes_converge_after_late_writes_at_every_stage() 
         .expect("all-index validation test thread should not panic");
 }
 
+/// Proves a secondary build activates while public write batches never stop,
+/// both between explicit steps and under the automatic worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_lifecycle_secondary_build_activates_under_sustained_public_writes() {
+    let _permit = CONTRACT_SUITE
+        .acquire()
+        .await
+        .expect("lifecycle contract semaphore remains open");
+    db::index_lifecycle_testing::run_secondary_sustained_write_contracts().await;
+}
+
 /// Proves real public writes survive every secondary/vector build boundary.
 #[test]
 fn index_lifecycle_secondary_vector_public_writes_cover_every_build_boundary() {

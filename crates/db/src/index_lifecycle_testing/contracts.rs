@@ -50,6 +50,7 @@ use super::{
 };
 
 mod all_index_validation;
+mod sustained_secondary_writes;
 mod text_build_reconciliation;
 
 const MAXIMUM_CONTROLLER_TURNS: usize = 4_096;
@@ -1543,6 +1544,11 @@ pub(super) async fn run_all_index_validation_mutations() {
 /// Runs text builds whose scanned entities change before partition construction.
 pub(super) async fn run_text_build_reconciliation() {
     text_build_reconciliation::run().await;
+}
+
+/// Runs secondary builds that must activate while public writes never stop.
+pub(super) async fn run_secondary_sustained_writes() {
+    sustained_secondary_writes::run().await;
 }
 
 /// Interleaves source changes with two builds and proves unique repair/retry.
@@ -3233,12 +3239,12 @@ async fn mutate_edge_source(
 }
 
 /// Compares one active physical equality lookup with an exact ID set.
-async fn assert_equality<const N: usize>(
+async fn assert_equality(
     db: &HelixDB,
     scope: DataScope,
     definition: &ValidatedDynamicIndexDefinition,
     value: &str,
-    expected: [u64; N],
+    expected: impl IntoIterator<Item = u64>,
 ) {
     let record = crate::index_lifecycle::repository::load_index_record(
         db.lifecycle_test_writer_db()
