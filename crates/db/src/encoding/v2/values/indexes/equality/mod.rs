@@ -39,6 +39,11 @@ impl BitmapMembershipDelta {
             .transpose()
     }
 
+    /// Whether the delta only adds members, so applying it can never remove an existing one.
+    pub(crate) fn only_adds_members(&self) -> bool {
+        self.removals.is_empty() && !self.additions.is_empty()
+    }
+
     pub(crate) fn from_additions(additions: RoaringTreemap) -> Self {
         Self {
             additions,

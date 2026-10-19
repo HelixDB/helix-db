@@ -517,7 +517,22 @@ impl TopologyMutationRuntime {
         let mut staged_keys = Vec::with_capacity(count);
         for (row, delta) in bitmaps {
             let (delta, admission) = delta.into_parts();
-            staged_keys.push(merges.bitmap(merges::Key::Typed(row.key()), &delta)?);
+            // Label rows only ever receive identifiers this request allocated, so their merge is
+            // blind: validating it would read the whole row, which grows with every entity written.
+            let validation = if delta.only_adds_members()
+                && matches!(
+                    row,
+                    BitmapRow::NodeLabel { .. } | BitmapRow::GlobalEdgeLabel { .. }
+                ) {
+                merges::Validation::Blind
+            } else {
+                merges::Validation::AgainstStoredRow
+            };
+            staged_keys.push(merges.bitmap_with(
+                merges::Key::Typed(row.key()),
+                &delta,
+                validation,
+            )?);
             let Some(admission) = admission else {
                 continue;
             };
