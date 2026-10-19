@@ -163,6 +163,68 @@ fn graph_pattern_contract_validates_deserialization_and_saturates_costs() {
 }
 
 #[test]
+fn relationship_scans_replace_full_scans_of_unbound_endpoints() {
+    let storage = cost::StorageCostProfile::default();
+    let rows = cost::EstimatedRows::rows(1000);
+    let sources = || {
+        (0..2)
+            .map(|slot| r::PatternSource {
+                slot: r::Slot(slot),
+                rows: 1000,
+                access_cost: storage.element_scan(rows),
+            })
+            .collect::<Vec<_>>()
+    };
+    let relationship = |scan_rows| r::PatternExpansion {
+        from: r::Slot(0),
+        to: r::Slot(1),
+        relationship: r::Slot(2),
+        forward_rows: 1,
+        reverse_rows: 1,
+        scan_rows,
+    };
+    let expand = r::GraphPatternOrder::new(sources(), vec![relationship(None)], BTreeSet::new())
+        .unwrap()
+        .schedule(&storage);
+    assert_eq!(expand.steps[0], r::MatchStep::Scan(r::Slot(0)));
+    let order =
+        r::GraphPatternOrder::new(sources(), vec![relationship(Some(1000))], BTreeSet::new())
+            .unwrap();
+    let scan = order.schedule(&storage);
+    assert_eq!(
+        scan.steps,
+        [r::MatchStep::ScanRelationship { relationship: 0 }]
+    );
+    assert_eq!(scan.estimated_rows, 1000);
+    assert_eq!(scan.cartesian_products, 0);
+    // One bitmap read and an endpoint read per edge, not a seek per node.
+    assert!(scan.cost.range_seeks < expand.cost.range_seeks);
+    assert!(scan.cost.latency < expand.cost.latency);
+    // An absent scan is not serialized, so existing plan digests are stable.
+    assert!(serde_json::to_value(relationship(None))
+        .unwrap()
+        .get("scan_rows")
+        .is_none());
+    let value = serde_json::to_value(&order).unwrap();
+    assert_eq!(
+        serde_json::from_value::<r::GraphPatternOrder>(value.clone()).unwrap(),
+        order
+    );
+    // A scan binds all three slots, so none of them may arrive bound.
+    for slot in 0..3 {
+        assert!(r::GraphPatternOrder::new(
+            sources(),
+            vec![relationship(Some(1))],
+            BTreeSet::from([r::Slot(slot)])
+        )
+        .is_err());
+        let mut bound = value.clone();
+        bound["incoming"] = serde_json::json!([slot]);
+        assert!(serde_json::from_value::<r::GraphPatternOrder>(bound).is_err());
+    }
+}
+
+#[test]
 fn grouping_hashes_match_total_equality_without_rounding_integers() {
     use std::hash::{Hash, Hasher};
     let hash = |value: r::Value| {

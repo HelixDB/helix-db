@@ -149,6 +149,6 @@ pub fn inputs() -> BTreeMap<String, Input> {
             }
         }
     }
-    assert_eq!(inputs.len(), 810, "fixed matrix denominator");
+    assert_eq!(inputs.len(), 834, "fixed matrix denominator");
     inputs
 }
