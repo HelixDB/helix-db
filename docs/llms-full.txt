@@ -7074,7 +7074,7 @@ as records.
 Foundry runs at [foundry.helix-db.com](https://foundry.helix-db.com). Sign in with the
 account you use for Helix Cloud; your workspaces come with it.
 
-  <video controls muted playsInline preload="metadata" className="w-full aspect-video" src="/images/foundry/start-here/tour.webm"></video>
+  <video controls muted playsInline preload="metadata" className="w-full aspect-video" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
 
 ## How it fits together
 

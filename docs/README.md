@@ -83,12 +83,16 @@ structure is fixed:
 
 ## Helix Foundry media
 
-The Helix Foundry tab's screenshots and videos in `images/foundry/` come from the
-helix-foundry-cloud repository, which drives the website against its mock backend.
-Regenerate them there after a UI change, rather than editing them by hand:
+The Helix Foundry tab's screenshots and videos are served from
+`https://assets.helix-db.com/docs/foundry/` (CloudFront in front of
+`s3://helix-blog/docs/foundry/`), not from this repository. The helix-foundry-cloud
+repository captures them by driving the website against its mock backend, and
+publishes them. Regenerate them there after a UI change rather than editing them by
+hand:
 
 ```bash
-DOCS_MEDIA_DIR=../helix-db/docs/images/foundry pnpm docs:media
+pnpm docs:media          # capture into docs-media/
+pnpm docs:media:upload   # publish to assets.helix-db.com
 ```
 
 ## Local checks
