@@ -679,3 +679,49 @@ async fn blind_and_checked_merges_compose_into_one_row() {
     );
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn blind_merge_of_an_already_present_member_matches_the_checked_merge() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "merge-blind-present".into(),
+    })
+    .await
+    .unwrap();
+    // The same history on two rows: ids 1 and 2 are stored, then id 2 (already a member, as when a
+    // node is re-added to a label after a removal in the same request) and id 3 are added again.
+    let blind_key = bitmap_key(4).to_bytes();
+    let checked_key = bitmap_key(5).to_bytes();
+    for (key, validation) in [
+        (&blind_key, Validation::Blind),
+        (&checked_key, Validation::AgainstStoredRow),
+    ] {
+        for ids in [vec![1_u64, 2], vec![2, 3]] {
+            let mut delta = equality::BitmapMembershipDelta::default();
+            for id in ids {
+                delta.add(id);
+            }
+            let transaction = Owned::begin(&db.inner_db(), None).await.unwrap();
+            let mut batch = transaction.merge_batch(1).unwrap();
+            drop(
+                batch
+                    .bitmap_with(Key::Encoded(key), &delta, validation)
+                    .unwrap(),
+            );
+            batch.stage().await.unwrap();
+            transaction.commit().await.unwrap();
+        }
+    }
+    let expected = [1_u64, 2, 3]
+        .into_iter()
+        .collect::<roaring::RoaringTreemap>();
+    for key in [&blind_key, &checked_key] {
+        let value = db.inner_db().get(key).await.unwrap().unwrap();
+        assert_eq!(
+            equality::SecondaryEqualityBitmapValue::decode(&value)
+                .unwrap()
+                .ids(),
+            &expected
+        );
+    }
+    db.close().await.unwrap();
+}

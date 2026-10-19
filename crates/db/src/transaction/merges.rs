@@ -167,8 +167,10 @@ pub(crate) enum Validation {
     /// Resolve the stored row and apply the operand to it first. This reads the whole row, so its
     /// cost grows with the number of members already stored.
     AgainstStoredRow,
-    /// Stage the operand without reading the row. Valid only for an additions-only operand whose
-    /// members cannot already be present, such as identifiers allocated by this request.
+    /// Stage the operand without reading the row. Only for an additions-only operand on a row whose
+    /// deltas are last-write-wins membership sets (the node and edge label rows): applying it gives
+    /// the same bitmap whether or not an added id is already a member, so reading the row would
+    /// only check that the stored row can be decoded.
     Blind,
 }
 
