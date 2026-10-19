@@ -628,7 +628,27 @@ fn plan_accesses(
                 )
             })
             .unzip();
+        // A labeled, indexed or bound node can anchor its connected pattern
+        // more selectively than any edge type, so only relationships whose
+        // whole component is unbound full scans may start from their edges.
         let full_scans = full_scans.into_iter().flatten().collect::<BTreeSet<_>>();
+        let mut neighbors = BTreeMap::<Slot, Vec<Slot>>::new();
+        for rel in &pattern.relationships {
+            neighbors.entry(rel.from).or_default().push(rel.to);
+            neighbors.entry(rel.to).or_default().push(rel.from);
+        }
+        let mut anchored = BTreeSet::new();
+        let mut pending = pattern
+            .nodes
+            .iter()
+            .map(|node| node.slot)
+            .filter(|slot| !full_scans.contains(slot) || incoming.contains(slot))
+            .collect::<Vec<_>>();
+        while let Some(slot) = pending.pop() {
+            if anchored.insert(slot) {
+                pending.extend(neighbors.get(&slot).into_iter().flatten().copied());
+            }
+        }
         let population = |slot| {
             pattern
                 .nodes
@@ -672,9 +692,7 @@ fn plan_accesses(
                 // Either endpoint's scan would reach every edge of the type,
                 // so an unselective start reads the edges themselves instead.
                 let scannable = !rel.types.is_empty()
-                    && [rel.from, rel.to]
-                        .iter()
-                        .all(|slot| full_scans.contains(slot) && !incoming.contains(slot))
+                    && !anchored.contains(&rel.from)
                     && !incoming.contains(&rel.slot);
                 PatternExpansion {
                     from: rel.from,

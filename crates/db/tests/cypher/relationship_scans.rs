@@ -19,9 +19,9 @@ async fn count(db: &HelixDB, query: &str) -> serde_json::Value {
     run(db, query).await.rows[0][0].clone()
 }
 
-/// Only a typed relationship between two unbound full node scans starts
-/// from its edges. A labeled, indexed, bound or untyped pattern keeps its
-/// node start, and the native label count agrees with the scan.
+/// Only a typed relationship whose connected nodes are all unbound full scans
+/// starts from its edges. A labeled, indexed, bound or untyped pattern keeps
+/// its node start, and the native label count agrees with the scan.
 #[tokio::test]
 async fn unselective_typed_patterns_start_from_their_edges() {
     let db = database().await;
@@ -45,6 +45,7 @@ async fn unselective_typed_patterns_start_from_their_edges() {
     for query in [
         "MATCH (a:A)-[r:R]->(b) RETURN count(*)",
         "MATCH (a)-[r:R]->(b:B) RETURN count(*)",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c:A) RETURN count(*)",
         "MATCH (a)-[r]->(b) RETURN count(*)",
         "MATCH (a)-[r:R]->(b) WHERE id(a) = 0 RETURN count(*)",
         "MATCH (a:A {k:0}) MATCH (a)-[r:R]->(b) RETURN count(*)",
@@ -104,21 +105,25 @@ async fn relationship_scans_follow_the_statement_and_storage_lifecycle() {
     assert_eq!(
         count(
             &db,
-            "CREATE ()-[:R]->(), ()-[:R]->() WITH 1 AS one MATCH ()-[r:R]->() RETURN count(r)"
+            "CREATE (:A)-[:R]->(:B), (:A)-[:R]->(:B) WITH 1 AS one MATCH ()-[r:R]->() RETURN count(r)"
         )
         .await,
         json!(2)
     );
     // The scan's rows are fixed before the CREATE they drive runs.
     assert_eq!(
-        count(&db, "MATCH ()-[r:R]->() CREATE ()-[:R]->() RETURN count(*)").await,
+        count(
+            &db,
+            "MATCH ()-[r:R]->() CREATE (:A)-[:R]->(:B) RETURN count(*)"
+        )
+        .await,
         json!(2)
     );
     assert_eq!(
         count(&db, "MATCH ()-[r:R]->() RETURN count(r)").await,
         json!(4)
     );
-    run(&db, "CREATE (a)-[:R]->(a)").await;
+    run(&db, "CREATE (a:A)-[:R]->(a)").await;
     assert_eq!(
         run(
             &db,

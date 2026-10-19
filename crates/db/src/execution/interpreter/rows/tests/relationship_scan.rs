@@ -112,21 +112,17 @@ async fn scans_skip_unconfirmed_edges_and_surface_corrupt_records() {
         ))
     };
     db.inner_db().delete(endpoints(edges[0])).await.unwrap();
-    let count = |db: &crate::HelixDB| {
-        let db = db.clone();
-        async move {
-            db.cypher(crate::cypher::Request::new(
-                "MATCH (a)-[r:R]->(b) RETURN count(*)",
-            ))
-            .await
-        }
+    let count = || {
+        db.cypher(crate::cypher::Request::new(
+            "MATCH (a)-[r:R]->(b) RETURN count(*)",
+        ))
     };
-    assert_eq!(count(&db).await.unwrap().rows, vec![vec![json!(3)]]);
+    assert_eq!(count().await.unwrap().rows, vec![vec![json!(3)]]);
     db.inner_db()
         .put(endpoints(edges[1]), bytes::Bytes::from_static(b"short"))
         .await
         .unwrap();
-    assert!(count(&db).await.is_err());
+    assert!(count().await.is_err());
     db.inner_db()
         .put(
             endpoints(edges[1]),
@@ -147,7 +143,7 @@ async fn scans_skip_unconfirmed_edges_and_surface_corrupt_records() {
         )
         .await
         .unwrap();
-    assert!(count(&db).await.is_err());
+    assert!(count().await.is_err());
     db.close().await.unwrap();
 }
 
@@ -239,8 +235,9 @@ async fn parents_replay_scans_and_release_admission() {
         edges
             .iter()
             .map(|edge| r::Value::Entity(r::Entity::Relationship(*edge)))
-            .filter(move |edge| *edge != other)
-            .map(move |edge| (other.clone(), edge))
+            .filter(|edge| *edge != other)
+            .map(|edge| (other.clone(), edge))
+            .collect::<Vec<_>>()
     })
     .collect::<Vec<_>>();
     assert_eq!(bound, expected);

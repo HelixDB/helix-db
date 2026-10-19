@@ -1510,8 +1510,8 @@ fn typed_relationships_between_full_scans_start_from_their_edges() {
     let mut known = unknown.clone();
     known.stats = known
         .stats
-        .with_edge_label_cardinality(ir::NonEmptyString::new("R".into()).unwrap(), 7)
-        .with_edge_label_cardinality(ir::NonEmptyString::new("S".into()).unwrap(), 5);
+        .with_edge_label_cardinality(ir::NonEmptyString::new("R").unwrap(), 7)
+        .with_edge_label_cardinality(ir::NonEmptyString::new("S").unwrap(), 5);
     let planned = |text: &str, context: &context::PlannerContext| {
         r::plan(helix_cypher::compile(text).unwrap(), context)
             .unwrap()
@@ -1548,10 +1548,11 @@ fn typed_relationships_between_full_scans_start_from_their_edges() {
     assert_eq!(product.steps.len(), 2);
     assert!(product.steps.contains(&scan(0)));
     assert_eq!(product.cartesian_products, 1);
-    // A selective anchor, a labeled endpoint or an untyped relationship
-    // keeps the node start.
+    // A selective anchor or label anywhere in the connected pattern, or an
+    // untyped relationship, keeps the node start.
     for text in [
         "MATCH (a:N {uid: 1})-[r:R]->(b)-[s:R]->(c) RETURN count(*)",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c:N) RETURN count(*)",
         "MATCH (a:N)-[r:R]->(b) RETURN count(*)",
         "MATCH (a)-[r]->(b) RETURN count(*)",
     ] {

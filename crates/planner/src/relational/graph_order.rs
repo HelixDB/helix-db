@@ -23,8 +23,8 @@ pub struct PatternExpansion {
     pub reverse_rows: u64,
     /// Rows a scan of the relationship's edge bitmaps binds, one per edge and
     /// orientation, when the relationship may start the pattern there: it is
-    /// typed, and it and both endpoints are unbound full node scans. `None`
-    /// keeps node-driven expansion.
+    /// typed and unbound, and every node connected to it is an unbound full
+    /// node scan. `None` keeps node-driven expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_rows: Option<u64>,
 }
@@ -331,11 +331,9 @@ impl GraphPatternOrder {
                 }
                 // The bitmaps are read once; each input row reads endpoints.
                 let reads = cost::EstimatedRows::rows(edges);
-                cost = cost.serial(storage.label_scan(reads)).serial(
-                    storage
-                        .authoritative_verification(reads)
-                        .saturating_mul(rows),
-                );
+                cost = cost
+                    .serial(storage.label_scan(reads))
+                    .serial(storage.relationship_endpoints(reads).saturating_mul(rows));
                 rows = rows.saturating_mul(edges);
                 cost = cost.serial(storage.stream_operator(cost::EstimatedRows::rows(rows)));
                 steps.push(MatchStep::ScanRelationship {
