@@ -63,7 +63,9 @@ pub fn inventory(corpus: &[Scenario]) -> Result<Report> {
             }
         }
         let status = match &reason {
-            Some(e) if e.category == "UnsupportedFeature" => Status::Unsupported,
+            Some(e) if e.category == helix_cypher::api::category::UNSUPPORTED_FEATURE => {
+                Status::Unsupported
+            }
             Some(_) => Status::NotExecuted,
             None => Status::NotExecuted,
         };

@@ -219,6 +219,6 @@ fn telemetry_shapes_redact_every_literal_and_drop_comments() {
         helix_cypher::redact_literals("RETURN 'unterminated")
             .unwrap_err()
             .category,
-        "SyntaxError"
+        "syntax_error"
     );
 }

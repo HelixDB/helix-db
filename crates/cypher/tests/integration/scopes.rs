@@ -40,36 +40,44 @@ fn restricted_scopes_and_errors_keep_their_existing_phase_detail_and_spans() {
     for (text, detail, variable) in [
         (
             "WITH 1 AS a, 2 AS b WITH DISTINCT a AS x ORDER BY b RETURN *",
-            "UndefinedVariable",
+            "undefined_variable",
             None,
         ),
         (
             "WITH 1 AS a WITH DISTINCT a AS x WHERE a > 0 RETURN *",
-            "UndefinedVariable",
+            "undefined_variable",
             Some("a"),
         ),
         (
             "WITH 1 AS a, 2 AS b WITH a AS x, count(*) AS n WHERE b > 0 RETURN *",
-            "UndefinedVariable",
+            "undefined_variable",
             Some("b"),
         ),
-        ("WITH 1 AS a WITH a + 1 RETURN a", "NoExpressionAlias", None),
+        (
+            "WITH 1 AS a WITH a + 1 RETURN a",
+            "no_expression_alias",
+            None,
+        ),
         (
             "WITH 1 AS a WITH a + 1 ORDER BY missing RETURN a",
-            "UndefinedVariable",
+            "undefined_variable",
             Some("missing"),
         ),
-        ("WITH 1 AS a RETURN a SKIP a", "NonConstantExpression", None),
+        (
+            "WITH 1 AS a RETURN a SKIP a",
+            "non_constant_expression",
+            None,
+        ),
         (
             "RETURN 1 LIMIT missing",
-            "UndefinedVariable",
+            "undefined_variable",
             Some("missing"),
         ),
-        ("WITH 1 AS a RETURN *, a AS a", "ColumnNameConflict", None),
+        ("WITH 1 AS a RETURN *, a AS a", "column_name_conflict", None),
     ] {
         let error = compile(text).unwrap_err();
         assert_eq!(error.phase, r::ErrorPhase::Compile, "{text}");
-        assert_eq!(error.category, "SyntaxError", "{text}");
+        assert_eq!(error.category, "syntax_error", "{text}");
         assert_eq!(error.detail, detail, "{text}");
         match (variable, error.span) {
             (Some(name), Some(span)) => assert_eq!(&text[span.start..span.end], name, "{text}"),

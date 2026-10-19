@@ -114,7 +114,7 @@ async fn excessive_computed_depth_is_a_runtime_error_and_rolls_back_prior_writes
                     .await
                     .unwrap_err();
                 assert!(
-                    matches!(error,Error::Query(error) if error.category=="ResourceLimit" && error.detail=="ValueDepth" && error.phase==r::ErrorPhase::Runtime),
+                    matches!(error,Error::Query(error) if error.category=="resource_limit" && error.detail=="value_depth" && error.phase==r::ErrorPhase::Runtime),
                     "{suffix}, map={map}"
                 );
                 assert_eq!(
@@ -132,7 +132,7 @@ async fn excessive_computed_depth_is_a_runtime_error_and_rolls_back_prior_writes
                 .await
                 .unwrap_err();
             assert!(
-                matches!(error,crate::cypher::Error::Query(error) if error.category=="ResourceLimit" && error.detail=="ValueDepth" && error.phase==r::ErrorPhase::Runtime)
+                matches!(error,crate::cypher::Error::Query(error) if error.category=="resource_limit" && error.detail=="value_depth" && error.phase==r::ErrorPhase::Runtime)
             );
             assert_eq!(
                 db.cypher(crate::cypher::Request::new(

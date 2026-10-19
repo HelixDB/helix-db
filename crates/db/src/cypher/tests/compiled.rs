@@ -50,21 +50,21 @@ async fn compiled_execution_preserves_parameters_limits_cancellation_and_rollbac
             QueryMode::Execute,
             ExecutionControl::unlimited(),
             Limits::default(),
-            "MissingParameter",
+            "missing_parameter",
         ),
         (
             "CREATE (:N) RETURN 1/0",
             QueryMode::Execute,
             ExecutionControl::unlimited(),
             Limits::default(),
-            "DivisionByZero",
+            "division_by_zero",
         ),
         (
             "CREATE (:N)",
             QueryMode::Warm,
             ExecutionControl::unlimited(),
             Limits::default(),
-            "WriterRequired",
+            "writer_required",
         ),
         (
             "CREATE (:N)",
@@ -81,7 +81,7 @@ async fn compiled_execution_preserves_parameters_limits_cancellation_and_rollbac
                 batch_rows: 0,
                 ..Default::default()
             },
-            "InvalidLimits",
+            "invalid_limits",
         ),
         (
             "RETURN 1",
@@ -91,7 +91,7 @@ async fn compiled_execution_preserves_parameters_limits_cancellation_and_rollbac
                 memory_bytes: 0,
                 ..Default::default()
             },
-            "InvalidLimits",
+            "invalid_limits",
         ),
         (
             "RETURN 1",
@@ -101,7 +101,7 @@ async fn compiled_execution_preserves_parameters_limits_cancellation_and_rollbac
                 result_bytes: 0,
                 ..Default::default()
             },
-            "InvalidLimits",
+            "invalid_limits",
         ),
         (
             "RETURN 1",
@@ -111,7 +111,7 @@ async fn compiled_execution_preserves_parameters_limits_cancellation_and_rollbac
                 collection_items: 0,
                 ..Default::default()
             },
-            "InvalidLimits",
+            "invalid_limits",
         ),
     ] {
         let error = service

@@ -60,8 +60,8 @@ fn graph_only_unicode_does_not_change_scalar_operators_or_identifiers() {
             format!("MATCH (n:{symbol}) RETURN n"),
         ] {
             let error = helix_cypher::compile(&text).unwrap_err();
-            assert_eq!(error.category, "SyntaxError", "{text}");
-            assert_eq!(error.detail, "InvalidUnicodeCharacter", "{text}");
+            assert_eq!(error.category, "syntax_error", "{text}");
+            assert_eq!(error.detail, "invalid_unicode_character", "{text}");
             let span = error.span.unwrap();
             assert_eq!(&text[span.start..span.end], symbol.to_string());
         }
@@ -73,7 +73,7 @@ fn graph_only_unicode_does_not_change_scalar_operators_or_identifiers() {
     ] {
         assert_eq!(
             helix_cypher::compile(text).unwrap_err().category,
-            "SyntaxError"
+            "syntax_error"
         );
     }
 }
@@ -90,7 +90,7 @@ fn pattern_predicates_cannot_introduce_variables() {
         let error = helix_cypher::compile(text).unwrap_err();
         assert_eq!(
             (&*error.category, &*error.detail),
-            ("SyntaxError", "UndefinedVariable"),
+            ("syntax_error", "undefined_variable"),
             "{text}: {error}"
         );
         let span = error.span.unwrap();
@@ -104,7 +104,7 @@ fn pattern_predicates_cannot_introduce_variables() {
         let error = helix_cypher::compile(text).unwrap_err();
         assert_eq!(
             (&*error.category, &*error.detail),
-            ("UnsupportedFeature", "PatternExpression"),
+            ("unsupported_feature", "pattern_expression"),
             "{text}: {error}"
         );
     }
@@ -129,7 +129,7 @@ fn deferred_pattern_expressions_are_recognized_without_reinterpreting_scalars() 
         let error = helix_cypher::compile(text).unwrap_err();
         assert_eq!(
             (&*error.category, &*error.detail),
-            ("UnsupportedFeature", "PatternExpression"),
+            ("unsupported_feature", "pattern_expression"),
             "{text}: {error}"
         );
         let span = error.span.unwrap();
@@ -148,7 +148,7 @@ fn deferred_pattern_expressions_are_recognized_without_reinterpreting_scalars() 
         let error = helix_cypher::compile(text).unwrap_err();
         assert_eq!(
             (&*error.category, &*error.detail),
-            ("SyntaxError", "UnexpectedSyntax"),
+            ("syntax_error", "unexpected_syntax"),
             "{text}: {error}"
         );
     }
@@ -160,7 +160,7 @@ fn deferred_pattern_expressions_are_recognized_without_reinterpreting_scalars() 
         let error = helix_cypher::compile(text).unwrap_err();
         assert_eq!(
             (&*error.category, &*error.detail),
-            ("UnsupportedFeature", "PatternComprehension"),
+            ("unsupported_feature", "pattern_comprehension"),
             "{text}: {error}"
         );
     }
@@ -176,12 +176,12 @@ fn deferred_pattern_expressions_are_recognized_without_reinterpreting_scalars() 
     }
     assert_eq!(
         helix_cypher::parse("RETURN (1)-->()").unwrap_err().category,
-        "SyntaxError"
+        "syntax_error"
     );
     for text in ["RETURN [()-->() nonsense]", "RETURN [p=()-->() nonsense]"] {
         assert_ne!(
             helix_cypher::parse(text).unwrap_err().detail,
-            "PatternComprehension",
+            "pattern_comprehension",
             "{text}"
         );
     }

@@ -277,7 +277,7 @@ async fn accumulating_property_writes_fail_cleanly_and_rollback_the_whole_statem
         completed > 0,
         "the limit failure must follow successful staged writes"
     );
-    assert!(matches!(error, crate::cypher::Error::Query(error) if error.detail == "MemoryLimit"));
+    assert!(matches!(error, crate::cypher::Error::Query(error) if error.detail == "memory_limit"));
     context.abort_request_write_scope();
     assert_eq!(context.row_budget().available(), limit);
     assert_eq!(

@@ -92,8 +92,8 @@ fn live_operand_is_charged_during_comparison_and_released_before_results() {
             ..evaluation
         };
         let error = constrained.eval(&expression).unwrap_err();
-        assert_eq!(error.category, "ResourceLimit");
-        assert_eq!(error.detail, "MemoryLimit");
+        assert_eq!(error.category, "resource_limit");
+        assert_eq!(error.detail, "memory_limit");
     }
 }
 
@@ -147,7 +147,7 @@ fn all_case_slots_are_visited_rewritten_and_checked() {
     }
     assert_eq!(
         invalid.validate_shape().unwrap_err().category,
-        "ResourceLimit"
+        "resource_limit"
     );
 }
 

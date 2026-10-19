@@ -81,7 +81,7 @@ async fn selected_native_and_graph_fields_skip_large_decoded_payloads_and_releas
     let properties = graph.properties(r::Entity::Node(7)).unwrap();
     assert_eq!(properties.len(), 2);
     assert_eq!(properties["small"], Ok(r::Value::Integer(17)));
-    assert!(matches!(&properties["future"], Err(error) if error.detail == "StoredValueType"));
+    assert!(matches!(&properties["future"], Err(error) if error.detail == "stored_value_type"));
     assert_eq!(graph.label(r::Entity::Node(7)).unwrap(), Some("N"));
     assert!(
         ctx.row_budget().available() < limit,
@@ -91,7 +91,7 @@ async fn selected_native_and_graph_fields_skip_large_decoded_payloads_and_releas
     assert_eq!(ctx.row_budget().available(), limit);
     let all = BTreeMap::from([(r::Slot(0), r::PropertyDemand::All)]);
     assert!(
-        matches!(ctx.graph_batch_required(&rows, &all).await, Err(Error::Query(error)) if error.detail == "MemoryLimit")
+        matches!(ctx.graph_batch_required(&rows, &all).await, Err(Error::Query(error)) if error.detail == "memory_limit")
     );
     assert_eq!(ctx.row_budget().available(), limit);
     ctx.close_request_read_view().unwrap();
@@ -140,7 +140,7 @@ async fn conversion_admission_rejects_expanded_lists_before_hydration_and_releas
     let rows = [vec![r::Value::Entity(r::Entity::Node(7))]];
     let all = BTreeMap::from([(r::Slot(0), r::PropertyDemand::All)]);
     assert!(
-        matches!(ctx.graph_batch_required(&rows, &all).await, Err(Error::Query(error)) if error.detail == "MemoryLimit")
+        matches!(ctx.graph_batch_required(&rows, &all).await, Err(Error::Query(error)) if error.detail == "memory_limit")
     );
     assert_eq!(ctx.row_budget().available(), limit);
     let unpolled = ctx.graph_batch_required(&rows, &all);
@@ -178,7 +178,7 @@ async fn stored_archive_nesting_has_a_specific_resource_error_and_releases_all_a
     let all = BTreeMap::from([(r::Slot(0), r::PropertyDemand::All)]);
     assert!(
         matches!(ctx.graph_batch_required(&rows, &all).await, Err(Error::Query(error))
-        if error.category == "ResourceLimit" && error.detail == "StoredValueNestingLimit" && error.phase == r::ErrorPhase::Runtime)
+        if error.category == "resource_limit" && error.detail == "stored_value_nesting_limit" && error.phase == r::ErrorPhase::Runtime)
     );
     assert_eq!(ctx.row_budget().available(), limit);
     ctx.close_request_read_view().unwrap();
@@ -240,11 +240,11 @@ async fn stored_map_output_obeys_the_common_value_depth_limit_without_forcing_un
             drop(output_memory);
         } else {
             let error = value.unwrap_err();
-            assert_eq!(error.category, "ResourceLimit");
-            assert_eq!(error.detail, "StoredValueNestingLimit");
+            assert_eq!(error.category, "resource_limit");
+            assert_eq!(error.detail, "stored_value_nesting_limit");
             assert_eq!(error.phase, r::ErrorPhase::Runtime);
             assert!(
-                matches!(graph.wire(&rows[0][0]), Err(Error::Query(error)) if error.detail == "StoredValueNestingLimit")
+                matches!(graph.wire(&rows[0][0]), Err(Error::Query(error)) if error.detail == "stored_value_nesting_limit")
             );
         }
         drop(graph);
@@ -272,11 +272,11 @@ async fn stored_map_output_obeys_the_common_value_depth_limit_without_forcing_un
         );
         if depth >= r::MAX_EXPRESSION_DEPTH {
             assert!(
-                matches!(db.cypher(crate::cypher::Request::new("MATCH (n) RETURN n.nested")).await, Err(Error::Query(error)) if error.category == "ResourceLimit" && error.detail == "StoredValueNestingLimit")
+                matches!(db.cypher(crate::cypher::Request::new("MATCH (n) RETURN n.nested")).await, Err(Error::Query(error)) if error.category == "resource_limit" && error.detail == "stored_value_nesting_limit")
             );
             assert!(
                 matches!(db.cypher(crate::cypher::Request::new("CREATE (:RolledBack) WITH 1 AS x MATCH (n) WHERE n.nested IS NOT NULL RETURN n.nested")).await,
-                Err(Error::Query(error)) if error.detail == "StoredValueNestingLimit")
+                Err(Error::Query(error)) if error.detail == "stored_value_nesting_limit")
             );
             assert_eq!(
                 db.cypher(crate::cypher::Request::new(

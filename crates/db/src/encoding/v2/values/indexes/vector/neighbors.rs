@@ -55,17 +55,9 @@ pub fn decode_flat_neighbors(data: &[u8]) -> Result<Vec<NodeId>, EncodingError> 
 
 /// Encodes upper-layer neighbors as `[count:4 BE][node_id:8 BE]...`.
 pub(crate) fn encode_upper_neighbors(neighbors: &[NodeId]) -> Result<Bytes, EncodingError> {
-    let count = u32::try_from(neighbors.len()).map_err(|_| {
-        EncodingError::Custom("upper-layer vector neighbor count exceeds u32".to_string())
-    })?;
-    let payload_len = neighbors.len().checked_mul(NODE_ID_LEN).ok_or_else(|| {
-        EncodingError::Custom("upper-layer vector neighbor value length overflow".to_string())
-    })?;
-    let capacity = UPPER_NEIGHBOR_COUNT_LEN
-        .checked_add(payload_len)
-        .ok_or_else(|| {
-            EncodingError::Custom("upper-layer vector neighbor value length overflow".to_string())
-        })?;
+    let capacity = encoded_upper_neighbors_len(neighbors.len())?;
+    let count =
+        u32::try_from(neighbors.len()).expect("encoded_upper_neighbors_len bounds the count");
 
     let mut bytes = Vec::with_capacity(capacity);
     bytes.extend_from_slice(&count.to_be_bytes());
@@ -73,6 +65,20 @@ pub(crate) fn encode_upper_neighbors(neighbors: &[NodeId]) -> Result<Bytes, Enco
         bytes.extend_from_slice(&node_id.to_be_bytes());
     }
     Ok(Bytes::from(bytes))
+}
+
+/// Returns the exact length [`encode_upper_neighbors`] gives `count`
+/// neighbors, without encoding them, failing exactly when it would.
+pub(crate) fn encoded_upper_neighbors_len(count: usize) -> Result<usize, EncodingError> {
+    u32::try_from(count).map_err(|_| {
+        EncodingError::Custom("upper-layer vector neighbor count exceeds u32".to_string())
+    })?;
+    count
+        .checked_mul(NODE_ID_LEN)
+        .and_then(|payload_len| UPPER_NEIGHBOR_COUNT_LEN.checked_add(payload_len))
+        .ok_or_else(|| {
+            EncodingError::Custom("upper-layer vector neighbor value length overflow".to_string())
+        })
 }
 
 /// Decodes an exact upper-layer neighbor row.
@@ -150,5 +156,33 @@ mod tests {
         let mut trailing = encode_upper_neighbors(&[1]).unwrap().to_vec();
         trailing.push(0);
         assert!(decode_upper_neighbors(&trailing).is_err());
+    }
+
+    #[test]
+    fn encoded_upper_neighbors_len_counts_the_prefix_and_every_id() {
+        assert_eq!(encoded_upper_neighbors_len(0).unwrap(), 4);
+        assert_eq!(encoded_upper_neighbors_len(3).unwrap(), 4 + 3 * 8);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn encoded_upper_neighbors_len_rejects_counts_the_encoder_rejects() {
+        let too_many = usize::try_from(u32::MAX).unwrap() + 1;
+        assert!(matches!(
+            encoded_upper_neighbors_len(too_many),
+            Err(EncodingError::Custom(message)) if message.contains("exceeds u32")
+        ));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn encoded_upper_neighbors_len_matches_encodings(
+            neighbors in proptest::collection::vec(proptest::prelude::any::<NodeId>(), 0..96)
+        ) {
+            proptest::prop_assert_eq!(
+                encoded_upper_neighbors_len(neighbors.len()).unwrap(),
+                encode_upper_neighbors(&neighbors).unwrap().len()
+            );
+        }
     }
 }

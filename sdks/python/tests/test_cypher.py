@@ -224,7 +224,7 @@ class CypherContractTests(unittest.TestCase):
                     )
             self.assertEqual(client.cypher("RETURN $x", {"x": 1}), ROWS)
             self.assertEqual(client.explain_cypher("RETURN $x", {"x": 1}, query_name="q"), PLAN)
-            handle.error = FakeNativeError("SyntaxError", "invalid syntax")
+            handle.error = FakeNativeError("syntax_error:compile:unexpected_end", "invalid syntax")
             with self.assertRaises(HelixError) as native_error:
                 client.explain_cypher("RETURN")
             client.close()
@@ -240,7 +240,7 @@ class CypherContractTests(unittest.TestCase):
             ],
         )
         self.assertEqual(native_error.exception.kind, "Embedded")
-        self.assertEqual(native_error.exception.code, "SyntaxError")
+        self.assertEqual(native_error.exception.code, "syntax_error:compile:unexpected_end")
 
     def test_sync_embedded_explain_inside_event_loop_keeps_runtime_error(self) -> None:
         with patch.dict(sys.modules, {"helixdb_uniffi": native_module(ExplainCypherHandle())}):
@@ -282,9 +282,9 @@ class AsyncCypherContractTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(
                 400,
                 json={
-                    "error": "SyntaxError",
+                    "error": "syntax_error",
                     "msg": "invalid syntax",
-                    "details": {"detail": "UndefinedVariable", "phase": "compile"},
+                    "details": {"detail": "undefined_variable", "phase": "compile"},
                 },
             )
 
@@ -293,9 +293,9 @@ class AsyncCypherContractTests(unittest.IsolatedAsyncioTestCase):
         ) as client:
             with self.assertRaises(HelixError) as error:
                 await client.cypher("RETURN missing")
-        self.assertEqual(error.exception.code, "SyntaxError")
+        self.assertEqual(error.exception.code, "syntax_error")
         self.assertEqual(
-            error.exception.server_details, {"detail": "UndefinedVariable", "phase": "compile"}
+            error.exception.server_details, {"detail": "undefined_variable", "phase": "compile"}
         )
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].url.path, "/v2/cypher")
@@ -375,7 +375,7 @@ class AsyncCypherContractTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(rejected.exception.kind, "InvalidRequest")
             self.assertEqual(await client.cypher("RETURN 1"), ROWS)
             self.assertEqual(await client.explain_cypher("RETURN 1", query_name="q"), PLAN)
-            handle.error = FakeNativeError("SyntaxError", "invalid syntax")
+            handle.error = FakeNativeError("syntax_error:compile:unexpected_end", "invalid syntax")
             with self.assertRaises(HelixError) as native_error:
                 await client.explain_cypher("RETURN")
             await client.close()
@@ -386,7 +386,7 @@ class AsyncCypherContractTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(handle.calls[1][1]["query_name"], "q")
         self.assertEqual(native_error.exception.kind, "Embedded")
-        self.assertEqual(native_error.exception.code, "SyntaxError")
+        self.assertEqual(native_error.exception.code, "syntax_error:compile:unexpected_end")
 
     async def test_async_embedded_explain_requires_rebuilt_bindings(self) -> None:
         handle = CypherHandle()

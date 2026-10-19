@@ -1,6 +1,7 @@
 //! Planning-only diagnostics. This path never opens an execution transaction,
 //! mutates graph data, flushes durability, or returns query-result rows.
 use super::*;
+use helix_planner::relational::{category, detail};
 
 #[derive(Debug)]
 pub struct Explanation {
@@ -80,8 +81,8 @@ pub async fn explain(
     if let Err(error) = serde_json::to_writer(&mut size, &explanation) {
         if size.bytes > size.limit {
             return Err(r::QueryError::runtime(
-                "ResourceLimit",
-                "ResultLimit",
+                category::RESOURCE_LIMIT,
+                detail::RESULT_LIMIT,
                 "explain response exceeds its byte budget",
             )
             .into());
@@ -213,7 +214,7 @@ mod tests {
             .explain_cypher(Request::new("RETURN $missing"))
             .await
             .unwrap_err();
-        assert!(matches!(error,Error::Query(error) if error.detail=="MissingParameter"));
+        assert!(matches!(error,Error::Query(error) if error.detail=="missing_parameter"));
         let request: Request =
             serde_json::from_value(json!({"query":"RETURN $n","parameters":{"n":7}})).unwrap();
         db.explain_cypher(request.clone()).await.unwrap();
@@ -229,7 +230,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(error,Error::Query(error) if error.detail=="ResultLimit"));
+        assert!(matches!(error,Error::Query(error) if error.detail=="result_limit"));
         let error = explain(
             &db,
             request.clone(),
@@ -242,7 +243,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(error,Error::Query(error) if error.detail=="InvalidLimits"));
+        assert!(matches!(error,Error::Query(error) if error.detail=="invalid_limits"));
         let error = explain(
             &db,
             request,

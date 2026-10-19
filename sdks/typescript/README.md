@@ -153,9 +153,9 @@ try {
 }
 ```
 
-An explicit `writer_fenced_commit_outcome_unknown` (or legacy Cloud
-`WRITE_OUTCOME_UNKNOWN`) response is distinct from a confirmed conflict and can
-carry `retryable: false`. A `Network` error after sending a write has no known
+An explicit `writer_fenced_commit_outcome_unknown` or Cloud
+`write_outcome_unknown` (formerly `WRITE_OUTCOME_UNKNOWN`) response is distinct
+from a confirmed conflict and can carry `retryable: false`. A `Network` error after sending a write has no known
 commit outcome. Reconcile application state before retrying; the SDK does not
 automatically replay mutations. Unknown future codes are preserved. Legacy
 message-only responses retain their diagnostic without inventing a code.
@@ -381,8 +381,10 @@ resolves to `{ columns: [], rows: [] }` and the builder's `explain()` resolves
 to `undefined`. A standalone local warm read can return its normal payload
 instead. `explainCypher(...)` sends no options, so it always resolves to a
 `CypherExplanation`. Cypher failures raise `HelixError`; a
-query diagnostic carries its category in `code` and
-`{ detail, phase, span }` in `serverDetails`.
+query diagnostic carries its lower snake case category, such as `syntax_error`, in
+`code` and `{ detail, phase, span }` in `serverDetails`. Embedded clients carry the
+three parts in `code` as `category:phase:detail`, such as
+`syntax_error:compile:undefined_variable`.
 
 Embedded clients reject server request options with an `InvalidRequest` error,
 as for native queries. `explainCypher(...)` needs an embedded package with

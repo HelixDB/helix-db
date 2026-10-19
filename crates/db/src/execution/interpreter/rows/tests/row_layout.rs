@@ -85,7 +85,7 @@ async fn physical_program_admission_rejects_insufficient_budget_before_writes() 
         )
         .await
         .unwrap_err();
-    assert!(matches!(failure,Error::Query(error) if error.detail=="MemoryLimit"));
+    assert!(matches!(failure,Error::Query(error) if error.detail=="memory_limit"));
     let reference = r::RowPlan::reference(
         helix_cypher::compile("MATCH (n:MustNotExist) RETURN count(*)").unwrap(),
     )
@@ -132,8 +132,8 @@ async fn identity_layout_rejects_a_row_that_cannot_fit_after_program_admission()
         .await;
     db.close().await.unwrap();
     assert!(matches!(result, Err(Error::Query(error))
-        if error.category == "ResourceLimit"
-        && error.detail == "MemoryLimit"
+        if error.category == "resource_limit"
+        && error.detail == "memory_limit"
         && error.message == "row schema exceeds the query memory budget"));
 }
 
@@ -176,8 +176,8 @@ async fn compact_rows_preserve_new_mutation_targets_and_atomic_failures() {
                     &failure,&BTreeMap::new(),Limits::default(),
                 ).await.unwrap_err();
                 assert!(matches!(error,Error::Query(error)
-                    if error.category=="ConstraintVerificationFailed"
-                    && error.detail=="DeleteConnectedNode"
+                    if error.category=="constraint_verification_failed"
+                    && error.detail=="delete_connected_node"
                     && error.phase==r::ErrorPhase::Runtime));
                 let observation = r::RowPlan::reference(helix_cypher::compile(
                     "MATCH (n:Rollback) RETURN count(*)",

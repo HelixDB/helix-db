@@ -18,8 +18,8 @@ async fn ambiguous_grouping_is_rejected_before_any_graph_changes() {
             panic!("expected a compile error: {query}");
         };
         assert_eq!(error.phase, r::ErrorPhase::Compile, "{query}");
-        assert_eq!(error.category, "SyntaxError", "{query}");
-        assert_eq!(error.detail, "AmbiguousAggregationExpression", "{query}");
+        assert_eq!(error.category, "syntax_error", "{query}");
+        assert_eq!(error.detail, "ambiguous_aggregation_expression", "{query}");
         assert_eq!(
             run(&db, "MATCH (n) RETURN labels(n)[0], n.key").await.rows,
             vec![vec![json!("N"), json!(1)]],

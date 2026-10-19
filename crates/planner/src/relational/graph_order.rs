@@ -2,6 +2,7 @@
 //! changes only traversal priority within one MATCH; predicates, relationship
 //! uniqueness, correlations and optional boundaries remain with its row operator.
 use super::{MatchStep, QueryError, Result, Slot};
+use crate::relational::{category, detail};
 use crate::{catalog, cost, logical, optimizer, physical, properties, rules};
 use std::collections::BTreeSet;
 
@@ -102,8 +103,8 @@ impl TryFrom<PatternOrderInput> for GraphPatternOrder {
                 || priority.iter().copied().collect::<BTreeSet<_>>() != (0..length).collect()
             {
                 return Err(QueryError::compile(
-                    "InternalPlannerError",
-                    "InvalidPatternOrder",
+                    category::INTERNAL_PLANNER_ERROR,
+                    detail::INVALID_PATTERN_ORDER,
                     "pattern priorities must be permutations",
                 ));
             }
@@ -134,8 +135,8 @@ impl GraphPatternOrder {
                 .any(|r| !nodes.contains(&r.from) || !nodes.contains(&r.to))
         {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "InvalidPatternOrder",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_PATTERN_ORDER,
                 "pattern sources must be unique and contain every endpoint",
             ));
         }
@@ -160,8 +161,8 @@ impl GraphPatternOrder {
                 .any(|slot| !self.sources.iter().any(|s| s.slot == *slot))
         {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "InvalidPatternEquality",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_PATTERN_EQUALITY,
                 "join keys require distinct node bindings and nonempty property names",
             ));
         }
@@ -188,8 +189,8 @@ impl GraphPatternOrder {
                 || !self.sources.iter().any(|source| source.slot == lookup.slot)
         }) {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "InvalidPatternLookup",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_PATTERN_LOOKUP,
                 "lookups require a distinct unbound node and a probe bound before it",
             ));
         }

@@ -3,6 +3,7 @@
 //! construction bound fits. Runtime execution keeps only the retained debit.
 use super::{context, ir, r, Result};
 use helix_ast::{query, value};
+use helix_planner::relational::{category, detail};
 use std::collections::BTreeMap;
 
 pub(super) struct Prepared {
@@ -36,8 +37,8 @@ pub(super) fn prepare(
     let footprint = preflight(&input)?;
     if footprint.construction() > memory_bytes {
         return Err(r::QueryError::runtime(
-            "ResourceLimit",
-            "MemoryLimit",
+            category::RESOURCE_LIMIT,
+            detail::MEMORY_LIMIT,
             "parameter representations exceed the query memory budget",
         )
         .into());
@@ -78,8 +79,8 @@ fn preflight(input: &BTreeMap<String, query::QueryValue>) -> r::Result<Footprint
     for (name, value) in input {
         if name.is_empty() {
             return Err(r::QueryError::compile(
-                "SyntaxError",
-                "InvalidParameter",
+                category::SYNTAX_ERROR,
+                detail::INVALID_PARAMETER,
                 "parameter name cannot be empty",
             ));
         }
@@ -100,8 +101,8 @@ fn payload(value: &query::QueryValue, depth: usize, count: &mut usize) -> r::Res
     *count = count.saturating_add(1);
     if depth >= r::MAX_EXPRESSION_DEPTH || *count > 200_000 {
         return Err(r::QueryError::compile(
-            "ResourceLimit",
-            "ValueDepth",
+            category::RESOURCE_LIMIT,
+            detail::VALUE_DEPTH,
             "parameter exceeds structural limits",
         ));
     }

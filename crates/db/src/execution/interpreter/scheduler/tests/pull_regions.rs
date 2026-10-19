@@ -256,13 +256,15 @@ async fn gated_region_releases_references_without_opening_its_source() {
     db.close().await.unwrap();
 }
 
-/// A region flushes the deferred index maintenance its operators observe
-/// before opening any source, so a pending unique conflict fails the region.
-#[tokio::test]
-async fn region_flush_surfaces_a_pending_unique_conflict_before_reading() {
+/// Stages two writes that conflict on a unique email, then runs a pull region
+/// counting the rows of `source`, which fails on its unbound parameter if the
+/// region opens it. Returns the region's result and its source visits.
+async fn count_region_over_staged_unique_conflict(
+    name: &str,
+    source: exec::ExecNodeAccessPlan,
+) -> (Result<()>, usize) {
     let db = test_support::open_db_with_config(
-        test_support::in_memory_config("scheduler-region-unique-flush")
-            .with_unique_equality_index("User", "email"),
+        test_support::in_memory_config(name).with_unique_equality_index("User", "email"),
     )
     .await;
     let plan = test_support::executable(
@@ -272,11 +274,7 @@ async fn region_flush_surfaces_a_pending_unique_conflict_before_reading() {
                 1,
                 Vec::new(),
                 exec::ExecOp::Access {
-                    plan: Box::new(exec::ExecAccessPlan::Node(
-                        exec::ExecNodeAccessPlan::FromParam {
-                            param: named("unbound"),
-                        },
-                    )),
+                    plan: Box::new(exec::ExecAccessPlan::Node(source)),
                 },
             ),
             test_support::step(
@@ -308,19 +306,54 @@ async fn region_flush_surfaces_a_pending_unique_conflict_before_reading() {
             .await
             .expect("conflicting writes stage without flushing");
     }
-
-    // The unbound source parameter would fail first if the region opened it.
-    assert!(matches!(
-        ctx.execute_steps(
+    let result = ctx
+        .execute_steps(
             plan.steps(),
             plan.execution_order(),
             plan.root(),
             plan.execution_program(),
         )
-        .await,
-        Err(HelixDbError::UniqueConstraintViolation { .. })
-    ));
-    assert_eq!(ctx.pull_work.snapshot().source_visits, 0);
+        .await;
+    let visits = ctx.pull_work.snapshot().source_visits;
     ctx.abort_request_write_scope();
     db.close().await.unwrap();
+    (result, visits)
+}
+
+/// A region flushes the deferred index maintenance its operators observe
+/// before opening any source, so a pending unique conflict fails the region.
+#[tokio::test]
+async fn region_flush_surfaces_a_pending_unique_conflict_before_reading() {
+    let (result, visits) = count_region_over_staged_unique_conflict(
+        "scheduler-region-unique-flush",
+        exec::ExecNodeAccessPlan::DynamicEquality {
+            index: helix_planner::catalog::NodeEqualityIndexMeta::try_new("user-email").unwrap(),
+            key: helix_planner::catalog::ScopedPropertyKey::try_new("User", "email").unwrap(),
+            param: named("unbound"),
+        },
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(HelixDbError::UniqueConstraintViolation { .. })
+    ));
+    assert_eq!(visits, 0);
+}
+
+/// A region that only counts rows it reads itself observes no deferred index
+/// state, so it opens its source without flushing; the pending conflict stays
+/// staged for the commit to reject.
+#[tokio::test]
+async fn region_counting_its_own_rows_skips_the_deferred_flush() {
+    let (result, _) = count_region_over_staged_unique_conflict(
+        "scheduler-region-held-rows",
+        exec::ExecNodeAccessPlan::FromParam {
+            param: named("unbound"),
+        },
+    )
+    .await;
+    let Err(HelixDbError::Query(message)) = result else {
+        panic!("the unbound source parameter fails before any flush: {result:?}");
+    };
+    assert!(message.contains("`unbound` is not bound"), "{message}");
 }

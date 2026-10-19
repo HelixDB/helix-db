@@ -1,6 +1,7 @@
 //! Static value domains. `Any` means data-dependent, rather than silently
 //! coercing an incompatible known type. Nullability is tracked by row bindings.
 use super::{Aggregate, Binary, Binding, Expression, Function, QueryError, Result, Unary, Value};
+use crate::relational::{category, detail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ValueType {
@@ -26,7 +27,7 @@ impl Expression {
             } else {
                 Err(QueryError::compile(
                     category,
-                    "InvalidArgumentType",
+                    detail::INVALID_ARGUMENT_TYPE,
                     format!("expected {accepted:?}, received {actual:?}"),
                 ))
             }
@@ -50,8 +51,8 @@ impl Expression {
                     .get(slot.0 as usize)
                     .ok_or_else(|| {
                         QueryError::compile(
-                            "InternalPlannerError",
-                            "InvalidSlot",
+                            category::INTERNAL_PLANNER_ERROR,
+                            detail::INVALID_SLOT,
                             "slot exceeds binding catalog",
                         )
                     })?
@@ -62,7 +63,7 @@ impl Expression {
                 require(
                     infer(value)?,
                     &[T::Map, T::Node, T::Relationship],
-                    "TypeError",
+                    category::TYPE_ERROR,
                 )?;
                 T::Any
             }
@@ -70,15 +71,15 @@ impl Expression {
                 require(
                     infer(value)?,
                     &[T::List, T::Map, T::Node, T::Relationship],
-                    "TypeError",
+                    category::TYPE_ERROR,
                 )?;
                 infer(index)?;
                 T::Any
             }
             Self::Slice { value, start, end } => {
-                require(infer(value)?, &[T::List], "SyntaxError")?;
+                require(infer(value)?, &[T::List], category::SYNTAX_ERROR)?;
                 for bound in start.iter().chain(end.iter()) {
-                    require(infer(bound)?, &[T::Integer], "SyntaxError")?;
+                    require(infer(bound)?, &[T::Integer], category::SYNTAX_ERROR)?;
                 }
                 T::List
             }
@@ -86,11 +87,11 @@ impl Expression {
                 let t = infer(x)?;
                 match op {
                     Unary::Not => {
-                        require(t, &[T::Boolean], "SyntaxError")?;
+                        require(t, &[T::Boolean], category::SYNTAX_ERROR)?;
                         T::Boolean
                     }
                     Unary::Negate | Unary::Positive => {
-                        require(t, &[T::Integer, T::Float], "SyntaxError")?;
+                        require(t, &[T::Integer, T::Float], category::SYNTAX_ERROR)?;
                         t
                     }
                     Unary::IsNull | Unary::IsNotNull => T::Boolean,
@@ -101,7 +102,7 @@ impl Expression {
                 let b = infer(b)?;
                 match op {
                     Binary::In => {
-                        require(b, &[T::List], "SyntaxError")?;
+                        require(b, &[T::List], category::SYNTAX_ERROR)?;
                         T::Boolean
                     }
                     Binary::StartsWith | Binary::EndsWith | Binary::Contains => T::Boolean,
@@ -119,8 +120,8 @@ impl Expression {
                     | Binary::Divide
                     | Binary::Modulo
                     | Binary::Power => {
-                        require(a, &[T::Integer, T::Float], "SyntaxError")?;
-                        require(b, &[T::Integer, T::Float], "SyntaxError")?;
+                        require(a, &[T::Integer, T::Float], category::SYNTAX_ERROR)?;
+                        require(b, &[T::Integer, T::Float], category::SYNTAX_ERROR)?;
                         if a == T::Float || b == T::Float || *op == Binary::Power {
                             T::Float
                         } else if a == T::Integer && b == T::Integer {
@@ -138,10 +139,10 @@ impl Expression {
                 // As the left-associated chain did, infer the first two
                 // operands before checking either, then each later one in turn.
                 let (first, second) = (infer(first)?, infer(second)?);
-                require(first, &[T::Boolean], "SyntaxError")?;
-                require(second, &[T::Boolean], "SyntaxError")?;
+                require(first, &[T::Boolean], category::SYNTAX_ERROR)?;
+                require(second, &[T::Boolean], category::SYNTAX_ERROR)?;
                 for operand in rest {
-                    require(infer(operand)?, &[T::Boolean], "SyntaxError")?;
+                    require(infer(operand)?, &[T::Boolean], category::SYNTAX_ERROR)?;
                 }
                 T::Boolean
             }
@@ -158,7 +159,11 @@ impl Expression {
                 T::Map
             }
             Self::HasLabel(slot, _) => {
-                require(infer(&Self::Slot(*slot))?, &[T::Node], "SyntaxError")?;
+                require(
+                    infer(&Self::Slot(*slot))?,
+                    &[T::Node],
+                    category::SYNTAX_ERROR,
+                )?;
                 T::Boolean
             }
             Self::Case {
@@ -167,7 +172,7 @@ impl Expression {
             } => {
                 let mut result = infer(otherwise)?;
                 for (predicate, value) in branches {
-                    require(infer(predicate)?, &[T::Boolean], "SyntaxError")?;
+                    require(infer(predicate)?, &[T::Boolean], category::SYNTAX_ERROR)?;
                     let t = infer(value)?;
                     if result == T::Null {
                         result = t;
@@ -209,39 +214,47 @@ impl Expression {
                 let first = types.first().copied().unwrap_or(T::Any);
                 match function {
                     Function::Id => {
-                        require(first, &[T::Node, T::Relationship], "SyntaxError")?;
+                        require(first, &[T::Node, T::Relationship], category::SYNTAX_ERROR)?;
                         T::Integer
                     }
                     Function::Type => {
-                        require(first, &[T::Relationship], "SyntaxError")?;
+                        require(first, &[T::Relationship], category::SYNTAX_ERROR)?;
                         T::String
                     }
                     Function::Labels => {
-                        require(first, &[T::Node], "TypeError")?;
+                        require(first, &[T::Node], category::TYPE_ERROR)?;
                         T::List
                     }
                     Function::Properties => {
-                        require(first, &[T::Node, T::Relationship, T::Map], "SyntaxError")?;
+                        require(
+                            first,
+                            &[T::Node, T::Relationship, T::Map],
+                            category::SYNTAX_ERROR,
+                        )?;
                         T::Map
                     }
                     Function::Keys => {
-                        require(first, &[T::Node, T::Relationship, T::Map], "SyntaxError")?;
+                        require(
+                            first,
+                            &[T::Node, T::Relationship, T::Map],
+                            category::SYNTAX_ERROR,
+                        )?;
                         T::List
                     }
                     Function::Nodes | Function::Relationships => {
-                        require(first, &[T::Path], "SyntaxError")?;
+                        require(first, &[T::Path], category::SYNTAX_ERROR)?;
                         T::List
                     }
                     Function::Length => {
-                        require(first, &[T::Path], "SyntaxError")?;
+                        require(first, &[T::Path], category::SYNTAX_ERROR)?;
                         T::Integer
                     }
                     Function::Size => {
-                        require(first, &[T::List, T::String], "SyntaxError")?;
+                        require(first, &[T::List, T::String], category::SYNTAX_ERROR)?;
                         T::Integer
                     }
                     Function::Head | Function::Last => {
-                        require(first, &[T::List], "SyntaxError")?;
+                        require(first, &[T::List], category::SYNTAX_ERROR)?;
                         T::Any
                     }
                     Function::Coalesce => T::Any,

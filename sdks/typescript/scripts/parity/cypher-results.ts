@@ -198,7 +198,7 @@ export function verifyCypherCase(fixture: CypherCase, output: unknown): void {
     }
     assert(typeof phase === "string");
     assert.deepStrictEqual(
-      { category, phase: phase.toLowerCase(), detail },
+      { category, phase, detail },
       {
         category: fixture.expectation.category,
         phase: fixture.expectation.phase,

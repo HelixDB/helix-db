@@ -136,7 +136,7 @@ async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() 
     // the scan's read dependencies until commit. Admit those independently.
     let error = execute(update).await.unwrap_err();
     assert!(matches!(error, cypher::Error::Query(e)
-        if e.category == "ResourceLimit" && e.detail == "MemoryLimit"
+        if e.category == "resource_limit" && e.detail == "memory_limit"
             && e.phase == helix_planner::relational::ErrorPhase::Runtime));
     assert_eq!(
         execute("MATCH (n:N) WHERE n.touched RETURN count(*)")
@@ -198,7 +198,7 @@ async fn reads_crud_paths_and_atomic_failure() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err,cypher::Error::Query(ref e) if e.detail=="DeleteConnectedNode"),
+        matches!(err,cypher::Error::Query(ref e) if e.detail=="delete_connected_node"),
         "{err:?}"
     );
     assert_eq!(
@@ -311,7 +311,7 @@ async fn bounded_generators_parameters_and_rollback() {
         )
         .await
         .unwrap_err();
-        assert!(matches!(error,cypher::Error::Query(e) if e.detail == "CollectionLimit"));
+        assert!(matches!(error,cypher::Error::Query(e) if e.detail == "collection_limit"));
         assert_eq!(
             run(&db, "MATCH (n:N) RETURN count(*)").await.rows,
             vec![vec![json!(0)]]
@@ -322,7 +322,7 @@ async fn bounded_generators_parameters_and_rollback() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, cypher::Error::Query(e) if e.category == "ParameterMissing" && e.phase == helix_planner::relational::ErrorPhase::Compile)
+        matches!(error, cypher::Error::Query(e) if e.category == "parameter_missing" && e.phase == helix_planner::relational::ErrorPhase::Compile)
     );
     let request: cypher::Request = serde_json::from_value(json!({"query":"RETURN $i AS i, $m AS m", "parameters":{"i":{"$type":"integer","value":"9223372036854775807"},"m":{"$type":"map","value":{"$type":"literal"}}}})).unwrap();
     assert_eq!(
@@ -452,7 +452,7 @@ async fn stored_native_values_do_not_fail_unevaluated_cypher_branches() {
         .cypher(cypher::Request::new("MATCH (n:N) RETURN n.future"))
         .await
         .unwrap_err();
-    assert!(matches!(error,cypher::Error::Query(e) if e.detail == "StoredValueType"));
+    assert!(matches!(error,cypher::Error::Query(e) if e.detail == "stored_value_type"));
     db.close().await.unwrap();
 }
 
@@ -507,7 +507,7 @@ async fn storage_scopes_and_response_limits_preserve_atomicity() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(error,cypher::Error::Query(e) if e.detail == "ResultLimit"));
+    assert!(matches!(error,cypher::Error::Query(e) if e.detail == "result_limit"));
     assert_eq!(
         cypher::execute(
             &db,
@@ -584,7 +584,7 @@ async fn live_operator_buffers_share_one_memory_budget() {
         .await
         .unwrap_err();
         assert!(
-            matches!(error, cypher::Error::Query(ref error) if error.detail == "MemoryLimit"),
+            matches!(error, cypher::Error::Query(ref error) if error.detail == "memory_limit"),
             "{query}: {error:?}"
         );
     }
@@ -640,7 +640,7 @@ async fn expression_memory_limits_do_not_truncate_values_or_limit_streaming_coun
         .await
         .unwrap_err();
         assert!(
-            matches!(error,cypher::Error::Query(ref error) if error.detail == "MemoryLimit"),
+            matches!(error,cypher::Error::Query(ref error) if error.detail == "memory_limit"),
             "{error:?}"
         );
     }
@@ -682,7 +682,7 @@ async fn expression_memory_limits_do_not_truncate_values_or_limit_streaming_coun
     )
     .await
     .unwrap_err();
-    assert!(matches!(error,cypher::Error::Query(ref error) if error.detail == "CollectionLimit"));
+    assert!(matches!(error,cypher::Error::Query(ref error) if error.detail == "collection_limit"));
     db.close().await.unwrap();
 }
 
@@ -735,7 +735,9 @@ async fn plain_match_windows_bound_rows_and_response_bytes_include_the_envelope(
             "{result:?}, expected {encoded_bytes} bytes"
         );
         if let Err(error) = result {
-            assert!(matches!(error,cypher::Error::Query(ref error) if error.detail=="ResultLimit"));
+            assert!(
+                matches!(error,cypher::Error::Query(ref error) if error.detail=="result_limit")
+            );
         }
     }
     db.close().await.unwrap();
@@ -808,7 +810,7 @@ async fn durable_cypher_data_survives_reopen_and_reader_mode_rejects_writes() {
         ))
         .await
         .unwrap_err();
-    assert!(matches!(error,cypher::Error::Query(ref e) if e.detail=="WriterRequired"));
+    assert!(matches!(error,cypher::Error::Query(ref e) if e.detail=="writer_required"));
     reader.close().await.unwrap();
     let reopened = HelixDB::open(source).await.unwrap();
     assert_eq!(
@@ -983,7 +985,7 @@ async fn string_temporaries_share_the_query_budget_and_failures_roll_back() {
         let error = execute(query.clone(), budget).await.unwrap_err();
         assert!(
             matches!(error, cypher::Error::Query(ref error)
-            if error.category == "ResourceLimit" && error.detail == "MemoryLimit"
+            if error.category == "resource_limit" && error.detail == "memory_limit"
                 && error.phase == helix_planner::relational::ErrorPhase::Runtime
                 && error.message == "expression temporaries exceed the query memory budget"),
             "{expression}: {error:?}"

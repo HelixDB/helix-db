@@ -1045,7 +1045,15 @@ async fn inserting_node_run<D: Distance>() {
             .unwrap()
             .unwrap();
         let descended = index
-            .search_layer_greedy_for_mutation(&measured, &query, source, layer, GHOST, &mut cache)
+            .search_layer_greedy_for_mutation(
+                &measured,
+                &query,
+                source,
+                layer,
+                GHOST,
+                &mut cache,
+                &mut MutationScratch::default(),
+            )
             .await
             .unwrap();
         if descended == target {
@@ -1058,7 +1066,15 @@ async fn inserting_node_run<D: Distance>() {
     };
     assert_ne!(
         index
-            .search_layer_greedy_for_mutation(&measured, &query, source, layer, target, &mut cache)
+            .search_layer_greedy_for_mutation(
+                &measured,
+                &query,
+                source,
+                layer,
+                target,
+                &mut cache,
+                &mut MutationScratch::default()
+            )
             .await
             .unwrap(),
         target,

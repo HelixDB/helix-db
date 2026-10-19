@@ -119,21 +119,36 @@ methods accept the same JSON body and existing request options, returning a
 `QueryJsonResponse` whose body matches the HTTP response. `ExplainCypher` applies
 the options as a read, like `POST /v2/cypher/explain`.
 
-Every transport reports a Cypher query error with the same class. HTTP returns a
-`{"error","msg","details":{"detail","phase","span"}}` body; gRPC carries the same
-query error as JSON in the status details. Request, storage and transaction
-failures keep the native error envelope and codes.
+Every transport reports a Cypher query error with the same class and codes.
+HTTP returns this body, and gRPC carries the same JSON in the status details:
+
+```json
+{
+  "error": "resource_limit",
+  "msg": "expression temporaries exceed the query memory budget",
+  "details": {"detail": "memory_limit", "phase": "runtime", "span": null}
+}
+```
+
+`error` is the category and `details.detail` the specific condition. Both use
+lower snake case, like every HelixDB error code. `details.phase` is `compile` or
+`runtime`, and `span` locates the failing text when it is known. Embedded SDK
+errors join the three parts into one code, `category:phase:detail`, such as
+`constraint_verification_failed:runtime:delete_connected_node`. Request, storage
+and transaction failures keep the native error envelope and codes. The
+[query error reference](database/helix-db/query-guides/error-handling.mdx#cypher-errors)
+lists every category.
 
 | Error category | HTTP | gRPC |
 |---|---|---|
-| `ResourceLimit` | 429 | `RESOURCE_EXHAUSTED` |
-| `AccessModeError` (a write on a reader) | 503 | `FAILED_PRECONDITION` |
-| `InternalPlannerError` | 500 | `INTERNAL` |
+| `resource_limit` | 429 | `RESOURCE_EXHAUSTED` |
+| `access_mode_error` (a write on a reader) | 503 | `FAILED_PRECONDITION` |
+| `internal_planner_error` | 500 | `INTERNAL` |
 | Any other category | 400 | `INVALID_ARGUMENT` |
 
 Rust transports reuse this contract from `helix_cypher::api` (`ErrorClass`,
-`ErrorBody` and the route paths) and decode requests with
-`helix_cypher::request::Request`, which needs no database.
+`ErrorBody`, the `category` and `detail` code constants, and the route paths) and
+decode requests with `helix_cypher::request::Request`, which needs no database.
 
 From a linked local Helix project:
 
@@ -165,18 +180,19 @@ The `WHERE` of a `WITH` filters the rows the clause returns, after its
 `DISTINCT`, `ORDER BY`, `SKIP` and `LIMIT`: `WITH x ORDER BY x LIMIT 3 WHERE x > 2`
 keeps at most the third row. After `SKIP` or `LIMIT` only the variables the `WITH`
 projects remain, so such a `WHERE` that reads any other variable is rejected with
-`UndefinedVariable`.
+`undefined_variable`.
 
 `MERGE`, variable-length and shortest paths, `UNION`, subqueries, comprehensions,
 procedures, schema DDL, temporal/spatial functions, and Bolt are outside this
-profile. Unsupported syntax receives a specific `UnsupportedFeature` error. A
+profile. Unsupported syntax receives a specific `unsupported_feature` error. A
 statement that is also invalid openCypher reports the standard compile error
-instead, such as `VariableAlreadyBound` for a CREATE that redeclares a variable
-or `UndefinedVariable` for a pattern predicate that introduces one. Other
-openCypher built-in functions, such as `sqrt` or `date`, are unsupported, while
-an unrecognized function name is a `SyntaxError` with `UnknownFunction`. A
+instead, such as `variable_already_bound` for a CREATE that redeclares a variable
+or `undefined_variable` for a pattern predicate that introduces one. Other
+openCypher built-in functions, such as `sqrt` or `date`, are an
+`unsupported_feature` with detail `function`, and the message names the function.
+An unrecognized function name is a `syntax_error` with `unknown_function`. A
 parameter map in a MATCH pattern, such as `(n $props)`, is an
-`InvalidParameterUse` syntax error; in CREATE it is unsupported. Use the
+`invalid_parameter_use` syntax error; in CREATE it is unsupported. Use the
 existing native index-management API to create indexes; Cypher planning can
 select existing compatible indexes.
 
@@ -418,8 +434,8 @@ clones and slices retain the body's admission until their final owner is dropped
 An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
-An expression may nest at most 48 levels, which a `ResourceLimit` error with
-`ExpressionDepth` reports. A chain of one Boolean operator, such as
+An expression may nest at most 48 levels, which a `resource_limit` error with
+`expression_depth` reports. A chain of one Boolean operator, such as
 `a OR b OR c OR ...`, and a comparison chain such as `a < b < c` are flat: the
 chain is one level over all of its operands, however many there are, so its
 length does not count toward the nesting depth. The operands are still
@@ -432,8 +448,8 @@ when a query returns one number. Scalar aggregation accounts for an incoming
 value while retained state grows, including `DISTINCT` key copies.
 Scalar `range()` checks its complete collection size before reserving output.
 After its arguments are evaluated, an excessive item count returns
-`CollectionLimit` before output-memory admission; otherwise an oversized buffer
-returns `MemoryLimit`. Direct `UNWIND range(...)` remains a streaming generator
+`collection_limit` before output-memory admission; otherwise an oversized buffer
+returns `memory_limit`. Direct `UNWIND range(...)` remains a streaming generator
 and can consume a bounded prefix without materialising the full range.
 `collection_items` bounds each materialized expression list, including lists
 nested in maps, and retained `DISTINCT` aggregate sets. It does not count map

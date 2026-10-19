@@ -22,8 +22,8 @@ fn nested(depth: usize, map: bool) -> r::Value {
 }
 
 fn depth_error(error: r::QueryError) {
-    assert_eq!(error.category, "ResourceLimit");
-    assert_eq!(error.detail, "ValueDepth");
+    assert_eq!(error.category, "resource_limit");
+    assert_eq!(error.detail, "value_depth");
     assert_eq!(error.phase, r::ErrorPhase::Runtime);
 }
 
@@ -266,13 +266,13 @@ fn averages_use_bounded_numeric_state_without_overflowing_the_sum() {
     let error = average
         .push_with_admission::<r::QueryError>(r::Value::Integer(3), 10, 1024 * 1024, |_| {
             Err(r::QueryError::runtime(
-                "ResourceLimit",
-                "MemoryLimit",
+                "resource_limit",
+                "memory_limit",
                 "test admission rejection",
             ))
         })
         .unwrap_err();
-    assert_eq!(error.detail, "MemoryLimit");
+    assert_eq!(error.detail, "memory_limit");
     assert_eq!(average.allocated_bytes(), before);
     // Admission failure must not retain the DISTINCT key or numeric transition.
     average.push(r::Value::Integer(3), 10, 1024 * 1024).unwrap();
@@ -286,7 +286,7 @@ fn averages_use_bounded_numeric_state_without_overflowing_the_sum() {
         sum.push(r::Value::Integer(1), 10, 1024 * 1024)
             .unwrap_err()
             .detail,
-        "NumberOutOfRange"
+        "number_out_of_range"
     );
     assert_eq!(sum.finish().unwrap(), r::Value::Integer(i64::MAX));
 }

@@ -439,7 +439,10 @@ mod tests {
                 br#"{"query":"RETURN 1","limit":1}"#.to_vec(),
                 "invalid_cypher_json",
             ),
-            (br#"{"query":"RETURN missing"}"#.to_vec(), "SyntaxError"),
+            (
+                br#"{"query":"RETURN missing"}"#.to_vec(),
+                "syntax_error:compile:undefined_variable",
+            ),
         ] {
             let HelixError::InvalidRequest { error, .. } = db
                 .explain_cypher_json(request)
@@ -448,7 +451,7 @@ mod tests {
             else {
                 panic!("expected an invalid request");
             };
-            assert!(error.starts_with(expected), "{error}");
+            assert_eq!(error, expected);
         }
         db.close().await.expect("DB should close");
     }

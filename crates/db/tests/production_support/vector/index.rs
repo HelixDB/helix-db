@@ -514,24 +514,31 @@ async fn run_row_contracts(db: &Db) {
     assert!(reads.total_reads() >= 2);
 
     let mut cache = MutationOpCache::<Cosine>::default();
-    assert!(index
-        .get_items_for_layer_cached_batch(&txn, 0, &[], &mut cache)
-        .await
-        .unwrap()
-        .is_empty());
-    let mut absent_only = MutationOpCache::<Cosine>::default();
-    assert!(index
-        .get_items_for_layer_cached_batch(&txn, 0, &[99], &mut absent_only)
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(absent_only.item_is_known_absent(0, 99));
-    let loaded = index
-        .get_items_for_layer_cached_batch(&txn, 0, &[1, 1, 99], &mut cache)
+    let mut batch = ItemBatch::default();
+    index
+        .get_items_for_layer_cached_batch(&txn, 0, &[], &mut cache, &mut batch)
         .await
         .unwrap();
-    assert_eq!(loaded.len(), 1);
-    assert!(loaded.contains_key(&1));
+    assert!(batch.is_empty());
+    let mut absent_only = MutationOpCache::<Cosine>::default();
+    index
+        .get_items_for_layer_cached_batch(&txn, 0, &[99], &mut absent_only, &mut batch)
+        .await
+        .unwrap();
+    assert!(batch.is_empty());
+    assert!(absent_only.item_is_known_absent(0, 99));
+    index
+        .get_items_for_layer_cached_batch(&txn, 0, &[1, 1, 99], &mut cache, &mut batch)
+        .await
+        .unwrap();
+    assert_eq!(batch.len(), 1);
+    assert!(batch.contains(1));
+    // A reused batch holds exactly the latest lookup's items.
+    index
+        .get_items_for_layer_cached_batch(&txn, 0, &[99], &mut cache, &mut batch)
+        .await
+        .unwrap();
+    assert!(batch.is_empty() && !batch.contains(1));
     assert!(index
         .get_item_for_layer_cached(&txn, 0, 1, &mut cache)
         .await
@@ -559,23 +566,23 @@ async fn run_row_contracts(db: &Db) {
     let cached_item_bytes = encode_item(cached_item.as_ref()).len();
     cached_batch.put_item(0, 1, Some(cached_item), cached_item_bytes);
     cached_batch.put_item(0, 99, None, 0);
-    let loaded = index
-        .get_items_for_layer_cached_batch(&txn, 0, &[1, 99], &mut cached_batch)
+    index
+        .get_items_for_layer_cached_batch(&txn, 0, &[1, 99], &mut cached_batch, &mut batch)
         .await
         .unwrap();
-    assert_eq!(loaded.len(), 1);
-    assert!(loaded.contains_key(&1));
+    assert_eq!(batch.len(), 1);
+    assert!(batch.contains(1));
 
     for node_id in 20_000_u64
         ..20_000_u64 + u64::try_from(super::super::mutation::VECTOR_BUILD_ITEM_CACHE_LIMIT).unwrap()
     {
         cached_batch.put_item(0, node_id, None, 0);
     }
-    assert!(index
-        .get_items_for_layer_cached_batch(&txn, 0, &[1], &mut cached_batch)
+    index
+        .get_items_for_layer_cached_batch(&txn, 0, &[1], &mut cached_batch, &mut batch)
         .await
-        .unwrap()
-        .contains_key(&1));
+        .unwrap();
+    assert!(batch.contains(1));
     assert!(cached_batch.item_count() <= super::super::mutation::VECTOR_BUILD_ITEM_CACHE_LIMIT);
 
     let (results, stats) = index
@@ -600,13 +607,14 @@ async fn run_row_contracts(db: &Db) {
     let upper = index.get_item_for_layer(&txn, 1, 1).await.unwrap().unwrap();
     assert_eq!(upper.vector.to_vec(), vec![0.0, 0.0, 1.0]);
     let mut upper_batch = MutationOpCache::<Cosine>::default();
-    let loaded = index
-        .get_items_for_layer_cached_batch(&txn, 1, &[1, 2, 99], &mut upper_batch)
+    let mut loaded = ItemBatch::default();
+    index
+        .get_items_for_layer_cached_batch(&txn, 1, &[1, 2, 99], &mut upper_batch, &mut loaded)
         .await
         .unwrap();
     assert_eq!(loaded.len(), 2);
-    assert!(loaded.contains_key(&1));
-    assert!(loaded.contains_key(&2));
+    assert!(loaded.contains(1));
+    assert!(loaded.contains(2));
     txn.rollback();
 
     let snapshot = db.snapshot().await.unwrap();
@@ -693,7 +701,13 @@ async fn run_row_contracts(db: &Db) {
         .await
         .is_err());
     assert!(index
-        .get_items_for_layer_cached_batch(&txn, 0, &[77], &mut missing_simhash)
+        .get_items_for_layer_cached_batch(
+            &txn,
+            0,
+            &[77],
+            &mut missing_simhash,
+            &mut ItemBatch::default()
+        )
         .await
         .is_err());
     txn.rollback();
@@ -721,11 +735,12 @@ async fn run_row_contracts(db: &Db) {
         .set(&txn, 78, crate::search::vector::SimHash::from_bits(0x77))
         .unwrap();
     let mut missing_payload = MutationOpCache::<Cosine>::default();
-    assert!(index
-        .get_items_for_layer_cached_batch(&txn, 0, &[78], &mut missing_payload)
+    let mut missing = ItemBatch::default();
+    index
+        .get_items_for_layer_cached_batch(&txn, 0, &[78], &mut missing_payload, &mut missing)
         .await
-        .unwrap()
-        .is_empty());
+        .unwrap();
+    assert!(missing.is_empty());
     assert!(missing_payload.item_is_known_absent(0, 78));
     txn.rollback();
 
@@ -950,7 +965,14 @@ where
         .await
         .unwrap();
     index
-        .relink_neighbor(&measured, 2, &candidates, 1, &mut relink_cache)
+        .relink_neighbor(
+            &measured,
+            2,
+            &candidates,
+            1,
+            &mut relink_cache,
+            &mut MutationScratch::default(),
+        )
         .await
         .unwrap();
     index

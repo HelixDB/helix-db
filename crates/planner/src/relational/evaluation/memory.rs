@@ -1,5 +1,6 @@
 //! Borrowed scalar admission with optional request-wide peak observation.
 use super::{QueryError, Result};
+use crate::relational::{category, detail};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A scalar allowance tracks retained siblings while evaluating a child.
@@ -85,8 +86,8 @@ impl<'a> Memory<'a> {
 
 fn exhausted() -> QueryError {
     QueryError::runtime(
-        "ResourceLimit",
-        "MemoryLimit",
+        category::RESOURCE_LIMIT,
+        detail::MEMORY_LIMIT,
         "expression temporaries exceed the query memory budget",
     )
 }

@@ -35,7 +35,7 @@ async fn index_probe_admission_rejects_before_copying_values_or_opening_storage(
                 .now_or_never()
                 .expect("admission precedes storage awaits")
         });
-        assert!(matches!(result,Err(Error::Query(error)) if error.detail=="MemoryLimit"));
+        assert!(matches!(result,Err(Error::Query(error)) if error.detail=="memory_limit"));
         assert_eq!(
             allocations.allocations, error_allocation.allocations,
             "only the structured error may allocate before rejection"
@@ -194,7 +194,7 @@ async fn probe_admission_failures_release_every_reservation() {
                     assert!(expected, "{available}");
                     successes += 1;
                 }
-                Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                Err(Error::Query(error)) if error.detail == "memory_limit" => failures += 1,
                 Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
                 Err(error) => panic!("{available}: {error:?}"),
             }
@@ -503,7 +503,7 @@ async fn lookup_cursor_admission_failures_release_every_reservation() {
                     assert_eq!(rows.len(), 2);
                     successes += 1;
                 }
-                Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                Err(Error::Query(error)) if error.detail == "memory_limit" => failures += 1,
                 Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
                 Ok(None) => panic!("the parent has candidates"),
                 Err(error) => panic!("{available}: {error:?}"),
@@ -635,10 +635,10 @@ async fn indexed_pattern_boundaries_preserve_writes_and_late_errors() {
         "MATCH (a:A {key:7}) SET a.key=8 WITH 1 AS marker UNWIND [8] AS key MATCH (a:A {key:key})-[:R]->(b:B) RETURN a.key,b.key"
     )).await.unwrap().rows, vec![vec![json!(8),json!(7)]]);
     for (text, detail, indexed) in [
-        ("CREATE (:Rollback) WITH 1 AS marker UNWIND [8] AS key MATCH (a:A {key:key})-[:R]->(b:B) RETURN 1/0", "DivisionByZero", true),
-        ("UNWIND [null,8] AS key MATCH (a:A {key:key}),(b:B {other:1/0}) RETURN count(*)", "DivisionByZero", false),
-        ("UNWIND [null,8] AS key MATCH (a:A),(b:B) WHERE a.key=key AND 1/0>0 RETURN count(*)", "DivisionByZero", false),
-        ("UNWIND [null,8] AS key MATCH (a:A),(b:B) WHERE a.key=key AND b.key=$missing RETURN count(*)", "MissingParameter", false),
+        ("CREATE (:Rollback) WITH 1 AS marker UNWIND [8] AS key MATCH (a:A {key:key})-[:R]->(b:B) RETURN 1/0", "division_by_zero", true),
+        ("UNWIND [null,8] AS key MATCH (a:A {key:key}),(b:B {other:1/0}) RETURN count(*)", "division_by_zero", false),
+        ("UNWIND [null,8] AS key MATCH (a:A),(b:B) WHERE a.key=key AND 1/0>0 RETURN count(*)", "division_by_zero", false),
+        ("UNWIND [null,8] AS key MATCH (a:A),(b:B) WHERE a.key=key AND b.key=$missing RETURN count(*)", "missing_parameter", false),
     ] {
         let plan=r::plan(helix_cypher::compile(text).unwrap(),&db.planner_context(context::ParamBindings::default())).unwrap();
         assert_eq!(plan.matches().values().any(|plan| plan.steps.iter().any(|step| matches!(step,r::MatchStep::IndexLookup(_)))), indexed, "{text}");
@@ -796,7 +796,7 @@ async fn unreadable_probe_properties_scan_and_fail_only_with_candidates() {
                 }
                 Err(error) => assert!(
                     candidate
-                        && matches!(error, Error::Query(ref error) if error.detail == "StoredValueType"),
+                        && matches!(error, Error::Query(ref error) if error.detail == "stored_value_type"),
                     "{strategy:?}: {error}"
                 ),
             }

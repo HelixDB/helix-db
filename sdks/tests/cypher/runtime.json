@@ -166,8 +166,8 @@
     {
       "name": "delete-rollback",
       "query": "MATCH (a:CypherParity {key:'a'}) SET a.rollback=true DELETE a",
-      "expected_error_detail": "DeleteConnectedNode",
-      "expected_error_category": "ConstraintVerificationFailed",
+      "expected_error_detail": "delete_connected_node",
+      "expected_error_category": "constraint_verification_failed",
       "expected_error_phase": "runtime"
     },
     {
@@ -289,8 +289,8 @@
     {
       "name": "aggregate-error-rollback",
       "query": "MATCH (a:CypherParity {key:'a'}) SET a.aggregate_marker=true WITH 0 AS zero RETURN CASE WHEN false THEN sum(1/zero) ELSE 0 END AS result",
-      "expected_error_detail": "DivisionByZero",
-      "expected_error_category": "ArithmeticError",
+      "expected_error_detail": "division_by_zero",
+      "expected_error_category": "arithmetic_error",
       "expected_error_phase": "runtime"
     },
     {

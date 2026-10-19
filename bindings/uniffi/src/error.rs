@@ -42,12 +42,13 @@ pub enum HelixError {
 
 impl From<db::cypher::Error> for HelixError {
     /// A Cypher diagnostic keeps its category, phase and detail in the error
-    /// code; storage failures classify exactly as native query failures do.
+    /// code, as `category:phase:detail` in lower snake case; storage failures
+    /// classify exactly as native query failures do.
     fn from(error: db::cypher::Error) -> Self {
         match error {
             db::cypher::Error::Storage(error) => Self::from(error),
             db::cypher::Error::Query(error) => Self::InvalidRequest {
-                error: format!("{}:{:?}:{}", error.category, error.phase, error.detail),
+                error: error.code(),
                 msg: error.message,
             },
             db::cypher::Error::Json(error) => Self::Internal {

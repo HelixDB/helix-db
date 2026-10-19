@@ -67,7 +67,7 @@ async fn correlated_pipelines_bound_outer_rows_and_preserve_optional_multiplicit
         expected
     );
     assert!(
-        matches!(Interpreter::new(&db, context::ParamBindings::default()).execute_rows(&reference, &BTreeMap::new(), Limits { batch_rows:8, memory_bytes:96*1024, ..Default::default() }).await, Err(Error::Query(error)) if error.detail=="MemoryLimit")
+        matches!(Interpreter::new(&db, context::ParamBindings::default()).execute_rows(&reference, &BTreeMap::new(), Limits { batch_rows:8, memory_bytes:96*1024, ..Default::default() }).await, Err(Error::Query(error)) if error.detail=="memory_limit")
     );
     db.close().await.unwrap();
 }
@@ -163,15 +163,15 @@ async fn correlated_pipelines_flush_pending_indexes_and_drain_late_errors() {
     for (text, detail) in [
         (
             "UNWIND [null,1] AS n OPTIONAL MATCH (n) RETURN n LIMIT 1",
-            "ExpectedNode",
+            "expected_node",
         ),
         (
             "UNWIND [1,0] AS k OPTIONAL MATCH (n:N) WHERE 1/k>0 RETURN k LIMIT 0",
-            "DivisionByZero",
+            "division_by_zero",
         ),
         (
             "CREATE (:Rollback) WITH 1 AS x UNWIND [1,0] AS k MATCH (n:N) RETURN 1/k LIMIT 1",
-            "DivisionByZero",
+            "division_by_zero",
         ),
     ] {
         let plan = r::plan(
@@ -415,7 +415,7 @@ async fn correlated_lookup_admission_failures_release_every_owner() {
                         ));
                         successes += 1;
                     }
-                    Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                    Err(Error::Query(error)) if error.detail == "memory_limit" => failures += 1,
                     Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => {
                         failures += 1
                     }
@@ -449,9 +449,9 @@ async fn correlated_batch_errors_preserve_candidate_order_and_drain_after_limits
         .await
         .unwrap();
     for (values, detail) in [
-        ("[n,1]", "DivisionByZero"),
-        ("[1,n]", "ExpectedNode"),
-        ("[n,null,1]", "DivisionByZero"),
+        ("[n,1]", "division_by_zero"),
+        ("[1,n]", "expected_node"),
+        ("[n,null,1]", "division_by_zero"),
     ] {
         for limit in [0, 1] {
             let text=format!("MATCH (n:N) WITH {values} AS values UNWIND values AS candidate MATCH (candidate) WHERE 1/0>0 RETURN candidate LIMIT {limit}");
@@ -492,7 +492,7 @@ async fn correlated_batch_errors_preserve_candidate_order_and_drain_after_limits
         .cypher(crate::cypher::Request::new(text))
         .await
         .unwrap_err();
-    assert!(matches!(error,Error::Query(error) if error.detail=="ExpectedNode"));
+    assert!(matches!(error,Error::Query(error) if error.detail=="expected_node"));
     assert_eq!(
         db.cypher(crate::cypher::Request::new(
             "MATCH (n:Rollback) RETURN count(*)"

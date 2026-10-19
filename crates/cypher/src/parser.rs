@@ -2,6 +2,7 @@ use crate::{
     lexer::{self, Kind, PatternPunctuation, Token},
     syntax::*,
 };
+use helix_planner::relational::{category, detail};
 use helix_planner::{
     ir::AtLeast,
     relational::{self as r, QueryError, Result, Span},
@@ -93,11 +94,11 @@ impl<'source> Parser<'source> {
     }
     fn error(&self, message: &str) -> QueryError {
         let detail = if matches!(self.token().kind, Kind::Pattern(_)) {
-            "InvalidUnicodeCharacter"
+            detail::INVALID_UNICODE_CHARACTER
         } else {
-            "UnexpectedSyntax"
+            detail::UNEXPECTED_SYNTAX
         };
-        QueryError::compile("SyntaxError", detail, message).at(self.token().span)
+        QueryError::compile(category::SYNTAX_ERROR, detail, message).at(self.token().span)
     }
     fn name(&mut self) -> Result<String> {
         let name = match &self.token().kind {
@@ -119,18 +120,21 @@ impl<'source> Parser<'source> {
             Ok(None)
         }
     }
-    fn unsupported(&self, name: &str) -> QueryError {
-        QueryError::unsupported(name).at(self.token().span)
+    fn unsupported(&self, detail: &str, construct: &str) -> QueryError {
+        QueryError::unsupported(detail, construct).at(self.token().span)
     }
     fn parameter_map(&self, clause: PatternClause) -> QueryError {
         match clause {
             PatternClause::Match => QueryError::compile(
-                "SyntaxError",
-                "InvalidParameterUse",
+                category::SYNTAX_ERROR,
+                detail::INVALID_PARAMETER_USE,
                 "pattern predicates in MATCH require a map literal",
             )
             .at(self.token().span),
-            PatternClause::Create => self.unsupported("PatternParameterMap"),
+            PatternClause::Create => self.unsupported(
+                detail::PATTERN_PARAMETER_MAP,
+                "a parameter map in a CREATE pattern",
+            ),
         }
     }
 
@@ -160,7 +164,9 @@ impl<'source> Parser<'source> {
                 loop {
                     let target = self.expr(5)?;
                     if matches!(target.kind, ExprKind::HasLabel(..)) {
-                        return Err(self.unsupported("LabelMutation"));
+                        return Err(
+                            self.unsupported(detail::LABEL_MUTATION, "setting or removing labels")
+                        );
                     }
                     let add = self.take("+=");
                     if !add {
@@ -176,7 +182,10 @@ impl<'source> Parser<'source> {
                             }
                         }
                         ExprKind::Property(..) if !add => Assignment::Property(target, value),
-                        ExprKind::HasLabel(..) => return Err(self.unsupported("LabelMutation")),
+                        ExprKind::HasLabel(..) => {
+                            return Err(self
+                                .unsupported(detail::LABEL_MUTATION, "setting or removing labels"))
+                        }
                         ExprKind::Literal(_)
                         | ExprKind::Parameter(_)
                         | ExprKind::PatternPredicate(_)
@@ -214,15 +223,15 @@ impl<'source> Parser<'source> {
                 }
             } else {
                 for (keyword, feature) in [
-                    ("MERGE", "Merge"),
-                    ("CALL", "ProceduresAndSubqueries"),
-                    ("UNION", "Union"),
-                    ("FOREACH", "Foreach"),
-                    ("LOAD", "LoadCsv"),
-                    ("DROP", "SchemaDdl"),
+                    ("MERGE", detail::MERGE),
+                    ("CALL", detail::PROCEDURES_AND_SUBQUERIES),
+                    ("UNION", detail::UNION),
+                    ("FOREACH", detail::FOREACH),
+                    ("LOAD", detail::LOAD_CSV),
+                    ("DROP", detail::SCHEMA_DDL),
                 ] {
                     if self.is(keyword) {
-                        return Err(self.unsupported(feature));
+                        return Err(self.unsupported(feature, keyword));
                     }
                 }
                 return Err(self.error("expected a query clause"));
@@ -231,7 +240,7 @@ impl<'source> Parser<'source> {
         }
         self.take(";");
         if !matches!(self.token().kind, Kind::End) {
-            return Err(self.unsupported("MultipleStatements"));
+            return Err(self.unsupported(detail::MULTIPLE_STATEMENTS, "multiple statements"));
         }
         if clauses.is_empty() {
             return Err(self.error("expected a statement"));
@@ -370,14 +379,16 @@ impl<'source> Parser<'source> {
                 if matches!(&self.tokens[end].kind, Kind::Symbol("|"))
                     || matches!(&self.tokens[end].kind, Kind::Word(word) if word.eq_ignore_ascii_case("WHERE")) =>
             {
-                "PatternComprehension"
+                detail::PATTERN_COMPREHENSION
             }
             PatternContext::Comprehension => return Ok(None),
         };
-        Err(QueryError::unsupported(detail).at(Span {
-            start: self.tokens[position].span.start,
-            end: self.tokens[end - 1].span.end,
-        }))
+        Err(
+            QueryError::unsupported(detail, "pattern comprehensions").at(Span {
+                start: self.tokens[position].span.start,
+                end: self.tokens[end - 1].span.end,
+            }),
+        )
     }
 
     fn pattern(&mut self, clause: PatternClause) -> Result<Pattern> {
@@ -388,7 +399,7 @@ impl<'source> Parser<'source> {
                     .get(self.position + 1)
                     .is_some_and(|token| matches!(token.kind, Kind::Symbol("(")))
             {
-                return Err(self.unsupported("ShortestPath"));
+                return Err(self.unsupported(detail::SHORTEST_PATH, "shortest paths"));
             }
             let name = self.name()?;
             self.expect("=")?;
@@ -402,7 +413,7 @@ impl<'source> Parser<'source> {
                 .get(self.position + 1)
                 .is_some_and(|token| matches!(token.kind, Kind::Symbol("(")))
         {
-            return Err(self.unsupported("ShortestPath"));
+            return Err(self.unsupported(detail::SHORTEST_PATH, "shortest paths"));
         }
         let mut nodes = vec![self.node(clause)?];
         let mut relationships = Vec::new();
@@ -431,7 +442,10 @@ impl<'source> Parser<'source> {
                 }
                 if self.is("*") {
                     if self.pattern_mode == PatternMode::Build {
-                        return Err(self.unsupported("VariableLengthPattern"));
+                        return Err(self.unsupported(
+                            detail::VARIABLE_LENGTH_PATTERN,
+                            "variable-length relationship patterns",
+                        ));
                     }
                     // Probe enough of the pinned range grammar to distinguish
                     // a deferred pattern expression from scalar subtraction of
@@ -449,8 +463,8 @@ impl<'source> Parser<'source> {
                 }
                 if matches!(self.token().kind, Kind::Number(_)) || self.is("..") {
                     return Err(QueryError::compile(
-                        "SyntaxError",
-                        "InvalidRelationshipPattern",
+                        category::SYNTAX_ERROR,
+                        detail::INVALID_RELATIONSHIP_PATTERN,
                         "relationship bounds require an asterisk",
                     )
                     .at(self.token().span));
@@ -534,8 +548,8 @@ impl<'source> Parser<'source> {
         self.depth += 1;
         if self.depth > r::MAX_EXPRESSION_DEPTH {
             return Err(QueryError::compile(
-                "ResourceLimit",
-                "ExpressionDepth",
+                category::RESOURCE_LIMIT,
+                detail::EXPRESSION_DEPTH,
                 "expression nesting exceeds 48 levels",
             )
             .at(self.token().span));
@@ -575,13 +589,13 @@ impl<'source> Parser<'source> {
             if matches!(&self.token().kind,Kind::Word(name) if !["true","false","null"].iter().any(|s|name.eq_ignore_ascii_case(s)))
                 && matches!(self.tokens.get(self.position+1).map(|t|&t.kind),Some(Kind::Word(word)) if word.eq_ignore_ascii_case("IN"))
             {
-                return Err(self.unsupported("ListComprehension"));
+                return Err(self.unsupported(detail::LIST_COMPREHENSION, "list comprehensions"));
             }
             let mut xs = Vec::new();
             if !self.take("]") {
                 xs = self.expressions()?;
                 if self.is("|") {
-                    return Err(self.unsupported("ListComprehension"));
+                    return Err(self.unsupported(detail::LIST_COMPREHENSION, "list comprehensions"));
                 }
                 self.expect("]")?;
             }
@@ -637,12 +651,15 @@ impl<'source> Parser<'source> {
                             .iter()
                             .any(|n| name.eq_ignore_ascii_case(n))
                         {
-                            return Err(self.unsupported("QuantifiedListExpression"));
+                            return Err(self.unsupported(
+                                detail::QUANTIFIED_LIST_EXPRESSION,
+                                "quantified list expressions",
+                            ));
                         }
                         if name.eq_ignore_ascii_case("shortestPath")
                             || name.eq_ignore_ascii_case("allShortestPaths")
                         {
-                            return Err(self.unsupported("ShortestPath"));
+                            return Err(self.unsupported(detail::SHORTEST_PATH, "shortest paths"));
                         }
                         let distinct = self.take("DISTINCT");
                         let star = self.take("*");
@@ -664,11 +681,11 @@ impl<'source> Parser<'source> {
                 }
                 kind @ (Kind::Symbol(_) | Kind::Pattern(_) | Kind::End) => {
                     return Err(QueryError::compile(
-                        "SyntaxError",
+                        category::SYNTAX_ERROR,
                         if matches!(kind, Kind::Pattern(_)) {
-                            "InvalidUnicodeCharacter"
+                            detail::INVALID_UNICODE_CHARACTER
                         } else {
-                            "UnexpectedSyntax"
+                            detail::UNEXPECTED_SYNTAX
                         },
                         "expected expression",
                     )
@@ -688,7 +705,9 @@ impl<'source> Parser<'source> {
                 self.position += 1;
                 let name = self.name()?;
                 if self.is("(") {
-                    return Err(self.unsupported("NamespacedFunction"));
+                    return Err(
+                        self.unsupported(detail::NAMESPACED_FUNCTION, "namespaced functions")
+                    );
                 }
                 left = ExprKind::Property(Box::new(expression), name);
             } else if self.is("[") && min <= 10 {
@@ -750,7 +769,10 @@ impl<'source> Parser<'source> {
                 );
             } else {
                 if self.is("{") {
-                    return Err(self.unsupported("MapProjectionOrSubquery"));
+                    return Err(self.unsupported(
+                        detail::MAP_PROJECTION_OR_SUBQUERY,
+                        "map projections and subqueries",
+                    ));
                 }
                 let Some((operator, precedence, width)) = self.binary() else {
                     break;
@@ -874,7 +896,7 @@ fn number_value(text: &str, negative: bool, span: Span) -> Result<r::Value> {
     };
     let error = |detail: &str| {
         QueryError::compile(
-            "SyntaxError",
+            category::SYNTAX_ERROR,
             detail,
             "invalid or out-of-range numeric literal",
         )
@@ -883,19 +905,19 @@ fn number_value(text: &str, negative: bool, span: Span) -> Result<r::Value> {
     if radix == 10 && text.contains(['.', 'e', 'E']) {
         let value = text
             .parse::<f64>()
-            .map_err(|_| error("InvalidNumberLiteral"))?;
+            .map_err(|_| error(detail::INVALID_NUMBER_LITERAL))?;
         if !value.is_finite() {
-            return Err(error("FloatingPointOverflow"));
+            return Err(error(detail::FLOATING_POINT_OVERFLOW));
         }
         return Ok(r::Value::Float(if negative { -value } else { value }));
     }
     if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
-        return Err(error("InvalidNumberLiteral"));
+        return Err(error(detail::INVALID_NUMBER_LITERAL));
     }
-    let value = u64::from_str_radix(digits, radix).map_err(|_| error("IntegerOverflow"))?;
+    let value = u64::from_str_radix(digits, radix).map_err(|_| error(detail::INTEGER_OVERFLOW))?;
     if negative && value == 1_u64 << 63 {
         return Ok(r::Value::Integer(i64::MIN));
     }
-    let value = i64::try_from(value).map_err(|_| error("IntegerOverflow"))?;
+    let value = i64::try_from(value).map_err(|_| error(detail::INTEGER_OVERFLOW))?;
     Ok(r::Value::Integer(if negative { -value } else { value }))
 }

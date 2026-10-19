@@ -174,6 +174,11 @@ pub use benchmarks::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
 };
+#[cfg(feature = "production-coverage")]
+#[doc(hidden)]
+pub use cache::benchmark::{
+    VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape, VectorMemoryBenchmarkStore,
+};
 #[cfg(test)]
 pub(crate) use cache::commit::gated_wal;
 #[cfg(feature = "production-coverage")]

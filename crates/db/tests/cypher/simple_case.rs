@@ -74,8 +74,8 @@ async fn simple_case_results_and_aggregate_arguments_follow_independent_expectat
         else {
             panic!("query error")
         };
-        assert_eq!(error.category, "ArithmeticError");
-        assert_eq!(error.detail, "DivisionByZero");
+        assert_eq!(error.category, "arithmetic_error");
+        assert_eq!(error.detail, "division_by_zero");
         assert_eq!(error.phase, helix_planner::relational::ErrorPhase::Runtime);
         assert_eq!(
             run(&db, "MATCH (n:CaseWrite) RETURN count(*)").await.rows,

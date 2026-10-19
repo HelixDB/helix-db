@@ -1,4 +1,4 @@
-use helix_planner::relational::{QueryError, Result, Span};
+use helix_planner::relational::{category, detail, QueryError, Result, Span};
 use std::borrow::Cow;
 
 #[cfg(test)]
@@ -91,8 +91,8 @@ pub fn lex(source: &str) -> Result<Vec<Token<'_>>> {
                             let len = if escape == 'u' { 4 } else { 8 };
                             let Some(hex) = source.get(i..i + len) else {
                                 return Err(QueryError::compile(
-                                    "SyntaxError",
-                                    "InvalidUnicodeLiteral",
+                                    category::SYNTAX_ERROR,
+                                    detail::INVALID_UNICODE_LITERAL,
                                     "incomplete Unicode escape",
                                 )
                                 .at(Span { start, end: i }));
@@ -102,8 +102,8 @@ pub fn lex(source: &str) -> Result<Vec<Token<'_>>> {
                                 .and_then(char::from_u32)
                                 .ok_or_else(|| {
                                     QueryError::compile(
-                                        "SyntaxError",
-                                        "InvalidUnicodeLiteral",
+                                        category::SYNTAX_ERROR,
+                                        detail::INVALID_UNICODE_LITERAL,
                                         "invalid Unicode scalar",
                                     )
                                     .at(Span {
@@ -222,11 +222,11 @@ pub fn lex(source: &str) -> Result<Vec<Token<'_>>> {
                     .find(|s| source[i..].starts_with(s))
                     .ok_or_else(|| {
                         QueryError::compile(
-                            "SyntaxError",
+                            category::SYNTAX_ERROR,
                             if c.is_ascii() {
-                                "UnexpectedSyntax"
+                                detail::UNEXPECTED_SYNTAX
                             } else {
-                                "InvalidUnicodeCharacter"
+                                detail::INVALID_UNICODE_CHARACTER
                             },
                             "unexpected character",
                         )
@@ -246,8 +246,8 @@ pub fn lex(source: &str) -> Result<Vec<Token<'_>>> {
         });
         if tokens.len() > 200_000 {
             return Err(QueryError::compile(
-                "ResourceLimit",
-                "TooManyTokens",
+                category::RESOURCE_LIMIT,
+                detail::TOO_MANY_TOKENS,
                 "query exceeds the token budget",
             ));
         }
@@ -260,5 +260,6 @@ pub fn lex(source: &str) -> Result<Vec<Token<'_>>> {
 }
 
 fn error(start: usize, end: usize, message: &str) -> QueryError {
-    QueryError::compile("SyntaxError", "UnexpectedSyntax", message).at(Span { start, end })
+    QueryError::compile(category::SYNTAX_ERROR, detail::UNEXPECTED_SYNTAX, message)
+        .at(Span { start, end })
 }

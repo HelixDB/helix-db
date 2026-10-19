@@ -26,7 +26,7 @@ async fn json_preparation_failure_after_create_rolls_back_without_changing_typed
     .await
     .unwrap_err();
     assert!(
-        matches!(error, Error::Query(error) if error.category == "ResourceLimit" && error.phase == r::ErrorPhase::Runtime && error.detail == "MemoryLimit")
+        matches!(error, Error::Query(error) if error.category == "resource_limit" && error.phase == r::ErrorPhase::Runtime && error.detail == "memory_limit")
     );
     let after = db
         .cypher(crate::cypher::Request::new(
@@ -82,7 +82,7 @@ async fn encoded_graphs_paths_empty_results_and_tagged_values_match_typed_output
                 assert_eq!(encoded.body(), expected, "{text}");
                 assert_eq!(encoded.resources.reads, typed.resources.reads, "{text}");
             } else {
-                assert!(matches!(result, Err(Error::Query(error)) if error.category == "ResourceLimit" && error.phase == r::ErrorPhase::Runtime && error.detail == "ResultLimit"), "{text}");
+                assert!(matches!(result, Err(Error::Query(error)) if error.category == "resource_limit" && error.phase == r::ErrorPhase::Runtime && error.detail == "result_limit"), "{text}");
             }
         }
     }
@@ -176,7 +176,7 @@ async fn encoding_memory_scales_with_owned_columns_and_actual_wire_bytes() {
             .await
             .unwrap_err();
             assert!(
-                matches!(error, Error::Query(error) if error.phase == r::ErrorPhase::Runtime && error.detail == "MemoryLimit")
+                matches!(error, Error::Query(error) if error.phase == r::ErrorPhase::Runtime && error.detail == "memory_limit")
             );
         }
         assert_eq!(

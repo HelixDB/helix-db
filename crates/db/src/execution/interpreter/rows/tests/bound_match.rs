@@ -156,7 +156,7 @@ async fn bound_expansions_keep_large_correlations_within_a_small_budget() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(error,Error::Query(error) if error.detail=="MemoryLimit"));
+    assert!(matches!(error,Error::Query(error) if error.detail=="memory_limit"));
     db.close().await.unwrap();
 }
 
@@ -218,7 +218,7 @@ async fn bound_pattern_levels_do_not_materialize_a_fanout_product() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(error,Error::Query(error) if error.detail=="MemoryLimit"));
+    assert!(matches!(error,Error::Query(error) if error.detail=="memory_limit"));
     db.close().await.unwrap();
 }
 
@@ -227,11 +227,11 @@ async fn bound_expansions_flush_topology_and_preserve_errors_and_rollback() {
     let db = test_support::open_db("bound-pattern-writes").await;
     assert_eq!(db.cypher(crate::cypher::Request::new("CREATE (a:N {k:0})-[:R]->(b:N {k:1}) WITH a UNWIND [a,a] AS n OPTIONAL MATCH (n)-[:R]->(m) RETURN count(*),sum(m.k)")).await.unwrap().rows,vec![vec![json!(2),json!(2)]]);
     for (text,detail) in [
-        ("MATCH (a:N {k:0}) UNWIND [a,1] AS n OPTIONAL MATCH (n)-[:R]->(b) RETURN b LIMIT 1","ExpectedNode"),
-        ("MATCH (a:N {k:0}) UNWIND [a,1] AS n OPTIONAL MATCH (n)-[:R]->(b) WHERE 1/0>0 RETURN b LIMIT 0","DivisionByZero"),
-        ("MATCH (a:N {k:0}) UNWIND [1,a] AS n OPTIONAL MATCH (n)-[:R]->(b) WHERE 1/0>0 RETURN b LIMIT 0","ExpectedNode"),
-        ("MATCH (a:N)-[found:R]->(b) UNWIND [found,1] AS r OPTIONAL MATCH (a)-[r:R]->(b) RETURN r LIMIT 0","ExpectedRelationship"),
-        ("CREATE (:Rollback) WITH 1 AS marker MATCH (a:N {k:0}) UNWIND [a,1] AS n OPTIONAL MATCH (n)-[:R]->(b) RETURN b LIMIT 1","ExpectedNode"),
+        ("MATCH (a:N {k:0}) UNWIND [a,1] AS n OPTIONAL MATCH (n)-[:R]->(b) RETURN b LIMIT 1","expected_node"),
+        ("MATCH (a:N {k:0}) UNWIND [a,1] AS n OPTIONAL MATCH (n)-[:R]->(b) WHERE 1/0>0 RETURN b LIMIT 0","division_by_zero"),
+        ("MATCH (a:N {k:0}) UNWIND [1,a] AS n OPTIONAL MATCH (n)-[:R]->(b) WHERE 1/0>0 RETURN b LIMIT 0","expected_node"),
+        ("MATCH (a:N)-[found:R]->(b) UNWIND [found,1] AS r OPTIONAL MATCH (a)-[r:R]->(b) RETURN r LIMIT 0","expected_relationship"),
+        ("CREATE (:Rollback) WITH 1 AS marker MATCH (a:N {k:0}) UNWIND [a,1] AS n OPTIONAL MATCH (n)-[:R]->(b) RETURN b LIMIT 1","expected_node"),
     ] {
         let plan=r::plan(helix_cypher::compile(text).unwrap(),&db.planner_context(context::ParamBindings::default())).unwrap();
         for batch_rows in [1,2,7] {
@@ -374,7 +374,7 @@ async fn bound_expansion_continuations_release_every_level_on_failure_or_drop() 
         Ok(_) => panic!("resumed pattern exceeded its remaining allowance"),
     };
     assert!(
-        matches!(&error,Error::Query(error) if error.detail=="MemoryLimit")
+        matches!(&error,Error::Query(error) if error.detail=="memory_limit")
             || matches!(
                 &error,
                 Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)
@@ -489,7 +489,7 @@ async fn bound_pattern_admission_failures_release_every_owner() {
                         assert_eq!(rows.len(), 1);
                         successes += 1;
                     }
-                    Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                    Err(Error::Query(error)) if error.detail == "memory_limit" => failures += 1,
                     Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => {
                         failures += 1
                     }
@@ -623,7 +623,7 @@ async fn stack_levels_admit_frames_and_polls_after_their_input_yields() {
                     assert_eq!(rows.len(), 1);
                     successes += 1;
                 }
-                Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+                Err(Error::Query(error)) if error.detail == "memory_limit" => failures += 1,
                 Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
                 Ok(None) => panic!("the input has a match"),
                 Err(error) => panic!("{available}: {error:?}"),

@@ -1,6 +1,7 @@
 //! Common selection program. Frontend adapters decide predicate semantics;
 //! this kernel preserves order, multiplicity, and the first evaluation failure.
 use super::{Expression, ExpressionInput, QueryError, Result, Slot};
+use crate::relational::{category, detail};
 use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 /// Three-valued predicate result. Native boolean predicates only produce True
@@ -48,8 +49,8 @@ impl<E: ExpressionInput> SelectionProgram<E> {
     pub fn validate_input(&self, input: &BTreeSet<Slot>) -> Result<()> {
         if !self.references.is_subset(input) {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "UnboundSlot",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::UNBOUND_SLOT,
                 "selection references an undefined incoming row slot",
             ));
         }

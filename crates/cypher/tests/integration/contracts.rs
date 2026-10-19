@@ -592,7 +592,7 @@ fn validated_plans_reject_malformed_paths_and_dangling_slots() {
         r::Query::new(vec![binding.clone()], vec![invalid], vec![])
             .unwrap_err()
             .detail,
-        "UnboundSlot"
+        "unbound_slot"
     );
     let pattern = r::Pattern {
         nodes: vec![r::NodePattern {
@@ -615,7 +615,7 @@ fn validated_plans_reject_malformed_paths_and_dangling_slots() {
         )
         .unwrap_err()
         .detail,
-        "EmptyLabel"
+        "empty_label"
     );
     assert!(r::Path::new(vec![1], vec![1]).is_err());
     assert!(r::Path::new(vec![], vec![]).is_err());
@@ -623,7 +623,7 @@ fn validated_plans_reject_malformed_paths_and_dangling_slots() {
     let invalid = r::Expression::Function(r::Function::Id, vec![]);
     assert_eq!(
         invalid.validate_shape().unwrap_err().detail,
-        "FunctionArity"
+        "function_arity"
     );
 }
 
@@ -649,7 +649,7 @@ fn named_path_nodes_must_belong_to_their_own_validated_pattern() {
         )
         .unwrap_err()
         .detail,
-        "InvalidPath"
+        "invalid_path"
     );
 
     let query = helix_cypher::compile("MATCH p=(n) RETURN p").unwrap();
@@ -666,7 +666,7 @@ fn named_path_nodes_must_belong_to_their_own_validated_pattern() {
         r::Query::new(bindings, operators, query.returns().to_vec())
             .unwrap_err()
             .detail,
-        "InvalidPath"
+        "invalid_path"
     );
 }
 
@@ -676,27 +676,27 @@ fn source_and_expression_limits_fail_cleanly() {
         helix_cypher::parse(&" ".repeat(16 * 1024 * 1024 + 1))
             .unwrap_err()
             .detail,
-        "QueryTooLarge"
+        "query_too_large"
     );
     let query = format!("RETURN {}1{}", "(".repeat(150), ")".repeat(150));
     assert_eq!(
         helix_cypher::compile(&query).unwrap_err().category,
-        "ResourceLimit"
+        "resource_limit"
     );
     let query = format!("RETURN 1{}", "+1".repeat(150));
     assert_eq!(
         helix_cypher::compile(&query).unwrap_err().category,
-        "ResourceLimit"
+        "resource_limit"
     );
     let mut value = r::Value::Null;
     for _ in 0..130 {
         value = r::Value::List(vec![value]);
     }
-    assert_eq!(value.validate_shape().unwrap_err().detail, "ValueDepth");
+    assert_eq!(value.validate_shape().unwrap_err().detail, "value_depth");
     let query = format!("RETURN {}", vec!["1"; 100_001].join(","));
     assert_eq!(
         helix_cypher::compile(&query).unwrap_err().detail,
-        "TooManyTokens"
+        "too_many_tokens"
     );
 }
 
@@ -882,7 +882,7 @@ fn escaped_parameter_names_share_identifier_escaping_and_source_validation() {
     );
     for malformed in ["RETURN $``", "RETURN $`unterminated"] {
         let error = helix_cypher::compile(malformed).unwrap_err();
-        assert_eq!(error.category, "SyntaxError");
+        assert_eq!(error.category, "syntax_error");
         assert!(error.span.is_some());
     }
 }

@@ -199,7 +199,7 @@ async fn proven_optional_matches_keep_late_errors_and_rollback() {
         ] {
             let error = execute(&db, &plan, strategy, batch_rows).await.unwrap_err();
             assert!(
-                matches!(&error, Error::Query(error) if error.category == "TypeError" || error.detail == "DivisionByZero"),
+                matches!(&error, Error::Query(error) if error.category == "type_error" || error.detail == "division_by_zero"),
                 "{text}: {error}"
             );
         }
@@ -210,7 +210,7 @@ async fn proven_optional_matches_keep_late_errors_and_rollback() {
         ))
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("DivisionByZero"), "{error}");
+    assert!(error.to_string().contains("division_by_zero"), "{error}");
     for (statement, expected) in [
         ("MATCH (m:OptMarker) RETURN count(m)", json!([[0]])),
         (

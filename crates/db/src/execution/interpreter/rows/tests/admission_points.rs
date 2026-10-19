@@ -40,7 +40,7 @@ async fn bounded(
             )
             .rows,
         ),
-        Err(Error::Query(error)) if error.detail == "MemoryLimit" => None,
+        Err(Error::Query(error)) if error.detail == "memory_limit" => None,
         Err(error) => panic!("{memory_bytes} bytes: {error}"),
     };
     match plan.query().effect() {
@@ -258,7 +258,7 @@ async fn request_boundary_rejects_programs_whose_execution_state_does_not_fit() 
             .await
             .unwrap_err();
         assert!(
-            matches!(error, Error::Query(ref error) if error.detail == "MemoryLimit"),
+            matches!(error, Error::Query(ref error) if error.detail == "memory_limit"),
             "{memory_bytes} bytes: {error}"
         );
     }

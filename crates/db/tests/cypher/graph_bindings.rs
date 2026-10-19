@@ -32,8 +32,8 @@ async fn computed_node_and_relationship_aliases_remain_usable_in_patterns_and_up
     else {
         panic!("query error")
     };
-    assert_eq!(error.category, "ArithmeticError");
-    assert_eq!(error.detail, "DivisionByZero");
+    assert_eq!(error.category, "arithmetic_error");
+    assert_eq!(error.detail, "division_by_zero");
     assert_eq!(
         run(&db, "MATCH (a:AliasNode {key:'a'}) RETURN a.value")
             .await

@@ -104,8 +104,8 @@ async fn streaming_write_read_sets_hit_the_budget_and_roll_back_all_graph_change
     assert_eq!(
         (error.category.as_str(), error.detail.as_str(), error.phase),
         (
-            "ResourceLimit",
-            "MemoryLimit",
+            "resource_limit",
+            "memory_limit",
             helix_planner::relational::ErrorPhase::Runtime
         )
     );

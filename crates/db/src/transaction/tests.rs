@@ -205,7 +205,7 @@ async fn rejected_read_does_not_reach_backend_or_hide_its_memory_error() {
     let crate::cypher::Error::Query(error) = crate::cypher::Error::from(error) else {
         panic!("memory error must retain the Cypher resource category")
     };
-    assert_eq!(error.detail, "MemoryLimit");
+    assert_eq!(error.detail, "memory_limit");
     assert!(is_admission_failure(
         &transaction.multi_get(&[&key, &next]).await.unwrap_err()
     ));

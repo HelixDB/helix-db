@@ -4,6 +4,7 @@ use crate::{
     encoding::v2::keys::scope::DataScope, execution_control::ExecutionControl, HelixDB,
     HelixDbError,
 };
+use helix_planner::relational::{category, detail};
 use helix_planner::{context, ir, relational as r};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -81,19 +82,26 @@ impl From<HelixDbError> for Error {
         let (detail, message) = if error.error_code()
             == helix_ast::error_code::QueryErrorCode::QueryMemoryLimitExceeded
         {
-            ("MemoryLimit", "query live buffers exceed the memory budget")
+            (
+                detail::MEMORY_LIMIT,
+                "query live buffers exceed the memory budget",
+            )
         } else if matches!(
             error,
             HelixDbError::Encoding(crate::encoding::error::EncodingError::PropertyNestingLimit)
         ) {
             (
-                "StoredValueNestingLimit",
+                detail::STORED_VALUE_NESTING_LIMIT,
                 "stored property archive exceeds the decoder nesting limit",
             )
         } else {
             return Self::Storage(error);
         };
-        Self::Query(r::QueryError::runtime("ResourceLimit", detail, message))
+        Self::Query(r::QueryError::runtime(
+            category::RESOURCE_LIMIT,
+            detail,
+            message,
+        ))
     }
 }
 
@@ -183,8 +191,8 @@ pub(crate) async fn execute_with<O: output::Format>(
         && (db.is_reader_mode() || mode == crate::query_service::QueryMode::Warm)
     {
         return Err(r::QueryError::compile(
-            "AccessModeError",
-            "WriterRequired",
+            category::ACCESS_MODE_ERROR,
+            detail::WRITER_REQUIRED,
             "mutating Cypher requires a writer",
         )
         .into());
@@ -235,8 +243,8 @@ fn prepare_request(request: Input, limits: Limits) -> Result<PreparedRequest> {
         || limits.collection_items == 0
     {
         return Err(r::QueryError::compile(
-            "ResourceLimit",
-            "InvalidLimits",
+            category::RESOURCE_LIMIT,
+            detail::INVALID_LIMITS,
             "resource budgets must be positive",
         )
         .into());
@@ -249,8 +257,8 @@ fn prepare_request(request: Input, limits: Limits) -> Result<PreparedRequest> {
     for name in query.parameters() {
         if !parameters.contains_key(&name) {
             return Err(r::QueryError::compile(
-                "ParameterMissing",
-                "MissingParameter",
+                category::PARAMETER_MISSING,
+                detail::MISSING_PARAMETER,
                 format!("missing parameter ${name}"),
             )
             .into());

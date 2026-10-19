@@ -64,7 +64,7 @@ fn graph_reference_visits_stop_at_the_first_callback_error() {
     )]));
     let mut visits = 0;
     let mut failure = Some(Error::Query(r::QueryError::runtime(
-        "ResourceLimit",
+        "resource_limit",
         "ExpectedFailure",
         "visitor callback failure",
     )));
@@ -277,7 +277,7 @@ async fn hydration_leaves_unreadable_labels_unset_and_skips_vanished_relationshi
         assert!(!graph.entities.contains_key(&r::Entity::Relationship(11)));
         assert!(matches!(
             graph.label(r::Entity::Relationship(11)),
-            Err(error) if error.detail == "DeletedEntityAccess"
+            Err(error) if error.detail == "deleted_entity_access"
         ));
         drop(graph);
         assert_eq!(ctx.row_budget().available(), 64 * 1024);
@@ -319,7 +319,7 @@ async fn returned_entities_with_unreadable_properties_fail_with_the_stored_value
             .await
             .unwrap_err();
         assert!(
-            matches!(error, Error::Query(ref error) if error.detail == "StoredValueType"),
+            matches!(error, Error::Query(ref error) if error.detail == "stored_value_type"),
             "{text}: {error}"
         );
     }
@@ -353,7 +353,7 @@ fn wire_encoding_rejects_hydrated_data_of_the_other_entity_kind() {
     for entity in [r::Entity::Relationship(3), r::Entity::Node(4)] {
         assert!(matches!(
             graph.wire(&r::Value::Entity(entity)),
-            Err(Error::Query(error)) if error.detail == "EntityKindMismatch"
+            Err(Error::Query(error)) if error.detail == "entity_kind_mismatch"
         ));
     }
 }

@@ -70,7 +70,7 @@ fn admission_rejects_before_target_allocation_and_preserves_empty_and_numeric_va
     let (result, observation) =
         allocation_testing::observe(|| prepare(input, footprint.construction() - 1));
     assert!(
-        matches!(result,Err(crate::cypher::Error::Query(error)) if error.detail=="MemoryLimit" && error.phase==r::ErrorPhase::Runtime)
+        matches!(result,Err(crate::cypher::Error::Query(error)) if error.detail=="memory_limit" && error.phase==r::ErrorPhase::Runtime)
     );
     assert!(
         observation.bytes < 512,
@@ -103,7 +103,7 @@ fn preflight_preserves_name_depth_and_node_limit_errors_without_a_wide_worklist(
     let error = preflight(&input).unwrap_err();
     assert_eq!(
         (error.category.as_str(), error.detail.as_str(), error.phase),
-        ("SyntaxError", "InvalidParameter", r::ErrorPhase::Compile)
+        ("syntax_error", "invalid_parameter", r::ErrorPhase::Compile)
     );
     let mut nested = Q::Null;
     for _ in 1..r::MAX_EXPRESSION_DEPTH {
@@ -112,7 +112,7 @@ fn preflight_preserves_name_depth_and_node_limit_errors_without_a_wide_worklist(
     let input = BTreeMap::from([("x".into(), nested)]);
     preflight(&input).unwrap();
     let input = BTreeMap::from([("x".into(), Q::Object(input))]);
-    assert_eq!(preflight(&input).unwrap_err().detail, "ValueDepth");
+    assert_eq!(preflight(&input).unwrap_err().detail, "value_depth");
     let input = BTreeMap::from([("x".into(), Q::Array(vec![Q::Null; 199_999]))]);
     let (result, observation) = allocation_testing::observe(|| preflight(&input));
     result.unwrap();
@@ -122,7 +122,7 @@ fn preflight_preserves_name_depth_and_node_limit_errors_without_a_wide_worklist(
     let error = result.unwrap_err();
     assert_eq!(
         (error.detail.as_str(), error.phase),
-        ("ValueDepth", r::ErrorPhase::Compile)
+        ("value_depth", r::ErrorPhase::Compile)
     );
     assert!(
         observation.bytes < 512,
@@ -167,7 +167,7 @@ async fn service_reports_parameter_memory_and_rejects_before_opening_writes() {
         },
     )
     .await;
-    assert!(matches!(result,Err(cypher::Error::Query(error)) if error.detail=="MemoryLimit"));
+    assert!(matches!(result,Err(cypher::Error::Query(error)) if error.detail=="memory_limit"));
     assert_eq!(
         db.cypher(cypher::Request::new("MATCH (n:Rejected) RETURN count(*)"))
             .await

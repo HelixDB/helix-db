@@ -98,7 +98,7 @@ async fn downstream_limits_stop_total_prefixes_without_hiding_source_errors() {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(error,Error::Query(ref error) if error.detail=="DivisionByZero"),
+                matches!(error,Error::Query(ref error) if error.detail=="division_by_zero"),
                 "{query}: {error}"
             );
         }
@@ -158,11 +158,11 @@ async fn projection_chain_windows_validate_parameters_on_empty_and_nonempty_inpu
                 Some(r::BatchConsumer::Pipeline { .. })
             ));
             for (value, detail) in [
-                (r::Value::Integer(-1), "NegativeIntegerArgument"),
-                (r::Value::Float(1.0), "InvalidArgumentType"),
-                (r::Value::Null, "InvalidArgumentType"),
-                (r::Value::Boolean(false), "InvalidArgumentType"),
-                (r::Value::List(vec![]), "InvalidArgumentType"),
+                (r::Value::Integer(-1), "negative_integer_argument"),
+                (r::Value::Float(1.0), "invalid_argument_type"),
+                (r::Value::Null, "invalid_argument_type"),
+                (r::Value::Boolean(false), "invalid_argument_type"),
+                (r::Value::List(vec![]), "invalid_argument_type"),
             ] {
                 let parameters = BTreeMap::from([("window".into(), value)]);
                 for strategy in [r::RowExecution::Batched, r::RowExecution::Materialized] {
@@ -212,7 +212,7 @@ async fn projection_chain_windows_validate_parameters_on_empty_and_nonempty_inpu
         .parameters
         .insert("window".into(), helix_ast::query::QueryValue::I64(-1));
     let error = db.cypher(request).await.unwrap_err();
-    assert!(matches!(error,Error::Query(ref error) if error.detail=="NegativeIntegerArgument"));
+    assert!(matches!(error,Error::Query(ref error) if error.detail=="negative_integer_argument"));
     assert_eq!(
         db.cypher(crate::cypher::Request::new(
             "MATCH (n:Marker) RETURN count(*)"
@@ -284,9 +284,9 @@ async fn immutable_match_constraints_bound_work_after_the_first_complete_match()
         )
         .unwrap();
         let expected = if query.contains("$missing") {
-            "MissingParameter"
+            "missing_parameter"
         } else {
-            "DivisionByZero"
+            "division_by_zero"
         };
         for strategy in [r::RowExecution::Batched, r::RowExecution::Materialized] {
             let error = Interpreter::new(&db, context::ParamBindings::default())
@@ -445,7 +445,7 @@ async fn composed_windows_match_sequence_model_across_batch_boundaries() {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, Error::Query(ref error) if error.detail=="NegativeIntegerArgument"),
+            matches!(error, Error::Query(ref error) if error.detail=="negative_integer_argument"),
             "{query}: {error}"
         );
     }
@@ -456,7 +456,7 @@ async fn composed_windows_match_sequence_model_across_batch_boundaries() {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, Error::Query(ref error) if error.detail=="MissingParameter"),
+        matches!(error, Error::Query(ref error) if error.detail=="missing_parameter"),
         "{error}"
     );
     db.cypher(crate::cypher::Request::new(
@@ -584,11 +584,11 @@ async fn empty_windows_ignore_skips_without_skipping_validation() {
         }
     }
     for (query, detail) in [
-        ("UNWIND [1/0] AS n RETURN n SKIP 1000000 LIMIT 0", "DivisionByZero"),
-        ("MATCH(n:EmptyWindowInput {k:$missing}) WITH n SKIP 1000000 LIMIT 1000000 RETURN n SKIP 1000000 LIMIT 0", "MissingParameter"),
-        ("MATCH(n:EmptyWindowInput) WITH n SKIP $negative LIMIT 1000000 RETURN n SKIP 1000000 LIMIT 0", "NegativeIntegerArgument"),
-        ("MATCH(n:EmptyWindowInput) WITH n SKIP 1000000 LIMIT 0 RETURN n SKIP $negative LIMIT 0", "NegativeIntegerArgument"),
-        ("MATCH(n:EmptyWindowInput) WITH n SKIP 1000000 LIMIT 0 RETURN n LIMIT $fraction", "InvalidArgumentType"),
+        ("UNWIND [1/0] AS n RETURN n SKIP 1000000 LIMIT 0", "division_by_zero"),
+        ("MATCH(n:EmptyWindowInput {k:$missing}) WITH n SKIP 1000000 LIMIT 1000000 RETURN n SKIP 1000000 LIMIT 0", "missing_parameter"),
+        ("MATCH(n:EmptyWindowInput) WITH n SKIP $negative LIMIT 1000000 RETURN n SKIP 1000000 LIMIT 0", "negative_integer_argument"),
+        ("MATCH(n:EmptyWindowInput) WITH n SKIP 1000000 LIMIT 0 RETURN n SKIP $negative LIMIT 0", "negative_integer_argument"),
+        ("MATCH(n:EmptyWindowInput) WITH n SKIP 1000000 LIMIT 0 RETURN n LIMIT $fraction", "invalid_argument_type"),
     ] {
         let plan = r::plan(
             helix_cypher::compile(query).unwrap(),

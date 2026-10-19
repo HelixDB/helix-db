@@ -126,7 +126,7 @@ async fn direct_grouping_keys_share_one_live_allowance() {
             allocated.bytes <= memory_bytes,
             "direct grouping copied keys before admission: {allocated:?}"
         );
-        assert!(matches!(result,Err(Error::Query(error)) if error.detail=="MemoryLimit"));
+        assert!(matches!(result,Err(Error::Query(error)) if error.detail=="memory_limit"));
         assert_eq!(ctx.row_budget().available(), memory_bytes);
     }
     db.close().await.unwrap();
@@ -171,7 +171,7 @@ async fn empty_global_aggregation_admits_its_null_representative_before_allocati
         .now_or_never()
     });
     assert!(
-        matches!(result.expect("empty aggregation performs no pending I/O"),Err(Error::Query(error)) if error.detail=="MemoryLimit")
+        matches!(result.expect("empty aggregation performs no pending I/O"),Err(Error::Query(error)) if error.detail=="memory_limit")
     );
     assert!(
         allocated.bytes < 2048,

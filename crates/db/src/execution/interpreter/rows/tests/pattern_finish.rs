@@ -51,7 +51,7 @@ async fn cached_scan_sets_admit_construction_and_stop_at_exact_demand() {
     ctx.row_memory = Some(memory::Budget::new(4095));
     assert!(
         matches!(ctx.match_source_ids(source, usize::MAX, Limits { batch_rows: 1, ..limits }).await,
-        Err(crate::cypher::Error::Query(error)) if error.detail == "MemoryLimit")
+        Err(crate::cypher::Error::Query(error)) if error.detail == "memory_limit")
     );
     assert_eq!(ctx.row_budget().reads().scan_rows, 1);
     assert_eq!(ctx.row_budget().available(), 4095);
@@ -138,7 +138,7 @@ async fn cached_native_fallback_preserves_subplan_isolation_and_validates_result
     ctx.variables.insert(variable, ExecutionValue::Count(4));
     assert!(
         matches!(ctx.match_source_ids(&source, usize::MAX, Limits::default()).await,
-        Err(crate::cypher::Error::Query(error)) if error.detail == "InvalidAccessResult")
+        Err(crate::cypher::Error::Query(error)) if error.detail == "invalid_access_result")
     );
     assert_eq!(ctx.step_outputs.len(), 1);
     let source = r::PlannedNode {
@@ -362,7 +362,7 @@ async fn materialized_matching_stops_reading_outer_rows_at_demand() {
             assert_eq!(demand, usize::MAX);
             assert!(matches!(
                 result,
-                Err(crate::cypher::Error::Query(error)) if error.detail == "ExpectedNode"
+                Err(crate::cypher::Error::Query(error)) if error.detail == "expected_node"
             ));
             continue;
         };

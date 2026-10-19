@@ -83,28 +83,28 @@ async fn bound_pattern_variables_accept_only_graph_values_or_null() {
         (
             "MATCH (n:User {uid: 1}) WITH [n, 1] AS xs UNWIND xs AS a \
              MATCH (a)-[:F]->(b) RETURN b.uid",
-            "ExpectedNode",
+            "expected_node",
         ),
         (
             "MATCH (n:User {uid: 1}) WITH [n, 1] AS xs UNWIND xs AS a \
              MATCH (a)-[:F]->(b) RETURN b.uid ORDER BY b.uid",
-            "ExpectedNode",
+            "expected_node",
         ),
         (
             "MATCH ()-[r:F]->() WITH [r, 1] AS xs UNWIND xs AS x \
              MATCH ()-[x]->() RETURN count(*)",
-            "ExpectedRelationship",
+            "expected_relationship",
         ),
         (
             "MATCH ()-[r:F]->() WITH [r, 1] AS xs UNWIND xs AS x \
              MATCH (a)-[x]->(b) RETURN a.uid ORDER BY a.uid",
-            "ExpectedRelationship",
+            "expected_relationship",
         ),
     ] {
         let error = runtime_error(&db, cypher::Request::new(query)).await;
         assert_eq!(
             (error.category.as_str(), error.detail.as_str()),
-            ("TypeError", detail),
+            ("type_error", detail),
             "{query}"
         );
     }
@@ -223,7 +223,7 @@ async fn index_lookups_answer_unindexable_probes_as_a_label_scan_would() {
         .await;
         assert_eq!(
             (error.category.as_str(), error.detail.as_str()),
-            ("EntityNotFound", "DeletedEntityAccess")
+            ("entity_not_found", "deleted_entity_access")
         );
         assert_eq!(
             run(
@@ -328,7 +328,7 @@ async fn equality_joins_resume_buckets_and_report_deleted_probes() {
         let error = runtime_error(&db, cypher::Request::new(query)).await;
         assert_eq!(
             (error.category.as_str(), error.detail.as_str()),
-            ("EntityNotFound", "DeletedEntityAccess"),
+            ("entity_not_found", "deleted_entity_access"),
             "{query}"
         );
     }
@@ -515,7 +515,7 @@ async fn pattern_demand_stops_early_but_never_hides_errors() {
         let error = runtime_error(&db, cypher::Request::new(query)).await;
         assert_eq!(
             (error.category.as_str(), error.detail.as_str()),
-            ("ArithmeticError", "DivisionByZero"),
+            ("arithmetic_error", "division_by_zero"),
             "{query}"
         );
     }
@@ -567,7 +567,7 @@ async fn response_and_memory_limits_fail_with_resource_errors() {
             .unwrap_err();
         assert!(
             matches!(&error, cypher::Error::Query(e)
-                if e.category == "ResourceLimit" && e.detail == "ResultLimit"
+                if e.category == "resource_limit" && e.detail == "result_limit"
                     && e.phase == r::ErrorPhase::Runtime),
             "{query}: {error:?}"
         );
@@ -590,7 +590,7 @@ async fn response_and_memory_limits_fail_with_resource_errors() {
             .unwrap_err();
         assert!(
             matches!(&error, cypher::Error::Query(e)
-                if e.category == "ResourceLimit" && e.detail == "MemoryLimit"
+                if e.category == "resource_limit" && e.detail == "memory_limit"
                     && e.phase == r::ErrorPhase::Runtime),
             "{memory_bytes} bytes, {width} columns: {error:?}"
         );

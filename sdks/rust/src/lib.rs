@@ -379,7 +379,7 @@ impl CypherExecutionRequest<'_, '_> {
 fn embedded_cypher_error(error: db::cypher::Error) -> HelixError {
     HelixError::EmbeddedError {
         code: match &error {
-            db::cypher::Error::Query(e) => format!("{}:{:?}:{}", e.category, e.phase, e.detail),
+            db::cypher::Error::Query(e) => e.code(),
             db::cypher::Error::Storage(e) => e.error_code().to_string(),
             db::cypher::Error::Json(_) => "response_serialization_error".into(),
         },
@@ -1861,7 +1861,7 @@ mod client_tests {
 
     #[tokio::test]
     async fn cypher_diagnostics_are_remote_errors() {
-        let body = r#"{"error":"SyntaxError","msg":"unexpected end","details":{"detail":"UnexpectedEnd","phase":"compile","span":null}}"#;
+        let body = r#"{"error":"syntax_error","msg":"unexpected end","details":{"detail":"unexpected_end","phase":"compile","span":null}}"#;
         let (base, handle) = spawn_capture_server(400, body).await;
         let error = Client::new(Some(&base))
             .unwrap()
@@ -1870,7 +1870,7 @@ mod client_tests {
             .expect_err("a Cypher diagnostic is a remote error");
         assert_eq!(handle.await.unwrap().0, "/v2/cypher");
         assert_eq!(error.status_code(), Some(400));
-        assert_eq!(error.remote_code(), Some("SyntaxError"));
+        assert_eq!(error.remote_code(), Some("syntax_error"));
         assert_eq!(error.remote_message(), Some("unexpected end"));
     }
 

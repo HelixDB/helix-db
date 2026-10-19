@@ -93,8 +93,8 @@ fn simple_case_preserves_equality_and_branch_laziness() {
             panic!("one projection")
         };
         let error = evaluation.eval(&items[0].expression).unwrap_err();
-        assert_eq!(error.category, "ArithmeticError");
-        assert_eq!(error.detail, "DivisionByZero");
+        assert_eq!(error.category, "arithmetic_error");
+        assert_eq!(error.detail, "division_by_zero");
         assert_eq!(error.phase, r::ErrorPhase::Runtime);
     }
 }

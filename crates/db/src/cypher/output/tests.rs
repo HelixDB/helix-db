@@ -100,7 +100,7 @@ fn failed_encoding_admission_precedes_payload_allocation_and_releases_input() {
     let (result, observed) = crate::allocation_testing::observe(|| {
         Json::prepare(response, memory, expected.len(), &budget, || Ok(()))
     });
-    assert!(matches!(result, Err(Error::Query(error)) if error.detail == "MemoryLimit"));
+    assert!(matches!(result, Err(Error::Query(error)) if error.detail == "memory_limit"));
     assert!(observed.bytes < expected.len());
     assert_eq!(budget.available(), expected.len());
 }
