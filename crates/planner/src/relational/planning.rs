@@ -24,6 +24,12 @@ pub enum MatchStep {
         to: Slot,
         reverse: bool,
     },
+    /// Bind an unbound typed relationship and both its unbound endpoints from
+    /// the edge bitmaps of its types, in place of a full node scan whose
+    /// expansion would reach the same edges through every node's adjacency.
+    ScanRelationship {
+        relationship: usize,
+    },
     HashJoin {
         slot: Slot,
         property: String,
@@ -572,7 +578,8 @@ fn plan_accesses(
         let lookup_predicate = index_predicates
             .remove(&operator_index)
             .expect("every MATCH has its index predicate");
-        let pattern_sources = nodes
+        let incoming = query.contracts()[operator_index].input().slots();
+        let (pattern_sources, full_scans): (Vec<_>, Vec<_>) = nodes
             .iter()
             .filter(|(index, _, _)| *index == operator_index)
             .map(|(_, slot, indices)| {
@@ -606,13 +613,22 @@ fn plan_accesses(
                         crate::optimizer::ordering::compare_alternatives((a, a.cost), (b, b.cost))
                     })
                     .expect("every source has an access candidate");
-                PatternSource {
-                    slot: *slot,
-                    rows: source_rows(&roots[index], &config),
-                    access_cost: alternative.cost,
-                }
+                let logical::LogicalExpr::AccessPath(logical::AccessPath::Node(access)) =
+                    &roots[index]
+                else {
+                    unreachable!("source candidates are node access roots");
+                };
+                (
+                    PatternSource {
+                        slot: *slot,
+                        rows: source_rows(&roots[index], &config),
+                        access_cost: alternative.cost,
+                    },
+                    (*access.source().as_ref() == ir::NodeAccessPlan::AllScan).then_some(*slot),
+                )
             })
-            .collect();
+            .unzip();
+        let full_scans = full_scans.into_iter().flatten().collect::<BTreeSet<_>>();
         let population = |slot| {
             pattern
                 .nodes
@@ -628,11 +644,14 @@ fn plan_accesses(
             .relationships
             .iter()
             .map(|rel| {
+                // Execution reads each distinct type once.
                 let edge_rows = if rel.types.is_empty() {
                     config.storage.default_unknown_scan_rows.as_rows()
                 } else {
                     rel.types
                         .iter()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
                         .map(|kind| {
                             config
                                 .stats
@@ -650,6 +669,13 @@ fn plan_accesses(
                 } else {
                     1
                 };
+                // Either endpoint's scan would reach every edge of the type,
+                // so an unselective start reads the edges themselves instead.
+                let scannable = !rel.types.is_empty()
+                    && [rel.from, rel.to]
+                        .iter()
+                        .all(|slot| full_scans.contains(slot) && !incoming.contains(slot))
+                    && !incoming.contains(&rel.slot);
                 PatternExpansion {
                     from: rel.from,
                     to: rel.to,
@@ -660,18 +686,14 @@ fn plan_accesses(
                     reverse_rows: edge_rows
                         .div_ceil(population(rel.to))
                         .saturating_mul(directions),
+                    scan_rows: scannable.then(|| edge_rows.saturating_mul(directions)),
                 }
             })
             .collect();
-        let mut order = GraphPatternOrder::new(
-            pattern_sources,
-            relationships,
-            query.contracts()[operator_index].input().slots(),
-        )?;
+        let mut order = GraphPatternOrder::new(pattern_sources, relationships, incoming.clone())?;
         // Probe extraction may eliminate candidates before final validation.
         // Only total constraints can cross that boundary: unbound parameters,
         // arithmetic, functions and dynamic property access retain their order.
-        let incoming = query.contracts()[operator_index].input().slots();
         let totality = Totality {
             pattern,
             bindings: query.bindings(),

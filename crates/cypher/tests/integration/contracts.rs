@@ -1039,6 +1039,7 @@ fn unique_correlated_lookups_beat_static_sources_and_other_keys() {
                 r::MatchStep::IndexLookup(lookup) => Some(lookup.key.property.as_ref().to_owned()),
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1082,6 +1083,7 @@ fn correlated_lookups_probe_properties_of_bound_values() {
                 r::MatchStep::IndexLookup(lookup) => Some(lookup.probe_property.clone()),
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1420,6 +1422,7 @@ fn membership_lookups_probe_list_variables() {
                 }
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1475,6 +1478,7 @@ fn incoming_lookups_survive_cheaper_lookups_on_the_same_pattern() {
                 r::MatchStep::IndexLookup(lookup) => Some(lookup.key.property.as_ref().to_owned()),
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()

@@ -21,6 +21,12 @@ pub struct PatternExpansion {
     /// Estimated adjacency rows per source endpoint in each direction.
     pub forward_rows: u64,
     pub reverse_rows: u64,
+    /// Rows a scan of the relationship's edge bitmaps binds, one per edge and
+    /// orientation, when the relationship may start the pattern there: it is
+    /// typed, and it and both endpoints are unbound full node scans. `None`
+    /// keeps node-driven expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_rows: Option<u64>,
 }
 
 /// A property equijoin whose null/error semantics were proven by the frontend
@@ -138,6 +144,19 @@ impl GraphPatternOrder {
                 category::INTERNAL_PLANNER_ERROR,
                 detail::INVALID_PATTERN_ORDER,
                 "pattern sources must be unique and contain every endpoint",
+            ));
+        }
+        // A scan binds all three slots, so none of them may arrive bound.
+        if relationships.iter().any(|r| {
+            r.scan_rows.is_some()
+                && [r.from, r.to, r.relationship]
+                    .iter()
+                    .any(|slot| incoming.contains(slot))
+        }) {
+            return Err(QueryError::compile(
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_PATTERN_ORDER,
+                "a relationship scan binds an unbound relationship and endpoints",
             ));
         }
         sources.sort_by_key(|s| (s.rows, s.slot));
@@ -291,6 +310,38 @@ impl GraphPatternOrder {
                 rows = rows.saturating_mul(lookup.estimated_rows);
                 steps.push(MatchStep::IndexLookup(lookup.clone()));
                 known.insert(source.slot);
+                continue;
+            }
+            // A full scan of either endpoint would expand to every edge of an
+            // eligible relationship; its type bitmaps name those edges
+            // directly. Endpoints and other edges remain pattern-validated.
+            let scan = self.relationship_priority.iter().find_map(|&index| {
+                let rel = &self.relationships[index];
+                let edges = rel.scan_rows.filter(|_| {
+                    remaining.contains(&index) && (rel.from == source.slot || rel.to == source.slot)
+                })?;
+                Some((index, rel, edges))
+            });
+            if join.is_none()
+                && let Some((index, rel, edges)) = scan
+            {
+                remaining.remove(&index);
+                if self.sources.iter().any(|s| known.contains(&s.slot)) {
+                    cartesian_products += 1;
+                }
+                // The bitmaps are read once; each input row reads endpoints.
+                let reads = cost::EstimatedRows::rows(edges);
+                cost = cost.serial(storage.label_scan(reads)).serial(
+                    storage
+                        .authoritative_verification(reads)
+                        .saturating_mul(rows),
+                );
+                rows = rows.saturating_mul(edges);
+                cost = cost.serial(storage.stream_operator(cost::EstimatedRows::rows(rows)));
+                steps.push(MatchStep::ScanRelationship {
+                    relationship: index,
+                });
+                known.extend([rel.from, rel.to, rel.relationship]);
                 continue;
             }
             cost = cost.serial(source.access_cost);

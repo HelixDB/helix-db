@@ -6,6 +6,7 @@ use super::{
     lookup_cursor::LookupCursor,
     memory, ExecutionContext, Limits, Result,
 };
+use crate::query_resources::bitmap;
 use futures::{Stream, StreamExt};
 use helix_planner::relational as r;
 use std::{collections::BTreeMap, pin::Pin, sync::Arc};
@@ -43,6 +44,8 @@ impl<'a> Frame<'a> {
 enum CachedSource {
     Scan(Box<ScanCache>),
     Hash(Arc<HashJoinTable>),
+    /// Edge IDs every parent of a relationship scan replays.
+    Relationships(Arc<bitmap::Bitmap>),
 }
 
 /// Shared across every continuation of one MATCH stage. Scan frames borrow the
@@ -71,6 +74,7 @@ impl<'a> SourceCache<'a> {
                     r::MatchStep::Scan(_)
                         | r::MatchStep::HashJoin { .. }
                         | r::MatchStep::IndexLookup(_)
+                        | r::MatchStep::ScanRelationship { .. }
                 )
             })
             .count();
@@ -96,7 +100,9 @@ impl<'a> SourceCache<'a> {
     ) -> Result<&mut ScanCache> {
         match self.sources.get(&slot) {
             Some(CachedSource::Scan(_)) => {}
-            Some(CachedSource::Hash(_)) => unreachable!("one physical source step per slot"),
+            Some(CachedSource::Hash(_) | CachedSource::Relationships(_)) => {
+                unreachable!("one physical source step per slot")
+            }
             None => {
                 let source = self
                     .plan
@@ -120,6 +126,30 @@ impl<'a> SourceCache<'a> {
             unreachable!("initialized scan source");
         };
         Ok(source)
+    }
+
+    /// Read a relationship scan's edge IDs at most once, and only on demand.
+    async fn relationships(
+        &mut self,
+        relationship: &r::RelationshipPattern,
+        context: &ExecutionContext<'_>,
+    ) -> Result<Arc<bitmap::Bitmap>> {
+        match self.sources.get(&relationship.slot) {
+            Some(CachedSource::Relationships(ids)) => return Ok(Arc::clone(ids)),
+            Some(CachedSource::Scan(_) | CachedSource::Hash(_)) => {
+                unreachable!("one physical source step per slot")
+            }
+            None => {}
+        }
+        let ids = context
+            .row_budget()
+            .admitted_future(context.relationship_scan_ids(relationship))?
+            .await?;
+        self.sources.insert(
+            relationship.slot,
+            CachedSource::Relationships(Arc::clone(&ids)),
+        );
+        Ok(ids)
     }
 }
 
@@ -152,6 +182,7 @@ impl<'a> ExpansionStack<'a> {
                 | r::MatchStep::Expand { .. }
                 | r::MatchStep::HashJoin { .. }
                 | r::MatchStep::IndexLookup(_)
+                | r::MatchStep::ScanRelationship { .. }
         )));
         let capacity = steps.len() - completed + 1;
         let memory = budget.reserve(
@@ -230,7 +261,7 @@ impl<'a> ExpansionStack<'a> {
                 } => {
                     let table = match cache.sources.get(slot) {
                         Some(CachedSource::Hash(table)) => Arc::clone(table),
-                        Some(CachedSource::Scan(_)) => {
+                        Some(CachedSource::Scan(_) | CachedSource::Relationships(_)) => {
                             unreachable!("one physical source step per slot")
                         }
                         None => {
@@ -272,6 +303,27 @@ impl<'a> ExpansionStack<'a> {
                     Frame::new(
                         depth + 1,
                         table.probe_batches(context, batch, *slot, *probe, probe_property, limits),
+                        context.row_budget(),
+                    )?
+                }
+                r::MatchStep::ScanRelationship { relationship } => {
+                    let ids = context
+                        .row_budget()
+                        .admitted_future(
+                            cache
+                                .relationships(&self.pattern.relationships[*relationship], context),
+                        )?
+                        .await?;
+                    Frame::new(
+                        depth + 1,
+                        context.relationship_scan_batches(
+                            batch,
+                            self.pattern,
+                            *relationship,
+                            ids,
+                            limits.batch_rows,
+                            limits,
+                        ),
                         context.row_budget(),
                     )?
                 }

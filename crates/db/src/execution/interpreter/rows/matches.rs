@@ -2,7 +2,7 @@ use super::super::ElementRef;
 use super::memory::Rows;
 use super::{push_row, ExecutionContext, ExecutionValue, Limits, Result, RowBuffer};
 use crate::query_resources::bitmap;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use helix_planner::relational::{category, detail};
 use helix_planner::{exec, ir, relational as r};
 use r::GraphValues;
@@ -98,13 +98,28 @@ impl ExecutionContext<'_> {
             return Rows::new(Vec::new(), self.row_budget());
         }
         let mut scans = BTreeMap::new();
+        let mut relationship_scans = BTreeMap::new();
         let mut scan_bytes = 0_usize;
         let mut scan_memory = self.row_budget().reserve(0)?;
         // Source streams are materialized once per operator, not once per
         // outer row. Adjacency expansions continue to use the current snapshot.
         for step in &plan.steps {
-            let (r::MatchStep::Scan(slot) | r::MatchStep::HashJoin { slot, .. }) = step else {
-                continue;
+            let slot = match step {
+                r::MatchStep::Scan(slot) | r::MatchStep::HashJoin { slot, .. } => slot,
+                r::MatchStep::ScanRelationship { relationship } => {
+                    self.flush_required_mutations(
+                        super::super::mutation::visibility::required_for_pattern(plan),
+                    )
+                    .await?;
+                    let ids = self
+                        .relationship_scan_ids(&pattern.relationships[*relationship])
+                        .await?;
+                    scan_bytes = scan_bytes.saturating_add(1024);
+                    scan_memory.resize(scan_bytes)?;
+                    relationship_scans.insert(*relationship, ids);
+                    continue;
+                }
+                r::MatchStep::IndexLookup(_) | r::MatchStep::Expand { .. } => continue,
             };
             let source = plan
                 .sources
@@ -249,6 +264,22 @@ impl ExecutionContext<'_> {
                         candidates = next.finish();
                         continue;
                     }
+                    r::MatchStep::ScanRelationship { relationship } => {
+                        let batches = self.relationship_scan_batches(
+                            candidates,
+                            pattern,
+                            *relationship,
+                            std::sync::Arc::clone(&relationship_scans[relationship]),
+                            limits.batch_rows,
+                            limits,
+                        );
+                        futures::pin_mut!(batches);
+                        while let Some(batch) = batches.next().await {
+                            for row in batch? {
+                                push_row(&mut next, row, limits)?;
+                            }
+                        }
+                    }
                     r::MatchStep::HashJoin {
                         slot,
                         property,
@@ -388,14 +419,10 @@ impl ExecutionContext<'_> {
         limits: Limits,
     ) -> impl futures::Stream<Item = Result<Rows>> + 'a {
         let InitialSource {
-            cursor,
+            root,
             operation,
             plan,
-            membership,
         } = source;
-        let Some(r::MatchStep::Scan(slot)) = plan.steps.first() else {
-            unreachable!("validated streamed pattern has an initial scan");
-        };
         assert!(plan.incoming.is_empty());
         assert!(plan.steps[1..].iter().all(|step| matches!(
             step,
@@ -403,6 +430,7 @@ impl ExecutionContext<'_> {
                 | r::MatchStep::Expand { .. }
                 | r::MatchStep::HashJoin { .. }
                 | r::MatchStep::IndexLookup(_)
+                | r::MatchStep::ScanRelationship { .. }
         )));
         // Demand sizes the first candidate/probe batch, not blocking source
         // builds; each later batch doubles up to the batch width, so a WHERE
@@ -411,18 +439,52 @@ impl ExecutionContext<'_> {
         // rows have arrived.
         let first = limits.batch_rows.min(operation.demand.max(1));
         let grow = move |rows: usize| rows.saturating_mul(2).min(limits.batch_rows);
-        let slot = *slot;
-        let roots =
-            futures::stream::try_unfold((cursor, first), move |(cursor, rows)| async move {
-                let batch_limits = Limits {
-                    batch_rows: rows,
-                    ..limits
+        let (roots, membership) = match root {
+            initial::Root::Nodes { cursor, membership } => {
+                let Some(r::MatchStep::Scan(slot)) = plan.steps.first() else {
+                    unreachable!("a node root starts with its scan");
                 };
-                Ok(cursor
-                    .next_batch(self, width, slot, batch_limits)
-                    .await?
-                    .map(|(batch, cursor)| (batch, (cursor, grow(rows)))))
-            });
+                let slot = *slot;
+                let roots = futures::stream::try_unfold(
+                    (cursor, first),
+                    move |(cursor, rows)| async move {
+                        let batch_limits = Limits {
+                            batch_rows: rows,
+                            ..limits
+                        };
+                        Ok(cursor
+                            .next_batch(self, width, slot, batch_limits)
+                            .await?
+                            .map(|(batch, cursor)| (batch, (cursor, grow(rows)))))
+                    },
+                );
+                (futures::future::Either::Left(roots), membership)
+            }
+            initial::Root::Relationships(ids) => {
+                let Some(r::MatchStep::ScanRelationship { relationship }) = plan.steps.first()
+                else {
+                    unreachable!("a relationship root starts with its scan");
+                };
+                let relationship = *relationship;
+                // The scan binds one unbound row, growing its batches from demand.
+                let roots = futures::stream::once(async move {
+                    let seed = Rows::new(vec![vec![r::Value::Null; width]], self.row_budget())?;
+                    Result::Ok(self.relationship_scan_batches(
+                        seed,
+                        operation.pattern,
+                        relationship,
+                        ids,
+                        first,
+                        limits,
+                    ))
+                })
+                .try_flatten();
+                (
+                    futures::future::Either::Right(roots),
+                    initial::Membership::Checked,
+                )
+            }
+        };
         let stack = super::expansion_stack::ExpansionStack::new(
             operation.pattern,
             plan,
@@ -524,25 +586,32 @@ impl ExecutionContext<'_> {
             demand: row_demand,
             ..
         } = operation;
+        // Only checked entities are read. A node without a label or
+        // properties has nothing to check, and the step that bound each
+        // relationship has already confirmed its type and endpoints.
         let mut demand = BTreeMap::<r::Slot, r::PropertyDemand>::new();
         for node in &pattern.nodes {
-            demand
-                .entry(node.slot)
-                .or_default()
-                .merge(&r::PropertyDemand::Keys(
-                    node.properties.iter().map(|(k, _)| k.clone()).collect(),
-                ));
+            if node.label.is_some() || !node.properties.is_empty() {
+                demand
+                    .entry(node.slot)
+                    .or_default()
+                    .merge(&r::PropertyDemand::Keys(
+                        node.properties.iter().map(|(k, _)| k.clone()).collect(),
+                    ));
+            }
             for (_, expression) in &node.properties {
                 expression.graph_requirements(&mut demand);
             }
         }
         for rel in &pattern.relationships {
-            demand
-                .entry(rel.slot)
-                .or_default()
-                .merge(&r::PropertyDemand::Keys(
-                    rel.properties.iter().map(|(k, _)| k.clone()).collect(),
-                ));
+            if !rel.properties.is_empty() {
+                demand
+                    .entry(rel.slot)
+                    .or_default()
+                    .merge(&r::PropertyDemand::Keys(
+                        rel.properties.iter().map(|(k, _)| k.clone()).collect(),
+                    ));
+            }
             for (_, expression) in &rel.properties {
                 expression.graph_requirements(&mut demand);
             }
@@ -624,13 +693,6 @@ impl ExecutionContext<'_> {
                         valid = false;
                         break;
                     };
-                    if !rel.types.is_empty() {
-                        let stored = graph.label(entity)?;
-                        if !rel.types.iter().any(|label| stored == Some(label.as_str())) {
-                            valid = false;
-                            break;
-                        }
-                    }
                     for (key, value) in &rel.properties {
                         let stored = graph.property(entity, key)?;
                         if stored.equals(&evaluation.eval(value)?) != Some(true) {

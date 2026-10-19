@@ -25,6 +25,7 @@ fn cascades_chooses_less_expansion_work_over_the_smallest_start() {
             relationship: r::Slot(2),
             forward_rows: 10000,
             reverse_rows: 1,
+            scan_rows: None,
         }],
         BTreeSet::new(),
     )
@@ -66,6 +67,7 @@ fn expansion_priorities_are_explored_and_bound_endpoints_stay_correlated() {
             relationship: r::Slot(3),
             forward_rows: 1000,
             reverse_rows: 1000,
+            scan_rows: None,
         },
         r::PatternExpansion {
             from: r::Slot(0),
@@ -73,6 +75,7 @@ fn expansion_priorities_are_explored_and_bound_endpoints_stay_correlated() {
             relationship: r::Slot(4),
             forward_rows: 0,
             reverse_rows: 0,
+            scan_rows: None,
         },
     ];
     let pattern = r::GraphPatternOrder::new(
@@ -125,6 +128,7 @@ fn graph_pattern_contract_validates_deserialization_and_saturates_costs() {
         relationship: r::Slot(2),
         forward_rows: u64::MAX,
         reverse_rows: u64::MAX,
+        scan_rows: None,
     };
     assert!(r::GraphPatternOrder::new(
         vec![source.clone()],
