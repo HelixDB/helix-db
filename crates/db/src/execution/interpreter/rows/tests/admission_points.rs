@@ -141,10 +141,10 @@ async fn initial_graph_sources_reject_every_admission_cleanly() {
         "MATCH (a:A)-[:R]->(b:B), (n:N) RETURN count(*)".to_owned(),
         "MATCH p=(h:H)-[:R]->(t:T) RETURN length(p)".to_owned(),
         // Relationship scans as the initial source, in both orientations, and
-        // as a later frame replayed for each scanned node.
+        // as a later frame replaying its bitmaps for a batch of parents.
         "MATCH ()-[r:R]->() RETURN count(r)".to_owned(),
         "MATCH (a)-[r:R]-(b) RETURN a, b".to_owned(),
-        "MATCH (n:N), ()-[r:R]->() RETURN count(*)".to_owned(),
+        "MATCH ()-[r:R]->(), ()-[s:R]->() RETURN count(*)".to_owned(),
         "OPTIONAL MATCH ()-[r:Absent]->() RETURN r".to_owned(),
         // A null row this wide outgrows the exhausted source's transients.
         format!("OPTIONAL MATCH (n:Missing) RETURN n, {}", wide(256)),
