@@ -14,6 +14,10 @@ pub(super) enum Membership {
 }
 
 /// What the pattern's first step reads.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a root is built once per MATCH and moved directly into its stream"
+)]
 pub(super) enum Root {
     /// A node scan, and the validation its candidates still require.
     Nodes {
