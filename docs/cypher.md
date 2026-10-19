@@ -505,10 +505,10 @@ When no node connected to a typed relationship has a label, an index or an
 earlier binding, as in `MATCH ()-[r:WROTE]->() RETURN count(r)` or
 `MATCH (a)-[r:WROTE|LIVES_IN]-(b)`, the pattern starts from the relationships of
 those types instead of scanning every node: it reads each type's relationship
-set once and the endpoints of each relationship once. A labeled pattern keeps
-starting from its nodes, because without statistics a rare label can match far
-fewer relationships than a type has. Pattern validation reads a node or
-relationship only to check a label or property it constrains.
+set once per MATCH and each relationship's endpoints once per input row. A
+labeled pattern keeps starting from its nodes, because without statistics a rare
+label can match far fewer relationships than a type has. Pattern validation
+reads a node or relationship only to check a label or property it constrains.
 Rows reuse execution cells after bindings leave scope, so successive `WITH`
 aliases do not widen every retained row. Logical binding IDs remain stable in
 validation and explain output. Simultaneous inputs, outputs and sort expressions

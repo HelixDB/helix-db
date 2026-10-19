@@ -21,12 +21,18 @@ pub struct PatternExpansion {
     /// Estimated adjacency rows per source endpoint in each direction.
     pub forward_rows: u64,
     pub reverse_rows: u64,
-    /// Rows a scan of the relationship's edge bitmaps binds, one per edge and
-    /// orientation, when the relationship may start the pattern there: it is
-    /// typed and unbound, and every node connected to it is an unbound full
-    /// node scan. `None` keeps node-driven expansion.
+    /// Present when the relationship may start the pattern from its edge
+    /// bitmaps: it is typed and unbound, and every node connected to it is an
+    /// unbound full node scan. `None` keeps node-driven expansion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scan_rows: Option<u64>,
+    pub scan: Option<RelationshipScan>,
+}
+
+/// A scan reads each edge once and binds one row per orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RelationshipScan {
+    pub edges: u64,
+    pub undirected: bool,
 }
 
 /// A property equijoin whose null/error semantics were proven by the frontend
@@ -148,7 +154,7 @@ impl GraphPatternOrder {
         }
         // A scan binds all three slots, so none of them may arrive bound.
         if relationships.iter().any(|r| {
-            r.scan_rows.is_some()
+            r.scan.is_some()
                 && [r.from, r.to, r.relationship]
                     .iter()
                     .any(|slot| incoming.contains(slot))
@@ -317,24 +323,25 @@ impl GraphPatternOrder {
             // directly. Endpoints and other edges remain pattern-validated.
             let scan = self.relationship_priority.iter().find_map(|&index| {
                 let rel = &self.relationships[index];
-                let edges = rel.scan_rows.filter(|_| {
+                let scan = rel.scan.filter(|_| {
                     remaining.contains(&index) && (rel.from == source.slot || rel.to == source.slot)
                 })?;
-                Some((index, rel, edges))
+                Some((index, rel, scan))
             });
             if join.is_none()
-                && let Some((index, rel, edges)) = scan
+                && let Some((index, rel, scan)) = scan
             {
                 remaining.remove(&index);
                 if self.sources.iter().any(|s| known.contains(&s.slot)) {
                     cartesian_products += 1;
                 }
                 // The bitmaps are read once; each input row reads endpoints.
-                let reads = cost::EstimatedRows::rows(edges);
+                let edges = cost::EstimatedRows::rows(scan.edges);
                 cost = cost
-                    .serial(storage.label_scan(reads))
-                    .serial(storage.relationship_endpoints(reads).saturating_mul(rows));
-                rows = rows.saturating_mul(edges);
+                    .serial(storage.label_scan(edges))
+                    .serial(storage.relationship_endpoints(edges).saturating_mul(rows));
+                rows =
+                    rows.saturating_mul(scan.edges.saturating_mul(1 + u64::from(scan.undirected)));
                 cost = cost.serial(storage.stream_operator(cost::EstimatedRows::rows(rows)));
                 steps.push(MatchStep::ScanRelationship {
                     relationship: index,

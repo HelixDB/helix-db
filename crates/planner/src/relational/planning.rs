@@ -704,7 +704,10 @@ fn plan_accesses(
                     reverse_rows: edge_rows
                         .div_ceil(population(rel.to))
                         .saturating_mul(directions),
-                    scan_rows: scannable.then(|| edge_rows.saturating_mul(directions)),
+                    scan: scannable.then_some(RelationshipScan {
+                        edges: edge_rows,
+                        undirected: rel.direction == Direction::Undirected,
+                    }),
                 }
             })
             .collect();

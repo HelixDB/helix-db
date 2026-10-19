@@ -140,6 +140,12 @@ async fn initial_graph_sources_reject_every_admission_cleanly() {
         "MATCH (a:A), (b:B) WHERE a.key = b.key RETURN count(*)".to_owned(),
         "MATCH (a:A)-[:R]->(b:B), (n:N) RETURN count(*)".to_owned(),
         "MATCH p=(h:H)-[:R]->(t:T) RETURN length(p)".to_owned(),
+        // Relationship scans as the initial source, in both orientations, and
+        // as a later frame replayed for each scanned node.
+        "MATCH ()-[r:R]->() RETURN count(r)".to_owned(),
+        "MATCH (a)-[r:R]-(b) RETURN a, b".to_owned(),
+        "MATCH (n:N), ()-[r:R]->() RETURN count(*)".to_owned(),
+        "OPTIONAL MATCH ()-[r:Absent]->() RETURN r".to_owned(),
         // A null row this wide outgrows the exhausted source's transients.
         format!("OPTIONAL MATCH (n:Missing) RETURN n, {}", wide(256)),
     ] {
@@ -172,6 +178,7 @@ async fn row_pipelines_reject_every_admission_cleanly() {
         "UNWIND [0,1,0,1] AS k MATCH (a:A {key:k}) RETURN a.key",
         "UNWIND [0,1] AS k MATCH (a:A)-[:R]->(b:B) WHERE a.key = k RETURN b.key",
         "UNWIND [1] AS i WITH i ORDER BY i MATCH (n:N) RETURN i, n.k",
+        "UNWIND [1,2] AS i MATCH ()-[r:R]->() RETURN i, count(*)",
     ] {
         for batch_rows in [1, 512] {
             sweep(&db, text, r::RowExecution::Batched, batch_rows).await;
@@ -224,6 +231,10 @@ async fn materialized_matches_and_mutations_reject_every_admission_cleanly() {
         ),
         (
             "MATCH (a:A)-[:R]->(b:B) RETURN count(*)".to_owned(),
+            r::RowExecution::Materialized,
+        ),
+        (
+            "MATCH (a)-[r:R]-(b) RETURN count(*)".to_owned(),
             r::RowExecution::Materialized,
         ),
     ] {

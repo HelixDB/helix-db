@@ -81,7 +81,7 @@ pub(super) fn matches(query: &Query) -> Result<BTreeMap<usize, MatchPlan>> {
                     relationship: relationship.slot,
                     forward_rows: 1,
                     reverse_rows: 1,
-                    scan_rows: None,
+                    scan: None,
                 })
                 .collect(),
             bound.clone(),

@@ -20,8 +20,11 @@ pub(super) enum Root {
         cursor: NodeCursor,
         membership: Membership,
     },
-    /// The edges of a leading relationship scan.
-    Relationships(Arc<bitmap::Bitmap>),
+    /// A leading relationship scan and its edges.
+    Relationships {
+        relationship: usize,
+        ids: Arc<[bitmap::Bitmap]>,
+    },
 }
 
 pub(in crate::execution::interpreter::rows) struct InitialSource<'a> {
@@ -68,7 +71,10 @@ impl ExecutionContext<'_> {
                     .relationship_scan_ids(&operation.pattern.relationships[*relationship])
                     .await?;
                 return Ok(Some(InitialSource {
-                    root: Root::Relationships(ids),
+                    root: Root::Relationships {
+                        relationship: *relationship,
+                        ids,
+                    },
                     operation,
                     plan,
                 }));

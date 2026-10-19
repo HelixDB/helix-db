@@ -45,7 +45,7 @@ enum CachedSource {
     Scan(Box<ScanCache>),
     Hash(Arc<HashJoinTable>),
     /// Edge IDs every parent of a relationship scan replays.
-    Relationships(Arc<bitmap::Bitmap>),
+    Relationships(Arc<[bitmap::Bitmap]>),
 }
 
 /// Shared across every continuation of one MATCH stage. Scan frames borrow the
@@ -133,7 +133,7 @@ impl<'a> SourceCache<'a> {
         &mut self,
         relationship: &r::RelationshipPattern,
         context: &ExecutionContext<'_>,
-    ) -> Result<Arc<bitmap::Bitmap>> {
+    ) -> Result<Arc<[bitmap::Bitmap]>> {
         match self.sources.get(&relationship.slot) {
             Some(CachedSource::Relationships(ids)) => return Ok(Arc::clone(ids)),
             Some(CachedSource::Scan(_) | CachedSource::Hash(_)) => {

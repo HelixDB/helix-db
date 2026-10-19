@@ -39,6 +39,7 @@ async fn unselective_typed_patterns_start_from_their_edges() {
         "MATCH (a)-[r:R]->(a) RETURN count(*)",
         "MATCH (a {k:1})-[r:R]->(b) RETURN count(*)",
         "MATCH ()-[r:R]->() RETURN r.q, count(r)",
+        "OPTIONAL MATCH ()-[r:R]->() RETURN count(r)",
     ] {
         assert_eq!(steps(&db, query).await.first(), Some(&scan), "{query}");
     }
@@ -68,6 +69,17 @@ async fn unselective_typed_patterns_start_from_their_edges() {
         ("MATCH (a:A)-[r:R]->(b:B) RETURN count(*)", 50),
     ] {
         assert_eq!(count(&db, query).await, json!(expected), "{query}");
+    }
+    // A leading optional scan without matches returns one null row.
+    for (query, expected) in [
+        ("OPTIONAL MATCH ()-[r:Absent]->() RETURN r", json!([[null]])),
+        (
+            "OPTIONAL MATCH (a)-[r:R]->(b) WHERE r.q = 99 RETURN a, r",
+            json!([[null, null]]),
+        ),
+        ("OPTIONAL MATCH ()-[r:R]->() RETURN count(r)", json!([[50]])),
+    ] {
+        assert_eq!(json!(run(&db, query).await.rows), expected, "{query}");
     }
     assert_eq!(
         run(

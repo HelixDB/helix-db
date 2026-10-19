@@ -460,12 +460,7 @@ impl ExecutionContext<'_> {
                 );
                 (futures::future::Either::Left(roots), membership)
             }
-            initial::Root::Relationships(ids) => {
-                let Some(r::MatchStep::ScanRelationship { relationship }) = plan.steps.first()
-                else {
-                    unreachable!("a relationship root starts with its scan");
-                };
-                let relationship = *relationship;
+            initial::Root::Relationships { relationship, ids } => {
                 // The scan binds one unbound row, growing its batches from demand.
                 let roots = futures::stream::once(async move {
                     let seed = Rows::new(vec![vec![r::Value::Null; width]], self.row_budget())?;

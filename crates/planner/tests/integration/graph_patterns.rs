@@ -25,7 +25,7 @@ fn cascades_chooses_less_expansion_work_over_the_smallest_start() {
             relationship: r::Slot(2),
             forward_rows: 10000,
             reverse_rows: 1,
-            scan_rows: None,
+            scan: None,
         }],
         BTreeSet::new(),
     )
@@ -67,7 +67,7 @@ fn expansion_priorities_are_explored_and_bound_endpoints_stay_correlated() {
             relationship: r::Slot(3),
             forward_rows: 1000,
             reverse_rows: 1000,
-            scan_rows: None,
+            scan: None,
         },
         r::PatternExpansion {
             from: r::Slot(0),
@@ -75,7 +75,7 @@ fn expansion_priorities_are_explored_and_bound_endpoints_stay_correlated() {
             relationship: r::Slot(4),
             forward_rows: 0,
             reverse_rows: 0,
-            scan_rows: None,
+            scan: None,
         },
     ];
     let pattern = r::GraphPatternOrder::new(
@@ -128,7 +128,7 @@ fn graph_pattern_contract_validates_deserialization_and_saturates_costs() {
         relationship: r::Slot(2),
         forward_rows: u64::MAX,
         reverse_rows: u64::MAX,
-        scan_rows: None,
+        scan: None,
     };
     assert!(r::GraphPatternOrder::new(
         vec![source.clone()],
@@ -175,21 +175,27 @@ fn relationship_scans_replace_full_scans_of_unbound_endpoints() {
             })
             .collect::<Vec<_>>()
     };
-    let relationship = |scan_rows| r::PatternExpansion {
+    let relationship = |scan| r::PatternExpansion {
         from: r::Slot(0),
         to: r::Slot(1),
         relationship: r::Slot(2),
         forward_rows: 1,
         reverse_rows: 1,
-        scan_rows,
+        scan,
     };
     let expand = r::GraphPatternOrder::new(sources(), vec![relationship(None)], BTreeSet::new())
         .unwrap()
         .schedule(&storage);
     assert_eq!(expand.steps[0], r::MatchStep::Scan(r::Slot(0)));
-    let order =
-        r::GraphPatternOrder::new(sources(), vec![relationship(Some(1000))], BTreeSet::new())
-            .unwrap();
+    let order = r::GraphPatternOrder::new(
+        sources(),
+        vec![relationship(Some(r::RelationshipScan {
+            edges: 1000,
+            undirected: false,
+        }))],
+        BTreeSet::new(),
+    )
+    .unwrap();
     let scan = order.schedule(&storage);
     assert_eq!(
         scan.steps,
@@ -203,7 +209,7 @@ fn relationship_scans_replace_full_scans_of_unbound_endpoints() {
     // An absent scan is not serialized, so existing plan digests are stable.
     assert!(serde_json::to_value(relationship(None))
         .unwrap()
-        .get("scan_rows")
+        .get("scan")
         .is_none());
     let value = serde_json::to_value(&order).unwrap();
     assert_eq!(
@@ -214,7 +220,10 @@ fn relationship_scans_replace_full_scans_of_unbound_endpoints() {
     for slot in 0..3 {
         assert!(r::GraphPatternOrder::new(
             sources(),
-            vec![relationship(Some(1))],
+            vec![relationship(Some(r::RelationshipScan {
+                edges: 1,
+                undirected: true
+            }))],
             BTreeSet::from([r::Slot(slot)])
         )
         .is_err());

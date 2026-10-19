@@ -209,7 +209,7 @@ proptest::proptest! {
             (0..8).map(|slot|r::PatternSource { slot:r::Slot(slot),rows:1_u64<<slot,access_cost:cost::CostVector::ZERO }).collect(),
             endpoints.iter().enumerate().map(|(i,(from,to))|r::PatternExpansion {
                 from:r::Slot(*from as u32),to:r::Slot(*to as u32),relationship:r::Slot(8+i as u32),forward_rows:2,reverse_rows:3,
-                scan_rows:(scannable[i] && !incoming.contains(&r::Slot(*from as u32)) && !incoming.contains(&r::Slot(*to as u32))).then_some(4),
+                scan:(scannable[i] && !incoming.contains(&r::Slot(*from as u32)) && !incoming.contains(&r::Slot(*to as u32))).then_some(r::RelationshipScan { edges:4, undirected:i%2==0 }),
             }).collect(),incoming.clone(),
         ).unwrap();
         let mut ctx=context::PlannerContext::default();

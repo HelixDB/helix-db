@@ -67,7 +67,7 @@ async fn scans_read_one_bitmap_per_type_and_one_endpoint_key_per_edge() {
     // The first batch follows demand; the returned relationship is hydrated.
     let result = db
         .cypher(crate::cypher::Request::new(
-            "MATCH ()-[r:R]->() RETURN r.w LIMIT 1",
+            "MATCH ()-[r:R]->() RETURN r LIMIT 1",
         ))
         .await
         .unwrap();
