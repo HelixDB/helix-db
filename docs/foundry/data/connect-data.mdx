@@ -53,7 +53,8 @@ when it last synced. Search finds a source or a table by name.
     Select **Test connection**. Foundry reads the source with the credential and lists
     what it can read: each table with its key and its links to other tables. Anything
     the credential can't read is named below the list and is skipped. For a database,
-    choose the tables to sync here; with none chosen, every table syncs.
+    choose the tables to sync here. Every table starts selected, and keeping them all
+    also syncs tables added later; at least one must stay selected.
 
     <Frame>
       <img src="/images/foundry/data/stripe-tested.png" alt="A successful Stripe test listing the objects the key can read with their keys and links" />
@@ -70,7 +71,9 @@ when it last synced. Search finds a source or a table by name.
 
 A connection's page shows its status, its recent syncs and its tables. A sync is
 **Queued**, then **Syncing**, then **Synced** or **Failed**; the page follows it as it
-runs. When a sync fails, the page says why above its history.
+runs. An attempt that fails for a passing reason runs again a minute or two later, shown
+as **Retrying**, up to three attempts. When a sync fails, the page says why above its
+history.
 
 <Frame>
   <img src="/images/foundry/data/connection.png" alt="A synced Stripe connection with its recent syncs, details and table cards" />
@@ -79,8 +82,8 @@ runs. When a sync fails, the page says why above its history.
 Syncs run when you select **Sync now** (or **Sync** on the Data page) and after you
 change a connection's settings. Foundry doesn't sync on a schedule yet. Each sync reads
 every table in full and replaces its snapshot; a table that finished keeps its new
-snapshot even if a later table fails. A connection runs one sync at a time, and can't
-be edited or deleted while one runs.
+snapshot even if a later table fails. A connection runs one sync at a time. While one
+runs, its settings can't change and it can't be deleted.
 
 ## Read a synced table
 
@@ -97,14 +100,14 @@ An app's columns are the fields found in its rows, without types.
 Open the **⋯** menu on a connection's page:
 
 - **Edit connection** changes its settings or credential. Foundry tests the new
-  settings before it saves them, then syncs again. Leave the credential blank to keep
-  the stored one. To change which database tables sync, enter the password and test
-  the connection again.
+  settings before it saves them, and syncs again when they changed. Leave the
+  credential blank to keep the stored one. To change which database tables sync, enter
+  the password and test the connection again.
 - **Delete connection** stops syncing it and removes its tables from the workspace's
   data. The source itself is not changed.
 
-Foundry never shows a stored credential again. The page names it by its first and last
-characters, such as `rk_live…Qx7m`.
+Foundry never shows a stored credential again. An API key is named by its prefix and
+last four characters, such as `rk_live…Qx7m`; a database shows that a password is set.
 
 ## Next steps
 

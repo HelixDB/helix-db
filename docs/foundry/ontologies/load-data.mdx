@@ -44,6 +44,9 @@ current only when the ontology has no current load.
 - If the database is new and still starting, the load waits and tries again by itself.
 - An ontology runs one load at a time.
 
+Loading, setting a load current and deleting one need owner or admin rights and write
+access to the database's Helix project.
+
 ## Manage loads
 
 **Data loads** lists the loads kept: the current one and the newest others, five in
@@ -59,7 +62,7 @@ load's version, status, node and fact counts, and its jobs.
 | **Open** | The load's page, with its steps and spend |
 | **Compare with current** | The Explorer with the load and the current one side by side |
 | **Set current** | Makes a Ready or Partial load the one every page reads |
-| **Delete** | Removes what the load wrote, with the links others added to its nodes. Never the current load or one still writing. |
+| **Delete** | Removes what the load wrote, including links your own data added to its nodes. Never the current load or one still writing. |
 | **Retry delete** | Tries a delete that failed again |
 
 ## Spending and limits
@@ -74,8 +77,10 @@ with the same models again costs nothing.
 | Documents | 200 in the workspace, 256 KiB each |
 | Loads kept per ontology | 5 |
 
-A load that reaches the cap stops, and the documents it didn't reach wait for the next
-one.
+A load that reaches its cap stops **Partial**. The documents it didn't reach are read
+into it once it's current and the month has budget left; a new load reads every
+document again. Once the workspace has spent $100 in a month, Foundry refuses new loads
+until the next month, and new uploads aren't read.
 
 ## Next steps
 

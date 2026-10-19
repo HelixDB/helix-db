@@ -82,8 +82,10 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO foundry_readonly;
 | Schema | `public` |
 | Encryption (under **Connection options**) | Require TLS with certificate verification. Add a CA certificate for a private CA, or choose **No TLS**. |
 
-After the test, choose the tables to sync. With none chosen, Foundry syncs every table
-in the schema; views are not synced.
+After the test, choose the tables to sync. Every table in the schema starts selected,
+and keeping them all also syncs tables added later; views are not synced. If a selected
+table is dropped or renamed, syncs fail until you edit the connection and test it
+again.
 
 <Frame>
   <img src="/images/foundry/data/postgresql-form.png" alt="The PostgreSQL form with the read-only user SQL, the outbound addresses and the connection fields" />
@@ -101,14 +103,14 @@ database must accept connections from outside your network. If it only accepts k
 addresses, allow the outbound addresses the form lists, and select **Copy** to copy
 them.
 
-Foundry refuses private, loopback and shared address ranges, and does not follow
-redirects to them.
+Foundry refuses private, loopback and shared address ranges, and follows no
+redirects.
 
 ## Limits
 
 | Limit | Value |
 | --- | --- |
-| Rows per table, per sync | 2,000,000. A larger table fails the sync; for a database, choose fewer tables. |
+| Rows per table, per sync | 2,000,000. A larger table fails the sync: for a database, leave it out; for PostHog, shorten the event history. |
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |

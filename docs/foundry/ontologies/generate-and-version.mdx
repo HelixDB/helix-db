@@ -32,7 +32,7 @@ current.
   </Step>
 
   <Step title="Check its documents">
-    The agent also sees the names of the ontology's 50 newest
+    The agent also sees the names of the ontology's 50 most recently uploaded
     [documents](/foundry/ontologies/documents), so it can add types for what they hold,
     such as a contract with a customer.
 
@@ -48,10 +48,11 @@ current.
 
 ## Follow a generation
 
-A generation is **Queued**, then **Running**, then **Succeeded** or **Failed**. A
-generation whose attempt failed is retried, up to three attempts; while it waits, the
-page says it is retrying, why, and when it runs next. An ontology runs one generation
-at a time.
+A generation is **Queued**, then **Running**, then **Succeeded** or **Failed**. It
+can take several minutes. An attempt that fails for a passing reason is retried, up to
+three attempts; while it waits, the page says it is retrying, why, and when it runs
+next. Other failures, such as a draft the agent refused, fail at once. An ontology runs
+one generation at a time.
 
 <Frame>
   <img src="/images/foundry/ontology/generation-done.png" alt="A succeeded generation that drafted version 4, with Review version 4" />
@@ -84,8 +85,8 @@ An agent draft opens on its summary and its graph, with a tab for each part:
   <img src="/images/foundry/ontology/version.png" alt="Version 3, an agent draft, with its summary and Graph tab" />
 </Frame>
 
-Versions never change. To change a draft, generate again with a sharper goal or
-different tables.
+Versions never change. Each generation drafts afresh rather than editing the current
+version, so to change a draft, generate again with a sharper goal or different tables.
 
 ## Make a version current
 
@@ -101,8 +102,9 @@ current at the same time, Foundry refuses yours, says why, and shows the version
 is current now.
 
 <Note>
-  Only an **Agent draft** can be [loaded](/foundry/ontologies/load-data). A version in
-  the older **Definition v1** format can be reviewed and made current, but not loaded.
+  Only an **Agent draft** the agent finished can be [loaded](/foundry/ontologies/load-data).
+  A draft it stopped early, or a version in the older **Definition v1** format, can be
+  reviewed and made current, but not loaded.
 </Note>
 
 ## Who can do what

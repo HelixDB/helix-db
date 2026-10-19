@@ -7108,6 +7108,12 @@ flowchart LR
 - It does not manage roles, member removal or single sign-on. Those stay in the
   [Helix dashboard](https://helix-db.com/login).
 
+## How Foundry uses AI models
+
+A generation sends your synced tables to Foundry's agent, which drafts the version. A
+load sends your documents' text to Anthropic and OpenAI models, which find the names
+and facts they hold and check them. Reading tables into a load uses no models.
+
 ## Next steps
 
     Go from sign-in to an explored graph in about ten minutes.
@@ -7124,7 +7130,8 @@ Page type: Tutorial
 
 This tutorial takes a new workspace from sign-in to an explored graph. You need a
 Helix account and a source to read, such as a Stripe account. Owners and admins of a
-workspace can do every step; members can follow along read-only.
+workspace can do every step. Members can follow along read-only; exploring a load also
+needs **Query read** on its database's Helix project.
 
     See [Connect data](/foundry/data/connect-data) for every source and what it needs.
 
@@ -7193,8 +7200,8 @@ Owners and admins add, sync, edit and delete connections; members see them.
 Syncs run when you select **Sync now** (or **Sync** on the Data page) and after you
 change a connection's settings. Foundry doesn't sync on a schedule yet. Each sync reads
 every table in full and replaces its snapshot; a table that finished keeps its new
-snapshot even if a later table fails. A connection runs one sync at a time, and can't
-be edited or deleted while one runs.
+snapshot even if a later table fails. A connection runs one sync at a time. While one
+runs, its settings can't change and it can't be deleted.
 
 ## Read a synced table
 
@@ -7207,14 +7214,14 @@ An app's columns are the fields found in its rows, without types.
 Open the **⋯** menu on a connection's page:
 
 - **Edit connection** changes its settings or credential. Foundry tests the new
-  settings before it saves them, then syncs again. Leave the credential blank to keep
-  the stored one. To change which database tables sync, enter the password and test
-  the connection again.
+  settings before it saves them, and syncs again when they changed. Leave the
+  credential blank to keep the stored one. To change which database tables sync, enter
+  the password and test the connection again.
 - **Delete connection** stops syncing it and removes its tables from the workspace's
   data. The source itself is not changed.
 
-Foundry never shows a stored credential again. The page names it by its first and last
-characters, such as `rk_live…Qx7m`.
+Foundry never shows a stored credential again. An API key is named by its prefix and
+last four characters, such as `rk_live…Qx7m`; a database shows that a password is set.
 
 ## Next steps
 
@@ -7293,8 +7300,10 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO foundry_readonly;
 | Schema | `public` |
 | Encryption (under **Connection options**) | Require TLS with certificate verification. Add a CA certificate for a private CA, or choose **No TLS**. |
 
-After the test, choose the tables to sync. With none chosen, Foundry syncs every table
-in the schema; views are not synced.
+After the test, choose the tables to sync. Every table in the schema starts selected,
+and keeping them all also syncs tables added later; views are not synced. If a selected
+table is dropped or renamed, syncs fail until you edit the connection and test it
+again.
 
 ## MySQL
 
@@ -7308,14 +7317,14 @@ database must accept connections from outside your network. If it only accepts k
 addresses, allow the outbound addresses the form lists, and select **Copy** to copy
 them.
 
-Foundry refuses private, loopback and shared address ranges, and does not follow
-redirects to them.
+Foundry refuses private, loopback and shared address ranges, and follows no
+redirects.
 
 ## Limits
 
 | Limit | Value |
 | --- | --- |
-| Rows per table, per sync | 2,000,000. A larger table fails the sync; for a database, choose fewer tables. |
+| Rows per table, per sync | 2,000,000. A larger table fails the sync: for a database, leave it out; for PostHog, shorten the event history. |
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |
@@ -7348,8 +7357,9 @@ versions**, **Documents**, **Data loads** and **Explorer**.
 ## Delete an ontology
 
 Select the bin on the overview. Foundry deletes the ontology, its versions and
-documents, and, in the background, everything its loads wrote into the database. The
-database and its other data stay.
+documents, and, in the background, everything its loads wrote into the database,
+including links your own data added to those records. The database and its other data
+stay. The database can take a new ontology once that removal finishes.
 
 ## Who can do what
 
@@ -7391,8 +7401,8 @@ An agent draft opens on its summary and its graph, with a tab for each part:
 | **Questions** | The questions the version is meant to answer |
 | **TOML** | The draft's `ontology.toml` and `mappings.toml` |
 
-Versions never change. To change a draft, generate again with a sharper goal or
-different tables.
+Versions never change. Each generation drafts afresh rather than editing the current
+version, so to change a draft, generate again with a sharper goal or different tables.
 
 ## Make a version current
 
@@ -7403,8 +7413,9 @@ To roll back, make an older version current. If someone else makes another versi
 current at the same time, Foundry refuses yours, says why, and shows the version that
 is current now.
 
-  Only an **Agent draft** can be [loaded](/foundry/ontologies/load-data). A version in
-  the older **Definition v1** format can be reviewed and made current, but not loaded.
+  Only an **Agent draft** the agent finished can be [loaded](/foundry/ontologies/load-data).
+  A draft it stopped early, or a version in the older **Definition v1** format, can be
+  reviewed and made current, but not loaded.
 
 ## Who can do what
 
@@ -7439,15 +7450,20 @@ each file before it uploads it, then sends it straight to storage with its progr
 
 ## How documents are used
 
-- **Generations** give the agent the names of the ontology's 50 newest documents, so a
-  draft can add types for what they hold, such as a contract.
+- **Generations** give the agent the names of the ontology's 50 most recently uploaded
+  documents, so a draft can add types for what they hold, such as a contract.
 - **Loads** read every document: its sections, the names it mentions, and the facts it
-  states, each with the quote it came from. A name the database doesn't hold is never
-  made into a record; it goes to **Needs review** instead.
+  states, each with the quote it came from. What a load can't settle, such as a name
+  the database doesn't hold, an ambiguous name, a quote it couldn't verify or a fact
+  that conflicts with your tables, goes to **Needs review** instead of becoming a
+  record.
 - A document uploaded after the current load is read into that load as it arrives.
 
 Each document's status says where it stands: **Waiting for a load**, **Queued for the
 load**, **Reading**, **Read**, **Needs review**, **Duplicate** or **Couldn't be read**.
+
+Reading documents uses AI models: a load sends each document's text to Anthropic and
+OpenAI models to find its names and facts and to check them.
 
 ## Read a document
 
@@ -7491,6 +7507,9 @@ current only when the ontology has no current load.
 - If the database is new and still starting, the load waits and tries again by itself.
 - An ontology runs one load at a time.
 
+Loading, setting a load current and deleting one need owner or admin rights and write
+access to the database's Helix project.
+
 ## Manage loads
 
 **Data loads** lists the loads kept: the current one and the newest others, five in
@@ -7502,7 +7521,7 @@ load's version, status, node and fact counts, and its jobs.
 | **Open** | The load's page, with its steps and spend |
 | **Compare with current** | The Explorer with the load and the current one side by side |
 | **Set current** | Makes a Ready or Partial load the one every page reads |
-| **Delete** | Removes what the load wrote, with the links others added to its nodes. Never the current load or one still writing. |
+| **Delete** | Removes what the load wrote, including links your own data added to its nodes. Never the current load or one still writing. |
 | **Retry delete** | Tries a delete that failed again |
 
 ## Spending and limits
@@ -7517,8 +7536,10 @@ with the same models again costs nothing.
 | Documents | 200 in the workspace, 256 KiB each |
 | Loads kept per ontology | 5 |
 
-A load that reaches the cap stops, and the documents it didn't reach wait for the next
-one.
+A load that reaches its cap stops **Partial**. The documents it didn't reach are read
+into it once it's current and the month has budget left; a new load reads every
+document again. Once the workspace has spent $100 in a month, Foundry refuses new loads
+until the next month, and new uploads aren't read.
 
 ## Next steps
 
@@ -7538,7 +7559,7 @@ to **Records** at the top to read the same data as tables.
 | --- | --- |
 | Jump to a record by name, id or text | Press <kbd>/</kbd> and type, then <kbd>Enter</kbd> |
 | Load a record's neighbors | Double-click it, or use **Expand** in the inspector |
-| Draw more of a type | Select it in the rail |
+| Draw more of a type | Select **+** beside it in the rail, 50 records at a time |
 | See every action on a record | Right-click it |
 | See every shortcut | Press <kbd>?</kbd> |
 
@@ -7635,10 +7656,8 @@ Status: Preview
 Ask is coming to Helix Foundry and isn't available yet. This page will cover it when it
   ships.
 
-Ask lets you question an ontology in plain language, such as "Which customers signed a
-contract this quarter but haven't paid an invoice?". It answers from the ontology's
-current load, and every answer cites the records, table rows and document passages it
-used, so you can check it.
+Ask will let you question an ontology's data in plain language and see where each
+answer came from.
 
 Until then, read the same data in the [Explorer](/foundry/explore/explorer) and
 [Records](/foundry/explore/records-and-entities).
@@ -7690,15 +7709,17 @@ change a role, remove someone or manage pending invitations, use the
 | Action | Owner | Admin | Member |
 | --- | :---: | :---: | :---: |
 | See data, ontologies, versions, documents, loads and the plan | ✓ | ✓ | ✓ |
-| Explore and read records | ✓ | ✓ | ✓ |
+| Explore and read records | ✓ | ✓ | With **Query read** on the database's project |
 | Add, sync, edit and delete connections | ✓ | ✓ | |
 | Create and delete ontologies | ✓ | ✓ | |
 | Generate, make versions current, upload documents and load | ✓ | ✓ | |
 | Invite people | ✓ | ✓ | |
 | Upgrade, switch, cancel and manage billing | ✓ | ✓ | |
 
-Creating or deleting an ontology also needs write access to its database's Helix
-project. Reading a load's contents needs read access to that project.
+Reading what a load wrote, in the Explorer, Records and a document's text, needs
+**Query read** on the database's Helix project; grant it in the Helix dashboard. Creating
+or deleting an ontology, uploading documents and loading also need write access to that
+project.
 
 ## Next steps
 
@@ -7733,13 +7754,13 @@ offers owners and admins **Upgrade to Pro**.
 
 Select **Cancel Pro** (or **Cancel Max**) and confirm. The plan stays on until the end
 of the period, then the workspace moves to Free and its PostgreSQL and MySQL connections
-stop syncing. Until then, **Resume** undoes the cancellation.
+stop syncing. Until then, **Resume Pro** (or **Resume Max**) undoes the cancellation.
 
 ## Manage payment and invoices
 
 Select **Manage billing** to open the Stripe billing portal for the workspace: payment
 methods, invoices and billing details. When an invoice isn't paid, the page says so and
-offers **Update payment method**.
+offers **Update payment method**; cancelling and switching wait until it's paid.
 
 ## Next steps
 
@@ -7770,7 +7791,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | --- | --- |
 | Goal | 2,000 characters |
 | Tables per generation | 50 |
-| Documents the agent sees | The 50 newest, by name |
+| Documents the agent sees | Names of the 50 most recently uploaded |
 | Attempts per generation | 3 |
 | Generations running per ontology | 1 |
 
@@ -7828,6 +7849,9 @@ Find the message Foundry shows, then its cause and fix.
 | Your company signs in with single sign-on. | Foundry doesn't offer single sign-on yet. Sign in to the [Helix dashboard](https://helix-db.com/login) instead. |
 | Your email isn't verified yet. | Verify the email with your provider, or continue with another provider. |
 | This account can't sign in here. | The environment doesn't accept this account. Sign in with your work account, or ask Helix for access. |
+| Sign-in couldn't start. | Choose a provider to try again. |
+| Sign-in is unavailable right now. | Helix couldn't start sign-in. Try again in a moment. |
+| Sign-in didn't finish. | The sign-in link expired or was already used. Try again. |
 | Couldn't load your workspaces. | Foundry couldn't reach Helix. Select **Retry**; **Sign out** is offered on the same page. |
 
 ## Connections and syncs
@@ -7839,15 +7863,16 @@ Find the message Foundry shows, then its cause and fix.
 | The database can't be reached | The database must accept connections from Helix's network. Allow the outbound addresses the form lists, and check the host and port. Private addresses are refused. |
 | A TLS error | Foundry verifies the server's certificate. Add the CA certificate under **Connection options**, or choose **No TLS** if the database doesn't offer it. |
 | PostgreSQL connections need Foundry Pro | Databases need [Pro or Max](/foundry/workspace/plans-and-billing). Owners and admins see **Upgrade to Pro**. |
-| table … has more than 2000000 rows; choose fewer tables | A table is over the [row limit](/foundry/reference/limits#data). For a database, edit the connection and leave the table out. |
+| table … has more than 2000000 rows; choose fewer tables | A table is over the [row limit](/foundry/reference/limits#data). For a database, edit the connection and leave the table out; for PostHog, shorten the event history. |
+| Syncs fail after a table changed | A selected database table was dropped or renamed. Edit the connection and test it again. |
 | A sync of this connector is already queued or running | Wait for it to finish before syncing, editing or deleting. |
 
 ## Ontologies and generations
 
 | Message or state | Cause and fix |
 | --- | --- |
-| Retrying | An attempt failed and Foundry will try again; the page says why and when. Nothing to do. |
-| Failed | Every attempt failed. Select **Try again** to reopen the form with the same goal and connectors; choosing fewer tables or a clearer goal helps. |
+| Retrying | An attempt failed for a passing reason and Foundry will try again; the page says why and when. Nothing to do. |
+| Failed | The generation failed for good. Select **Try again** to reopen the form with the same goal and connectors; choosing fewer tables or a clearer goal helps. |
 | Making a version current is refused | Someone else made another version current at the same time. The page now shows it; make yours current again if you still want it. |
 | A new database can't be created | The workspace has no Helix plan. Add one in the Helix dashboard's billing, or use a database you already have. |
 | The database is starting | A new database takes a few minutes to start. Pages read it again by themselves; a load waits for it. |
@@ -7857,10 +7882,11 @@ Find the message Foundry shows, then its cause and fix.
 
 | Message or state | Cause and fix |
 | --- | --- |
-| **Load data** isn't offered | Only a current agent draft can be loaded. [Generate](/foundry/ontologies/generate-and-version) one and make it current. |
-| Partial, or Stopped at the cap | Reading documents reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits). The documents it didn't reach wait for the next load. |
+| **Load data** isn't offered | Only a current agent draft the agent finished can be loaded. [Generate](/foundry/ontologies/generate-and-version) one and make it current. |
+| Partial, or Stopped at the cap | Reading documents reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits). The documents it didn't reach are read into it once it's current and the month has budget. |
+| The workspace has spent this month's $100 of loads | New loads are refused until next month. |
 | The tables synced again during the load | A source changed under the load. Start a new load to write the new snapshot. |
-| A document needs review | The document names something the database doesn't hold, so it wasn't made a record. Open the document to see it. |
+| A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Open the document to see why. |
 | Delete failed | Select **Retry delete** in **Data loads**. |
 
 ## Next steps

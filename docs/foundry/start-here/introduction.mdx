@@ -51,6 +51,12 @@ flowchart LR
 - It does not manage roles, member removal or single sign-on. Those stay in the
   [Helix dashboard](https://helix-db.com/login).
 
+## How Foundry uses AI models
+
+A generation sends your synced tables to Foundry's agent, which drafts the version. A
+load sends your documents' text to Anthropic and OpenAI models, which find the names
+and facts they hold and check them. Reading tables into a load uses no models.
+
 ## Next steps
 
 <CardGroup cols={2}>
