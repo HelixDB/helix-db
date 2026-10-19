@@ -19,7 +19,8 @@ badge. Do not use Mintlify's native `tag` field because it adds the type to the
 sidebar.
 
 Database page paths mirror the sidebar hierarchy under
-`database/helix-db/<group>/` and `database/helix-cloud/<group>/`. Keep redirects
+`database/helix-db/<group>/` and `database/helix-cloud/<group>/`, and Foundry pages
+under `foundry/<group>/`. Keep redirects
 when moving an existing public route.
 
 `docs.json` also redirects short, guessable paths to their pages: product and SDK
@@ -33,6 +34,7 @@ any name a reader is likely to type. Shortcut sources must not match a live rout
 | --- | --- | --- |
 | HelixDB | Start Here, Core Concepts, Query Guides | The engine in every run mode: setup, SDKs, data model, queries, indexes and search, HTTP API, error codes, troubleshooting |
 | Helix Cloud | Start Here, Connect and automate, Operate | Managed deployments only: account setup, connecting, architecture, MCP, security, tenancy, limits, gateway errors |
+| Helix Foundry | Start Here, Data, Ontologies, Explore, Ask, Workspace, Reference | The hosted Foundry website (foundry.helix-db.com): connecting and syncing sources, generating, loading and exploring ontologies, members and billing |
 | CLI Reference | Using the helix CLI, CLI Command Reference | The `helix` CLI: workflows, configuration, and one page per command |
 | Learn | One group per topic | Vendor-neutral explainers that answer one broad question each, such as "What is BM25?" |
 
@@ -78,6 +80,16 @@ structure is fixed:
   answers, not accordions) and `## Related topics`.
 - Add every new page as a question link on the `/learn` tile page, link it from the related
   guide, and add shortcut redirects for its obvious names.
+
+## Helix Foundry media
+
+The Helix Foundry tab's screenshots and videos in `images/foundry/` come from the
+helix-foundry-cloud repository, which drives the website against its mock backend.
+Regenerate them there after a UI change, rather than editing them by hand:
+
+```bash
+DOCS_MEDIA_DIR=../helix-db/docs/images/foundry pnpm docs:media
+```
 
 ## Local checks
 
