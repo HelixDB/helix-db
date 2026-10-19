@@ -118,16 +118,6 @@
           "anchor": "GitHub",
           "icon": "github",
           "href": "https://github.com/HelixDB/helix-db"
-        },
-        {
-          "anchor": "HelixDB Rust DSL Docs",
-          "icon": "code",
-          "href": "https://docs.rs/helix-db/latest/helix_db/"
-        },
-        {
-          "anchor": "Legacy HQL Docs",
-          "icon": "warning",
-          "href": "https://github.com/HelixDB/hql-v1-docs"
         }
       ]
     },
