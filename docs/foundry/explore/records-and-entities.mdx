@@ -1,0 +1,65 @@
+---
+title: "Records and entities"
+description: "Read a Helix Foundry load as tables by type, open a record's links and sources, and see everything about one entity"
+sidebarTitle: "Records and entities"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+**Records** is the Explorer's table view: one type at a time, searchable and sortable,
+with every record's links and where it came from. An entity's page gathers everything
+the load knows about one record.
+
+## Read a type as a table
+
+In the Explorer, select **Records**. Choose a type at the top; the count beside it is
+how many records the load holds.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/explore/records.png" alt="Records showing the Customer type as a table with currency and email columns" />
+</Frame>
+
+- **Search** finds records by name or key.
+- **Filter by field** keeps the records whose field matches a value.
+- Select a column's header to sort by it, and **Columns** to choose which show.
+- Pages hold 50 records. Searches and filters count up to 1,000 matches, and paging
+  reaches the first 10,000 records of a type.
+
+## Open a record
+
+Select a row to open the record beside the table: its properties, its links to other
+records, and **Where it comes from**. A link or record that came from a table names the
+source and row; one that came from a document shows the quote, with a link to it in the
+document.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/explore/record.png" alt="The Globex Corporation record with its properties, billed_to and signed_with links, and its Stripe row and contract quote" />
+</Frame>
+
+Select **Open in graph** to find it in the Explorer, or **Open its page** for the
+entity's page.
+
+## An entity's page
+
+An entity's page names the record's type, key and sources, with tabs for its
+**Overview** (properties), **Facts** (its links, with their evidence), **Mentions** (where
+documents name it) and **Needs review**.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/explore/entity.png" alt="Globex Corporation's page with its key, sources and properties" />
+</Frame>
+
+Every page here reads one load. Use the **Load** picker to read another; links between
+pages keep it.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Explore the graph" icon="diagram-project" href="/foundry/explore/explorer">
+    Search, expand and compare loads.
+  </Card>
+  <Card title="Upload documents" icon="file-lines" href="/foundry/ontologies/documents">
+    Add the documents facts and mentions come from.
+  </Card>
+</CardGroup>

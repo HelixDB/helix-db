@@ -1,0 +1,91 @@
+---
+title: "Plans and billing"
+description: "Compare Helix Foundry Free, Pro and Max, upgrade a workspace, switch tiers, cancel, resume and manage payment"
+sidebarTitle: "Plans and billing"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Each workspace has one Foundry plan, billed monthly and separately from Helix Cloud.
+Owners and admins change it in **Settings** → **Plan & billing**; members see which plan
+the workspace holds.
+
+| | Free | Pro | Max |
+| --- | --- | --- | --- |
+| Price | $0 | $100 a month | $500 a month |
+| Stripe, WorkOS and PostHog | ✓ | ✓ | ✓ |
+| Syncs and synced tables | ✓ | ✓ | ✓ |
+| Ontology generation and versions | ✓ | ✓ | ✓ |
+| PostgreSQL and MySQL | | ✓ | ✓ |
+
+Max includes everything in Pro, and will add more.
+
+On Free, choosing PostgreSQL or MySQL in **Add data** says the source needs Pro, and
+offers owners and admins **Upgrade to Pro**.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/pro-gate.png" alt="Choosing PostgreSQL on Foundry Free: PostgreSQL connections need Foundry Pro, with Upgrade to Pro" />
+</Frame>
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/billing-free.png" alt="Plan & billing for a Free workspace with the Free, Pro and Max cards" />
+</Frame>
+
+## Upgrade
+
+<Steps>
+  <Step title="Choose a tier">
+    Select **Upgrade**, choose **Pro** or **Max**, and add a promotion code if you have
+    one.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/workspace/upgrade.png" alt="The Upgrade Foundry dialog with Pro selected and a promotion code field" />
+    </Frame>
+  </Step>
+
+  <Step title="Pay">
+    Select **Continue to payment**. Foundry opens Stripe Checkout, or charges the card on
+    file when the workspace has one.
+  </Step>
+
+  <Step title="Come back">
+    Stripe returns you to **Plan & billing**, which checks the payment until the new plan
+    shows. PostgreSQL and MySQL are available at once.
+  </Step>
+</Steps>
+
+If an upgrade's answer is lost, for example when the network drops, the page checks the
+plan before it offers checkout again, so you aren't charged twice.
+
+## Switch between Pro and Max
+
+On a paid workspace, select **Switch to Max** or **Switch to Pro** on the other tier's
+card and confirm.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/billing-pro.png" alt="Plan & billing for a Pro workspace with Manage billing, Cancel Pro and Switch to Max" />
+</Frame>
+
+## Cancel or resume
+
+Select **Cancel Pro** (or **Cancel Max**) and confirm. The plan stays on until the end
+of the period, then the workspace moves to Free and its PostgreSQL and MySQL connections
+stop syncing. Until then, **Resume Pro** (or **Resume Max**) undoes the cancellation.
+
+## Manage payment and invoices
+
+Select **Manage billing** to open the Stripe billing portal for the workspace: payment
+methods, invoices and billing details. When an invoice isn't paid, the page says so and
+offers **Update payment method**; cancelling and switching wait until it's paid.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Connectors" icon="plug" href="/foundry/data/connectors">
+    Set up a PostgreSQL or MySQL connection.
+  </Card>
+  <Card title="Members and roles" icon="users" href="/foundry/workspace/members-and-roles">
+    Who can change the plan.
+  </Card>
+</CardGroup>
