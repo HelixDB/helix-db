@@ -633,7 +633,14 @@ async fn transports_preserve_nested_values_folded_rows_and_edge_paths() {
                     .n_with_label("Encoded")
                     .values(vec!["payload"]),
             )
-            .var_as("edge_paths", traversal::g().e_with_label("LINKS").path())
+            .var_as(
+                "edge_paths",
+                traversal::g()
+                    .n(graph::NodeRef::id(node_id))
+                    .out_e(Some("LINKS"))
+                    .in_n()
+                    .path(),
+            )
             .var_as("missing", traversal::g().n(graph::NodeRef::id(u64::MAX)))
             .returning([
                 "folded",
@@ -651,8 +658,8 @@ async fn transports_preserve_nested_values_folded_rows_and_edge_paths() {
         "values": [{"nested": [[f64::from(0.1_f32), -0.0_f64], "quote\"\\ é"]}],
         "edge_paths": [{
             "bindings": {},
-            "current": {"edge": edge_id},
-            "path": [{"edge": edge_id}],
+            "current": {"node": node_id},
+            "path": [{"node": node_id}, {"edge": edge_id}, {"node": node_id}],
         }],
         "missing": [],
     });
