@@ -402,6 +402,9 @@ impl CacheConfig {
 ///
 /// Only one server may use a cache directory at a time: while its storage is
 /// open, a server holds an exclusive lock on `.helix-cache.lock` in the root.
+/// A process keeps the block cache it builds in `slate/` until it exits, so a
+/// later server in the same process reads through it and must use the same
+/// `HELIX_DISK_CACHE_BYTES`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HybridCache {
     root: PathBuf,

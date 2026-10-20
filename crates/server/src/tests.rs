@@ -837,18 +837,28 @@ async fn a_hybrid_cache_directory_serves_one_server_at_a_time() {
     assert!(error.to_string().starts_with("HELIX_DISK_CACHE_DIR"));
     assert_eq!(files_below(&cache_root.join("slate")), partitions);
 
-    // Closing the first server frees the directory.
+    // Closing the first server frees the directory. The next server in this
+    // process reads through the cache the first one built, so resizing it
+    // takes a restart.
     first.db.close().await.unwrap();
     drop(first);
-    let ServerDatabase { db, cache_lock } = open_database(&smaller).await.unwrap();
-    assert_eq!(files_below(&cache_root.join("slate")).len(), 384);
+    let Err(error) = open_database(&smaller).await else {
+        panic!("a resized server reopened this process's cache");
+    };
+    assert!(
+        error.to_string().contains("already open in this process"),
+        "{error:?}"
+    );
+    let same = config(128 * MIB);
+    let ServerDatabase { db, cache_lock } = open_database(&same).await.unwrap();
+    assert_eq!(files_below(&cache_root.join("slate")), partitions);
     db.close().await.unwrap();
     drop(db);
     drop(cache_lock);
 
     // The server runners hold the lock until storage has closed.
-    run_with_shutdown(smaller.clone(), async {}).await.unwrap();
-    open_database(&smaller)
+    run_with_shutdown(same.clone(), async {}).await.unwrap();
+    open_database(&same)
         .await
         .unwrap()
         .db

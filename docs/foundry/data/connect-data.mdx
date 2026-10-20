@@ -1,0 +1,121 @@
+---
+title: "Connect and sync data"
+description: "Add a source to a Helix Foundry workspace, test its credential, sync its tables and read what each table holds"
+sidebarTitle: "Connect data"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+A connection is a source Foundry reads, such as a Stripe account or a PostgreSQL
+database. Each sync copies its tables into a snapshot that generations and loads read.
+Owners and admins add, sync, edit and delete connections; members see them.
+
+<Frame caption="Connect Stripe, test the key, sync it and open a table.">
+  <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/data/connect-data-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/data/connect-data.webm"></video>
+</Frame>
+
+## The Data page
+
+**Data** lists every connection with its status, its tables and their row counts, and
+when it last synced. Search finds a source or a table by name.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/data-page.png" alt="The Data page with a synced Stripe connection and a synced PostgreSQL database" />
+</Frame>
+
+## Add a connection
+
+<Steps>
+  <Step title="Choose the source">
+    Select **Add data**, then choose where the data is. Apps are listed first, then
+    databases. A tick marks a kind the workspace already connects; you can add another.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/data/add-data.png" alt="The Where is your data? picker with Stripe, WorkOS, PostHog, PostgreSQL and MySQL" />
+    </Frame>
+  </Step>
+
+  <Step title="Create a read-only credential">
+    Follow the numbered steps above the form. They link to the place in the source
+    where you create the key or user, and say which read permissions to give it.
+    [Connectors](/foundry/data/connectors) lists them for every source.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/data/stripe-form.png" alt="The Stripe form with its three numbered steps above the Restricted API key field" />
+    </Frame>
+
+    Under **Connection options** you can name the connection; databases also choose
+    their encryption there.
+  </Step>
+
+  <Step title="Test the connection">
+    Select **Test connection**. Foundry reads the source with the credential and lists
+    what it can read: each table with its key and its links to other tables. Anything
+    the credential can't read is named below the list and is skipped. For a database,
+    choose the tables to sync here. Every table starts selected, and keeping them all
+    also syncs tables added later; at least one must stay selected.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/data/stripe-tested.png" alt="A successful Stripe test listing the objects the key can read with their keys and links" />
+    </Frame>
+  </Step>
+
+  <Step title="Connect and sync">
+    Select **Connect and sync**. Foundry stores the credential encrypted, opens the
+    connection's page and queues its first sync.
+  </Step>
+</Steps>
+
+## Follow a sync
+
+A connection's page shows its status, its recent syncs and its tables. A sync is
+**Queued**, then **Syncing**, then **Synced** or **Failed**; the page follows it as it
+runs. An attempt that fails for a passing reason runs again a minute or two later, shown
+as **Retrying**, up to three attempts. When a sync fails, the page says why above its
+history.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/connection.png" alt="A synced Stripe connection with its recent syncs, details and table cards" />
+</Frame>
+
+Syncs run when you select **Sync now** (or **Sync** on the Data page) and after you
+change a connection's settings. Foundry doesn't sync on a schedule yet. Each sync reads
+every table in full and replaces its snapshot; a table that finished keeps its new
+snapshot even if a later table fails. A connection runs one sync at a time. While one
+runs, its settings can't change and it can't be deleted.
+
+## Read a synced table
+
+Select a table to see its columns, its primary key, the columns that point at other
+tables, the columns in other tables that point at it, and when its snapshot was taken.
+An app's columns are the fields found in its rows, without types.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/synced-table.png" alt="The customers table with its columns, primary key, foreign keys and referencing columns" />
+</Frame>
+
+## Edit or delete a connection
+
+Open the **⋯** menu on a connection's page:
+
+- **Edit connection** changes its settings or credential. Foundry tests the new
+  settings before it saves them, and syncs again when they changed. Leave the
+  credential blank to keep the stored one. To change which database tables sync, enter
+  the password and test the connection again.
+- **Delete connection** stops syncing it and removes its tables from the workspace's
+  data. The source itself is not changed.
+
+Foundry never shows a stored credential again. An API key is named by its prefix and
+last four characters, such as `rk_live…Qx7m`; a database shows that a password is set.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Connectors" icon="plug" href="/foundry/data/connectors">
+    What each source needs, and what it syncs.
+  </Card>
+  <Card title="Generate an ontology" icon="wand-magic-sparkles" href="/foundry/ontologies/generate-and-version">
+    Draft an ontology from your synced tables.
+  </Card>
+</CardGroup>
