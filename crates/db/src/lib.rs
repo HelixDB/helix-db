@@ -2349,8 +2349,8 @@ impl HelixDB {
         .await
     }
 
-    /// Execute a plan like [`Self::execute_prepared_scoped_controlled`] but keep
-    /// only the requested returns, moved out of the interpreter without copies.
+    /// Execute a prepared plan, keeping only its requested returns moved out
+    /// of the interpreter without copies.
     /// The query service encodes nothing else.
     pub(crate) async fn execute_prepared_returns_scoped_controlled(
         &self,

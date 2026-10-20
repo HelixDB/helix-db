@@ -140,8 +140,8 @@ impl<'db> Interpreter<'db> {
         self
     }
 
-    /// Execute a validated executable plan, keeping the root output and every
-    /// bound variable in the result.
+    /// Execute a validated plan, keeping its root output, unreturned variables,
+    /// and requested returns in the result.
     pub async fn execute(self, plan: &exec::ExecutablePlan) -> Result<ExecutionResult> {
         self.run(plan, |ctx| {
             ctx.finish(plan.root(), plan.executable_returns())
