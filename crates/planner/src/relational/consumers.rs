@@ -36,7 +36,7 @@ pub(super) fn prepare(
             #[cfg(test)]
             tests::visited(1);
             match step {
-                r::MatchStep::Expand { .. } => true,
+                r::MatchStep::Expand { .. } | r::MatchStep::ScanRelationship { .. } => true,
                 r::MatchStep::Scan(slot) | r::MatchStep::HashJoin { slot, .. } => {
                     cursors.contains(slot)
                 }
@@ -47,8 +47,11 @@ pub(super) fn prepare(
             unsupported.insert(index);
         }
         if index == 0 {
-            initial_cursor =
-                supported && matches!(pattern.steps.first(), Some(r::MatchStep::Scan(_)));
+            initial_cursor = supported
+                && matches!(
+                    pattern.steps.first(),
+                    Some(r::MatchStep::Scan(_) | r::MatchStep::ScanRelationship { .. })
+                );
         }
     }
     let operators = pipeline.query().operators();

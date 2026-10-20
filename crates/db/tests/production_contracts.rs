@@ -260,17 +260,15 @@ async fn server_open_prunes_foyer_partitions_a_smaller_hybrid_cache_no_longer_ow
             .collect::<Vec<_>>()
     };
 
-    // 16 MiB in 64 KiB blocks is 256 partitions.
-    HelixDB::open_for_server(source(), hybrid(&foyer_root, 16 * 1024 * 1024))
-        .await
-        .expect("server writer opens a fresh hybrid cache")
-        .close()
-        .await
-        .expect("server writer closes");
-    assert_eq!(entries(), partitions(256));
-
+    // An earlier process with a 16 MiB budget left 256 partitions of 64 KiB.
     // Halving the budget keeps the block size, so partitions 0..128 are
     // reused and 128..256 go. Names Foyer never numbers are left alone.
+    std::fs::create_dir_all(&foyer_root).expect("Foyer cache directory");
+    for name in partitions(256) {
+        std::fs::File::create(foyer_root.join(name))
+            .and_then(|file| file.set_len(64 * 1024))
+            .expect("earlier partition");
+    }
     for name in ["foyer-storage-direct-fs-not-a-number", "unrelated"] {
         std::fs::write(foyer_root.join(name), b"").expect("foreign cache entry");
     }
@@ -280,38 +278,57 @@ async fn server_open_prunes_foyer_partitions_a_smaller_hybrid_cache_no_longer_ow
         .close()
         .await
         .expect("server writer closes");
-    assert_eq!(
-        entries(),
-        [
-            partitions(128),
-            vec![
-                "foyer-storage-direct-fs-not-a-number".to_owned(),
-                "unrelated".to_owned(),
-            ],
-        ]
-        .concat()
+    let pruned = [
+        partitions(128),
+        vec![
+            "foyer-storage-direct-fs-not-a-number".to_owned(),
+            "unrelated".to_owned(),
+        ],
+    ]
+    .concat();
+    assert_eq!(entries(), pruned);
+
+    // The process keeps the root's cache after the close: a reopen with the
+    // same budget reads through it, and another budget takes a restart.
+    HelixDB::open_for_server(source(), hybrid(&foyer_root, 8 * 1024 * 1024))
+        .await
+        .expect("server writer reopens the hybrid cache")
+        .close()
+        .await
+        .expect("server writer closes");
+    assert_eq!(entries(), pruned);
+    let error = HelixDB::open_for_server(source(), hybrid(&foyer_root, 16 * 1024 * 1024))
+        .await
+        .err()
+        .expect("a resized reopen fails");
+    assert!(
+        error.to_string().contains("already open in this process"),
+        "{error}"
     );
+    assert_eq!(entries(), pruned);
 
     // A stale partition that cannot be removed, and a cache root that is
     // not a directory, fail the open instead of leaving stale blocks.
-    std::fs::create_dir(foyer_root.join("foyer-storage-direct-fs-00000999"))
+    let blocked_root = root.path().join("blocked-foyer");
+    std::fs::create_dir_all(blocked_root.join("foyer-storage-direct-fs-00000999"))
         .expect("irremovable stale partition");
     let not_a_directory = root.path().join("not-a-directory");
     std::fs::write(&not_a_directory, b"").expect("regular file");
     for (foyer_root, reason) in [
-        (foyer_root.as_path(), "stale partition directory"),
-        (not_a_directory.as_path(), "regular file"),
+        (
+            blocked_root.as_path(),
+            "failed to remove stale Slate hybrid cache partitions",
+        ),
+        (
+            not_a_directory.as_path(),
+            "failed to resolve Slate hybrid cache root",
+        ),
     ] {
         let error = HelixDB::open_for_server(source(), hybrid(foyer_root, 8 * 1024 * 1024))
             .await
             .err()
             .expect("the open fails");
-        assert!(
-            error
-                .to_string()
-                .contains("failed to remove stale Slate hybrid cache partitions"),
-            "{reason}: {error}"
-        );
+        assert!(error.to_string().contains(reason), "{reason}: {error}");
     }
 }
 

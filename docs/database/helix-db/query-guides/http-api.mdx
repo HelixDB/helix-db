@@ -35,10 +35,15 @@ Cloud, use the gateway URL and database ID shown in the dashboard. The
 `cluster.helix-db.com` hostname in the OpenAPI document is a placeholder, not a
 shared query endpoint.
 
-The root OpenAPI server and the `/healthz` and `/readyz` operations describe a
-local HelixDB server. The Helix Cloud gateway is advertised only for
-`POST /v2/query`; its separate `/health` and `/readyz` contracts are not part of
-this specification.
+The root OpenAPI server and the `/healthz`, `/readyz` and `/v2/diagnostics`
+operations describe a local HelixDB server. The Helix Cloud gateway is advertised
+only for `POST /v2/query`; its separate `/health` and `/readyz` contracts are not
+part of this specification.
+
+`GET /v2/diagnostics` returns read-only checks of the server's setup: storage,
+the S3 bucket's region, the disk cache's device and room, memory, index
+publication, and recent queries' index use.
+[`helix doctor`](/cli/command-reference/doctor) renders it.
 
 Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
 gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
@@ -201,17 +206,9 @@ apply. A read-only Helix Cloud API key can read and explain, but receives `403`
 for a modifying statement. Cloud database-selection headers do not select a
 database on a standalone server.
 
-The profile includes fixed-length `MATCH` and `OPTIONAL MATCH`, `WHERE`, `WITH`,
-`RETURN`, `UNWIND`, aggregation, ordering and windows, and `CREATE`, property
-`SET`/`REMOVE`, `DELETE`, and `DETACH DELETE`. It requires exactly one nonempty
-label on created nodes and one nonempty type on created relationships. Unlabeled
-matching is supported. Multiple labels, label changes, and property names
-beginning with `$` are rejected. Assigning null removes a property. Plain node
-deletion fails if relationships remain; `DETACH DELETE` removes those relationships.
-
-`MERGE`, variable-length or shortest paths, `UNION`, subqueries, comprehensions,
-procedures, schema DDL, temporal/spatial functions, and Bolt are deferred. They
-produce specific unsupported-feature errors.
+The [Cypher guide](/database/helix-db/query-guides/cypher) lists which clauses,
+expressions, and functions are supported, and which constructs are rejected with
+an `unsupported_feature` error, such as `MERGE`, variable-length paths, and `UNION`.
 
 ### Lossless JSON values
 

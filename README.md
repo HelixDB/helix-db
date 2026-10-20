@@ -72,7 +72,7 @@ helix chef
 ## Cypher
 
 Source builds also support Cypher reads and CRUD through `POST /v2/cypher`,
-embedded clients, and `helix cypher`. See the [Cypher reference](docs/cypher.md)
+embedded clients, and `helix cypher`. See the [Cypher guide](https://docs.helix-db.com/database/helix-db/query-guides/cypher)
 for the supported language profile, SDK calls, parameters, lossless results,
 and transaction rules. Use SDK and server builds from this checkout for Cypher.
 

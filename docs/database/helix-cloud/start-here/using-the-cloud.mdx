@@ -94,6 +94,18 @@ curl --fail-with-body \
   }'
 ```
 
+To test the Cypher route, send the equivalent statement to `/v2/cypher` with the
+same headers; an empty database returns `{"columns":["node_count"],"rows":[[0]]}`.
+
+```bash
+curl --fail-with-body \
+  "$HELIX_ENDPOINT/v2/cypher" \
+  --header "Authorization: Bearer $HELIX_API_KEY" \
+  --header "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  --header "Content-Type: application/json" \
+  --data '{"query":"MATCH (n) RETURN count(n) AS node_count"}'
+```
+
 Keep API keys in a secrets manager or environment variable. Do not commit them
 to source control.
 

@@ -16,6 +16,8 @@ pub(super) const CYPHER: &[(&str, &str)] = &[
     ("filter_limit", "MATCH (n:User) WHERE n.age%2=0 RETURN n.key LIMIT 10"),
     ("late_error", "MATCH (n:User) RETURN 1/n.age AS v LIMIT 1"),
     ("chain", "MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User) RETURN c.key LIMIT 10"),
+    ("relationship_count", "MATCH ()-[r:FOLLOWS]->() RETURN count(r)"),
+    ("unlabeled_chain", "MATCH (a)-[:FOLLOWS]-(b)-[:FOLLOWS]->(c) RETURN a.key,c.key LIMIT 10"),
     ("selective_tail", "MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User {email:'a'}) RETURN a.key"),
     ("reverse", "MATCH (a:User)<-[:FOLLOWS]-(b:User) RETURN b.key LIMIT 10"),
     ("undirected", "MATCH (a:User)-[:FOLLOWS]-(b:User) RETURN b.key LIMIT 10"),

@@ -175,6 +175,8 @@ async fn cached_native_fallback_preserves_subplan_isolation_and_validates_result
 
 /// Candidate generation may leave labels and properties for late hydration.
 /// Compare that boundary to a separate tuple model over real stored edges.
+/// The steps that bind relationships confirm their types, so candidates here
+/// hold only relationships of the pattern's type.
 #[tokio::test]
 async fn late_pattern_constraints_preserve_multiplicity_paths_and_demand() {
     let db = test_support::open_db("cypher-late-pattern-model").await;
@@ -219,10 +221,12 @@ async fn late_pattern_constraints_preserve_multiplicity_paths_and_demand() {
     };
     let mut candidates = model
         .iter()
+        .filter(|(.., kind, _)| *kind == "R")
         .map(|(source, edge, ..)| make_row(*source, *edge))
         .collect::<Vec<_>>();
     // A repeated outer row must remain repeated. Nullable correlated bindings
     // cannot satisfy a mandatory pattern, even if the other endpoint exists.
+    let repeated = candidates.len();
     candidates.push(candidates[0].clone());
     let mut null_node = candidates[0].clone();
     null_node[pattern.nodes[0].slot.0 as usize] = r::Value::Null;
@@ -252,7 +256,7 @@ async fn late_pattern_constraints_preserve_multiplicity_paths_and_demand() {
             // assembly and predicate filtering move them into the destination.
             let allocations = [
                 input[0].as_ptr() as usize,
-                input[model.len()].as_ptr() as usize,
+                input[repeated].as_ptr() as usize,
             ];
             let matched = ctx
                 .finish_pattern_rows(

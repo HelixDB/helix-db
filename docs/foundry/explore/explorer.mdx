@@ -1,0 +1,84 @@
+---
+title: "Explore the graph"
+description: "Read what a Helix Foundry load wrote as a graph: search, expand, inspect, pick a load and compare two"
+sidebarTitle: "Explorer"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+The Explorer draws what a load wrote into the ontology's database: its records and how
+they connect. It reads the database with your session and never writes to it. Switch
+to **Records** at the top to read the same data as tables.
+
+<Frame caption="Load, then search the graph and read a type as records.">
+  <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/explore/load-and-explore-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/explore/load-and-explore.webm"></video>
+</Frame>
+
+## Read the graph
+
+The Explorer opens on a connected sample of the current load: records of its central
+types, their neighbors, and the links among them. The rail on the left lists the
+version's types and links with how many the load holds and how many are drawn.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/explore/explorer-node.png" alt="The Explorer with Globex Corporation selected, its properties and relationships in the inspector" />
+</Frame>
+
+| To | Do |
+| --- | --- |
+| Jump to a record by name, id or text | Press <kbd>/</kbd> and type, then <kbd>Enter</kbd> |
+| Load a record's neighbors | Double-click it, or use **Expand** in the inspector |
+| Draw more of a type | Select **+** beside it in the rail, 50 records at a time |
+| See every action on a record | Right-click it |
+| See every shortcut | Press <kbd>?</kbd> |
+
+Select a record to open it in the inspector on the right: its type, its properties, the
+load that wrote it, and its relationships with their counts.
+
+Records are named the way the version says: by a name property, else by their keys.
+A record drawn with a dashed outline was reached outside the load you're reading; the
+inspector names its load.
+
+## Choose a load
+
+The **Load** picker reads another load of the ontology. Links between the Explorer,
+Records, a record's page and a document keep the load you chose.
+
+**Other data** shows what no load wrote: data the database held already, or that your
+own applications write. It is hidden while you read a load, and listed below the rail.
+
+## Show Foundry's own records
+
+Loads also write Foundry's bookkeeping beside your data: documents, their sections,
+mentions and evidence, and reviews. The Explorer hides these until you select **Show
+Foundry internals** under Labels. They are then listed apart and drawn grey. The choice
+is kept in this browser.
+
+## Compare two loads
+
+Choose a second load under **Compare with**, or select **Compare with current** in
+[Data loads](/foundry/ontologies/load-data#manage-loads). The two loads are drawn side by
+side over **What changed**: the count of each type and link in each load. Open a type to
+see the records added, removed and renamed between them, by key, and select one to find
+it on its side.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/explore/compare-diff.png" alt="What changed from one load to another: one Contract added, customers and invoices unchanged" />
+</Frame>
+
+## When a database is starting
+
+A database created in the last few minutes may not answer yet. The Explorer says it is
+starting and opens by itself once it answers.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Records and entities" icon="table" href="/foundry/explore/records-and-entities">
+    Read each type as a table, and a record's page.
+  </Card>
+  <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
+    Ask the graph questions in plain language. Coming soon.
+  </Card>
+</CardGroup>

@@ -1,7 +1,7 @@
 # Reviewing query-plan regressions
 
-`cargo test -p helix-cypher --test plans` checks 810 fixed cases through the
-production planner. The suite covers both frontends: 50 Cypher query families
+`cargo test -p helix-cypher --test plans` checks 834 fixed cases through the
+production planner. The suite covers both frontends: 52 Cypher query families
 across small/large populations, index availability and three storage profiles;
 five skewed graph families with normal/exhausted optimizer budgets; and 12
 native planner fixture families at three scales under each storage profile.
@@ -10,12 +10,13 @@ conjunctions around disjunctions at 1, 2, 64 and 65 values, crossing batch and
 union-planning boundaries.
 
 The Cypher cases cover scans, equality/unique/range access, intersections,
-disjunctions, chains, stars, cycles, selective endpoints, repeated bindings,
-correlated lookups, hash joins, products, optional matches, paths, grouping,
-distinct, ordering, top-k, windows, scope changes and mutations. Native cases
-also cover root reuse, branching, nested execution, search, index DDL and wide
-Boolean predicates. Existing semantic/model tests remain separate correctness
-gates; these signatures do not establish query-result correctness.
+disjunctions, chains, relationship scans, stars, cycles, selective endpoints,
+repeated bindings, correlated lookups, hash joins, products, optional matches,
+paths, grouping, distinct, ordering, top-k, windows, scope changes and
+mutations. Native cases also cover root reuse, branching, nested execution,
+search, index DDL and wide Boolean predicates. Existing semantic/model tests
+remain separate correctness gates; these signatures do not establish
+query-result correctness.
 
 Every case signs its complete input and selected plan, including expressions,
 properties, trace decisions, blocking operators, windows, cost estimates and
@@ -64,7 +65,7 @@ After generating the full SDK parity corpus, include all request fixtures:
 cargo run -p helix-cypher --example planner_snapshots -- capture target/plans-with-sdk.json sdks/tests/parity/generated/rust 248
 ```
 
-This adds 1,488 cases, for 2,298 total: each request runs with the search
+This adds 1,488 cases, for 2,322 total: each request runs with the search
 indexes from SDK setup fixture 024 both absent and present. Missing-index
 rejections therefore remain tested alongside executable vector/text plans. The explicit expected fixture count is a
 denominator check. Review corpus changes before changing that argument. Rejected
@@ -104,7 +105,7 @@ the reviewed manifest be edited. A candidate manifest can be exported locally:
 cargo run -p helix-cypher --example planner_snapshots -- manifest target/plans-after.json target/plans-manifest.json
 ```
 
-The fixed gate's manifest must contain exactly its 810 cases; SDK captures are a
+The fixed gate's manifest must contain exactly its 834 cases; SDK captures are a
 separate full-corpus review. Changes to the cost model can increase estimates
 without increasing runtime work. Document that distinction and the measured
 evidence instead of weakening the gate or accepting every increase together.
