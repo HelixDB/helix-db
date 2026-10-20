@@ -605,19 +605,25 @@ async fn transports_preserve_nested_values_folded_rows_and_edge_paths() {
         .await
         .unwrap();
     let node_id = created["node"][0]["$id"].as_u64().unwrap();
-    db.query(QueryRequest::write(batch::write_batch().var_as(
-        "edge",
-        traversal::g().n(graph::NodeRef::id(node_id)).add_e(
-            "LINKS",
-            graph::NodeRef::id(node_id),
-            Vec::<(String, value::PropertyInput)>::new(),
-        ),
-    )))
+    db.query(QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "edge",
+                traversal::g().n(graph::NodeRef::id(node_id)).add_e(
+                    "LINKS",
+                    graph::NodeRef::id(node_id),
+                    Vec::<(String, value::PropertyInput)>::new(),
+                ),
+            )
+            .returning(["edge"]),
+    ))
     .await
     .unwrap();
     let edge_ids = db
         .query(QueryRequest::read(
-            batch::read_batch().var_as("ids", traversal::g().e_with_label("LINKS").id()),
+            batch::read_batch()
+                .var_as("ids", traversal::g().e_with_label("LINKS").id())
+                .returning(["ids"]),
         ))
         .await
         .unwrap();
