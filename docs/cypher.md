@@ -1,104 +1,19 @@
-# Cypher
+# Cypher implementation notes
 
-Helix supports the Cypher profile below alongside the native DSL. Both frontends
-use the existing graph storage, transactions, and indexes. Existing databases do
-not need a storage migration. This is a supported language profile, not full
-openCypher compatibility. Use a server, embedded build or Helix Cloud gateway
-containing this implementation.
+The user guide for Cypher, including how to run statements from each SDK, the
+supported profile, the constructs it rejects, and the lossless value encoding,
+is [Query HelixDB with Cypher](database/helix-db/query-guides/cypher.mdx),
+published at <https://docs.helix-db.com/database/helix-db/query-guides/cypher>.
+The HTTP contract is in the [HTTP API reference](database/helix-db/query-guides/http-api.mdx#cypher)
+and [`openapi.json`](openapi.json).
 
-## Execute a statement
+These notes record implementation detail for contributors: the Rust and transport
+APIs, index selection, evaluation semantics, mutation rules, and memory accounting.
+Keep the guide in step when behavior changes.
 
-Every server serves Cypher on its own routes, `POST /v2/cypher` and
-`POST /v2/cypher/explain`, and on the gRPC `ExecuteCypher` and `ExplainCypher`
-methods, alongside the native `POST /v2/query` and `ExecuteQuery`. Clients can use
-either language against the same database.
+## Rust and transport APIs
 
-Send one statement to a local server's `POST /v2/cypher` endpoint:
-
-```sh
-curl http://localhost:6969/v2/cypher \
-  -H 'Content-Type: application/json' \
-  --data '{"query":"RETURN $name AS name, $age AS age","parameters":{"name":"Ada","age":30}}'
-```
-
-```json
-{"columns":["name","age"],"rows":[["Ada",30]]}
-```
-
-Use the host and port of your configured instance. The standalone server has no
-authentication and, like `POST /v2/query`, runs every statement against the
-unscoped graph. `query` is required; `parameters` and `query_name` are
-optional. Each row has one value per column in column order. Duplicates are
-preserved unless the query uses `DISTINCT`. Use `ORDER BY` when row order matters.
-
-A Helix Cloud gateway serves the same routes with the same request and response
-bodies. Authenticate as for `POST /v2/query`, with the cluster API key and, on a
-GA shared gateway, the database ID:
-
-```sh
-curl "$HELIX_ENDPOINT/v2/cypher" \
-  -H "Authorization: Bearer $HELIX_API_KEY" \
-  -H "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
-  -H 'Content-Type: application/json' \
-  --data '{"query":"MATCH (n) RETURN count(n) AS nodes"}'
-```
-
-The gateway compiles each statement to learn whether it writes. Reads go to
-readers, and writes and `X-Helix-Require-Writer` requests go to the elected
-writer. A read-only API key can read and explain, but receives `403` for a
-modifying statement. Explain always routes as a read. Cloud request bodies are
-limited to 2 MiB (`413 payload_too_large`), and the database's rate limit and
-query time limit (`408`) apply as they do to native queries. Authentication,
-rate-limit, timeout and availability failures use the native
-`{"error","msg"}` envelope; statement errors use the Cypher envelope below.
-
-Create and read a graph:
-
-```cypher
-CREATE (a:Person {name:'Ada', age:30})-[:KNOWS]->(b:Person {name:'Bob', age:40})
-RETURN a.name AS person, b.name AS friend
-```
-
-```cypher
-MATCH (a:Person)-[:KNOWS]->(b:Person)
-WHERE a.age >= $minimumAge
-RETURN a.name AS person, collect(b.name) AS friends
-ORDER BY person
-```
-
-Parameters are values; labels, relationship types, and variable names are query
-syntax. Keep values in parameters rather than interpolating them into query text.
-The existing `POST /v2/query` endpoint continues to accept the native DSL contract.
-
-## SDK and embedded entry points
-
-Use an existing configured client and its normal connection lifecycle:
-
-| Client | Execute | Explain | With request options |
-|---|---|---|---|
-| TypeScript | `await client.cypher(query, parameters, queryName)` | `await client.explainCypher(...)` | `client.requestBuilder().writerOnly().cypher(...).send()` |
-| Rust SDK | `client.cypher(query, parameters, query_name).await` | `client.explain_cypher(...).await` | `client.request_builder::<()>().writer_only().cypher(...).send().await` |
-| Go | `client.Cypher(ctx, helix.CypherRequest{...})` | `client.ExplainCypher(ctx, ...)` | `client.Cypher(ctx, request, helix.WriterOnly())` |
-| Python | `client.cypher(query, parameters, query_name="example")` | `client.explain_cypher(...)` | `client.cypher(query, writer_only=True)` |
-| Async Python | `await client.cypher(...)` | `await client.explain_cypher(...)` | `await client.cypher(query, writer_only=True)` |
-
-Every client sends its API key and database ID (`withDatabaseId`, `with_database_id`,
-`WithDatabaseID`, `database_id=`) on both Cypher routes; Helix Cloud requires the
-database ID. The options are the same warm, require-writer and await-durable
-options as native queries. A warm-only read that Helix Cloud answers with
-`204 No Content` returns no columns or rows, and its explain returns nothing.
-Embedded clients reject request options and explain through the native
-`explain_cypher_json` binding.
-
-TypeScript and Python default omitted parameters to an empty map. Rust SDK
-parameters are a `BTreeMap<String, serde_json::Value>` and `query_name` is
-`Option<&str>`. Go returns `(*CypherResponse, error)`. Each client preserves tagged
-lossless values in the response. See the [Rust](../sdks/rust/README.md),
-[TypeScript](../sdks/typescript/README.md), [Go](../sdks/go/README.md), and
-[Python](../sdks/python/README.md) guides for client construction and embedded
-build prerequisites. Use SDK and server builds from this checkout for Cypher.
-
-The database crate also exposes `database.cypher(db::cypher::Request::new(query)).await`.
+The database crate exposes `database.cypher(db::cypher::Request::new(query)).await`.
 The lower-level `db::cypher::execute` accepts explicit scope, execution control,
 query mode, and resource limits. These use the caller's existing database handle.
 For a prepared JSON body, use `database.cypher_json(request).await` or
@@ -150,51 +65,7 @@ Rust transports reuse this contract from `helix_cypher::api` (`ErrorClass`,
 `ErrorBody`, the `category` and `detail` code constants, and the route paths) and
 decode requests with `helix_cypher::request::Request`, which needs no database.
 
-From a linked local Helix project:
-
-```sh
-helix cypher -e 'RETURN 1 AS value'
-helix cypher -e 'RETURN $name AS name' --parameters '{"name":"Ada"}'
-helix cypher --file query.cypher --parameters '{"minimumAge":30}'
-```
-
-An optional instance name selects a linked local instance. `--host` and `--port`
-control the connection, and `--explain` shows the selected plans without
-executing the statement. Responses print as highlighted JSON, or as compact
-JSON with the global `--json` flag. The CLI currently requires a local instance
-configuration.
-
-## Supported language profile
-
-| Area | Supported |
-|---|---|
-| Patterns | `MATCH`, `OPTIONAL MATCH`, fixed-length directed and undirected relationships, multiple patterns, repeated variables, named paths |
-| Rows | `WHERE`, `WITH`, `RETURN`, aliases, `DISTINCT`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT` |
-| Expressions | Parameters, scalar/list/map literals, property and index access, arithmetic, comparisons, boolean operators, null tests, `IN`, string predicates, `CASE` |
-| Graph/list functions | `id`, `type`, `labels`, `properties`, `keys`, `exists` for properties, `size`, `length`, `nodes`, `relationships`, `head`, `last`, `range`, `reverse` |
-| Scalar functions | `coalesce`, `abs`, `toString`, `toInteger`/`toInt`, `toFloat`, `toBoolean`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
-| Aggregation | `count`, `sum`, `avg`, `min`, `max`, `collect`, including distinct arguments |
-| Writes | `CREATE`, property and map `SET`, property `REMOVE`, `DELETE`, `DETACH DELETE` |
-
-The `WHERE` of a `WITH` filters the rows the clause returns, after its
-`DISTINCT`, `ORDER BY`, `SKIP` and `LIMIT`: `WITH x ORDER BY x LIMIT 3 WHERE x > 2`
-keeps at most the third row. After `SKIP` or `LIMIT` only the variables the `WITH`
-projects remain, so such a `WHERE` that reads any other variable is rejected with
-`undefined_variable`.
-
-`MERGE`, variable-length and shortest paths, `UNION`, subqueries, comprehensions,
-procedures, schema DDL, temporal/spatial functions, and Bolt are outside this
-profile. Unsupported syntax receives a specific `unsupported_feature` error. A
-statement that is also invalid openCypher reports the standard compile error
-instead, such as `variable_already_bound` for a CREATE that redeclares a variable
-or `undefined_variable` for a pattern predicate that introduces one. Other
-openCypher built-in functions, such as `sqrt` or `date`, are an
-`unsupported_feature` with detail `function`, and the message names the function.
-An unrecognized function name is a `syntax_error` with `unknown_function`. A
-parameter map in a MATCH pattern, such as `(n $props)`, is an
-`invalid_parameter_use` syntax error; in CREATE it is unsupported. Use the
-existing native index-management API to create indexes; Cypher planning can
-select existing compatible indexes.
+## Index selection
 
 A label test in WHERE, such as `MATCH (n) WHERE n:User`, labels the node for
 this purpose, and every occurrence of a repeated node variable contributes its
@@ -381,47 +252,7 @@ waits for started commits before closing shared resources; dropping the close
 waiter does not abandon shutdown. Keep the async runtime alive until close
 finishes. A cancelled transport request does not prove that its write rolled back.
 
-## Lossless values
-
-Nulls, booleans, strings, lists, maps, and finite floats use ordinary JSON values.
-Signed integers in the JavaScript safe-integer range use JSON numbers. Larger
-integers and nonfinite floats use tagged values:
-
-```json
-{"$type":"integer","value":"9223372036854775807"}
-```
-
-```json
-{"$type":"float","value":"Infinity"}
-```
-
-Float tags also support `NaN` and `-Infinity`. These tags are accepted in parameters.
-Wrap a literal map containing a `$type` key as
-`{"$type":"map","value":{"$type":"literal"}}` to disambiguate it from a tag.
-
-Graph results use these tags:
-
-| `$type` | Fields |
-|---|---|
-| `node` | `id`, `labels`, `properties` |
-| `relationship` | `id`, `start`, `end`, `type`, `properties` |
-| `path` | Ordered `nodes` and `relationships`, containing full tagged graph objects |
-
-Node IDs and relationship IDs are unsigned
-decimal strings and occupy separate namespaces. Nodes include `labels` and
-`properties`; relationships include `start`, `end`, `type`, and `properties`.
-Paths include ordered `nodes` and `relationships`. Relationship endpoints retain
-their stored direction even when a path traverses them in reverse. Preserve IDs
-as strings; `id()` separately checks conversion to a signed integer and reports
-overflow when it cannot be represented.
-
-## Explain and limits
-
-`POST /v2/cypher/explain` accepts the same request body and returns a separate
-planning response without executing the statement. It describes selected access
-paths, cardinality estimates, blocking work, Cartesian products, and optimizer
-budget warnings. The embedded equivalent is `HelixDB::explain_cypher`; the CLI
-uses `--explain`.
+## Limits and memory accounting
 
 Successful result JSON contains only `columns` and `rows`. Embedded response
 objects expose local diagnostics separately. Resource-limit failures return an
