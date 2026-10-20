@@ -577,6 +577,101 @@ async fn embedded_service_http_and_grpc_match_the_shared_model_corpus() {
 }
 
 #[tokio::test]
+async fn transports_preserve_nested_values_folded_rows_and_edge_paths() {
+    use helix_ast::{graph, value};
+
+    let db = fresh_database("transport-nested-return-values").await;
+    let created = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "node",
+                    traversal::g().add_n(
+                        "Encoded",
+                        vec![(
+                            "payload",
+                            value::PropertyValue::Object(BTreeMap::from([(
+                                "nested".to_owned(),
+                                value::PropertyValue::Array(vec![
+                                    value::PropertyValue::F32Array(vec![0.1_f32, -0.0_f32]),
+                                    value::PropertyValue::String("quote\"\\ é".to_owned()),
+                                ]),
+                            )])),
+                        )],
+                    ),
+                )
+                .returning(["node"]),
+        ))
+        .await
+        .unwrap();
+    let node_id = created["node"][0]["$id"].as_u64().unwrap();
+    db.query(QueryRequest::write(batch::write_batch().var_as(
+        "edge",
+        traversal::g().n(graph::NodeRef::id(node_id)).add_e(
+            "LINKS",
+            graph::NodeRef::id(node_id),
+            Vec::<(String, value::PropertyInput)>::new(),
+        ),
+    )))
+    .await
+    .unwrap();
+    let edge_ids = db
+        .query(QueryRequest::read(
+            batch::read_batch().var_as("ids", traversal::g().e_with_label("LINKS").id()),
+        ))
+        .await
+        .unwrap();
+    let edge_id = edge_ids["ids"][0].as_u64().unwrap();
+    let request = QueryRequest::read(
+        batch::read_batch()
+            .var_as("folded", traversal::g().n_with_label("Encoded").fold())
+            .var_as("exists", traversal::g().n_with_label("Encoded").exists())
+            .var_as("labels", traversal::g().n_with_label("Encoded").label())
+            .var_as(
+                "values",
+                traversal::g()
+                    .n_with_label("Encoded")
+                    .values(vec!["payload"]),
+            )
+            .var_as("edge_paths", traversal::g().e_with_label("LINKS").path())
+            .var_as("missing", traversal::g().n(graph::NodeRef::id(u64::MAX)))
+            .returning([
+                "folded",
+                "exists",
+                "labels",
+                "values",
+                "edge_paths",
+                "missing",
+            ]),
+    );
+    let expected = serde_json::json!({
+        "folded": [{"$id": node_id}],
+        "exists": true,
+        "labels": ["Encoded"],
+        "values": [{"nested": [[f64::from(0.1_f32), -0.0_f64], "quote\"\\ é"]}],
+        "edge_paths": [{
+            "bindings": {},
+            "current": {"edge": edge_id},
+            "path": [{"edge": edge_id}],
+        }],
+        "missing": [],
+    });
+    assert_eq!(db.query(request.clone()).await.unwrap(), expected);
+    let mut http = HttpAdapter {
+        router: http::router(ServerState::new(
+            Arc::clone(&db),
+            None,
+            crate::StorageConfig::Memory,
+        )),
+        db: Arc::clone(&db),
+    };
+    assert_eq!(http.execute_query(request.clone()).await.unwrap(), expected);
+    let mut grpc = GrpcAdapter::start(db).await;
+    assert_eq!(grpc.execute_query(request).await.unwrap(), expected);
+    grpc.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn query_service_scoped_entry_points_execute_the_same_tenant_read() {
     let db = fresh_database("transport-query-service-tenant-scope").await;
     let service = HelixQueryService::new(Arc::clone(&db));
