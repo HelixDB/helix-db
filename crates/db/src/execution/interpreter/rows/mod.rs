@@ -18,6 +18,7 @@ mod mutations;
 mod projection;
 mod projection_chain;
 mod property_conversion;
+mod relationship_scan;
 mod requirements;
 mod scan;
 mod streaming;
@@ -71,7 +72,13 @@ impl Interpreter<'_> {
                         && pattern
                             .steps
                             .iter()
-                            .filter(|step| matches!(step, r::MatchStep::Expand { .. }))
+                            .filter(|step| {
+                                matches!(
+                                    step,
+                                    r::MatchStep::Expand { .. }
+                                        | r::MatchStep::ScanRelationship { .. }
+                                )
+                            })
                             .take(2)
                             .count()
                             == 2

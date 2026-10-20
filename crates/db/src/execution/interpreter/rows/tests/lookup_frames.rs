@@ -312,6 +312,7 @@ async fn indexed_pattern_frames_match_independent_products_and_paths() {
                 r::MatchStep::Scan(_) => "scan",
                 r::MatchStep::IndexLookup(_) => "index",
                 r::MatchStep::Expand { .. } => "expand",
+                r::MatchStep::ScanRelationship { .. } => "relationship scan",
                 r::MatchStep::HashJoin { .. } => "hash",
             });
         }

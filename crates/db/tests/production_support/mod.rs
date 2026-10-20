@@ -21,6 +21,9 @@ pub use crate::search::vector::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
 };
+pub use crate::search::vector::{
+    VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape, VectorMemoryBenchmarkStore,
+};
 
 /// Current managed-index storage version exposed to production fixtures.
 pub const CURRENT_INDEX_STORAGE_VERSION: u16 =

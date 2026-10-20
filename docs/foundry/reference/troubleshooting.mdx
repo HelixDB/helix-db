@@ -1,0 +1,68 @@
+---
+title: "Troubleshooting Helix Foundry"
+description: "What Helix Foundry's sign-in, connection, sync, generation, database and load messages mean, and what to do"
+sidebarTitle: "Troubleshooting"
+pageType: "Troubleshooting"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Troubleshooting</Badge></div>
+
+Find the message Foundry shows, then its cause and fix.
+
+## Sign-in
+
+| Message | Cause and fix |
+| --- | --- |
+| Your company signs in with single sign-on. | Foundry doesn't offer single sign-on yet. Sign in to the [Helix dashboard](https://helix-db.com/login) instead. |
+| Your email isn't verified yet. | Verify the email with your provider, or continue with another provider. |
+| This account can't sign in here. | The environment doesn't accept this account. Sign in with your work account, or ask Helix for access. |
+| Sign-in couldn't start. | Choose a provider to try again. |
+| Sign-in is unavailable right now. | Helix couldn't start sign-in. Try again in a moment. |
+| Sign-in didn't finish. | The sign-in link expired or was already used. Try again. |
+| Couldn't load your workspaces. | Foundry couldn't reach Helix. Select **Retry**; **Sign out** is offered on the same page. |
+
+## Connections and syncs
+
+| Message or state | Cause and fix |
+| --- | --- |
+| The test fails | The credential is wrong, revoked or lacks read access. Create it again with the permissions in [Connectors](/foundry/data/connectors). |
+| This key cannot read: … | The key can't read those objects, so they're skipped. Add **Read** for them and test again, or carry on without them. |
+| The database can't be reached | The database must accept connections from Helix's network. Allow the outbound addresses the form lists, and check the host and port. Private addresses are refused. |
+| A TLS error | Foundry verifies the server's certificate. Add the CA certificate under **Connection options**, or choose **No TLS** if the database doesn't offer it. |
+| PostgreSQL connections need Foundry Pro | Databases need [Pro or Max](/foundry/workspace/plans-and-billing). Owners and admins see **Upgrade to Pro**. |
+| table … has more than 2000000 rows; choose fewer tables | A table is over the [row limit](/foundry/reference/limits#data). For a database, edit the connection and leave the table out; for PostHog, shorten the event history. |
+| Syncs fail after a table changed | A selected database table was dropped or renamed. Edit the connection and test it again. |
+| A sync of this connector is already queued or running | Wait for it to finish before syncing, editing or deleting. |
+
+## Ontologies and generations
+
+| Message or state | Cause and fix |
+| --- | --- |
+| Retrying | An attempt failed for a passing reason and Foundry will try again; the page says why and when. Nothing to do. |
+| Failed | The generation failed for good. Select **Try again** to reopen the form with the same goal and connectors; choosing fewer tables or a clearer goal helps. |
+| Making a version current is refused | Someone else made another version current at the same time. The page now shows it; make yours current again if you still want it. |
+| A new database can't be created | The workspace has no Helix plan. Add one in the Helix dashboard's billing, or use a database you already have. |
+| The database is starting | A new database takes a few minutes to start. Pages read it again by themselves; a load waits for it. |
+| The ontology shows no database contents | You can't read the database's Helix project. Ask an owner for access to it. |
+
+## Loads
+
+| Message or state | Cause and fix |
+| --- | --- |
+| **Load data** isn't offered | Only a current agent draft the agent finished can be loaded. [Generate](/foundry/ontologies/generate-and-version) one and make it current. |
+| Partial, or Stopped at the cap | Reading documents reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits). The documents it didn't reach are read into it once it's current and the month has budget. |
+| The workspace has spent this month's $100 of loads | New loads are refused until next month. |
+| The tables synced again during the load | A source changed under the load. Start a new load to write the new snapshot. |
+| A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Open the document to see why. |
+| Delete failed | Select **Retry delete** in **Data loads**. |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Limits" icon="ruler" href="/foundry/reference/limits">
+    Every limit in one place.
+  </Card>
+  <Card title="Connectors" icon="plug" href="/foundry/data/connectors">
+    What each source needs.
+  </Card>
+</CardGroup>

@@ -333,7 +333,7 @@ pub(crate) fn run() {
         .unwrap();
     assert_eq!(old.as_slice(), [1, 3, 5]);
     assert!(old.contains(3));
-    assert_eq!(old.to_vec(), [1, 3, 5]);
+    assert_eq!(old.as_slice(), [1, 3, 5]);
     let next = neighbor_set::NeighborSet::try_from_canonical(9, limits.for_layer(0), vec![2, 3, 4])
         .unwrap();
     let (removed, added) = old.difference(&next).unwrap().into_parts();

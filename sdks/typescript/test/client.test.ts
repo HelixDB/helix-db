@@ -860,7 +860,8 @@ await withFakeNativeModule(async (moduleUrl) => {
     await assert.rejects(
       run(),
       (error: unknown) =>
-        error instanceof HelixError && error.kind === "Embedded" &&
+        error instanceof HelixError &&
+        error.kind === "Embedded" &&
         error.code === "syntax_error:compile:unexpected_end" &&
         error.details === "unexpected token",
     );

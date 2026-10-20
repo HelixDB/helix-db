@@ -717,5 +717,5 @@ let created = client
 
 The API key and database ID apply to Cypher as they do to native queries. A
 warm-only read that Helix Cloud answers with `204 No Content` returns no rows.
-Embedded clients reject request options. See the [Cypher reference](../../docs/cypher.md)
+Embedded clients reject request options. See the [Cypher guide](https://docs.helix-db.com/database/helix-db/query-guides/cypher)
 for the language profile, parameters, lossless values, errors and transaction behavior.

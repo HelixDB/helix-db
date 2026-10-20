@@ -88,6 +88,9 @@ envelope and the codes below.
 | `access_mode_error` | A modifying statement reached a reader or a warm-only request (`writer_required`). | 503 | On the writer |
 | `internal_planner_error` | The planner broke one of its own invariants. | 500 | No automatic retry |
 
+The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists
+the `details.detail` code for each construct outside the supported profile.
+
 ## Access the code in an SDK
 
 <CodeGroup>

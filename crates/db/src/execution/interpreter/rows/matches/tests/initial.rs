@@ -47,7 +47,13 @@ async fn deferred_source_and_validation_share_snapshot_and_write_visibility() {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(source.membership, Membership::FreshLabel(_)));
+        assert!(matches!(
+            source.root,
+            Root::Nodes {
+                membership: Membership::FreshLabel(_),
+                ..
+            }
+        ));
         let parameters = BTreeMap::new();
         let mut stream = Box::pin(ctx.graph_match_batches(
             source,
@@ -150,7 +156,13 @@ async fn only_exact_initial_label_patterns_defer_membership() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            matches!(source.membership, Membership::FreshLabel(_)),
+            matches!(
+                source.root,
+                Root::Nodes {
+                    membership: Membership::FreshLabel(_),
+                    ..
+                }
+            ),
             deferred,
             "{text}"
         );
@@ -303,7 +315,13 @@ async fn deferred_initial_sources_release_ownership_on_drop_cancellation_and_adm
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(source.membership, Membership::FreshLabel(_)));
+        assert!(matches!(
+            source.root,
+            Root::Nodes {
+                membership: Membership::FreshLabel(_),
+                ..
+            }
+        ));
         let mut stream = Box::pin(ctx.graph_match_batches(
             source,
             plan.query().bindings().len(),
