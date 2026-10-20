@@ -169,7 +169,7 @@
               "database/helix-db/query-guides/projections",
               "database/helix-db/query-guides/parameters",
               "database/helix-db/query-guides/advanced",
-          "database/helix-db/query-guides/cypher",
+              "database/helix-db/query-guides/cypher",
               {
                 "group": "INDEXES AND SEARCH",
                 "pages": [
@@ -300,7 +300,7 @@
               "cli/command-reference/api",
               "cli/command-reference/chef",
               "cli/command-reference/cluster",
-          "cli/command-reference/cypher",
+              "cli/command-reference/cypher",
               "cli/command-reference/database",
               "cli/command-reference/delete",
               "cli/command-reference/doctor",
