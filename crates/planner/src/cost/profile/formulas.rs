@@ -128,6 +128,26 @@ impl StorageCostProfile {
             .serial(self.secondary_row_materialization(rows))
     }
 
+    /// Cost reading the stored endpoints of `edges` relationships named by a
+    /// type bitmap. Ascending edge IDs make adjacent keys, read in serial
+    /// `multi_get`s of at most [`crate::cost::RECORD_BATCH_ROWS`] keys.
+    ///
+    /// ```
+    /// use helix_planner::cost::{EstimatedRows, StorageCostProfile};
+    /// let profile = StorageCostProfile::default();
+    /// let cost = profile.relationship_endpoints(EstimatedRows::rows(1000));
+    /// assert_eq!(cost.multi_get_calls, 4);
+    /// assert_eq!(cost.object_reads, 1000);
+    /// assert_eq!(cost.range_seeks, 0);
+    /// assert_eq!(profile.relationship_endpoints(EstimatedRows::rows(0)).object_reads, 0);
+    /// ```
+    pub fn relationship_endpoints(&self, edges: EstimatedRows) -> CostVector {
+        PositiveUsize::new(usize::try_from(edges.as_rows()).unwrap_or(usize::MAX))
+            .map_or(CostVector::ZERO, |keys| {
+                self.record_batched_multi_get(keys, KeyLocality::Close)
+            })
+    }
+
     /// Cost an element-ID scan followed by graph-row reads and row construction.
     /// This is distinct from an index range scan, whose driver may defer graph
     /// verification until after membership filtering.

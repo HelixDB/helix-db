@@ -159,7 +159,10 @@ pub(in crate::execution::interpreter) fn required_for_pattern(
                         required.0 |= required_for(&step.op).0;
                     }
                 }
-                MatchStep::Expand { .. } => required.0 |= RequiredMutationVisibility::TOPOLOGY,
+                // Edge label bitmaps and adjacency are both topology rows.
+                MatchStep::Expand { .. } | MatchStep::ScanRelationship { .. } => {
+                    required.0 |= RequiredMutationVisibility::TOPOLOGY;
+                }
             }
             required
         })
