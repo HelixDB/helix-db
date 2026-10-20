@@ -661,7 +661,7 @@ async fn transports_preserve_nested_values_folded_rows_and_edge_paths() {
         "folded": [{"$id": node_id}],
         "exists": true,
         "labels": ["Encoded"],
-        "values": [{"nested": [[f64::from(0.1_f32), -0.0_f64], "quote\"\\ é"]}],
+        "values": [{"payload": {"nested": [[f64::from(0.1_f32), -0.0_f64], "quote\"\\ é"]}}],
         "edge_paths": [{
             "bindings": {},
             "current": {"node": node_id},
