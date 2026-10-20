@@ -281,6 +281,49 @@
         }
       }
     },
+    "/v2/diagnostics": {
+      "get": {
+        "operationId": "getDiagnostics",
+        "summary": "Diagnose the server's setup",
+        "description": "Runs read-only checks of how this server is set up and returns each verdict: storage durability, the S3 bucket's region and round-trip time, the disk cache's device, free space and startup warm, memory headroom, vector and text index publication, and the missing indexes and unbounded scans of recent queries. Checks that do not apply to the configured storage are left out. Nothing is changed; the only outbound requests are HEADs of a key that does not exist in the bucket, an unsigned HEAD of the bucket for its region, and the EC2 or ECS metadata endpoint, each bounded by a short timeout. `helix doctor` renders this report.",
+        "tags": [
+          "Health"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Every applicable check, in report order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticsReport"
+                },
+                "example": {
+                  "uptime_secs": 3600,
+                  "checks": [
+                    {
+                      "id": "storage.s3_region",
+                      "category": "storage",
+                      "status": "pass",
+                      "summary": "S3 bucket is in this server's region",
+                      "detail": "Bucket helix-data and this server are both in us-east-2."
+                    },
+                    {
+                      "id": "cache.device",
+                      "category": "cache",
+                      "status": "warn",
+                      "summary": "The disk cache is on network block storage",
+                      "detail": "/var/cache/helix is on nvme0n1 (Amazon Elastic Block Store). Each cache miss pays network-disk latency and draws on the volume's IOPS limit; local NVMe answers several times faster.",
+                      "fix": "Run on an instance with local NVMe (for example the i4i, i8g, m7gd or c7gd families) and mount it at /var/cache/helix, or point HELIX_DISK_CACHE_DIR at it."
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v2/cypher": {
       "post": {
         "operationId": "executeCypher",
@@ -1262,6 +1305,89 @@
           "mode": "writer",
           "index_runtime": "ready",
           "blocked_index_entity_count": 0
+        }
+      },
+      "DiagnosticsReport": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "uptime_secs",
+          "checks"
+        ],
+        "properties": {
+          "uptime_secs": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Seconds since the server opened its database."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticCheck"
+            }
+          }
+        }
+      },
+      "DiagnosticCheck": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "category",
+          "status",
+          "summary",
+          "detail"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable check identifier.",
+            "enum": [
+              "storage.durability",
+              "storage.data_device",
+              "storage.s3_region",
+              "storage.s3_latency",
+              "cache.device",
+              "cache.space",
+              "cache.warm",
+              "resources.memory",
+              "indexes.publication",
+              "queries.missing_indexes",
+              "queries.unbounded_scans"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "storage",
+              "cache",
+              "resources",
+              "indexes",
+              "queries"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "warn",
+              "fail",
+              "skip"
+            ],
+            "description": "`warn`: works but costs performance or money. `fail`: risks losing data. `skip`: the check could not run; `detail` says why."
+          },
+          "summary": {
+            "type": "string",
+            "description": "One-line verdict."
+          },
+          "detail": {
+            "type": "string",
+            "description": "What was observed, or why the check was skipped. May span several lines."
+          },
+          "fix": {
+            "type": "string",
+            "description": "What to change; present only for `warn` and `fail`. May contain `<instance>`, which a client that knows the instance's name substitutes."
+          }
         }
       },
       "CypherInteger": {

@@ -1,0 +1,115 @@
+---
+title: "Helix Foundry quickstart"
+description: "Sign in, connect a source, generate an ontology, load it into a Helix database and explore it"
+sidebarTitle: "Quickstart"
+pageType: "Tutorial"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
+
+This tutorial takes a new workspace from sign-in to an explored graph. You need a
+Helix account and a source to read, such as a Stripe account. Owners and admins of a
+workspace can do every step. Members can follow along read-only; exploring a load also
+needs **Query read** on its database's Helix project.
+
+<Frame caption="The steps below, end to end.">
+  <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
+</Frame>
+
+<Steps>
+  <Step title="Sign in">
+    Open [foundry.helix-db.com](https://foundry.helix-db.com) and continue with
+    Google, GitHub or Microsoft, using the account you use for Helix Cloud.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/start-here/sign-in.png" alt="The Helix Foundry sign-in page with Google, GitHub and Microsoft buttons" />
+    </Frame>
+  </Step>
+
+  <Step title="Choose a workspace">
+    Foundry opens your workspace when you have one, or the workspace picker when you
+    have several or none. Select **Create workspace** to start a new one; it starts on
+    Foundry Free.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/start-here/create-workspace.png" alt="The Create a workspace dialog over the workspace picker" />
+    </Frame>
+  </Step>
+
+  <Step title="Connect and sync a source">
+    In **Data**, select **Add data**, choose the source, and follow its numbered steps
+    to create a read-only credential. Select **Test connection** to see what the
+    credential can read, then **Connect and sync**. The first sync starts at once.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/data/stripe-tested.png" alt="The Stripe connection form after a successful test, listing the objects the key can read" />
+    </Frame>
+
+    See [Connect data](/foundry/data/connect-data) for every source and what it needs.
+  </Step>
+
+  <Step title="Create an ontology">
+    In **Ontologies**, select **New ontology**. Name it and choose the Helix database
+    it loads into: one you have, or a new one on Helix's shared cluster.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology.png" alt="The New ontology form with a name and an existing database selected" />
+    </Frame>
+  </Step>
+
+  <Step title="Generate a draft">
+    On the ontology, select **Generate**. Say what the ontology should serve, choose the
+    connectors whose tables it reads, and select **Generate**. The page follows the
+    generation until it stores a new version.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/generate.png" alt="The Generate an ontology form with a goal and the Stripe and Shop database connectors selected" />
+    </Frame>
+  </Step>
+
+  <Step title="Review it and make it current">
+    Select **Review version**. Read its types, links, mappings and rules, then select
+    **Make current**. Your earlier version stays, so you can roll back at any time.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/version.png" alt="An agent-drafted version with its Graph, Types, Links, Mappings, Rules, Questions and TOML tabs" />
+    </Frame>
+  </Step>
+
+  <Step title="Load it">
+    In **Data loads**, select **Load data**. The dialog says which tables and documents
+    the load reads and what it may spend; select **Load**. When it finishes, it becomes
+    the current load.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/load-dialog.png" alt="The Load version 3 into contracts dialog with the tables, documents, spending and limits" />
+    </Frame>
+  </Step>
+
+  <Step title="Explore it">
+    Select **Open Explorer**. The graph opens on a connected sample of the load. Search
+    with <kbd>/</kbd>, double-click a node to expand it, or switch to **Records** to read
+    each type as a table.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/explore/explorer-node.png" alt="The Explorer with a customer selected and its properties and relationships in the inspector" />
+    </Frame>
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Upload documents" icon="file-lines" href="/foundry/ontologies/documents">
+    Add contracts and notes so loads fill types from their text.
+  </Card>
+  <Card title="Invite your team" icon="user-plus" href="/foundry/workspace/members-and-roles">
+    Invite members and admins to the workspace.
+  </Card>
+  <Card title="Connect a database" icon="database" href="/foundry/data/connectors">
+    PostgreSQL and MySQL need Foundry Pro.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/foundry/reference/troubleshooting">
+    What each error and waiting state means.
+  </Card>
+</CardGroup>

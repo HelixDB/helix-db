@@ -145,7 +145,7 @@ impl GrpcAdapter {
     async fn start(db: Arc<HelixDB>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let state = ServerState::new(Arc::clone(&db), None);
+        let state = ServerState::new(Arc::clone(&db), None, crate::StorageConfig::Memory);
         let (shutdown, mut shutdown_rx) = watch::channel(false);
         let server = tokio::spawn(async move {
             Server::builder()
@@ -586,7 +586,11 @@ async fn embedded_service_http_and_grpc_match_the_shared_model_corpus() {
 
     let db = fresh_database("transport-corpus-http").await;
     let mut http = HttpAdapter {
-        router: http::router(ServerState::new(Arc::clone(&db), None)),
+        router: http::router(ServerState::new(
+            Arc::clone(&db),
+            None,
+            crate::StorageConfig::Memory,
+        )),
         db,
     };
     assert_eq!(execute_transport_corpus(&mut http).await.unwrap(), expected);
@@ -842,7 +846,11 @@ async fn missing_text_index_preserves_the_public_error_code() {
     assert_eq!(embedded_error.index_error_code(), Some("index_not_found"));
     assert_eq!(embedded_error.to_string(), expected_message);
 
-    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        crate::StorageConfig::Memory,
+    ));
     let response = router
         .oneshot(
             HttpRequest::post("/v2/query")
@@ -981,7 +989,11 @@ async fn grpc_rejects_malformed_and_oversized_queries_then_shuts_down_cleanly() 
 #[tokio::test]
 async fn http_rejects_malformed_oversized_and_incompatible_options() {
     let db = fresh_database("transport-errors-http").await;
-    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        crate::StorageConfig::Memory,
+    ));
 
     let malformed = router
         .clone()
@@ -1077,7 +1089,11 @@ async fn transport_readiness_reports_direct_text_storage_as_ready() {
             .await
             .unwrap(),
     );
-    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        crate::StorageConfig::Memory,
+    ));
 
     let liveness = router
         .clone()
@@ -1417,10 +1433,14 @@ async fn health_counts_the_index_entities_the_worker_holds_back() {
     );
     assert_eq!(db.blocked_index_entity_count(), 1);
 
-    let response = http::router(ServerState::new(Arc::clone(&db), None))
-        .oneshot(HttpRequest::get("/healthz").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let response = http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        crate::StorageConfig::Memory,
+    ))
+    .oneshot(HttpRequest::get("/healthz").body(Body::empty()).unwrap())
+    .await
+    .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let health: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 4_096).await.unwrap()).unwrap();

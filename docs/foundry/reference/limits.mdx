@@ -1,0 +1,77 @@
+---
+title: "Helix Foundry limits"
+description: "Every Helix Foundry limit in one place: syncs, generations, documents, loads, spending and reads"
+sidebarTitle: "Limits"
+pageType: "Reference"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
+
+The limits Foundry applies, by area. Each guide explains what happens when you reach one.
+
+## Data
+
+| Limit | Value |
+| --- | --- |
+| Rows per table, per sync | 2,000,000 |
+| One sync attempt | 2 hours |
+| Attempts per sync | 3 |
+| Syncs running per connection | 1 |
+| PostHog event history | 1 to 365 days, 30 by default |
+| PostgreSQL and MySQL | Foundry Pro or Max |
+
+## Generations
+
+| Limit | Value |
+| --- | --- |
+| Goal | 2,000 characters |
+| Tables per generation | 50 |
+| Documents the agent sees | Names of the 50 most recently uploaded |
+| Attempts per generation | 3 |
+| Generations running per ontology | 1 |
+
+## Documents
+
+| Limit | Value |
+| --- | --- |
+| File types | `.md`, `.markdown`, `.txt` |
+| Size | 256 KiB per document |
+| Documents per workspace | 200 |
+| Name | 255 characters, no slash, backslash or control character |
+
+## Loads
+
+| Limit | Value |
+| --- | --- |
+| Document reading spend, per load | $20 |
+| Document reading spend, per workspace each month | $100 |
+| Loads kept per ontology | 5: the current one and the four newest others |
+| Loads or extracts running per ontology | 1 |
+
+## Explorer and Records
+
+| Limit | Value |
+| --- | --- |
+| First view of a load | A connected sample of about 320 records |
+| Records per page | 50 |
+| Records reachable by paging, per type | 10,000 |
+| Matches counted by a search or filter | 1,000 |
+| Records compared per type, per side | 5,000 |
+
+## Ontologies
+
+| Limit | Value |
+| --- | --- |
+| Ontologies per database | 1 |
+| Databases per ontology | 1 |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Troubleshooting" icon="wrench" href="/foundry/reference/troubleshooting">
+    What to do when you reach a limit.
+  </Card>
+  <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
+    What each plan includes.
+  </Card>
+</CardGroup>
