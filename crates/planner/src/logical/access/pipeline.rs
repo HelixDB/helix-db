@@ -68,6 +68,11 @@ impl AccessPipeline {
         self.ops.as_at_least()
     }
 
+    /// The access path and operators, moved out.
+    pub fn into_parts(self) -> (AccessPath, ir::AtLeast<StreamPipelineOp, 1>) {
+        (self.access, self.ops.into_at_least())
+    }
+
     /// First pipeline-operator family.
     pub fn head_op_kind(&self) -> StreamPipelineOpKind {
         self.ops.as_slice()[0].kind()

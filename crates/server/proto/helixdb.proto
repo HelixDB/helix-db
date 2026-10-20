@@ -6,6 +6,9 @@ service HelixDbServer {
   rpc ExecuteQuery(QueryJsonRequest) returns (QueryJsonResponse);
   // body is the same lossless JSON request/result contract as POST /v2/cypher.
   rpc ExecuteCypher(QueryJsonRequest) returns (QueryJsonResponse);
+  // body is the POST /v2/cypher/explain request/result contract. The
+  // statement is planned, never executed, so request options apply as a read.
+  rpc ExplainCypher(QueryJsonRequest) returns (QueryJsonResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }
 

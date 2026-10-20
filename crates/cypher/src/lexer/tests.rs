@@ -173,41 +173,51 @@ fn token_boundaries_and_byte_spans_survive_comments_and_mixed_payloads() {
 #[test]
 fn malformed_quotes_and_unicode_keep_exact_error_details_and_spans() {
     for (source, detail, end, message) in [
-        ("$", "UnexpectedSyntax", 1, "expected parameter name"),
-        ("$``", "UnexpectedSyntax", 3, "expected parameter name"),
-        ("'abc", "UnexpectedSyntax", 4, "unterminated quoted value"),
-        ("'abc\\", "UnexpectedSyntax", 5, "unterminated quoted value"),
-        ("`abc``", "UnexpectedSyntax", 6, "unterminated quoted value"),
-        (r"'\q'", "UnexpectedSyntax", 3, "invalid string escape"),
+        ("$", "unexpected_syntax", 1, "expected parameter name"),
+        ("$``", "unexpected_syntax", 3, "expected parameter name"),
+        ("'abc", "unexpected_syntax", 4, "unterminated quoted value"),
+        (
+            "'abc\\",
+            "unexpected_syntax",
+            5,
+            "unterminated quoted value",
+        ),
+        (
+            "`abc``",
+            "unexpected_syntax",
+            6,
+            "unterminated quoted value",
+        ),
+        (r"'\q'", "unexpected_syntax", 3, "invalid string escape"),
         (
             r"'\u12'",
-            "InvalidUnicodeLiteral",
+            "invalid_unicode_literal",
             3,
             "incomplete Unicode escape",
         ),
         (
             r"'\uD800'",
-            "InvalidUnicodeLiteral",
+            "invalid_unicode_literal",
             7,
             "invalid Unicode scalar",
         ),
         (
             r"'\U00110000'",
-            "InvalidUnicodeLiteral",
+            "invalid_unicode_literal",
             11,
             "invalid Unicode scalar",
         ),
         (
             r"'\uZZZZ'",
-            "InvalidUnicodeLiteral",
+            "invalid_unicode_literal",
             7,
             "invalid Unicode scalar",
         ),
-        ("/*abc", "UnexpectedSyntax", 5, "unterminated comment"),
-        ("🙂", "InvalidUnicodeCharacter", 4, "unexpected character"),
+        ("/*abc", "unexpected_syntax", 5, "unterminated comment"),
+        ("🙂", "invalid_unicode_character", 4, "unexpected character"),
     ] {
         let error = lex(source).unwrap_err();
-        assert_eq!(error.category, "SyntaxError", "{source}");
+        assert_eq!(error.category, "syntax_error", "{source}");
         assert_eq!(error.detail, detail, "{source}");
         assert_eq!(error.message, message, "{source}");
         assert_eq!(error.span, Some(Span { start: 0, end }), "{source}");

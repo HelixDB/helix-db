@@ -173,7 +173,7 @@ async fn product_positions_handle_sparse_ids_duplicates_empty_inputs_and_drop() 
                         crate::HelixDbError::QueryDeadlineExceeded
                             | crate::HelixDbError::QueryMemoryLimitExceeded
                     )
-                ) || matches!(error, crate::cypher::Error::Query(ref e) if e.detail == "MemoryLimit")
+                ) || matches!(error, crate::cypher::Error::Query(ref e) if e.detail == "memory_limit")
             );
         }
         drop(held);
@@ -413,7 +413,7 @@ async fn disconnected_products_match_an_independent_model_and_optional_boundarie
             .cypher(crate::cypher::Request::new(text))
             .await
             .unwrap_err();
-        assert!(matches!(error,crate::cypher::Error::Query(e) if e.detail=="DivisionByZero"));
+        assert!(matches!(error,crate::cypher::Error::Query(e) if e.detail=="division_by_zero"));
     }
     db.close().await.unwrap();
 }
@@ -466,7 +466,7 @@ async fn product_cardinality_does_not_determine_retained_memory_or_source_reads(
         .await
         .unwrap_err();
     assert!(
-        matches!(error,crate::cypher::Error::Query(ref e) if e.detail=="MemoryLimit")
+        matches!(error,crate::cypher::Error::Query(ref e) if e.detail=="memory_limit")
             || matches!(
                 error,
                 crate::cypher::Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)
@@ -595,7 +595,7 @@ async fn range_sources_replay_their_prefix_then_the_rest_in_rank_order() {
         .err()
         .expect("a replayed row needs admission");
     assert!(
-        matches!(error, crate::cypher::Error::Query(ref e) if e.detail == "MemoryLimit")
+        matches!(error, crate::cypher::Error::Query(ref e) if e.detail == "memory_limit")
             || matches!(
                 error,
                 crate::cypher::Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)

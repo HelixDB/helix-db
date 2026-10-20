@@ -41,7 +41,7 @@ pub(in crate::rules) fn index_membership_filter(
     planner_limits: &context::PlannerLimits,
 ) -> Option<ir::NodeIndexMembershipPlan> {
     let Ok(analysis::PrunedPredicate::Feasible { predicate, label }) =
-        analysis::prune_statically_impossible_branches(predicate.as_ref())
+        analysis::prune_borrowed(predicate.as_ref())
     else {
         return None;
     };

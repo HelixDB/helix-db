@@ -4,6 +4,7 @@
 #[path = "../../../planner/src/analysis/tests/allocations.rs"]
 mod allocations;
 
+mod api;
 mod contracts;
 mod frontend;
 mod graph_bindings;
@@ -13,6 +14,7 @@ mod ordering;
 mod ordering_aliases;
 mod pattern_scopes;
 mod punctuation;
+mod request;
 mod schema_storage;
 mod scopes;
 mod simple_case;

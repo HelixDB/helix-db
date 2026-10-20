@@ -33,7 +33,9 @@ fn restricted_vector_ranking_preserves_input_scope_for_diagnostics() {
 #[test]
 fn equality_and_every_range_shape_are_typed_for_nodes_and_edges() {
     let ctx = context::PlannerContext {
-        params: context::ParamBindings::default().with_value(name("needle"), 5),
+        params: context::ParamBindings::default()
+            .with_value(name("needle"), 5)
+            .into(),
         ..context::PlannerContext::default()
     };
     let cases = [

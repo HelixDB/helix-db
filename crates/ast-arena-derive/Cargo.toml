@@ -1,0 +1,16 @@
+[package]
+name = "helix-ast-arena-derive"
+version = "0.1.0"
+edition = "2024"
+description = "Generates helix-ast's arena-backed mirrors of its owned request types"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[lints]
+workspace = true

@@ -116,12 +116,17 @@ pub(super) fn set_canonicalization_candidate(source: &NodeAccessPlan) -> bool {
 
 pub(super) fn set_subsumption_candidate(source: &NodeAccessPlan) -> bool {
     match source {
-        NodeAccessPlan::Union(sources) => {
-            super::super::union_has_subsumption_candidate(sources, NodeAccessSourcePlan::subsumes)
-        }
+        NodeAccessPlan::Union(sources) => super::super::union_has_subsumption_candidate(
+            sources,
+            |superset: &NodeAccessSourcePlan, subset: &NodeAccessSourcePlan| {
+                structurally_subsumes(superset.as_ref(), subset.as_ref())
+            },
+        ),
         NodeAccessPlan::Intersect(sources) => super::super::intersection_has_subsumption_candidate(
             sources,
-            NodeAccessSourcePlan::subsumes,
+            |superset: &NodeAccessSourcePlan, subset: &NodeAccessSourcePlan| {
+                structurally_subsumes(superset.as_ref(), subset.as_ref())
+            },
         ),
         NodeAccessPlan::Empty
         | NodeAccessPlan::PointIds { .. }
@@ -139,9 +144,12 @@ pub(super) fn set_subsumption_candidate(source: &NodeAccessPlan) -> bool {
 }
 
 pub(super) fn subsumes(superset: &NodeAccessPlan, subset: &NodeAccessPlan) -> bool {
-    if superset == subset {
-        return true;
-    }
+    superset == subset || structurally_subsumes(superset, subset)
+}
+
+/// [`subsumes`] apart from equality, which callers comparing many pairs can
+/// test more cheaply themselves.
+fn structurally_subsumes(superset: &NodeAccessPlan, subset: &NodeAccessPlan) -> bool {
     match (superset, subset) {
         (_, NodeAccessPlan::Empty) => true,
         (NodeAccessPlan::AllScan, _) => true,

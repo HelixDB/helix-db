@@ -1,8 +1,9 @@
+use helix_ast_arena_derive::ArenaMirror;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 
 /// Physical direction for range indexes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum RangeIndexDirection {
     /// Ascending.
@@ -13,7 +14,7 @@ pub enum RangeIndexDirection {
 }
 
 /// Vector distance metric for vector index creation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum VectorDistanceMetric {
     /// Cosine similarity.
@@ -25,7 +26,7 @@ pub enum VectorDistanceMetric {
 }
 
 /// Dynamic index declaration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexSpec {
     /// Node equality index.

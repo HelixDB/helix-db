@@ -7,7 +7,7 @@ The Helix CLI — binary `helix`, crate `helix-cli` (v3.0.1). It is a **runtime 
 This CLI has **no `helix compile` and no `helix check`**, and there is **no `.hx` query workflow** in it. (Older notes/memory that mention those commands describe the v2 CLI and are stale.) In v3:
 
 - **Queries are JSON requests** sent to a *running* instance via `POST /v2/query` (`helix query`). Validation happens server-side, in the instance.
-- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.11`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (SeaweedFS-backed) with `--disk`.
+- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.12`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (SeaweedFS-backed) with `--disk`.
 - **Cloud instances are linked resources.** The CLI authenticates only with a rotating WorkOS session and sends Cloud queries through WFE's backend broker. It does not deploy query bundles or call Cloud gateways directly.
 
 The Rust DSL builder lives in `sdks/rust/` (a client library), not in this CLI.
@@ -53,6 +53,7 @@ Instance args default to `dev`, else the only instance, else a prompt (TTY), els
 - `start [instance] [--foreground] [--port <p>] [--disk] [--persist]` (alias `run`) — start a local container (background by default; `--detach` is a hidden alias). `--disk` forces on-disk/SeaweedFS storage for this run; `--persist` writes the resolved port/storage back to `helix.toml`. The in-memory data-loss warning is shown only once per instance (tracked by a `.warned-memory` marker in the instance workspace).
 - `stop [instance]` / `restart [instance]` — stop/restart a background container.
 - `status [instance]` — project header plus an INSTANCE/KIND/STATUS/ENDPOINT table; an unreachable Cloud database is an `unreachable` row plus a warning, not a failure. Omit instance for all.
+- `doctor [instance|cluster:<id>|tenant:<id>] [--url <URL>]` — read-only setup checkup (`commands/doctor.rs`). CLI checks: `cli.version` (fresh release check, honours `HELIX_NO_UPDATE_CHECK`), and for local instances `runtime.daemon` (bounded `info`, never auto-starts), `runtime.container`, `runtime.image`; then `server.reachable` (`/healthz`) and the server's own checks from `GET /v2/diagnostics` (storage, S3 region/latency, cache device/space/warm, memory, index publication, missing indexes, unbounded scans). A stopped container skips server checks; Cloud databases report `cloud.managed` (skip). `<instance>` in server fixes is replaced by the instance name. Exits 1 when any check fails; `--json` prints `{target, uptime_secs?, checks, summary}`.
 - `logs [instance] [-f] [--start <rfc3339>] [--end <rfc3339>]` — local: Docker/Podman logs (`-f` follows; no `--json`). Cloud: query errors as a table (default last hour, explicit empty state).
 - `prune [instance] [-a/--all] [-y/--yes]` — delete local containers + `.helix/workspace/` dirs. Non-interactive needs an instance or `--all`.
 - `delete <instance> [-y/--yes]` — remove instance from `helix.toml` **and** its local runtime state (instance arg required).
@@ -134,7 +135,7 @@ Chef is framed as one `intro`/`outro` session. `Step` provides `println` (print 
 **Project config — `helix.toml`** (`HelixConfig` in `config.rs`, found via `ProjectContext::find_and_load`):
 
 - `[project]` — `name` (required), optional `id` / `workspace_id`, `queries` (default `db/`), `container_runtime` (`docker` | `podman`, default docker).
-- `[local.<name>]` — `port` (default `6969`), `image` (default `ghcr.io/helixdb/helixdb`), `tag` (default `v0.0.11`), `storage` (`memory` | `disk`, default memory).
+- `[local.<name>]` — `port` (default `6969`), `image` (default `ghcr.io/helixdb/helixdb`), `tag` (default `v0.0.12`), `storage` (`memory` | `disk`, default memory).
 - `[enterprise.<name>]` — typed `database = "cluster:<id>"|"tenant:<id>"`, plus optional stable `workspace_id` and `project_id` linkage. Gateway URLs, query keys, query bundles, and sync snapshots are rejected as obsolete.
 
 `HelixConfig::validate` requires a non-empty project name, at least one instance, non-empty instance names, and a valid typed database for each Cloud instance. `default_config()` seeds a single in-memory `local.dev`.

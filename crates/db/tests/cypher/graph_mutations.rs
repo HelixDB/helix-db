@@ -159,7 +159,7 @@ async fn homogeneous_lists_round_trip_through_typed_storage() {
 async fn invalid_property_values_and_names_fail_without_writing() {
     let db = database().await;
     run(&db, "CREATE (:Target {k: 1})").await;
-    let invalid = ("TypeError", "InvalidPropertyType");
+    let invalid = ("type_error", "invalid_property_type");
     let cases = [
         ("CREATE (:Bad {xs: [1, null]})", json!({}), invalid),
         ("CREATE (:Bad {xs: [1, 'a']})", json!({}), invalid),
@@ -172,7 +172,7 @@ async fn invalid_property_values_and_names_fail_without_writing() {
         (
             "CREATE (:Bad {``: 1})",
             json!({}),
-            ("UnsupportedFeature", "EmptyPropertyName"),
+            ("unsupported_feature", "empty_property_name"),
         ),
         (
             "MATCH (n:Target) SET n.x = $p",
@@ -187,17 +187,17 @@ async fn invalid_property_values_and_names_fail_without_writing() {
         (
             "MATCH (n:Target) SET n += $p",
             json!({"p": {"$x": 1}}),
-            ("UnsupportedFeature", "ReservedPropertyName"),
+            ("unsupported_feature", "reserved_property_name"),
         ),
         (
             "MATCH (n:Target) SET n += $p",
             json!({"p": {"": 1}}),
-            ("UnsupportedFeature", "EmptyPropertyName"),
+            ("unsupported_feature", "empty_property_name"),
         ),
         (
             "MATCH (n:Target) SET n = $p",
             json!({"p": {"": 1}}),
-            ("UnsupportedFeature", "EmptyPropertyName"),
+            ("unsupported_feature", "empty_property_name"),
         ),
     ];
     assert_runtime_errors(
@@ -228,35 +228,39 @@ async fn mutation_targets_of_the_wrong_type_are_runtime_type_errors() {
         (
             "MATCH (b:T) OPTIONAL MATCH (a:Missing) CREATE (a)-[:R]->(b)",
             json!({}),
-            "ExpectedNode",
+            "expected_node",
         ),
         (
             "MATCH (a:T) OPTIONAL MATCH (b:Missing) CREATE (a)-[:R]->(b)",
             json!({}),
-            "ExpectedNode",
+            "expected_node",
         ),
-        ("MATCH (n:T) SET n += 1", json!({}), "ExpectedMap"),
-        ("MATCH (n:T) SET n = $p", json!({"p": [1]}), "ExpectedMap"),
+        ("MATCH (n:T) SET n += 1", json!({}), "expected_map"),
+        ("MATCH (n:T) SET n = $p", json!({"p": [1]}), "expected_map"),
         (
             "WITH $p AS x SET x.a = 1",
             json!({"p": 1}),
-            "ExpectedEntity",
+            "expected_entity",
         ),
         (
             "WITH $p AS x SET x += {a: 1}",
             json!({"p": "text"}),
-            "ExpectedEntity",
+            "expected_entity",
         ),
         (
             "WITH $p AS x DELETE x",
             json!({"p": 1}),
-            "InvalidArgumentType",
+            "invalid_argument_type",
         ),
-        ("UNWIND [1] AS x DELETE x", json!({}), "InvalidArgumentType"),
+        (
+            "UNWIND [1] AS x DELETE x",
+            json!({}),
+            "invalid_argument_type",
+        ),
     ];
     assert_runtime_errors(
         &db,
-        cases.map(|(text, parameters, detail)| (request(text, parameters), "TypeError", detail)),
+        cases.map(|(text, parameters, detail)| (request(text, parameters), "type_error", detail)),
     )
     .await;
     assert_eq!(
@@ -356,7 +360,7 @@ async fn deleted_entities_keep_relationship_types_but_hide_properties() {
         "MATCH (a:Del {k: 1}), (b:Del {k: 2}) CREATE (a)-[:C {w: 3}]->(b)",
     )
     .await;
-    let unavailable = ("EntityNotFound", "DeletedEntityAccess");
+    let unavailable = ("entity_not_found", "deleted_entity_access");
     assert_runtime_errors(
         &db,
         [
@@ -525,14 +529,14 @@ async fn stored_native_collections_convert_to_cypher_values() {
     let node = &run(&db, "MATCH (n:NativeOk) RETURN n").await.rows[0][0];
     assert_eq!(node["labels"], json!(["NativeOk"]));
     assert_eq!(node["properties"], values);
-    let stored_type = ("UnsupportedFeature", "StoredValueType");
+    let stored_type = ("unsupported_feature", "stored_value_type");
     assert_runtime_errors(
         &db,
         [
             ("MATCH (n:NativeBad) RETURN n.bytes", stored_type),
             (
                 "MATCH (n:NativeBad) RETURN n.deep",
-                ("ResourceLimit", "StoredValueNestingLimit"),
+                ("resource_limit", "stored_value_nesting_limit"),
             ),
             ("MATCH (n:NativeBad) RETURN n", stored_type),
             ("MATCH (n:NativeBad) RETURN [n]", stored_type),
@@ -570,7 +574,7 @@ async fn distinct_and_ordered_windows_bound_and_validate_rows() {
     ] {
         assert_eq!(run(&db, query).await.rows, expected, "{query}");
     }
-    let negative = ("SyntaxError", "NegativeIntegerArgument");
+    let negative = ("syntax_error", "negative_integer_argument");
     assert_runtime_errors(
         &db,
         [
@@ -592,14 +596,14 @@ async fn distinct_and_ordered_windows_bound_and_validate_rows() {
                 cypher::Request::new(
                     "UNWIND range(1, 5) AS x WITH x ORDER BY x WHERE x / (x - x) > 0 RETURN x",
                 ),
-                ("ArithmeticError", "DivisionByZero"),
+                ("arithmetic_error", "division_by_zero"),
             ),
             (
                 cypher::Request::new(
                     "UNWIND range(1, 5) AS x WITH x AS y ORDER BY y LIMIT 2 \
                      WHERE y / (y - y) > 0 RETURN y",
                 ),
-                ("ArithmeticError", "DivisionByZero"),
+                ("arithmetic_error", "division_by_zero"),
             ),
         ]
         .map(|(request, (category, detail))| (request, category, detail)),
@@ -706,8 +710,8 @@ async fn aggregation_keys_order_by_inputs_and_reject_oversized_lists() {
         &db,
         [(
             cypher::Request::new("WITH range(1, 200000) AS xs RETURN xs, count(*)"),
-            "ResourceLimit",
-            "ValueDepth",
+            "resource_limit",
+            "value_depth",
         )],
     )
     .await;

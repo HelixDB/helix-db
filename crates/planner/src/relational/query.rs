@@ -1,4 +1,5 @@
 use super::{Expression, QueryError, Result, Slot};
+use crate::relational::{category, detail};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -239,8 +240,8 @@ impl Query {
     ) -> Result<Self> {
         if bindings.len() > 4096 || operators.len() > 4096 {
             return Err(QueryError::compile(
-                "ResourceLimit",
-                "PlanSize",
+                category::RESOURCE_LIMIT,
+                detail::PLAN_SIZE,
                 "query exceeds the binding or operator budget",
             ));
         }
@@ -252,8 +253,8 @@ impl Query {
             expression.validate_shape()?;
             if expression.slots().iter().any(|s| !defined.contains(s)) {
                 return Err(QueryError::compile(
-                    "InternalPlannerError",
-                    "UnboundSlot",
+                    category::INTERNAL_PLANNER_ERROR,
+                    detail::UNBOUND_SLOT,
                     "expression references an undefined row slot",
                 ));
             }
@@ -271,8 +272,8 @@ impl Query {
             };
             if outputs.iter().any(|s| s.0 as usize >= bindings.len()) {
                 return Err(QueryError::compile(
-                    "InternalPlannerError",
-                    "InvalidSchema",
+                    category::INTERNAL_PLANNER_ERROR,
+                    detail::INVALID_SCHEMA,
                     "operator output is outside the binding catalog",
                 ));
             }
@@ -285,8 +286,8 @@ impl Query {
                     for node in &pattern.nodes {
                         if node.label.as_ref().is_some_and(String::is_empty) {
                             return Err(QueryError::compile(
-                                "InternalPlannerError",
-                                "EmptyLabel",
+                                category::INTERNAL_PLANNER_ERROR,
+                                detail::EMPTY_LABEL,
                                 "resolved node labels must be nonempty",
                             ));
                         }
@@ -298,8 +299,8 @@ impl Query {
                                 )
                         }) {
                             return Err(QueryError::compile(
-                                "InternalPlannerError",
-                                "InvalidNodeSlot",
+                                category::INTERNAL_PLANNER_ERROR,
+                                detail::INVALID_NODE_SLOT,
                                 "node pattern must bind a node",
                             ));
                         }
@@ -313,7 +314,7 @@ impl Query {
                                 .iter()
                                 .any(|slot| !pattern.nodes.iter().any(|node| node.slot == *slot))
                         {
-                            return Err(QueryError::compile("InternalPlannerError", "InvalidRelationshipPattern", "relationship endpoints must be node pattern slots and types must be nonempty"));
+                            return Err(QueryError::compile(category::INTERNAL_PLANNER_ERROR, detail::INVALID_RELATIONSHIP_PATTERN, "relationship endpoints must be node pattern slots and types must be nonempty"));
                         }
                         if bindings.get(rel.slot.0 as usize).is_none_or(|b| {
                             b.kind != BindingType::Relationship
@@ -325,8 +326,8 @@ impl Query {
                             || !defined.contains(&rel.to)
                         {
                             return Err(QueryError::compile(
-                                "InternalPlannerError",
-                                "InvalidRelationshipSlot",
+                                category::INTERNAL_PLANNER_ERROR,
+                                detail::INVALID_RELATIONSHIP_SLOT,
                                 "relationship pattern has invalid endpoints or binding",
                             ));
                         }
@@ -360,15 +361,15 @@ impl Query {
                             })
                         {
                             return Err(QueryError::compile(
-                                "InternalPlannerError",
-                                "InvalidPath",
+                                category::INTERNAL_PLANNER_ERROR,
+                                detail::INVALID_PATH,
                                 "path members must belong to their pattern and have compatible types; the path output must be separate",
                             ));
                         }
                         if path.nodes.len() != path.relationships.len().saturating_add(1) {
                             return Err(QueryError::compile(
-                                "InternalPlannerError",
-                                "InvalidPath",
+                                category::INTERNAL_PLANNER_ERROR,
+                                detail::INVALID_PATH,
                                 "path must alternate nodes and relationships",
                             ));
                         }
@@ -382,8 +383,8 @@ impl Query {
                             });
                             if !connects {
                                 return Err(QueryError::compile(
-                                    "InternalPlannerError",
-                                    "InvalidPath",
+                                    category::INTERNAL_PLANNER_ERROR,
+                                    detail::INVALID_PATH,
                                     "path relationship does not connect its adjacent nodes",
                                 ));
                             }
@@ -458,8 +459,8 @@ impl Query {
             || returns.iter().any(|(_, s)| !defined.contains(s))
         {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "InvalidSchema",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_SCHEMA,
                 "query output does not match the binding catalog",
             ));
         }

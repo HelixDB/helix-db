@@ -11,7 +11,9 @@ pub use self::{
     access::*, cardinality::*, contracts::*, core::*, registry::SeedRuleSet, root::*, stream::*,
 };
 
-pub(crate) use self::access::{missing_index_candidates, CandidateIndexKind};
+pub(crate) use self::access::{
+    missing_index_candidates, with_index_rewrite_cache, CandidateIndexKind,
+};
 
 use self::access::required_filter_rewrite_pending;
 #[cfg(test)]

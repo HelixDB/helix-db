@@ -4,8 +4,8 @@ This directory owns the build and test surface for the standalone HelixDB image.
 
 The canonical image repository is `ghcr.io/helixdb/helixdb`. The scripts require an explicit platform and image tag so local and CI runs exercise the same artifact.
 
-The published release is `ghcr.io/helixdb/helixdb:v0.0.11`, available for Linux amd64
-and arm64. See the [local server guide](../docs/database/helix-db/start-here/local-development/local-server.mdx)
+The next release is `ghcr.io/helixdb/helixdb:v0.0.12`, targeting Linux amd64
+and arm64. The published release remains v0.0.11 until the release workflow succeeds. See the [local server guide](../docs/database/helix-db/start-here/local-development/local-server.mdx)
 for release-image commands. The `local-amd64` and `local-arm64` tags below refer
 to images built from your checkout.
 
@@ -13,7 +13,7 @@ to images built from your checkout.
 
 - `/bin/helix-server` is PID 1 and runs as the distroless `nonroot` user (`65532:65532`).
 - HTTP listens on `0.0.0.0:8080`; internal gRPC listens on `127.0.0.1:8081` and is not exposed.
-- `GET /healthz`, `GET /readyz`, and `POST /v2/query` are the supported container probes and query endpoint.
+- `GET /healthz`, `GET /readyz`, and `POST /v2/query` are the supported container probes and query endpoint. `GET /v2/diagnostics` reports read-only setup checks, which `helix doctor` renders.
 - Storage is in memory unless local-disk or S3-compatible configuration is supplied.
 - `/var/lib/helix` (data) and `/var/cache/helix` (disk cache, always used with S3 storage) are owned by the runtime user, so new named volumes mounted there are writable.
 - Docker sends `SIGTERM`; the server drains both listeners and closes storage before exiting.

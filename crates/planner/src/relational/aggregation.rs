@@ -2,6 +2,7 @@
 //! DISTINCT retains unique keys only; ordinary numeric aggregates retain O(1)
 //! values regardless of input cardinality.
 use super::{evaluation, Aggregate, Binary, GroupingKey, QueryError, Result, Value};
+use crate::relational::{category, detail};
 use std::collections::HashSet;
 
 mod average;
@@ -172,8 +173,8 @@ impl Accumulator {
             .saturating_add(distinct_growth);
         if self.allocated_bytes().saturating_add(additional) > max_bytes {
             return Err(QueryError::runtime(
-                "ResourceLimit",
-                "MemoryLimit",
+                category::RESOURCE_LIMIT,
+                detail::MEMORY_LIMIT,
                 "aggregation state exceeds the memory budget",
             )
             .into());
@@ -199,8 +200,8 @@ impl Accumulator {
         };
         if matches!(&self.state,State::Collect { values, .. } if values.len() >= max_items) {
             return Err(QueryError::runtime(
-                "ResourceLimit",
-                "CollectionLimit",
+                category::RESOURCE_LIMIT,
+                detail::COLLECTION_LIMIT,
                 "collect exceeds the collection budget",
             )
             .into());
@@ -208,8 +209,8 @@ impl Accumulator {
         if matches!(&self.deduplication, Deduplication::Distinct { seen, .. } if seen.len() >= max_items)
         {
             return Err(QueryError::runtime(
-                "ResourceLimit",
-                "CollectionLimit",
+                category::RESOURCE_LIMIT,
+                detail::COLLECTION_LIMIT,
                 "distinct aggregation exceeds the collection budget",
             )
             .into());
@@ -218,8 +219,8 @@ impl Accumulator {
         if let Deduplication::Distinct { seen, bytes } = &mut self.deduplication {
             seen.try_reserve(1).map_err(|_| {
                 QueryError::runtime(
-                    "ResourceLimit",
-                    "MemoryLimit",
+                    category::RESOURCE_LIMIT,
+                    detail::MEMORY_LIMIT,
                     "distinct aggregation allocation failed",
                 )
             })?;

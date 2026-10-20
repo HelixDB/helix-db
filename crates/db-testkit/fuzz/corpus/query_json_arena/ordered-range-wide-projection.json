@@ -1,0 +1,159 @@
+{
+  "request_type": "read",
+  "query_name": "find_resources_by_type",
+  "parameter_types": {
+    "limit": "i64",
+    "since_last_seen_us": "i64",
+    "tenant": "string",
+    "type": "string"
+  },
+  "parameters": {
+    "limit": 1000,
+    "since_last_seen_us": 1788000000000000,
+    "tenant": "FZob8v6ZTnCcuVk4",
+    "type": "pod"
+  },
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "q",
+            "root": {
+              "value_map": {
+                "input": {
+                  "limit": {
+                    "count": {
+                      "expr": {
+                        "param": "limit"
+                      }
+                    },
+                    "input": {
+                      "order_by": {
+                        "input": {
+                          "nodes_where": {
+                            "predicate": {
+                              "and": {
+                                "predicates": [
+                                  {
+                                    "eq": {
+                                      "left": {
+                                        "property": "$label"
+                                      },
+                                      "right": {
+                                        "constant": {
+                                          "string": "Resource"
+                                        }
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "eq": {
+                                      "left": {
+                                        "property": "tenant"
+                                      },
+                                      "right": {
+                                        "param": "tenant"
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "eq": {
+                                      "left": {
+                                        "property": "type"
+                                      },
+                                      "right": {
+                                        "param": "type"
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "gt": {
+                                      "left": {
+                                        "property": "last_seen"
+                                      },
+                                      "right": {
+                                        "param": "since_last_seen_us"
+                                      }
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        "order": "desc",
+                        "property": "last_seen"
+                      }
+                    }
+                  }
+                },
+                "properties": [
+                  "id",
+                  "name",
+                  "type",
+                  "namespace",
+                  "category",
+                  "source",
+                  "tenant",
+                  "cluster_id",
+                  "uid",
+                  "phase",
+                  "image",
+                  "sha",
+                  "selector",
+                  "labels",
+                  "owner_references",
+                  "volume_mounts",
+                  "services",
+                  "metrics",
+                  "tags",
+                  "kube_namespace",
+                  "status",
+                  "severity",
+                  "env_vars",
+                  "env_refs",
+                  "service_account_name",
+                  "owned",
+                  "internet_exposed",
+                  "is_hub_service",
+                  "storage_class",
+                  "volume_name",
+                  "volumeName",
+                  "involved_object",
+                  "regarding_kind",
+                  "regarding_name",
+                  "regarding_namespace",
+                  "event_type",
+                  "reason",
+                  "message",
+                  "timestamp",
+                  "api_group",
+                  "kind",
+                  "node",
+                  "references",
+                  "deleted",
+                  "code_linked",
+                  "mesh_observed",
+                  "security_scanned",
+                  "last_seen",
+                  "created_at",
+                  "checksum",
+                  "archived_at",
+                  "updated_at",
+                  "relationship_count",
+                  "previous_relationship_count",
+                  "count",
+                  "has_embedding"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "returns": [
+        "q"
+      ]
+    }
+  }
+}

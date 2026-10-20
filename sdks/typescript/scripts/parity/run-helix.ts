@@ -212,7 +212,6 @@ function startServer(instance: Instance, dataRoot: string): RunningServer {
       HELIX_HTTP_ADDR: `127.0.0.1:${instance.port}`,
       HELIX_GRPC_ADDR: `127.0.0.1:${instance.port + 1000}`,
       HELIX_DATA_DIR: dataRoot,
-      HELIX_ENABLE_CYPHER: "true",
       DB_PATH: `parity-${instance.label}/`,
     },
     stdio: ["ignore", "pipe", "pipe"],

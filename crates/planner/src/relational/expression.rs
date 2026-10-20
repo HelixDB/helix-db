@@ -1,4 +1,5 @@
 use super::Value;
+use crate::relational::{category, detail};
 use std::{collections::BTreeSet, ops::ControlFlow};
 
 /// A logical Query binding index. RowProgram relocates these fields into its
@@ -257,8 +258,8 @@ impl Expression {
             count += 1;
             if depth >= super::MAX_EXPRESSION_DEPTH || count > super::MAX_EXPRESSION_NODES {
                 return Err(super::QueryError::compile(
-                    "ResourceLimit",
-                    "ExpressionDepth",
+                    category::RESOURCE_LIMIT,
+                    detail::EXPRESSION_DEPTH,
                     "expression exceeds validated structural limits",
                 ));
             }
@@ -306,8 +307,8 @@ impl Expression {
                     };
                     if !valid {
                         return Err(super::QueryError::compile(
-                            "InternalPlannerError",
-                            "FunctionArity",
+                            category::INTERNAL_PLANNER_ERROR,
+                            detail::FUNCTION_ARITY,
                             "resolved function has incompatible argument count",
                         ));
                     }
@@ -320,8 +321,8 @@ impl Expression {
                 } => {
                     if argument.is_none() && (*function != Aggregate::Count || *distinct) {
                         return Err(super::QueryError::compile(
-                            "InternalPlannerError",
-                            "AggregateArity",
+                            category::INTERNAL_PLANNER_ERROR,
+                            detail::AGGREGATE_ARITY,
                             "only count(*) permits no argument",
                         ));
                     }

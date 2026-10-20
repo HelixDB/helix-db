@@ -21,6 +21,9 @@ pub use crate::search::vector::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
 };
+pub use crate::search::vector::{
+    VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape, VectorMemoryBenchmarkStore,
+};
 
 /// Current managed-index storage version exposed to production fixtures.
 pub const CURRENT_INDEX_STORAGE_VERSION: u16 =
@@ -546,6 +549,12 @@ pub async fn interpreter_topology_mutation_contracts() {
 pub async fn interpreter_scheduler_and_projection_contracts() {
     crate::execution::interpreter::production_contracts::run_scheduler_and_projection_contracts()
         .await;
+}
+
+/// Proves filtered node vector searches fuse each index-set access into its
+/// search, and that every other shape runs unfused.
+pub async fn interpreter_fused_vector_search_contracts() {
+    crate::execution::interpreter::production_contracts::run_fused_vector_search_contracts().await;
 }
 
 #[cfg(feature = "index-lifecycle-testing")]

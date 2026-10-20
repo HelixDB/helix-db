@@ -32,8 +32,8 @@ fn nesting_preflight_matches_common_values_including_implicit_typed_array_elemen
                 result.unwrap().validate_shape().unwrap();
             } else {
                 let error = result.unwrap_err();
-                assert_eq!(error.category, "ResourceLimit");
-                assert_eq!(error.detail, "StoredValueNestingLimit");
+                assert_eq!(error.category, "resource_limit");
+                assert_eq!(error.detail, "stored_value_nesting_limit");
                 assert_eq!(allocations.allocations, 3, "no partial output containers");
                 assert_eq!(allocations.bytes, bound);
             }
@@ -166,8 +166,8 @@ fn unsupported_subtrees_create_only_one_error_without_partial_containers() {
             let bound = conversion.owned_bytes();
             let (result, allocations) = allocation_testing::observe(|| conversion.finish());
             let error = result.unwrap_err();
-            assert_eq!(error.category, "UnsupportedFeature");
-            assert_eq!(error.detail, "StoredValueType");
+            assert_eq!(error.category, "unsupported_feature");
+            assert_eq!(error.detail, "stored_value_type");
             assert_eq!(error.phase, r::ErrorPhase::Runtime);
             assert_eq!(allocations.allocations, 3);
             assert_eq!(allocations.bytes, bound);

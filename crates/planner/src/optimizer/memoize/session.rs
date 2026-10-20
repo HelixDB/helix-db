@@ -5,9 +5,10 @@ use std::collections::BTreeMap;
 use super::contracts::{MemoizedExpr, QueuedMemoExpr};
 use crate::{digest, logical, memo};
 
+/// A memo expression this session inserted. The memo holds the expression
+/// itself; the session keeps only where to find it.
 #[derive(Debug, Clone)]
 struct MemoizedIdentity {
-    expression: memo::MemoExpression,
     group: memo::MemoGroupId,
     memo_expr: memo::MemoExprId,
     queued_for_exploration: bool,
@@ -52,13 +53,13 @@ impl MemoExpressionMemoizer {
     ) -> Result<MemoizedExpr, memo::MemoError> {
         let expression = self.memo_expression_for_expr(memo, expr)?;
         let digest = memo::expression_digest(&expression);
-        if let Some(existing) = self.find_existing_mut(digest, &expression) {
+        if let Some(existing) = self.find_existing_mut(memo, digest, &expression) {
             let queued = if queue_for_exploration && !existing.queued_for_exploration {
                 existing.queued_for_exploration = true;
                 Some(QueuedMemoExpr {
                     group: existing.group,
                     expr: existing.memo_expr,
-                    logical: existing.expression.expr().clone(),
+                    logical: expression.into_parts().0,
                 })
             } else {
                 None
@@ -70,19 +71,19 @@ impl MemoExpressionMemoizer {
             return Ok(MemoizedExpr { group });
         }
 
-        let inserted = memo.insert_group_with_expr_id(expression.clone())?;
-        if queue_for_exploration {
+        let logical = queue_for_exploration.then(|| expression.expr().clone());
+        let inserted = memo.insert_group_with_expr_id(expression)?;
+        if let Some(logical) = logical {
             self.queued.push(QueuedMemoExpr {
                 group: inserted.group,
                 expr: inserted.expr,
-                logical: expression.expr().clone(),
+                logical,
             });
         }
         self.identities
             .entry(digest)
             .or_default()
             .push(MemoizedIdentity {
-                expression,
                 group: inserted.group,
                 memo_expr: inserted.expr,
                 queued_for_exploration: queue_for_exploration,
@@ -92,14 +93,21 @@ impl MemoExpressionMemoizer {
         })
     }
 
+    /// The identity of an inserted expression equal to `expression`,
+    /// compared against the copy the memo holds.
     fn find_existing_mut(
         &mut self,
+        memo: &memo::Memo,
         digest: digest::PlanDigest,
         expression: &memo::MemoExpression,
     ) -> Option<&mut MemoizedIdentity> {
         self.identities
             .get_mut(&digest)?
             .iter_mut()
-            .find(|identity| &identity.expression == expression)
+            .find(|identity| {
+                memo.expression(identity.memo_expr).is_some_and(|known| {
+                    &known.expr == expression.expr() && &known.children == expression.children()
+                })
+            })
     }
 }

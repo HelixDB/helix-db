@@ -36,7 +36,8 @@ mod tests {
         .expect("test memo group allocation should fit");
 
         let mut config =
-            optimizer::OptimizerConfig::from_context(&context::PlannerContext::default());
+            optimizer::OptimizerConfig::from_context(&context::PlannerContext::default())
+                .into_owned();
         config.limits.memo_groups = properties::PositiveUsize::new(1).unwrap();
         assert_eq!(
             super::memo_size_guardrail(&memo, &config),

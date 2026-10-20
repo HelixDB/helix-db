@@ -62,20 +62,16 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let crate::CypherEndpoints::Enabled = self.state.cypher_endpoints() else {
-            return Err(Status::unimplemented(
-                "Cypher is not enabled on this server",
-            ));
-        };
+        let metrics_tenant_id = crate::query_metrics_tenant_id(
+            request
+                .metadata()
+                .get(crate::TENANT_ID_HEADER_NAME)
+                .and_then(|value| value.to_str().ok()),
+        );
         let request = request.into_inner();
-        if request.body.len() > MAX_QUERY_BODY_BYTES {
-            return Err(Status::resource_exhausted(
-                "Cypher request body exceeds the byte limit",
-            ));
-        }
-        let query: db::cypher::Request = serde_json::from_slice(&request.body)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let query = query.compile().map_err(|e| cypher_status(e.into()))?;
+        let query = cypher_request(&request.body)?
+            .compile()
+            .map_err(|e| cypher_status(e.into()))?;
         validate_options_for_request_type(
             request.warm_only,
             request.require_writer,
@@ -90,10 +86,9 @@ impl HelixDbServer for GrpcService {
                 query,
                 query_mode(request.warm_only),
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
-                db::execution_control::ExecutionControl::from_timeout(
-                    std::time::Duration::from_secs(30),
-                ),
+                db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
                 db::cypher::Limits::default(),
+                metrics_tenant_id,
             )
             .await
             .map_err(cypher_status)?;
@@ -108,6 +103,36 @@ impl HelixDbServer for GrpcService {
         }))
     }
 
+    async fn explain_cypher(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let request = request.into_inner();
+        let query = cypher_request(&request.body)?;
+        // Explaining never executes, so even a modifying statement uses read options.
+        validate_options_for_request_type(
+            request.warm_only,
+            request.require_writer,
+            request.await_durable,
+            QueryRequestType::Read,
+            self.state.db_mode(),
+        )?;
+        let explanation = self
+            .state
+            .query_service()
+            .explain_cypher_scoped_controlled(
+                query,
+                db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
+                db::cypher::Limits::default(),
+            )
+            .await
+            .map_err(cypher_status)?;
+        let body = serde_json::to_vec(&explanation)
+            .map_err(|e| status_from_service_error(QueryServiceError::JsonSerialize(e)))?;
+        Ok(Response::new(QueryJsonResponse { body: body.into() }))
+    }
+
     async fn execute_query(
         &self,
         request: Request<QueryJsonRequest>,
@@ -118,15 +143,27 @@ impl HelixDbServer for GrpcService {
                 .get(crate::TENANT_ID_HEADER_NAME)
                 .and_then(|value| value.to_str().ok()),
         );
-        let request = request.into_inner();
-        if request.body.len() > MAX_QUERY_BODY_BYTES {
+        let QueryJsonRequest {
+            body,
+            warm_only,
+            require_writer,
+            await_durable,
+        } = request.into_inner();
+        if body.len() > MAX_QUERY_BODY_BYTES {
             return Err(status_with_error_code(
                 tonic::Code::ResourceExhausted,
                 error_code::QueryErrorCode::InvalidRequestBody,
                 format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
             ));
         }
-        let query = QueryRequest::from_json_slice(&request.body).map_err(|error| {
+        // simd-json parses a uniquely owned body in place and copies a shared
+        // one. The request owns everything it needs, so the body is freed here
+        // rather than held through planning and execution.
+        let parsed = match body.try_into_mut() {
+            Ok(mut body) => QueryRequest::from_json_slice_mut(&mut body),
+            Err(shared) => QueryRequest::from_json_slice(&shared),
+        };
+        let query = parsed.map_err(|error| {
             status_with_error_code(
                 tonic::Code::InvalidArgument,
                 error_code::QueryErrorCode::InvalidQueryJson,
@@ -134,9 +171,9 @@ impl HelixDbServer for GrpcService {
             )
         })?;
         validate_options_for_request_type(
-            request.warm_only,
-            request.require_writer,
-            request.await_durable,
+            warm_only,
+            require_writer,
+            await_durable,
             query.request_type(),
             self.state.db_mode(),
         )?;
@@ -145,12 +182,12 @@ impl HelixDbServer for GrpcService {
             .query_service()
             .execute_query_with_mode_and_metrics_tenant(
                 query,
-                query_mode(request.warm_only),
+                query_mode(warm_only),
                 metrics_tenant_id,
             )
             .await
             .map_err(status_from_service_error)?;
-        if request.await_durable {
+        if await_durable {
             self.state
                 .flush_writer()
                 .await
@@ -182,25 +219,52 @@ fn query_mode(warm_only: bool) -> QueryMode {
     }
 }
 
+/// Decode a Cypher body with the same size limit and error codes as native queries.
+fn cypher_request(body: &[u8]) -> Result<db::cypher::Request, Status> {
+    if body.len() > MAX_QUERY_BODY_BYTES {
+        return Err(status_with_error_code(
+            tonic::Code::ResourceExhausted,
+            error_code::QueryErrorCode::InvalidRequestBody,
+            format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
+        ));
+    }
+    serde_json::from_slice(body).map_err(|error| {
+        status_with_error_code(
+            tonic::Code::InvalidArgument,
+            error_code::QueryErrorCode::InvalidQueryJson,
+            error.to_string(),
+        )
+    })
+}
+
+/// Cypher diagnostics carry the HTTP error body ([`helix_cypher::api::ErrorBody`])
+/// in the status details; storage and encoding failures report exactly as
+/// native queries do.
 fn cypher_status(error: db::cypher::Error) -> Status {
+    use helix_cypher::api::ErrorClass;
+
     match error {
         db::cypher::Error::Query(error) => {
-            let code = match error.category.as_str() {
-                "ResourceLimit" => tonic::Code::ResourceExhausted,
-                "AccessModeError" => tonic::Code::Unavailable,
-                "InternalPlannerError" => tonic::Code::Internal,
-                _ => tonic::Code::InvalidArgument,
+            let code = match ErrorClass::of(&error) {
+                ErrorClass::InvalidQuery => tonic::Code::InvalidArgument,
+                ErrorClass::ResourceLimit => tonic::Code::ResourceExhausted,
+                ErrorClass::WriterRequired => tonic::Code::FailedPrecondition,
+                ErrorClass::Internal => tonic::Code::Internal,
             };
             Status::with_details(
                 code,
                 error.message.clone(),
-                serde_json::to_vec(&error)
+                serde_json::to_vec(&helix_cypher::api::ErrorBody::from(&error))
                     .expect("Cypher error serializes")
                     .into(),
             )
         }
-        db::cypher::Error::Storage(error) => status_from_service_error(error.into()),
-        db::cypher::Error::Json(error) => Status::internal(error.to_string()),
+        db::cypher::Error::Storage(error) => {
+            status_from_service_error(QueryServiceError::Db(error))
+        }
+        db::cypher::Error::Json(error) => {
+            status_from_service_error(QueryServiceError::JsonSerialize(error))
+        }
     }
 }
 
@@ -315,6 +379,64 @@ mod tests {
                     .to_str()
                     .expect("error codes are ASCII"),
                 expected_error_code
+            );
+        }
+    }
+
+    #[test]
+    fn cypher_statuses_follow_the_shared_error_classes() {
+        let query = |category| {
+            db::cypher::Error::Query(helix_cypher::QueryError::compile(category, "detail", "msg"))
+        };
+        let cases = [
+            (query("syntax_error"), tonic::Code::InvalidArgument, None),
+            (
+                query("resource_limit"),
+                tonic::Code::ResourceExhausted,
+                None,
+            ),
+            (
+                query("access_mode_error"),
+                tonic::Code::FailedPrecondition,
+                None,
+            ),
+            (query("internal_planner_error"), tonic::Code::Internal, None),
+            (
+                db::cypher::Error::Storage(db::error::HelixDbError::TransactionConflict(
+                    "retry".to_string(),
+                )),
+                tonic::Code::Aborted,
+                Some("transaction_conflict"),
+            ),
+            (
+                db::cypher::Error::Json(serde_json::from_str::<u8>("x").expect_err("invalid JSON")),
+                tonic::Code::Internal,
+                Some("response_serialization_error"),
+            ),
+        ];
+        for (error, expected_status_code, expected_error_code) in cases {
+            let error_body = match &error {
+                db::cypher::Error::Query(error) => Some(
+                    serde_json::to_value(helix_cypher::api::ErrorBody::from(error))
+                        .expect("Cypher error body serializes"),
+                ),
+                db::cypher::Error::Storage(_) | db::cypher::Error::Json(_) => None,
+            };
+            let status = cypher_status(error);
+            assert_eq!(status.code(), expected_status_code);
+            assert_eq!(
+                status
+                    .metadata()
+                    .get(HELIX_ERROR_CODE_METADATA)
+                    .map(|code| code.to_str().expect("error codes are ASCII")),
+                expected_error_code
+            );
+            assert_eq!(
+                error_body,
+                (!status.details().is_empty()).then(|| {
+                    serde_json::from_slice::<serde_json::Value>(status.details())
+                        .expect("details are the Cypher error body")
+                })
             );
         }
     }

@@ -55,7 +55,7 @@ fn create_distinguishes_incoming_bindings_from_new_and_shadowed_names() {
     ] {
         let error = helix_cypher::compile(source).expect_err(source);
         assert_eq!(error.phase, r::ErrorPhase::Compile, "{source}");
-        assert_eq!(error.category, "SyntaxError", "{source}");
-        assert_eq!(error.detail, "VariableAlreadyBound", "{source}");
+        assert_eq!(error.category, "syntax_error", "{source}");
+        assert_eq!(error.detail, "variable_already_bound", "{source}");
     }
 }

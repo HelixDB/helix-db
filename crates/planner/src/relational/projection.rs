@@ -3,6 +3,7 @@
 //! All expressions observe the incoming row, including when a destination
 //! shadows an input slot. A failed expression produces no partially updated row.
 use super::{Expression, ExpressionInput, QueryError, Result, Slot};
+use crate::relational::{category, detail};
 use std::{collections::BTreeSet, future::Future};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -39,8 +40,8 @@ impl<E: ExpressionInput> ProjectionProgram<E> {
         for item in &items {
             if !outputs.insert(item.slot) {
                 return Err(QueryError::compile(
-                    "InternalPlannerError",
-                    "InvalidSchema",
+                    category::INTERNAL_PLANNER_ERROR,
+                    detail::INVALID_SCHEMA,
                     "projection output slots must be unique",
                 ));
             }
@@ -57,8 +58,8 @@ impl<E: ExpressionInput> ProjectionProgram<E> {
     pub fn validate_input(&self, input: &BTreeSet<Slot>) -> Result<()> {
         if !self.references.is_subset(input) {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "UnboundSlot",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::UNBOUND_SLOT,
                 "projection references an undefined incoming row slot",
             ));
         }

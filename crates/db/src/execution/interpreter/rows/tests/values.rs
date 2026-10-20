@@ -82,7 +82,7 @@ async fn raw_read_memory_failure_after_create_is_classified_and_rolls_back() {
     .await
     .unwrap_err();
     assert!(
-        matches!(error, Error::Query(error) if error.category == "ResourceLimit" && error.detail == "MemoryLimit" && error.phase == r::ErrorPhase::Runtime)
+        matches!(error, Error::Query(error) if error.category == "resource_limit" && error.detail == "memory_limit" && error.phase == r::ErrorPhase::Runtime)
     );
     let after = db
         .cypher(crate::cypher::Request::new(
@@ -219,7 +219,7 @@ async fn graph_demand_admission_precedes_storage_reads_and_deduplicates_referenc
         .await
         .err()
         .unwrap();
-    assert!(matches!(error, Error::Query(error) if error.detail=="MemoryLimit"));
+    assert!(matches!(error, Error::Query(error) if error.detail=="memory_limit"));
     assert_eq!(
         context.row_budget().reads(),
         crate::cypher::StorageReadUsage::default()
@@ -333,7 +333,7 @@ fn stored_value_conversion_preserves_widths_and_rejects_unstorable_composites() 
         r::Value::Path(r::Path::new(vec![1], vec![]).unwrap()),
     ] {
         assert!(
-            matches!(graph::to_property(value),Err(Error::Query(error)) if error.detail=="InvalidPropertyType")
+            matches!(graph::to_property(value),Err(Error::Query(error)) if error.detail=="invalid_property_type")
         );
     }
     assert!(graph::properties(BTreeMap::from([(

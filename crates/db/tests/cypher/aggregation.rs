@@ -66,8 +66,8 @@ async fn aggregation_errors_roll_back_before_post_projection_case_and_limits() {
             helix_planner::relational::ErrorPhase::Runtime,
             "{query}"
         );
-        assert_eq!(error.category, "ArithmeticError", "{query}");
-        assert_eq!(error.detail, "DivisionByZero", "{query}");
+        assert_eq!(error.category, "arithmetic_error", "{query}");
+        assert_eq!(error.detail, "division_by_zero", "{query}");
         assert_eq!(
             run(&db, "MATCH (n) RETURN count(*)").await.rows,
             vec![vec![json!(0)]],
@@ -117,8 +117,8 @@ async fn mixed_aggregates_stream_large_inputs_and_charge_collection_state() {
     else {
         panic!("expected collection limit")
     };
-    assert_eq!(error.category, "ResourceLimit");
-    assert_eq!(error.detail, "CollectionLimit");
+    assert_eq!(error.category, "resource_limit");
+    assert_eq!(error.detail, "collection_limit");
     db.close().await.unwrap();
 }
 

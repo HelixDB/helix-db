@@ -40,6 +40,35 @@ pub enum HelixError {
     Internal { error: String, msg: String },
 }
 
+impl From<db::cypher::Error> for HelixError {
+    /// A Cypher diagnostic keeps its category, phase and detail in the error
+    /// code, as `category:phase:detail` in lower snake case; storage failures
+    /// classify exactly as native query failures do.
+    fn from(error: db::cypher::Error) -> Self {
+        match error {
+            db::cypher::Error::Storage(error) => Self::from(error),
+            db::cypher::Error::Query(error) => Self::InvalidRequest {
+                error: error.code(),
+                msg: error.message,
+            },
+            db::cypher::Error::Json(error) => Self::Internal {
+                error: "response_serialization_error".into(),
+                msg: error.to_string(),
+            },
+        }
+    }
+}
+
+impl HelixError {
+    /// A Cypher request body that is not the `POST /v2/cypher` JSON contract.
+    pub(crate) fn invalid_cypher_json(error: serde_json::Error) -> Self {
+        Self::InvalidRequest {
+            error: "invalid_cypher_json".into(),
+            msg: error.to_string(),
+        }
+    }
+}
+
 impl From<HelixDbError> for HelixError {
     /// Classifies a detailed database error without exposing Rust-only payload types.
     ///

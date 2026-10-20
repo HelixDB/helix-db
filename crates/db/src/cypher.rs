@@ -4,48 +4,25 @@ use crate::{
     encoding::v2::keys::scope::DataScope, execution_control::ExecutionControl, HelixDB,
     HelixDbError,
 };
+use helix_planner::relational::{category, detail};
 use helix_planner::{context, ir, relational as r};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::BTreeMap;
 
-mod compiled;
 mod explain;
-pub use compiled::CompiledRequest;
-pub(crate) use compiled::Input;
+pub use explain::{explain, Explanation};
+pub use helix_cypher::request::{CompiledRequest, Request};
 pub(crate) mod output;
 mod parameters;
-pub use explain::{explain, Explanation};
 pub use output::EncodedResponse;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Request {
-    pub query: String,
-    #[serde(default, deserialize_with = "deserialize_parameters")]
-    pub parameters: BTreeMap<String, helix_ast::query::QueryValue>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub query_name: Option<String>,
-}
+/// Deadline applied when a caller does not supply its own execution control.
+pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-impl Request {
-    pub fn new(query: impl Into<String>) -> Self {
-        Self {
-            query: query.into(),
-            parameters: BTreeMap::new(),
-            query_name: None,
-        }
-    }
-}
-
-impl Request {
-    /// Resolve statement effects before applying transport routing options.
-    /// Use [`Self::compile`] when execution follows routing, to retain this work.
-    pub fn request_type(&self) -> r::Result<helix_ast::query::QueryRequestType> {
-        Ok(match helix_cypher::compile(&self.query)?.effect() {
-            r::Effect::Read => helix_ast::query::QueryRequestType::Read,
-            r::Effect::Write => helix_ast::query::QueryRequestType::Write,
-        })
-    }
+/// A request in either form accepted by [`execute_with`].
+pub(crate) enum Input {
+    Source(Request),
+    Compiled(CompiledRequest),
 }
 
 /// Bounded per-query resources. These limits never truncate a successful result.
@@ -105,19 +82,26 @@ impl From<HelixDbError> for Error {
         let (detail, message) = if error.error_code()
             == helix_ast::error_code::QueryErrorCode::QueryMemoryLimitExceeded
         {
-            ("MemoryLimit", "query live buffers exceed the memory budget")
+            (
+                detail::MEMORY_LIMIT,
+                "query live buffers exceed the memory budget",
+            )
         } else if matches!(
             error,
             HelixDbError::Encoding(crate::encoding::error::EncodingError::PropertyNestingLimit)
         ) {
             (
-                "StoredValueNestingLimit",
+                detail::STORED_VALUE_NESTING_LIMIT,
                 "stored property archive exceeds the decoder nesting limit",
             )
         } else {
             return Self::Storage(error);
         };
-        Self::Query(r::QueryError::runtime("ResourceLimit", detail, message))
+        Self::Query(r::QueryError::runtime(
+            category::RESOURCE_LIMIT,
+            detail,
+            message,
+        ))
     }
 }
 
@@ -143,7 +127,7 @@ impl HelixDB {
             request,
             DataScope::LegacyUnscoped,
             crate::query_service::QueryMode::Execute,
-            ExecutionControl::from_timeout(std::time::Duration::from_secs(30)),
+            ExecutionControl::from_timeout(DEFAULT_TIMEOUT),
             Limits::default(),
         )
         .await
@@ -156,7 +140,7 @@ impl HelixDB {
             request,
             DataScope::LegacyUnscoped,
             crate::query_service::QueryMode::Execute,
-            ExecutionControl::from_timeout(std::time::Duration::from_secs(30)),
+            ExecutionControl::from_timeout(DEFAULT_TIMEOUT),
             Limits::default(),
         )
         .await
@@ -207,8 +191,8 @@ pub(crate) async fn execute_with<O: output::Format>(
         && (db.is_reader_mode() || mode == crate::query_service::QueryMode::Warm)
     {
         return Err(r::QueryError::compile(
-            "AccessModeError",
-            "WriterRequired",
+            category::ACCESS_MODE_ERROR,
+            detail::WRITER_REQUIRED,
             "mutating Cypher requires a writer",
         )
         .into());
@@ -259,21 +243,22 @@ fn prepare_request(request: Input, limits: Limits) -> Result<PreparedRequest> {
         || limits.collection_items == 0
     {
         return Err(r::QueryError::compile(
-            "ResourceLimit",
-            "InvalidLimits",
+            category::RESOURCE_LIMIT,
+            detail::INVALID_LIMITS,
             "resource budgets must be positive",
         )
         .into());
     }
-    let CompiledRequest { query, parameters } = match request {
+    let (query, parameters) = match request {
         Input::Source(request) => request.compile()?,
         Input::Compiled(request) => request,
-    };
+    }
+    .into_parts();
     for name in query.parameters() {
         if !parameters.contains_key(&name) {
             return Err(r::QueryError::compile(
-                "ParameterMissing",
-                "MissingParameter",
+                category::PARAMETER_MISSING,
+                detail::MISSING_PARAMETER,
                 format!("missing parameter ${name}"),
             )
             .into());
@@ -310,58 +295,10 @@ fn parameter_value(value: &helix_ast::query::QueryValue) -> r::Value {
     }
 }
 
-fn deserialize_parameters<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<BTreeMap<String, helix_ast::query::QueryValue>, D::Error> {
-    let values = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
-    values
-        .into_iter()
-        .map(|(name, value)| {
-            decode_parameter(value)
-                .map(|value| (name, value))
-                .map_err(serde::de::Error::custom)
-        })
-        .collect()
-}
-
-fn decode_parameter(
-    value: serde_json::Value,
-) -> std::result::Result<helix_ast::query::QueryValue, String> {
-    use helix_ast::query::QueryValue as Q;
-    match value {
-        serde_json::Value::Array(values) => values
-            .into_iter()
-            .map(decode_parameter)
-            .collect::<std::result::Result<_, _>>()
-            .map(Q::Array),
-        serde_json::Value::Object(mut map) => {
-            let tag = map
-                .get("$type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned);
-            match tag.as_deref(){
-                Some("integer") if map.len()==2=>map.get("value").and_then(serde_json::Value::as_str).ok_or_else(||"integer envelope requires a decimal string".to_owned())?.parse().map(Q::I64).map_err(|_|"integer envelope exceeds signed 64-bit range".into()),
-                Some("float") if map.len()==2=>match map.get("value").and_then(serde_json::Value::as_str){Some("NaN")=>Ok(Q::F64(f64::NAN)),Some("Infinity")=>Ok(Q::F64(f64::INFINITY)),Some("-Infinity")=>Ok(Q::F64(f64::NEG_INFINITY)),_=>Err("invalid float envelope".into())},
-                Some("map") if map.len()==2=>{
-                    let Some(serde_json::Value::Object(values))=map.remove("value") else{return Err("map envelope requires an object".into());};
-                    values.into_iter().map(|(k,v)|decode_parameter(v).map(|v|(k,v))).collect::<std::result::Result<_,_>>().map(Q::Object)
-                }
-                Some(_)=>Err("unknown lossless parameter envelope; escape literal $type maps with a map envelope".into()),
-                None=>map.into_iter().map(|(k,v)|decode_parameter(v).map(|v|(k,v))).collect::<std::result::Result<_,_>>().map(Q::Object),
-            }
-        }
-        serde_json::Value::Number(number) if number.is_u64() && number.as_i64().is_none() => {
-            Err("integer parameter exceeds signed 64-bit range".into())
-        }
-        value @ serde_json::Value::Null
-        | value @ serde_json::Value::Bool(_)
-        | value @ serde_json::Value::Number(_)
-        | value @ serde_json::Value::String(_) => {
-            serde_json::from_value(value).map_err(|e| e.to_string())
-        }
-    }
-}
-
 #[cfg(test)]
 #[path = "cypher/tests/parameters.rs"]
 mod parameter_tests;
+
+#[cfg(test)]
+#[path = "cypher/tests/compiled.rs"]
+mod compiled_tests;

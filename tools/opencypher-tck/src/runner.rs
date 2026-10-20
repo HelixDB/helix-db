@@ -4,6 +4,7 @@ use crate::{
     snapshot, values,
 };
 use db::{cypher, HelixDB, HelixDbSource};
+use helix_cypher::api::category;
 use std::{collections::BTreeMap, path::Path, time::Duration};
 use tokio::sync::watch;
 
@@ -39,17 +40,42 @@ fn failed(reason: impl Into<String>) -> Failure {
         reason: reason.into(),
     }
 }
-fn blocked(error: cypher::Error) -> Failure {
+/// A setup statement in `query` failed; an unsupported construct reports its
+/// capability reason so the gate can match it to the manifest.
+fn blocked(error: cypher::Error, query: &str) -> Failure {
     if matches!(
         error,
         cypher::Error::Storage(db::error::HelixDbError::QueryDeadlineExceeded)
     ) {
         return db::error::HelixDbError::QueryDeadlineExceeded.into();
     }
+    let reason = match &error {
+        cypher::Error::Query(e) if e.category == category::UNSUPPORTED_FEATURE => {
+            crate::gate::unsupported_reason(e, query)
+        }
+        cypher::Error::Query(_) | cypher::Error::Storage(_) | cypher::Error::Json(_) => {
+            error.to_string()
+        }
+    };
     Failure {
         status: Status::SetupBlocked,
-        reason: format!("Setup:{error}"),
+        reason: format!("Setup:{reason}"),
     }
+}
+
+/// The openCypher TCK names errors in upper camel case, such as
+/// `UndefinedVariable`. HelixDB codes are the same words in lower snake case.
+fn code(tck_name: &str) -> String {
+    tck_name
+        .chars()
+        .enumerate()
+        .fold(String::new(), |mut code, (index, c)| {
+            if c.is_ascii_uppercase() && index > 0 {
+                code.push('_');
+            }
+            code.push(c.to_ascii_lowercase());
+            code
+        })
 }
 
 pub(crate) async fn execute_tracked(
@@ -83,6 +109,7 @@ async fn steps(
 ) -> Result<(), Failure> {
     let mut parameters = BTreeMap::new();
     let mut subject: Option<cypher::Result<cypher::Response>> = None;
+    let mut subject_query = String::new();
     let mut before = None;
     let mut assertion = false;
     for step in &scenario.steps {
@@ -90,9 +117,11 @@ async fn steps(
         match text {
             "an empty graph" | "any graph" => {}
             "having executed:" => {
-                db.cypher(request(step, parameters.clone())?)
+                let request = request(step, parameters.clone())?;
+                let query = request.query.clone();
+                db.cypher(request)
                     .await
-                    .map_err(blocked)?;
+                    .map_err(|error| blocked(error, &query))?;
             }
             "parameters are:" => {
                 for row in table(step)? {
@@ -113,7 +142,9 @@ async fn steps(
                     });
                 }
                 before = Some(snapshot::take(db).await?);
-                let result = db.cypher(request(step, parameters.clone())?).await;
+                let request = request(step, parameters.clone())?;
+                subject_query.clone_from(&request.query);
+                let result = db.cypher(request).await;
                 let did_plan = match &result {
                     Ok(_) => true,
                     Err(cypher::Error::Query(e)) => {
@@ -128,7 +159,7 @@ async fn steps(
                 assertion = false;
             }
             "the result should be empty" => {
-                let result = result(&subject)?;
+                let result = result(&subject, &subject_query)?;
                 if !result.rows.is_empty() {
                     return Err(failed("NonemptyResult"));
                 }
@@ -138,7 +169,7 @@ async fn steps(
             | "the result should be, in order:"
             | "the result should be (ignoring element order for lists):"
             | "the result should be, in order (ignoring element order for lists):" => {
-                let response = result(&subject)?;
+                let response = result(&subject, &subject_query)?;
                 let table = table(step)?;
                 let Some(columns) = table.first() else {
                     return Err(Failure {
@@ -232,7 +263,7 @@ async fn steps(
                     status: Status::HarnessError,
                     reason: "invalid error expectation".into(),
                 })?;
-                assert_error(&subject, category, phase, detail)?;
+                assert_error(&subject, &subject_query, category, phase, detail)?;
                 let after = snapshot::take(db).await?;
                 if before.as_ref() != Some(&after) {
                     return Err(failed("RollbackMismatch"));
@@ -251,7 +282,7 @@ async fn steps(
             _ if text.starts_with("there exists a procedure ") => {
                 return Err(Failure {
                     status: Status::SetupBlocked,
-                    reason: "Setup:Procedures".into(),
+                    reason: "Setup:procedures".into(),
                 })
             }
             _ => {
@@ -271,18 +302,21 @@ async fn steps(
     Ok(())
 }
 
-fn result(
-    subject: &Option<cypher::Result<cypher::Response>>,
-) -> Result<&cypher::Response, Failure> {
+fn result<'a>(
+    subject: &'a Option<cypher::Result<cypher::Response>>,
+    query: &str,
+) -> Result<&'a cypher::Response, Failure> {
     match subject {
         Some(Ok(result)) => Ok(result),
         Some(Err(cypher::Error::Storage(db::error::HelixDbError::QueryDeadlineExceeded))) => {
             Err(db::error::HelixDbError::QueryDeadlineExceeded.into())
         }
-        Some(Err(cypher::Error::Query(error))) if error.category == "UnsupportedFeature" => {
+        Some(Err(cypher::Error::Query(error)))
+            if error.category == category::UNSUPPORTED_FEATURE =>
+        {
             Err(Failure {
                 status: Status::Unsupported,
-                reason: error.detail.clone(),
+                reason: crate::gate::unsupported_reason(error, query),
             })
         }
         Some(Err(error)) => Err(failed(format!("UnexpectedError: {error}"))),
@@ -337,13 +371,14 @@ async fn setup_graph(db: &HelixDB, name: &str, root: &Path) -> Result<(), Failur
     for query in script.split(';').filter(|s| !s.trim().is_empty()) {
         db.cypher(cypher::Request::new(query))
             .await
-            .map_err(blocked)?;
+            .map_err(|error| blocked(error, query))?;
     }
     Ok(())
 }
 
 fn assert_error(
     subject: &Option<cypher::Result<cypher::Response>>,
+    query: &str,
     category: &str,
     phase: &str,
     detail: &str,
@@ -360,10 +395,10 @@ fn assert_error(
     let cypher::Error::Query(error) = error else {
         return Err(failed(format!("ExpectedCypherError: {error}")));
     };
-    if error.category == "UnsupportedFeature" {
+    if error.category == category::UNSUPPORTED_FEATURE {
         return Err(Failure {
             status: Status::Unsupported,
-            reason: error.detail.clone(),
+            reason: crate::gate::unsupported_reason(error, query),
         });
     }
     let phase_matches = match phase {
@@ -377,7 +412,10 @@ fn assert_error(
             })
         }
     };
-    if error.category != category || !phase_matches || (detail != "*" && error.detail != detail) {
+    if error.category != code(category)
+        || !phase_matches
+        || (detail != "*" && error.detail != code(detail))
+    {
         return Err(failed(format!(
             "ErrorMismatch: expected {category}/{phase}/{detail}, received {}/{:?}/{}",
             error.category, error.phase, error.detail

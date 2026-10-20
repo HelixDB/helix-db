@@ -31,7 +31,7 @@ mod legacy {
     pub(super) fn bytes(
         result: ExecutionResult,
     ) -> std::result::Result<Vec<u8>, QueryServiceError> {
-        sonic_rs::to_vec(&returns(result)?).map_err(QueryServiceError::Serialize)
+        serde_json::to_vec(&returns(result)?).map_err(QueryServiceError::JsonSerialize)
     }
 
     pub(super) fn value(
@@ -56,7 +56,6 @@ mod legacy {
         match value {
             ReturnedValue::Present(value) => execution_value_to_json(value),
             ReturnedValue::EmptyList => Ok(JsonValue::Array(Vec::new())),
-            ReturnedValue::EmptyObject => Ok(JsonValue::Null),
         }
     }
 
@@ -468,7 +467,6 @@ fn cases() -> Vec<(&'static str, ExecutionResult)> {
             "empty_shapes",
             result(vec![
                 ("list", ReturnedValue::EmptyList),
-                ("object", ReturnedValue::EmptyObject),
                 ("stream", stream(Vec::new())),
                 ("scalars", scalars(Vec::new())),
                 (
@@ -730,7 +728,7 @@ fn cases() -> Vec<(&'static str, ExecutionResult)> {
 const GOLDEN: &[(&str, &str)] = &[
     ("annotated_rows", "{\"rows\":[{\"bindings\":{},\"current\":null},{\"bindings\":{\"Alpha\":{\"node\":1},\"friend\":{\"edge\":9}},\"current\":{\"node\":7}},{\"bindings\":{},\"current\":{\"node\":8}},{\"bindings\":{},\"current\":{\"node\":3},\"path\":[{\"node\":1},{\"edge\":2},{\"node\":3}]},{\"bindings\":{},\"current\":{\"node\":5},\"sack\":[0.10000000149011612]},{\"bindings\":{},\"current\":{\"node\":6},\"sack\":null},{\"$id\":10},{\"bindings\":{},\"current\":null,\"path\":[],\"sack\":null}]}"),
     ("counts_and_bools", "{\"max\":18446744073709551615,\"no\":false,\"yes\":true,\"zero\":0}"),
-    ("empty_shapes", "{\"folded\":[],\"list\":[],\"object\":null,\"scalars\":[],\"stream\":[]}"),
+    ("empty_shapes", "{\"folded\":[],\"list\":[],\"scalars\":[],\"stream\":[]}"),
     ("first_invalid_datetime_wins", "ERROR Internal ResponseSerializationError json serialization error: datetime millis '9223372036854775807' cannot be rendered as RFC3339"),
     ("folded_rows", "{\"folded\":[{\"$id\":11},{\"bindings\":{},\"current\":{\"node\":1},\"path\":[{\"node\":1}]}]}"),
     ("hidden_invalid_datetime_is_not_encoded", "{\"rows\":[{\"$id\":1},{\"$id\":2}]}"),
@@ -1017,7 +1015,6 @@ fn arb_result() -> impl Strategy<Value = ExecutionResult> {
     let returned = prop_oneof![
         8 => arb_execution_value().prop_map(ReturnedValue::Present),
         1 => Just(ReturnedValue::EmptyList),
-        1 => Just(ReturnedValue::EmptyObject),
     ];
     btree_map(arb_name(), returned, 0..4).prop_map(|returns| ExecutionResult {
         last: None,
@@ -1176,7 +1173,7 @@ async fn embedded_api_results_match_golden_bytes_and_the_json_api() {
         let value = db.query(request).await.expect("embedded query executes");
         let rendered = String::from_utf8(bytes).expect("response is UTF-8");
         assert_eq!(
-            sonic_rs::from_str::<JsonValue>(&rendered).expect("response parses"),
+            serde_json::from_str::<JsonValue>(&rendered).expect("response parses"),
             value,
             "{case}: embedded value and JSON bytes agree"
         );

@@ -14,6 +14,7 @@ mod rows;
 mod search;
 mod secondary_set;
 
+pub(in crate::execution::interpreter) use restricted_vector::IdSetVectorSearch;
 pub(in crate::execution::interpreter) use search::{PendingSets, SearchReadLimit};
 pub(in crate::execution::interpreter) use secondary_set::{
     intersection, union, LabelVerifiedLeaf, SharedIndexReads, PARALLEL_INDEX_READS,

@@ -38,7 +38,8 @@ async fn reference_delete_from_layer<D: Distance>(
 ) -> Result<Vec<NodeId>, HelixDbError> {
     let outgoing_neighbors = index
         .load_neighbors_for_mutation(txn, layer, node_id, mutation_cache)
-        .await?;
+        .await?
+        .to_vec();
     let mandatory_relink = outgoing_neighbors
         .iter()
         .copied()
@@ -76,7 +77,8 @@ async fn reference_delete_from_layer<D: Distance>(
     for &neighbor_id in &relink_sources {
         let neighbors = index
             .load_neighbors_for_mutation(txn, layer, neighbor_id, mutation_cache)
-            .await?;
+            .await?
+            .to_vec();
         candidates.extend(
             neighbors
                 .into_iter()
@@ -116,7 +118,8 @@ async fn reference_relink_neighbor<D: Distance>(
     };
     let old_neighbors = index
         .load_neighbors_for_mutation(txn, layer, neighbor_id, mutation_cache)
-        .await?;
+        .await?
+        .to_vec();
     let mut current_neighbors = old_neighbors.clone();
     let mut candidate_distances = Vec::new();
     for &candidate_id in candidates {
@@ -175,7 +178,8 @@ async fn reference_relink_neighbor<D: Distance>(
         }
         let mut reverse_neighbors = index
             .load_neighbors_for_mutation(txn, layer, new_neighbor_id, mutation_cache)
-            .await?;
+            .await?
+            .to_vec();
         if reverse_neighbors.contains(&neighbor_id) {
             continue;
         }
@@ -186,11 +190,11 @@ async fn reference_relink_neighbor<D: Distance>(
                 .await?
             else {
                 index
-                    .stage_neighbors_vec_for_mutation(
+                    .stage_neighbors_for_mutation(
                         txn,
                         layer,
                         new_neighbor_id,
-                        reverse_neighbors,
+                        &reverse_neighbors,
                         mutation_cache,
                     )
                     .await?;
@@ -220,11 +224,11 @@ async fn reference_relink_neighbor<D: Distance>(
             )?;
         }
         index
-            .stage_neighbors_vec_for_mutation(
+            .stage_neighbors_for_mutation(
                 txn,
                 layer,
                 new_neighbor_id,
-                reverse_neighbors,
+                &reverse_neighbors,
                 mutation_cache,
             )
             .await?;
@@ -368,6 +372,7 @@ async fn assert_relink_parity<D: Distance>(seed: u64) {
                     limit(layer),
                     &extra_sources,
                     &mut hydrated_cache,
+                    &mut MutationScratch::default(),
                 )
                 .await
                 .unwrap();
@@ -470,7 +475,15 @@ async fn relink_reads_no_candidate_when_no_source_has_an_item() {
     let mut cache = MutationOpCache::<Cosine>::with_degree_limits(4, 2).unwrap();
 
     let outgoing = index
-        .delete_from_layer(&measured, 1, 1, 2, &[], &mut cache)
+        .delete_from_layer(
+            &measured,
+            1,
+            1,
+            2,
+            &[],
+            &mut cache,
+            &mut MutationScratch::default(),
+        )
         .await
         .unwrap();
 
@@ -511,7 +524,15 @@ async fn relink_skips_candidates_without_an_item() {
     assert!(candidates.items[&60].is_none());
 
     index
-        .delete_from_layer(&measured, 1, 1, 2, &[], &mut cache)
+        .delete_from_layer(
+            &measured,
+            1,
+            1,
+            2,
+            &[],
+            &mut cache,
+            &mut MutationScratch::default(),
+        )
         .await
         .unwrap();
     index

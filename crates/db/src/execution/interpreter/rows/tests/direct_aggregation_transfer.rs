@@ -19,7 +19,7 @@ fn admitted_output_rows_transfer_at_a_full_budget_and_release_on_growth_failure(
             "row transfer copied payload: {allocated:?}"
         );
         if spare == 0 {
-            assert!(matches!(result,Err(Error::Query(error)) if error.detail=="MemoryLimit"));
+            assert!(matches!(result,Err(Error::Query(error)) if error.detail=="memory_limit"));
             assert_eq!(output.len(), 0);
             drop(output);
         } else {
@@ -107,7 +107,7 @@ async fn aggregate_collection_failure_after_create_rolls_back_and_allows_retry()
         )
         .await
         .unwrap_err();
-    assert!(matches!(error,Error::Query(error) if error.detail=="CollectionLimit"));
+    assert!(matches!(error,Error::Query(error) if error.detail=="collection_limit"));
     let after = db
         .cypher(crate::cypher::Request::new(
             "MATCH (n:AggregateRollback) RETURN count(*)",

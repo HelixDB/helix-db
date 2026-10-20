@@ -7,14 +7,40 @@
 //! - upper vectors (`kind=0x13`)
 //!
 //! Layer-0 neighbor rows intentionally remain on the normal DB/foyer path.
-//! Upper neighbors are grouped node-first so deleting one entity never scans
+//! Upper rows are grouped node-first so deleting one entity never scans
 //! unrelated cached nodes. Hydration validates, measures, and admits one row
 //! at a time. A bounded partial store remains correct because absent rows fall
 //! back to the caller's stable storage view without mutating the snapshot.
+//!
+//! # Resident layout
+//!
+//! Upper-row bytes are copied into slab chunks ([`VectorMemorySlab`])
+//! instead of retaining the zero-copy scan values, which would keep whole
+//! SlateDB block buffers alive. Each node keeps one compact index entry
+//! ([`UpperNodeRows`]) holding `(chunk, offset, len)` locations for its
+//! vector and its usually single upper-neighbor layer. Lookups return
+//! [`Bytes`] slices of the owning chunk, so callers see the same bytes and
+//! type as before.
+//!
+//! # Accounting
+//!
+//! A load charges the bytes the finished store keeps: every row's exact
+//! length, a handle per slab chunk, and an upper bound on hash-index memory
+//! per entry ([`hash_index_entry_bytes`]). A bounded load admits the longest
+//! scan prefix whose charge fits, as if each row cost exactly its charge. The
+//! open chunk's spare capacity (at most [`VECTOR_MEMORY_SLAB_CHUNK_BYTES`])
+//! is a transient of the running load: sealing copies a partly filled chunk
+//! into an exact-size allocation, so the spare bytes are freed under every
+//! allocator. Evicted rows stay charged until the store is replaced, because
+//! their chunk bytes are only released when the whole store drops. Allocator
+//! size-class rounding and headers, and fixed per-store overhead independent
+//! of row count (the hash maps' shard arrays and their smallest tables), are
+//! not charged.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -44,7 +70,21 @@ use crate::search::vector::simhash::SimHash;
 use crate::search::vector::storage::{SimHashRow, VectorRowKeyspace, VectorRows};
 
 const VECTOR_MEMORY_LOAD_MAX_FETCH_TASKS: usize = 4;
-const VECTOR_MEMORY_ENTRY_OVERHEAD_BYTES: u64 = 64;
+/// Capacity of a slab chunk; a longer row gets a chunk of its own length.
+///
+/// Every lookup bumps its chunk's reference count, so chunks stay small
+/// enough that concurrent searches spread over many counters; sealing trims
+/// each chunk to its length, so the size costs no tail waste.
+const VECTOR_MEMORY_SLAB_CHUNK_BYTES: usize = 16 * 1024;
+/// Charged bytes for one chunk's handle: at most two table slots (buckets
+/// double) and the `Bytes` shared header, rounded up to a 32-byte class.
+const SLAB_CHUNK_HANDLE_BYTES: u64 = 2 * core::mem::size_of::<OnceLock<Bytes>>() as u64 + 32;
+/// Charged index bytes for one SimHash entry.
+const SIMHASH_INDEX_ENTRY_BYTES: u64 = hash_index_entry_bytes::<NodeId, SimHash>();
+/// Charged index bytes for one node's upper-row entry.
+const UPPER_NODE_INDEX_ENTRY_BYTES: u64 = hash_index_entry_bytes::<NodeId, UpperNodeRows>();
+/// Heap bytes of one spilled upper-neighbor layer location.
+const UPPER_LAYER_SLOT_BYTES: u64 = core::mem::size_of::<(u16, SlabRow)>() as u64;
 
 /// Summary returned after hydrating a vector memory store.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -84,11 +124,19 @@ pub(crate) enum VectorMemoryAdmissionBudget {
 }
 
 impl VectorMemoryAdmissionBudget {
-    /// Returns whether a checked candidate total remains within this budget.
-    const fn admits(self, candidate_total: u64) -> bool {
+    /// Returns the budget left after `charged` bytes were admitted.
+    const fn remaining(self, charged: u64) -> Self {
+        match self {
+            Self::Unbounded => Self::Unbounded,
+            Self::Bounded(bytes) => Self::Bounded(bytes.saturating_sub(charged)),
+        }
+    }
+
+    /// Returns whether `bytes` more fit in this budget.
+    const fn admits(self, bytes: u64) -> bool {
         match self {
             Self::Unbounded => true,
-            Self::Bounded(bytes) => candidate_total <= bytes,
+            Self::Bounded(remaining) => bytes <= remaining,
         }
     }
 }
@@ -99,8 +147,8 @@ pub(crate) struct VectorMemoryStore {
     index_id: u64,
     visible_seq: u64,
     simhashes: DashMap<NodeId, SimHash>,
-    upper_neighbors: DashMap<NodeId, BTreeMap<u16, Bytes>>,
-    upper_vectors: DashMap<NodeId, Bytes>,
+    upper_nodes: DashMap<NodeId, UpperNodeRows>,
+    slab: VectorMemorySlab,
     estimated_bytes: AtomicU64,
 }
 
@@ -572,8 +620,15 @@ impl VectorMemoryStore {
             index_id,
             visible_seq,
             simhashes: DashMap::new(),
-            upper_neighbors: DashMap::new(),
-            upper_vectors: DashMap::new(),
+            // A node's vector and neighbor lookups take the same shard's read
+            // lock, so this map gets twice dashmap's default shard count
+            // (eight per core); the default made contended lookups slower
+            // than two separate maps.
+            upper_nodes: DashMap::with_shard_amount(
+                (std::thread::available_parallelism().map_or(1, usize::from) * 8)
+                    .next_power_of_two(),
+            ),
+            slab: VectorMemorySlab::default(),
             estimated_bytes: AtomicU64::new(0),
         }
     }
@@ -606,7 +661,12 @@ impl VectorMemoryStore {
         self.visible_seq <= snapshot_seq
     }
 
-    /// Return the estimated resident bytes populated by the last load.
+    /// Return the resident bytes charged by the last load.
+    ///
+    /// The charge is exact for row bytes and chunk handles and an upper bound
+    /// for index memory (see the module's accounting notes). Rows evicted
+    /// afterwards stay charged until the store is replaced, and rows inserted
+    /// directly through the `insert_*` methods are not charged.
     pub fn estimated_bytes(&self) -> u64 {
         self.estimated_bytes.load(Ordering::Relaxed)
     }
@@ -616,7 +676,8 @@ impl VectorMemoryStore {
         self.simhashes.get(&node_id).map(|entry| *entry)
     }
 
-    /// SimHash upsert.
+    /// SimHash upsert for fixtures; production rows enter through hydration.
+    #[cfg(any(test, feature = "production-coverage"))]
     pub fn insert_simhash(&self, node_id: NodeId, hash: SimHash) {
         self.simhashes.insert(node_id, hash);
     }
@@ -628,21 +689,15 @@ impl VectorMemoryStore {
 
     /// Upper-neighbor raw-bytes lookup.
     pub fn get_upper_neighbors_bytes(&self, layer: u16, node_id: NodeId) -> Option<Bytes> {
-        self.upper_neighbors
-            .get(&node_id)
-            .and_then(|layers| layers.get(&layer).cloned())
+        let row = self.upper_nodes.get(&node_id)?.neighbors.get(layer)?;
+        self.slab.read(row)
     }
 
-    /// Upper-neighbor raw-bytes upsert.
+    /// Upper-neighbor raw-bytes upsert for fixtures, copying `bytes` into
+    /// the slab without charging it; production rows enter through hydration.
+    #[cfg(any(test, feature = "production-coverage"))]
     pub fn insert_upper_neighbors_bytes(&self, layer: u16, node_id: NodeId, bytes: Bytes) {
-        match self.upper_neighbors.entry(node_id) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().insert(layer, bytes);
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(BTreeMap::from([(layer, bytes)]));
-            }
-        }
+        self.insert_upper_row(node_id, UpperRowKind::Neighbors(layer), &bytes);
     }
 
     /// Encodes and inserts one validated upper-neighbor list for contract tests.
@@ -663,48 +718,133 @@ impl VectorMemoryStore {
 
     /// Remove one upper-neighbor row.
     pub fn remove_upper_neighbors(&self, layer: u16, node_id: NodeId) {
-        let Entry::Occupied(mut entry) = self.upper_neighbors.entry(node_id) else {
-            return;
-        };
-        entry.get_mut().remove(&layer);
-        if entry.get().is_empty() {
-            entry.remove();
-        }
-    }
-
-    /// Remove all upper-neighbor rows for this node across all layers.
-    pub fn remove_upper_neighbors_for_node(&self, node_id: NodeId) {
-        self.upper_neighbors.remove(&node_id);
+        self.update_upper_node(node_id, |rows| rows.neighbors.remove(layer));
     }
 
     /// Upper-vector raw-bytes lookup.
     pub fn get_upper_vector(&self, node_id: NodeId) -> Option<Bytes> {
-        self.upper_vectors.get(&node_id).map(|entry| entry.clone())
+        let row = self.upper_nodes.get(&node_id)?.vector?;
+        self.slab.read(row)
     }
 
-    /// Upper-vector raw-bytes upsert.
+    /// Upper-vector raw-bytes upsert for fixtures, copying `bytes` into the
+    /// slab without charging it; production rows enter through hydration.
+    #[cfg(any(test, feature = "production-coverage"))]
     pub fn insert_upper_vector(&self, node_id: NodeId, bytes: Bytes) {
-        self.upper_vectors.insert(node_id, bytes);
+        self.insert_upper_row(node_id, UpperRowKind::Vector, &bytes);
     }
 
     /// Remove upper-vector row.
+    #[cfg(any(test, feature = "production-coverage"))]
     pub fn remove_upper_vector(&self, node_id: NodeId) {
-        self.upper_vectors.remove(&node_id);
+        self.update_upper_node(node_id, |rows| rows.vector = None);
     }
 
     /// Remove all cache rows for one node.
     pub fn remove_node(&self, node_id: NodeId) {
         self.remove_simhash(node_id);
-        self.remove_upper_vector(node_id);
-        self.remove_upper_neighbors_for_node(node_id);
+        self.upper_nodes.remove(&node_id);
     }
 
-    /// Remove every row from this store.
+    /// Remove every row from this store and release its open slab chunk.
+    ///
+    /// Contract: sealed chunks, which hold the bulk of the row bytes, are
+    /// freed only when the last reference to the store drops, so a caller that
+    /// keeps a cleared store alive keeps that memory resident while
+    /// [`Self::estimated_bytes`] reports zero. Every registry clear discards
+    /// an unpublished store, or a retired one with no active readers, and
+    /// then drops it. Releasing sealed chunks here would need a lock or an
+    /// atomic swap on every lookup. Bytes already returned by lookups stay
+    /// valid; they own their chunk.
     pub fn clear(&self) {
         self.simhashes.clear();
-        self.upper_vectors.clear();
-        self.upper_neighbors.clear();
+        self.simhashes.shrink_to_fit();
+        self.upper_nodes.clear();
+        self.upper_nodes.shrink_to_fit();
+        self.slab.clear();
         self.estimated_bytes.store(0, Ordering::Relaxed);
+    }
+
+    /// Copies one uncharged row into the slab and indexes it.
+    #[cfg(any(test, feature = "production-coverage"))]
+    fn insert_upper_row(&self, node_id: NodeId, kind: UpperRowKind, bytes: &[u8]) {
+        let appended = self
+            .slab
+            .append(bytes, VectorMemoryAdmissionBudget::Unbounded)
+            .expect("an unbounded slab append always admits its row");
+        self.upsert_upper_row(node_id, kind, appended.row);
+    }
+
+    /// Points `node_id`'s `kind` row at `row`, replacing any previous location.
+    fn upsert_upper_row(&self, node_id: NodeId, kind: UpperRowKind, row: SlabRow) {
+        match self.upper_nodes.entry(node_id) {
+            Entry::Occupied(mut entry) => entry.get_mut().upsert(kind, row),
+            Entry::Vacant(entry) => {
+                let mut rows = UpperNodeRows {
+                    vector: None,
+                    neighbors: UpperNeighborRows::Empty,
+                };
+                rows.upsert(kind, row);
+                entry.insert(rows);
+            }
+        }
+    }
+
+    /// Applies `update` to one node's rows and drops the entry once it is empty.
+    fn update_upper_node(&self, node_id: NodeId, update: impl FnOnce(&mut UpperNodeRows)) {
+        let Entry::Occupied(mut entry) = self.upper_nodes.entry(node_id) else {
+            return;
+        };
+        update(entry.get_mut());
+        if entry.get().is_empty() {
+            entry.remove();
+        }
+    }
+
+    /// Admits one validated row when its charge fits `budget`.
+    ///
+    /// Returns the charged bytes, or `None` without changing the store when
+    /// the row does not fit. Upper-row bytes are copied, so the scan's block
+    /// buffer is released as soon as the caller drops the row.
+    fn admit(
+        &self,
+        row: VectorMemoryHydrationRow,
+        budget: VectorMemoryAdmissionBudget,
+    ) -> Option<u64> {
+        let (node_id, kind, value) = match row {
+            VectorMemoryHydrationRow::SimHash { node_id, value } => {
+                return match self.simhashes.entry(node_id) {
+                    Entry::Occupied(mut entry) => {
+                        entry.insert(value);
+                        Some(0)
+                    }
+                    Entry::Vacant(entry) => budget.admits(SIMHASH_INDEX_ENTRY_BYTES).then(|| {
+                        entry.insert(value);
+                        SIMHASH_INDEX_ENTRY_BYTES
+                    }),
+                };
+            }
+            VectorMemoryHydrationRow::Neighbors {
+                layer,
+                node_id,
+                value,
+            } => (node_id, UpperRowKind::Neighbors(layer), value),
+            VectorMemoryHydrationRow::Vector { node_id, value } => {
+                (node_id, UpperRowKind::Vector, value)
+            }
+        };
+        let index_bytes = self
+            .upper_nodes
+            .get(&node_id)
+            .map_or(UPPER_NODE_INDEX_ENTRY_BYTES, |rows| {
+                rows.index_growth_bytes(kind)
+            });
+        if !budget.admits(index_bytes) {
+            return None;
+        }
+        let appended = self.slab.append(&value, budget.remaining(index_bytes))?;
+        self.upsert_upper_row(node_id, kind, appended.row);
+        Some(index_bytes + appended.charged)
     }
 
     /// Hydrates a descriptor-bound unpublished store with fail-closed parsing.
@@ -747,6 +887,8 @@ impl VectorMemoryStore {
         let mut loaded = 0usize;
         let mut estimated_bytes = 0u64;
         let mut completion = VectorMemoryStoreLoadCompletion::Complete;
+        // Rows this load admits must never share an uncharged chunk.
+        self.slab.seal();
 
         loop {
             let shutdown_requested = shutdown.as_ref().is_some_and(|rx| *rx.borrow());
@@ -831,17 +973,15 @@ impl VectorMemoryStore {
             let Some(row) = row else {
                 continue;
             };
-            let row_bytes = estimated_entry_bytes(kv.key.len(), row.value_len())?;
+            let Some(row_bytes) = self.admit(row, budget.remaining(estimated_bytes)) else {
+                completion = VectorMemoryStoreLoadCompletion::BudgetExhausted;
+                break;
+            };
             let Some(candidate_total) = estimated_bytes.checked_add(row_bytes) else {
                 return Err(HelixDbError::InvariantViolation(
                     "vector memory admission byte count overflowed".to_string(),
                 ));
             };
-            if !budget.admits(candidate_total) {
-                completion = VectorMemoryStoreLoadCompletion::BudgetExhausted;
-                break;
-            }
-            row.insert_into(self);
             let Some(next_loaded) = loaded.checked_add(1) else {
                 return Err(HelixDbError::InvariantViolation(
                     "vector memory admitted entry count overflowed".to_string(),
@@ -851,6 +991,7 @@ impl VectorMemoryStore {
             estimated_bytes = candidate_total;
         }
 
+        self.slab.seal();
         self.estimated_bytes
             .store(estimated_bytes, Ordering::Relaxed);
         Ok(VectorMemoryStoreLoadSummary {
@@ -861,28 +1002,22 @@ impl VectorMemoryStore {
     }
 }
 
-#[inline]
-/// Computes the checked resident estimate before a row is admitted.
-fn estimated_entry_bytes(key_len: usize, value_len: usize) -> Result<u64, HelixDbError> {
-    let Ok(key_len) = u64::try_from(key_len) else {
-        return Err(HelixDbError::InvariantViolation(
-            "vector memory key length exceeds u64".to_string(),
-        ));
-    };
-    let Ok(value_len) = u64::try_from(value_len) else {
-        return Err(HelixDbError::InvariantViolation(
-            "vector memory value length exceeds u64".to_string(),
-        ));
-    };
-    let Some(estimated) = key_len
-        .checked_add(value_len)
-        .and_then(|bytes| bytes.checked_add(VECTOR_MEMORY_ENTRY_OVERHEAD_BYTES))
-    else {
-        return Err(HelixDbError::InvariantViolation(
-            "vector memory entry byte estimate overflowed".to_string(),
-        ));
-    };
-    Ok(estimated)
+/// Upper bound on hash-index bytes per live entry of a map from `K` to `V`.
+///
+/// `hashbrown` stores a one-byte control word beside each `(K, V)` bucket,
+/// fills at most 7/8 of its buckets, and doubles when full, so a table that has
+/// just grown is 7/16 full. Charging 16/7 buckets per entry therefore covers
+/// every table once it has outgrown its smallest sizes.
+const fn hash_index_entry_bytes<K, V>() -> u64 {
+    let bucket = core::mem::size_of::<(K, V)>() as u64 + 1;
+    (bucket * 16).div_ceil(7)
+}
+
+/// Charge for one upper row of `value_len` bytes admitted into an empty
+/// store: its index entry, its bytes, and the handle of the chunk it opens.
+#[cfg(any(test, feature = "production-coverage"))]
+pub(crate) const fn isolated_upper_row_admission_bytes(value_len: u64) -> u64 {
+    UPPER_NODE_INDEX_ENTRY_BYTES + SLAB_CHUNK_HANDLE_BYTES + value_len
 }
 
 /// One fully validated cache row held only until its admission decision.
@@ -902,25 +1037,338 @@ enum VectorMemoryHydrationRow {
     },
 }
 
-impl VectorMemoryHydrationRow {
-    /// Returns the current persisted value length used by admission accounting.
-    fn value_len(&self) -> usize {
-        match self {
-            Self::Neighbors { value, .. } | Self::Vector { value, .. } => value.len(),
-            Self::SimHash { .. } => core::mem::size_of::<u64>(),
+/// Which upper row of a node an operation addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpperRowKind {
+    /// The node's upper-layer vector row.
+    Vector,
+    /// The node's upper-neighbor row on this layer.
+    Neighbors(u16),
+}
+
+/// Location of one row's bytes inside a [`VectorMemorySlab`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SlabRow {
+    chunk: u32,
+    offset: u32,
+    len: u32,
+}
+
+impl SlabRow {
+    /// Location of a zero-length row, which never occupies a chunk.
+    const EMPTY: Self = Self {
+        chunk: 0,
+        offset: 0,
+        len: 0,
+    };
+
+    /// Byte range of this row inside its chunk.
+    fn range(self) -> Range<usize> {
+        // u32 -> usize is lossless on every supported target.
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// Upper rows resident for one node; an empty value is never stored.
+#[derive(Debug)]
+struct UpperNodeRows {
+    vector: Option<SlabRow>,
+    neighbors: UpperNeighborRows,
+}
+
+impl UpperNodeRows {
+    fn is_empty(&self) -> bool {
+        self.vector.is_none() && self.neighbors.is_empty()
+    }
+
+    /// Heap bytes inserting a `kind` row would add beyond this entry.
+    fn index_growth_bytes(&self, kind: UpperRowKind) -> u64 {
+        match kind {
+            UpperRowKind::Vector => 0,
+            UpperRowKind::Neighbors(layer) => self.neighbors.growth_bytes(layer),
         }
     }
 
-    /// Moves one admitted row into its node-primary resident collection.
-    fn insert_into(self, store: &VectorMemoryStore) {
+    fn upsert(&mut self, kind: UpperRowKind, row: SlabRow) {
+        match kind {
+            UpperRowKind::Vector => self.vector = Some(row),
+            UpperRowKind::Neighbors(layer) => self.neighbors.upsert(layer, row),
+        }
+    }
+}
+
+/// Upper-neighbor row locations of one node, inline for the common case of a
+/// single upper layer.
+#[derive(Debug)]
+enum UpperNeighborRows {
+    Empty,
+    One(u16, SlabRow),
+    /// Two or more rows, strictly ascending by layer.
+    Many(Box<[(u16, SlabRow)]>),
+}
+
+impl UpperNeighborRows {
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn get(&self, layer: u16) -> Option<SlabRow> {
         match self {
-            Self::Neighbors {
-                layer,
-                node_id,
-                value,
-            } => store.insert_upper_neighbors_bytes(layer, node_id, value),
-            Self::SimHash { node_id, value } => store.insert_simhash(node_id, value),
-            Self::Vector { node_id, value } => store.insert_upper_vector(node_id, value),
+            Self::Empty => None,
+            Self::One(row_layer, row) => (*row_layer == layer).then_some(*row),
+            Self::Many(rows) => rows
+                .binary_search_by_key(&layer, |(row_layer, _)| *row_layer)
+                .ok()
+                .map(|position| rows[position].1),
+        }
+    }
+
+    /// Heap bytes [`Self::upsert`] of `layer` would add.
+    fn growth_bytes(&self, layer: u16) -> u64 {
+        match self {
+            Self::Empty => 0,
+            Self::One(row_layer, _) if *row_layer == layer => 0,
+            Self::One(..) => 2 * UPPER_LAYER_SLOT_BYTES,
+            Self::Many(rows) => {
+                match rows.binary_search_by_key(&layer, |(row_layer, _)| *row_layer) {
+                    Ok(_) => 0,
+                    Err(_) => UPPER_LAYER_SLOT_BYTES,
+                }
+            }
+        }
+    }
+
+    fn upsert(&mut self, layer: u16, row: SlabRow) {
+        *self = match core::mem::replace(self, Self::Empty) {
+            Self::Empty => Self::One(layer, row),
+            Self::One(row_layer, _) if row_layer == layer => Self::One(layer, row),
+            Self::One(row_layer, existing) => {
+                let mut rows = [(row_layer, existing), (layer, row)];
+                rows.sort_unstable_by_key(|(row_layer, _)| *row_layer);
+                Self::Many(Box::new(rows))
+            }
+            Self::Many(mut rows) => {
+                match rows.binary_search_by_key(&layer, |(row_layer, _)| *row_layer) {
+                    Ok(position) => {
+                        rows[position].1 = row;
+                        Self::Many(rows)
+                    }
+                    Err(position) => Self::Many(
+                        rows[..position]
+                            .iter()
+                            .copied()
+                            .chain([(layer, row)])
+                            .chain(rows[position..].iter().copied())
+                            .collect(),
+                    ),
+                }
+            }
+        };
+    }
+
+    fn remove(&mut self, layer: u16) {
+        *self = match core::mem::replace(self, Self::Empty) {
+            Self::One(row_layer, row) if row_layer != layer => Self::One(row_layer, row),
+            Self::Empty | Self::One(..) => Self::Empty,
+            Self::Many(rows) => {
+                let kept: Vec<(u16, SlabRow)> = rows
+                    .iter()
+                    .copied()
+                    .filter(|(row_layer, _)| *row_layer != layer)
+                    .collect();
+                match kept.as_slice() {
+                    [(row_layer, row)] => Self::One(*row_layer, *row),
+                    _ => Self::Many(kept.into_boxed_slice()),
+                }
+            }
+        };
+    }
+}
+
+/// Result of copying one row into the slab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SlabAppend {
+    row: SlabRow,
+    /// The row's length, plus [`SLAB_CHUNK_HANDLE_BYTES`] when it opened a
+    /// chunk.
+    charged: u64,
+}
+
+/// Append-only byte arena that owns the store's upper-row bytes.
+///
+/// Rows are copied into one open chunk. When the next row does not fit, the
+/// open chunk is trimmed to its length, frozen into an immutable [`Bytes`],
+/// and published once in [`SealedChunks`], which lookups read with plain
+/// atomic loads. Rows still in the open chunk (only during an unpublished
+/// load, or after fixture inserts) are copied out under its lock. Chunks
+/// stay alive until the slab and every returned slice of them drop.
+struct VectorMemorySlab {
+    sealed: SealedChunks,
+    open: parking_lot::Mutex<OpenChunk>,
+}
+
+impl Default for VectorMemorySlab {
+    fn default() -> Self {
+        Self {
+            sealed: SealedChunks {
+                buckets: std::array::from_fn(|_| OnceLock::new()),
+            },
+            open: parking_lot::Mutex::new(OpenChunk { id: 0, bytes: None }),
+        }
+    }
+}
+
+/// The chunk rows are appended to, and the id it takes when sealed.
+struct OpenChunk {
+    /// Id of the open chunk; ids below it are sealed or were skipped by a
+    /// clear, so a released open chunk's id is never reused.
+    id: u32,
+    /// Open chunk bytes, never empty while present.
+    bytes: Option<Vec<u8>>,
+}
+
+/// Lock-free, append-only table of sealed chunks.
+///
+/// Bucket `b` holds the `2^b` ids `2^b - 1 ..= 2^(b + 1) - 2`, so 33 buckets
+/// cover every `u32` id. A bucket is allocated when its first chunk seals, so
+/// slots never move and each is set once.
+struct SealedChunks {
+    buckets: [OnceLock<Box<[OnceLock<Bytes>]>>; u32::BITS as usize + 1],
+}
+
+impl SealedChunks {
+    /// Bucket and slot of chunk `id`.
+    fn position(id: u32) -> (usize, usize) {
+        let ordinal = u64::from(id) + 1;
+        let bucket = 63 - ordinal.leading_zeros();
+        // Both values are below 2^32, so they fit usize on supported targets.
+        (bucket as usize, (ordinal - (1 << bucket)) as usize)
+    }
+
+    fn get(&self, id: u32) -> Option<&Bytes> {
+        let (bucket, slot) = Self::position(id);
+        self.buckets[bucket].get()?[slot].get()
+    }
+
+    /// Publishes `chunk` under `id`; each id is published at most once.
+    fn publish(&self, id: u32, chunk: Bytes) {
+        let (bucket, slot) = Self::position(id);
+        let slots = self.buckets[bucket]
+            .get_or_init(|| (0..1usize << bucket).map(|_| OnceLock::new()).collect());
+        assert!(
+            slots[slot].set(chunk).is_ok(),
+            "vector memory slab chunk {id} was sealed twice"
+        );
+    }
+}
+
+impl VectorMemorySlab {
+    /// Returns the bytes at `row`, or `None` when its open chunk was released.
+    fn read(&self, row: SlabRow) -> Option<Bytes> {
+        if row.len == 0 {
+            return Some(Bytes::new());
+        }
+        let Some(chunk) = self.sealed.get(row.chunk) else {
+            // Sealing publishes and advances the open id under this lock, so
+            // a row not in the open chunk now is sealed or was released.
+            let open = self.open.lock();
+            return match &open.bytes {
+                Some(bytes) if open.id == row.chunk => {
+                    Some(Bytes::copy_from_slice(&bytes[row.range()]))
+                }
+                _ => self
+                    .sealed
+                    .get(row.chunk)
+                    .map(|chunk| chunk.slice(row.range())),
+            };
+        };
+        Some(chunk.slice(row.range()))
+    }
+
+    /// Copies `bytes` into the open chunk, first sealing it and opening a new
+    /// chunk of [`VECTOR_MEMORY_SLAB_CHUNK_BYTES`] (or the row's length, when
+    /// longer) when it lacks room.
+    ///
+    /// Charges the row's length, plus [`SLAB_CHUNK_HANDLE_BYTES`] when it
+    /// opens a chunk, and returns `None`, leaving the slab unchanged, when
+    /// that charge exceeds `budget`. The open chunk's spare capacity is not
+    /// charged: sealing frees it. Rows must fit `u32` lengths, which SlateDB
+    /// enforces for every value.
+    fn append(&self, bytes: &[u8], budget: VectorMemoryAdmissionBudget) -> Option<SlabAppend> {
+        let len = u32::try_from(bytes.len()).expect("SlateDB values fit u32 lengths");
+        if len == 0 {
+            return Some(SlabAppend {
+                row: SlabRow::EMPTY,
+                charged: 0,
+            });
+        }
+        let mut open = self.open.lock();
+        let fits = open
+            .bytes
+            .as_ref()
+            .is_some_and(|chunk| chunk.capacity() - chunk.len() >= bytes.len());
+        let handle = if fits { 0 } else { SLAB_CHUNK_HANDLE_BYTES };
+        let charged = u64::from(len) + handle;
+        if !budget.admits(charged) {
+            return None;
+        }
+        if !fits {
+            self.seal_locked(&mut open);
+        }
+        let id = open.id;
+        // A chunk holds one u32-length row or at most the chunk size, so
+        // offsets fit u32.
+        let chunk = open.bytes.get_or_insert_with(|| {
+            Vec::with_capacity(VECTOR_MEMORY_SLAB_CHUNK_BYTES.max(bytes.len()))
+        });
+        let offset = u32::try_from(chunk.len()).expect("slab chunk offsets fit u32");
+        chunk.extend_from_slice(bytes);
+        Some(SlabAppend {
+            row: SlabRow {
+                chunk: id,
+                offset,
+                len,
+            },
+            charged,
+        })
+    }
+
+    /// Seals the open chunk, if any.
+    fn seal(&self) {
+        self.seal_locked(&mut self.open.lock());
+    }
+
+    /// Publishes the open chunk under its id, trimmed to its length.
+    ///
+    /// A chunk with spare capacity is copied into an exact-size allocation
+    /// and dropped, because shrinking in place may leave the spare bytes
+    /// resident (mimalloc keeps a block that shrinks by less than half).
+    fn seal_locked(&self, open: &mut OpenChunk) {
+        let Some(chunk) = open.bytes.take() else {
+            return;
+        };
+        let sealed = if chunk.len() == chunk.capacity() {
+            Bytes::from(chunk)
+        } else {
+            Bytes::copy_from_slice(&chunk)
+        };
+        self.sealed.publish(open.id, sealed);
+        open.id = open
+            .id
+            .checked_add(1)
+            .expect("vector memory slab chunk ids fit u32");
+    }
+
+    /// Releases the open chunk and skips its id. Sealed chunks are released
+    /// when the slab drops, which follows every production clear.
+    fn clear(&self) {
+        let mut open = self.open.lock();
+        if open.bytes.take().is_some() {
+            open.id = open
+                .id
+                .checked_add(1)
+                .expect("vector memory slab chunk ids fit u32");
         }
     }
 }
@@ -928,6 +1376,10 @@ impl VectorMemoryHydrationRow {
 #[cfg(feature = "production-coverage")]
 #[path = "../../../../tests/production_support/vector/memory_store.rs"]
 pub(crate) mod production_contracts;
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod oracle_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1170,7 +1622,8 @@ mod tests {
         tx.put(&second_key, second_value).unwrap();
         tx.commit().await.unwrap();
 
-        let first_row_bytes = estimated_entry_bytes(first_key.len(), first_value.len()).unwrap();
+        let first_row_bytes =
+            isolated_upper_row_admission_bytes(u64::try_from(first_value.len()).unwrap());
         let store = VectorMemoryStore::new(DataScope::LegacyUnscoped, index_id, u64::MAX);
         let summary = store
             .load_descriptor_bound_with_budget(
@@ -1250,15 +1703,534 @@ mod tests {
             store.insert_upper_neighbors_bytes(1, node_id, Bytes::from_static(&[1]));
         }
         store.insert_upper_neighbors_bytes(2, 50_000, Bytes::from_static(&[2]));
-        assert_eq!(store.upper_neighbors.len(), 100_000);
+        assert_eq!(store.upper_nodes.len(), 100_000);
 
         store.remove_node(50_000);
 
-        assert_eq!(store.upper_neighbors.len(), 99_999);
+        assert_eq!(store.upper_nodes.len(), 99_999);
         assert!(store.get_upper_neighbors_bytes(1, 49_999).is_some());
         assert!(store.get_upper_neighbors_bytes(1, 50_000).is_none());
         assert!(store.get_upper_neighbors_bytes(2, 50_000).is_none());
         assert!(store.get_upper_neighbors_bytes(1, 50_001).is_some());
+    }
+
+    /// Pins the compact per-node index layout the accounting relies on.
+    #[test]
+    fn index_entries_stay_compact() {
+        assert_eq!(core::mem::size_of::<SlabRow>(), 12);
+        assert_eq!(core::mem::size_of::<UpperNodeRows>(), 40);
+        assert_eq!(UPPER_NODE_INDEX_ENTRY_BYTES, 112);
+        assert_eq!(SIMHASH_INDEX_ENTRY_BYTES, 39);
+        assert_eq!(UPPER_LAYER_SLOT_BYTES, 16);
+        assert_eq!(hash_index_entry_bytes::<u8, ()>(), 5);
+    }
+
+    /// Layers stay sorted, collapse back to inline storage, and report the
+    /// heap growth each upsert causes.
+    #[test]
+    fn upper_neighbor_rows_keep_layers_sorted_and_report_growth() {
+        let row = |chunk| SlabRow {
+            chunk,
+            offset: 0,
+            len: 1,
+        };
+        let mut rows = UpperNeighborRows::Empty;
+        assert!(rows.is_empty());
+        assert_eq!(rows.get(1), None);
+        assert_eq!(rows.growth_bytes(3), 0);
+        rows.remove(3);
+        assert!(rows.is_empty());
+
+        rows.upsert(3, row(3));
+        assert!(matches!(rows, UpperNeighborRows::One(3, _)));
+        assert_eq!(rows.growth_bytes(3), 0);
+        rows.upsert(3, row(30));
+        assert_eq!(rows.get(3), Some(row(30)));
+        assert_eq!(rows.get(1), None);
+        rows.remove(1);
+        assert_eq!(rows.get(3), Some(row(30)));
+
+        assert_eq!(rows.growth_bytes(1), 2 * UPPER_LAYER_SLOT_BYTES);
+        rows.upsert(1, row(1));
+        assert_eq!(rows.growth_bytes(2), UPPER_LAYER_SLOT_BYTES);
+        rows.upsert(2, row(2));
+        assert_eq!(rows.growth_bytes(2), 0);
+        rows.upsert(2, row(20));
+        rows.upsert(5, row(5));
+        let UpperNeighborRows::Many(layers) = &rows else {
+            panic!("four layers spill to the heap");
+        };
+        assert_eq!(
+            layers.iter().map(|(layer, _)| *layer).collect::<Vec<_>>(),
+            [1, 2, 3, 5]
+        );
+        assert_eq!(rows.get(2), Some(row(20)));
+        assert_eq!(rows.get(4), None);
+
+        rows.remove(4);
+        rows.remove(2);
+        rows.remove(5);
+        assert!(matches!(rows, UpperNeighborRows::Many(ref layers) if layers.len() == 2));
+        rows.remove(1);
+        assert!(matches!(rows, UpperNeighborRows::One(3, _)));
+        rows.remove(3);
+        assert!(rows.is_empty());
+    }
+
+    /// Rows read back from the open chunk and from sealed chunks, empty rows
+    /// never occupy a chunk, and a released open chunk's id is never reused.
+    #[test]
+    fn slab_reads_open_and_sealed_rows_and_never_aliases_after_clear() {
+        let slab = VectorMemorySlab::default();
+        slab.seal();
+        assert!(
+            slab.sealed.get(0).is_none(),
+            "sealing without an open chunk is a no-op"
+        );
+        let empty = slab
+            .append(&[], VectorMemoryAdmissionBudget::Bounded(0))
+            .unwrap();
+        assert_eq!(empty.row, SlabRow::EMPTY);
+        assert_eq!(empty.charged, 0);
+        assert_eq!(slab.read(empty.row).as_deref(), Some(&[][..]));
+
+        let first = slab
+            .append(b"first", VectorMemoryAdmissionBudget::Unbounded)
+            .unwrap();
+        assert_eq!(first.charged, 5 + SLAB_CHUNK_HANDLE_BYTES);
+        let second = slab
+            .append(b"second", VectorMemoryAdmissionBudget::Bounded(6))
+            .unwrap();
+        assert_eq!(
+            second.charged, 6,
+            "a row that fits the open chunk opens none"
+        );
+        assert_eq!(second.row.chunk, first.row.chunk);
+        assert_eq!(second.row.offset, 5);
+        assert_eq!(slab.read(first.row).as_deref(), Some(&b"first"[..]));
+
+        slab.seal();
+        assert_eq!(slab.read(second.row).as_deref(), Some(&b"second"[..]));
+        assert_eq!(slab.sealed.get(first.row.chunk).map(Bytes::len), Some(11));
+
+        let open = slab
+            .append(b"open", VectorMemoryAdmissionBudget::Unbounded)
+            .unwrap();
+        assert_eq!(open.row.chunk, first.row.chunk + 1);
+        slab.clear();
+        assert_eq!(slab.read(open.row), None, "the open chunk is released");
+        assert_eq!(
+            slab.read(first.row).as_deref(),
+            Some(&b"first"[..]),
+            "sealed chunks live until the slab drops"
+        );
+        slab.clear();
+
+        let after = slab
+            .append(b"after", VectorMemoryAdmissionBudget::Unbounded)
+            .unwrap();
+        assert_eq!(after.row.chunk, open.row.chunk + 1);
+        assert_eq!(slab.read(after.row).as_deref(), Some(&b"after"[..]));
+        assert_eq!(slab.read(open.row), None, "a skipped id never aliases");
+        assert_eq!(
+            slab.read(SlabRow {
+                chunk: after.row.chunk + 1,
+                offset: 0,
+                len: 1,
+            }),
+            None,
+            "an id past the open chunk is a miss"
+        );
+    }
+
+    /// Chunk ids map onto doubling buckets without gaps or overlap.
+    #[test]
+    fn sealed_chunk_positions_fill_doubling_buckets() {
+        assert_eq!(SealedChunks::position(0), (0, 0));
+        assert_eq!(SealedChunks::position(1), (1, 0));
+        assert_eq!(SealedChunks::position(2), (1, 1));
+        assert_eq!(SealedChunks::position(3), (2, 0));
+        assert_eq!(SealedChunks::position(6), (2, 3));
+        assert_eq!(SealedChunks::position(7), (3, 0));
+        assert_eq!(SealedChunks::position(u32::MAX - 1), (31, (1 << 31) - 1));
+        assert_eq!(SealedChunks::position(u32::MAX), (32, 0));
+        let slab = VectorMemorySlab::default();
+        for id in 0..20u32 {
+            slab.sealed.publish(id, Bytes::from(vec![id as u8]));
+        }
+        for id in 0..20u32 {
+            assert_eq!(slab.sealed.get(id).map(|chunk| chunk[0]), Some(id as u8));
+        }
+        assert_eq!(slab.sealed.get(20), None);
+        assert_eq!(slab.sealed.get(40), None);
+    }
+
+    /// Appends charge the row plus a handle for each chunk they open, refuse
+    /// a row whose charge exceeds the budget without changing the slab, and
+    /// give a row longer than the chunk size a chunk of its own.
+    #[test]
+    fn slab_appends_charge_rows_and_opened_chunks() {
+        let chunk = VECTOR_MEMORY_SLAB_CHUNK_BYTES;
+        let handle = SLAB_CHUNK_HANDLE_BYTES;
+        let slab = VectorMemorySlab::default();
+        assert_eq!(
+            slab.append(b"four", VectorMemoryAdmissionBudget::Bounded(handle + 3)),
+            None
+        );
+        assert_eq!(
+            slab.append(b"four", VectorMemoryAdmissionBudget::Bounded(3)),
+            None,
+            "a budget below the handle refuses every new chunk"
+        );
+        assert!(slab.open.lock().bytes.is_none());
+
+        let exact = slab
+            .append(b"four", VectorMemoryAdmissionBudget::Bounded(handle + 4))
+            .unwrap();
+        assert_eq!(exact.charged, handle + 4);
+        assert_eq!(
+            slab.open.lock().bytes.as_ref().map(Vec::capacity),
+            Some(chunk)
+        );
+        assert_eq!(
+            slab.append(b"next", VectorMemoryAdmissionBudget::Bounded(3)),
+            None,
+            "a row that fits the open chunk still needs its length"
+        );
+        let next = slab
+            .append(b"next", VectorMemoryAdmissionBudget::Bounded(4))
+            .unwrap();
+        assert_eq!(
+            (next.row.chunk, next.row.offset, next.charged),
+            (exact.row.chunk, 4, 4)
+        );
+
+        let tail = vec![7; chunk - 8];
+        let filled = slab
+            .append(
+                &tail,
+                VectorMemoryAdmissionBudget::Bounded(tail.len() as u64),
+            )
+            .unwrap();
+        assert_eq!(
+            filled.row.chunk, exact.row.chunk,
+            "the row fills the chunk exactly"
+        );
+        let opener = slab
+            .append(b"x", VectorMemoryAdmissionBudget::Unbounded)
+            .unwrap();
+        assert_eq!(opener.row.chunk, exact.row.chunk + 1);
+        assert_eq!(opener.charged, handle + 1);
+
+        let oversized = vec![9; chunk + 1];
+        let large = slab
+            .append(
+                &oversized,
+                VectorMemoryAdmissionBudget::Bounded(handle + chunk as u64 + 1),
+            )
+            .unwrap();
+        assert_eq!(large.row.chunk, opener.row.chunk + 1);
+        assert_eq!(large.charged, handle + chunk as u64 + 1);
+        assert_eq!(
+            slab.open.lock().bytes.as_ref().map(Vec::capacity),
+            Some(chunk + 1),
+            "a long row gets a chunk of its own length"
+        );
+        slab.seal();
+        assert_eq!(slab.read(large.row).as_deref(), Some(&oversized[..]));
+        assert_eq!(slab.read(filled.row).as_deref(), Some(&tail[..]));
+        assert_eq!(slab.read(opener.row).as_deref(), Some(&b"x"[..]));
+        assert_eq!(slab.read(exact.row).as_deref(), Some(&b"four"[..]));
+        assert_eq!(slab.read(next.row).as_deref(), Some(&b"next"[..]));
+    }
+
+    /// Sealing trims a partly filled chunk by copying it into an exact-size
+    /// allocation, so its spare capacity is freed under any allocator, and
+    /// publishes a full chunk without copying.
+    #[test]
+    fn sealing_copies_partly_filled_chunks_into_exact_allocations() {
+        let slab = VectorMemorySlab::default();
+        let partial = slab
+            .append(b"partial", VectorMemoryAdmissionBudget::Unbounded)
+            .unwrap();
+        let partial_buffer = slab.open.lock().bytes.as_ref().map(|chunk| chunk.as_ptr());
+        slab.seal();
+        let sealed = slab.sealed.get(partial.row.chunk).unwrap();
+        assert_eq!(sealed.len(), 7);
+        assert_ne!(
+            Some(sealed.as_ptr()),
+            partial_buffer,
+            "a partly filled chunk is copied"
+        );
+
+        let full = vec![3; VECTOR_MEMORY_SLAB_CHUNK_BYTES + 5];
+        let whole = slab
+            .append(&full, VectorMemoryAdmissionBudget::Unbounded)
+            .unwrap();
+        let whole_buffer = slab.open.lock().bytes.as_ref().map(|chunk| chunk.as_ptr());
+        slab.seal();
+        let sealed = slab.sealed.get(whole.row.chunk).unwrap();
+        assert_eq!(
+            Some(sealed.as_ptr()),
+            whole_buffer,
+            "a full chunk is moved, not copied"
+        );
+        assert_eq!(&sealed[..], &full[..]);
+    }
+
+    /// A load charges every row byte, each opened chunk's handle, and each
+    /// index entry; a budget equal to that charge admits every row.
+    #[tokio::test]
+    async fn load_charges_exact_slab_and_index_bytes() {
+        let db = test_db("memory_store_exact_charge").await;
+        let index_id = crate::search::vector::index_id_from_name("memory_store_exact_charge_idx");
+        let rows = [
+            (
+                VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(index_id, 1, 5)).to_bytes(),
+                Bytes::from_static(&[1; 10]),
+            ),
+            (
+                VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(index_id, 1, 6)).to_bytes(),
+                Bytes::from_static(&[2; 20]),
+            ),
+            (
+                VectorKey::UpperNeighbors(VectorUpperNeighborsKey::new(index_id, 2, 5)).to_bytes(),
+                Bytes::from_static(&[3; 30]),
+            ),
+            (
+                VectorKey::SimHash(VectorSimHashKey::new(index_id, 5)).to_bytes(),
+                Bytes::copy_from_slice(&encode_simhash(5)),
+            ),
+            (
+                VectorKey::UpperVector(VectorUpperVectorKey::new(index_id, 5)).to_bytes(),
+                Bytes::from_static(&[4; 40]),
+            ),
+            (
+                VectorKey::UpperVector(VectorUpperVectorKey::new(index_id, 7)).to_bytes(),
+                Bytes::new(),
+            ),
+        ];
+        let tx = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        for (key, value) in &rows {
+            tx.put(key, value.clone()).unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let store = VectorMemoryStore::new(DataScope::LegacyUnscoped, index_id, u64::MAX);
+        // A fixture row inserted before the load must not absorb charged rows.
+        store.insert_upper_vector(99, Bytes::from_static(b"fixture"));
+        let summary = store
+            .load_descriptor_bound_with_budget(
+                db.as_ref(),
+                VectorMemoryAdmissionBudget::Unbounded,
+                None,
+            )
+            .await
+            .unwrap();
+        let expected = 3 * UPPER_NODE_INDEX_ENTRY_BYTES
+            + 2 * UPPER_LAYER_SLOT_BYTES
+            + SIMHASH_INDEX_ENTRY_BYTES
+            + SLAB_CHUNK_HANDLE_BYTES
+            + 10
+            + 20
+            + 30
+            + 40;
+        assert_eq!(summary.loaded_entries, rows.len());
+        assert_eq!(summary.estimated_bytes, expected);
+        assert_eq!(store.estimated_bytes(), expected);
+        assert_eq!(
+            [0, 1, 2].map(|id| store.slab.sealed.get(id).map(Bytes::len)),
+            [Some(b"fixture".len()), Some(100), None],
+            "the fixture chunk stays separate and the load's chunk is shrunk"
+        );
+        assert!(store.slab.open.lock().bytes.is_none());
+        assert_eq!(store.get_upper_vector(7).as_deref(), Some(&[][..]));
+        assert_eq!(store.get_upper_vector(99).as_deref(), Some(&b"fixture"[..]));
+
+        let bounded = VectorMemoryStore::new(DataScope::LegacyUnscoped, index_id, u64::MAX);
+        let summary = bounded
+            .load_descriptor_bound_with_budget(
+                db.as_ref(),
+                VectorMemoryAdmissionBudget::Bounded(expected),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.loaded_entries, rows.len());
+        assert_eq!(summary.estimated_bytes, expected);
+        assert_eq!(
+            summary.completion,
+            VectorMemoryStoreLoadCompletion::Complete
+        );
+    }
+
+    /// A bounded load admits exactly the longest scan prefix whose charge,
+    /// modelled row by row, fits its budget, and charges that prefix exactly.
+    #[tokio::test]
+    async fn bounded_loads_admit_the_longest_prefix_whose_charge_fits() {
+        let db = test_db("memory_store_prefix_charges").await;
+        let index_id = crate::search::vector::index_id_from_name("memory_store_prefix_charges_idx");
+        let chunk = VECTOR_MEMORY_SLAB_CHUNK_BYTES;
+        // Lengths cross chunk boundaries, fill a chunk exactly, exceed the
+        // chunk size, and include empty rows.
+        let lens = [
+            0,
+            1,
+            700,
+            chunk - 701,
+            6_000,
+            6_000,
+            6_000,
+            chunk + 3,
+            64,
+            0,
+            9_000,
+            512,
+        ];
+        // Persisted key, value, and the upper row it fills (none for SimHashes).
+        type ScanRow = (Bytes, Bytes, Option<(NodeId, UpperRowKind)>);
+        let mut rows: Vec<ScanRow> = Vec::new();
+        for (node_id, len) in (0u64..).zip(lens) {
+            for layer in 1..=u16::try_from(node_id % 3).unwrap() + 1 {
+                let key = VectorUpperNeighborsKey::new(index_id, layer, node_id);
+                rows.push((
+                    VectorKey::UpperNeighbors(key).to_bytes(),
+                    Bytes::from(vec![
+                        u8::try_from(layer).unwrap();
+                        len / 4 + usize::from(layer)
+                    ]),
+                    Some((node_id, UpperRowKind::Neighbors(layer))),
+                ));
+            }
+            rows.push((
+                VectorKey::SimHash(VectorSimHashKey::new(index_id, node_id)).to_bytes(),
+                Bytes::copy_from_slice(&encode_simhash(node_id)),
+                None,
+            ));
+            rows.push((
+                VectorKey::UpperVector(VectorUpperVectorKey::new(index_id, node_id)).to_bytes(),
+                Bytes::from(vec![node_id.to_le_bytes()[0]; len]),
+                Some((node_id, UpperRowKind::Vector)),
+            ));
+        }
+        rows.sort_by(|left, right| left.0.cmp(&right.0));
+        let tx = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        for (key, value, _) in &rows {
+            tx.put(key, value.clone()).unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        // prefix_charges[k] is the modelled charge of the first k scan rows.
+        let mut prefix_charges = vec![0u64];
+        let mut layers: HashMap<NodeId, usize> = HashMap::new();
+        let mut room = 0usize;
+        for (_, value, target) in &rows {
+            let index = match target {
+                None => SIMHASH_INDEX_ENTRY_BYTES,
+                Some((node_id, kind)) => {
+                    let new_node = !layers.contains_key(node_id);
+                    let count = layers.entry(*node_id).or_default();
+                    if matches!(kind, UpperRowKind::Neighbors(_)) {
+                        *count += 1;
+                    }
+                    match (new_node, kind, *count) {
+                        (true, ..) => UPPER_NODE_INDEX_ENTRY_BYTES,
+                        (false, UpperRowKind::Neighbors(_), 2) => 2 * UPPER_LAYER_SLOT_BYTES,
+                        (false, UpperRowKind::Neighbors(_), 3..) => UPPER_LAYER_SLOT_BYTES,
+                        (false, ..) => 0,
+                    }
+                }
+            };
+            // SimHashes are decoded into the index, never copied to the slab.
+            let len = if target.is_some() { value.len() } else { 0 };
+            let slab = if len == 0 {
+                0
+            } else if len <= room {
+                room -= len;
+                len as u64
+            } else {
+                room = chunk.max(len) - len;
+                len as u64 + SLAB_CHUNK_HANDLE_BYTES
+            };
+            prefix_charges.push(prefix_charges.last().unwrap() + index + slab);
+        }
+
+        let load = |budget| {
+            let db = Arc::clone(&db);
+            async move {
+                let store = VectorMemoryStore::new(DataScope::LegacyUnscoped, index_id, u64::MAX);
+                let summary = store
+                    .load_descriptor_bound_with_budget(db.as_ref(), budget, None)
+                    .await
+                    .unwrap();
+                (store, summary)
+            }
+        };
+        let (_, full) = load(VectorMemoryAdmissionBudget::Unbounded).await;
+        assert_eq!(full.loaded_entries, rows.len());
+        assert_eq!(full.estimated_bytes, *prefix_charges.last().unwrap());
+
+        for budget in prefix_charges
+            .iter()
+            .flat_map(|&charge| [charge, charge.saturating_sub(1)])
+        {
+            let admitted = prefix_charges
+                .iter()
+                .rposition(|&charge| charge <= budget)
+                .unwrap();
+            let (store, summary) = load(VectorMemoryAdmissionBudget::Bounded(budget)).await;
+            assert_eq!(summary.loaded_entries, admitted, "budget {budget}");
+            assert_eq!(
+                summary.estimated_bytes, prefix_charges[admitted],
+                "budget {budget}"
+            );
+            let completion = if admitted == rows.len() {
+                VectorMemoryStoreLoadCompletion::Complete
+            } else {
+                VectorMemoryStoreLoadCompletion::BudgetExhausted
+            };
+            assert_eq!(summary.completion, completion, "budget {budget}");
+            for (position, (_, value, target)) in rows.iter().enumerate() {
+                let found = match target {
+                    None => continue,
+                    Some((node_id, UpperRowKind::Vector)) => store.get_upper_vector(*node_id),
+                    Some((node_id, UpperRowKind::Neighbors(layer))) => {
+                        store.get_upper_neighbors_bytes(*layer, *node_id)
+                    }
+                };
+                assert_eq!(found.as_ref(), (position < admitted).then_some(value));
+            }
+        }
+    }
+
+    /// Readers follow rows while fixture inserts fill and seal chunks.
+    #[test]
+    fn concurrent_reads_follow_rows_across_chunk_seals() {
+        let store = Arc::new(VectorMemoryStore::new(DataScope::LegacyUnscoped, 1, 0));
+        let row = |node_id: NodeId| Bytes::from(vec![node_id.to_le_bytes()[0]; 64 * 1024]);
+        let written = Arc::new(AtomicU64::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let store = Arc::clone(&store);
+                let written = Arc::clone(&written);
+                scope.spawn(move || {
+                    while written.load(Ordering::Acquire) < 64 {
+                        let visible = written.load(Ordering::Acquire);
+                        for node_id in 0..visible {
+                            assert_eq!(store.get_upper_vector(node_id), Some(row(node_id)));
+                        }
+                    }
+                });
+            }
+            for node_id in 0..64 {
+                store.insert_upper_vector(node_id, row(node_id));
+                written.store(node_id + 1, Ordering::Release);
+            }
+        });
+        assert!(store.slab.sealed.get(2).is_some());
+        for node_id in 0..64 {
+            assert_eq!(store.get_upper_vector(node_id), Some(row(node_id)));
+        }
     }
 
     #[test]

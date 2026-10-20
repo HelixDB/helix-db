@@ -6,13 +6,12 @@
 //! and `ForEach` preparation.
 
 use helix_ast::batch::{BatchEntry, NamedQuery};
-use std::collections::BTreeSet;
 
 use super::super::super::super::{cache, SelectedCascadesPlanner};
 use super::super::super::rejection::{self, NativeUnsupportedReason};
 use super::super::super::{entries, names};
 use super::SelectedBatchDraft;
-use crate::{cost, error, exec, ir};
+use crate::{context, cost, error, exec, ir};
 
 pub(super) struct InitialEntryDraft<'a>(EntryDraft<'a>);
 
@@ -20,10 +19,10 @@ impl<'a> InitialEntryDraft<'a> {
     pub(super) fn prepare(
         planner: &SelectedCascadesPlanner<'_>,
         entry: &'a BatchEntry,
-        late_bound_params: &BTreeSet<ir::NonEmptyString>,
+        ctx: &context::PlannerContext,
         pending: &mut cache::PendingSelectedRunRoots,
     ) -> Result<Self, error::PlannerError> {
-        EntryDraft::prepare(planner, entry, late_bound_params, pending).map(Self)
+        EntryDraft::prepare(planner, entry, ctx, pending).map(Self)
     }
 
     pub(super) fn materialize(
@@ -63,10 +62,10 @@ impl<'a> FollowupEntryDraft<'a> {
     pub(super) fn prepare(
         planner: &SelectedCascadesPlanner<'_>,
         entry: &'a BatchEntry,
-        late_bound_params: &BTreeSet<ir::NonEmptyString>,
+        ctx: &context::PlannerContext,
         pending: &mut cache::PendingSelectedRunRoots,
     ) -> Result<Self, error::PlannerError> {
-        EntryDraft::prepare(planner, entry, late_bound_params, pending).map(Self)
+        EntryDraft::prepare(planner, entry, ctx, pending).map(Self)
     }
 
     pub(super) fn materialize(
@@ -128,22 +127,22 @@ impl<'a> EntryDraft<'a> {
     fn prepare(
         planner: &SelectedCascadesPlanner<'_>,
         entry: &'a BatchEntry,
-        late_bound_params: &BTreeSet<ir::NonEmptyString>,
+        ctx: &context::PlannerContext,
         pending: &mut cache::PendingSelectedRunRoots,
     ) -> Result<Self, error::PlannerError> {
         match entry {
             BatchEntry::Query(query) => planner
-                .prepare_selected_ast_query_root(query, late_bound_params, pending)
+                .prepare_selected_ast_query_root(query, ctx, pending)
                 .map(|root_use| Self::Query { query, root_use }),
             BatchEntry::ForEach { param, body } => {
                 let param = names::non_empty(param, ir::NameField::Param)?;
-                let mut body_late_bound_params = late_bound_params.clone();
-                body_late_bound_params.insert(param.clone());
+                let mut body_ctx = ctx.clone();
+                body_ctx.late_bound_params.insert(param.clone());
                 let body = SelectedBatchDraft::prepare(
                     planner,
                     body,
                     error::BatchOp::ForEach,
-                    &body_late_bound_params,
+                    &body_ctx,
                     pending,
                 )?;
                 Ok(Self::ForEach {

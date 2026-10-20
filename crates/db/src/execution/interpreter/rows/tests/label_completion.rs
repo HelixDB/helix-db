@@ -141,9 +141,9 @@ async fn label_completion_preserves_corruption_errors_and_mutation_rollback() {
         "MATCH (n:N) DELETE n RETURN n.key",
     ] {
         let expected = if text.contains("DELETE") {
-            "DeletedEntityAccess"
+            "deleted_entity_access"
         } else {
-            "DivisionByZero"
+            "division_by_zero"
         };
         let query = helix_cypher::compile(text).unwrap();
         let selected = r::plan(

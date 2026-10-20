@@ -50,6 +50,9 @@ pub struct Span {
     pub end: usize,
 }
 
+mod codes;
+pub use codes::{category, detail};
+
 /// A stable failure phase, independent of transport and frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,7 +61,19 @@ pub enum ErrorPhase {
     Runtime,
 }
 
+impl ErrorPhase {
+    /// The phase as it appears in error codes and bodies.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Compile => "compile",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
 /// A query error with machine-readable classification and optional source span.
+///
+/// `category` and `detail` hold codes from [`category`] and [`detail`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[error("{category}: {detail}: {message}")]
 pub struct QueryError {
@@ -95,12 +110,26 @@ impl QueryError {
         self
     }
 
-    pub fn unsupported(feature: &str) -> Self {
+    /// A construct outside the supported profile. `detail` is its code and
+    /// `construct` names it for the message, such as `MERGE`.
+    pub fn unsupported(detail: &str, construct: impl std::fmt::Display) -> Self {
         Self::compile(
-            "UnsupportedFeature",
-            feature,
-            format!("{feature} is outside the Cypher MVP profile"),
+            category::UNSUPPORTED_FEATURE,
+            detail,
+            format!("the Cypher MVP profile does not support {construct}"),
         )
+    }
+
+    /// One code for transports with a single code field, such as the embedded
+    /// bindings: `category:phase:detail`.
+    ///
+    /// ```
+    /// use helix_planner::relational::{category, detail, QueryError};
+    /// let error = QueryError::compile(category::SYNTAX_ERROR, detail::UNDEFINED_VARIABLE, "x");
+    /// assert_eq!(error.code(), "syntax_error:compile:undefined_variable");
+    /// ```
+    pub fn code(&self) -> String {
+        format!("{}:{}:{}", self.category, self.phase.as_str(), self.detail)
     }
 }
 

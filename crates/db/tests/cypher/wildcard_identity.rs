@@ -71,7 +71,7 @@ async fn identity_wildcards_preserve_write_barriers_and_late_error_rollback() {
         else {
             panic!("query error")
         };
-        assert_eq!(error.detail, "DivisionByZero", "{query}");
+        assert_eq!(error.detail, "division_by_zero", "{query}");
     }
     assert_eq!(
         run(&db, "MATCH (n:N) RETURN count(n.changed)").await.rows,

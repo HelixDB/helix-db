@@ -96,7 +96,7 @@ fn windowed_with_where_filters_after_the_window() {
     // binding the WITH drops is rejected rather than moved before the window.
     let error = helix_cypher::compile("MATCH (a) WITH a.x AS x LIMIT 1 WHERE a.y = 1 RETURN x")
         .unwrap_err();
-    assert_eq!(error.detail, "UndefinedVariable");
+    assert_eq!(error.detail, "undefined_variable");
 }
 
 #[test]
@@ -118,68 +118,72 @@ fn standard_errors_precede_deferred_capabilities() {
     for (text, category, detail) in [
         (
             "CREATE (n {}) CREATE (n:Bar)-[:OWNS]->(:Dog)",
-            "SyntaxError",
-            "VariableAlreadyBound",
+            "syntax_error",
+            "variable_already_bound",
         ),
         (
             "CREATE (b {name: missing}) RETURN b",
-            "SyntaxError",
-            "UndefinedVariable",
+            "syntax_error",
+            "undefined_variable",
         ),
-        ("CREATE ()-->()", "SyntaxError", "NoSingleRelationshipType"),
+        (
+            "CREATE ()-->()",
+            "syntax_error",
+            "no_single_relationship_type",
+        ),
         (
             "CREATE ()-[:A|:B]->()",
-            "SyntaxError",
-            "NoSingleRelationshipType",
+            "syntax_error",
+            "no_single_relationship_type",
         ),
         (
             "MATCH ()-[r]->() CREATE ()-[r]->()",
-            "SyntaxError",
-            "VariableAlreadyBound",
+            "syntax_error",
+            "variable_already_bound",
         ),
         (
             "MATCH ()-[r]->() CREATE (:A)-[r]->(:B)",
-            "SyntaxError",
-            "VariableAlreadyBound",
+            "syntax_error",
+            "variable_already_bound",
         ),
-        ("CREATE () RETURN foo()", "SyntaxError", "UnknownFunction"),
+        ("CREATE () RETURN foo()", "syntax_error", "unknown_function"),
         // The first capability error still wins over later deferred features.
         (
             "CREATE () RETURN date() AS d",
-            "UnsupportedFeature",
-            "NodeLabelRequired",
+            "unsupported_feature",
+            "node_label_required",
         ),
         (
             "CREATE (), (:A {x: 1}) RETURN 1 AS one",
-            "UnsupportedFeature",
-            "NodeLabelRequired",
+            "unsupported_feature",
+            "node_label_required",
         ),
-        ("RETURN foo(1) AS x", "SyntaxError", "UnknownFunction"),
-        ("RETURN sqrt(4) AS x", "UnsupportedFeature", "Function:sqrt"),
+        ("RETURN foo(1) AS x", "syntax_error", "unknown_function"),
+        ("RETURN sqrt(4) AS x", "unsupported_feature", "function"),
         (
             "RETURN percentileCont(1, 0.5) AS x",
-            "UnsupportedFeature",
-            "Function:percentilecont",
+            "unsupported_feature",
+            "function",
         ),
         (
             "MATCH (n $param) RETURN n",
-            "SyntaxError",
-            "InvalidParameterUse",
+            "syntax_error",
+            "invalid_parameter_use",
         ),
         (
             "MATCH ()-[r:T $param]->() RETURN r",
-            "SyntaxError",
-            "InvalidParameterUse",
+            "syntax_error",
+            "invalid_parameter_use",
         ),
         (
             "CREATE (n:A $props)",
-            "UnsupportedFeature",
-            "PatternParameterMap",
+            "unsupported_feature",
+            "pattern_parameter_map",
         ),
         (
             "CREATE (:A)-[:R $props]->(:B)",
-            "UnsupportedFeature",
-            "PatternParameterMap",
+            "unsupported_feature",
+            "pattern_parameter_map",
         ),
     ] {
         let error = helix_cypher::compile(text).unwrap_err();
@@ -194,34 +198,38 @@ fn standard_errors_precede_deferred_capabilities() {
 #[test]
 fn rejects_profile_boundaries_and_scope_errors() {
     for (text, category, detail) in [
-        ("CREATE ()", "UnsupportedFeature", "NodeLabelRequired"),
+        ("CREATE ()", "unsupported_feature", "node_label_required"),
         (
             "MATCH (n:A:B) RETURN n",
-            "UnsupportedFeature",
-            "MultipleNodeLabels",
+            "unsupported_feature",
+            "multiple_node_labels",
         ),
-        ("MERGE (n:A)", "UnsupportedFeature", "Merge"),
+        ("MERGE (n:A)", "unsupported_feature", "merge"),
         (
             "MATCH (n)-[*]->(m) RETURN m",
-            "UnsupportedFeature",
-            "VariableLengthPattern",
+            "unsupported_feature",
+            "variable_length_pattern",
         ),
         (
             "MATCH (n) WITH n.name AS name RETURN n",
-            "SyntaxError",
-            "UndefinedVariable",
+            "syntax_error",
+            "undefined_variable",
         ),
         (
             "MATCH (n) RETURN n.`$label`",
-            "UnsupportedFeature",
-            "ReservedPropertyName",
+            "unsupported_feature",
+            "reserved_property_name",
         ),
-        ("RETURN 1 AS x, 2 AS x", "SyntaxError", "ColumnNameConflict"),
-        ("WITH 1 + 1 RETURN 2", "SyntaxError", "NoExpressionAlias"),
+        (
+            "RETURN 1 AS x, 2 AS x",
+            "syntax_error",
+            "column_name_conflict",
+        ),
+        ("WITH 1 + 1 RETURN 2", "syntax_error", "no_expression_alias"),
         (
             "RETURN 1; RETURN 2",
-            "UnsupportedFeature",
-            "MultipleStatements",
+            "unsupported_feature",
+            "multiple_statements",
         ),
     ] {
         let e = helix_cypher::compile(text).unwrap_err();
@@ -317,7 +325,7 @@ fn public_syntax_cannot_bypass_pattern_validation() {
     patterns[0].nodes.pop();
     assert_eq!(
         helix_cypher::resolve(&statement).unwrap_err().detail,
-        "InvalidRelationshipPattern"
+        "invalid_relationship_pattern"
     );
     let parsed = helix_cypher::parse("RETURN 1").unwrap();
     let helix_cypher::syntax::Clause::Project { items, .. } = &parsed.clauses[0] else {
@@ -333,7 +341,7 @@ fn public_syntax_cannot_bypass_pattern_validation() {
     statement.clauses.clear();
     assert_eq!(
         helix_cypher::resolve(&statement).unwrap_err().detail,
-        "InvalidStatement"
+        "invalid_statement"
     );
 }
 
@@ -343,8 +351,8 @@ fn named_and_unnamed_shortest_path_calls_report_the_deferred_feature() {
         for prefix in ["", "p = ", "p = /* path */ "] {
             let query = format!("MATCH {prefix}{function}((a)-[*1..3]->(b)) RETURN a");
             let error = helix_cypher::compile(&query).unwrap_err();
-            assert_eq!(error.category, "UnsupportedFeature");
-            assert_eq!(error.detail, "ShortestPath");
+            assert_eq!(error.category, "unsupported_feature");
+            assert_eq!(error.detail, "shortest_path");
             assert_eq!(error.phase, r::ErrorPhase::Compile);
             let span = error.span.unwrap();
             assert_eq!(&query[span.start..span.end], function);
@@ -359,6 +367,6 @@ fn named_and_unnamed_shortest_path_calls_report_the_deferred_feature() {
         "MATCH p =",
     ] {
         let error = helix_cypher::compile(query).unwrap_err();
-        assert_eq!(error.category, "SyntaxError");
+        assert_eq!(error.category, "syntax_error");
     }
 }

@@ -3,6 +3,7 @@
 //! partial list/map or copying unobserved payloads along the failing branch.
 use crate::encoding::v2::values::property::property_value::PropertyValue as P;
 use helix_planner::relational as r;
+use helix_planner::relational::{category, detail};
 use std::collections::BTreeMap;
 
 #[cfg(test)]
@@ -17,13 +18,13 @@ impl Rejection {
     fn description(self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::StoredType => (
-                "UnsupportedFeature",
-                "StoredValueType",
+                category::UNSUPPORTED_FEATURE,
+                detail::STORED_VALUE_TYPE,
                 "temporal and binary stored values are outside the MVP profile",
             ),
             Self::Nesting => (
-                "ResourceLimit",
-                "StoredValueNestingLimit",
+                category::RESOURCE_LIMIT,
+                detail::STORED_VALUE_NESTING_LIMIT,
                 "stored property value exceeds the query value nesting limit",
             ),
         }

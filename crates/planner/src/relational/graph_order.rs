@@ -2,6 +2,7 @@
 //! changes only traversal priority within one MATCH; predicates, relationship
 //! uniqueness, correlations and optional boundaries remain with its row operator.
 use super::{MatchStep, QueryError, Result, Slot};
+use crate::relational::{category, detail};
 use crate::{catalog, cost, logical, optimizer, physical, properties, rules};
 use std::collections::BTreeSet;
 
@@ -20,6 +21,18 @@ pub struct PatternExpansion {
     /// Estimated adjacency rows per source endpoint in each direction.
     pub forward_rows: u64,
     pub reverse_rows: u64,
+    /// Present when the relationship may start the pattern from its edge
+    /// bitmaps: it is typed and unbound, and every node connected to it is an
+    /// unbound full node scan. `None` keeps node-driven expansion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<RelationshipScan>,
+}
+
+/// A scan reads each edge once and binds one row per orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RelationshipScan {
+    pub edges: u64,
+    pub undirected: bool,
 }
 
 /// A property equijoin whose null/error semantics were proven by the frontend
@@ -102,8 +115,8 @@ impl TryFrom<PatternOrderInput> for GraphPatternOrder {
                 || priority.iter().copied().collect::<BTreeSet<_>>() != (0..length).collect()
             {
                 return Err(QueryError::compile(
-                    "InternalPlannerError",
-                    "InvalidPatternOrder",
+                    category::INTERNAL_PLANNER_ERROR,
+                    detail::INVALID_PATTERN_ORDER,
                     "pattern priorities must be permutations",
                 ));
             }
@@ -134,9 +147,22 @@ impl GraphPatternOrder {
                 .any(|r| !nodes.contains(&r.from) || !nodes.contains(&r.to))
         {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "InvalidPatternOrder",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_PATTERN_ORDER,
                 "pattern sources must be unique and contain every endpoint",
+            ));
+        }
+        // A scan binds all three slots, so none of them may arrive bound.
+        if relationships.iter().any(|r| {
+            r.scan.is_some()
+                && [r.from, r.to, r.relationship]
+                    .iter()
+                    .any(|slot| incoming.contains(slot))
+        }) {
+            return Err(QueryError::compile(
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_PATTERN_ORDER,
+                "a relationship scan binds an unbound relationship and endpoints",
             ));
         }
         sources.sort_by_key(|s| (s.rows, s.slot));
@@ -160,8 +186,8 @@ impl GraphPatternOrder {
                 .any(|slot| !self.sources.iter().any(|s| s.slot == *slot))
         {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "InvalidPatternEquality",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_PATTERN_EQUALITY,
                 "join keys require distinct node bindings and nonempty property names",
             ));
         }
@@ -188,8 +214,8 @@ impl GraphPatternOrder {
                 || !self.sources.iter().any(|source| source.slot == lookup.slot)
         }) {
             return Err(QueryError::compile(
-                "InternalPlannerError",
-                "InvalidPatternLookup",
+                category::INTERNAL_PLANNER_ERROR,
+                detail::INVALID_PATTERN_LOOKUP,
                 "lookups require a distinct unbound node and a probe bound before it",
             ));
         }
@@ -290,6 +316,37 @@ impl GraphPatternOrder {
                 rows = rows.saturating_mul(lookup.estimated_rows);
                 steps.push(MatchStep::IndexLookup(lookup.clone()));
                 known.insert(source.slot);
+                continue;
+            }
+            // A full scan of either endpoint would expand to every edge of an
+            // eligible relationship; its type bitmaps name those edges
+            // directly. Endpoints and other edges remain pattern-validated.
+            let scan = self.relationship_priority.iter().find_map(|&index| {
+                let rel = &self.relationships[index];
+                let scan = rel.scan.filter(|_| {
+                    remaining.contains(&index) && (rel.from == source.slot || rel.to == source.slot)
+                })?;
+                Some((index, rel, scan))
+            });
+            if join.is_none()
+                && let Some((index, rel, scan)) = scan
+            {
+                remaining.remove(&index);
+                if self.sources.iter().any(|s| known.contains(&s.slot)) {
+                    cartesian_products += 1;
+                }
+                // The bitmaps are read once; each input row reads endpoints.
+                let edges = cost::EstimatedRows::rows(scan.edges);
+                cost = cost
+                    .serial(storage.label_scan(edges))
+                    .serial(storage.relationship_endpoints(edges).saturating_mul(rows));
+                rows =
+                    rows.saturating_mul(scan.edges.saturating_mul(1 + u64::from(scan.undirected)));
+                cost = cost.serial(storage.stream_operator(cost::EstimatedRows::rows(rows)));
+                steps.push(MatchStep::ScanRelationship {
+                    relationship: index,
+                });
+                known.extend([rel.from, rel.to, rel.relationship]);
                 continue;
             }
             cost = cost.serial(source.access_cost);

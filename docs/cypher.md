@@ -1,74 +1,19 @@
-# Cypher
+# Cypher implementation notes
 
-Helix supports the Cypher profile below alongside the native DSL. Both frontends
-use the existing graph storage, transactions, and indexes. Existing databases do
-not need a storage migration. This is a supported language profile, not full
-openCypher compatibility. Use a server or embedded build containing this implementation;
-cloud gateway deployment is separate.
+The user guide for Cypher, including how to run statements from each SDK, the
+supported profile, the constructs it rejects, and the lossless value encoding,
+is [Query HelixDB with Cypher](database/helix-db/query-guides/cypher.mdx),
+published at <https://docs.helix-db.com/database/helix-db/query-guides/cypher>.
+The HTTP contract is in the [HTTP API reference](database/helix-db/query-guides/http-api.mdx#cypher)
+and [`openapi.json`](openapi.json).
 
-## Execute a statement
+These notes record implementation detail for contributors: the Rust and transport
+APIs, index selection, evaluation semantics, mutation rules, and memory accounting.
+Keep the guide in step when behavior changes.
 
-Cypher is off by default. Start the server with `HELIX_ENABLE_CYPHER=true` to
-route `POST /v2/cypher`, `POST /v2/cypher/explain` and gRPC `ExecuteCypher`;
-without it they return 404 and `Unimplemented`, and only native queries are
-served.
+## Rust and transport APIs
 
-Send one statement to a local server's `POST /v2/cypher` endpoint:
-
-```sh
-curl http://localhost:6969/v2/cypher \
-  -H 'Content-Type: application/json' \
-  --data '{"query":"RETURN $name AS name, $age AS age","parameters":{"name":"Ada","age":30}}'
-```
-
-```json
-{"columns":["name","age"],"rows":[["Ada",30]]}
-```
-
-Use the host and port of your configured instance. Existing server authentication
-and tenant routing apply. `query` is required; `parameters` and `query_name` are
-optional. Each row has one value per column in column order. Duplicates are
-preserved unless the query uses `DISTINCT`. Use `ORDER BY` when row order matters.
-
-Create and read a graph:
-
-```cypher
-CREATE (a:Person {name:'Ada', age:30})-[:KNOWS]->(b:Person {name:'Bob', age:40})
-RETURN a.name AS person, b.name AS friend
-```
-
-```cypher
-MATCH (a:Person)-[:KNOWS]->(b:Person)
-WHERE a.age >= $minimumAge
-RETURN a.name AS person, collect(b.name) AS friends
-ORDER BY person
-```
-
-Parameters are values; labels, relationship types, and variable names are query
-syntax. Keep values in parameters rather than interpolating them into query text.
-The existing `POST /v2/query` endpoint continues to accept the native DSL contract.
-
-## SDK and embedded entry points
-
-Use an existing configured client and its normal connection lifecycle:
-
-| Client | Method |
-|---|---|
-| TypeScript | `await client.cypher(query, parameters, queryName)` |
-| Rust SDK | `client.cypher(query, parameters, query_name).await` |
-| Go | `client.Cypher(ctx, helix.CypherRequest{Query: query, Parameters: parameters})` |
-| Python | `client.cypher(query, parameters, query_name="example")` |
-| Async Python | `await client.cypher(query, parameters, query_name="example")` |
-
-TypeScript and Python default omitted parameters to an empty map. Rust SDK
-parameters are a `BTreeMap<String, serde_json::Value>` and `query_name` is
-`Option<&str>`. Go returns `(*CypherResponse, error)`. Each client preserves tagged
-lossless values in the response. See the [Rust](../sdks/rust/README.md),
-[TypeScript](../sdks/typescript/README.md), [Go](../sdks/go/README.md), and
-[Python](../sdks/python/README.md) guides for client construction and embedded
-build prerequisites. Use SDK and server builds from this checkout for Cypher.
-
-The database crate also exposes `database.cypher(db::cypher::Request::new(query)).await`.
+The database crate exposes `database.cypher(db::cypher::Request::new(query)).await`.
 The lower-level `db::cypher::execute` accepts explicit scope, execution control,
 query mode, and resource limits. These use the caller's existing database handle.
 For a prepared JSON body, use `database.cypher_json(request).await` or
@@ -84,53 +29,43 @@ HTTP and gRPC use this path. Compilation retains no database or catalog snapshot
 execution still acquires the current scoped catalog, validates parameters, and
 applies the attempt's limits and cancellation control.
 
-The additive gRPC `ExecuteCypher(QueryJsonRequest)` method accepts the same JSON
-body and existing request options, returning a `QueryJsonResponse`.
+The gRPC `ExecuteCypher(QueryJsonRequest)` and `ExplainCypher(QueryJsonRequest)`
+methods accept the same JSON body and existing request options, returning a
+`QueryJsonResponse` whose body matches the HTTP response. `ExplainCypher` applies
+the options as a read, like `POST /v2/cypher/explain`.
 
-From a linked local Helix project:
+Every transport reports a Cypher query error with the same class and codes.
+HTTP returns this body, and gRPC carries the same JSON in the status details:
 
-```sh
-helix cypher -e 'RETURN 1 AS value'
-helix cypher -e 'RETURN $name AS name' --parameters '{"name":"Ada"}'
-helix cypher --file query.cypher --parameters '{"minimumAge":30}'
+```json
+{
+  "error": "resource_limit",
+  "msg": "expression temporaries exceed the query memory budget",
+  "details": {"detail": "memory_limit", "phase": "runtime", "span": null}
+}
 ```
 
-An optional instance name selects a linked local instance. `--host` and `--port`
-control the connection, and `--explain` shows the selected plans without
-executing the statement. Responses print as highlighted JSON, or as compact
-JSON with the global `--json` flag. The CLI currently requires a local instance
-configuration.
+`error` is the category and `details.detail` the specific condition. Both use
+lower snake case, like every HelixDB error code. `details.phase` is `compile` or
+`runtime`, and `span` locates the failing text when it is known. Embedded SDK
+errors join the three parts into one code, `category:phase:detail`, such as
+`constraint_verification_failed:runtime:delete_connected_node`. Request, storage
+and transaction failures keep the native error envelope and codes. The
+[query error reference](database/helix-db/query-guides/error-handling.mdx#cypher-errors)
+lists every category.
 
-## Supported language profile
+| Error category | HTTP | gRPC |
+|---|---|---|
+| `resource_limit` | 429 | `RESOURCE_EXHAUSTED` |
+| `access_mode_error` (a write on a reader) | 503 | `FAILED_PRECONDITION` |
+| `internal_planner_error` | 500 | `INTERNAL` |
+| Any other category | 400 | `INVALID_ARGUMENT` |
 
-| Area | Supported |
-|---|---|
-| Patterns | `MATCH`, `OPTIONAL MATCH`, fixed-length directed and undirected relationships, multiple patterns, repeated variables, named paths |
-| Rows | `WHERE`, `WITH`, `RETURN`, aliases, `DISTINCT`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT` |
-| Expressions | Parameters, scalar/list/map literals, property and index access, arithmetic, comparisons, boolean operators, null tests, `IN`, string predicates, `CASE` |
-| Graph/list functions | `id`, `type`, `labels`, `properties`, `keys`, `exists` for properties, `size`, `length`, `nodes`, `relationships`, `head`, `last`, `range`, `reverse` |
-| Scalar functions | `coalesce`, `abs`, `toString`, `toInteger`/`toInt`, `toFloat`, `toBoolean`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
-| Aggregation | `count`, `sum`, `avg`, `min`, `max`, `collect`, including distinct arguments |
-| Writes | `CREATE`, property and map `SET`, property `REMOVE`, `DELETE`, `DETACH DELETE` |
+Rust transports reuse this contract from `helix_cypher::api` (`ErrorClass`,
+`ErrorBody`, the `category` and `detail` code constants, and the route paths) and
+decode requests with `helix_cypher::request::Request`, which needs no database.
 
-The `WHERE` of a `WITH` filters the rows the clause returns, after its
-`DISTINCT`, `ORDER BY`, `SKIP` and `LIMIT`: `WITH x ORDER BY x LIMIT 3 WHERE x > 2`
-keeps at most the third row. After `SKIP` or `LIMIT` only the variables the `WITH`
-projects remain, so such a `WHERE` that reads any other variable is rejected with
-`UndefinedVariable`.
-
-`MERGE`, variable-length and shortest paths, `UNION`, subqueries, comprehensions,
-procedures, schema DDL, temporal/spatial functions, and Bolt are outside this
-profile. Unsupported syntax receives a specific `UnsupportedFeature` error. A
-statement that is also invalid openCypher reports the standard compile error
-instead, such as `VariableAlreadyBound` for a CREATE that redeclares a variable
-or `UndefinedVariable` for a pattern predicate that introduces one. Other
-openCypher built-in functions, such as `sqrt` or `date`, are unsupported, while
-an unrecognized function name is a `SyntaxError` with `UnknownFunction`. A
-parameter map in a MATCH pattern, such as `(n $props)`, is an
-`InvalidParameterUse` syntax error; in CREATE it is unsupported. Use the
-existing native index-management API to create indexes; Cypher planning can
-select existing compatible indexes.
+## Index selection
 
 A label test in WHERE, such as `MATCH (n) WHERE n:User`, labels the node for
 this purpose, and every occurrence of a repeated node variable contributes its
@@ -317,47 +252,7 @@ waits for started commits before closing shared resources; dropping the close
 waiter does not abandon shutdown. Keep the async runtime alive until close
 finishes. A cancelled transport request does not prove that its write rolled back.
 
-## Lossless values
-
-Nulls, booleans, strings, lists, maps, and finite floats use ordinary JSON values.
-Signed integers in the JavaScript safe-integer range use JSON numbers. Larger
-integers and nonfinite floats use tagged values:
-
-```json
-{"$type":"integer","value":"9223372036854775807"}
-```
-
-```json
-{"$type":"float","value":"Infinity"}
-```
-
-Float tags also support `NaN` and `-Infinity`. These tags are accepted in parameters.
-Wrap a literal map containing a `$type` key as
-`{"$type":"map","value":{"$type":"literal"}}` to disambiguate it from a tag.
-
-Graph results use these tags:
-
-| `$type` | Fields |
-|---|---|
-| `node` | `id`, `labels`, `properties` |
-| `relationship` | `id`, `start`, `end`, `type`, `properties` |
-| `path` | Ordered `nodes` and `relationships`, containing full tagged graph objects |
-
-Node IDs and relationship IDs are unsigned
-decimal strings and occupy separate namespaces. Nodes include `labels` and
-`properties`; relationships include `start`, `end`, `type`, and `properties`.
-Paths include ordered `nodes` and `relationships`. Relationship endpoints retain
-their stored direction even when a path traverses them in reverse. Preserve IDs
-as strings; `id()` separately checks conversion to a signed integer and reports
-overflow when it cannot be represented.
-
-## Explain and limits
-
-`POST /v2/cypher/explain` accepts the same request body and returns a separate
-planning response without executing the statement. It describes selected access
-paths, cardinality estimates, blocking work, Cartesian products, and optimizer
-budget warnings. The embedded equivalent is `HelixDB::explain_cypher`; the CLI
-uses `--explain`.
+## Limits and memory accounting
 
 Successful result JSON contains only `columns` and `rows`. Embedded response
 objects expose local diagnostics separately. Resource-limit failures return an
@@ -370,8 +265,8 @@ clones and slices retain the body's admission until their final owner is dropped
 An embedded caller taking a Vec assumes its memory ownership and accounting.
 Transport framing, TLS queues, shared storage caches and caller allocations are
 outside this engine estimate. Disk spilling is not implemented.
-An expression may nest at most 48 levels, which a `ResourceLimit` error with
-`ExpressionDepth` reports. A chain of one Boolean operator, such as
+An expression may nest at most 48 levels, which a `resource_limit` error with
+`expression_depth` reports. A chain of one Boolean operator, such as
 `a OR b OR c OR ...`, and a comparison chain such as `a < b < c` are flat: the
 chain is one level over all of its operands, however many there are, so its
 length does not count toward the nesting depth. The operands are still
@@ -384,8 +279,8 @@ when a query returns one number. Scalar aggregation accounts for an incoming
 value while retained state grows, including `DISTINCT` key copies.
 Scalar `range()` checks its complete collection size before reserving output.
 After its arguments are evaluated, an excessive item count returns
-`CollectionLimit` before output-memory admission; otherwise an oversized buffer
-returns `MemoryLimit`. Direct `UNWIND range(...)` remains a streaming generator
+`collection_limit` before output-memory admission; otherwise an oversized buffer
+returns `memory_limit`. Direct `UNWIND range(...)` remains a streaming generator
 and can consume a bounded prefix without materialising the full range.
 `collection_items` bounds each materialized expression list, including lists
 nested in maps, and retained `DISTINCT` aggregate sets. It does not count map
@@ -437,6 +332,14 @@ and mutations still end the proof.
 An expansion reads the adjacency of each relationship type it names, so
 `-[:WROTE|LIVES_IN]->` does not read a node's other relationships; a step
 without a type reads them all.
+When no node connected to a typed relationship has a label, an index or an
+earlier binding, as in `MATCH ()-[r:WROTE]->() RETURN count(r)` or
+`MATCH (a)-[r:WROTE|LIVES_IN]-(b)`, the pattern starts from the relationships of
+those types instead of scanning every node: it reads each type's relationship
+set once per MATCH and each relationship's endpoints once per input row. A
+labeled pattern keeps starting from its nodes, because without statistics a rare
+label can match far fewer relationships than a type has. Pattern validation
+reads a node or relationship only to check a label or property it constrains.
 Rows reuse execution cells after bindings leave scope, so successive `WITH`
 aliases do not widen every retained row. Logical binding IDs remain stable in
 validation and explain output. Simultaneous inputs, outputs and sort expressions

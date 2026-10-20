@@ -1,16 +1,17 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{SecondsFormat, Utc};
+use helix_ast_arena_derive::ArenaMirror;
 use serde::{Deserialize, Serialize};
 
-use crate::expr::Expr;
+use crate::expr::{ArenaExpr, Expr};
 /// Arbitrary nested parameter value.
 pub type ParamValue = PropertyValue;
 
 /// Object-shaped parameter payload.
 pub type ParamObject = BTreeMap<String, PropertyValue>;
 /// A property value that can be stored on nodes or edges.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum PropertyValue {
     /// Null value.
@@ -256,7 +257,7 @@ impl From<DateTime> for PropertyValue {
     }
 }
 /// Mutation input value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum PropertyInput {
     /// Literal value.

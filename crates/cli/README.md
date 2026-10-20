@@ -2,7 +2,7 @@
 
 The v3 CLI manages local Helix instances and WorkOS-session-authenticated Helix Cloud resources.
 
-- Local: `init`, `add`, `start`, `stop`, `restart`, `status`, `logs`, `query`, `shell`, `prune`.
+- Local: `init`, `add`, `start`, `stop`, `restart`, `status`, `logs`, `query`, `shell`, `explorer`, `prune`.
 - Cloud discovery/resources: `workspace`, `project`, `cluster`, `database`, `service-credential`, `api`.
 - Cloud queries: `query` and `shell` execute through the backend query broker.
 - Authentication: `auth login|status|logout` stores only a rotating WorkOS session.
@@ -22,7 +22,7 @@ The CLI defaults to its tested image version. `latest` is opt-in:
 
 ```bash
 helix start dev --image-version latest
-helix start dev --image-version v0.0.11 --persist
+helix start dev --image-version v0.0.12 --persist
 helix start dev --pull never
 ```
 
@@ -34,7 +34,7 @@ apply only to that invocation.
 ```toml
 [local.dev]
 image = "ghcr.io/helixdb/helixdb"
-tag = "v0.0.11"
+tag = "v0.0.12"
 pull = "missing"
 ```
 

@@ -178,7 +178,8 @@ mod tests {
         let ctx = context::PlannerContext {
             params: context::ParamBindings::default()
                 .with_query_value(name("minimum"), QueryValue::I64(18))
-                .with_query_value(name("needle"), QueryValue::String("rust".to_owned())),
+                .with_query_value(name("needle"), QueryValue::String("rust".to_owned()))
+                .into(),
             ..context::PlannerContext::default()
         };
         let original = Predicate::and(vec![
@@ -211,7 +212,8 @@ mod tests {
         ]);
         let ctx = context::PlannerContext {
             params: context::ParamBindings::default()
-                .with_query_value(name("values"), value.clone()),
+                .with_query_value(name("values"), value.clone())
+                .into(),
             ..context::PlannerContext::default()
         };
 
@@ -224,7 +226,9 @@ mod tests {
     #[test]
     fn active_runtime_scope_preserves_all_parameters() {
         let mut ctx = context::PlannerContext {
-            params: context::ParamBindings::default().with_value(name("status"), "static"),
+            params: context::ParamBindings::default()
+                .with_value(name("status"), "static")
+                .into(),
             ..context::PlannerContext::default()
         };
         ctx.late_bound_params.insert(name("items"));

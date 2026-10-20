@@ -9,13 +9,14 @@ pageType: "Guide"
 
 Helix Cloud runs a dedicated writer and horizontally scalable readers behind a routing
 gateway. Applications send the same dynamic operation-tree request used in local and
-embedded modes.
+embedded modes, or a Cypher statement to `POST /v2/cypher`, which the gateway routes
+by whether the statement writes.
 
 ## Request flow
 
 ```text
 application
-   │ POST /v2/query
+   │ POST /v2/query or POST /v2/cypher
    ▼
 gateway
    ├── read request ──► reader
@@ -97,7 +98,13 @@ Each client sends the same operation-tree request body:
 ```
 
 Keep API keys in secrets management, not source control. The JSON example is the request
-body sent to `POST /v2/query`.
+body sent to `POST /v2/query`. The same lookup as a Cypher statement goes in the `query`
+field of a `POST /v2/cypher` body:
+
+```cypher
+MATCH (user {username: 'Alice'})
+RETURN id(user) AS `$id`
+```
 
 `query_name` is optional diagnostic metadata. The query itself remains entirely inside
 the request; there is no route deployment step.

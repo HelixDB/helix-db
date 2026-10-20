@@ -150,7 +150,7 @@ fn rejected_types_and_count_overflow_leave_state_unchanged() {
         let error = state.next(&value).unwrap_err();
         assert_eq!(
             (error.category.as_str(), error.detail.as_str()),
-            ("TypeError", "InvalidArgumentType")
+            ("type_error", "invalid_argument_type")
         );
         assert_eq!(state.finish(), Value::Float(7.0));
     }
@@ -161,7 +161,7 @@ fn rejected_types_and_count_overflow_leave_state_unchanged() {
     let error = state.next(&Value::Integer(1)).unwrap_err();
     assert_eq!(
         (error.category.as_str(), error.detail.as_str()),
-        ("ArithmeticError", "NumberOutOfRange")
+        ("arithmetic_error", "number_out_of_range")
     );
     assert_eq!(state.finish(), Value::Float(1.0));
 }

@@ -221,6 +221,9 @@ async fn connected_patterns_stream_paths_cycles_and_write_selection_with_bounded
         "OPTIONAL MATCH p=(a:Loop)-[:Absent]->(b) RETURN count(*),min(length(p))",
         "OPTIONAL MATCH p=(a:Loop)-[:Absent]->(b) RETURN p,a,b",
         "OPTIONAL MATCH (a:Root)-[:R]->(b:Middle)-[:S]->(c:Leaf) RETURN count(*),sum(c.key)",
+        "OPTIONAL MATCH ()-[r:Absent]->() RETURN r",
+        "OPTIONAL MATCH (a)-[r:R]->(b) WHERE a.key = -1 RETURN a, r",
+        "OPTIONAL MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN count(*),sum(c.key)",
         "MATCH (a:Root)-[:R]->(b:Middle)-[:S]->(c:Leaf) WHERE a.key/0>1 RETURN count(*)",
         "MATCH (a:Root)-[:R]->(b:Middle)-[:S]->(c:Leaf) RETURN c.key SKIP 3 LIMIT 4",
         "MATCH (a:Root)-[:R]->(b:Middle)-[:S]->(c:Leaf) RETURN c.key/0 LIMIT 0",
@@ -284,7 +287,7 @@ async fn connected_patterns_stream_paths_cycles_and_write_selection_with_bounded
         )
         .await
         .unwrap_err();
-    assert!(matches!(error,Error::Query(error) if error.detail=="MemoryLimit"));
+    assert!(matches!(error,Error::Query(error) if error.detail=="memory_limit"));
     // The complete input selection is consumed before any write changes a
     // matching label/property, so the mutation cannot alter its own cursor.
     let result = db.cypher(crate::cypher::Request::new(
@@ -349,7 +352,7 @@ async fn high_fan_out_keeps_compact_ids_and_bounded_endpoint_batches() {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error,Error::Query(error) if error.detail=="MemoryLimit"));
+        assert!(matches!(error,Error::Query(error) if error.detail=="memory_limit"));
     }
     for (query, count, maximum_keys) in [
         (
@@ -398,7 +401,7 @@ async fn high_fan_out_keeps_compact_ids_and_bounded_endpoint_batches() {
         ))
         .await
         .unwrap_err();
-    assert!(matches!(error, Error::Query(error) if error.detail == "DivisionByZero"));
+    assert!(matches!(error, Error::Query(error) if error.detail == "division_by_zero"));
     db.close().await.unwrap();
 }
 
@@ -620,7 +623,7 @@ async fn explicit_filter_contracts_and_empty_or_limited_matches_preserve_rows() 
         if expected {
             assert_eq!(result.unwrap().rows, vec![vec![json!(true)]]);
         } else {
-            assert!(matches!(result,Err(Error::Query(error)) if error.category=="TypeError"));
+            assert!(matches!(result,Err(Error::Query(error)) if error.category=="type_error"));
         }
     }
     let text = format!(
@@ -643,6 +646,6 @@ async fn explicit_filter_contracts_and_empty_or_limited_matches_preserve_rows() 
     )
     .await
     .unwrap_err();
-    assert!(matches!(error,Error::Query(error) if error.detail=="MemoryLimit"));
+    assert!(matches!(error,Error::Query(error) if error.detail=="memory_limit"));
     db.close().await.unwrap();
 }

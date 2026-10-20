@@ -111,7 +111,7 @@ test("result comparison preserves order, duplicates, nulls and rectangularity", 
     { ...scalar.expectation.value, resources: {} },
   ])
     assert.throws(() => verifyCypherCase(scalar, { result }));
-  assert.throws(() => verifyCypherCase(scalar, { error: "UnsupportedFeature" }));
+  assert.throws(() => verifyCypherCase(scalar, { error: "unsupported_feature" }));
 });
 
 test("large integers and escaped maps cannot be flattened by a driver", () => {
@@ -171,24 +171,35 @@ test("graph IDs are lossless, namespace-aware and consistent across path appeara
 
 test("negative case requires its specific error and excludes a result", () => {
   const fixture = cases[3]!;
-  verifyCypherCase(fixture, { error: "cannot delete connected node", code: "ConstraintVerificationFailed:Runtime:DeleteConnectedNode" });
   verifyCypherCase(fixture, {
     error: "cannot delete connected node",
-    code: "ConstraintVerificationFailed",
-    details: { phase: "runtime", detail: "DeleteConnectedNode" },
+    code: "constraint_verification_failed:runtime:delete_connected_node",
+  });
+  verifyCypherCase(fixture, {
+    error: "cannot delete connected node",
+    code: "constraint_verification_failed",
+    details: { phase: "runtime", detail: "delete_connected_node" },
   });
   for (const output of [
-    { error: "UnsupportedFeature" },
-    { error: "SyntaxError" },
-    { error: "DeleteConnectedNode" },
-    { error: "DeleteConnectedNode", code: "UnsupportedFeature:Runtime:DeleteConnectedNode" },
-    { error: "DeleteConnectedNode", code: "ConstraintVerificationFailed:Parse:DeleteConnectedNode" },
-    { error: "DeleteConnectedNode", code: "ConstraintVerificationFailed:Runtime:WrongDetail" },
-    { error: "DeleteConnectedNode", code: "ConstraintVerificationFailed:DeleteConnectedNode" },
-    { error: "DeleteConnectedNode", code: "ConstraintVerificationFailed", details: { phase: 1, detail: "DeleteConnectedNode" } },
-    { error: "DeleteConnectedNode", code: "ConstraintVerificationFailed", details: null },
+    { error: "unsupported_feature" },
+    { error: "syntax_error" },
+    { error: "delete_connected_node" },
+    { error: "delete_connected_node", code: "unsupported_feature:runtime:delete_connected_node" },
+    { error: "delete_connected_node", code: "constraint_verification_failed:parse:delete_connected_node" },
+    { error: "delete_connected_node", code: "constraint_verification_failed:runtime:wrong_detail" },
+    { error: "delete_connected_node", code: "constraint_verification_failed:delete_connected_node" },
+    { error: "delete_connected_node", code: "constraint_verification_failed", details: { phase: 1, detail: "delete_connected_node" } },
+    { error: "delete_connected_node", code: "constraint_verification_failed", details: null },
+    // Every transport spells codes in lower snake case; another spelling is a parity failure.
+    { error: "delete_connected_node", code: "ConstraintVerificationFailed:Runtime:DeleteConnectedNode" },
+    { error: "delete_connected_node", code: "constraint_verification_failed:Runtime:delete_connected_node" },
+    {
+      error: "delete_connected_node",
+      code: "ConstraintVerificationFailed",
+      details: { phase: "runtime", detail: "DeleteConnectedNode" },
+    },
     { result: {} },
-    { error: "DeleteConnectedNode", result: {} },
+    { error: "delete_connected_node", result: {} },
   ]) {
     assert.throws(() => verifyCypherCase(fixture, output));
   }

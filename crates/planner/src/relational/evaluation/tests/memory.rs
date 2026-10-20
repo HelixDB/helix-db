@@ -39,7 +39,7 @@ fn invalid_or_unaddressable_admission_does_not_raise_the_peak() {
     let error = memory.remaining(1001).err().unwrap();
     assert_eq!(
         (error.category.as_str(), error.detail.as_str()),
-        ("ResourceLimit", "MemoryLimit")
+        ("resource_limit", "memory_limit")
     );
     assert_eq!(peak.load(Ordering::Relaxed), 17);
     let memory = Memory::observed(usize::MAX, 0, &peak).unwrap();

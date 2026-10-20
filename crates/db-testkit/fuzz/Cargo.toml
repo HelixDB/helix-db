@@ -25,6 +25,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "query_json_arena"
+path = "fuzz_targets/query_json_arena.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "planner_context_ast"
 path = "fuzz_targets/planner_context_ast.rs"
 test = false

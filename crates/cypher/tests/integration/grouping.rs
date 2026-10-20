@@ -20,8 +20,8 @@ fn mixed_aggregates_require_recognized_grouping_dependencies() {
     ] {
         let error = compile(query).expect_err(query);
         assert_eq!(error.phase, r::ErrorPhase::Compile, "{query}");
-        assert_eq!(error.category, "SyntaxError", "{query}");
-        assert_eq!(error.detail, "AmbiguousAggregationExpression", "{query}");
+        assert_eq!(error.category, "syntax_error", "{query}");
+        assert_eq!(error.detail, "ambiguous_aggregation_expression", "{query}");
     }
 }
 

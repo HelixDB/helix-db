@@ -32,6 +32,10 @@ impl CanonicalStreamPipelineOps {
     pub(in crate::logical) const fn as_at_least(&self) -> &ir::AtLeast<StreamPipelineOp, 1> {
         &self.0
     }
+
+    pub(in crate::logical) fn into_at_least(self) -> ir::AtLeast<StreamPipelineOp, 1> {
+        self.0
+    }
 }
 
 impl<'de> Deserialize<'de> for CanonicalStreamPipelineOps {
@@ -63,6 +67,8 @@ pub(crate) fn canonicalize_stream_pipeline_ops(
     canonical
 }
 
+/// A lone filter that is not itself a conjunction moves through unchanged;
+/// a run of filters, or a conjunction, becomes one flattened conjunction.
 fn flush_filters(ops: &mut Vec<StreamPipelineOp>, filters: &mut Vec<ir::PredicatePlan>) {
     match filters.as_slice() {
         [] => {}
@@ -73,7 +79,7 @@ fn flush_filters(ops: &mut Vec<StreamPipelineOp>, filters: &mut Vec<ir::Predicat
             ) =>
         {
             ops.push(StreamPipelineOp::Filter {
-                predicate: predicate.clone(),
+                predicate: filters.pop().expect("one filter is pending"),
             })
         }
         [first, rest @ ..] => {

@@ -20,13 +20,20 @@ pub(super) trait AccessFilterIndexFamily {
     fn path_source(path: &Self::Path) -> &Self::Source;
     fn source_common_label(source: &Self::Source) -> Option<&ir::NonEmptyString>;
     fn path_from_source(source: Self::Source) -> Self::Path;
+    /// The equality index on `label.property`, looked up without building a
+    /// key.
     fn equality_index(
         indexes: &catalog::IndexCatalogSnapshot,
-        key: &catalog::ScopedPropertyKey,
+        label: &str,
+        property: &str,
     ) -> Option<Self::EqualityIndex>;
+    /// The range index on `label.property` in `direction`, looked up without
+    /// building a key.
     fn range_index(
         indexes: &catalog::IndexCatalogSnapshot,
-        key: &catalog::ScopedPropertyDirectionKey,
+        label: &str,
+        property: &str,
+        direction: helix_ast::index::RangeIndexDirection,
     ) -> Option<Self::RangeIndex>;
     fn equality_source(
         index: Self::EqualityIndex,
@@ -230,10 +237,10 @@ where
 {
     match atom {
         AccessFilterIndexAtom::Equality { property, domain } => {
-            let key = catalog::ScopedPropertyKey::new(label.clone(), property.clone());
-            let Some(index) = F::equality_index(indexes, &key) else {
+            let Some(index) = F::equality_index(indexes, label, property) else {
                 return range_point_source::<F>(label, property, domain, indexes);
             };
+            let key = catalog::ScopedPropertyKey::new(label.clone(), property.clone());
             Ok(match domain {
                 AccessEqualityDomain::One(value) => F::equality_source(index, key, value.clone()),
                 AccessEqualityDomain::Many(values) => F::union_source(
@@ -256,12 +263,14 @@ where
         ]
         .into_iter()
         .find_map(|direction| {
-            let key = catalog::ScopedPropertyDirectionKey::new(
-                label.clone(),
-                property.clone(),
-                direction,
-            );
-            F::range_index(indexes, &key).map(|index| F::range_source(index, key, range.clone()))
+            F::range_index(indexes, label, property, direction).map(|index| {
+                let key = catalog::ScopedPropertyDirectionKey::new(
+                    label.clone(),
+                    property.clone(),
+                    direction,
+                );
+                F::range_source(index, key, range.clone())
+            })
         })
         .ok_or(MissingAccessIndex::Range),
     }
@@ -289,6 +298,16 @@ fn range_point_source<F>(
 where
     F: AccessFilterIndexFamily,
 {
+    // Look for the range index first: without one, no point range is built.
+    let (index, direction) = [
+        helix_ast::index::RangeIndexDirection::Asc,
+        helix_ast::index::RangeIndexDirection::Desc,
+    ]
+    .into_iter()
+    .find_map(|direction| {
+        F::range_index(indexes, label, property, direction).map(|index| (index, direction))
+    })
+    .ok_or(MissingAccessIndex::Equality)?;
     let literal_point = |literal: &ir::SecondaryIndexLiteral| {
         ir::RangeIndexValue::literal(literal.as_property_value().clone()).map(|value| {
             ir::IndexRange::Between(
@@ -315,17 +334,7 @@ where
     .into_iter()
     .collect::<Option<Vec<_>>>()
     .ok_or(MissingAccessIndex::Equality)?;
-    let (index, key) = [
-        helix_ast::index::RangeIndexDirection::Asc,
-        helix_ast::index::RangeIndexDirection::Desc,
-    ]
-    .into_iter()
-    .find_map(|direction| {
-        let key =
-            catalog::ScopedPropertyDirectionKey::new(label.clone(), property.clone(), direction);
-        F::range_index(indexes, &key).map(|index| (index, key))
-    })
-    .ok_or(MissingAccessIndex::Equality)?;
+    let key = catalog::ScopedPropertyDirectionKey::new(label.clone(), property.clone(), direction);
     let mut sources = ranges
         .into_iter()
         .map(|range| F::range_source(index.clone(), key.clone(), range))

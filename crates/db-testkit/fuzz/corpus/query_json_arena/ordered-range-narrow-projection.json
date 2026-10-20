@@ -1,0 +1,108 @@
+{
+  "request_type": "read",
+  "query_name": "find_resource_dedup_keys_by_type",
+  "parameter_types": {
+    "limit": "i64",
+    "since_last_seen_us": "i64",
+    "tenant": "string",
+    "type": "string"
+  },
+  "parameters": {
+    "limit": 1000,
+    "since_last_seen_us": 1788000000000000,
+    "tenant": "FZob8v6ZTnCcuVk4",
+    "type": "pod"
+  },
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "q",
+            "root": {
+              "value_map": {
+                "input": {
+                  "limit": {
+                    "count": {
+                      "expr": {
+                        "param": "limit"
+                      }
+                    },
+                    "input": {
+                      "order_by": {
+                        "input": {
+                          "nodes_where": {
+                            "predicate": {
+                              "and": {
+                                "predicates": [
+                                  {
+                                    "eq": {
+                                      "left": {
+                                        "property": "$label"
+                                      },
+                                      "right": {
+                                        "constant": {
+                                          "string": "Resource"
+                                        }
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "eq": {
+                                      "left": {
+                                        "property": "tenant"
+                                      },
+                                      "right": {
+                                        "param": "tenant"
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "eq": {
+                                      "left": {
+                                        "property": "type"
+                                      },
+                                      "right": {
+                                        "param": "type"
+                                      }
+                                    }
+                                  },
+                                  {
+                                    "gt": {
+                                      "left": {
+                                        "property": "last_seen"
+                                      },
+                                      "right": {
+                                        "param": "since_last_seen_us"
+                                      }
+                                    }
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        "order": "desc",
+                        "property": "last_seen"
+                      }
+                    }
+                  }
+                },
+                "properties": [
+                  "id",
+                  "cluster_id",
+                  "namespace",
+                  "name",
+                  "last_seen"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "returns": [
+        "q"
+      ]
+    }
+  }
+}

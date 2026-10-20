@@ -194,7 +194,7 @@ fn every_child_shape_matches_existing_rewrite_order_and_pruning() {
                 };
                 seen.push(*value);
                 if failure == Some(*value) {
-                    return Err(r::QueryError::compile("TestError", "Stop", "first error"));
+                    return Err(r::QueryError::compile("test_error", "stop", "first error"));
                 }
                 Ok(false)
             };

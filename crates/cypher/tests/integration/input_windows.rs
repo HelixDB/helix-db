@@ -25,10 +25,11 @@ fn input_windows_compose_offsets_and_rebuild_their_proof_on_decode() {
     assert_eq!(demand, 14);
     assert_eq!(evaluated, ["first", "second", "third", "limit"]);
     let error = window.demand(|_| Ok(r::Value::Null)).unwrap_err();
-    assert_eq!(error.detail, "InvalidArgumentType");
+    assert_eq!(error.detail, "invalid_argument_type");
     let error = window.demand(|_| Ok(r::Value::Integer(-1))).unwrap_err();
-    assert_eq!(error.detail, "NegativeIntegerArgument");
-    let expected = r::QueryError::runtime("ParameterMissing", "MissingParameter", "missing input");
+    assert_eq!(error.detail, "negative_integer_argument");
+    let expected =
+        r::QueryError::runtime("parameter_missing", "missing_parameter", "missing input");
     assert_eq!(
         window.demand(|_| Err(expected.clone())).unwrap_err(),
         expected

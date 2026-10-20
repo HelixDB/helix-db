@@ -385,7 +385,9 @@ pub(crate) async fn load_active_manifest_page(
     Ok(value.entries().to_vec())
 }
 
-/// Point-loads the exact V2 state used to accept or reject one split candidate.
+/// Point-loads the exact V2 state used to accept or reject one split
+/// candidate and, when it is live, validates its statistics marker as a
+/// served hit's is.
 ///
 /// Missing state is corruption for a V2 candidate: unlike configured-static
 /// manifests, every document admitted to a V2 split has a canonical
@@ -396,20 +398,27 @@ pub(crate) async fn load_active_entity_state(
     root: &ValidatedActiveTextManifestRoot,
     entity_id: u64,
 ) -> Result<ActiveTextEntityState> {
-    Ok(load_active_entity_states(reader, root, &[entity_id])
+    let state = load_active_entity_states(reader, root, &[entity_id])
         .await?
         .remove(&entity_id)
-        .expect("a validated requested entity has one returned state"))
+        .expect("a validated requested entity has one returned state");
+    if state.live {
+        validate_live_entity_contributions(reader, root, &[entity_id]).await?;
+    }
+    Ok(state)
 }
 
-/// Batch-loads up to 512 exact V2 states and validates live contribution rows.
+/// Batch-loads up to 512 exact V2 states with one `multi_get`.
+///
+/// Statistics markers are not read here: a search resolves many candidates
+/// it never serves, so it validates only the markers of the live hits it
+/// serves with [`validate_live_entity_contributions`].
 pub(crate) async fn load_active_entity_states(
     reader: &(impl DbReadOps + Send + Sync),
     root: &ValidatedActiveTextManifestRoot,
     entity_ids: &[u64],
 ) -> Result<BTreeMap<u64, ActiveTextEntityState>> {
     const MAX_STATE_BATCH: usize = 512;
-    const CONTRIBUTION_READ_CONCURRENCY: usize = 8;
     if entity_ids.len() > MAX_STATE_BATCH {
         return Err(HelixDbError::InvariantViolation(format!(
             "text entity-state batch has {} entries; maximum is {MAX_STATE_BATCH}",
@@ -439,7 +448,6 @@ pub(crate) async fn load_active_entity_states(
         .collect::<Vec<_>>();
     let values = reader.multi_get(&keys).await?;
     let mut states = BTreeMap::new();
-    let mut live_entities = Vec::new();
     for ((entity, key), value) in entities.into_iter().zip(keys).zip(values) {
         let Some(value) = value else {
             return Err(corruption(
@@ -471,9 +479,6 @@ pub(crate) async fn load_active_entity_states(
                 "text entity-state key/value ownership or revision mismatch",
             ));
         }
-        if state.live {
-            live_entities.push(entity);
-        }
         states.insert(
             entity.id.get(),
             ActiveTextEntityState {
@@ -482,7 +487,29 @@ pub(crate) async fn load_active_entity_states(
             },
         );
     }
-    futures::stream::iter(live_entities)
+    Ok(states)
+}
+
+/// Checks that every entity in `entity_ids`, each live under `root`, has a
+/// statistics marker present in the root's partition.
+///
+/// A missing marker, or one that is absent or names another partition, is
+/// corruption: the entity's document would not be counted in the BM25
+/// statistics that scored it. Markers are point-read eight at a time.
+pub(crate) async fn validate_live_entity_contributions(
+    reader: &(impl DbReadOps + Send + Sync),
+    root: &ValidatedActiveTextManifestRoot,
+    entity_ids: &[u64],
+) -> Result<()> {
+    const CONTRIBUTION_READ_CONCURRENCY: usize = 8;
+    let entities = entity_ids
+        .iter()
+        .map(|entity_id| index_keys::IndexEntity {
+            kind: root.element_kind,
+            id: IndexEntityId::new(*entity_id),
+        })
+        .collect::<Vec<_>>();
+    futures::stream::iter(entities)
         .map(|entity| async move {
             let Some(contribution) = super::statistics::load_entity_contribution(
                 reader,
@@ -511,7 +538,7 @@ pub(crate) async fn load_active_entity_states(
         .buffer_unordered(CONTRIBUTION_READ_CONCURRENCY)
         .try_collect::<Vec<_>>()
         .await?;
-    Ok(states)
+    Ok(())
 }
 
 /// Encodes one typed V2 data key in its exact scope.

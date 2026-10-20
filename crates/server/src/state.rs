@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use db::query_service::HelixQueryService;
 use db::{HelixDB, HelixDbMode, IndexRuntimeReadiness};
 use helix_metrics::query::transport::OssQueryMetrics;
+
+use crate::config::StorageConfig;
 
 /// Shared server state used by every transport.
 #[derive(Clone)]
@@ -11,12 +14,20 @@ pub struct ServerState {
     query_service: HelixQueryService,
     db_mode: HelixDbMode,
     index_readiness: IndexRuntimeReadiness,
-    cypher: crate::CypherEndpoints,
+    /// The storage `db` was opened on, which diagnostics inspect.
+    storage: Arc<StorageConfig>,
+    /// Diagnostic facts that take I/O, shared between requests.
+    diagnostic_facts: Arc<crate::diagnostics::FactCache>,
+    started: Instant,
 }
 
 impl ServerState {
-    /// Build state from an opened DB handle.
-    pub fn new(db: Arc<HelixDB>, query_metrics: Option<OssQueryMetrics>) -> Self {
+    /// Build state from a DB handle opened on `storage`.
+    pub fn new(
+        db: Arc<HelixDB>,
+        query_metrics: Option<OssQueryMetrics>,
+        storage: StorageConfig,
+    ) -> Self {
         let db_mode = db.mode();
         let index_readiness = db.index_runtime_readiness();
         let query_service = match query_metrics {
@@ -30,18 +41,30 @@ impl ServerState {
             query_service,
             db_mode,
             index_readiness,
-            cypher: crate::CypherEndpoints::Disabled,
+            storage: Arc::new(storage),
+            diagnostic_facts: Arc::default(),
+            started: Instant::now(),
         }
     }
 
-    /// Route or refuse Cypher requests; new state refuses them.
-    pub fn with_cypher_endpoints(self, cypher: crate::CypherEndpoints) -> Self {
-        Self { cypher, ..self }
+    /// Borrow the opened database.
+    pub(crate) fn db(&self) -> &HelixDB {
+        &self.db
     }
 
-    /// Return whether Cypher requests are routed.
-    pub const fn cypher_endpoints(&self) -> crate::CypherEndpoints {
-        self.cypher
+    /// Borrow the storage the database was opened on.
+    pub(crate) fn storage(&self) -> &StorageConfig {
+        &self.storage
+    }
+
+    /// The diagnostic facts every clone of this state shares.
+    pub(crate) fn diagnostic_facts(&self) -> &crate::diagnostics::FactCache {
+        &self.diagnostic_facts
+    }
+
+    /// Time since this state was built, as the server opened its database.
+    pub(crate) fn uptime(&self) -> Duration {
+        self.started.elapsed()
     }
 
     /// Borrow the query service.

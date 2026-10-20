@@ -34,6 +34,7 @@ mod query_resources;
 pub mod query_service;
 mod runtime_dependencies;
 pub mod search;
+mod slate_cache;
 mod transaction;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
@@ -80,9 +81,6 @@ use config::ValidatedDynamicIndexDefinition;
 use config::{db::EmbeddedStorageProfile, runtime_catalog, CacheMode, RuntimeIndexCatalog};
 use error::{HelixDbError, Result};
 use execution::interpreter::{ExecutionResult, Interpreter};
-use foyer::{
-    BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig,
-};
 use futures::{stream, StreamExt};
 use helix_ast::query::QueryRequest;
 use helix_metrics::query::transport::OssQueryMetrics;
@@ -96,8 +94,7 @@ use id_allocator::{EdgeIdAllocator, NodeIdAllocator};
 use serde_json::Value as JsonValue;
 use slatedb::db_cache::{
     foyer::{FoyerCache, FoyerCacheOptions},
-    foyer_hybrid::{FoyerHybridCache, FoyerHybridCacheMetrics},
-    CacheUsageSnapshot, CachedEntry, DbCache, SplitCache,
+    CacheUsageSnapshot, DbCache, SplitCache,
 };
 #[cfg(test)]
 use slatedb::object_store::memory::InMemory;
@@ -629,7 +626,7 @@ impl StartupCacheTasks {
 }
 
 struct HelixCaches {
-    slate_db: Option<Arc<dyn DbCache>>,
+    slate_db: Option<slate_cache::SlateDbCache>,
     fts: Option<Arc<search::text::FtsCache>>,
     vector_memory: VectorMemoryCache,
     slate_last_warm: Mutex<Option<SlateWarmSummary>>,
@@ -897,14 +894,18 @@ impl PreparedPlannerContext {
         &self.context
     }
 
+    /// The catalog proof alone, for test plans built without the request's
+    /// parameters; request execution takes [`Self::into_execution_inputs`].
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) fn into_catalog_proof(self) -> CatalogRefreshProof {
         self.proof
     }
 
     /// Transfer the request's original parameters together with its catalog
-    /// proof. Serial planning and execution need no duplicate binding tables.
+    /// proof. Planning only borrows the shared bindings, so once it is done
+    /// they move out without a copy.
     pub(crate) fn into_execution_inputs(self) -> (ParamBindings, CatalogRefreshProof) {
-        (self.context.params, self.proof)
+        (self.context.params.into_inner(), self.proof)
     }
 }
 
@@ -956,7 +957,7 @@ impl HelixDB {
                     tracing::warn!(
                         error = %close_error,
                         original_error = %open_error,
-                        "failed to close database runtime after writer open failed"
+                        "failed to close database runtime after open failed"
                     );
                 }
                 Err(open_error)
@@ -1229,55 +1230,60 @@ impl HelixDB {
                         "configured SlateDB cache mode must build a cache".into(),
                     ));
                 };
-                builder = builder.with_db_cache(Arc::clone(cache));
+                builder = builder.with_db_cache(Arc::clone(cache.cache()));
             }
         }
         let stage_started = Instant::now();
         let db = Arc::new(builder.build().await?);
         log_stage("slatedb_writer_open", stage_started);
-        let stage_started = Instant::now();
-        match &open_mode {
-            WriterOpenMode::Embedded => {
-                migrations::startup::bootstrap_writer(&db).await?;
-                migrations::preflight_legacy_vector_reservations(&db).await?;
-            }
-            WriterOpenMode::Managed {
-                intent: ManagedWriterOpenIntent::Bootstrap,
-                ..
-            } => {
-                migrations::startup::bootstrap_managed_writer(&db).await?;
-                index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
-            }
-            WriterOpenMode::Managed {
-                intent: ManagedWriterOpenIntent::Failover,
-                ..
-            } => {
-                migrations::startup::require_current_managed_writer(&db).await?;
-                index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
-            }
-            WriterOpenMode::Managed {
-                intent: ManagedWriterOpenIntent::ControlledMigration(authorization),
-                ..
-            } => {
-                if authorization.target_schema_version().get() != MANAGED_STORAGE_SCHEMA_VERSION {
-                    return Err(HelixDbError::Config(format!(
-                        "managed migration operation {} targets storage schema {}, but this binary requires {}",
-                        authorization.operation_id(),
-                        authorization.target_schema_version(),
-                        MANAGED_STORAGE_SCHEMA_VERSION,
-                    )));
-                }
-                migrations::startup::bootstrap_writer(&db).await?;
-                migrations::preflight_legacy_vector_reservations(&db).await?;
-            }
-        }
-        log_stage("storage_contract_validation", stage_started);
+        // Built before the storage checks so every failure below closes
+        // storage: an unclosed Db keeps its tasks running, and polling the
+        // object store, for the life of the runtime.
         let writer = HelixWriter::new(
             Arc::clone(&db),
             config.id_lease_size(),
             config.id_lease_refill_threshold(),
         );
         let runtime_inputs: Result<_> = async {
+            let stage_started = Instant::now();
+            match &open_mode {
+                WriterOpenMode::Embedded => {
+                    migrations::startup::bootstrap_writer(&db).await?;
+                    migrations::preflight_legacy_vector_reservations(&db).await?;
+                }
+                WriterOpenMode::Managed {
+                    intent: ManagedWriterOpenIntent::Bootstrap,
+                    ..
+                } => {
+                    migrations::startup::bootstrap_managed_writer(&db).await?;
+                    index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
+                }
+                WriterOpenMode::Managed {
+                    intent: ManagedWriterOpenIntent::Failover,
+                    ..
+                } => {
+                    migrations::startup::require_current_managed_writer(&db).await?;
+                    index_lifecycle::outbox::reconcile_operation_queue(&db).await?;
+                }
+                WriterOpenMode::Managed {
+                    intent: ManagedWriterOpenIntent::ControlledMigration(authorization),
+                    ..
+                } => {
+                    if authorization.target_schema_version().get()
+                        != MANAGED_STORAGE_SCHEMA_VERSION
+                    {
+                        return Err(HelixDbError::Config(format!(
+                            "managed migration operation {} targets storage schema {}, but this binary requires {}",
+                            authorization.operation_id(),
+                            authorization.target_schema_version(),
+                            MANAGED_STORAGE_SCHEMA_VERSION,
+                        )));
+                    }
+                    migrations::startup::bootstrap_writer(&db).await?;
+                    migrations::preflight_legacy_vector_reservations(&db).await?;
+                }
+            }
+            log_stage("storage_contract_validation", stage_started);
             let stage_started = Instant::now();
             let migration_authorized = matches!(
                 &open_mode,
@@ -1504,7 +1510,7 @@ impl HelixDB {
                         "configured SlateDB cache mode must build a cache".into(),
                     ));
                 };
-                builder = builder.with_db_cache(Arc::clone(cache));
+                builder = builder.with_db_cache(Arc::clone(cache.cache()));
             }
         }
         #[cfg(feature = "async-index-benchmark")]
@@ -1512,21 +1518,42 @@ impl HelixDB {
             builder = builder.with_metrics_recorder(benchmark::storage_recorder());
         }
         let reader = builder.build().await?;
-        let compatibility =
-            index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
-        // Product builds cannot select another queue layout, so only builds
-        // that can pay this per-tenant-scope probe.
-        #[cfg(any(test, feature = "async-index-benchmark"))]
-        index_lifecycle::queue::recovery::require_layout(
-            &reader,
-            config.index_operation_queue().layout(),
-        )
-        .await?;
-        let loaded_catalog =
-            index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
-                .await?;
+        let runtime_inputs: Result<_> = async {
+            let compatibility =
+                index_lifecycle::repository::require_reader_bootstrap_or_legacy(&reader).await?;
+            // Product builds cannot select another queue layout, so only builds
+            // that can pay this per-tenant-scope probe.
+            #[cfg(any(test, feature = "async-index-benchmark"))]
+            index_lifecycle::queue::recovery::require_layout(
+                &reader,
+                config.index_operation_queue().layout(),
+            )
+            .await?;
+            let loaded_catalog =
+                index_lifecycle::repository::load_scope_catalog(&reader, DataScope::LegacyUnscoped)
+                    .await?;
+            let fts_cache = build_fts_cache(&path, &object_store, &config)?;
+            Ok((compatibility, loaded_catalog, fts_cache))
+        }
+        .await;
+        // An unclosed reader's manifest poller polls the object store for
+        // the life of the runtime. Callers retry these errors, such as a
+        // reader awaiting a writer migration, so each attempt would leave
+        // another poller running.
+        let (compatibility, loaded_catalog, fts_cache) = match runtime_inputs {
+            Ok(inputs) => inputs,
+            Err(open_error) => {
+                if let Err(close_error) = reader.close().await {
+                    tracing::warn!(
+                        error = %close_error,
+                        original_error = %open_error,
+                        "failed to close SlateDB after reader open failed"
+                    );
+                }
+                return Err(open_error);
+            }
+        };
         let storage = HelixStorage::Reader(Arc::new(reader));
-        let fts_cache = build_fts_cache(&path, &object_store, &config)?;
         let db = Self::from_storage(
             HelixStorageParts::new(path, object_store, storage),
             HelixConfig::new(config),
@@ -1535,9 +1562,13 @@ impl HelixDB {
             fts_cache,
             compatibility,
         );
-        db.run_configured_startup_cache_warm(true).await?;
-        db.run_configured_vector_memory_warm(vector_memory_settings, true)
-            .await?;
+        let warm_result: Result<()> = async {
+            db.run_configured_startup_cache_warm(true).await?;
+            db.run_configured_vector_memory_warm(vector_memory_settings, true)
+                .await
+        }
+        .await;
+        db.close_on_open_error(warm_result).await?;
         Ok(db)
     }
 
@@ -1545,7 +1576,7 @@ impl HelixDB {
         storage: HelixStorageParts,
         config: HelixConfig,
         indexes: index_lifecycle::LoadedV2ScopeCatalog,
-        slate_db_cache: Option<Arc<dyn DbCache>>,
+        slate_db_cache: Option<slate_cache::SlateDbCache>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
         reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
     ) -> Self {
@@ -1564,7 +1595,7 @@ impl HelixDB {
         storage: HelixStorageParts,
         config: HelixConfig,
         indexes: index_lifecycle::LoadedV2ScopeCatalog,
-        slate_db_cache: Option<Arc<dyn DbCache>>,
+        slate_db_cache: Option<slate_cache::SlateDbCache>,
         fts_cache: Option<Arc<search::text::FtsCache>>,
         index_scheduling: IndexLifecycleScheduling,
         reader_storage_compatibility: index_lifecycle::repository::ReaderStorageCompatibility,
@@ -2168,7 +2199,7 @@ impl HelixDB {
     pub fn planner_context(&self, params: ParamBindings) -> PlannerContext {
         let indexes = self.runtime_catalog_snapshot();
         PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -2187,7 +2218,7 @@ impl HelixDB {
     ) -> Result<PlannerContext> {
         let indexes = self.runtime_catalog_snapshot_scoped(tenant_scope).await?;
         Ok(PlannerContext {
-            params,
+            params: params.into(),
             late_bound_params: Default::default(),
             indexes,
             stats: Default::default(),
@@ -2236,7 +2267,7 @@ impl HelixDB {
         };
         Ok(PreparedPlannerContext {
             context: PlannerContext {
-                params,
+                params: params.into(),
                 late_bound_params: Default::default(),
                 indexes,
                 stats: Default::default(),
@@ -2412,7 +2443,9 @@ impl HelixDB {
     /// Concurrent callers elect one owned close task or wait for that attempt.
     /// Dropping a caller does not interrupt shutdown. Started commits finish
     /// before migration/outbox workers are joined and storage or caches close.
-    /// The finite close task retains no handle in the runtime it owns.
+    /// The finite close task retains no handle in the runtime it owns. A
+    /// memory cache closes with storage; a hybrid cache, shared by every
+    /// handle on its disk root, writes its memory tier to disk and stays open.
     pub async fn close(&self) -> Result<()> {
         loop {
             let wait = {
@@ -3882,41 +3915,7 @@ fn build_fts_cache(
         .map(Some)
 }
 
-const FOYER_PARTITION_FILE_PREFIX: &str = "foyer-storage-direct-fs-";
-
-/// Removes Foyer partition files that the device about to open would not own.
-///
-/// Foyer opens partitions `0..partitions`, resizing reused files in place, and
-/// never looks at higher indexes. Files left by a larger earlier disk budget
-/// would stay on disk forever, and files of another block size would be
-/// recovered at the wrong block boundaries. Both are disposable cache data.
-fn remove_stale_foyer_partitions(
-    root: &std::path::Path,
-    partitions: usize,
-    block_bytes: usize,
-) -> std::io::Result<()> {
-    let entries = match std::fs::read_dir(root) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        entries => entries?,
-    };
-    entries.into_iter().try_for_each(|entry| {
-        let entry = entry?;
-        let Some(index) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_prefix(FOYER_PARTITION_FILE_PREFIX))
-            .and_then(|index| index.parse::<usize>().ok())
-        else {
-            return Ok(());
-        };
-        if index < partitions && entry.metadata()?.len() == block_bytes as u64 {
-            return Ok(());
-        }
-        std::fs::remove_file(entry.path())
-    })
-}
-
-async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCache>>> {
+async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<slate_cache::SlateDbCache>> {
     match config {
         CacheMode::VectorMemoryOnly => Ok(None),
         CacheMode::Memory { slate_db, .. } => {
@@ -3930,55 +3929,14 @@ async fn build_slate_db_cache(config: &CacheMode) -> Result<Option<Arc<dyn DbCac
                     max_capacity: slate_db.metadata_bytes(),
                     ..Default::default()
                 }));
-            Ok(Some(Arc::new(
+            Ok(Some(slate_cache::SlateDbCache::Memory(Arc::new(
                 SplitCache::new()
                     .with_block_cache(Some(block_cache))
                     .with_meta_cache(Some(metadata_cache))
                     .build(),
-            )))
+            ))))
         }
-        CacheMode::Hybrid { slate_db, .. } => {
-            remove_stale_foyer_partitions(
-                slate_db.disk().root(),
-                slate_db.disk_partitions(),
-                slate_db.disk_block_bytes(),
-            )
-            .map_err(|err| {
-                HelixDbError::Config(format!(
-                    "failed to remove stale Slate hybrid cache partitions in '{}': {err}",
-                    slate_db.disk().root().display()
-                ))
-            })?;
-            let metrics = FoyerHybridCacheMetrics::new();
-            let cache = HybridCacheBuilder::new()
-                .with_name("helix-slate-hybrid")
-                .with_metrics_registry(metrics.registry())
-                .memory(slate_db.memory_bytes())
-                .with_weighter(|_, value: &CachedEntry| value.size())
-                .storage()
-                .with_io_engine_config(PsyncIoEngineConfig::new())
-                .with_engine_config(
-                    BlockEngineConfig::new(
-                        FsDeviceBuilder::new(slate_db.disk().root())
-                            .with_capacity(slate_db.disk().bytes())
-                            .build()
-                            .map_err(|err| {
-                                HelixDbError::Config(format!(
-                                    "failed to build Slate hybrid cache device: {err}"
-                                ))
-                            })?,
-                    )
-                    .with_block_size(slate_db.disk_block_bytes()),
-                )
-                .build()
-                .await
-                .map_err(|err| {
-                    HelixDbError::Config(format!("failed to build Slate hybrid cache: {err}"))
-                })?;
-            Ok(Some(Arc::new(
-                FoyerHybridCache::new_with_cache_and_metrics(cache, metrics),
-            )))
-        }
+        CacheMode::Hybrid { slate_db, .. } => slate_cache::shared_hybrid(slate_db).await.map(Some),
     }
 }
 
@@ -4135,7 +4093,7 @@ mod tests {
             fts: None,
         };
 
-        let cache = build_slate_db_cache(&mode)
+        build_slate_db_cache(&mode)
             .await
             .expect("Foyer cache builds")
             .expect("hybrid mode enables Foyer");
@@ -4146,13 +4104,14 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("foyer-storage-direct-fs-")
+                    .starts_with(slate_cache::FOYER_PARTITION_FILE_PREFIX)
             })
             .count();
         assert_eq!(partition_count, expected_partitions);
-        cache.close().await.expect("Foyer cache closes");
     }
 
+    /// A root a larger budget used, in an earlier process, keeps only the
+    /// partitions the new device owns.
     #[tokio::test]
     async fn slate_hybrid_cache_removes_partitions_beyond_a_smaller_budget() {
         use crate::config::{
@@ -4162,85 +4121,56 @@ mod tests {
 
         let root = tempfile::tempdir().expect("temporary cache root");
         let foyer_root = root.path().join("foyer");
-        let partition_indexes = || {
-            let mut indexes = std::fs::read_dir(&foyer_root)
-                .expect("Foyer cache directory exists")
-                .map(|entry| {
-                    entry
-                        .expect("readable cache entry")
-                        .file_name()
-                        .to_string_lossy()
-                        .strip_prefix(FOYER_PARTITION_FILE_PREFIX)
-                        .expect("only partition files")
-                        .parse::<usize>()
-                        .expect("numbered partition")
-                })
-                .collect::<Vec<_>>();
-            indexes.sort_unstable();
-            indexes
+        let earlier = SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, 16 * 1024 * 1024)
+            .expect("valid Slate hybrid cache");
+        std::fs::create_dir_all(&foyer_root).expect("cache root");
+        for index in 0..earlier.disk_partitions() {
+            std::fs::File::create(foyer_root.join(format!(
+                "{}{index:08}",
+                slate_cache::FOYER_PARTITION_FILE_PREFIX
+            )))
+            .and_then(|file| file.set_len(earlier.disk_block_bytes() as u64))
+            .expect("earlier partition file");
+        }
+
+        let slate_db = SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, 8 * 1024 * 1024)
+            .expect("valid Slate hybrid cache");
+        assert_eq!(slate_db.disk_block_bytes(), earlier.disk_block_bytes());
+        let partitions = slate_db.disk_partitions();
+        let mode = CacheMode::Hybrid {
+            slate_db,
+            object_store: SlateObjectStoreCacheSettings::try_new(
+                root.path().join("object-store"),
+                Some(1024 * 1024),
+                4096,
+                false,
+                ObjectStoreWarmLevel::Off,
+                None,
+                1,
+            )
+            .expect("valid object-store cache"),
+            slate_warm: SlateWarmConfig::Off,
+            fts: None,
         };
-        for (disk_bytes, partitions) in [(16 * 1024 * 1024, 256), (8 * 1024 * 1024, 128)] {
-            let mode = CacheMode::Hybrid {
-                slate_db: SlateHybridCacheConfig::try_new(1024 * 1024, &foyer_root, disk_bytes)
-                    .expect("valid Slate hybrid cache"),
-                object_store: SlateObjectStoreCacheSettings::try_new(
-                    root.path().join("object-store"),
-                    Some(1024 * 1024),
-                    4096,
-                    false,
-                    ObjectStoreWarmLevel::Off,
-                    None,
-                    1,
-                )
-                .expect("valid object-store cache"),
-                slate_warm: SlateWarmConfig::Off,
-                fts: None,
-            };
-            let cache = build_slate_db_cache(&mode)
-                .await
-                .expect("Foyer cache builds")
-                .expect("hybrid mode enables Foyer");
-            assert_eq!(partition_indexes(), (0..partitions).collect::<Vec<_>>());
-            cache.close().await.expect("Foyer cache closes");
-        }
-    }
-
-    #[test]
-    fn stale_foyer_partitions_are_indexes_past_the_device_or_another_block_size() {
-        const BLOCK: u64 = 64 * 1024;
-        let root = tempfile::tempdir().expect("temporary cache root");
-        for (name, length) in [
-            ("foyer-storage-direct-fs-00000000", BLOCK),
-            ("foyer-storage-direct-fs-00000001", 2 * BLOCK),
-            ("foyer-storage-direct-fs-00000003", BLOCK),
-            ("foyer-storage-direct-fs-00000004", BLOCK),
-            ("foyer-storage-direct-fs-not-a-number", BLOCK),
-            ("unrelated", 2 * BLOCK),
-        ] {
-            std::fs::File::create(root.path().join(name))
-                .and_then(|file| file.set_len(length))
-                .expect("fixture file");
-        }
-
-        remove_stale_foyer_partitions(root.path(), 4, BLOCK as usize)
-            .expect("stale partitions are removed");
-        let mut remaining = std::fs::read_dir(root.path())
-            .expect("cache root exists")
-            .map(|entry| entry.expect("readable entry").file_name())
+        build_slate_db_cache(&mode)
+            .await
+            .expect("Foyer cache builds")
+            .expect("hybrid mode enables Foyer");
+        let mut indexes = std::fs::read_dir(&foyer_root)
+            .expect("Foyer cache directory exists")
+            .map(|entry| {
+                entry
+                    .expect("readable cache entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .strip_prefix(slate_cache::FOYER_PARTITION_FILE_PREFIX)
+                    .expect("only partition files")
+                    .parse::<usize>()
+                    .expect("numbered partition")
+            })
             .collect::<Vec<_>>();
-        remaining.sort();
-        assert_eq!(
-            remaining,
-            [
-                "foyer-storage-direct-fs-00000000",
-                "foyer-storage-direct-fs-00000003",
-                "foyer-storage-direct-fs-not-a-number",
-                "unrelated",
-            ]
-        );
-
-        remove_stale_foyer_partitions(&root.path().join("missing"), 4, BLOCK as usize)
-            .expect("a missing cache directory has nothing to remove");
+        indexes.sort_unstable();
+        assert_eq!(indexes, (0..partitions).collect::<Vec<_>>());
     }
 
     #[test]
@@ -4398,7 +4328,7 @@ mod tests {
         db.query_scoped(request.clone(), DataScope::LegacyUnscoped)
             .await
             .expect("scoped query");
-        let encoded = sonic_rs::to_vec(&request).expect("encode request");
+        let encoded = simd_json::to_vec(&request).expect("encode request");
         db.query_json(&encoded).await.expect("JSON query");
         db.query_json_scoped(&encoded, DataScope::LegacyUnscoped)
             .await
@@ -6149,20 +6079,20 @@ mod tests {
             .await
             .expect("tenant b second write succeeds");
 
-        let tenant_a_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_a_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_a)
                 .await
-                .expect("tenant a read succeeds"),
+                .expect("tenant a read succeeds")[..],
         )
         .expect("tenant a response decodes");
-        let tenant_b_json: serde_json::Value = sonic_rs::from_slice(
+        let tenant_b_json: serde_json::Value = simd_json::from_reader(
             &db.query_json_scoped(&read, scope_b)
                 .await
-                .expect("tenant b read succeeds"),
+                .expect("tenant b read succeeds")[..],
         )
         .expect("tenant b response decodes");
         let legacy_json: serde_json::Value =
-            sonic_rs::from_slice(&db.query_json(&read).await.expect("legacy read succeeds"))
+            simd_json::from_reader(&db.query_json(&read).await.expect("legacy read succeeds")[..])
                 .expect("legacy response decodes");
 
         assert_eq!(tenant_a_json.get("users"), Some(&serde_json::json!(1)));

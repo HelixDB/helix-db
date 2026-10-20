@@ -25,13 +25,15 @@ fn cascades_chooses_less_expansion_work_over_the_smallest_start() {
             relationship: r::Slot(2),
             forward_rows: 10000,
             reverse_rows: 1,
+            scan: None,
         }],
         BTreeSet::new(),
     )
     .unwrap();
     let seed = pattern.schedule(&storage);
     assert_eq!(seed.steps[0], r::MatchStep::Scan(r::Slot(0)));
-    let config = optimizer::OptimizerConfig::from_context(&context::PlannerContext::default());
+    let config =
+        optimizer::OptimizerConfig::from_context(&context::PlannerContext::default()).into_owned();
     let rules = rules::SeedRuleSet::default();
     let result = rules
         .optimizer()
@@ -65,6 +67,7 @@ fn expansion_priorities_are_explored_and_bound_endpoints_stay_correlated() {
             relationship: r::Slot(3),
             forward_rows: 1000,
             reverse_rows: 1000,
+            scan: None,
         },
         r::PatternExpansion {
             from: r::Slot(0),
@@ -72,6 +75,7 @@ fn expansion_priorities_are_explored_and_bound_endpoints_stay_correlated() {
             relationship: r::Slot(4),
             forward_rows: 0,
             reverse_rows: 0,
+            scan: None,
         },
     ];
     let pattern = r::GraphPatternOrder::new(
@@ -124,6 +128,7 @@ fn graph_pattern_contract_validates_deserialization_and_saturates_costs() {
         relationship: r::Slot(2),
         forward_rows: u64::MAX,
         reverse_rows: u64::MAX,
+        scan: None,
     };
     assert!(r::GraphPatternOrder::new(
         vec![source.clone()],
@@ -155,6 +160,77 @@ fn graph_pattern_contract_validates_deserialization_and_saturates_costs() {
     let schedule = pattern.schedule(&cost::StorageCostProfile::default());
     assert_eq!(schedule.estimated_rows, u64::MAX);
     assert_eq!(schedule.cost.range_nexts, u64::MAX);
+}
+
+#[test]
+fn relationship_scans_replace_full_scans_of_unbound_endpoints() {
+    let storage = cost::StorageCostProfile::default();
+    let rows = cost::EstimatedRows::rows(1000);
+    let sources = || {
+        (0..2)
+            .map(|slot| r::PatternSource {
+                slot: r::Slot(slot),
+                rows: 1000,
+                access_cost: storage.element_scan(rows),
+            })
+            .collect::<Vec<_>>()
+    };
+    let relationship = |scan| r::PatternExpansion {
+        from: r::Slot(0),
+        to: r::Slot(1),
+        relationship: r::Slot(2),
+        forward_rows: 1,
+        reverse_rows: 1,
+        scan,
+    };
+    let expand = r::GraphPatternOrder::new(sources(), vec![relationship(None)], BTreeSet::new())
+        .unwrap()
+        .schedule(&storage);
+    assert_eq!(expand.steps[0], r::MatchStep::Scan(r::Slot(0)));
+    let order = r::GraphPatternOrder::new(
+        sources(),
+        vec![relationship(Some(r::RelationshipScan {
+            edges: 1000,
+            undirected: false,
+        }))],
+        BTreeSet::new(),
+    )
+    .unwrap();
+    let scan = order.schedule(&storage);
+    assert_eq!(
+        scan.steps,
+        [r::MatchStep::ScanRelationship { relationship: 0 }]
+    );
+    assert_eq!(scan.estimated_rows, 1000);
+    assert_eq!(scan.cartesian_products, 0);
+    // One bitmap read and an endpoint read per edge, not a seek per node.
+    assert!(scan.cost.range_seeks < expand.cost.range_seeks);
+    assert!(scan.cost.latency < expand.cost.latency);
+    // An absent scan is not serialized, so existing plan digests are stable.
+    assert!(serde_json::to_value(relationship(None))
+        .unwrap()
+        .get("scan")
+        .is_none());
+    let value = serde_json::to_value(&order).unwrap();
+    assert_eq!(
+        serde_json::from_value::<r::GraphPatternOrder>(value.clone()).unwrap(),
+        order
+    );
+    // A scan binds all three slots, so none of them may arrive bound.
+    for slot in 0..3 {
+        assert!(r::GraphPatternOrder::new(
+            sources(),
+            vec![relationship(Some(r::RelationshipScan {
+                edges: 1,
+                undirected: true
+            }))],
+            BTreeSet::from([r::Slot(slot)])
+        )
+        .is_err());
+        let mut bound = value.clone();
+        bound["incoming"] = serde_json::json!([slot]);
+        assert!(serde_json::from_value::<r::GraphPatternOrder>(bound).is_err());
+    }
 }
 
 #[test]
@@ -221,7 +297,7 @@ fn incremental_aggregates_bound_distinct_state_and_keep_failed_updates_atomic() 
             .push(r::Value::Integer(3), 1, 2048)
             .unwrap_err()
             .detail,
-        "CollectionLimit"
+        "collection_limit"
     );
     assert_eq!(
         collect.finish().unwrap(),
@@ -233,7 +309,7 @@ fn incremental_aggregates_bound_distinct_state_and_keep_failed_updates_atomic() 
             .push(r::Value::String("x".repeat(4096)), 10, 2048)
             .unwrap_err()
             .detail,
-        "MemoryLimit"
+        "memory_limit"
     );
     assert_eq!(minimum.finish().unwrap(), r::Value::Null);
 }
@@ -288,7 +364,8 @@ fn correlated_lookup_contracts_and_scan_alternatives_share_the_memo() {
         invalid["lookups"][0]["probe"] = serde_json::json!(99);
         assert!(serde_json::from_value::<r::GraphPatternOrder>(invalid).is_err());
         let rules = rules::SeedRuleSet::default();
-        let config = optimizer::OptimizerConfig::from_context(&context::PlannerContext::default());
+        let config = optimizer::OptimizerConfig::from_context(&context::PlannerContext::default())
+            .into_owned();
         let result = rules
             .optimizer()
             .optimize(logical::LogicalExpr::GraphPattern(indexed), &config)

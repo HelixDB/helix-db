@@ -25,6 +25,11 @@ impl AccessWindow {
         &self.access
     }
 
+    /// The access path and window, moved out.
+    pub fn into_parts(self) -> (AccessPath, AccessWindowRange) {
+        (self.access, self.window)
+    }
+
     /// Static window.
     pub const fn window(&self) -> AccessWindowRange {
         self.window
@@ -74,6 +79,11 @@ impl AccessOrder {
     /// Access path being ordered.
     pub const fn access(&self) -> &AccessPath {
         &self.access
+    }
+
+    /// The access path and ordering, moved out.
+    pub fn into_parts(self) -> (AccessPath, ir::OrderKeys) {
+        (self.access, self.ordering)
     }
 
     /// Required non-empty ordering.
@@ -166,6 +176,11 @@ impl AccessDistinct {
         &self.access
     }
 
+    /// The access path, moved out.
+    pub fn into_access(self) -> AccessPath {
+        self.access
+    }
+
     /// Whether access-distinct exploration can prove this distinct is a no-op.
     ///
     /// ```
@@ -200,6 +215,11 @@ impl AccessFilter {
     /// Access path being filtered.
     pub const fn access(&self) -> &AccessPath {
         &self.access
+    }
+
+    /// The access path and residual predicate, moved out.
+    pub fn into_parts(self) -> (AccessPath, ir::PredicatePlan) {
+        (self.access, self.predicate)
     }
 
     /// Residual predicate applied to the access path.

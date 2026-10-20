@@ -97,7 +97,7 @@ fn selection_construction_and_deserialization_rebuild_validated_dependencies() {
     assert_eq!(program.references(), &BTreeSet::from([r::Slot(2)]));
     assert_eq!(
         program.validate_input(&BTreeSet::new()).unwrap_err().detail,
-        "UnboundSlot"
+        "unbound_slot"
     );
     program
         .validate_input(&BTreeSet::from([r::Slot(2)]))

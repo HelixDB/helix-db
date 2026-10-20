@@ -100,6 +100,7 @@ fn membership_sources_respect_the_union_budget_and_constraint_totality() {
         if let Some(value) = parameter {
             context
                 .params
+                .make_mut()
                 .values
                 .insert(ir::NonEmptyString::new("keys").unwrap(), value);
         }
@@ -519,7 +520,7 @@ fn correlated_lookups_accept_bound_parameters_in_the_predicate() {
     };
     // An unbound parameter could fail on a row the lookup would skip.
     assert_eq!(lookups(&context), 0);
-    context.params.values.insert(
+    context.params.make_mut().values.insert(
         ir::NonEmptyString::new("r").unwrap(),
         helix_ast::value::PropertyValue::from("us"),
     );
@@ -591,7 +592,7 @@ fn validated_plans_reject_malformed_paths_and_dangling_slots() {
         r::Query::new(vec![binding.clone()], vec![invalid], vec![])
             .unwrap_err()
             .detail,
-        "UnboundSlot"
+        "unbound_slot"
     );
     let pattern = r::Pattern {
         nodes: vec![r::NodePattern {
@@ -614,7 +615,7 @@ fn validated_plans_reject_malformed_paths_and_dangling_slots() {
         )
         .unwrap_err()
         .detail,
-        "EmptyLabel"
+        "empty_label"
     );
     assert!(r::Path::new(vec![1], vec![1]).is_err());
     assert!(r::Path::new(vec![], vec![]).is_err());
@@ -622,7 +623,7 @@ fn validated_plans_reject_malformed_paths_and_dangling_slots() {
     let invalid = r::Expression::Function(r::Function::Id, vec![]);
     assert_eq!(
         invalid.validate_shape().unwrap_err().detail,
-        "FunctionArity"
+        "function_arity"
     );
 }
 
@@ -648,7 +649,7 @@ fn named_path_nodes_must_belong_to_their_own_validated_pattern() {
         )
         .unwrap_err()
         .detail,
-        "InvalidPath"
+        "invalid_path"
     );
 
     let query = helix_cypher::compile("MATCH p=(n) RETURN p").unwrap();
@@ -665,7 +666,7 @@ fn named_path_nodes_must_belong_to_their_own_validated_pattern() {
         r::Query::new(bindings, operators, query.returns().to_vec())
             .unwrap_err()
             .detail,
-        "InvalidPath"
+        "invalid_path"
     );
 }
 
@@ -675,27 +676,27 @@ fn source_and_expression_limits_fail_cleanly() {
         helix_cypher::parse(&" ".repeat(16 * 1024 * 1024 + 1))
             .unwrap_err()
             .detail,
-        "QueryTooLarge"
+        "query_too_large"
     );
     let query = format!("RETURN {}1{}", "(".repeat(150), ")".repeat(150));
     assert_eq!(
         helix_cypher::compile(&query).unwrap_err().category,
-        "ResourceLimit"
+        "resource_limit"
     );
     let query = format!("RETURN 1{}", "+1".repeat(150));
     assert_eq!(
         helix_cypher::compile(&query).unwrap_err().category,
-        "ResourceLimit"
+        "resource_limit"
     );
     let mut value = r::Value::Null;
     for _ in 0..130 {
         value = r::Value::List(vec![value]);
     }
-    assert_eq!(value.validate_shape().unwrap_err().detail, "ValueDepth");
+    assert_eq!(value.validate_shape().unwrap_err().detail, "value_depth");
     let query = format!("RETURN {}", vec!["1"; 100_001].join(","));
     assert_eq!(
         helix_cypher::compile(&query).unwrap_err().detail,
-        "TooManyTokens"
+        "too_many_tokens"
     );
 }
 
@@ -881,7 +882,7 @@ fn escaped_parameter_names_share_identifier_escaping_and_source_validation() {
     );
     for malformed in ["RETURN $``", "RETURN $`unterminated"] {
         let error = helix_cypher::compile(malformed).unwrap_err();
-        assert_eq!(error.category, "SyntaxError");
+        assert_eq!(error.category, "syntax_error");
         assert!(error.span.is_some());
     }
 }
@@ -1038,6 +1039,7 @@ fn unique_correlated_lookups_beat_static_sources_and_other_keys() {
                 r::MatchStep::IndexLookup(lookup) => Some(lookup.key.property.as_ref().to_owned()),
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1081,6 +1083,7 @@ fn correlated_lookups_probe_properties_of_bound_values() {
                 r::MatchStep::IndexLookup(lookup) => Some(lookup.probe_property.clone()),
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1197,6 +1200,7 @@ fn bound_parameter_properties_and_elements_read_indexes() {
     ] {
         context
             .params
+            .make_mut()
             .values
             .insert(ir::NonEmptyString::new(name).unwrap(), value);
     }
@@ -1418,6 +1422,7 @@ fn membership_lookups_probe_list_variables() {
                 }
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1473,6 +1478,7 @@ fn incoming_lookups_survive_cheaper_lookups_on_the_same_pattern() {
                 r::MatchStep::IndexLookup(lookup) => Some(lookup.key.property.as_ref().to_owned()),
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1485,5 +1491,79 @@ fn incoming_lookups_survive_cheaper_lookups_on_the_same_pattern() {
     ] {
         let found = lookups(text);
         assert!(found == ["key"] || found == ["email"], "{text}: {found:?}");
+    }
+}
+
+#[test]
+fn typed_relationships_between_full_scans_start_from_their_edges() {
+    let mut indexes = catalog::IndexCatalogSnapshot::default();
+    indexes.node_eq.insert(
+        catalog::ScopedPropertyKey::try_new("N", "uid").unwrap(),
+        catalog::NodeEqualityIndexMeta::try_new("node_eq:N:uid")
+            .unwrap()
+            .with_uniqueness(catalog::IndexUniqueness::Unique),
+    );
+    let unknown = context::PlannerContext {
+        indexes,
+        ..context::PlannerContext::default()
+    };
+    let mut known = unknown.clone();
+    known.stats = known
+        .stats
+        .with_edge_label_cardinality(ir::NonEmptyString::new("R").unwrap(), 7)
+        .with_edge_label_cardinality(ir::NonEmptyString::new("S").unwrap(), 5);
+    let planned = |text: &str, context: &context::PlannerContext| {
+        r::plan(helix_cypher::compile(text).unwrap(), context)
+            .unwrap()
+            .matches()[&0]
+            .clone()
+    };
+    let plan = |text: &str| planned(text, &known);
+    let scan = |relationship| r::MatchStep::ScanRelationship { relationship };
+    // The scan binds one row per edge and orientation of the distinct types.
+    for (text, rows) in [
+        ("MATCH ()-[r:R]->() RETURN count(r)", 7),
+        ("MATCH ()<-[r:R|R]-() RETURN count(r)", 7),
+        ("MATCH ()-[r:R|S]-() RETURN count(r)", 24),
+    ] {
+        let plan = plan(text);
+        assert_eq!(plan.steps, [scan(0)], "{text}");
+        assert_eq!(plan.estimated_rows, rows, "{text}");
+    }
+    // Later relationships expand from the endpoints the scan bound.
+    let chain = plan("MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN count(*)");
+    assert!(
+        matches!(
+            chain.steps.as_slice(),
+            [
+                r::MatchStep::ScanRelationship { .. },
+                r::MatchStep::Expand { .. }
+            ]
+        ),
+        "{:?}",
+        chain.steps
+    );
+    // Another component is a cartesian product whichever side starts.
+    let product = plan("MATCH (x:N), ()-[r:R]->() RETURN count(*)");
+    assert_eq!(product.steps.len(), 2);
+    assert!(product.steps.contains(&scan(0)));
+    assert_eq!(product.cartesian_products, 1);
+    // A selective anchor or label anywhere in the connected pattern, or an
+    // untyped relationship, keeps the node start.
+    for text in [
+        "MATCH (a:N {uid: 1})-[r:R]->(b)-[s:R]->(c) RETURN count(*)",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c:N) RETURN count(*)",
+        "MATCH (a:N)-[r:R]->(b) RETURN count(*)",
+        "MATCH (a)-[r]->(b) RETURN count(*)",
+    ] {
+        let plan = planned(text, &unknown);
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, r::MatchStep::ScanRelationship { .. })),
+            "{text}: {:?}",
+            plan.steps
+        );
     }
 }

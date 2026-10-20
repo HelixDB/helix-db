@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 
+use helix_ast_arena_derive::ArenaMirror;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::batch::{BatchQuery, ReadBatch, WriteBatch};
+use crate::arena::{self, ArenaDeserialize, IntoOwned};
+use crate::batch::{ArenaBatchQuery, BatchQuery, ReadBatch, WriteBatch};
 use crate::value::PropertyValue;
 /// Declared query parameter shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,7 +34,7 @@ pub enum QueryParamType {
 }
 
 /// Query request type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "lowercase")]
 pub enum QueryRequestType {
     /// Read-only query.
@@ -54,7 +56,7 @@ pub enum QueryRequestType {
 /// use std::collections::BTreeMap;
 /// use helix_ast::query::QueryValue;
 /// let value: QueryValue =
-///     sonic_rs::from_str(r#"[null, -1, 18446744073709551615, 0.5, "a\n", {"k": 1, "k": true}]"#)
+///     simd_json::from_reader(r#"[null, -1, 18446744073709551615, 0.5, "a\n", {"k": 1, "k": true}]"#.as_bytes())
 ///         .unwrap();
 /// assert_eq!(
 ///     value,
@@ -88,6 +90,10 @@ pub enum QueryValue {
     /// Object.
     Object(BTreeMap<String, QueryValue>),
 }
+
+/// Most parameter values an array reserves from a deserializer's length hint
+/// before seeing them: serde's own 1 MiB cap for 32-byte values.
+const MAX_HINTED_VALUES: usize = 1024 * 1024 / size_of::<QueryValue>();
 
 /// Builds each value directly from the deserializer's events. A derived
 /// untagged impl buffers the value and then copies every nested subtree once
@@ -153,9 +159,18 @@ impl<'de> Deserialize<'de> for QueryValue {
             where
                 A: SeqAccess<'de>,
             {
-                let mut values = Vec::new();
+                // Trust a length hint (simd-json gives exact ones) only as
+                // far as serde does, so a hostile hint cannot reserve much.
+                let hint = seq.size_hint().unwrap_or(0).min(MAX_HINTED_VALUES);
+                let mut values = Vec::with_capacity(hint);
                 while let Some(value) = seq.next_element()? {
                     values.push(value);
+                }
+                // Parameters live through execution, and growth by doubling
+                // leaves up to half of a long array (a bulk insert's
+                // embeddings) unused, so arrays keep exactly their length.
+                if values.capacity() > values.len() {
+                    values.shrink_to_fit();
                 }
                 Ok(QueryValue::Array(values))
             }
@@ -203,7 +218,7 @@ impl From<&QueryValue> for PropertyValue {
 #[derive(Debug)]
 pub enum QueryError {
     /// JSON serialization error.
-    Serialize(sonic_rs::Error),
+    Serialize(serde_json::Error),
     /// UTF-8 conversion error.
     Utf8(std::string::FromUtf8Error),
     /// Bytes cannot be represented safely in query parameters.
@@ -311,8 +326,8 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 
-impl From<sonic_rs::Error> for QueryError {
-    fn from(value: sonic_rs::Error) -> Self {
+impl From<serde_json::Error> for QueryError {
+    fn from(value: serde_json::Error) -> Self {
         Self::Serialize(value)
     }
 }
@@ -347,9 +362,9 @@ impl Default for QueryParameters {
 /// use helix_ast::query::SearchConsistency;
 ///
 /// assert_eq!(SearchConsistency::default(), SearchConsistency::Strong);
-/// assert_eq!(sonic_rs::to_string(&SearchConsistency::Eventual).unwrap(), "\"eventual\"");
+/// assert_eq!(simd_json::to_string(&SearchConsistency::Eventual).unwrap(), "\"eventual\"");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, ArenaMirror)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchConsistency {
     /// Every committed graph change in the serving node's pinned snapshot is
@@ -385,13 +400,14 @@ pub struct QueryRequest {
     search_consistency: SearchConsistency,
 }
 
-/// Deepest JSON nesting a native request may use: sonic-rs's own limit for
-/// the values it deserializes.
+/// Deepest JSON nesting a native request may use. Every JSON entry point
+/// enforces it before parsing.
 pub const MAX_REQUEST_JSON_DEPTH: usize = 255;
 
 /// Reject JSON nested deeper than [`MAX_REQUEST_JSON_DEPTH`] with one flat
-/// pass that tracks only the depth.
-fn check_json_depth(bytes: &[u8]) -> sonic_rs::Result<()> {
+/// pass that tracks only the depth. Every JSON backend runs it first, so the
+/// bound does not depend on which parser reads the body.
+pub(crate) fn check_json_depth<E: serde::de::Error>(bytes: &[u8]) -> Result<(), E> {
     // Nesting never exceeds the number of `[` and `{` bytes, wherever they
     // appear, so one count settles almost every request. `byte | 0x20` maps
     // exactly `[` and `{` to `{`; counting 255-byte chunks in `u8` lanes
@@ -435,7 +451,7 @@ fn check_json_depth(bytes: &[u8]) -> sonic_rs::Result<()> {
         rest = tail;
         match byte {
             b'[' | b'{' if depth == MAX_REQUEST_JSON_DEPTH => {
-                return Err(<sonic_rs::Error as serde::de::Error>::custom(format!(
+                return Err(E::custom(format!(
                     "JSON nesting exceeds {MAX_REQUEST_JSON_DEPTH} levels"
                 )));
             }
@@ -461,10 +477,9 @@ fn check_json_depth(bytes: &[u8]) -> sonic_rs::Result<()> {
 }
 
 impl QueryRequest {
-    /// Parse a request from JSON bytes. A flat scan bounds the nesting first:
-    /// sonic-rs skips the value of an unknown key recursively without its own
-    /// depth limit, so an unchecked body could exhaust the parsing thread's
-    /// stack.
+    /// Parse a request from JSON bytes. simd-json parses in place, so this
+    /// copies `bytes` first; a caller that owns a mutable body should use
+    /// [`Self::from_json_slice_mut`] instead.
     ///
     /// ```
     /// use helix_ast::query::{QueryRequest, MAX_REQUEST_JSON_DEPTH};
@@ -474,15 +489,57 @@ impl QueryRequest {
     ///     .to_string()
     ///     .contains("nesting"));
     /// ```
-    pub fn from_json_slice(bytes: &[u8]) -> sonic_rs::Result<Self> {
-        check_json_depth(bytes)?;
-        sonic_rs::from_slice(bytes)
+    pub fn from_json_slice(bytes: &[u8]) -> simd_json::Result<Self> {
+        Self::from_json_slice_mut(&mut bytes.to_vec())
+    }
+
+    /// Parse a request in place with simd-json, which selects its SIMD
+    /// implementation for the running CPU at runtime. A flat scan bounds the
+    /// nesting first, so no body can exhaust the parsing thread's stack.
+    /// simd-json rewrites `bytes` while it unescapes strings, so the body is
+    /// not reusable after.
+    ///
+    /// ```
+    /// use helix_ast::query::QueryRequest;
+    ///
+    /// let mut body = br#"{"request_type":"read","query":{"read":{"entries":[]}}}"#.to_vec();
+    /// let request = QueryRequest::from_json_slice_mut(&mut body).unwrap();
+    /// assert_eq!(request, QueryRequest::from_json_slice(
+    ///     br#"{"request_type":"read","query":{"read":{"entries":[]}}}"#,
+    /// ).unwrap());
+    /// ```
+    pub fn from_json_slice_mut(bytes: &mut [u8]) -> simd_json::Result<Self> {
+        check_json_depth::<simd_json::Error>(bytes)?;
+        simd_json::serde::from_slice(bytes)
+    }
+
+    /// [`Self::from_json_slice_mut`] reusing simd-json's padding, structural
+    /// index and string buffers across requests.
+    ///
+    /// ```
+    /// use helix_ast::query::QueryRequest;
+    ///
+    /// let mut buffers = simd_json::Buffers::default();
+    /// for _ in 0..2 {
+    ///     let mut body = br#"{"request_type":"read","query":{"read":{"entries":[]}}}"#.to_vec();
+    ///     assert!(QueryRequest::from_json_slice_mut_with_buffers(&mut body, &mut buffers).is_ok());
+    /// }
+    /// ```
+    pub fn from_json_slice_mut_with_buffers(
+        bytes: &mut [u8],
+        buffers: &mut simd_json::Buffers,
+    ) -> simd_json::Result<Self> {
+        check_json_depth::<simd_json::Error>(bytes)?;
+        simd_json::serde::from_slice_with_buffers(bytes, buffers)
     }
 
     /// Check with one iterative pass that no batch entry, step, predicate,
     /// expression or value nests more than [`MAX_REQUEST_JSON_DEPTH`] levels.
     /// Planning, execution and telemetry walk a request recursively; a JSON
     /// request is bounded by its text, and this bounds one built in memory.
+    /// Parameter values are bounded when they enter the request (parsing and
+    /// every insert builder check them), so the pass walks only the batch:
+    /// a bulk insert's parameters are most of its size.
     ///
     /// ```
     /// use helix_ast::{batch, query::QueryRequest, traversal};
@@ -496,14 +553,10 @@ impl QueryRequest {
             BatchQuery::Read(batch) => batch.entries(),
             BatchQuery::Write(batch) => &batch.entries,
         };
-        let values = match &self.parameters {
-            QueryParameters::Untyped(values) | QueryParameters::Typed { values, .. } => values,
-        };
-        let roots = entries
-            .iter()
-            .map(crate::nesting::Node::Entry)
-            .chain(values.values().map(crate::nesting::Node::Query));
-        match crate::nesting::within(roots, MAX_REQUEST_JSON_DEPTH) {
+        match crate::nesting::within(
+            entries.iter().map(crate::nesting::Node::Entry),
+            MAX_REQUEST_JSON_DEPTH,
+        ) {
             true => Ok(()),
             false => Err(QueryError::NestingTooDeep {
                 path: "request".to_owned(),
@@ -623,7 +676,7 @@ impl QueryRequest {
     ) -> Result<(), QueryError> {
         let name = name.into();
         validate_parameter_name(&name)?;
-        validate_json_value(&value, &name)?;
+        validate_json_value(&value, &name, 0)?;
         match &mut self.parameters {
             QueryParameters::Untyped(values) => {
                 if values.contains_key(&name) {
@@ -707,9 +760,12 @@ impl QueryRequest {
         self
     }
 
-    /// Serialize to JSON bytes.
+    /// Serialize to JSON bytes, with serde_json: it writes each `f32` in its
+    /// shortest form (`0.9`), where simd-json widens it to `f64` digits
+    /// (`0.8999999761581421`), which more than doubles bulk vector requests.
+    /// Parsing uses simd-json.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, QueryError> {
-        Ok(sonic_rs::to_vec(self)?)
+        Ok(serde_json::to_vec(self)?)
     }
 
     /// Serialize to JSON string.
@@ -750,15 +806,19 @@ impl Serialize for QueryRequest {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ArenaMirror)]
 struct RawQueryRequest {
     request_type: QueryRequestType,
     #[serde(default)]
     query_name: Option<String>,
     query: BatchQuery,
+    // Parameters live through execution, so they stay owned rather than
+    // pinning the request's arena until the response is built.
     #[serde(default)]
+    #[arena(owned)]
     parameters: Option<UniqueMap<QueryValue>>,
     #[serde(default)]
+    #[arena(owned)]
     parameter_types: Option<UniqueMap<QueryParamType>>,
     #[serde(default)]
     search_consistency: Option<SearchConsistency>,
@@ -812,74 +872,386 @@ impl<'de> Deserialize<'de> for QueryRequest {
         D: Deserializer<'de>,
     {
         let raw = RawQueryRequest::deserialize(deserializer)?;
-        if !matches!(
-            (&raw.request_type, &raw.query),
-            (QueryRequestType::Read, BatchQuery::Read(_))
-                | (QueryRequestType::Write, BatchQuery::Write(_))
-        ) {
-            return Err(serde::de::Error::custom(
-                "request_type must match the query batch variant",
-            ));
-        }
-
-        let search_consistency = raw.search_consistency.unwrap_or_default();
-        if search_consistency == SearchConsistency::Eventual
-            && raw.request_type == QueryRequestType::Write
-        {
-            return Err(serde::de::Error::custom(
-                QueryError::EventualWriteSearchConsistency,
-            ));
-        }
-        let values = raw.parameters.map_or_else(BTreeMap::new, |values| values.0);
-        let parameters = match raw.parameter_types.map(|types| types.0) {
-            None => {
-                for (name, value) in &values {
-                    validate_parameter_name(name).map_err(serde::de::Error::custom)?;
-                    validate_json_value(value, name).map_err(serde::de::Error::custom)?;
-                }
-                QueryParameters::Untyped(values)
-            }
-            Some(types) => {
-                let missing_values = types
-                    .keys()
-                    .filter(|name| !values.contains_key(*name))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let extra_values = values
-                    .keys()
-                    .filter(|name| !types.contains_key(*name))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !missing_values.is_empty() || !extra_values.is_empty() {
-                    return Err(serde::de::Error::custom(
-                        QueryError::ParameterNameMismatch {
-                            missing_values,
-                            extra_values,
-                        },
-                    ));
-                }
-                let values = values
-                    .into_iter()
-                    .map(|(name, value)| {
-                        validate_parameter_name(&name).map_err(serde::de::Error::custom)?;
-                        let ty = types
-                            .get(&name)
-                            .expect("schema and value names were proven equal");
-                        normalize_typed_value(ty, value, &name)
-                            .map(|value| (name, value))
-                            .map_err(serde::de::Error::custom)
-                    })
-                    .collect::<Result<BTreeMap<_, _>, _>>()?;
-                QueryParameters::Typed { values, types }
-            }
+        let batch_type = match &raw.query {
+            BatchQuery::Read(_) => QueryRequestType::Read,
+            BatchQuery::Write(_) => QueryRequestType::Write,
         };
-
+        let (parameters, search_consistency) = validate_raw_request(
+            raw.request_type,
+            batch_type,
+            raw.search_consistency,
+            raw.parameters,
+            raw.parameter_types,
+        )
+        .map_err(serde::de::Error::custom)?;
         Ok(Self {
             query_name: raw.query_name,
             query: raw.query,
             parameters,
             search_consistency,
         })
+    }
+}
+
+/// Why a well-formed raw request is still invalid.
+enum RawRequestError {
+    /// The declared `request_type` disagrees with the batch variant.
+    BatchTypeMismatch,
+    /// Search consistency or parameters are invalid.
+    Query(QueryError),
+}
+
+impl std::fmt::Display for RawRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BatchTypeMismatch => {
+                f.write_str("request_type must match the query batch variant")
+            }
+            Self::Query(error) => error.fmt(f),
+        }
+    }
+}
+
+/// Everything a request decides beyond its JSON shape. Owned and arena
+/// parsing both finish with it, so they reject the same requests with the
+/// same messages.
+fn validate_raw_request(
+    request_type: QueryRequestType,
+    batch_type: QueryRequestType,
+    search_consistency: Option<SearchConsistency>,
+    parameters: Option<UniqueMap<QueryValue>>,
+    parameter_types: Option<UniqueMap<QueryParamType>>,
+) -> Result<(QueryParameters, SearchConsistency), RawRequestError> {
+    if request_type != batch_type {
+        return Err(RawRequestError::BatchTypeMismatch);
+    }
+    let search_consistency = search_consistency.unwrap_or_default();
+    if search_consistency == SearchConsistency::Eventual && request_type == QueryRequestType::Write
+    {
+        return Err(RawRequestError::Query(
+            QueryError::EventualWriteSearchConsistency,
+        ));
+    }
+    let values = parameters.map_or_else(BTreeMap::new, |values| values.0);
+    let parameters = match parameter_types.map(|types| types.0) {
+        None => {
+            for (name, value) in &values {
+                validate_parameter_name(name).map_err(RawRequestError::Query)?;
+                validate_json_value(value, name, 0).map_err(RawRequestError::Query)?;
+            }
+            QueryParameters::Untyped(values)
+        }
+        Some(types) => {
+            let missing_values = types
+                .keys()
+                .filter(|name| !values.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            let extra_values = values
+                .keys()
+                .filter(|name| !types.contains_key(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing_values.is_empty() || !extra_values.is_empty() {
+                return Err(RawRequestError::Query(QueryError::ParameterNameMismatch {
+                    missing_values,
+                    extra_values,
+                }));
+            }
+            let values = values
+                .into_iter()
+                .map(|(name, value)| {
+                    validate_parameter_name(&name)?;
+                    let ty = types
+                        .get(&name)
+                        .expect("schema and value names were proven equal");
+                    normalize_typed_value(ty, value, &name).map(|value| (name, value))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map_err(RawRequestError::Query)?;
+            QueryParameters::Typed { values, types }
+        }
+    };
+    Ok((parameters, search_consistency))
+}
+
+/// A native request parsed into an arena: the arena counterpart of
+/// [`QueryRequest`], with the same validation.
+///
+/// Its batch is an arena tree borrowed from the [`arena::Bump`] it was parsed
+/// into, so dropping the request frees nothing node by node; freeing or
+/// resetting the arena frees the whole tree at once. Parameters stay owned
+/// because they live through execution, after the tree is no longer needed.
+///
+/// ```
+/// use helix_ast::arena::{self, IntoOwned};
+/// use helix_ast::query::{ArenaQueryRequest, QueryRequest};
+///
+/// let body = br#"{"request_type":"read","query":{"read":{"entries":[{"query":{"name":"users","root":{"limit":{"input":{"nodes":{"reference":"all"}},"count":{"literal":10}}}}}],"returns":["users"]}},"parameters":{"tenant":"acme"}}"#;
+/// let bump = arena::Bump::new();
+/// let request = ArenaQueryRequest::from_json_slice(&bump, body).unwrap();
+/// let arena::BatchQuery::Read(batch) = request.query() else { panic!("read batch") };
+/// let arena::BatchEntry::Query(query) = batch.entries()[0] else { panic!("query entry") };
+/// assert!(matches!(query.root, arena::AstNode::Limit { .. }));
+/// assert_eq!(request.into_owned(), QueryRequest::from_json_slice(body).unwrap());
+///
+/// // Mutations in a read batch are rejected exactly as the owned parse does.
+/// let write_in_read = br#"{"request_type":"read","query":{"read":{"entries":[{"query":{"root":{"drop":{"input":{"nodes":{"reference":"all"}}}}}}]}}}"#;
+/// assert_eq!(
+///     ArenaQueryRequest::from_json_slice(&bump, write_in_read).unwrap_err().to_string(),
+///     QueryRequest::from_json_slice(write_in_read).unwrap_err().to_string(),
+/// );
+/// ```
+#[derive(Debug, PartialEq)]
+pub struct ArenaQueryRequest<'a> {
+    query_name: Option<&'a str>,
+    query: ArenaBatchQuery<'a>,
+    parameters: QueryParameters,
+    search_consistency: SearchConsistency,
+}
+
+impl<'a> ArenaQueryRequest<'a> {
+    /// Parse a request into `bump`, copying `bytes` first as
+    /// [`QueryRequest::from_json_slice`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns every error [`QueryRequest::from_json_slice`] returns for the
+    /// same body, and [`arena::ALLOCATION_LIMIT_EXCEEDED`] when `bump` refuses
+    /// memory.
+    pub fn from_json_slice(bump: &'a arena::Bump, bytes: &[u8]) -> simd_json::Result<Self> {
+        Self::from_json_slice_mut(bump, &mut bytes.to_vec())
+    }
+
+    /// Parse a request into `bump` in place, after the same flat depth scan
+    /// as [`QueryRequest::from_json_slice_mut`].
+    ///
+    /// # Errors
+    ///
+    /// Returns every error [`QueryRequest::from_json_slice_mut`] returns for
+    /// the same body, and [`arena::ALLOCATION_LIMIT_EXCEEDED`] when `bump`
+    /// refuses memory.
+    pub fn from_json_slice_mut(bump: &'a arena::Bump, bytes: &mut [u8]) -> simd_json::Result<Self> {
+        check_json_depth::<simd_json::Error>(bytes)?;
+        Self::deserialize_in(bump, &mut simd_json::Deserializer::from_slice(bytes)?)
+    }
+
+    /// [`Self::from_json_slice_mut`] reusing simd-json's buffers.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_json_slice_mut`].
+    pub fn from_json_slice_mut_with_buffers(
+        bump: &'a arena::Bump,
+        bytes: &mut [u8],
+        buffers: &mut simd_json::Buffers,
+    ) -> simd_json::Result<Self> {
+        check_json_depth::<simd_json::Error>(bytes)?;
+        Self::deserialize_in(
+            bump,
+            &mut simd_json::Deserializer::from_slice_with_buffers(bytes, buffers)?,
+        )
+    }
+
+    /// Derived request kind.
+    pub const fn request_type(&self) -> QueryRequestType {
+        match self.query {
+            ArenaBatchQuery::Read(_) => QueryRequestType::Read,
+            ArenaBatchQuery::Write(_) => QueryRequestType::Write,
+        }
+    }
+
+    /// Closed query payload, borrowed from the arena.
+    pub const fn query(&self) -> &ArenaBatchQuery<'a> {
+        &self.query
+    }
+
+    /// Optional query name.
+    pub const fn query_name(&self) -> Option<&'a str> {
+        self.query_name
+    }
+
+    /// Search visibility requested for unpublished vector/text work.
+    pub const fn search_consistency(&self) -> SearchConsistency {
+        self.search_consistency
+    }
+
+    /// Consume the request into its arena batch and owned runtime values.
+    pub fn into_query(self) -> (ArenaBatchQuery<'a>, BTreeMap<String, QueryValue>) {
+        let values = match self.parameters {
+            QueryParameters::Untyped(values) | QueryParameters::Typed { values, .. } => values,
+        };
+        (self.query, values)
+    }
+}
+
+/// The arena counterpart of `QueryRequest`'s `Deserialize`.
+impl<'a> ArenaDeserialize<'a> for ArenaQueryRequest<'a> {
+    fn deserialize_in<'de, D: Deserializer<'de>>(
+        bump: &'a arena::Bump,
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        let raw = ArenaRawQueryRequest::deserialize_in(bump, deserializer)?;
+        let batch_type = match raw.query {
+            ArenaBatchQuery::Read(_) => QueryRequestType::Read,
+            ArenaBatchQuery::Write(_) => QueryRequestType::Write,
+        };
+        let (parameters, search_consistency) = validate_raw_request(
+            raw.request_type,
+            batch_type,
+            raw.search_consistency,
+            raw.parameters,
+            raw.parameter_types,
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            query_name: raw.query_name,
+            query: raw.query,
+            parameters,
+            search_consistency,
+        })
+    }
+}
+
+impl IntoOwned<QueryRequest> for ArenaQueryRequest<'_> {
+    fn into_owned(self) -> QueryRequest {
+        QueryRequest {
+            query_name: self.query_name.map(str::to_owned),
+            query: self.query.into_owned(),
+            parameters: self.parameters,
+            search_consistency: self.search_consistency,
+        }
+    }
+}
+
+/// A parameter value in an arena: the arena counterpart of [`QueryValue`],
+/// parsed by the same rules. Request parsing keeps parameters owned, because
+/// they live through execution; this type measures what a separate parameter
+/// arena would save.
+///
+/// ```
+/// use helix_ast::arena::{self, IntoOwned};
+/// use helix_ast::query::{ArenaQueryValue, QueryValue};
+///
+/// let bump = arena::Bump::new();
+/// let json = r#"[null,-1,18446744073709551615,0.5,"a\n",{"k":true,"k":false}]"#;
+/// let mut body = json.as_bytes().to_vec();
+/// let mut deserializer = simd_json::Deserializer::from_slice(&mut body).unwrap();
+/// let value: ArenaQueryValue<'_> =
+///     serde::de::DeserializeSeed::deserialize(arena::Seed::new(&bump), &mut deserializer).unwrap();
+/// let owned: QueryValue = simd_json::from_reader(json.as_bytes()).unwrap();
+/// assert_eq!(value.into_owned(), owned);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ArenaQueryValue<'a> {
+    /// Null.
+    Null,
+    /// Boolean.
+    Bool(bool),
+    /// 64-bit signed integer.
+    I64(i64),
+    /// 64-bit float.
+    F64(f64),
+    /// 32-bit float.
+    F32(f32),
+    /// String.
+    String(&'a str),
+    /// Array.
+    Array(&'a [ArenaQueryValue<'a>]),
+    /// Object.
+    Object(arena::Map<'a, ArenaQueryValue<'a>>),
+}
+
+/// `QueryValue`'s visitor, allocating in the arena.
+impl<'a> ArenaDeserialize<'a> for ArenaQueryValue<'a> {
+    fn deserialize_in<'de, D: Deserializer<'de>>(
+        bump: &'a arena::Bump,
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        struct ValueVisitor<'a> {
+            bump: &'a arena::Bump,
+        }
+
+        impl<'a, 'de> Visitor<'de> for ValueVisitor<'a> {
+            type Value = ArenaQueryValue<'a>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::Null)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::Null)
+            }
+
+            fn visit_some<D: Deserializer<'de>>(
+                self,
+                deserializer: D,
+            ) -> Result<Self::Value, D::Error> {
+                ArenaQueryValue::deserialize_in(self.bump, deserializer)
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::Bool(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::I64(value))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(i64::try_from(value)
+                    .map_or(ArenaQueryValue::F64(value as f64), ArenaQueryValue::I64))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(ArenaQueryValue::F64(value))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                <&'a str as ArenaDeserialize<'a>>::deserialize_in(
+                    self.bump,
+                    serde::de::value::StrDeserializer::<E>::new(value),
+                )
+                .map(ArenaQueryValue::String)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, seq: A) -> Result<Self::Value, A::Error> {
+                <&'a [ArenaQueryValue<'a>] as ArenaDeserialize<'a>>::deserialize_in(
+                    self.bump,
+                    serde::de::value::SeqAccessDeserializer::new(seq),
+                )
+                .map(ArenaQueryValue::Array)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                <arena::Map<'a, ArenaQueryValue<'a>> as ArenaDeserialize<'a>>::deserialize_in(
+                    self.bump,
+                    serde::de::value::MapAccessDeserializer::new(map),
+                )
+                .map(ArenaQueryValue::Object)
+            }
+        }
+
+        deserializer.deserialize_any(ValueVisitor { bump })
+    }
+}
+
+impl IntoOwned<QueryValue> for ArenaQueryValue<'_> {
+    fn into_owned(self) -> QueryValue {
+        match self {
+            Self::Null => QueryValue::Null,
+            Self::Bool(value) => QueryValue::Bool(value),
+            Self::I64(value) => QueryValue::I64(value),
+            Self::F64(value) => QueryValue::F64(value),
+            Self::F32(value) => QueryValue::F32(value),
+            Self::String(value) => QueryValue::String(value.to_owned()),
+            Self::Array(values) => QueryValue::Array(values.into_owned()),
+            Self::Object(values) => QueryValue::Object(values.into_owned()),
+        }
     }
 }
 
@@ -891,46 +1263,101 @@ fn validate_parameter_name(name: &str) -> Result<(), QueryError> {
     }
 }
 
+/// A parameter's path below its name: one array index per declared array
+/// level. It renders (`name[3][0]`) only when an error reports it, so
+/// accepting a large parameter formats no paths.
+#[derive(Clone, Copy)]
+struct ParamPath<'p> {
+    name: &'p str,
+    indices: &'p [usize],
+}
+
+impl std::fmt::Display for ParamPath<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)?;
+        self.indices
+            .iter()
+            .try_for_each(|index| write!(f, "[{index}]"))
+    }
+}
+
 /// Validate a parameter value with an explicit stack, so neither its size nor
-/// its nesting reaches the call stack; nesting is bounded like a request.
-fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), QueryError> {
-    let mut pending = vec![(value, path.to_owned(), 1_usize)];
-    while let Some((value, path, depth)) = pending.pop() {
-        if depth > MAX_REQUEST_JSON_DEPTH {
+/// its nesting reaches the call stack; nesting is bounded like a request,
+/// counting the `levels_above` the value already sits under (the declared
+/// array levels of a typed parameter). Every parameter a request holds has
+/// passed this check, so [`QueryRequest::check_nesting`] need not walk them.
+///
+/// The walk visits values in document order and keeps one frame per open
+/// array or object, holding its remaining children and the key or index of
+/// the child being visited. An error renders its path from those frames, so
+/// a valid value costs no path formatting and the stack stays as deep as the
+/// value rather than as wide.
+fn validate_json_value(
+    value: &QueryValue,
+    path: impl std::fmt::Display,
+    levels_above: usize,
+) -> Result<(), QueryError> {
+    enum Children<'a> {
+        Array(std::iter::Enumerate<std::slice::Iter<'a, QueryValue>>),
+        Object(std::collections::btree_map::Iter<'a, String, QueryValue>),
+    }
+    #[derive(Clone, Copy)]
+    enum Segment<'a> {
+        Index(usize),
+        Key(&'a str),
+    }
+    struct Frame<'a> {
+        children: Children<'a>,
+        visiting: Option<Segment<'a>>,
+    }
+    let render = |frames: &[Frame<'_>]| {
+        frames.iter().filter_map(|frame| frame.visiting).fold(
+            path.to_string(),
+            |mut rendered, segment| {
+                match segment {
+                    Segment::Index(index) => rendered.push_str(&format!("[{index}]")),
+                    Segment::Key(name) => {
+                        rendered.push('.');
+                        rendered.push_str(name);
+                    }
+                }
+                rendered
+            },
+        )
+    };
+    let mut frames = Vec::<Frame<'_>>::new();
+    let mut visit = value;
+    loop {
+        // Every open frame is an ancestor of `visit`.
+        if levels_above + frames.len() + 1 > MAX_REQUEST_JSON_DEPTH {
             return Err(QueryError::NestingTooDeep {
-                path,
+                path: render(&frames),
                 maximum: MAX_REQUEST_JSON_DEPTH,
             });
         }
-        match value {
+        match visit {
             QueryValue::F64(value) if !value.is_finite() => {
                 return Err(QueryError::ParameterTypeMismatch {
-                    path,
+                    path: render(&frames),
                     expected: QueryParamType::Value,
                     actual: "non-finite f64",
                 });
             }
             QueryValue::F32(value) if !value.is_finite() => {
                 return Err(QueryError::ParameterTypeMismatch {
-                    path,
+                    path: render(&frames),
                     expected: QueryParamType::Value,
                     actual: "non-finite f32",
                 });
             }
-            // Reverse pushes keep the first invalid element in document order.
-            QueryValue::Array(values) => pending.extend(
-                values
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .map(|(index, value)| (value, format!("{path}[{index}]"), depth + 1)),
-            ),
-            QueryValue::Object(values) => pending.extend(
-                values
-                    .iter()
-                    .rev()
-                    .map(|(name, value)| (value, format!("{path}.{name}"), depth + 1)),
-            ),
+            QueryValue::Array(values) => frames.push(Frame {
+                children: Children::Array(values.iter().enumerate()),
+                visiting: None,
+            }),
+            QueryValue::Object(values) => frames.push(Frame {
+                children: Children::Object(values.iter()),
+                visiting: None,
+            }),
             QueryValue::Null
             | QueryValue::Bool(_)
             | QueryValue::I64(_)
@@ -938,14 +1365,36 @@ fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), QueryError>
             | QueryValue::F32(_)
             | QueryValue::String(_) => {}
         }
+        // Move to the next value in document order, closing finished frames.
+        visit = loop {
+            let Some(frame) = frames.last_mut() else {
+                return Ok(());
+            };
+            let next = match &mut frame.children {
+                Children::Array(values) => values
+                    .next()
+                    .map(|(index, value)| (Segment::Index(index), value)),
+                Children::Object(values) => values
+                    .next()
+                    .map(|(name, value)| (Segment::Key(name.as_str()), value)),
+            };
+            let Some((segment, value)) = next else {
+                frames.pop();
+                continue;
+            };
+            frame.visiting = Some(segment);
+            break value;
+        };
     }
-    Ok(())
 }
 
+/// Normalize a typed parameter to its declared schema. The declared type
+/// bounds the recursion, so its depth is checked once here rather than at
+/// every element.
 fn normalize_typed_value(
     ty: &QueryParamType,
     value: QueryValue,
-    path: &str,
+    name: &str,
 ) -> Result<QueryValue, QueryError> {
     // Normalization recurses once per array level of the declared type.
     let type_depth = std::iter::successors(Some(ty), |ty| match ty {
@@ -963,10 +1412,22 @@ fn normalize_typed_value(
     .count();
     if type_depth > MAX_REQUEST_JSON_DEPTH {
         return Err(QueryError::NestingTooDeep {
-            path: path.to_owned(),
+            path: name.to_owned(),
             maximum: MAX_REQUEST_JSON_DEPTH,
         });
     }
+    normalize_typed_value_at(ty, value, name, &mut Vec::with_capacity(type_depth))
+}
+
+/// [`normalize_typed_value`] below `indices`, the array positions leading to
+/// `value`, which render into a path only when an error reports one.
+fn normalize_typed_value_at(
+    ty: &QueryParamType,
+    value: QueryValue,
+    name: &str,
+    indices: &mut Vec<usize>,
+) -> Result<QueryValue, QueryError> {
+    let path = || ParamPath { name, indices }.to_string();
     let actual = query_value_kind(&value);
     match (ty, value) {
         (QueryParamType::Bool, value @ QueryValue::Bool(_))
@@ -996,22 +1457,27 @@ fn normalize_typed_value(
             Ok(QueryValue::String(datetime))
         }
         (QueryParamType::Value, value) => {
-            validate_json_value(&value, path)?;
+            validate_json_value(&value, ParamPath { name, indices }, indices.len())?;
             Ok(value)
         }
         (QueryParamType::Object, value @ QueryValue::Object(_)) => {
-            validate_json_value(&value, path)?;
+            validate_json_value(&value, ParamPath { name, indices }, indices.len())?;
             Ok(value)
         }
         (QueryParamType::Array(inner), QueryValue::Array(values)) => values
             .into_iter()
             .enumerate()
-            .map(|(index, value)| normalize_typed_value(inner, value, &format!("{path}[{index}]")))
+            .map(|(index, value)| {
+                indices.push(index);
+                let normalized = normalize_typed_value_at(inner, value, name, indices);
+                indices.pop();
+                normalized
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(QueryValue::Array),
-        (QueryParamType::Bytes, _) => Err(QueryError::unsupported_bytes(path)),
+        (QueryParamType::Bytes, _) => Err(QueryError::unsupported_bytes(path())),
         (expected, _) => Err(QueryError::ParameterTypeMismatch {
-            path: path.to_owned(),
+            path: path(),
             expected: expected.clone(),
             actual,
         }),
@@ -1032,9 +1498,46 @@ fn query_value_kind(value: &QueryValue) -> &'static str {
 }
 
 #[cfg(test)]
+mod validation_oracle;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::batch::{read_batch, write_batch};
+
+    /// Each `f32` is written in its shortest form: widened to `f64` digits, a
+    /// batch of 1,100 embeddings of 768 values grew past the 16 MiB body
+    /// limit while decoding to the same vectors.
+    #[test]
+    fn requests_write_f32_values_in_their_shortest_form() {
+        let request = |embedding: Vec<f32>| {
+            QueryRequest::write(write_batch().var_as(
+                "doc",
+                crate::traversal::g().add_n(
+                    "Doc",
+                    vec![("embedding", PropertyValue::F32Array(embedding))],
+                ),
+            ))
+        };
+        let small = request(vec![0.9, 0.1, -0.25, 1.0e-3]);
+        let json = small.to_json_string().unwrap();
+        assert!(json.contains("[0.9,0.1,-0.25,0.001]"), "{json}");
+        assert_eq!(
+            QueryRequest::from_json_slice(json.as_bytes()).unwrap(),
+            small
+        );
+
+        // Four-decimal values take at most eight bytes each with a separator,
+        // where widened ones took about twenty.
+        let embedding = (0..768_i32)
+            .map(|index| {
+                let ten_thousandths = i16::try_from(index * 37 % 19_999 - 9_999).unwrap();
+                f32::from(ten_thousandths) / 10_000.0
+            })
+            .collect::<Vec<_>>();
+        let bulk = request(embedding).to_json_bytes().unwrap();
+        assert!(bulk.len() < 768 * 8 + 200, "{} bytes", bulk.len());
+    }
 
     #[test]
     fn built_requests_and_parameters_are_bounded_without_recursion() {
@@ -1085,6 +1588,30 @@ mod tests {
         ));
     }
 
+    /// A typed parameter's declared array levels count toward the nesting
+    /// bound of the values inside them, so every parameter a request holds is
+    /// bounded when inserted and `check_nesting` need not walk parameters.
+    #[test]
+    fn typed_array_levels_count_toward_the_nesting_bound() {
+        let declared = |levels: usize| {
+            (0..levels).fold(QueryParamType::Value, |inner, _| {
+                QueryParamType::Array(Box::new(inner))
+            })
+        };
+        let nested = |levels: usize, leaf: QueryValue| {
+            (0..levels).fold(leaf, |inner, _| QueryValue::Array(vec![inner]))
+        };
+        // 100 declared levels around a 155-level value reach the limit exactly.
+        let at_limit = typed(declared(100), nested(100, nested(154, QueryValue::Null)))
+            .expect("a parameter at the limit is accepted");
+        assert!(at_limit.check_nesting().is_ok());
+        assert!(matches!(
+            typed(declared(100), nested(100, nested(155, QueryValue::Null))),
+            Err(QueryError::NestingTooDeep { path, maximum })
+                if maximum == MAX_REQUEST_JSON_DEPTH && path.starts_with("value[0][0]")
+        ));
+    }
+
     #[test]
     fn request_json_nesting_is_bounded_before_parsing() {
         // An unclosed value far deeper than any stack could skip recursively
@@ -1102,12 +1629,18 @@ mod tests {
                 "]".repeat(levels - 1)
             )
         };
-        assert!(check_json_depth(depth(MAX_REQUEST_JSON_DEPTH).as_bytes()).is_ok());
-        assert!(check_json_depth(depth(MAX_REQUEST_JSON_DEPTH + 1).as_bytes()).is_err());
-        // Brackets and escaped quotes inside strings are not structure.
         assert!(
-            check_json_depth(format!("{{\"x\":\"\\\"{}\"}}", "[".repeat(1_000)).as_bytes()).is_ok()
+            check_json_depth::<simd_json::Error>(depth(MAX_REQUEST_JSON_DEPTH).as_bytes()).is_ok()
         );
+        assert!(
+            check_json_depth::<simd_json::Error>(depth(MAX_REQUEST_JSON_DEPTH + 1).as_bytes())
+                .is_err()
+        );
+        // Brackets and escaped quotes inside strings are not structure.
+        assert!(check_json_depth::<simd_json::Error>(
+            format!("{{\"x\":\"\\\"{}\"}}", "[".repeat(1_000)).as_bytes()
+        )
+        .is_ok());
         // Word skipping agrees with a byte-at-a-time scan, with quotes,
         // escapes and brackets at every offset around word boundaries.
         let oracle = |bytes: &[u8]| {
@@ -1154,19 +1687,20 @@ mod tests {
                 body.extend_from_slice(fragments[(seed >> 33) as usize % fragments.len()]);
             }
             assert_eq!(
-                check_json_depth(&body).is_ok(),
+                check_json_depth::<simd_json::Error>(&body).is_ok(),
                 oracle(&body),
                 "{:?}",
                 String::from_utf8_lossy(&body)
             );
         }
         // Many shallow siblings pass the full scan.
-        assert!(
-            check_json_depth(format!("{{\"x\":[{}[]]}}", "[],".repeat(1_000)).as_bytes()).is_ok()
-        );
+        assert!(check_json_depth::<simd_json::Error>(
+            format!("{{\"x\":[{}[]]}}", "[],".repeat(1_000)).as_bytes()
+        )
+        .is_ok());
         let request = QueryRequest::read(read_batch());
         assert_eq!(
-            QueryRequest::from_json_slice(&sonic_rs::to_vec(&request).unwrap()).unwrap(),
+            QueryRequest::from_json_slice(&simd_json::to_vec(&request).unwrap()).unwrap(),
             request
         );
     }
@@ -1289,9 +1823,9 @@ mod tests {
 
         for (json, expected) in cases {
             assert_eq!(
-                sonic_rs::from_str::<QueryValue>(json).unwrap(),
+                simd_json::from_reader::<_, QueryValue>(json.as_bytes()).unwrap(),
                 expected,
-                "sonic-rs: {json}"
+                "simd-json: {json}"
             );
             assert_eq!(
                 serde_json::from_str::<QueryValue>(json).unwrap(),
@@ -1303,9 +1837,9 @@ mod tests {
                 expected,
                 "serde_json::Value: {json}"
             );
-            let serialized = sonic_rs::to_string(&expected).unwrap();
+            let serialized = simd_json::to_string(&expected).unwrap();
             assert_eq!(
-                sonic_rs::from_str::<QueryValue>(&serialized).unwrap(),
+                simd_json::from_reader::<_, QueryValue>(serialized.as_bytes()).unwrap(),
                 expected,
                 "round trip: {serialized}"
             );
@@ -1313,7 +1847,7 @@ mod tests {
 
         for invalid in ["", "[1,", r#"{"k"}"#, "nul", r#""\x""#] {
             assert!(
-                sonic_rs::from_str::<QueryValue>(invalid).is_err(),
+                simd_json::from_reader::<_, QueryValue>(invalid.as_bytes()).is_err(),
                 "{invalid}"
             );
             assert!(
@@ -1328,41 +1862,51 @@ mod tests {
     /// own thread with a larger stack.
     #[test]
     fn deeply_nested_escaped_strings_parse_without_a_copy_per_level() {
-        const DEPTH: usize = 40;
-        const LEN: usize = 1 << 20;
-        // The escape makes the parser hand over an owned copy of the string.
-        let body = read_wire(
-            &format!(
-                r#"{{"p":{}"{}\n"{}}}"#,
-                "[".repeat(DEPTH),
-                "a".repeat(LEN),
-                "]".repeat(DEPTH)
-            ),
-            None,
-        );
+        // Unoptimized aarch64 Linux builds need more than the default 2 MiB
+        // test stack for 40 levels of the parser's frames (an optimized
+        // build needs a fraction). The heap counter is per thread, so the
+        // whole measurement runs on the larger stack.
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(|| {
+                const DEPTH: usize = 40;
+                const LEN: usize = 1 << 20;
+                // The escape makes the parser hand over an owned copy of the string.
+                let body = read_wire(
+                    &format!(
+                        r#"{{"p":{}"{}\n"{}}}"#,
+                        "[".repeat(DEPTH),
+                        "a".repeat(LEN),
+                        "]".repeat(DEPTH)
+                    ),
+                    None,
+                );
 
-        heap::HEAP.with(|heap| heap.set((0, 0)));
-        let request = QueryRequest::from_json_slice(body.as_bytes()).unwrap();
-        let peak = heap::HEAP.with(std::cell::Cell::get).1;
+                heap::HEAP.with(|heap| heap.set((0, 0)));
+                let request = QueryRequest::from_json_slice(body.as_bytes()).unwrap();
+                let peak = heap::HEAP.with(std::cell::Cell::get).1;
 
-        let innermost =
-            (0..DEPTH).try_fold(
-                &request.parameters().unwrap()["p"],
-                |value, _| match value {
-                    QueryValue::Array(values) => values.first(),
-                    _ => None,
-                },
-            );
-        assert!(matches!(
-            innermost,
-            Some(QueryValue::String(text)) if text.len() == LEN + 1 && text.ends_with('\n')
-        ));
-        // Parser scratch and the owned string take about 3x the string. The
-        // derived untagged impl held a copy per level: about 40x here.
-        assert!(
-            peak < (8 * LEN) as isize,
-            "parsing peaked at {peak} heap bytes"
-        );
+                let innermost = (0..DEPTH).try_fold(
+                    &request.parameters().unwrap()["p"],
+                    |value, _| match value {
+                        QueryValue::Array(values) => values.first(),
+                        _ => None,
+                    },
+                );
+                assert!(matches!(
+                    innermost,
+                    Some(QueryValue::String(text)) if text.len() == LEN + 1 && text.ends_with('\n')
+                ));
+                // Parser scratch and the owned string take about 3x the string. The
+                // derived untagged impl held a copy per level: about 40x here.
+                assert!(
+                    peak < (8 * LEN) as isize,
+                    "parsing peaked at {peak} heap bytes"
+                );
+            })
+            .expect("test thread spawns")
+            .join()
+            .expect("nested strings parse within the larger stack");
     }
 
     fn typed(ty: QueryParamType, value: QueryValue) -> Result<QueryRequest, QueryError> {
@@ -1415,10 +1959,10 @@ mod tests {
             .to_json_string()
             .expect("write request should serialize");
 
-        let parsed_read =
-            sonic_rs::from_str::<QueryRequest>(&read).expect("read/read should deserialize");
-        let parsed_write =
-            sonic_rs::from_str::<QueryRequest>(&write).expect("write/write should deserialize");
+        let parsed_read = simd_json::from_reader::<_, QueryRequest>(read.as_bytes())
+            .expect("read/read should deserialize");
+        let parsed_write = simd_json::from_reader::<_, QueryRequest>(write.as_bytes())
+            .expect("write/write should deserialize");
         assert_eq!(parsed_read.request_type(), QueryRequestType::Read);
         assert_eq!(parsed_write.request_type(), QueryRequestType::Write);
 
@@ -1426,8 +1970,8 @@ mod tests {
             write.replacen(r#""request_type":"write""#, r#""request_type":"read""#, 1);
         let write_tagged_read =
             read.replacen(r#""request_type":"read""#, r#""request_type":"write""#, 1);
-        assert!(sonic_rs::from_str::<QueryRequest>(&read_tagged_write).is_err());
-        assert!(sonic_rs::from_str::<QueryRequest>(&write_tagged_read).is_err());
+        assert!(simd_json::from_reader::<_, QueryRequest>(read_tagged_write.as_bytes()).is_err());
+        assert!(simd_json::from_reader::<_, QueryRequest>(write_tagged_read.as_bytes()).is_err());
     }
 
     #[test]
@@ -1437,7 +1981,7 @@ mod tests {
             .expect("strong read should serialize");
         assert!(!strong.contains("search_consistency"));
         assert_eq!(
-            sonic_rs::from_str::<QueryRequest>(&strong)
+            simd_json::from_reader::<_, QueryRequest>(strong.as_bytes())
                 .expect("absent consistency is strong")
                 .search_consistency(),
             SearchConsistency::Strong
@@ -1451,7 +1995,8 @@ mod tests {
             .expect("eventual read should serialize");
         assert!(wire.contains(r#""search_consistency":"eventual""#));
         assert_eq!(
-            sonic_rs::from_str::<QueryRequest>(&wire).expect("eventual read round-trips"),
+            simd_json::from_reader::<_, QueryRequest>(wire.as_bytes())
+                .expect("eventual read round-trips"),
             eventual
         );
 
@@ -1460,7 +2005,7 @@ mod tests {
             &strong[..strong.len() - 1]
         );
         assert_eq!(
-            sonic_rs::from_str::<QueryRequest>(&explicit_strong)
+            simd_json::from_reader::<_, QueryRequest>(explicit_strong.as_bytes())
                 .expect("explicit strong is accepted")
                 .search_consistency(),
             SearchConsistency::Strong
@@ -1469,7 +2014,7 @@ mod tests {
             "{},\"search_consistency\":\"sometimes\"}}",
             &strong[..strong.len() - 1]
         );
-        assert!(sonic_rs::from_str::<QueryRequest>(&unknown).is_err());
+        assert!(simd_json::from_reader::<_, QueryRequest>(unknown.as_bytes()).is_err());
 
         let write = QueryRequest::write(write_batch());
         assert!(matches!(
@@ -1483,21 +2028,22 @@ mod tests {
             "{},\"search_consistency\":\"eventual\"}}",
             &write_wire[..write_wire.len() - 1]
         );
-        let error = sonic_rs::from_str::<QueryRequest>(&eventual_write)
+        let error = simd_json::from_reader::<_, QueryRequest>(eventual_write.as_bytes())
             .expect_err("eventual writes are rejected on the wire");
         assert!(error.to_string().contains("only valid for read requests"));
         let strong_write = format!(
             "{},\"search_consistency\":\"strong\"}}",
             &write_wire[..write_wire.len() - 1]
         );
-        assert!(sonic_rs::from_str::<QueryRequest>(&strong_write).is_ok());
+        assert!(simd_json::from_reader::<_, QueryRequest>(strong_write.as_bytes()).is_ok());
     }
 
     #[test]
     fn published_openapi_examples_are_valid_query_requests() {
-        let specification =
-            sonic_rs::from_str::<sonic_rs::Value>(include_str!("../../../docs/openapi.json"))
-                .expect("published OpenAPI document is valid JSON");
+        let specification = simd_json::from_reader::<_, simd_json::OwnedValue>(
+            (include_str!("../../../docs/openapi.json")).as_bytes(),
+        )
+        .expect("published OpenAPI document is valid JSON");
         let examples = &specification["paths"]["/v2/query"]["post"]["requestBody"]["content"]
             ["application/json"]["examples"];
 
@@ -1505,9 +2051,9 @@ mod tests {
             ("read", QueryRequestType::Read),
             ("write", QueryRequestType::Write),
         ] {
-            let example = sonic_rs::to_string(&examples[name]["value"])
+            let example = simd_json::to_string(&examples[name]["value"])
                 .expect("OpenAPI query example is serializable");
-            let request = sonic_rs::from_str::<QueryRequest>(&example)
+            let request = simd_json::from_reader::<_, QueryRequest>(example.as_bytes())
                 .unwrap_or_else(|error| panic!("OpenAPI {name} example is invalid: {error}"));
             assert_eq!(request.request_type(), expected_type);
         }
@@ -1682,7 +2228,7 @@ mod tests {
             duplicate_type,
         ] {
             assert!(
-                sonic_rs::from_str::<QueryRequest>(&invalid).is_err(),
+                simd_json::from_reader::<_, QueryRequest>(invalid.as_bytes()).is_err(),
                 "invalid DTO should be rejected: {invalid}"
             );
         }
@@ -1691,7 +2237,8 @@ mod tests {
     #[test]
     fn raw_f32_is_normalized_and_untyped_parameters_remain_explicit() {
         let raw = read_wire(r#"{"value":1.25}"#, Some(r#"{"value":"f32"}"#));
-        let typed = sonic_rs::from_str::<QueryRequest>(&raw).expect("valid typed f32 request");
+        let typed = simd_json::from_reader::<_, QueryRequest>(raw.as_bytes())
+            .expect("valid typed f32 request");
         assert!(matches!(
             typed.parameters().unwrap().get("value"),
             Some(QueryValue::F32(value)) if *value == 1.25
@@ -1701,7 +2248,7 @@ mod tests {
             r#"{"value":[1,0,-1]}"#,
             Some(r#"{"value":{"array":"f32"}}"#),
         );
-        let typed = sonic_rs::from_str::<QueryRequest>(&raw)
+        let typed = simd_json::from_reader::<_, QueryRequest>(raw.as_bytes())
             .expect("integer JSON values normalize into a typed f32 array");
         assert!(matches!(
             typed.parameters().unwrap().get("value"),
@@ -1714,7 +2261,8 @@ mod tests {
         ));
 
         let raw = read_wire(r#"{"value":{"nested":[true,1,"x"]}}"#, None);
-        let untyped = sonic_rs::from_str::<QueryRequest>(&raw).expect("valid untyped JSON request");
+        let untyped = simd_json::from_reader::<_, QueryRequest>(raw.as_bytes())
+            .expect("valid untyped JSON request");
         assert!(untyped.parameter_types().is_none());
         assert!(matches!(
             untyped.parameters().unwrap().get("value"),

@@ -124,6 +124,13 @@ impl Bitmap {
         self.ids
     }
 
+    /// Moves the IDs to an owner outside this module together with the
+    /// reservation that admits them. The caller holds the reservation for as
+    /// long as it holds the IDs, so the request keeps paying for them.
+    pub(crate) fn into_parts(self) -> (roaring::RoaringTreemap, Option<Reservation>) {
+        (self.ids, self.memory)
+    }
+
     pub(crate) fn singleton(id: u64, budget: Option<&Budget>) -> Result<Self> {
         // One tree node, one growing container vector and one short array.
         let memory = budget.map(|budget| budget.reserve(2048)).transpose()?;
@@ -455,6 +462,25 @@ mod tests {
         Bitmap::singleton(1, Some(&budget))
             .unwrap()
             .into_unbudgeted();
+    }
+
+    /// Splitting a bitmap hands its charge to the caller with its IDs: the
+    /// request pays until the caller drops the reservation, never earlier.
+    #[test]
+    fn into_parts_moves_the_charge_with_the_ids() {
+        let budget = Budget::new(10000);
+        let (ids, memory) = Bitmap::singleton(7, Some(&budget)).unwrap().into_parts();
+        assert_eq!(ids.iter().collect::<Vec<_>>(), vec![7]);
+        assert!(memory.is_some());
+        assert!(budget.available() < 10000);
+        drop(ids);
+        assert!(budget.available() < 10000);
+        drop(memory);
+        assert_eq!(budget.available(), 10000);
+
+        let (ids, memory) = Bitmap::singleton(7, None).unwrap().into_parts();
+        assert_eq!(ids.len(), 1);
+        assert!(memory.is_none());
     }
 
     #[test]

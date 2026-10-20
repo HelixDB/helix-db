@@ -44,7 +44,7 @@ struct Fixture {
 }
 
 fn fixture() -> &'static Fixture {
-    static FIXTURE: OnceLock<Fixture> = OnceLock::new();
+    static FIXTURE: OnceLock<Fixture> = const { OnceLock::new() };
     FIXTURE.get_or_init(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

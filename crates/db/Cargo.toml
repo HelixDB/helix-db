@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d" }
-slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "50c063327b826c2c018c664171fc1ada5dc3096d", optional = true }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd" }
+slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd", optional = true }
 http-body = { version = "1", optional = true }
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
@@ -29,7 +29,11 @@ roaring = { version = "0.11", features = ["serde"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sonic-rs = "0.5.8"
+simd-json = { version = "0.18.1", default-features = false, features = [
+    "runtime-detection",
+    "serde_impl",
+    "swar-number-parsing",
+] }
 rkyv = "0.8"
 
 # Error handling
@@ -94,6 +98,10 @@ name = "response_encoding"
 harness = false
 
 [[bench]]
+name = "property_row_reads"
+harness = false
+
+[[bench]]
 name = "write_path_mutations"
 harness = false
 
@@ -113,6 +121,11 @@ required-features = ["production-coverage"]
 
 [[bench]]
 name = "vector_batch_insert"
+harness = false
+required-features = ["production-coverage"]
+
+[[bench]]
+name = "vector_memory_store"
 harness = false
 required-features = ["production-coverage"]
 

@@ -17,12 +17,12 @@ fn orbit_filter_before_label_uses_label_scoped_parameterized_equality_index() {
 
     let mut planner_ctx = ctx(builtin_label_indexes()
         .with_node_eq(ScopedPropertyKey::try_new("Person", "orbit_id").unwrap()));
-    planner_ctx.params =
-        parameters
-            .into_iter()
-            .fold(ParamBindings::default(), |bindings, (name, value)| {
-                bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
-            });
+    planner_ctx.params = parameters
+        .into_iter()
+        .fold(ParamBindings::default(), |bindings, (name, value)| {
+            bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
+        })
+        .into();
 
     let output = crate::planning::plan_with_diagnostics(&query, &planner_ctx).unwrap();
     let access = output
@@ -79,12 +79,12 @@ fn orbit_organization_raw_query_uses_label_scoped_parameterized_equality_index()
 
     let mut planner_ctx = ctx(builtin_label_indexes()
         .with_node_eq(ScopedPropertyKey::try_new("Organization", "organization_id").unwrap()));
-    planner_ctx.params =
-        parameters
-            .into_iter()
-            .fold(ParamBindings::default(), |bindings, (name, value)| {
-                bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
-            });
+    planner_ctx.params = parameters
+        .into_iter()
+        .fold(ParamBindings::default(), |bindings, (name, value)| {
+            bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
+        })
+        .into();
 
     let output = crate::planning::plan_with_diagnostics(&query, &planner_ctx).unwrap();
     assert!(
@@ -129,12 +129,12 @@ fn orbit_organization_nested_single_filter_extracts_index_and_residual() {
 
     let mut planner_ctx = ctx(builtin_label_indexes()
         .with_node_eq(ScopedPropertyKey::try_new("Organization", "organization_id").unwrap()));
-    planner_ctx.params =
-        parameters
-            .into_iter()
-            .fold(ParamBindings::default(), |bindings, (name, value)| {
-                bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
-            });
+    planner_ctx.params = parameters
+        .into_iter()
+        .fold(ParamBindings::default(), |bindings, (name, value)| {
+            bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
+        })
+        .into();
 
     let output = crate::planning::plan_with_diagnostics(&query, &planner_ctx).unwrap();
     assert!(
@@ -185,12 +185,12 @@ fn terminal_label_scoped_parameterized_equality_uses_index_after_request_round_t
 
     let mut planner_ctx = ctx(builtin_label_indexes()
         .with_node_eq(ScopedPropertyKey::try_new("Person", "orbit_id").unwrap()));
-    planner_ctx.params =
-        parameters
-            .into_iter()
-            .fold(ParamBindings::default(), |bindings, (name, value)| {
-                bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
-            });
+    planner_ctx.params = parameters
+        .into_iter()
+        .fold(ParamBindings::default(), |bindings, (name, value)| {
+            bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
+        })
+        .into();
 
     let output = crate::planning::plan_with_diagnostics(&query, &planner_ctx).unwrap();
     assert!(
@@ -238,12 +238,12 @@ fn terminal_edge_filter_before_label_uses_parameterized_equality_index() {
 
     let mut planner_ctx = ctx(builtin_label_indexes()
         .with_edge_eq(ScopedPropertyKey::try_new("MEMBER_OF", "orbit_id").unwrap()));
-    planner_ctx.params =
-        parameters
-            .into_iter()
-            .fold(ParamBindings::default(), |bindings, (name, value)| {
-                bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
-            });
+    planner_ctx.params = parameters
+        .into_iter()
+        .fold(ParamBindings::default(), |bindings, (name, value)| {
+            bindings.with_query_value(NonEmptyString::new(name).unwrap(), value)
+        })
+        .into();
 
     let output = crate::planning::plan_with_diagnostics(&query, &planner_ctx).unwrap();
     let count = output
@@ -286,13 +286,15 @@ fn ordinary_request_membership_parameters_match_literal_index_access() {
         .with_edge_eq(ScopedPropertyKey::try_new("MEMBER_OF", "$label").unwrap())
         .with_edge_eq(ScopedPropertyKey::try_new("MEMBER_OF", "orbit_id").unwrap());
     let mut planner_ctx = ctx(indexes.clone());
-    planner_ctx.params = ParamBindings::default().with_query_value(
-        NonEmptyString::new("orbit_ids").unwrap(),
-        QueryValue::Array(vec![
-            QueryValue::String("orbit-1".to_owned()),
-            QueryValue::String("orbit-2".to_owned()),
-        ]),
-    );
+    planner_ctx.params = ParamBindings::default()
+        .with_query_value(
+            NonEmptyString::new("orbit_ids").unwrap(),
+            QueryValue::Array(vec![
+                QueryValue::String("orbit-1".to_owned()),
+                QueryValue::String("orbit-2".to_owned()),
+            ]),
+        )
+        .into();
 
     let parameterized_node = executable_traversal(
         g().n_with_label("Person")
@@ -344,13 +346,15 @@ fn ordinary_request_label_membership_matches_literal_label_union() {
         stats: stats.clone(),
         ..PlannerContext::default()
     };
-    parameterized_ctx.params = ParamBindings::default().with_query_value(
-        NonEmptyString::new("labels").unwrap(),
-        QueryValue::Array(vec![
-            QueryValue::String("User".to_owned()),
-            QueryValue::String("Account".to_owned()),
-        ]),
-    );
+    parameterized_ctx.params = ParamBindings::default()
+        .with_query_value(
+            NonEmptyString::new("labels").unwrap(),
+            QueryValue::Array(vec![
+                QueryValue::String("User".to_owned()),
+                QueryValue::String("Account".to_owned()),
+            ]),
+        )
+        .into();
 
     let parameterized = executable_traversal(
         g().n_where(Predicate::is_in_param("$label", "labels")),
@@ -400,10 +404,12 @@ fn membership_parameter_cardinality_matches_literal_normalization() {
             .map(|value| (*value).to_owned())
             .collect::<Vec<_>>();
         let mut planner_ctx = ctx(indexes.clone());
-        planner_ctx.params = ParamBindings::default().with_query_value(
-            NonEmptyString::new("orbit_ids").unwrap(),
-            QueryValue::Array(query_values),
-        );
+        planner_ctx.params = ParamBindings::default()
+            .with_query_value(
+                NonEmptyString::new("orbit_ids").unwrap(),
+                QueryValue::Array(query_values),
+            )
+            .into();
 
         let parameterized = executable_traversal(
             g().n_with_label_where("Person", Predicate::is_in_param("orbit_id", "orbit_ids")),
@@ -431,10 +437,12 @@ fn optimizer_proven_empty_membership_preserves_collection_return_shape() {
         .with_node_eq(ScopedPropertyKey::try_new("Person", "$label").unwrap())
         .with_node_eq(ScopedPropertyKey::try_new("Person", "orbit_id").unwrap());
     let mut planner_ctx = ctx(indexes);
-    planner_ctx.params = ParamBindings::default().with_query_value(
-        NonEmptyString::new("orbit_ids").unwrap(),
-        QueryValue::Array(Vec::new()),
-    );
+    planner_ctx.params = ParamBindings::default()
+        .with_query_value(
+            NonEmptyString::new("orbit_ids").unwrap(),
+            QueryValue::Array(Vec::new()),
+        )
+        .into();
 
     let plan = executable_traversal(
         g().n_with_label("Person")
@@ -479,10 +487,12 @@ fn ordinary_request_range_parameters_enable_literal_constraint_reduction() {
             ScopedPropertyDirectionKey::try_new("Person", "age", RangeIndexDirection::Asc).unwrap(),
         );
     let mut planner_ctx = ctx(indexes.clone());
-    planner_ctx.params = ParamBindings::default().with_query_value(
-        NonEmptyString::new("minimum_age").unwrap(),
-        QueryValue::I64(20),
-    );
+    planner_ctx.params = ParamBindings::default()
+        .with_query_value(
+            NonEmptyString::new("minimum_age").unwrap(),
+            QueryValue::I64(20),
+        )
+        .into();
     let parameterized_predicate = Predicate::and(vec![
         Predicate::gte_param("age", "minimum_age"),
         Predicate::lt("age", 10),
@@ -522,7 +532,8 @@ fn ordinary_request_parameters_specialize_non_indexable_predicates_recursively()
         .with_query_value(
             NonEmptyString::new("excluded_age").unwrap(),
             QueryValue::I64(17),
-        );
+        )
+        .into();
     let parameterized_predicate = Predicate::and(vec![
         Predicate::contains_param("bio", "needle"),
         Predicate::not(Predicate::eq_param("age", "excluded_age")),

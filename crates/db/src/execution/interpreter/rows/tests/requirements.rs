@@ -67,7 +67,7 @@ fn requirements_reject_growth_before_copying_names_and_preserve_previous_state()
             requirements.insert(slot, r::PropertyRequirement::Key(&large))
         });
         assert!(
-            matches!(result, Err(crate::cypher::Error::Query(error)) if error.detail == "MemoryLimit")
+            matches!(result, Err(crate::cypher::Error::Query(error)) if error.detail == "memory_limit")
         );
         // The structured error owns short diagnostic strings, never the key.
         assert!(allocations.bytes < 1024, "{allocations:?}");

@@ -18,7 +18,6 @@ fn memory_config(name: &str) -> ServerConfig {
         db_path: name.to_string(),
         storage: StorageConfig::Memory,
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
-        cypher: crate::CypherEndpoints::Disabled,
     }
 }
 
@@ -443,7 +442,7 @@ async fn post_query(router: axum::Router, request: &query::QueryRequest) -> serd
             Request::post("/v2/query")
                 .header("content-type", "application/json")
                 .header("x-helix-await-durable", is_write.to_string())
-                .body(Body::from(sonic_rs::to_vec(request).unwrap()))
+                .body(Body::from(simd_json::to_vec(request).unwrap()))
                 .unwrap(),
         )
         .await
@@ -508,7 +507,6 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
             cache: CacheConfig::Hybrid(Box::new(cache)),
         },
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
-        cypher: crate::CypherEndpoints::Disabled,
     };
     let write = query::QueryRequest::write(
         batch::write_batch()
@@ -543,7 +541,11 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
         stats.fts_disk.state,
         db::CacheTierState::Ready { capacity_bytes: Some(bytes), .. } if bytes == 8 * MIB as u64
     ));
-    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        config.storage.clone(),
+    ));
     post_query(router.clone(), &write).await;
     assert_eq!(post_query(router, &read).await["count"], 1);
     db.close().await.unwrap();
@@ -564,7 +566,11 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
         db: reader,
         cache_lock,
     } = open_database(&config).await.unwrap();
-    let router = http::router(ServerState::new(Arc::clone(&reader), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&reader),
+        None,
+        config.storage.clone(),
+    ));
     assert_eq!(post_query(router, &read).await["count"], 1);
     reader.close().await.unwrap();
     drop(reader);
@@ -587,7 +593,11 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
         db: reopened,
         cache_lock,
     } = open_database(&config).await.unwrap();
-    let router = http::router(ServerState::new(Arc::clone(&reopened), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&reopened),
+        None,
+        config.storage.clone(),
+    ));
     assert_eq!(post_query(router, &read).await["count"], 1);
     reopened.close().await.unwrap();
     drop(reopened);
@@ -651,7 +661,6 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
             )),
         },
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
-        cypher: crate::CypherEndpoints::Disabled,
     };
     let search = query::QueryRequest::read(
         batch::read_batch()
@@ -677,7 +686,11 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
     };
 
     let ServerDatabase { db, cache_lock } = open_database(&config).await.unwrap();
-    let router = http::router(ServerState::new(Arc::clone(&db), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        config.storage.clone(),
+    ));
     post_query(
         router.clone(),
         &query::QueryRequest::write(
@@ -748,7 +761,11 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
     );
 
     // A split searched twice is admitted to disk in the background.
-    let router = http::router(ServerState::new(Arc::clone(&reopened), None));
+    let router = http::router(ServerState::new(
+        Arc::clone(&reopened),
+        None,
+        config.storage.clone(),
+    ));
     for _ in 0..2 {
         assert_eq!(
             post_query(router.clone(), &search).await["ids"],
@@ -799,7 +816,6 @@ async fn a_hybrid_cache_directory_serves_one_server_at_a_time() {
             )),
         },
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
-        cypher: crate::CypherEndpoints::Disabled,
     };
     let first = open_database(&config(128 * MIB)).await.unwrap();
     let partitions = files_below(&cache_root.join("slate"));
@@ -821,18 +837,28 @@ async fn a_hybrid_cache_directory_serves_one_server_at_a_time() {
     assert!(error.to_string().starts_with("HELIX_DISK_CACHE_DIR"));
     assert_eq!(files_below(&cache_root.join("slate")), partitions);
 
-    // Closing the first server frees the directory.
+    // Closing the first server frees the directory. The next server in this
+    // process reads through the cache the first one built, so resizing it
+    // takes a restart.
     first.db.close().await.unwrap();
     drop(first);
-    let ServerDatabase { db, cache_lock } = open_database(&smaller).await.unwrap();
-    assert_eq!(files_below(&cache_root.join("slate")).len(), 384);
+    let Err(error) = open_database(&smaller).await else {
+        panic!("a resized server reopened this process's cache");
+    };
+    assert!(
+        error.to_string().contains("already open in this process"),
+        "{error:?}"
+    );
+    let same = config(128 * MIB);
+    let ServerDatabase { db, cache_lock } = open_database(&same).await.unwrap();
+    assert_eq!(files_below(&cache_root.join("slate")), partitions);
     db.close().await.unwrap();
     drop(db);
     drop(cache_lock);
 
     // The server runners hold the lock until storage has closed.
-    run_with_shutdown(smaller.clone(), async {}).await.unwrap();
-    open_database(&smaller)
+    run_with_shutdown(same.clone(), async {}).await.unwrap();
+    open_database(&same)
         .await
         .unwrap()
         .db
@@ -871,7 +897,6 @@ async fn a_benchmark_writer_holds_its_hybrid_cache_directory_like_the_server() {
             )),
         },
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
-        cypher: crate::CypherEndpoints::Disabled,
     };
     let benchmark = crate::benchmark::open_database(
         crate::benchmark::Role::Writer,

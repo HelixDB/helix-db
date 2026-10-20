@@ -14,7 +14,8 @@ fn ordinary_request_equality_parameters_are_specialized_before_selection() {
         .with_query_value(
             NonEmptyString::new("edge_event").unwrap(),
             QueryValue::String("evt-edge".to_owned()),
-        );
+        )
+        .into();
     let batch = read_batch()
         .var_as(
             "node",

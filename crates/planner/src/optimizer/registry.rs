@@ -71,6 +71,16 @@ impl<'a> OptimizerRuleRegistry<'a> {
         Ok(Self { rules })
     }
 
+    /// A registry over rules a validator has already accepted, such as the
+    /// seed rule set, whose inventory is fixed at compile time and validated
+    /// once per process.
+    pub(crate) fn from_validated_rules(rules: Vec<&'a dyn rule::OptimizerRule>) -> Self {
+        Self {
+            rules: ir::AtLeast::<_, 1>::try_from_vec(rules)
+                .expect("a validated rule inventory is not empty"),
+        }
+    }
+
     /// Build the complete production known-rule registry.
     pub fn try_from_known_rules(
         rules: Vec<&'a dyn rule::OptimizerRule>,

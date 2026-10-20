@@ -7,7 +7,7 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.11` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.12` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -59,6 +59,12 @@ Use the manual flow below when you want to scaffold and run each step yourself.
     The example counts `User` nodes. Try `--json` to print compact JSON only, or
     `--warm` to populate the standalone process caches while returning the normal
     response.
+
+    The same count in Cypher:
+
+    ```bash
+    helix cypher dev -e 'MATCH (u:User) RETURN count(u) AS users'
+    ```
   </Step>
 </Steps>
 
@@ -131,6 +137,9 @@ $EDITOR examples/request.json
 # Send the request
 helix query dev --file examples/request.json
 
+# Or run a Cypher statement from a file you write
+helix cypher dev --file examples/users.cypher
+
 # Tail container logs in another shell
 helix logs dev --follow
 
@@ -156,6 +165,16 @@ helix status
 
 Each instance is isolated by container name and host port. Disk-mode instances also get their own SeaweedFS container, network, and volume, and disk-mode and S3 instances their own disk-cache volume.
 
+## Browsing the graph
+
+```bash
+helix explorer dev            # start the graph Explorer and open it in your browser
+helix explorer dev --no-open  # print the URL only
+helix explorer dev --stop     # stop the Explorer, keep the instance
+```
+
+[`helix explorer`](/cli/command-reference/explorer) runs the Explorer in a `helix-<project>-<instance>.explorer` container on `http://127.0.0.1:6970` (or the next free port) and points it at the running instance. `helix stop <instance>` stops it too.
+
 ## Inspecting logs
 
 ```bash
@@ -170,6 +189,7 @@ helix logs dev --follow      # stream
 | Goal | Command |
 |------|---------|
 | Stop one instance | `helix stop <instance>` |
+| Stop only an instance's Explorer | `helix explorer <instance> --stop` |
 | Restart one instance | `helix restart <instance>` |
 | Remove containers, workspace state, and Helix-managed volumes for one instance | `helix prune <instance>` |
 | Remove everything Helix-owned, for every local instance | `helix prune --all` (`--yes` in non-TTY) |

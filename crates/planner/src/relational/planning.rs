@@ -1,6 +1,7 @@
 //! Shared physical planning for resolved graph/row queries. Graph access uses
 //! the production Cascades rules and executable lowering, not frontend ASTs.
 use super::*;
+use crate::relational::{category, detail};
 use crate::{analysis, catalog, context, exec, ir, logical, optimizer, rules, trace};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,6 +23,12 @@ pub enum MatchStep {
         from: Slot,
         to: Slot,
         reverse: bool,
+    },
+    /// Bind an unbound typed relationship and both its unbound endpoints from
+    /// the edge bitmaps of its types, in place of a full node scan whose
+    /// expansion would reach the same edges through every node's adjacency.
+    ScanRelationship {
+        relationship: usize,
     },
     HashJoin {
         slot: Slot,
@@ -571,7 +578,8 @@ fn plan_accesses(
         let lookup_predicate = index_predicates
             .remove(&operator_index)
             .expect("every MATCH has its index predicate");
-        let pattern_sources = nodes
+        let incoming = query.contracts()[operator_index].input().slots();
+        let (pattern_sources, full_scans): (Vec<_>, Vec<_>) = nodes
             .iter()
             .filter(|(index, _, _)| *index == operator_index)
             .map(|(_, slot, indices)| {
@@ -601,17 +609,46 @@ fn plan_accesses(
                                 .clone(),
                         )
                     })
-                    .min_by_key(|(_, a)| {
-                        crate::optimizer::ordering::alternative_key_for_cost(a, a.cost)
+                    .min_by(|(_, a), (_, b)| {
+                        crate::optimizer::ordering::compare_alternatives((a, a.cost), (b, b.cost))
                     })
                     .expect("every source has an access candidate");
-                PatternSource {
-                    slot: *slot,
-                    rows: source_rows(&roots[index], &config),
-                    access_cost: alternative.cost,
-                }
+                let logical::LogicalExpr::AccessPath(logical::AccessPath::Node(access)) =
+                    &roots[index]
+                else {
+                    unreachable!("source candidates are node access roots");
+                };
+                (
+                    PatternSource {
+                        slot: *slot,
+                        rows: source_rows(&roots[index], &config),
+                        access_cost: alternative.cost,
+                    },
+                    (*access.source().as_ref() == ir::NodeAccessPlan::AllScan).then_some(*slot),
+                )
             })
-            .collect();
+            .unzip();
+        // A labeled, indexed or bound node can anchor its connected pattern
+        // more selectively than any edge type, so only relationships whose
+        // whole component is unbound full scans may start from their edges.
+        let full_scans = full_scans.into_iter().flatten().collect::<BTreeSet<_>>();
+        let mut neighbors = BTreeMap::<Slot, Vec<Slot>>::new();
+        for rel in &pattern.relationships {
+            neighbors.entry(rel.from).or_default().push(rel.to);
+            neighbors.entry(rel.to).or_default().push(rel.from);
+        }
+        let mut anchored = BTreeSet::new();
+        let mut pending = pattern
+            .nodes
+            .iter()
+            .map(|node| node.slot)
+            .filter(|slot| !full_scans.contains(slot) || incoming.contains(slot))
+            .collect::<Vec<_>>();
+        while let Some(slot) = pending.pop() {
+            if anchored.insert(slot) {
+                pending.extend(neighbors.get(&slot).into_iter().flatten().copied());
+            }
+        }
         let population = |slot| {
             pattern
                 .nodes
@@ -627,11 +664,14 @@ fn plan_accesses(
             .relationships
             .iter()
             .map(|rel| {
+                // Execution reads each distinct type once.
                 let edge_rows = if rel.types.is_empty() {
                     config.storage.default_unknown_scan_rows.as_rows()
                 } else {
                     rel.types
                         .iter()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
                         .map(|kind| {
                             config
                                 .stats
@@ -649,6 +689,11 @@ fn plan_accesses(
                 } else {
                     1
                 };
+                // Either endpoint's scan would reach every edge of the type,
+                // so an unselective start reads the edges themselves instead.
+                let scannable = !rel.types.is_empty()
+                    && !anchored.contains(&rel.from)
+                    && !incoming.contains(&rel.slot);
                 PatternExpansion {
                     from: rel.from,
                     to: rel.to,
@@ -659,18 +704,17 @@ fn plan_accesses(
                     reverse_rows: edge_rows
                         .div_ceil(population(rel.to))
                         .saturating_mul(directions),
+                    scan: scannable.then_some(RelationshipScan {
+                        edges: edge_rows,
+                        undirected: rel.direction == Direction::Undirected,
+                    }),
                 }
             })
             .collect();
-        let mut order = GraphPatternOrder::new(
-            pattern_sources,
-            relationships,
-            query.contracts()[operator_index].input().slots(),
-        )?;
+        let mut order = GraphPatternOrder::new(pattern_sources, relationships, incoming.clone())?;
         // Probe extraction may eliminate candidates before final validation.
         // Only total constraints can cross that boundary: unbound parameters,
         // arithmetic, functions and dynamic property access retain their order.
-        let incoming = query.contracts()[operator_index].input().slots();
         let totality = Totality {
             pattern,
             bindings: query.bindings(),
@@ -827,8 +871,7 @@ fn plan_accesses(
     }
     let pipeline_index = roots.len();
     roots.push(logical::LogicalExpr::Rows(std::sync::Arc::clone(query)));
-    let seed = rules::SeedRuleSet::default();
-    let optimizer = seed.optimizer();
+    let optimizer = rules::SeedRuleSet::shared_optimizer();
     let result = optimizer
         .optimize_many(
             ir::AtLeast::try_from_vec(roots.clone()).expect("nonempty roots"),
@@ -848,9 +891,7 @@ fn plan_accesses(
                     .map(|alternative| (*index, alternative.clone()))
             })
             .min_by(|(_, a), (_, b)| {
-                crate::optimizer::ordering::alternative_key_for_cost(a, a.cost).cmp(
-                    &crate::optimizer::ordering::alternative_key_for_cost(b, b.cost),
-                )
+                crate::optimizer::ordering::compare_alternatives((a, a.cost), (b, b.cost))
             });
         let (index, alternative) = match selected {
             Some(selected) => selected,
@@ -1719,7 +1760,11 @@ fn literal(value: Value) -> Option<helix_ast::value::PropertyValue> {
 }
 
 fn planning_error(message: impl Into<String>) -> QueryError {
-    QueryError::compile("InternalPlannerError", "PhysicalPlanning", message)
+    QueryError::compile(
+        category::INTERNAL_PLANNER_ERROR,
+        detail::PHYSICAL_PLANNING,
+        message,
+    )
 }
 
 fn source_rows(root: &logical::LogicalExpr, config: &optimizer::OptimizerConfig) -> u64 {

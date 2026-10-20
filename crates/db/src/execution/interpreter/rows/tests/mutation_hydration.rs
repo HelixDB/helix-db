@@ -171,8 +171,8 @@ async fn selected_entity_maps_and_sequential_writes_observe_current_properties()
         )).await.unwrap();
         assert_eq!(result.rows, vec![vec![json!(5), json!(6), json!(7)]]);
         for (query, detail) in [
-            ("MATCH (t:Target),(a:A) SET t.x=100 SET t = CASE WHEN true THEN a ELSE null END RETURN 1/0", "DivisionByZero"),
-            ("MATCH (t:Target),(a:A) SET t.x=100 DELETE a SET t=coalesce(a,null)", "DeletedEntityAccess"),
+            ("MATCH (t:Target),(a:A) SET t.x=100 SET t = CASE WHEN true THEN a ELSE null END RETURN 1/0", "division_by_zero"),
+            ("MATCH (t:Target),(a:A) SET t.x=100 DELETE a SET t=coalesce(a,null)", "deleted_entity_access"),
         ] {
             let error = db.cypher(crate::cypher::Request::new(query)).await.unwrap_err();
             assert!(matches!(error, Error::Query(error) if error.phase == r::ErrorPhase::Runtime && error.detail == detail), "{query}");
@@ -235,7 +235,7 @@ async fn unselected_map_sources_stay_unloaded_and_selected_source_limits_roll_ba
         limits,
     ).await.unwrap_err();
     assert!(
-        matches!(error,Error::Query(error) if error.phase == r::ErrorPhase::Runtime && error.detail == "MemoryLimit")
+        matches!(error,Error::Query(error) if error.phase == r::ErrorPhase::Runtime && error.detail == "memory_limit")
     );
     let after = db
         .cypher(crate::cypher::Request::new(

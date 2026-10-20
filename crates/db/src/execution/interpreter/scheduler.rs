@@ -13,9 +13,12 @@ use futures::future;
 
 use super::*;
 
+pub(super) mod fusion;
+
 impl<'db> ExecutionContext<'db> {
     /// Nested plans recurse through here, so the stage loop's state is boxed
-    /// and each level holds only pointers to its stages and steps.
+    /// and each level holds only pointers to its stages and steps. Each level
+    /// pairs its own fused vector searches (see [`fusion`]).
     pub(super) fn execute_steps<'a>(
         &'a mut self,
         steps: &'a [exec::ExecStep],
@@ -29,10 +32,11 @@ impl<'db> ExecutionContext<'db> {
                 .iter()
                 .map(|step| (step.id, step))
                 .collect::<BTreeMap<_, _>>();
+            let fused = fusion::plan(&by_id, &self.step_output_uses, program);
 
             for stage in order.stages() {
                 self.check_execution_deadline()?;
-                self.execute_stage(stage, &by_id, program).await?;
+                self.execute_stage(stage, &by_id, program, &fused).await?;
             }
             Ok(())
         })
@@ -45,6 +49,7 @@ impl<'db> ExecutionContext<'db> {
         stage: &'a exec::ExecExecutionStage,
         by_id: &'a BTreeMap<exec::ExecStepId, &'a exec::ExecStep>,
         program: &'a exec::ExecProgram,
+        fused: &'a BTreeMap<exec::ExecStepId, fusion::Role<'a>>,
     ) -> futures::future::BoxFuture<'a, Result<()>> {
         let serial_only =
             self.has_active_write_tx() || self.request_read_view_requires_serial_stages();
@@ -75,20 +80,21 @@ impl<'db> ExecutionContext<'db> {
                         by_id,
                         program,
                         parallel.policy(),
+                        fused,
                     ))
                 }
                 exec::ExecExecutionStage::Parallel(_) | exec::ExecExecutionStage::Single(_) => {
-                    self.execute_region_stage(stage, by_id, program)
+                    self.execute_region_stage(stage, by_id, program, fused)
                 }
             };
         }
         match StageExecutionMode::for_stage(stage, by_id) {
             Err(error) => Box::pin(std::future::ready(Err(error))),
             Ok(StageExecutionMode::ParallelIsolated(policy)) if !serial_only => {
-                Box::pin(self.execute_parallel_isolated_stage(stage, by_id, policy))
+                Box::pin(self.execute_parallel_isolated_stage(stage, by_id, policy, fused))
             }
             Ok(StageExecutionMode::Serial | StageExecutionMode::ParallelIsolated(_)) => {
-                self.execute_serial_stage(stage, by_id)
+                self.execute_serial_stage(stage, by_id, fused)
             }
         }
     }
@@ -99,6 +105,7 @@ impl<'db> ExecutionContext<'db> {
         stage: &'a exec::ExecExecutionStage,
         by_id: &'a BTreeMap<exec::ExecStepId, &'a exec::ExecStep>,
         program: &'a exec::ExecProgram,
+        fused: &'a BTreeMap<exec::ExecStepId, fusion::Role<'a>>,
     ) -> futures::future::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             for id in stage.iter() {
@@ -111,7 +118,7 @@ impl<'db> ExecutionContext<'db> {
                         let control = self.execution_control.clone();
                         control.run(self.execute_pull_region(region, by_id)).await?
                     }
-                    None => self.execute_step(step).await?,
+                    None => self.execute_step(step, fused.get(&id).copied()).await?,
                 };
                 self.record_step_output(step, value);
             }
@@ -123,12 +130,13 @@ impl<'db> ExecutionContext<'db> {
         &'a mut self,
         stage: &'a exec::ExecExecutionStage,
         by_id: &'a BTreeMap<exec::ExecStepId, &'a exec::ExecStep>,
+        fused: &'a BTreeMap<exec::ExecStepId, fusion::Role<'a>>,
     ) -> futures::future::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             for id in stage.iter() {
                 self.check_execution_deadline()?;
                 let step = step_by_id(by_id, id)?;
-                let value = self.execute_step(step).await?;
+                let value = self.execute_step(step, fused.get(&id).copied()).await?;
                 self.check_execution_deadline()?;
                 self.record_step_output(step, value);
             }
@@ -141,6 +149,7 @@ impl<'db> ExecutionContext<'db> {
         stage: &exec::ExecExecutionStage,
         by_id: &BTreeMap<exec::ExecStepId, &exec::ExecStep>,
         policy: exec::ExecParallelStagePolicy,
+        fused: &BTreeMap<exec::ExecStepId, fusion::Role<'_>>,
     ) -> Result<()> {
         let ids = stage.iter().collect::<Vec<_>>();
         for chunk in ids.chunks(policy.max_concurrency().get()) {
@@ -148,10 +157,11 @@ impl<'db> ExecutionContext<'db> {
                 .iter()
                 .map(|id| {
                     let step = step_by_id(by_id, *id)?;
+                    let role = fused.get(id).copied();
                     let mut context = self.parallel_step_context(step)?;
                     Ok(async move {
                         context
-                            .execute_step(step)
+                            .execute_step(step, role)
                             .await
                             .map(|value| CompletedStep::new(step, value))
                     })
@@ -171,6 +181,7 @@ impl<'db> ExecutionContext<'db> {
         by_id: &BTreeMap<exec::ExecStepId, &exec::ExecStep>,
         program: &exec::ExecProgram,
         policy: exec::ExecParallelStagePolicy,
+        fused: &BTreeMap<exec::ExecStepId, fusion::Role<'_>>,
     ) -> Result<()> {
         let ids = stage
             .iter()
@@ -187,6 +198,7 @@ impl<'db> ExecutionContext<'db> {
                         add_output_uses(&mut uses, *dependency, *count)?;
                     }
                 }
+                let role = fused.get(id).copied();
                 let mut context = self.parallel_context(step, uses)?;
                 futures.push(async move {
                     let control = context.execution_control.clone();
@@ -196,7 +208,7 @@ impl<'db> ExecutionContext<'db> {
                                 .run(context.execute_pull_region(region, by_id))
                                 .await?
                         }
-                        None => context.execute_step(step).await?,
+                        None => context.execute_step(step, role).await?,
                     };
                     Ok::<_, HelixDbError>(CompletedStep::new(step, value))
                 });
@@ -300,14 +312,25 @@ impl<'db> ExecutionContext<'db> {
                 "step-output use plan was not isolated from its enclosing plan".to_string(),
             ));
         }
-        for step in steps {
-            let references = step_output_references(step)?;
-            for (dependency, count) in references.iter() {
-                add_output_uses(&mut self.step_output_uses, *dependency, *count)?;
-            }
-        }
-        increment_output_use(&mut self.step_output_uses, root)
+        self.step_output_uses = output_uses(steps, root)?;
+        Ok(())
     }
+}
+
+/// Every use of each step's output in a DAG: each dependency and condition
+/// that reads it, and the DAG's own use of its `root`.
+pub(in crate::execution::interpreter) fn output_uses(
+    steps: &[exec::ExecStep],
+    root: exec::ExecStepId,
+) -> Result<runtime_context::StepOutputUsePlan> {
+    let mut uses = runtime_context::StepOutputUsePlan::default();
+    for step in steps {
+        for (dependency, count) in step_output_references(step)?.iter() {
+            add_output_uses(&mut uses, *dependency, *count)?;
+        }
+    }
+    increment_output_use(&mut uses, root)?;
+    Ok(uses)
 }
 
 fn step_output_references(step: &exec::ExecStep) -> Result<runtime_context::StepOutputUsePlan> {
@@ -423,6 +446,7 @@ fn is_parallel_isolated_step(step: &exec::ExecStep) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod fused_vector_search;
     mod pull_regions;
 
     use helix_planner::{context, exec, ir, properties, trace};
@@ -496,7 +520,7 @@ mod tests {
             Some(3)
         );
         assert_eq!(
-            parallel.execute_step(&step).await.unwrap(),
+            parallel.execute_step(&step, None).await.unwrap(),
             ExecutionValue::Stream(Vec::new())
         );
         assert!(!parallel.step_output_uses.contains_key(&dependency));
@@ -824,8 +848,13 @@ mod tests {
         let db = test_support::open_db("scheduler-missing-stage-step").await;
         let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
         assert!(matches!(
-            ctx.execute_stage(&stage, &by_id(&steps), &exec::ExecProgram::default())
-                .await,
+            ctx.execute_stage(
+                &stage,
+                &by_id(&steps),
+                &exec::ExecProgram::default(),
+                &BTreeMap::new()
+            )
+            .await,
             Err(HelixDbError::InvariantViolation(message))
                 if message.contains("missing step 2")
         ));

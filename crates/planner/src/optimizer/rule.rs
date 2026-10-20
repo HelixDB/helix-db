@@ -68,7 +68,10 @@ impl RuleResult {
 }
 
 /// Optimizer rule contract.
-pub trait OptimizerRule {
+///
+/// Rules are immutable, so one set of them serves every thread's planning
+/// (see `SeedRuleSet::shared_optimizer`).
+pub trait OptimizerRule: Send + Sync {
     /// Stable rule metadata.
     fn metadata(&self) -> &rules::RuleMetadata;
 

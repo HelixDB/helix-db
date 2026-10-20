@@ -480,7 +480,7 @@ async fn node_cursors_reject_foreign_tenants_and_unadmitted_raw_rows() {
         )
         .try_collect::<Vec<_>>()
         .await;
-    assert!(matches!(result,Err(Error::Query(error)) if error.detail=="MemoryLimit"));
+    assert!(matches!(result,Err(Error::Query(error)) if error.detail=="memory_limit"));
     assert_eq!(ctx.row_budget().available(), 64);
     ctx.close_request_read_view().unwrap();
     drop(ctx);
@@ -634,7 +634,7 @@ async fn cursor_contracts_cover_fallbacks_write_visibility_filters_and_exhaustio
         .await
         .err()
         .unwrap();
-    assert!(matches!(error,Error::Query(error) if error.detail=="MemoryLimit"));
+    assert!(matches!(error,Error::Query(error) if error.detail=="memory_limit"));
     ctx.abort_request_write_scope();
     assert_eq!(
         db.cypher(crate::cypher::Request::new("MATCH (n) RETURN count(*)"))
@@ -708,7 +708,7 @@ async fn graph_hydration_rejects_invalid_metadata_and_corrupt_encoded_values() {
         match id {
             17 => assert!(result.unwrap().entities.is_empty()),
             18 => assert!(
-                matches!(result,Err(Error::Query(error)) if error.detail=="UntypedStoredRelationship")
+                matches!(result,Err(Error::Query(error)) if error.detail=="untyped_stored_relationship")
             ),
             _ => assert!(matches!(result, Err(Error::Storage(_)))),
         }

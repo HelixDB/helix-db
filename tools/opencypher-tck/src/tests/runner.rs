@@ -184,10 +184,25 @@ mod protocol_tests {
             "    Given parameters are:\n      | x | (:N) |",
             "    When executing query:\n      \"\"\"\n      CREATE (:N)\n      \"\"\"\n    Then the result should be empty\n    And the side effects should be:\n      | bogus | 1 |",
             "    When executing query:\n      \"\"\"\n      CREATE (:N)\n      \"\"\"\n    Then the result should be empty\n    And the side effects should be:\n      | +nodes | x |",
+            "    When executing query:\n      \"\"\"\n      CREATE (:N)\n      \"\"\"\n    Then the result should be empty\n    And the side effects should be:",
+            "    Given having executed:",
         ] {
             let scenario = test_support::scenario("malformed",body);
             assert!(matches!(execute(&scenario,&mut false,Duration::from_secs(60)).await.unwrap_err().status,Status::HarnessError),"{body}");
         }
+        // A failed statement must leave the graph as it found it; a change
+        // made after it, before its error assertion, is a rollback mismatch.
+        let rollback = test_support::scenario(
+            "rollback",
+            "    When executing query:\n      \"\"\"\n      RETURN 1 / 0\n      \"\"\"\n    And having executed:\n      \"\"\"\n      CREATE (:N)\n      \"\"\"\n    Then a ArithmeticError should be raised at runtime: DivisionByZero",
+        );
+        assert_eq!(
+            execute(&rollback, &mut false, Duration::from_secs(60))
+                .await
+                .unwrap_err()
+                .reason,
+            "RollbackMismatch"
+        );
         assert!(run(&[], 0).await.is_err());
         assert!(run(&[], 33).await.is_err());
         assert!(run(
@@ -223,7 +238,7 @@ mod protocol_tests {
         let subject = Some(Err(cypher::Error::Storage(
             db::error::HelixDbError::TransactionConflict("subject storage failure".into()),
         )));
-        assert!(result(&subject)
+        assert!(result(&subject, "")
             .unwrap_err()
             .reason
             .contains("subject storage failure"));
@@ -255,7 +270,7 @@ async fn missing_or_unsupported_named_fixture_and_storage_errors_cannot_pass() {
     let subject = Some(Err(cypher::Error::Storage(
         db::error::HelixDbError::TransactionConflict("test storage conflict".into()),
     )));
-    let error = assert_error(&subject, "SyntaxError", "compile time", "*").unwrap_err();
+    let error = assert_error(&subject, "", "SyntaxError", "compile time", "*").unwrap_err();
     assert!(matches!(error.status, Status::Failed));
     assert!(error.reason.contains("ExpectedCypherError"));
     db.close().await.unwrap();
@@ -272,16 +287,31 @@ async fn missing_or_unsupported_named_fixture_and_storage_errors_cannot_pass() {
 #[test]
 fn production_deadlines_are_timeouts_in_setup_success_and_error_assertions() {
     let deadline = || cypher::Error::Storage(db::error::HelixDbError::QueryDeadlineExceeded);
-    assert!(matches!(blocked(deadline()).status, Status::TimedOut));
+    assert!(matches!(blocked(deadline(), "").status, Status::TimedOut));
     let subject = Some(Err(deadline()));
     assert!(matches!(
-        result(&subject).unwrap_err().status,
+        result(&subject, "").unwrap_err().status,
         Status::TimedOut
     ));
     assert!(matches!(
-        assert_error(&subject, "SyntaxError", "any time", "*")
+        assert_error(&subject, "", "SyntaxError", "any time", "*")
             .unwrap_err()
             .status,
         Status::TimedOut
     ));
+}
+
+#[test]
+fn tck_error_names_are_compared_as_helix_codes() {
+    for (tck_name, helix_code) in [
+        ("SyntaxError", "syntax_error"),
+        ("UndefinedVariable", "undefined_variable"),
+        (
+            "ConstraintVerificationFailed",
+            "constraint_verification_failed",
+        ),
+        ("InvalidNumberOfArguments", "invalid_number_of_arguments"),
+    ] {
+        assert_eq!(code(tck_name), helix_code);
+    }
 }

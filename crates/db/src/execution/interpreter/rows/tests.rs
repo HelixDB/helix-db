@@ -25,6 +25,7 @@ mod projection_ownership;
 mod projection_windows;
 mod property_admission;
 mod reference;
+mod relationship_scan;
 mod requirements;
 mod response_admission;
 mod row_layout;
@@ -144,7 +145,7 @@ fn relation_memory_check_accepts_owned_bytes_up_to_the_budget() {
         let Err(error) = result else {
             continue;
         };
-        assert!(matches!(error, Error::Query(error) if error.detail == "MemoryLimit"));
+        assert!(matches!(error, Error::Query(error) if error.detail == "memory_limit"));
     }
 }
 

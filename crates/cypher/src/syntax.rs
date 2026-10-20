@@ -1,4 +1,5 @@
 //! Source-shaped syntax. Names stay strings until semantic resolution.
+use helix_planner::relational::{category, detail};
 use helix_planner::{
     ir::AtLeast,
     relational::{self as r, Span},
@@ -124,8 +125,8 @@ impl Expr {
         };
         if depth > r::MAX_EXPRESSION_DEPTH {
             return Err(r::QueryError::compile(
-                "ResourceLimit",
-                "ExpressionDepth",
+                category::RESOURCE_LIMIT,
+                detail::EXPRESSION_DEPTH,
                 "expression tree exceeds 48 levels",
             )
             .at(span));

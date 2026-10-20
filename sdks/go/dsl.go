@@ -513,7 +513,7 @@ func BoundLiteral(value int) StreamBound {
 	}
 	return StreamBound{literal: &value}
 }
-func BoundExpr(expr Expr) StreamBound    { return StreamBound{expr: &expr} }
+func BoundExpr(expr Expr) StreamBound { return StreamBound{expr: &expr} }
 
 func streamBoundOf(value any) StreamBound {
 	switch v := value.(type) {
@@ -2865,6 +2865,7 @@ func (q *ReadQueryBuilder) ForEachParam(param string, body *ReadBatch) *ReadQuer
 	}
 	return q
 }
+
 // WithSearchConsistency selects search visibility for this read query.
 func (q *ReadQueryBuilder) WithSearchConsistency(consistency SearchConsistency) *ReadQueryBuilder {
 	q.QueryRequest.WithSearchConsistency(consistency)

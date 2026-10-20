@@ -9,9 +9,9 @@ fn seed_rule_set_implements_explored_filter_pushdown_pipeline() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let predicate = ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("active", true)).unwrap();
 
@@ -47,9 +47,9 @@ fn seed_rule_set_simplifies_pure_pipeline_before_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let expr = pipeline_expr(vec![
         logical::PureLogicalOp::NoOp,
@@ -89,9 +89,9 @@ fn seed_rule_set_composes_static_stream_windows_before_implementation() {
         late_bound_params: Default::default(),
         limits: crate::context::OptimizerLimits::default(),
         planner_limits: crate::context::PlannerLimits::default(),
-        stats: crate::context::StatsSnapshot::default(),
+        stats: std::borrow::Cow::Owned(crate::context::StatsSnapshot::default()),
         storage: cost::StorageCostProfile::default(),
-        indexes: catalog::IndexCatalogSnapshot::default(),
+        indexes: std::borrow::Cow::Owned(catalog::IndexCatalogSnapshot::default()),
     };
     let expr = pipeline_expr(vec![
         logical::PureLogicalOp::Source {

@@ -135,6 +135,28 @@ enum Commands {
         instance: Option<String>,
     },
 
+    /// Check an instance's setup: runtime, storage, disk cache, memory, and index use
+    #[command(
+        after_help = r#"Read-only: doctor never changes the instance, its data, or helix.toml.
+It exits 1 when a check fails; warnings alone exit 0.
+
+Examples:
+  helix doctor
+  helix doctor production
+  helix doctor --url http://10.0.1.5:8080
+  helix doctor --json
+
+Docs: https://docs.helix-db.com/cli/command-reference/doctor"#
+    )]
+    Doctor {
+        /// Instance or typed database; defaults to dev or the sole instance
+        #[arg(conflicts_with = "url")]
+        instance: Option<String>,
+        /// Diagnose the server at this base URL instead; no helix.toml needed
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
+    },
+
     /// View logs for a local or Helix Cloud instance
     Logs {
         /// Instance name
@@ -217,6 +239,9 @@ Docs: https://docs.helix-db.com/cli/command-reference/query"#)]
         /// Instance or typed database; defaults to dev or the sole linked target
         instance: Option<String>,
     },
+
+    /// Open the graph Explorer for a running local instance
+    Explorer(commands::explorer::Args),
 
     /// Log in to Helix Cloud and inspect the session
     Auth {
@@ -401,6 +426,7 @@ fn display_welcome(update_available: Option<String>, skills_update_available: bo
         38,
     );
     print_command("helix status", "Show local and Cloud instance status", 38);
+    print_command("helix doctor", "Check an instance's setup for problems", 38);
     print_command(
         "helix logs <instance> -f",
         "Follow logs for an instance",
@@ -496,9 +522,15 @@ fn print_help() {
     print_command("stop", "Stop a background local instance", W);
     print_command("restart", "Restart a background local instance", W);
     print_command("status", "Show local and Cloud instance status", W);
+    print_command("doctor", "Check an instance's setup for problems", W);
     print_command("logs", "View or follow instance logs", W);
     print_command("query", "Send a query to a local or Cloud instance", W);
     print_command("shell", "Open an interactive JSON query shell", W);
+    print_command(
+        "explorer",
+        "Browse a local instance in the graph Explorer",
+        W,
+    );
     print_command("prune", "Remove Helix-owned local containers and state", W);
     print_command("delete", "Delete an instance from helix.toml", W);
 
@@ -614,6 +646,7 @@ async fn main() -> Result<()> {
         Some(Commands::Stop { instance }) => commands::stop::run(instance).await,
         Some(Commands::Restart { instance }) => commands::restart::run(instance).await,
         Some(Commands::Status { instance }) => commands::status::run(instance).await,
+        Some(Commands::Doctor { instance, url }) => commands::doctor::run(instance, url).await,
         Some(Commands::Logs {
             instance,
             follow,
@@ -643,6 +676,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Cypher(args)) => commands::cypher::run(args).await,
         Some(Commands::Shell { instance }) => commands::shell::run(instance).await,
+        Some(Commands::Explorer(args)) => commands::explorer::run(args).await,
         Some(Commands::Auth { action }) => commands::auth::run(action).await,
         Some(Commands::Workspace { action }) => commands::cloud::workspace::run(action).await,
         Some(Commands::Project { action }) => commands::cloud::project::run(action).await,
@@ -1349,6 +1383,35 @@ mod tests {
     }
 
     #[test]
+    fn doctor_targets_an_instance_or_a_url_but_not_both() {
+        match Cli::parse_from(["helix", "doctor"]).command {
+            Some(Commands::Doctor { instance, url }) => {
+                assert!(instance.is_none());
+                assert!(url.is_none());
+            }
+            _ => panic!("expected doctor command"),
+        }
+        match Cli::parse_from(["helix", "doctor", "production"]).command {
+            Some(Commands::Doctor { instance, url }) => {
+                assert_eq!(instance.as_deref(), Some("production"));
+                assert!(url.is_none());
+            }
+            _ => panic!("expected doctor command"),
+        }
+        match Cli::parse_from(["helix", "doctor", "--url", "http://10.0.1.5:8080"]).command {
+            Some(Commands::Doctor { instance, url }) => {
+                assert!(instance.is_none());
+                assert_eq!(url.as_deref(), Some("http://10.0.1.5:8080"));
+            }
+            _ => panic!("expected doctor command"),
+        }
+        assert!(
+            Cli::try_parse_from(["helix", "doctor", "dev", "--url", "http://localhost:6969"])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn status_accepts_optional_instance() {
         let cli = Cli::parse_from(["helix", "status", "qa"]);
 
@@ -1402,6 +1465,82 @@ mod tests {
             "{}",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn explorer_defaults_to_opening_the_default_instance() {
+        let cli = Cli::parse_from(["helix", "explorer"]);
+        let Some(Commands::Explorer(args)) = cli.command else {
+            panic!("expected explorer command");
+        };
+        assert!(args.instance.is_none());
+        assert!(args.port.is_none());
+        assert!(!args.no_open);
+        assert!(args.image.is_none());
+        assert!(!args.stop);
+    }
+
+    #[test]
+    fn explorer_accepts_an_instance_port_image_and_no_open() {
+        let cli = Cli::parse_from([
+            "helix",
+            "explorer",
+            "qa",
+            "--port",
+            "7100",
+            "--no-open",
+            "--image",
+            "helix-explorer:local",
+        ]);
+        let Some(Commands::Explorer(args)) = cli.command else {
+            panic!("expected explorer command");
+        };
+        assert_eq!(args.instance.as_deref(), Some("qa"));
+        assert_eq!(args.port, Some(7100));
+        assert!(args.no_open);
+        assert_eq!(args.image.as_deref(), Some("helix-explorer:local"));
+    }
+
+    #[test]
+    fn explorer_stop_conflicts_with_the_options_that_start_one() {
+        let cli = Cli::parse_from(["helix", "explorer", "qa", "--stop"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Explorer(commands::explorer::Args {
+                stop: true,
+                ..
+            }))
+        ));
+        for flag in [
+            &["--port", "7100"][..],
+            &["--no-open"][..],
+            &["--image", "helix-explorer:local"][..],
+        ] {
+            let args = [&["helix", "explorer", "--stop"][..], flag].concat();
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn explorer_help_names_the_default_image_and_its_override() {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let explorer = cmd
+            .get_subcommands_mut()
+            .find(|c| c.get_name() == "explorer")
+            .expect("explorer subcommand should exist");
+        let help = explorer.render_help().to_string();
+        let default_image = format!(
+            "{}:{}",
+            helix_cli::config::DEFAULT_EXPLORER_IMAGE,
+            helix_cli::config::DEFAULT_EXPLORER_IMAGE_TAG
+        );
+        assert!(help.contains(&default_image), "{help}");
+        assert!(
+            help.contains(helix_cli::commands::explorer::EXPLORER_IMAGE_ENV),
+            "{help}"
+        );
+        assert!(help.contains("Examples:"), "{help}");
     }
 
     #[test]

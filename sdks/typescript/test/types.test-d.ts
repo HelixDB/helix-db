@@ -1,5 +1,9 @@
 import {
   BindingProjection,
+  Client,
+  CypherExecutionRequest,
+  CypherExplanation,
+  CypherResponse,
   DateTime,
   ParamSchema,
   QueryParamType,
@@ -113,3 +117,31 @@ QueryRequest.read(writeBatch());
 
 // @ts-expect-error write requests require a nominal write batch
 QueryRequest.write(readBatch());
+
+export async function cypherApi(client: Client) {
+  const request: CypherExecutionRequest = client
+    .requestBuilder()
+    .writerOnly()
+    .shouldAwaitDurability(false)
+    .cypher("RETURN $x AS x", { x: 1n });
+  const response: CypherResponse = await request.send();
+  // A builder explanation is absent after a Helix Cloud warm-only 204.
+  const warmed: CypherExplanation | undefined = await client.requestBuilder().warmOnly().cypher("MATCH (n) RETURN n").explain();
+  // @ts-expect-error builder explanations must be checked before use
+  const unchecked: CypherExplanation = await client.requestBuilder().cypher("MATCH (n) RETURN n").explain();
+  const explanation: CypherExplanation = await client.explainCypher("MATCH (n) RETURN n");
+  const effect: "Read" | "Write" = explanation.effect;
+  const planner: unknown = explanation.planner;
+  const direct: [CypherResponse, CypherExplanation] = [
+    await client.cypher("RETURN 1 AS x"),
+    await client.explainCypher("RETURN 1 AS x", {}, "name"),
+  ];
+
+  // @ts-expect-error Cypher parameters are a map of names to values
+  client.cypher("RETURN $x AS x", "x");
+
+  // @ts-expect-error the query name is a string
+  client.explainCypher("RETURN 1 AS x", {}, 1);
+
+  return { response, warmed, unchecked, effect, planner, direct };
+}

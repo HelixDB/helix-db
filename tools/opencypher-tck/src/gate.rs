@@ -3,10 +3,28 @@ use crate::{
     corpus::{Result, Scenario},
     report::{Report, Status},
 };
+use helix_cypher::api::{category, detail};
+use helix_cypher::QueryError;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
 };
+
+/// The capability reason recorded for an unsupported construct in `query`: its
+/// detail code, such as `merge`. An unsupported function also records its name,
+/// as `function:rand`, which the error code leaves to the message; the name is
+/// the text the error's span covers, up to its argument list.
+pub(crate) fn unsupported_reason(error: &QueryError, query: &str) -> String {
+    let function = (error.detail == detail::FUNCTION)
+        .then(|| error.span.and_then(|span| query.get(span.start..span.end)))
+        .flatten()
+        .and_then(|call| call.split('(').next())
+        .map(|name| name.trim().to_ascii_lowercase());
+    match function {
+        Some(name) => format!("{}:{name}", error.detail),
+        None => error.detail.clone(),
+    }
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Required {
@@ -96,10 +114,7 @@ pub fn verify(root: &Path, corpus: &[Scenario], report: &Report) -> Result<()> {
         let detail = outcome.reason.as_deref().unwrap_or_default();
         let expected = match outcome.status {
             Status::Unsupported => detail == reason,
-            Status::SetupBlocked => {
-                detail == format!("Setup:{reason}")
-                    || detail.starts_with(&format!("Setup:UnsupportedFeature: {reason}: "))
-            }
+            Status::SetupBlocked => detail == format!("Setup:{reason}"),
             Status::Passed
             | Status::Failed
             | Status::TimedOut
@@ -155,7 +170,7 @@ pub fn draft(corpus: &[Scenario]) -> Required {
         let mut unknown = false;
         for step in &scenario.steps {
             if step.value.starts_with("there exists a procedure ") {
-                exclusion = Some("Procedures".into());
+                exclusion = Some("procedures".into());
                 break;
             }
             // Both pinned binary-tree fixtures create exactly one label per
@@ -177,8 +192,8 @@ pub fn draft(corpus: &[Scenario]) -> Required {
                 continue;
             };
             match helix_cypher::parse(text) {
-                Err(e) if e.category == "UnsupportedFeature" => {
-                    exclusion = Some(e.detail);
+                Err(e) if e.category == category::UNSUPPORTED_FEATURE => {
+                    exclusion = Some(unsupported_reason(&e, text));
                     break;
                 }
                 Err(_) => {
@@ -188,9 +203,9 @@ pub fn draft(corpus: &[Scenario]) -> Required {
                 }
                 Ok(ast) => {
                     if let Err(e) = helix_cypher::resolve(&ast)
-                        && e.category == "UnsupportedFeature"
+                        && e.category == category::UNSUPPORTED_FEATURE
                     {
-                        exclusion = Some(e.detail);
+                        exclusion = Some(unsupported_reason(&e, text));
                         break;
                     }
                 }

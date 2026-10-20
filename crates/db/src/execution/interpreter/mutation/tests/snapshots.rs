@@ -87,7 +87,7 @@ async fn row_mutations_fail_cleanly_across_admission_shortfalls() {
                 break;
             };
             assert!(
-                matches!(error, crate::cypher::Error::Query(ref error) if error.detail == "MemoryLimit"),
+                matches!(error, crate::cypher::Error::Query(ref error) if error.detail == "memory_limit"),
                 "{operation:?} at {allowance} spare bytes: {error:?}"
             );
             shortfalls += 1;
@@ -292,7 +292,7 @@ async fn snapshot_limit_failures_rollback_prior_writes_and_success_preserves_nat
             ctx.enable_request_write_scope().await.unwrap();
             ctx.row_create_node("Rollback", vec![]).await.unwrap();
             assert!(
-                matches!(ctx.row_edit_property(entity,"key",value).await,Err(crate::cypher::Error::Query(error)) if error.detail=="MemoryLimit")
+                matches!(ctx.row_edit_property(entity,"key",value).await,Err(crate::cypher::Error::Query(error)) if error.detail=="memory_limit")
             );
             ctx.abort_request_write_scope();
             assert_eq!(ctx.row_budget().available(), 16 * 1024);

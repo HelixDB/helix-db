@@ -27,8 +27,8 @@ fn extraction_rejects_unbound_group_dependencies_and_invalid_aggregate_inputs() 
             &mut bindings,
         )
         .unwrap_err();
-        assert_eq!(error.category, "SyntaxError");
-        assert_eq!(error.detail, "AmbiguousAggregationExpression");
+        assert_eq!(error.category, "syntax_error");
+        assert_eq!(error.detail, "ambiguous_aggregation_expression");
         assert_eq!(bindings.len(), 1);
     }
     let mut bindings = Vec::new();
@@ -44,8 +44,8 @@ fn extraction_rejects_unbound_group_dependencies_and_invalid_aggregate_inputs() 
         &mut bindings,
     )
     .unwrap_err();
-    assert_eq!(error.category, "InternalPlannerError");
-    assert_eq!(error.detail, "InvalidSlot");
+    assert_eq!(error.category, "internal_planner_error");
+    assert_eq!(error.detail, "invalid_slot");
     assert!(bindings.is_empty());
 }
 
@@ -312,8 +312,8 @@ fn hidden_aggregation_bindings_respect_the_existing_limit() {
     }];
     let error = split_projection(projections, &mut bindings).unwrap_err();
     assert_eq!(error.phase, r::ErrorPhase::Compile);
-    assert_eq!(error.category, "ResourceLimit");
-    assert_eq!(error.detail, "TooManyBindings");
+    assert_eq!(error.category, "resource_limit");
+    assert_eq!(error.detail, "too_many_bindings");
     assert_eq!(bindings.len(), 4096);
 }
 
@@ -356,8 +356,8 @@ fn forced_collisions_bound_work_and_reuse_the_last_admitted_state() {
     assert_eq!(post[7].expression, post[8].expression);
     let error = make((0..9).collect()).unwrap_err();
     assert_eq!(error.phase, r::ErrorPhase::Compile);
-    assert_eq!(error.category, "ResourceLimit");
-    assert_eq!(error.detail, "AggregateIdentityBudget");
+    assert_eq!(error.category, "resource_limit");
+    assert_eq!(error.detail, "aggregate_identity_budget");
 }
 
 #[test]
@@ -399,8 +399,8 @@ fn forced_collision_work_is_bounded_and_collision_is_not_equality() {
     assert_eq!(index.find_identity(&values[7], identity()), Some(7));
     assert_eq!(index.find_identity(&values[8], identity()), None);
     let error = index.insert(&values[8], 8, identity()).unwrap_err();
-    assert_eq!(error.category, "ResourceLimit");
-    assert_eq!(error.detail, "AggregateIdentityBudget");
+    assert_eq!(error.category, "resource_limit");
+    assert_eq!(error.detail, "aggregate_identity_budget");
     assert_eq!(index.buckets.values().next().unwrap().len(), 8);
 }
 #[test]
@@ -417,6 +417,6 @@ fn indexing_preserves_large_literal_lookup_and_checks_depth() {
     let error = ExpressionIndex::new(std::iter::once((&deep, ())))
         .err()
         .unwrap();
-    assert_eq!(error.category, "ResourceLimit");
-    assert_eq!(error.detail, "ExpressionDepth");
+    assert_eq!(error.category, "resource_limit");
+    assert_eq!(error.detail, "expression_depth");
 }

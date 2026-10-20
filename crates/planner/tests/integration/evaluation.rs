@@ -106,19 +106,19 @@ fn unwind_range_admits_live_arguments_and_keeps_argument_errors_visible() {
         vec![E::Parameter("large".into()), E::Parameter("large".into())],
     );
     assert!(evaluation.eval(&E::Parameter("large".into())).is_ok());
-    assert!(matches!(evaluation.unwind(&range), Err(error) if error.detail == "MemoryLimit"));
+    assert!(matches!(evaluation.unwind(&range), Err(error) if error.detail == "memory_limit"));
     let null_with_missing = E::Function(
         F::Range,
         vec![E::Literal(V::Null), E::Parameter("missing".into())],
     );
     assert!(
-        matches!(evaluation.unwind(&null_with_missing), Err(error) if error.detail == "MissingParameter")
+        matches!(evaluation.unwind(&null_with_missing), Err(error) if error.detail == "missing_parameter")
     );
     let too_small = r::Evaluation {
         memory: r::EvaluationMemory::new(1),
         ..evaluation
     };
-    assert!(matches!(too_small.unwind(&range), Err(error) if error.detail == "MemoryLimit"));
+    assert!(matches!(too_small.unwind(&range), Err(error) if error.detail == "memory_limit"));
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn overlapping_index_and_slice_operands_are_admitted_together() {
         let error = evaluation.eval(&expression).unwrap_err();
         assert_eq!(
             (&*error.category, &*error.detail),
-            ("ResourceLimit", "MemoryLimit")
+            ("resource_limit", "memory_limit")
         );
     }
     let small = r::Evaluation {
@@ -165,7 +165,7 @@ fn overlapping_index_and_slice_operands_are_admitted_together() {
         ..evaluation
     };
     for expression in [E::Slot(r::Slot(0)), E::Parameter("large".into())] {
-        assert_eq!(small.eval(&expression).unwrap_err().detail, "MemoryLimit");
+        assert_eq!(small.eval(&expression).unwrap_err().detail, "memory_limit");
     }
 }
 
@@ -224,7 +224,7 @@ fn graph_outputs_and_path_expansion_are_admitted_before_materialization() {
     ] {
         assert_eq!(
             evaluation.eval(&expression).unwrap_err().detail,
-            "MemoryLimit"
+            "memory_limit"
         );
     }
     let path = E::Literal(V::Path(
@@ -241,7 +241,7 @@ fn graph_outputs_and_path_expansion_are_admitted_before_materialization() {
                 .eval(&E::Function(function, vec![path.clone()]))
                 .unwrap_err()
                 .detail,
-            "MemoryLimit"
+            "memory_limit"
         );
     }
 }
@@ -268,14 +268,14 @@ fn expression_sequences_share_live_memory_and_preserve_error_order() {
         .unwrap_err();
     assert_eq!(
         (&*result.category, &*result.detail),
-        ("ResourceLimit", "MemoryLimit")
+        ("resource_limit", "memory_limit")
     );
     assert_eq!(
         evaluation
             .eval_sequence([&missing, &large].into_iter())
             .unwrap_err()
             .detail,
-        "MissingParameter"
+        "missing_parameter"
     );
     assert_eq!(
         evaluation
@@ -298,12 +298,12 @@ fn expression_sequences_share_live_memory_and_preserve_error_order() {
             .eval_sequence([&slot].into_iter())
             .unwrap_err()
             .detail,
-        "MemoryLimit"
+        "memory_limit"
     );
     let oversized = std::iter::repeat_n(&slot, usize::MAX);
     assert_eq!(
         evaluation.eval_sequence(oversized).unwrap_err().detail,
-        "MemoryLimit"
+        "memory_limit"
     );
 }
 
@@ -344,7 +344,7 @@ fn string_transforms_admit_outputs_before_allocating_them() {
                 let error = result.unwrap_err();
                 assert_eq!(
                     (&*error.category, &*error.detail),
-                    ("ResourceLimit", "MemoryLimit"),
+                    ("resource_limit", "memory_limit"),
                     "{function:?}"
                 );
                 assert!(
@@ -430,7 +430,7 @@ fn string_selection_preserves_unicode_boundaries_and_argument_errors() {
             if first == V::Null {
                 assert_eq!(result.unwrap(), V::Null);
             } else {
-                assert_eq!(result.unwrap_err().category, "TypeError");
+                assert_eq!(result.unwrap_err().category, "type_error");
             }
         }
     }
@@ -444,9 +444,9 @@ fn string_selection_preserves_unicode_boundaries_and_argument_errors() {
             assert_eq!(
                 error.detail,
                 if offset == V::Integer(-1) {
-                    "NegativeIntegerArgument"
+                    "negative_integer_argument"
                 } else {
-                    "InvalidArgumentType"
+                    "invalid_argument_type"
                 }
             );
         }
@@ -700,13 +700,13 @@ fn collection_limits_bound_values_instead_of_function_arity() {
                     integer(1),
                 ],
             ),
-            "ArithmeticError",
-            "DivisionByZero",
+            "arithmetic_error",
+            "division_by_zero",
         ),
         (
             E::Function(F::Range, vec![integer(1), integer(2), integer(0)]),
-            "ArgumentError",
-            "NumberOutOfRange",
+            "argument_error",
+            "number_out_of_range",
         ),
     ] {
         let error = evaluation.eval(&expression).unwrap_err();
@@ -722,8 +722,8 @@ fn collection_limits_bound_values_instead_of_function_arity() {
     ] {
         let expression = E::Binary(B::Add, Box::new(left), Box::new(right));
         let error = evaluation.eval(&expression).unwrap_err();
-        assert_eq!(error.category, "ResourceLimit");
-        assert_eq!(error.detail, "CollectionLimit");
+        assert_eq!(error.category, "resource_limit");
+        assert_eq!(error.detail, "collection_limit");
         assert_eq!(error.phase, r::ErrorPhase::Runtime);
         assert_eq!(
             r::Evaluation {
@@ -769,7 +769,7 @@ fn collection_limits_validate_nested_borrowed_inputs_before_selected_results() {
         E::Parameter("input".into()),
     ] {
         let error = evaluation.eval(&expression).unwrap_err();
-        assert_eq!(error.detail, "CollectionLimit");
+        assert_eq!(error.detail, "collection_limit");
         assert_eq!(
             r::Evaluation {
                 max_collection_items: 2,
@@ -828,7 +828,10 @@ fn collection_limits_cover_graph_lists_without_reading_dormant_values() {
     }
     let graph = Graph(BTreeMap::from([
         ("a".into(), Ok(V::List(vec![V::Integer(1), V::Integer(2)]))),
-        ("b".into(), Err(r::QueryError::unsupported("StoredValue"))),
+        (
+            "b".into(),
+            Err(r::QueryError::unsupported("stored_value", "this value")),
+        ),
     ]));
     let parameters = BTreeMap::new();
     let evaluation = r::Evaluation {
@@ -853,7 +856,7 @@ fn collection_limits_cover_graph_lists_without_reading_dormant_values() {
     ] {
         assert_eq!(
             evaluation.eval(&expression).unwrap_err().detail,
-            "CollectionLimit"
+            "collection_limit"
         );
     }
     assert_eq!(
@@ -924,7 +927,7 @@ fn collection_limits_cover_graph_lists_without_reading_dormant_values() {
                 .eval(&expression)
                 .unwrap_err()
                 .detail,
-                "CollectionLimit"
+                "collection_limit"
             );
         }
     }
@@ -939,7 +942,7 @@ fn collection_limits_cover_graph_lists_without_reading_dormant_values() {
         ))
         .unwrap_err()
         .detail,
-        "CollectionLimit"
+        "collection_limit"
     );
     // Property-map materialization must validate a nested collection before its
     // copy, while enumerating keys continues to ignore dormant value errors.
@@ -948,7 +951,7 @@ fn collection_limits_cover_graph_lists_without_reading_dormant_values() {
             .properties(r::Entity::Node(1))
             .unwrap_err()
             .detail,
-        "CollectionLimit"
+        "collection_limit"
     );
 }
 
@@ -978,12 +981,12 @@ fn nested_collection_limits_match_an_independent_stack_walk() {
             let mut expected = None;
             while let Some((value, depth)) = pending.pop() {
                 if depth >= r::MAX_EXPRESSION_DEPTH {
-                    expected = Some("ValueDepth");
+                    expected = Some("value_depth");
                     break;
                 }
                 match value {
                     V::List(values) if values.len() > limit => {
-                        expected = Some("CollectionLimit");
+                        expected = Some("collection_limit");
                         break;
                     }
                     V::List(values) => pending.extend(values.iter().rev().map(|v| (v, depth + 1))),
@@ -1005,7 +1008,7 @@ fn nested_collection_limits_match_an_independent_stack_walk() {
                 Some(detail) => {
                     let error = result.unwrap_err();
                     assert_eq!(
-                        error.category, "ResourceLimit",
+                        error.category, "resource_limit",
                         "seed={seed}, limit={limit}"
                     );
                     assert_eq!(error.detail, detail, "seed={seed}, limit={limit}");
@@ -1049,7 +1052,7 @@ fn collection_growth_checks_cardinality_even_with_spare_capacity() {
     );
     assert_eq!(
         evaluation.eval(&expression).unwrap_err().detail,
-        "CollectionLimit"
+        "collection_limit"
     );
     assert_eq!(
         r::Evaluation {

@@ -132,7 +132,7 @@ async fn distinct_retention_scales_with_unique_rows_and_drains_late_errors() {
                 .await
                 .unwrap_err();
             assert!(
-                matches!(error, Error::Query(ref error) if error.detail=="DivisionByZero"),
+                matches!(error, Error::Query(ref error) if error.detail=="division_by_zero"),
                 "{query}: {error}"
             );
         }
@@ -224,7 +224,7 @@ async fn distinct_memory_exhaustion_and_cancellation_rollback_prior_writes() {
     .await
     .unwrap_err();
     assert!(
-        matches!(error,Error::Query(ref error) if error.detail=="MemoryLimit"),
+        matches!(error,Error::Query(ref error) if error.detail=="memory_limit"),
         "{error}"
     );
     assert_eq!(
@@ -281,7 +281,7 @@ async fn distinct_memory_exhaustion_and_cancellation_rollback_prior_writes() {
             .await
             .unwrap_err();
         assert!(
-            matches!(error, Error::Query(ref error) if error.detail == "DivisionByZero"),
+            matches!(error, Error::Query(ref error) if error.detail == "division_by_zero"),
             "{error}"
         );
         assert_eq!(
@@ -338,7 +338,7 @@ async fn distinct_admission_failures_leave_no_partial_result() {
                 );
                 successes += 1;
             }
-            Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+            Err(Error::Query(error)) if error.detail == "memory_limit" => failures += 1,
             Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
             Err(error) => panic!("{memory_bytes}: {error:?}"),
         }

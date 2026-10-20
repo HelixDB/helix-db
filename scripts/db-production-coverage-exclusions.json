@@ -103,13 +103,13 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/index.rs",
-    "line": 346,
+    "line": 348,
     "reason": "After exact legacy metadata validation, transcoding changes only the physical name to the canonical name used to construct the comparison descriptor; every other compared field is unchanged.",
     "evidence": "vector_index_exercises_facade_and_row_safety_contracts and populated_legacy_vector_is_adopted_in_place"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/index.rs",
-    "line": 355,
+    "line": 357,
     "reason": "One metadata replacement cannot exceed the measured-write operation or byte domains on supported 64-bit targets.",
     "evidence": "populated_legacy_vector_is_adopted_in_place and db-vector-production-coverage architecture matrix"
   },
@@ -541,37 +541,25 @@
   },
   {
     "path": "crates/db/src/search/vector/cache/store.rs",
-    "line": 781,
+    "line": 923,
     "reason": "SlateDB scan_prefix returns only rows under the exact DataScope-qualified prefix used to create the iterator, so stripping that same scope cannot fail.",
     "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries"
   },
   {
     "path": "crates/db/src/search/vector/cache/store.rs",
-    "line": 836,
+    "line": 981,
     "reason": "This error value belongs to the platform-gated resident-byte overflow that cannot occur in a supported 64-bit address space.",
     "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/cache/store.rs",
-    "line": 846,
+    "line": 986,
     "reason": "This error value belongs to the platform-gated live-entry-count overflow that cannot occur in a supported process address space.",
     "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries and db-vector-production-coverage architecture matrix"
   },
   {
-    "path": "crates/db/src/search/vector/cache/store.rs",
-    "line": 868,
-    "reason": "This error belongs to the platform-gated usize-to-u64 key-length conversion that cannot fail on supported 64-bit targets.",
-    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries and db-vector-production-coverage architecture matrix"
-  },
-  {
-    "path": "crates/db/src/search/vector/cache/store.rs",
-    "line": 873,
-    "reason": "This error belongs to the platform-gated usize-to-u64 value-length conversion that cannot fail on supported 64-bit targets.",
-    "evidence": "vector_memory_store_exercises_cache_and_hydration_boundaries and db-vector-production-coverage architecture matrix"
-  },
-  {
     "path": "crates/db/src/search/vector/mod.rs",
-    "line": 916,
+    "line": 921,
     "reason": "After checked round-up addition succeeds, dividing by the nonzero word size and multiplying by that same word size cannot exceed the rounded dividend.",
     "evidence": "vector_primitives_exercise_active_codec_and_runtime_boundaries and db-vector-production-coverage architecture matrix"
   },
@@ -589,25 +577,25 @@
   },
   {
     "path": "crates/db/src/search/vector/hnsw/restricted.rs",
-    "line": 1324,
+    "line": 1339,
     "reason": "Scoring skips nodes it has already scored, so each node enters the restricted frontier at most once and inserting a popped node into the expanded set always succeeds; this closing edge belongs to the never-taken repeat case.",
     "evidence": "vector_restricted_search_exercises_bounded_graph_and_directory_paths"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3736,
+    "line": 4046,
     "reason": "Only shrink_to evicts without a transaction, and it runs only on sessions the lifecycle driver retained. The driver retains a session only when it holds no unflushed rows, after flush_all has written every dirty neighbor for the step, so this arm cannot meet a dirty neighbor row.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3832,
+    "line": 4142,
     "reason": "This error value belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
   },
   {
     "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
-    "line": 3835,
+    "line": 4145,
     "reason": "This closing edge belongs to the platform-gated u64-to-usize payload accounting failure that cannot occur on supported 64-bit production targets.",
     "evidence": "vector_build_cache_reuses_only_exact_committed_checkpoints and db-vector-production-coverage architecture matrix"
   },
@@ -616,5 +604,17 @@
     "line": 252,
     "reason": "The reader-outrun branch is exercised, but LLVM does not attribute the tracing macro field expression to the enclosing covered branch.",
     "evidence": "vector_hydration_exercises_active_generation_boundaries"
+  },
+  {
+    "path": "crates/db/src/search/vector/storage/mod.rs",
+    "line": 2291,
+    "reason": "The reverse-edge scan prefix includes the exact target node ID, so a successfully parsed locator under that prefix cannot contain another target.",
+    "evidence": "vector_storage_exercises_all_current_row_families"
+  },
+  {
+    "path": "crates/db/src/search/vector/hnsw/mutation/mod.rs",
+    "line": 1830,
+    "reason": "load_neighbors_for_mutation has just cached this row, so staging cannot reach the unloaded-row guard. The staged known-absent value encodes nothing, and the loaded row's encoded length is computed within the degree bound it was decoded under, so payload accounting cannot fail.",
+    "evidence": "vector_mutation_cache_exercises_closed_state_transitions"
   }
 ]

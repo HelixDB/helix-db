@@ -2,6 +2,7 @@
 use super::memory::Rows;
 use super::{graph, ExecutionContext, Limits, Result};
 use helix_planner::relational as r;
+use helix_planner::relational::{category, detail};
 use std::collections::BTreeMap;
 
 impl ExecutionContext<'_> {
@@ -82,8 +83,8 @@ impl ExecutionContext<'_> {
                 let r::Value::Entity(r::Entity::Node(mut from)) = row[relationship.from.0 as usize]
                 else {
                     return Err(r::QueryError::runtime(
-                        "TypeError",
-                        "ExpectedNode",
+                        category::TYPE_ERROR,
+                        detail::EXPECTED_NODE,
                         "relationship endpoint must be a node",
                     )
                     .into());
@@ -91,8 +92,8 @@ impl ExecutionContext<'_> {
                 let r::Value::Entity(r::Entity::Node(mut to)) = row[relationship.to.0 as usize]
                 else {
                     return Err(r::QueryError::runtime(
-                        "TypeError",
-                        "ExpectedNode",
+                        category::TYPE_ERROR,
+                        detail::EXPECTED_NODE,
                         "relationship endpoint must be a node",
                     )
                     .into());
@@ -112,8 +113,8 @@ impl ExecutionContext<'_> {
                 )?;
                 let label = relationship.types.first().ok_or_else(|| {
                     r::QueryError::runtime(
-                        "SyntaxError",
-                        "NoRelationshipType",
+                        category::SYNTAX_ERROR,
+                        detail::NO_RELATIONSHIP_TYPE,
                         "new relationships require one type",
                     )
                 })?;
@@ -135,8 +136,8 @@ impl ExecutionContext<'_> {
                         | r::Value::Entity(_)
                         | r::Value::Path(_) => {
                             return Err(r::QueryError::runtime(
-                                "TypeError",
-                                "ExpectedNode",
+                                category::TYPE_ERROR,
+                                detail::EXPECTED_NODE,
                                 "path must contain nodes",
                             )
                             .into())
@@ -157,8 +158,8 @@ impl ExecutionContext<'_> {
                         | r::Value::Entity(_)
                         | r::Value::Path(_) => {
                             return Err(r::QueryError::runtime(
-                                "TypeError",
-                                "ExpectedRelationship",
+                                category::TYPE_ERROR,
+                                detail::EXPECTED_RELATIONSHIP,
                                 "path must contain relationships",
                             )
                             .into())
@@ -232,8 +233,8 @@ impl ExecutionContext<'_> {
                             | r::Value::List(_)
                             | r::Value::Path(_) => {
                                 return Err(r::QueryError::runtime(
-                                    "TypeError",
-                                    "ExpectedMap",
+                                    category::TYPE_ERROR,
+                                    detail::EXPECTED_MAP,
                                     "property update requires a map",
                                 )
                                 .into())
@@ -260,8 +261,8 @@ impl ExecutionContext<'_> {
                     | r::Value::Map(_)
                     | r::Value::Path(_) => {
                         return Err(r::QueryError::runtime(
-                            "TypeError",
-                            "ExpectedEntity",
+                            category::TYPE_ERROR,
+                            detail::EXPECTED_ENTITY,
                             "SET and REMOVE require a graph entity",
                         )
                         .into())
@@ -311,10 +312,10 @@ impl ExecutionContext<'_> {
                         // item, preserving the frontend's observable error order.
                         edit.insert(key, value).map_err(|error| {
                             r::QueryError::runtime(
-                                "UnsupportedFeature",
+                                category::UNSUPPORTED_FEATURE,
                                 match error {
-                                    map::NameError::Empty => "EmptyPropertyName",
-                                    map::NameError::Reserved => "ReservedPropertyName",
+                                    map::NameError::Empty => detail::EMPTY_PROPERTY_NAME,
+                                    map::NameError::Reserved => detail::RESERVED_PROPERTY_NAME,
                                 },
                                 error.to_string(),
                             )
@@ -408,8 +409,8 @@ impl ExecutionContext<'_> {
                         | r::Value::List(_)
                         | r::Value::Map(_) => {
                             return Err(r::QueryError::runtime(
-                                "TypeError",
-                                "InvalidArgumentType",
+                                category::TYPE_ERROR,
+                                detail::INVALID_ARGUMENT_TYPE,
                                 "DELETE requires graph entities or paths",
                             )
                             .into())
@@ -456,16 +457,16 @@ mod property_tests {
         let mut fields = fields;
         fields.push(("b".into(), r::Expression::Parameter("payload".into())));
         assert!(
-            matches!(ctx.create_properties(&fields, ctx.evaluate(&[], &params, &graph, Limits::default())), Err(crate::cypher::Error::Query(error)) if error.detail == "MemoryLimit")
+            matches!(ctx.create_properties(&fields, ctx.evaluate(&[], &params, &graph, Limits::default())), Err(crate::cypher::Error::Query(error)) if error.detail == "memory_limit")
         );
         assert_eq!(ctx.row_budget().available(), 32 * 1024);
         for (key, value, detail) in [
-            ("$label", r::Value::Null, "ReservedPropertyName"),
-            ("", r::Value::Integer(1), "EmptyPropertyName"),
+            ("$label", r::Value::Null, "reserved_property_name"),
+            ("", r::Value::Integer(1), "empty_property_name"),
             (
                 "mixed",
                 r::Value::List(vec![r::Value::Integer(1), r::Value::Boolean(true)]),
-                "InvalidPropertyType",
+                "invalid_property_type",
             ),
         ] {
             let fields = vec![(key.into(), r::Expression::Literal(value))];

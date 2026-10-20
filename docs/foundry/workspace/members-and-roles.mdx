@@ -1,0 +1,64 @@
+---
+title: "Members and roles"
+description: "See who is in a Helix Foundry workspace, invite people, and what owners, admins and members can do"
+sidebarTitle: "Members and roles"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Everyone in a workspace shares its data, ontologies and plan. Foundry uses the
+workspace's Helix Cloud members and roles, so someone you add in either place has access
+in both.
+
+## See the members
+
+**Settings** → **Members** lists everyone in the workspace with their role and when they
+joined.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/members.png" alt="The Members tab listing an owner and a member" />
+</Frame>
+
+## Invite people
+
+Owners and admins select **Invite people**, enter an email address and choose a role:
+
+- **Member** sees everything in the workspace.
+- **Admin** also connects data, invites people and manages billing.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/invite.png" alt="The Invite to Acme dialog with an email address and the Admin role chosen" />
+</Frame>
+
+The invitation arrives by email and is accepted through Helix. To make someone an owner,
+change a role, remove someone or manage pending invitations, use the
+[Helix dashboard](https://helix-db.com/login).
+
+## What each role can do
+
+| Action | Owner | Admin | Member |
+| --- | :---: | :---: | :---: |
+| See data, ontologies, versions, documents, loads and the plan | ✓ | ✓ | ✓ |
+| Explore and read records | ✓ | ✓ | With **Query read** on the database's project |
+| Add, sync, edit and delete connections | ✓ | ✓ | |
+| Create and delete ontologies | ✓ | ✓ | |
+| Generate, make versions current, upload documents and load | ✓ | ✓ | |
+| Invite people | ✓ | ✓ | |
+| Upgrade, switch, cancel and manage billing | ✓ | ✓ | |
+
+Reading what a load wrote, in the Explorer, Records and a document's text, needs
+**Query read** on the database's Helix project; grant it in the Helix dashboard. Creating
+or deleting an ontology, uploading documents and loading also need write access to that
+project.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
+    Compare Free, Pro and Max.
+  </Card>
+  <Card title="Workspaces and navigation" icon="compass" href="/foundry/start-here/workspaces-and-navigation">
+    Switch workspaces and find your way around.
+  </Card>
+</CardGroup>

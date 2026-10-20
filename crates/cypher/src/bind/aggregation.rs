@@ -1,5 +1,6 @@
 //! Normalize mixed Cypher aggregates into shared aggregate and scalar programs.
 //! Indexes borrow expression owners and bound exact-identity candidate work.
+use helix_planner::relational::{category, detail};
 use helix_planner::{digest, relational as r};
 use std::{collections::BTreeMap, ops::ControlFlow};
 
@@ -71,8 +72,8 @@ fn split_projection_with(
                             .is_some_and(|bucket| bucket.len() >= MAX_IDENTITY_CANDIDATES)
                         {
                             return Err(r::QueryError::compile(
-                                "ResourceLimit",
-                                "AggregateIdentityBudget",
+                                category::RESOURCE_LIMIT,
+                                detail::AGGREGATE_IDENTITY_BUDGET,
                                 "aggregate identity collision budget exhausted",
                             ));
                         }
@@ -81,8 +82,8 @@ fn split_projection_with(
                             None => {
                                 if bindings.len() >= 4096 {
                                     return Err(r::QueryError::compile(
-                                        "ResourceLimit",
-                                        "TooManyBindings",
+                                        category::RESOURCE_LIMIT,
+                                        detail::TOO_MANY_BINDINGS,
                                         "aggregate extraction exceeds the binding budget",
                                     ));
                                 }
@@ -115,8 +116,8 @@ fn split_projection_with(
                 let Some(grouped) = grouped else {
                     if matches!(expression, r::Expression::Slot(_)) {
                         return Err(r::QueryError::compile(
-                            "SyntaxError",
-                            "AmbiguousAggregationExpression",
+                            category::SYNTAX_ERROR,
+                            detail::AMBIGUOUS_AGGREGATION_EXPRESSION,
                             "unbound grouping dependency",
                         ));
                     }
@@ -132,8 +133,8 @@ fn split_projection_with(
                 .find(|group| group.expression == r::Expression::Slot(slot))
             else {
                 return Err(r::QueryError::compile(
-                    "SyntaxError",
-                    "AmbiguousAggregationExpression",
+                    category::SYNTAX_ERROR,
+                    detail::AMBIGUOUS_AGGREGATION_EXPRESSION,
                     "unbound label grouping dependency",
                 ));
             };
@@ -222,8 +223,8 @@ impl<'a, T: Copy> ExpressionIndex<'a, T> {
         }
         if bucket.len() >= MAX_IDENTITY_CANDIDATES {
             return Err(r::QueryError::compile(
-                "ResourceLimit",
-                "AggregateIdentityBudget",
+                category::RESOURCE_LIMIT,
+                detail::AGGREGATE_IDENTITY_BUDGET,
                 "expression identity collision budget exhausted",
             ));
         }

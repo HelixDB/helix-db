@@ -66,7 +66,7 @@ async fn mixed_pipelines_stream_expansion_filters_aggregation_and_top_k() {
             expected
         );
         assert!(
-            matches!(Interpreter::new(&db, context::ParamBindings::default()).execute_rows(&reference, &BTreeMap::new(), limits).await, Err(Error::Query(error)) if error.detail == "MemoryLimit")
+            matches!(Interpreter::new(&db, context::ParamBindings::default()).execute_rows(&reference, &BTreeMap::new(), limits).await, Err(Error::Query(error)) if error.detail == "memory_limit")
         );
     }
     db.close().await.unwrap();
@@ -98,7 +98,7 @@ async fn mixed_pipeline_windows_preserve_pending_expansions_and_errors() {
         let plan = r::plan(helix_cypher::compile(text).unwrap(), &db.planner_context(context::ParamBindings::default())).unwrap();
         for strategy in [r::RowExecution::Batched, r::RowExecution::Materialized] {
             let result = Interpreter::new(&db, context::ParamBindings::default()).execute_rows(&plan.clone().with_execution(strategy), &BTreeMap::new(), Limits { batch_rows: 1, ..Default::default() }).await;
-            assert!(matches!(result, Err(Error::Query(error)) if error.detail == "DivisionByZero"), "{text}");
+            assert!(matches!(result, Err(Error::Query(error)) if error.detail == "division_by_zero"), "{text}");
         }
     }
     assert_eq!(
@@ -171,7 +171,7 @@ async fn standalone_common_filters_stream_and_reject_non_boolean_values() {
                 .await;
             if matches!(predicate, r::Value::Integer(_)) {
                 assert!(
-                    matches!(result, Err(Error::Query(error)) if error.detail == "InvalidArgumentType")
+                    matches!(result, Err(Error::Query(error)) if error.detail == "invalid_argument_type")
                 );
             } else {
                 assert_eq!(

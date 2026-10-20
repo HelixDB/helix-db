@@ -1,0 +1,39 @@
+{
+  "request_type": "read",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "users",
+            "root": {
+              "value_map": {
+                "input": {
+                  "has": {
+                    "input": {
+                      "has_label": {
+                        "input": {
+                          "nodes": {
+                            "reference": "all"
+                          }
+                        },
+                        "label": "DockerImageSmokeUser"
+                      }
+                    },
+                    "property": "scenario",
+                    "value": {
+                      "string": "docker-image-smoke"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "returns": [
+        "users"
+      ]
+    }
+  }
+}

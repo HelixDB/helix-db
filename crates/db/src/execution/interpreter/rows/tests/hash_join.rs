@@ -123,7 +123,7 @@ async fn duplicate_hash_buckets_stream_beyond_the_query_memory_budget() {
             .await
             .unwrap_err();
         assert!(
-            matches!(&error,Error::Query(error) if error.detail=="MemoryLimit")
+            matches!(&error,Error::Query(error) if error.detail=="memory_limit")
                 || matches!(
                     &error,
                     Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)
@@ -206,7 +206,7 @@ async fn hash_probe_continuations_preserve_error_order_and_release_owned_state()
         Ok(_) => panic!("a later graph access failure was lost"),
     };
     assert!(
-        matches!(&error,Error::Query(error) if error.detail=="DeletedEntityAccess"),
+        matches!(&error,Error::Query(error) if error.detail=="deleted_entity_access"),
         "{error:?}"
     );
     drop(cursor);
@@ -285,7 +285,7 @@ async fn hash_probe_continuations_preserve_error_order_and_release_owned_state()
                     Ok(_) => panic!("a resumed probe exceeded its remaining allowance"),
                 };
                 assert!(
-                    matches!(&error,Error::Query(error) if error.detail=="MemoryLimit")
+                    matches!(&error,Error::Query(error) if error.detail=="memory_limit")
                         || matches!(
                             &error,
                             Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)
@@ -344,7 +344,7 @@ async fn hash_table_builds_admit_every_source_row_or_release_everything() {
                 );
                 successes += 1;
             }
-            Err(Error::Query(error)) if error.detail == "MemoryLimit" => failures += 1,
+            Err(Error::Query(error)) if error.detail == "memory_limit" => failures += 1,
             Err(Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => failures += 1,
             Err(error) => panic!("{memory_bytes}: {error:?}"),
         }

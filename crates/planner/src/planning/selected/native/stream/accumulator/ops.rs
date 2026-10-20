@@ -13,11 +13,11 @@ impl NativeAccessStream {
         ctx: &context::PlannerContext,
         predicate: &Predicate,
     ) -> Result<Self, error::PlannerError> {
-        let _ = ir::PredicatePlan::new(predicate.clone())?;
+        ir::PredicatePlan::validate(predicate)?;
         let predicate = parameter_specialization::predicate(ctx, predicate)?;
-        let predicate_plan = ir::PredicatePlan::new(predicate.clone())
-            .expect("specializing validated parameters preserves predicate validity");
         let _ = analysis::prune_borrowed(&predicate)?;
+        let predicate_plan = ir::PredicatePlan::new(predicate)
+            .expect("specializing validated parameters preserves predicate validity");
         Ok(self.filter_plan(predicate_plan))
     }
 

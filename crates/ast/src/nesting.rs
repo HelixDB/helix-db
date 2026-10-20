@@ -8,7 +8,6 @@
 use crate::batch::BatchEntry;
 use crate::expr::{Expr, Predicate, StreamBound};
 use crate::projection::Projection;
-use crate::query::QueryValue;
 use crate::traversal::{AstNode, RepeatConfig};
 use crate::value::{PropertyInput, PropertyValue};
 
@@ -20,7 +19,6 @@ pub(crate) enum Node<'a> {
     Expr(&'a Expr),
     Input(&'a PropertyInput),
     Value(&'a PropertyValue),
-    Query(&'a QueryValue),
 }
 
 /// Whether no part below `roots` nests more than `maximum` levels deep. Each
@@ -128,20 +126,6 @@ pub(crate) fn within<'a>(roots: impl IntoIterator<Item = Node<'a>>, maximum: usi
                 | PropertyValue::F64Array(_)
                 | PropertyValue::F32Array(_)
                 | PropertyValue::StringArray(_),
-            ) => {}
-            Node::Query(QueryValue::Array(values)) => {
-                values.iter().for_each(|value| push(Node::Query(value)))
-            }
-            Node::Query(QueryValue::Object(values)) => {
-                values.values().for_each(|value| push(Node::Query(value)));
-            }
-            Node::Query(
-                QueryValue::Null
-                | QueryValue::Bool(_)
-                | QueryValue::I64(_)
-                | QueryValue::F64(_)
-                | QueryValue::F32(_)
-                | QueryValue::String(_),
             ) => {}
         }
     }

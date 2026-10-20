@@ -24,35 +24,35 @@ fn access_pipeline(
         .ok_or_else(|| rejection::unsupported(NativeUnsupportedReason::AccessPipelineNonCanonical))
 }
 
+/// The stream's access path and operators, moved out of it: composing an
+/// N-step chain one operator at a time must not copy the steps before it.
 fn access_stream_parts(
     input: logical::AccessStream,
 ) -> (logical::AccessPath, Vec<logical::StreamPipelineOp>) {
     match input {
         logical::AccessStream::Path(access) => (access, Vec::new()),
-        logical::AccessStream::Filter(filter) => (
-            filter.access().clone(),
-            vec![logical::StreamPipelineOp::Filter {
-                predicate: filter.predicate().clone(),
-            }],
-        ),
-        logical::AccessStream::Window(window) => (
-            window.access().clone(),
-            vec![logical::StreamPipelineOp::Window {
-                window: window.window(),
-            }],
-        ),
-        logical::AccessStream::Order(order) => (
-            order.access().clone(),
-            vec![logical::StreamPipelineOp::Order {
-                ordering: order.ordering().clone(),
-            }],
-        ),
+        logical::AccessStream::Filter(filter) => {
+            let (access, predicate) = filter.into_parts();
+            (
+                access,
+                vec![logical::StreamPipelineOp::Filter { predicate }],
+            )
+        }
+        logical::AccessStream::Window(window) => {
+            let (access, window) = window.into_parts();
+            (access, vec![logical::StreamPipelineOp::Window { window }])
+        }
+        logical::AccessStream::Order(order) => {
+            let (access, ordering) = order.into_parts();
+            (access, vec![logical::StreamPipelineOp::Order { ordering }])
+        }
         logical::AccessStream::Distinct(distinct) => (
-            distinct.access().clone(),
+            distinct.into_access(),
             vec![logical::StreamPipelineOp::Distinct],
         ),
         logical::AccessStream::Pipeline(pipeline) => {
-            (pipeline.access().clone(), pipeline.ops().to_vec())
+            let (access, ops) = pipeline.into_parts();
+            (access, ops.into_iter().collect())
         }
     }
 }
@@ -63,7 +63,8 @@ fn root_pipeline(
 ) -> Result<logical::LogicalExpr, error::PlannerError> {
     let (input, ops) = match input {
         logical::RootStream::Pipeline(pipeline) => {
-            (pipeline.input().clone(), pipeline.ops().to_vec())
+            let (input, ops) = pipeline.into_parts();
+            (input, ops.into_iter().collect())
         }
         input => (input, Vec::new()),
     };
@@ -74,16 +75,9 @@ fn root_pipeline(
 }
 
 fn append_pipeline_op(
-    existing: Vec<logical::StreamPipelineOp>,
+    mut ops: Vec<logical::StreamPipelineOp>,
     op: logical::StreamPipelineOp,
 ) -> ir::AtLeast<logical::StreamPipelineOp, 1> {
-    let mut existing = existing.into_iter();
-    match existing.next() {
-        Some(first) => {
-            let mut rest = existing.collect::<Vec<_>>();
-            rest.push(op);
-            ir::AtLeast::from_one_and_rest(first, rest)
-        }
-        None => ir::AtLeast::from_one(op),
-    }
+    ops.push(op);
+    ir::AtLeast::try_from_vec(ops).expect("an appended operator makes the pipeline non-empty")
 }

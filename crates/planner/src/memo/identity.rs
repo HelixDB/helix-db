@@ -11,13 +11,13 @@ struct MemoExpressionDigest<'a> {
     children: &'a super::children::MemoChildGroups,
 }
 
-/// Compute the stable identity digest for a memo expression.
+/// Compute the stable identity digest for a memo expression. Each expression
+/// computes it once, and its clones share the result.
 pub fn expression_digest(expression: &MemoExpression) -> digest::PlanDigest {
-    digest::PlanDigest::for_tagged_value(
-        "memo_expr:v2",
-        &MemoExpressionDigest {
-            expr: expression.expr(),
-            children: expression.children(),
-        },
-    )
+    expression.identity_digest(|expr, children| {
+        digest::PlanDigest::for_tagged_value(
+            "memo_expr:v2",
+            &MemoExpressionDigest { expr, children },
+        )
+    })
 }

@@ -114,7 +114,7 @@ async fn ranked_window_admission_failures_leave_no_partial_result() {
                 );
                 successes += 1;
             }
-            Err(crate::cypher::Error::Query(error)) if error.detail == "MemoryLimit" => {
+            Err(crate::cypher::Error::Query(error)) if error.detail == "memory_limit" => {
                 failures += 1
             }
             Err(crate::cypher::Error::Storage(crate::HelixDbError::QueryMemoryLimitExceeded)) => {
