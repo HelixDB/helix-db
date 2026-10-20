@@ -15,6 +15,9 @@ HTTP endpoints:
   index entities the writer's index worker holds back
   (`blocked_index_entity_count`); the writer's logs name each one.
 - `GET /readyz` reports whether the configured database handle is ready.
+- `GET /v2/diagnostics` runs read-only checks of the setup (storage, the S3
+  bucket's region, the disk cache's device and room, memory, index
+  publication, and recent queries' missing indexes); `helix doctor` renders it.
 
 The `x-helix-warm`, `x-helix-require-writer`, and
 `x-helix-await-durable` headers select the corresponding request contract.

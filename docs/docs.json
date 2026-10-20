@@ -105,6 +105,11 @@
           "href": "https://helix-db.com/login"
         },
         {
+          "anchor": "Foundry",
+          "icon": "shapes",
+          "href": "https://foundry.helix-db.com"
+        },
+        {
           "anchor": "Status",
           "icon": "signal",
           "href": "https://status.helix-db.com"
@@ -113,16 +118,6 @@
           "anchor": "GitHub",
           "icon": "github",
           "href": "https://github.com/HelixDB/helix-db"
-        },
-        {
-          "anchor": "HelixDB Rust DSL Docs",
-          "icon": "code",
-          "href": "https://docs.rs/helix-db/latest/helix_db/"
-        },
-        {
-          "anchor": "Legacy HQL Docs",
-          "icon": "warning",
-          "href": "https://github.com/HelixDB/hql-v1-docs"
         }
       ]
     },
@@ -228,6 +223,62 @@
         ]
       },
       {
+        "tab": "Helix Foundry",
+        "groups": [
+          {
+            "group": "Start Here",
+            "pages": [
+              "foundry/start-here/introduction",
+              "foundry/start-here/quickstart",
+              "foundry/start-here/workspaces-and-navigation"
+            ]
+          },
+          {
+            "group": "Data",
+            "pages": [
+              "foundry/data/connect-data",
+              "foundry/data/connectors"
+            ]
+          },
+          {
+            "group": "Ontologies",
+            "pages": [
+              "foundry/ontologies/create-an-ontology",
+              "foundry/ontologies/generate-and-version",
+              "foundry/ontologies/documents",
+              "foundry/ontologies/load-data"
+            ]
+          },
+          {
+            "group": "Explore",
+            "pages": [
+              "foundry/explore/explorer",
+              "foundry/explore/records-and-entities"
+            ]
+          },
+          {
+            "group": "Ask",
+            "pages": [
+              "foundry/ask/ask-questions"
+            ]
+          },
+          {
+            "group": "Workspace",
+            "pages": [
+              "foundry/workspace/members-and-roles",
+              "foundry/workspace/plans-and-billing"
+            ]
+          },
+          {
+            "group": "Reference",
+            "pages": [
+              "foundry/reference/limits",
+              "foundry/reference/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "CLI Reference",
         "groups": [
           {
@@ -252,6 +303,7 @@
           "cli/command-reference/cypher",
               "cli/command-reference/database",
               "cli/command-reference/delete",
+              "cli/command-reference/doctor",
               "cli/command-reference/explorer",
               "cli/command-reference/feedback",
               "cli/command-reference/init",
@@ -1480,6 +1532,30 @@
     {
       "source": "/what-is-rag",
       "destination": "/learn/ai-memory/what-is-rag"
+    },
+    {
+      "source": "/foundry",
+      "destination": "/foundry/start-here/introduction"
+    },
+    {
+      "source": "/foundry-cloud",
+      "destination": "/foundry/start-here/introduction"
+    },
+    {
+      "source": "/foundry/quickstart",
+      "destination": "/foundry/start-here/quickstart"
+    },
+    {
+      "source": "/foundry/connectors",
+      "destination": "/foundry/data/connectors"
+    },
+    {
+      "source": "/foundry/billing",
+      "destination": "/foundry/workspace/plans-and-billing"
+    },
+    {
+      "source": "/foundry/ask",
+      "destination": "/foundry/ask/ask-questions"
     }
   ],
   "search": {

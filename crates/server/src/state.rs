@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use db::query_service::HelixQueryService;
 use db::{HelixDB, HelixDbMode, IndexRuntimeReadiness};
 use helix_metrics::query::transport::OssQueryMetrics;
+
+use crate::config::StorageConfig;
 
 /// Shared server state used by every transport.
 #[derive(Clone)]
@@ -11,11 +14,20 @@ pub struct ServerState {
     query_service: HelixQueryService,
     db_mode: HelixDbMode,
     index_readiness: IndexRuntimeReadiness,
+    /// The storage `db` was opened on, which diagnostics inspect.
+    storage: Arc<StorageConfig>,
+    /// Diagnostic facts that take I/O, shared between requests.
+    diagnostic_facts: Arc<crate::diagnostics::FactCache>,
+    started: Instant,
 }
 
 impl ServerState {
-    /// Build state from an opened DB handle.
-    pub fn new(db: Arc<HelixDB>, query_metrics: Option<OssQueryMetrics>) -> Self {
+    /// Build state from a DB handle opened on `storage`.
+    pub fn new(
+        db: Arc<HelixDB>,
+        query_metrics: Option<OssQueryMetrics>,
+        storage: StorageConfig,
+    ) -> Self {
         let db_mode = db.mode();
         let index_readiness = db.index_runtime_readiness();
         let query_service = match query_metrics {
@@ -29,7 +41,30 @@ impl ServerState {
             query_service,
             db_mode,
             index_readiness,
+            storage: Arc::new(storage),
+            diagnostic_facts: Arc::default(),
+            started: Instant::now(),
         }
+    }
+
+    /// Borrow the opened database.
+    pub(crate) fn db(&self) -> &HelixDB {
+        &self.db
+    }
+
+    /// Borrow the storage the database was opened on.
+    pub(crate) fn storage(&self) -> &StorageConfig {
+        &self.storage
+    }
+
+    /// The diagnostic facts every clone of this state shares.
+    pub(crate) fn diagnostic_facts(&self) -> &crate::diagnostics::FactCache {
+        &self.diagnostic_facts
+    }
+
+    /// Time since this state was built, as the server opened its database.
+    pub(crate) fn uptime(&self) -> Duration {
+        self.started.elapsed()
     }
 
     /// Borrow the query service.

@@ -83,6 +83,36 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Tradeoffs](https://docs.helix-db.com/database/helix-cloud/operate/tradeoffs): What the Helix Cloud architecture is optimized for, and where another system may fit better — Page type: Concept
 - [Helix Cloud gateway errors](https://docs.helix-db.com/database/helix-cloud/operate/error-handling): Use stable Helix Cloud error codes, HTTP statuses, and SDK error metadata — Page type: Reference
 
+## Helix Foundry — Start Here
+- [What is Helix Foundry?](https://docs.helix-db.com/foundry/start-here/introduction): Helix Foundry connects your company's data, drafts an ontology across it, and loads it into a Helix database you can explore — Page type: Concept
+- [Helix Foundry quickstart](https://docs.helix-db.com/foundry/start-here/quickstart): Sign in, connect a source, generate an ontology, load it into a Helix database and explore it — Page type: Tutorial
+- [Workspaces and navigation](https://docs.helix-db.com/foundry/start-here/workspaces-and-navigation): Sign in to Helix Foundry, choose or create a workspace, and find your way with the sidebar, search and themes — Page type: Guide
+
+## Data
+- [Connect and sync data](https://docs.helix-db.com/foundry/data/connect-data): Add a source to a Helix Foundry workspace, test its credential, sync its tables and read what each table holds — Page type: Guide
+- [Connectors](https://docs.helix-db.com/foundry/data/connectors): What each Helix Foundry source needs, the permissions to give it, the tables it syncs and its limits — Page type: Reference
+
+## Ontologies
+- [Create an ontology](https://docs.helix-db.com/foundry/ontologies/create-an-ontology): Create a Helix Foundry ontology on an existing Helix database or a new one, and read its overview — Page type: Guide
+- [Generate and version an ontology](https://docs.helix-db.com/foundry/ontologies/generate-and-version): Ask Helix Foundry's agent to draft an ontology from your synced tables and documents, review each version, and choose the current one — Page type: Guide
+- [Upload documents](https://docs.helix-db.com/foundry/ontologies/documents): Upload Markdown and text files to a Helix Foundry ontology so generations and loads read the names and facts they hold — Page type: Guide
+- [Load data into a Helix database](https://docs.helix-db.com/foundry/ontologies/load-data): Write an ontology's current version, your synced tables and your documents into its Helix database, and manage its loads — Page type: Guide
+
+## Explore
+- [Explore the graph](https://docs.helix-db.com/foundry/explore/explorer): Read what a Helix Foundry load wrote as a graph: search, expand, inspect, pick a load and compare two — Page type: Guide
+- [Records and entities](https://docs.helix-db.com/foundry/explore/records-and-entities): Read a Helix Foundry load as tables by type, open a record's links and sources, and see everything about one entity — Page type: Guide
+
+## Ask
+- [Ask questions of your data](https://docs.helix-db.com/foundry/ask/ask-questions): Ask a Helix Foundry ontology questions in plain language and get answers that cite where they came from. Coming soon. — Page type: Guide; Status: Preview
+
+## Workspace
+- [Members and roles](https://docs.helix-db.com/foundry/workspace/members-and-roles): See who is in a Helix Foundry workspace, invite people, and what owners, admins and members can do — Page type: Guide
+- [Plans and billing](https://docs.helix-db.com/foundry/workspace/plans-and-billing): Compare Helix Foundry Free, Pro and Max, upgrade a workspace, switch tiers, cancel, resume and manage payment — Page type: Guide
+
+## Reference
+- [Helix Foundry limits](https://docs.helix-db.com/foundry/reference/limits): Every Helix Foundry limit in one place: syncs, generations, documents, loads, spending and reads — Page type: Reference
+- [Troubleshooting Helix Foundry](https://docs.helix-db.com/foundry/reference/troubleshooting): What Helix Foundry's sign-in, connection, sync, generation, database and load messages mean, and what to do — Page type: Troubleshooting
+
 ## Using the helix CLI
 - [Getting started with HelixDB CLI](https://docs.helix-db.com/cli/getting-started): Install the CLI, run locally, or link a WorkOS-authenticated Cloud database — Page type: Tutorial
 - [Local development](https://docs.helix-db.com/cli/workflows/local): Run a local instance and iterate on dynamic JSON queries — Page type: Guide
@@ -100,6 +130,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [helix cypher](https://docs.helix-db.com/cli/command-reference/cypher): Execute or explain one Cypher statement against a local instance — Page type: Reference
 - [helix database](https://docs.helix-db.com/cli/command-reference/database): Discover and manage Helix Cloud databases and application keys — Page type: Reference
 - [helix delete](https://docs.helix-db.com/cli/command-reference/delete): Remove an instance from helix.toml and clean up its local state — Page type: Reference
+- [helix doctor](https://docs.helix-db.com/cli/command-reference/doctor): Check an instance's setup: runtime, storage, disk cache, memory, and index use — Page type: Reference
 - [helix explorer](https://docs.helix-db.com/cli/command-reference/explorer): Browse a running local instance in the graph Explorer — Page type: Reference
 - [helix feedback](https://docs.helix-db.com/cli/command-reference/feedback): Open a pre-filled feedback issue for the Helix team — Page type: Reference
 - [helix init](https://docs.helix-db.com/cli/command-reference/init): Create a local project or a WorkOS-authenticated Cloud link — Page type: Reference

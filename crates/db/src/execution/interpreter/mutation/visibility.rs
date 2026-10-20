@@ -60,8 +60,8 @@ pub(in crate::execution::interpreter) fn required_for(
 ) -> RequiredMutationVisibility {
     match op {
         exec::ExecOp::Access { plan } => required_for_access(plan),
-        exec::ExecOp::Count { .. }
-        | exec::ExecOp::KvRead(_)
+        exec::ExecOp::Count { plan } => required_for_count(plan),
+        exec::ExecOp::KvRead(_)
         | exec::ExecOp::Reserved { .. }
         | exec::ExecOp::Barrier { .. }
         | exec::ExecOp::IndexDdl { .. } => RequiredMutationVisibility::ALL,
@@ -163,6 +163,44 @@ pub(in crate::execution::interpreter) fn required_for_pattern(
             }
             required
         })
+}
+
+/// Counts of a constant, a request parameter, a materialized variable or the
+/// rows of the step they consume read no storage, so they flush nothing.
+/// Flushing before them would re-merge every shared row a preceding mutation
+/// touched, once per count (`add_n(..).count()` repeated in one batch).
+/// Every other count reads storage and keeps the conservative barrier.
+fn required_for_count(plan: &exec::ExecCountPlan) -> RequiredMutationVisibility {
+    match plan {
+        exec::ExecCountPlan::Constant(_)
+        | exec::ExecCountPlan::RuntimeInput { .. }
+        | exec::ExecCountPlan::InputRows { .. }
+        | exec::ExecCountPlan::InputScalars { .. } => RequiredMutationVisibility::NONE,
+        exec::ExecCountPlan::NodeBitmap(_)
+        | exec::ExecCountPlan::EdgeBitmap(_)
+        | exec::ExecCountPlan::NodeUnique(_)
+        | exec::ExecCountPlan::NodeRange(_)
+        | exec::ExecCountPlan::EdgeRange(_)
+        | exec::ExecCountPlan::NodeAuthoritativeScan(_)
+        | exec::ExecCountPlan::EdgeAuthoritativeScan(_)
+        | exec::ExecCountPlan::NodePointReads { .. }
+        | exec::ExecCountPlan::EdgePointReads { .. }
+        | exec::ExecCountPlan::NodeRuntimeInput { .. }
+        | exec::ExecCountPlan::EdgeRuntimeInput { .. }
+        | exec::ExecCountPlan::NodeFullScan { .. }
+        | exec::ExecCountPlan::EdgeFullScan { .. }
+        | exec::ExecCountPlan::NodeLabelBitmap { .. }
+        | exec::ExecCountPlan::EdgeLabelBitmap { .. }
+        | exec::ExecCountPlan::NodeVectorSearch(_)
+        | exec::ExecCountPlan::EdgeVectorSearch(_)
+        | exec::ExecCountPlan::NodeTextSearch(_)
+        | exec::ExecCountPlan::EdgeTextSearch(_)
+        | exec::ExecCountPlan::NodeDynamicEquality(_)
+        | exec::ExecCountPlan::EdgeDynamicEquality(_)
+        | exec::ExecCountPlan::NodeDynamicMembership(_)
+        | exec::ExecCountPlan::EdgeDynamicMembership(_)
+        | exec::ExecCountPlan::Stream(_) => RequiredMutationVisibility::ALL,
+    }
 }
 
 fn required_for_access(plan: &exec::ExecAccessPlan) -> RequiredMutationVisibility {
@@ -322,6 +360,50 @@ mod tests {
             }),
             RequiredMutationVisibility::NONE
         );
+    }
+
+    #[test]
+    fn counts_of_held_rows_flush_nothing_and_storage_counts_flush_everything() {
+        let window = exec::ExecCountWindowPlan::identity;
+        let name = || helix_planner::ir::NonEmptyString::new("held").unwrap();
+        let count = |plan| {
+            required_for(&exec::ExecOp::Count {
+                plan: Box::new(plan),
+            })
+        };
+        for plan in [
+            exec::ExecCountPlan::Constant(3),
+            exec::ExecCountPlan::InputRows { window: window() },
+            exec::ExecCountPlan::InputScalars { window: window() },
+            exec::ExecCountPlan::RuntimeInput {
+                input: exec::ExecRuntimeInputPlan::Param(name()),
+                window: window(),
+            },
+            exec::ExecCountPlan::RuntimeInput {
+                input: exec::ExecRuntimeInputPlan::Variable(name()),
+                window: window(),
+            },
+        ] {
+            assert_eq!(count(plan), RequiredMutationVisibility::NONE);
+        }
+        for plan in [
+            exec::ExecCountPlan::NodeFullScan { window: window() },
+            exec::ExecCountPlan::EdgeFullScan { window: window() },
+            exec::ExecCountPlan::NodeLabelBitmap {
+                label: name(),
+                window: window(),
+            },
+            exec::ExecCountPlan::EdgeLabelBitmap {
+                label: name(),
+                window: window(),
+            },
+            exec::ExecCountPlan::NodeRuntimeInput {
+                input: exec::ExecRuntimeInputPlan::Variable(name()),
+                window: window(),
+            },
+        ] {
+            assert_eq!(count(plan), RequiredMutationVisibility::ALL);
+        }
     }
 
     #[test]

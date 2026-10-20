@@ -1,0 +1,124 @@
+---
+title: "Generate and version an ontology"
+description: "Ask Helix Foundry's agent to draft an ontology from your synced tables and documents, review each version, and choose the current one"
+sidebarTitle: "Generate and version"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+A generation asks Foundry's agent to draft a new version of an ontology: its types,
+links, mappings from your tables, rules and the questions it should answer. Each draft
+is stored as a new version beside the others. Nothing changes until you make a version
+current.
+
+<Frame caption="Generate a draft, review it and make it current.">
+  <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/ontology/generate-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/ontology/generate.webm"></video>
+</Frame>
+
+## Generate a draft
+
+<Steps>
+  <Step title="Say what it should serve">
+    On the ontology, select **Generate**. Under **What should it serve?**, write the
+    questions people will ask of it, in your words. The goal is optional, up to 2,000
+    characters, and names the generation.
+  </Step>
+
+  <Step title="Choose its tables">
+    Choose the connectors whose synced tables go in; every table a connector has synced
+    is included. Expand a connector to see its tables. A generation reads at most 50
+    tables.
+  </Step>
+
+  <Step title="Check its documents">
+    The agent also sees the names of the ontology's 50 most recently uploaded
+    [documents](/foundry/ontologies/documents), so it can add types for what they hold,
+    such as a contract with a customer.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/generate.png" alt="The Generate an ontology form with a goal, the Stripe connector's tables expanded and the Documents section" />
+    </Frame>
+  </Step>
+
+  <Step title="Generate">
+    Select **Generate**. The generation's page follows it as it runs.
+  </Step>
+</Steps>
+
+## Follow a generation
+
+A generation is **Queued**, then **Running**, then **Succeeded** or **Failed**. It
+can take several minutes. An attempt that fails for a passing reason is retried, up to
+three attempts; while it waits, the page says it is retrying, why, and when it runs
+next. Other failures, such as a draft the agent refused, fail at once. An ontology runs
+one generation at a time.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/generation-done.png" alt="A succeeded generation that drafted version 4, with Review version 4" />
+</Frame>
+
+**Generations** lists every generation with its title, status and the version it
+drafted. Open one to see its goal, tables and steps. A failed generation offers **Try
+again**, which opens the form with the same goal and connectors.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/generations.png" alt="The Generations list with each generation's title, status and version" />
+</Frame>
+
+## Review a version
+
+Select **Review version** on a generation, or open a version from **Schema versions**.
+An agent draft opens on its summary and its graph, with a tab for each part:
+
+| Tab | Shows |
+| --- | --- |
+| **Graph** | The agent's summary and the types and links as a scene or a schema |
+| **Types** | Each type with its properties and keys |
+| **Links** | How types connect, and what each link means |
+| **Mappings** | Which table and columns fill each type and link |
+| **Rules** | Checks the data should pass |
+| **Questions** | The questions the version is meant to answer |
+| **TOML** | The draft's `ontology.toml` and `mappings.toml` |
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/version.png" alt="Version 3, an agent draft, with its summary and Graph tab" />
+</Frame>
+
+Versions never change. Each generation drafts afresh rather than editing the current
+version, so to change a draft, generate again with a sharper goal or different tables.
+
+## Make a version current
+
+Select **Make current** on a version, or in **Schema versions**, and confirm. The
+current version is the one the overview shows and the one a load writes.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/versions.png" alt="Schema versions listing three versions with their status, format and Make current" />
+</Frame>
+
+To roll back, make an older version current. If someone else makes another version
+current at the same time, Foundry refuses yours, says why, and shows the version that
+is current now.
+
+<Note>
+  Only an **Agent draft** the agent finished can be [loaded](/foundry/ontologies/load-data).
+  A draft it stopped early, or a version in the older **Definition v1** format, can be
+  reviewed and made current, but not loaded.
+</Note>
+
+## Who can do what
+
+Owners and admins generate and make versions current. Members see every generation and
+version.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Load data" icon="database" href="/foundry/ontologies/load-data">
+    Write the current version into the ontology's database.
+  </Card>
+  <Card title="Upload documents" icon="file-lines" href="/foundry/ontologies/documents">
+    Give the agent and your loads documents to read.
+  </Card>
+</CardGroup>

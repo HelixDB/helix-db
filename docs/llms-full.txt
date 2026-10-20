@@ -5717,10 +5717,15 @@ Cloud, use the gateway URL and database ID shown in the dashboard. The
 `cluster.helix-db.com` hostname in the OpenAPI document is a placeholder, not a
 shared query endpoint.
 
-The root OpenAPI server and the `/healthz` and `/readyz` operations describe a
-local HelixDB server. The Helix Cloud gateway is advertised only for
-`POST /v2/query`; its separate `/health` and `/readyz` contracts are not part of
-this specification.
+The root OpenAPI server and the `/healthz`, `/readyz` and `/v2/diagnostics`
+operations describe a local HelixDB server. The Helix Cloud gateway is advertised
+only for `POST /v2/query`; its separate `/health` and `/readyz` contracts are not
+part of this specification.
+
+`GET /v2/diagnostics` returns read-only checks of the server's setup: storage,
+the S3 bucket's region, the disk cache's device and room, memory, index
+publication, and recent queries' index use.
+[`helix doctor`](/cli/command-reference/doctor) renders it.
 
 Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
 gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
@@ -7685,6 +7690,839 @@ Current SDKs read both shapes. Keep a readable diagnostic fallback for
 intermediaries and older self-hosted endpoints that do not return the Cloud
 envelope.
 
+# What is Helix Foundry?
+
+Page type: Concept
+
+Helix Foundry turns the tools your company runs on into one connected graph. Connect
+sources such as Stripe or your PostgreSQL database, let Foundry's agent draft an
+ontology across them, then load it into a Helix database and explore it as a graph or
+as records.
+
+Foundry runs at [foundry.helix-db.com](https://foundry.helix-db.com). Sign in with the
+account you use for Helix Cloud; your workspaces come with it.
+
+  <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
+
+## How it fits together
+
+| Concept | What it is |
+| --- | --- |
+| **Workspace** | Your team's space, shared with Helix Cloud. It holds connections, ontologies, members and the Foundry plan. |
+| **Connection** | A source Foundry reads, with its credential. Each **sync** copies its tables into a snapshot Foundry keeps. |
+| **Ontology** | The types, links and rules that describe your data, bound to one Helix database. |
+| **Generation** | A request to Foundry's agent to draft a new version of the ontology from your synced tables and documents. |
+| **Version** | One draft of the ontology. Versions never change; you choose which one is current. |
+| **Document** | A Markdown or text file, such as a contract, that a load reads for the names and facts it holds. |
+| **Load** | One write of the current version into the ontology's database: your tables, then your documents. |
+| **Explorer** | The graph and records view of a load, read from the database with your session. |
+
+The work flows in one direction:
+
+```mermaid
+flowchart LR
+  A[Connect and sync data] --> B[Generate a draft]
+  B --> C[Review and make it current]
+  C --> D[Load into the database]
+  D --> E[Explore and ask]
+```
+
+## What Foundry does not do
+
+- It never writes to your sources. Connections only read, and database users need
+  `SELECT` only.
+- It never deletes a Helix database. Deleting an ontology removes what its loads wrote
+  and leaves the database's other data in place.
+- It does not manage roles, member removal or single sign-on. Those stay in the
+  [Helix dashboard](https://helix-db.com/login).
+
+## How Foundry uses AI models
+
+A generation sends your synced tables to Foundry's agent, which drafts the version. A
+load sends your documents' text to Anthropic and OpenAI models, which find the names
+and facts they hold and check them. Reading tables into a load uses no models.
+
+## Next steps
+
+    Go from sign-in to an explored graph in about ten minutes.
+
+    Add a source, test it and sync its tables.
+
+    Draft types, links and mappings from your tables.
+
+    Ask your data questions in plain language. Coming soon.
+
+# Helix Foundry quickstart
+
+Page type: Tutorial
+
+This tutorial takes a new workspace from sign-in to an explored graph. You need a
+Helix account and a source to read, such as a Stripe account. Owners and admins of a
+workspace can do every step. Members can follow along read-only; exploring a load also
+needs **Query read** on its database's Helix project.
+
+    See [Connect data](/foundry/data/connect-data) for every source and what it needs.
+
+## Next steps
+
+    Add contracts and notes so loads fill types from their text.
+
+    Invite members and admins to the workspace.
+
+    PostgreSQL and MySQL need Foundry Pro.
+
+    What each error and waiting state means.
+
+# Workspaces and navigation
+
+Page type: Guide
+
+Use this page to sign in, move between workspaces and get around Foundry quickly.
+Foundry's workspaces are your Helix Cloud workspaces: the same names, members and
+roles.
+
+To switch later, use the workspace menu at the top of the sidebar. Foundry remembers
+the workspace you chose in this browser.
+
+## Home
+
+Home says where the workspace stands: its connections and synced tables, its
+ontologies, its members and its plan. Each card links to the page that changes it.
+
+## Search with the command palette
+
+Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and Linux) to
+search pages, synced tables and ontologies. Owners and admins also get **Add data** and
+**Create an ontology** there.
+
+## Account menu and theme
+
+Select your name at the foot of the sidebar for Settings, Members, Plan & billing, the
+theme and **Sign out**. Choose **System**, **Light** or **Dark**; Foundry keeps the
+choice in this browser.
+
+## Workspace settings
+
+**Settings** → **General** shows the workspace's name, address, region and your role.
+Rename or delete a workspace in the Helix dashboard; Foundry shares it with Helix Cloud.
+
+## Next steps
+
+    Invite people and see what each role can do.
+
+    Compare Free, Pro and Max.
+
+# Connect and sync data
+
+Page type: Guide
+
+A connection is a source Foundry reads, such as a Stripe account or a PostgreSQL
+database. Each sync copies its tables into a snapshot that generations and loads read.
+Owners and admins add, sync, edit and delete connections; members see them.
+
+## Add a connection
+
+    Under **Connection options** you can name the connection; databases also choose
+    their encryption there.
+
+Syncs run when you select **Sync now** (or **Sync** on the Data page) and after you
+change a connection's settings. Foundry doesn't sync on a schedule yet. Each sync reads
+every table in full and replaces its snapshot; a table that finished keeps its new
+snapshot even if a later table fails. A connection runs one sync at a time. While one
+runs, its settings can't change and it can't be deleted.
+
+## Read a synced table
+
+Select a table to see its columns, its primary key, the columns that point at other
+tables, the columns in other tables that point at it, and when its snapshot was taken.
+An app's columns are the fields found in its rows, without types.
+
+## Edit or delete a connection
+
+Open the **⋯** menu on a connection's page:
+
+- **Edit connection** changes its settings or credential. Foundry tests the new
+  settings before it saves them, and syncs again when they changed. Leave the
+  credential blank to keep the stored one. To change which database tables sync, enter
+  the password and test the connection again.
+- **Delete connection** stops syncing it and removes its tables from the workspace's
+  data. The source itself is not changed.
+
+Foundry never shows a stored credential again. An API key is named by its prefix and
+last four characters, such as `rk_live…Qx7m`; a database shows that a password is set.
+
+## Next steps
+
+    What each source needs, and what it syncs.
+
+    Draft an ontology from your synced tables.
+
+# Connectors
+
+Page type: Reference
+
+Foundry reads five kinds of source. Apps sync every table their credential can read;
+databases sync the tables you choose. Every credential only needs read access.
+
+| Source | Credential | Plan |
+| --- | --- | --- |
+| [Stripe](#stripe) | Restricted (`rk_`) or secret (`sk_`) API key | Free |
+| [WorkOS](#workos) | Secret API key (`sk_`) | Free |
+| [PostHog](#posthog) | Personal API key (`phx_`) | Free |
+| [PostgreSQL](#postgresql) | Database user and password | [Pro or Max](/foundry/workspace/plans-and-billing) |
+| [MySQL](#mysql) | Database user and password | [Pro or Max](/foundry/workspace/plans-and-billing) |
+
+## Stripe
+
+In Stripe, open **API keys** and select **Create restricted key**. Name it "Helix
+Foundry", set **Read** on the objects you want and leave everything else as **None**.
+Foundry reads test or live data, as the key says. Use a sandbox or test mode key first
+to try Foundry without live data.
+
+Syncs `customers`, `products`, `prices`, `coupons`, `promotion_codes`, `subscriptions`,
+`subscription_items`, `invoices`, `invoice_line_items`, `charges`, `payment_intents`,
+`refunds`, `disputes`, `payouts` and `balance_transactions`. A table the key can't read
+is skipped and named after the test; the test fails only when the key can read none.
+
+## WorkOS
+
+In WorkOS, open **API Keys** in the environment you want to import (Staging or
+Production) and copy the secret key. Production keys are shown only when created, so
+create a new one if you no longer have it. WorkOS keys can make changes, but Foundry
+only reads.
+
+Syncs `organizations`, `users`, `organization_memberships`, `invitations`,
+`sso_connections`, `directories`, `directory_users`, `directory_groups` and
+`directory_group_members`.
+
+## PostHog
+
+In PostHog, open **Settings** → **Personal API keys** and select **Create personal API
+key**. Give it the **Query** and **Project** read scopes only, limited to the project you
+want to import.
+
+| Field | Notes |
+| --- | --- |
+| Region | US Cloud, EU Cloud or Self-hosted (an HTTPS host). |
+| Project ID | Optional when the key sees one project; Foundry fills it in after the test. |
+| Event history (days) | 1 to 365, 30 by default. |
+
+Syncs `persons`, `person_distinct_ids` and `groups` in full, and `events` and
+`daily_event_counts` for the event history you chose.
+
+## PostgreSQL
+
+Create a read-only user as an administrator, replacing the database name and password:
+
+```sql
+CREATE ROLE foundry_readonly LOGIN PASSWORD 'choose-a-password';
+GRANT CONNECT ON DATABASE app TO foundry_readonly;
+GRANT USAGE ON SCHEMA public TO foundry_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO foundry_readonly;
+```
+
+| Field | Default |
+| --- | --- |
+| Host, Database, Username, Password | Required. |
+| Port | `5432` |
+| Schema | `public` |
+| Encryption (under **Connection options**) | Require TLS with certificate verification. Add a CA certificate for a private CA, or choose **No TLS**. |
+
+After the test, choose the tables to sync. Every table in the schema starts selected,
+and keeping them all also syncs tables added later; views are not synced. If a selected
+table is dropped or renamed, syncs fail until you edit the connection and test it
+again.
+
+## MySQL
+
+The same fields as PostgreSQL, with port `3306` and no schema: Foundry reads the
+database you name. Give the user `SELECT` on it only.
+
+## Network access for databases
+
+Foundry connects to a database over the internet from Helix's network, so the
+database must accept connections from outside your network. If it only accepts known
+addresses, allow the outbound addresses the form lists, and select **Copy** to copy
+them.
+
+Foundry refuses private, loopback and shared address ranges, and follows no
+redirects.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Rows per table, per sync | 2,000,000. A larger table fails the sync: for a database, leave it out; for PostHog, shorten the event history. |
+| One sync attempt | 2 hours |
+| Attempts per sync | 3 |
+| Syncs running per connection | 1 |
+
+## Next steps
+
+    Add a connection and follow its syncs.
+
+    Upgrade to Pro for PostgreSQL and MySQL.
+
+# Create an ontology
+
+Page type: Guide
+
+An ontology holds the types, links and rules that describe your data, with its
+versions, documents and loads. Each one is bound to one Helix database, which its loads
+write into. A workspace can have several ontologies, one per database.
+
+**Ontologies** lists the workspace's ontologies with the database each one uses.
+
+## Create one
+
+    **Create a new one** makes a database in the project you choose, on Helix's shared
+    cluster, under the workspace's Helix plan. Its address is the name you give it, with
+    a short suffix when another database already has it.
+
+The sidebar lists the ontology's pages: **Overview**, **Generations**, **Schema
+versions**, **Documents**, **Data loads** and **Explorer**.
+
+## Delete an ontology
+
+Select the bin on the overview. Foundry deletes the ontology, its versions and
+documents, and, in the background, everything its loads wrote into the database,
+including links your own data added to those records. The database and its other data
+stay. The database can take a new ontology once that removal finishes.
+
+## Who can do what
+
+Owners and admins create and delete ontologies, and need write access to the
+database's Helix project to do so. Members see every ontology. A member who can't read
+the database's project sees the ontology without its database's details or contents.
+
+## Next steps
+
+    Draft a version from your synced tables.
+
+    Add the files a load reads for names and facts.
+
+# Generate and version an ontology
+
+Page type: Guide
+
+A generation asks Foundry's agent to draft a new version of an ontology: its types,
+links, mappings from your tables, rules and the questions it should answer. Each draft
+is stored as a new version beside the others. Nothing changes until you make a version
+current.
+
+**Generations** lists every generation with its title, status and the version it
+drafted. Open one to see its goal, tables and steps. A failed generation offers **Try
+again**, which opens the form with the same goal and connectors.
+
+## Review a version
+
+Select **Review version** on a generation, or open a version from **Schema versions**.
+An agent draft opens on its summary and its graph, with a tab for each part:
+
+| Tab | Shows |
+| --- | --- |
+| **Graph** | The agent's summary and the types and links as a scene or a schema |
+| **Types** | Each type with its properties and keys |
+| **Links** | How types connect, and what each link means |
+| **Mappings** | Which table and columns fill each type and link |
+| **Rules** | Checks the data should pass |
+| **Questions** | The questions the version is meant to answer |
+| **TOML** | The draft's `ontology.toml` and `mappings.toml` |
+
+Versions never change. Each generation drafts afresh rather than editing the current
+version, so to change a draft, generate again with a sharper goal or different tables.
+
+## Make a version current
+
+Select **Make current** on a version, or in **Schema versions**, and confirm. The
+current version is the one the overview shows and the one a load writes.
+
+To roll back, make an older version current. If someone else makes another version
+current at the same time, Foundry refuses yours, says why, and shows the version that
+is current now.
+
+  Only an **Agent draft** the agent finished can be [loaded](/foundry/ontologies/load-data).
+  A draft it stopped early, or a version in the older **Definition v1** format, can be
+  reviewed and made current, but not loaded.
+
+## Who can do what
+
+Owners and admins generate and make versions current. Members see every generation and
+version.
+
+## Next steps
+
+    Write the current version into the ontology's database.
+
+    Give the agent and your loads documents to read.
+
+# Upload documents
+
+Page type: Guide
+
+Documents carry what your tables don't: who signed a contract, what was agreed, who
+referred whom. Upload them to an ontology, and each load reads them into its database,
+linking the names they mention to the records your tables hold.
+
+## Upload
+
+In the ontology's **Documents**, choose files or drop them on the page. Foundry checks
+each file before it uploads it, then sends it straight to storage with its progress.
+
+| Rule | Value |
+| --- | --- |
+| File types | Markdown (`.md`, `.markdown`) and text (`.txt`) |
+| Size | Up to 256 KiB each |
+| Count | At most 200 documents in the workspace |
+| Name | At most 255 characters, with no slash, backslash or control character |
+
+## How documents are used
+
+- **Generations** give the agent the names of the ontology's 50 most recently uploaded
+  documents, so a draft can add types for what they hold, such as a contract.
+- **Loads** read every document: its sections, the names it mentions, and the facts it
+  states, each with the quote it came from. What a load can't settle, such as a name
+  the database doesn't hold, an ambiguous name, a quote it couldn't verify or a fact
+  that conflicts with your tables, goes to **Needs review** instead of becoming a
+  record.
+- A document uploaded after the current load is read into that load as it arrives.
+
+Each document's status says where it stands: **Waiting for a load**, **Queued for the
+load**, **Reading**, **Read**, **Needs review**, **Duplicate** or **Couldn't be read**.
+
+Reading documents uses AI models: a load sends each document's text to Anthropic and
+OpenAI models to find its names and facts and to check them.
+
+## Read a document
+
+Open a document to see its text as the load read it: names underlined, quoted facts
+tinted and anything that needs review marked. Beside it, **Facts**, **Entities** and
+**Needs review** list what the load found, each linked to its record.
+
+Use the **Load** picker to read the document as another load saw it.
+
+## Delete a document
+
+Select **Delete** on a document's page. Owners and admins upload and delete documents;
+members read them.
+
+## Next steps
+
+    Write tables and documents into the database.
+
+    See every place a record comes from.
+
+# Load data into a Helix database
+
+Page type: Guide
+
+A load writes the ontology's current version into its Helix database: your synced
+tables as its mappings shape them, then your documents. Each load is a complete copy,
+written beside the earlier ones, so you can compare them and switch back. Reads go to
+the current load.
+
+## Follow a load
+
+The load's page follows each step: preparing, writing the tables, reading the
+documents, finishing. A load is **Writing**, then **Ready**. It ends **Partial** when
+it reached the spending cap with its tables written but some documents unread, or
+**Failed**.
+
+The newest load that finishes **Ready** becomes current. A **Partial** load becomes
+current only when the ontology has no current load.
+
+- If a source synced again while the load ran, the load says so and offers a new one.
+- If the database is new and still starting, the load waits and tries again by itself.
+- An ontology runs one load at a time.
+
+Loading, setting a load current and deleting one need owner or admin rights and write
+access to the database's Helix project.
+
+## Manage loads
+
+**Data loads** lists the loads kept: the current one and the newest others, five in
+all. Older loads are deleted from the database in the background. Each row shows the
+load's version, status, node and fact counts, and its jobs.
+
+| Action | Does |
+| --- | --- |
+| **Open** | The load's page, with its steps and spend |
+| **Compare with current** | The Explorer with the load and the current one side by side |
+| **Set current** | Makes a Ready or Partial load the one every page reads |
+| **Delete** | Removes what the load wrote, including links your own data added to its nodes. Never the current load or one still writing. |
+| **Retry delete** | Tries a delete that failed again |
+
+## Spending and limits
+
+Reading documents uses models, so it costs money; tables don't. Reading the same text
+with the same models again costs nothing.
+
+| Limit | Value |
+| --- | --- |
+| Per load | $20 |
+| Per workspace, per month | $100 |
+| Documents | 200 in the workspace, 256 KiB each |
+| Loads kept per ontology | 5 |
+
+A load that reaches its cap stops **Partial**. The documents it didn't reach are read
+into it once it's current and the month has budget left; a new load reads every
+document again. Once the workspace has spent $100 in a month, Foundry refuses new loads
+until the next month, and new uploads aren't read.
+
+## Next steps
+
+    See what the load wrote.
+
+    Read each type as a table.
+
+# Explore the graph
+
+Page type: Guide
+
+The Explorer draws what a load wrote into the ontology's database: its records and how
+they connect. It reads the database with your session and never writes to it. Switch
+to **Records** at the top to read the same data as tables.
+
+| To | Do |
+| --- | --- |
+| Jump to a record by name, id or text | Press <kbd>/</kbd> and type, then <kbd>Enter</kbd> |
+| Load a record's neighbors | Double-click it, or use **Expand** in the inspector |
+| Draw more of a type | Select **+** beside it in the rail, 50 records at a time |
+| See every action on a record | Right-click it |
+| See every shortcut | Press <kbd>?</kbd> |
+
+Select a record to open it in the inspector on the right: its type, its properties, the
+load that wrote it, and its relationships with their counts.
+
+Records are named the way the version says: by a name property, else by their keys.
+A record drawn with a dashed outline was reached outside the load you're reading; the
+inspector names its load.
+
+## Choose a load
+
+The **Load** picker reads another load of the ontology. Links between the Explorer,
+Records, a record's page and a document keep the load you chose.
+
+**Other data** shows what no load wrote: data the database held already, or that your
+own applications write. It is hidden while you read a load, and listed below the rail.
+
+## Show Foundry's own records
+
+Loads also write Foundry's bookkeeping beside your data: documents, their sections,
+mentions and evidence, and reviews. The Explorer hides these until you select **Show
+Foundry internals** under Labels. They are then listed apart and drawn grey. The choice
+is kept in this browser.
+
+## Compare two loads
+
+Choose a second load under **Compare with**, or select **Compare with current** in
+[Data loads](/foundry/ontologies/load-data#manage-loads). The two loads are drawn side by
+side over **What changed**: the count of each type and link in each load. Open a type to
+see the records added, removed and renamed between them, by key, and select one to find
+it on its side.
+
+## When a database is starting
+
+A database created in the last few minutes may not answer yet. The Explorer says it is
+starting and opens by itself once it answers.
+
+## Next steps
+
+    Read each type as a table, and a record's page.
+
+    Ask the graph questions in plain language. Coming soon.
+
+# Records and entities
+
+Page type: Guide
+
+**Records** is the Explorer's table view: one type at a time, searchable and sortable,
+with every record's links and where it came from. An entity's page gathers everything
+the load knows about one record.
+
+## Read a type as a table
+
+In the Explorer, select **Records**. Choose a type at the top; the count beside it is
+how many records the load holds.
+
+- **Search** finds records by name or key.
+- **Filter by field** keeps the records whose field matches a value.
+- Select a column's header to sort by it, and **Columns** to choose which show.
+- Pages hold 50 records. Searches and filters count up to 1,000 matches, and paging
+  reaches the first 10,000 records of a type.
+
+## Open a record
+
+Select a row to open the record beside the table: its properties, its links to other
+records, and **Where it comes from**. A link or record that came from a table names the
+source and row; one that came from a document shows the quote, with a link to it in the
+document.
+
+Select **Open in graph** to find it in the Explorer, or **Open its page** for the
+entity's page.
+
+## An entity's page
+
+An entity's page names the record's type, key and sources, with tabs for its
+**Overview** (properties), **Facts** (its links, with their evidence), **Mentions** (where
+documents name it) and **Needs review**.
+
+Every page here reads one load. Use the **Load** picker to read another; links between
+pages keep it.
+
+## Next steps
+
+    Search, expand and compare loads.
+
+    Add the documents facts and mentions come from.
+
+# Ask questions of your data
+
+Page type: Guide
+Status: Preview
+
+Ask is coming to Helix Foundry and isn't available yet. This page will cover it when it
+  ships.
+
+Ask will let you question an ontology's data in plain language and see where each
+answer came from.
+
+Until then, read the same data in the [Explorer](/foundry/explore/explorer) and
+[Records](/foundry/explore/records-and-entities).
+
+{/*
+  TODO(ask): fill in when Ask ships, and drop the Note and the Preview status.
+  Media: add tests/docs/ask.spec.ts to helix-foundry-cloud; `pnpm docs:media` writes
+  images/foundry/ask/. Suggested sections:
+  - Ask a question (video ask/ask.webm, screenshot ask/ask-panel.png)
+  - Read an answer: its steps and the queries it ran, and the numbered citations
+  - Threads: follow-up questions and earlier threads
+  - Ask about a record from its page
+  - When Ask can't answer: what it says, and drafting a new version from the gap
+  - Limits and spending
+*/}
+
+## Next steps
+
+    Search and expand what a load wrote.
+
+    Ask reads the current load, so keep it up to date.
+
+# Members and roles
+
+Page type: Guide
+
+Everyone in a workspace shares its data, ontologies and plan. Foundry uses the
+workspace's Helix Cloud members and roles, so someone you add in either place has access
+in both.
+
+## See the members
+
+**Settings** → **Members** lists everyone in the workspace with their role and when they
+joined.
+
+## Invite people
+
+Owners and admins select **Invite people**, enter an email address and choose a role:
+
+- **Member** sees everything in the workspace.
+- **Admin** also connects data, invites people and manages billing.
+
+The invitation arrives by email and is accepted through Helix. To make someone an owner,
+change a role, remove someone or manage pending invitations, use the
+[Helix dashboard](https://helix-db.com/login).
+
+## What each role can do
+
+| Action | Owner | Admin | Member |
+| --- | :---: | :---: | :---: |
+| See data, ontologies, versions, documents, loads and the plan | ✓ | ✓ | ✓ |
+| Explore and read records | ✓ | ✓ | With **Query read** on the database's project |
+| Add, sync, edit and delete connections | ✓ | ✓ | |
+| Create and delete ontologies | ✓ | ✓ | |
+| Generate, make versions current, upload documents and load | ✓ | ✓ | |
+| Invite people | ✓ | ✓ | |
+| Upgrade, switch, cancel and manage billing | ✓ | ✓ | |
+
+Reading what a load wrote, in the Explorer, Records and a document's text, needs
+**Query read** on the database's Helix project; grant it in the Helix dashboard. Creating
+or deleting an ontology, uploading documents and loading also need write access to that
+project.
+
+## Next steps
+
+    Compare Free, Pro and Max.
+
+    Switch workspaces and find your way around.
+
+# Plans and billing
+
+Page type: Guide
+
+Each workspace has one Foundry plan, billed monthly and separately from Helix Cloud.
+Owners and admins change it in **Settings** → **Plan & billing**; members see which plan
+the workspace holds.
+
+| | Free | Pro | Max |
+| --- | --- | --- | --- |
+| Price | $0 | $100 a month | $500 a month |
+| Stripe, WorkOS and PostHog | ✓ | ✓ | ✓ |
+| Syncs and synced tables | ✓ | ✓ | ✓ |
+| Ontology generation and versions | ✓ | ✓ | ✓ |
+| PostgreSQL and MySQL | | ✓ | ✓ |
+
+Max includes everything in Pro, and will add more.
+
+On Free, choosing PostgreSQL or MySQL in **Add data** says the source needs Pro, and
+offers owners and admins **Upgrade to Pro**.
+
+## Upgrade
+
+## Cancel or resume
+
+Select **Cancel Pro** (or **Cancel Max**) and confirm. The plan stays on until the end
+of the period, then the workspace moves to Free and its PostgreSQL and MySQL connections
+stop syncing. Until then, **Resume Pro** (or **Resume Max**) undoes the cancellation.
+
+## Manage payment and invoices
+
+Select **Manage billing** to open the Stripe billing portal for the workspace: payment
+methods, invoices and billing details. When an invoice isn't paid, the page says so and
+offers **Update payment method**; cancelling and switching wait until it's paid.
+
+## Next steps
+
+    Set up a PostgreSQL or MySQL connection.
+
+    Who can change the plan.
+
+# Helix Foundry limits
+
+Page type: Reference
+
+The limits Foundry applies, by area. Each guide explains what happens when you reach one.
+
+## Data
+
+| Limit | Value |
+| --- | --- |
+| Rows per table, per sync | 2,000,000 |
+| One sync attempt | 2 hours |
+| Attempts per sync | 3 |
+| Syncs running per connection | 1 |
+| PostHog event history | 1 to 365 days, 30 by default |
+| PostgreSQL and MySQL | Foundry Pro or Max |
+
+## Generations
+
+| Limit | Value |
+| --- | --- |
+| Goal | 2,000 characters |
+| Tables per generation | 50 |
+| Documents the agent sees | Names of the 50 most recently uploaded |
+| Attempts per generation | 3 |
+| Generations running per ontology | 1 |
+
+## Documents
+
+| Limit | Value |
+| --- | --- |
+| File types | `.md`, `.markdown`, `.txt` |
+| Size | 256 KiB per document |
+| Documents per workspace | 200 |
+| Name | 255 characters, no slash, backslash or control character |
+
+## Loads
+
+| Limit | Value |
+| --- | --- |
+| Document reading spend, per load | $20 |
+| Document reading spend, per workspace each month | $100 |
+| Loads kept per ontology | 5: the current one and the four newest others |
+| Loads or extracts running per ontology | 1 |
+
+## Explorer and Records
+
+| Limit | Value |
+| --- | --- |
+| First view of a load | A connected sample of about 320 records |
+| Records per page | 50 |
+| Records reachable by paging, per type | 10,000 |
+| Matches counted by a search or filter | 1,000 |
+| Records compared per type, per side | 5,000 |
+
+## Ontologies
+
+| Limit | Value |
+| --- | --- |
+| Ontologies per database | 1 |
+| Databases per ontology | 1 |
+
+## Next steps
+
+    What to do when you reach a limit.
+
+    What each plan includes.
+
+# Troubleshooting Helix Foundry
+
+Page type: Troubleshooting
+
+Find the message Foundry shows, then its cause and fix.
+
+## Sign-in
+
+| Message | Cause and fix |
+| --- | --- |
+| Your company signs in with single sign-on. | Foundry doesn't offer single sign-on yet. Sign in to the [Helix dashboard](https://helix-db.com/login) instead. |
+| Your email isn't verified yet. | Verify the email with your provider, or continue with another provider. |
+| This account can't sign in here. | The environment doesn't accept this account. Sign in with your work account, or ask Helix for access. |
+| Sign-in couldn't start. | Choose a provider to try again. |
+| Sign-in is unavailable right now. | Helix couldn't start sign-in. Try again in a moment. |
+| Sign-in didn't finish. | The sign-in link expired or was already used. Try again. |
+| Couldn't load your workspaces. | Foundry couldn't reach Helix. Select **Retry**; **Sign out** is offered on the same page. |
+
+## Connections and syncs
+
+| Message or state | Cause and fix |
+| --- | --- |
+| The test fails | The credential is wrong, revoked or lacks read access. Create it again with the permissions in [Connectors](/foundry/data/connectors). |
+| This key cannot read: … | The key can't read those objects, so they're skipped. Add **Read** for them and test again, or carry on without them. |
+| The database can't be reached | The database must accept connections from Helix's network. Allow the outbound addresses the form lists, and check the host and port. Private addresses are refused. |
+| A TLS error | Foundry verifies the server's certificate. Add the CA certificate under **Connection options**, or choose **No TLS** if the database doesn't offer it. |
+| PostgreSQL connections need Foundry Pro | Databases need [Pro or Max](/foundry/workspace/plans-and-billing). Owners and admins see **Upgrade to Pro**. |
+| table … has more than 2000000 rows; choose fewer tables | A table is over the [row limit](/foundry/reference/limits#data). For a database, edit the connection and leave the table out; for PostHog, shorten the event history. |
+| Syncs fail after a table changed | A selected database table was dropped or renamed. Edit the connection and test it again. |
+| A sync of this connector is already queued or running | Wait for it to finish before syncing, editing or deleting. |
+
+## Ontologies and generations
+
+| Message or state | Cause and fix |
+| --- | --- |
+| Retrying | An attempt failed for a passing reason and Foundry will try again; the page says why and when. Nothing to do. |
+| Failed | The generation failed for good. Select **Try again** to reopen the form with the same goal and connectors; choosing fewer tables or a clearer goal helps. |
+| Making a version current is refused | Someone else made another version current at the same time. The page now shows it; make yours current again if you still want it. |
+| A new database can't be created | The workspace has no Helix plan. Add one in the Helix dashboard's billing, or use a database you already have. |
+| The database is starting | A new database takes a few minutes to start. Pages read it again by themselves; a load waits for it. |
+| The ontology shows no database contents | You can't read the database's Helix project. Ask an owner for access to it. |
+
+## Loads
+
+| Message or state | Cause and fix |
+| --- | --- |
+| **Load data** isn't offered | Only a current agent draft the agent finished can be loaded. [Generate](/foundry/ontologies/generate-and-version) one and make it current. |
+| Partial, or Stopped at the cap | Reading documents reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits). The documents it didn't reach are read into it once it's current and the month has budget. |
+| The workspace has spent this month's $100 of loads | New loads are refused until next month. |
+| The tables synced again during the load | A source changed under the load. Start a new load to write the new snapshot. |
+| A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Open the document to see why. |
+| Delete failed | Select **Retry delete** in **Data loads**. |
+
+## Next steps
+
+    Every limit in one place.
+
+    What each source needs.
+
 # Getting started with HelixDB CLI
 
 Page type: Tutorial
@@ -8125,6 +8963,7 @@ They never accept or store application database keys or service credentials.
 | [`helix stop`](/cli/command-reference/stop) | Local | Stop a local instance and remove its containers |
 | [`helix restart`](/cli/command-reference/restart) | Local | Restart a local instance |
 | [`helix status`](/cli/command-reference/status) | Local, Cloud | Inspect runtime or database status |
+| [`helix doctor`](/cli/command-reference/doctor) | Local, Cloud | Check an instance's setup and recent queries' index use |
 | [`helix logs`](/cli/command-reference/logs) | Local, Cloud | Follow local logs or list Cloud query errors |
 | [`helix query`](/cli/command-reference/query) | Local, Cloud | Execute one v3 JSON/SDK query |
 | [`helix cypher`](/cli/command-reference/cypher) | Local | Execute or explain one Cypher statement |
@@ -8807,6 +9646,101 @@ helix delete staging --yes
 - [`helix prune`](/cli/command-reference/prune) — clean up local state but keep the instance in `helix.toml`.
 - [`helix add`](/cli/command-reference/add) — add a replacement instance.
 - [CLI configuration](/cli/configuration) — the `helix.toml` format.
+
+# helix doctor
+
+Page type: Reference
+
+Check how an instance is set up and what to change. Doctor checks what the CLI can see itself,
+then asks the server for its own checks: whether data is durable, whether the S3 bucket is in the
+server's region, whether the disk cache is on local NVMe rather than network block storage like
+EBS, whether caches fit in memory, and whether recent queries used indexes. Local, self-hosted,
+and Cloud.
+
+Doctor is read-only. It never changes the instance, its data, its caches, or `helix.toml`, and it
+never starts a container.
+
+## Usage
+
+```bash
+helix doctor [INSTANCE]
+helix doctor --url <URL>
+```
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Instance or typed database (`cluster:<id>`, `tenant:<id>`). Defaults to `dev`, else the only instance, else a prompt. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--url <URL>` | Diagnose the server at this base URL instead, e.g. a self-hosted server. No `helix.toml` is needed. Cannot be combined with `INSTANCE`. | — |
+| `--json` | Print the report as JSON on stdout. | Off |
+| `-v`, `--verbose` | Also print the details of passing checks. | Off |
+| `--quiet` | Print only warnings, failures, and the summary. | Off |
+
+## Checks
+
+Each check passes, warns, fails, or is skipped with its reason. A warning means the setup works
+but costs performance or money; a failure means it risks losing data or cannot work. Warnings and
+failures print a fix.
+
+| Check | What it looks at |
+| --- | --- |
+| `cli.version` | Whether a newer CLI is released. |
+| `runtime.daemon`, `runtime.container`, `runtime.image` | Local instances: Docker or Podman answers, the container is running, and its image is not older than the one this CLI ships with. |
+| `server.reachable` | The server answers `GET /healthz`. |
+| `storage.durability` | Data is in S3 or on disk, not in memory only. |
+| `storage.data_device` | `HELIX_DATA_DIR` is on persistent storage: not tmpfs, the container's writable layer, or ephemeral instance storage. |
+| `storage.s3_region` | The S3 bucket is in the server's AWS region. The server's region comes from EC2 or ECS metadata; in a container on EC2 that needs an IMDSv2 hop limit of 2. |
+| `storage.s3_latency` | The median of five S3 round trips from the server is under 50 ms. |
+| `cache.device` | The disk cache is on a local SSD or NVMe instance storage, not network block storage (EBS, Persistent Disk), a network filesystem, tmpfs, or the container's writable layer. |
+| `cache.space` | `HELIX_DISK_CACHE_BYTES` fits the cache's filesystem. |
+| `cache.warm` | S3 storage warms the disk cache after a restart. |
+| `resources.memory` | Cache budgets take at most 70% of the memory the server may use. |
+| `indexes.publication` | Vector and text index publication is caught up and holds back no entries. |
+| `queries.missing_indexes` | Recent queries filtered without the secondary index the planner recommends. The fix is the `helix query` command that creates each index. |
+| `queries.unbounded_scans` | Recent queries read every element of a label that no index would bound. |
+
+The query checks cover queries from the last 24 hours since the server started. A missing index
+stops being reported once the index is active. Queries that only count matches are not analyzed
+yet. Server checks need a server image with
+`GET /v2/diagnostics`; an older server reports `server.diagnostics` as skipped. Helix Cloud manages
+storage, caching, and regions, so a Cloud database reports `cloud.managed` as skipped.
+
+## Behavior
+
+- Prints `Helix doctor`, the target, and the server's uptime, then the checks grouped by area, and a
+  summary such as `Setup works, with room to improve · 2 warnings · 9 passed`.
+- Passing checks print one line; others also print their detail and fix.
+- Exits `1` when any check fails, after printing the report. Warnings alone exit `0`.
+- A local instance whose container is not running reports that, and skips the server checks.
+- `--json` prints an object with `target`, `uptime_secs` (when the server reported its checks),
+  `checks`, and `summary`. Each check has `id`, `category`, `status` (`pass`, `warn`, `fail`, or
+  `skip`), `summary`, and, when present, `detail` and `fix`. The server's own report is
+  [`GET /v2/diagnostics`](/database/helix-db/query-guides/http-api).
+
+## Examples
+
+```bash
+# Check the default instance
+helix doctor
+
+# Check a self-hosted server
+helix doctor --url http://10.0.1.5:8080
+
+# Machine-readable report for an agent or CI
+helix doctor --json
+```
+
+## Related
+
+- [`helix status`](/cli/command-reference/status) — show instance state.
+- [`helix logs`](/cli/command-reference/logs) — view server logs.
+- [Secondary indexes](/database/helix-db/query-guides/secondary-indexes) — create the indexes doctor recommends.
 
 # helix explorer
 
