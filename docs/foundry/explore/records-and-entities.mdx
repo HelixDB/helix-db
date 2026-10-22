@@ -43,15 +43,31 @@ entity's page.
 ## An entity's page
 
 An entity's page names the record's type, key and sources, with tabs for its
-**Overview** (properties), **Facts** (its links, with their evidence), **Mentions** (where
-documents name it) and **Needs review**.
+**Overview** (properties, each with the row or quote that states it), **Facts** (its
+links, with their evidence), **Derived** (what the version's rules derive about it, and
+why), **Mentions** (where documents name it) and **Needs review** (reviews, and rule
+breaks).
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/explore/entity.png" alt="Globex Corporation's page with its key, sources and properties" />
 </Frame>
 
 Every page here reads one load. Use the **Load** picker to read another; links between
-pages keep it.
+pages keep it. **Ask about this** asks a question about the record in a drawer; see
+[Ask](/foundry/ask/ask-questions#ask-about-a-record).
+
+**Derived** shows only for a version with rules. Its facts are worked out when the page
+reads them and are never stored; one too costly to work out says so.
+
+## Settle a review
+
+Owners and admins settle a review in **Needs review** on an entity's page or a
+document's, while it reads the current load: link a name to the record it means or mark
+it **Not in data**, keep one of the values documents disagree on, or replace a table's
+value with one a document states. A decision applies from the next load, so load again
+to see it; a value chosen over a table's holds in every later load, even after the
+table changes. **Saved decisions** lists the decisions, and removing one also applies
+from the next load.
 
 ## Next steps
 
@@ -59,7 +75,7 @@ pages keep it.
   <Card title="Explore the graph" icon="diagram-project" href="/foundry/explore/explorer">
     Search, expand and compare loads.
   </Card>
-  <Card title="Upload documents" icon="file-lines" href="/foundry/ontologies/documents">
+  <Card title="Documents" icon="file-lines" href="/foundry/data/documents">
     Add the documents facts and mentions come from.
   </Card>
 </CardGroup>
