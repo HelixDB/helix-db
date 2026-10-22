@@ -64,17 +64,20 @@ access to the database's Helix project.
 
 ## Manage loads
 
-**Data loads** lists the loads kept: the current one and the newest others, five in
-all. Older loads are deleted from the database in the background. Each row shows the
-load's version, status, node and fact counts, and its jobs.
+**Data loads**, among the ontology's pages in the Ontologies panel, lists the loads
+kept: the current one and the newest others, five in all. Older loads are deleted from
+the database in the background. Each row shows the load's version, status, node and
+fact counts, and its jobs. Select a row to open the load's page, with its steps and
+spend.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/loads.png" alt="Data loads listing two ready loads of version 3, one current" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/loads.png" alt="Data loads listing two ready loads of version 3, one current, each with Open and a menu of more actions" />
 </Frame>
+
+**Open** reads the load in the Explorer. The **⋯** menu beside it holds the rest:
 
 | Action | Does |
 | --- | --- |
-| **Open** | The load's page, with its steps and spend |
 | **Compare with current** | The Explorer with the load and the current one side by side |
 | **Set current** | Makes a Ready or Partial load the one every page reads |
 | **Delete** | Removes what the load wrote, including links your own data added to its nodes. Never the current load or one still writing. |

@@ -7713,7 +7713,7 @@ account you use for Helix Cloud; your workspaces come with it.
 | --- | --- |
 | **Workspace** | Your team's space, shared with Helix Cloud. It holds connections, documents, ontologies, members and the Foundry plan. |
 | **Connection** | A source Foundry reads, with its credential. Each **sync** copies its tables into a snapshot Foundry keeps. |
-| **Document** | A Markdown or text file of the workspace, such as a contract, that a load reads for the names and facts it holds. |
+| **Document** | A file of the workspace, such as a contract, kept in Data. A load reads Markdown and text documents for the names and facts they hold; other formats, such as CSV, JSON or PDF, are kept to view. |
 | **Document set** | A folder of documents in Data. A version reads the sets its generation picked. |
 | **Ontology** | The types, links and rules that describe your data, bound to one Helix database. |
 | **Generation** | A request to Foundry's agent to draft a new version of the ontology from your synced tables and the document sets you pick. |
@@ -7773,6 +7773,8 @@ database's Helix project.
 
     See [Documents](/foundry/data/documents) for sets and what they're for.
 
+    See [Create an ontology](/foundry/ontologies/create-an-ontology) for each step.
+
 ## Next steps
 
     Keep contracts and notes in sets for your ontologies to read.
@@ -7791,28 +7793,54 @@ Use this page to sign in, move between workspaces and get around Foundry quickly
 Foundry's workspaces are your Helix Cloud workspaces: the same names, members and
 roles.
 
-To switch later, use the workspace menu at the top of the sidebar. Foundry remembers
-the workspace you chose in this browser.
+To switch later, use the workspace menu at the top of the sidebar, or the workspace's
+initial near the foot of the rail. Foundry remembers the workspace you chose in this
+browser.
 
 ## The sidebar
 
 The sidebar lists Foundry's sections: **Home**, **Ontologies**, **Explorer**, **Ask**
 and **Data**. The workspace menu sits at its top, and your account and **Settings** at
-its foot. While an ontology is open, its pages are listed under **Ontologies**.
+its foot.
 
-**Data** and **Ask** have a panel of their own: the Data explorer, and Ask's threads.
+Every section but Home has a panel of its own:
+
+| Section | Its panel |
+| --- | --- |
+| **Ontologies** | The workspace's ontologies, with the pages of the one open |
+| **Explorer** | The labels of the graph, or the types in Records |
+| **Ask** | The ontology's threads |
+| **Data** | The Data explorer: connections and documents as a tree |
+
 In those sections the sidebar shrinks to a slim rail of section icons, with the
 section's panel beside it. The toggle near the top of the rail hides the panel and
-shows it again; Foundry remembers the choice in this browser. In other sections, the
-toggle at the top of the sidebar collapses it to icons.
+shows it again; Foundry remembers the choice in this browser. On Home and in Settings,
+the toggle at the top of the sidebar collapses it to icons.
 
 On a phone, select the menu button at the top of the page. The drawer it opens holds the
 sidebar, or the rail and the section's panel side by side.
 
 ## Home
 
-Home says where the workspace stands: its connections and synced tables, its
-ontologies, its members and its plan. Each card links to the page that changes it.
+Home says where the workspace stands, in four cards that each link to the page that
+changes it:
+
+- **Connections**: how many are healthy, meaning their newest sync succeeded, and the
+  kinds of source connected.
+- **Data health**: open issues: failed syncs, ontologies whose last load failed, and
+  documents that need review. **Needs attention** lists them, each with **Inspect**.
+- **Team**: the workspace's members.
+- **Plan**: Foundry Free, Pro or Max.
+
+Until the workspace has an ontology, **Get started** below them lists the steps to a
+first one, ticked as you go: connect data, sync it, add documents (optional), create an
+ontology, generate a draft, review it and make it current, load it, then explore or ask.
+Owners and admins get a button on each step that can be done now.
+
+Once there is one, Home shows the ontology you last opened instead: its current version
+as a map with its types, and how many records the current load holds of each. Pick
+another ontology in the card, or select **Open**. While the current version isn't
+loaded, the card says so and offers **Load it**.
 
 ## Search with the command palette
 
@@ -7946,12 +7974,10 @@ it straight to storage and shows its progress.
 
 | Rule | Value |
 | --- | --- |
-| File types | Markdown (`.md`, `.markdown`) and text (`.txt`) |
-| Size | Up to 256 KiB each |
+| File types | Markdown (`.md`, `.markdown`), text (`.txt`), JSON (`.json`), CSV (`.csv`), TSV (`.tsv`), JSONL (`.jsonl`, `.ndjson`), Parquet (`.parquet`) and PDF (`.pdf`) |
+| Size | 1 byte to 1 MiB each |
 | Count | At most 200 documents in the workspace |
 | Name | At most 255 characters, with no slash, backslash or control character |
-
-Each upload says which set it went into and which ontologies read that set.
 
 A workspace keeps one copy of each file. Uploading a file it already holds, under any
 name, doesn't add another: the upload says **Already uploaded** and names the set the
@@ -7959,10 +7985,23 @@ file is in.
 
 ## A document's page
 
-Select a document in the explorer to open its page: its text, its set, its size and
-when it was uploaded. **Ontologies** lists each ontology that reads the document's set,
-or whose current load holds the document, with what its current load made of it and
-**Open in** to read it there.
+Select a document in the explorer to open its page: what it holds, its set, its size and
+when it was uploaded. Foundry shows each document by its type:
+
+| Type | Shown as |
+| --- | --- |
+| Markdown | Rendered, with headings, lists, tables and links; images show as their alt text and are never loaded |
+| Text | As it is |
+| JSON | A tree you open node by node |
+| CSV, TSV, JSONL and Parquet | A table of the first 5,000 rows, with the rows it couldn't read |
+| PDF | Its pages |
+
+Markdown, JSON, CSV, TSV and JSONL also have **Source**, to read the file's own text.
+
+**Details** lists its media type, size, SHA-256 and ID. **Ontologies** lists each
+ontology that reads the document's set, or whose current load holds the document, with
+what its current load made of it and **Open in** to read it there. For a format
+ontologies don't read, it says so instead.
 
 Each ontology's status says where the document stands in its current load: **Not read
 yet**, **Read**, **Needs review**, **Duplicate**, **Couldn't be read** or **Not read
@@ -8005,16 +8044,23 @@ OpenAI models to find its names and facts and to check them.
 
 ## In an ontology
 
-An ontology's **Documents** page lists what it reads of the workspace's documents: those
-in the sets its version reads, and those its current load holds. Open it from the
-document count in the ontology's header, or from a load's **Documents read** and
-**Review documents**. It is read-only: **Open in Data** goes back to the documents in
-Data.
+An ontology's **Documents** lists what it reads of the workspace's documents: those in
+the sets its version reads, and those its current load holds. Open it from the
+ontology's pages in the Ontologies panel, from the document count in the ontology's
+header, or from a load's **Documents read** and **Review documents**. It is read-only:
+**Open in Data** goes back to the documents in Data.
 
-Open a document there to see its text as the load read it: names underlined, quoted
-facts tinted and anything that needs review marked. Beside it, **Facts**, **Entities**
-and **Needs review** list what the load found, each linked to its record. Use the
-**Load** picker to read the document as another load saw it.
+There, the Ontologies panel becomes the ontology's documents explorer: a row back to
+the ontology, a filter, and its sets as folders of their documents. Each document's dot
+says what the current load made of it: orange needs review, red couldn't be read,
+green read, grey waiting or not read. A set counts its documents that need review.
+
+Open a document there to see its text as the load read it, shown as the document is
+(Markdown rendered, text as it is), with names underlined, quoted facts tinted and
+anything that needs review marked. Beside it, **Facts**, **Entities**, **Needs review**
+and **Details** list what the load found, each linked to its record. Until a load holds
+the document, it shows as uploaded. Use the **Load** picker to read the document as
+another load saw it.
 
 ## Who can do what
 
@@ -8184,18 +8230,32 @@ into. A workspace can have several ontologies, one per database, and each reads 
 workspace's [data](/foundry/data/connect-data) and
 [documents](/foundry/data/documents) its versions pick.
 
-**Ontologies** lists the workspace's ontologies with the database each one uses.
+**Ontologies** on the rail opens the ontology you last opened in this browser, or the
+first one.
 
 ## Create one
 
-    **Create a new one** makes a database in the project you choose, on Helix's shared
-    cluster, under the workspace's Helix plan. Its address is the name you give it, with
-    a short suffix when another database already has it.
+Select **New ontology**. The page walks through six steps, one at a time: each step
+you finish shrinks to a line saying what you chose, with **Edit** to change it. Select
+**Continue** to go on, or **Skip** on an optional step you leave empty. Your choices
+are kept in the browser tab until you create the ontology or select **Cancel**, and
+the step is in the page's address, so going back or reloading keeps your place.
 
-The sidebar lists the ontology's pages: **Overview**, **Schema versions** and **Data
-loads**. The [Explorer](/foundry/explore/explorer) and
-[Ask](/foundry/ask/ask-questions) are sections of their own, which open the ontology
-you last opened.
+    **Create a new one** makes a database in a project you choose, or a new project, on
+    Helix's shared cluster, under the workspace's Helix plan. Its address is the name you
+    give it, with a short suffix when another database already has it.
+
+You review the draft before it is used: make it current to load it. If the ontology
+was created but its generation couldn't start, the ontology opens saying why, with
+**Try again**, which opens Generate with your choices.
+
+Its header names the database and its Helix project, the status of the last load and
+when the ontology was created. It links to **All versions** and to the documents the
+ontology reads, and offers **Generate** and, once the current version can be loaded,
+**Load data**.
+
+The [Explorer](/foundry/explore/explorer) and [Ask](/foundry/ask/ask-questions) are
+sections of their own, which open the ontology you last opened.
 
 ## Delete an ontology
 
@@ -8213,7 +8273,7 @@ the database's project sees the ontology without its database's details or conte
 
 ## Next steps
 
-    Draft a version from your synced tables.
+    Review the draft, make it current, and draft new versions.
 
     Add the files a load reads for names and facts.
 
@@ -8225,6 +8285,9 @@ A generation asks Foundry's agent to draft a new version of an ontology: its typ
 links, mappings from your tables, routes for your documents, rules and the questions it
 should answer. Each draft is stored as a new version beside the others. Nothing changes
 until you make a version current.
+
+[Creating an ontology](/foundry/ontologies/create-an-ontology) drafts its first
+version. **Generate** drafts the next ones.
 
 A generation's page shows its goal, its tables and its steps. Open it from its
 version's page, where the version is named for it, or from a failed generation's row in
@@ -8247,7 +8310,7 @@ graph, with a tab for each part:
 
 | Tab | Shows |
 | --- | --- |
-| **Graph** | The agent's summary and the types and links as a scene or a schema |
+| **Graph** | The agent's summary, and the types and links as a schema; select a type to open it |
 | **Types** | Each type with its properties, keys and identifiers |
 | **Links** | How types connect, and what each link means |
 | **Mappings** | Which table and columns fill each type and link |
@@ -8336,13 +8399,16 @@ access to the database's Helix project.
 
 ## Manage loads
 
-**Data loads** lists the loads kept: the current one and the newest others, five in
-all. Older loads are deleted from the database in the background. Each row shows the
-load's version, status, node and fact counts, and its jobs.
+**Data loads**, among the ontology's pages in the Ontologies panel, lists the loads
+kept: the current one and the newest others, five in all. Older loads are deleted from
+the database in the background. Each row shows the load's version, status, node and
+fact counts, and its jobs. Select a row to open the load's page, with its steps and
+spend.
+
+**Open** reads the load in the Explorer. The **⋯** menu beside it holds the rest:
 
 | Action | Does |
 | --- | --- |
-| **Open** | The load's page, with its steps and spend |
 | **Compare with current** | The Explorer with the load and the current one side by side |
 | **Set current** | Makes a Ready or Partial load the one every page reads |
 | **Delete** | Removes what the load wrote, including links your own data added to its nodes. Never the current load or one still writing. |
@@ -8357,7 +8423,7 @@ with the same models again costs nothing.
 | --- | --- |
 | Per load | $20 |
 | Per workspace, per month | $100 |
-| Documents | 200 in the workspace, 256 KiB each |
+| Documents | 200 in the workspace, 1 MiB each |
 | Loads kept per ontology | 5 |
 
 A load that reaches its cap stops **Partial**. The documents it didn't reach are read
@@ -8377,18 +8443,24 @@ Page type: Guide
 
 The Explorer draws what a load wrote into the ontology's database: its records and how
 they connect. It reads the database with your session and never writes to it. Switch
-to **Records** at the top to read the same data as tables.
+to **Records** in the bar at the top to read the same data as tables.
 
 | To | Do |
 | --- | --- |
 | Jump to a record by name, id or text | Press <kbd>/</kbd> and type, then <kbd>Enter</kbd> |
 | Load a record's neighbors | Double-click it, or use **Expand** in the inspector |
-| Draw more of a type | Select **+** beside it in the rail, 50 records at a time |
+| Draw more of a type | Select **+** beside it in Labels, 50 records at a time |
 | See every action on a record | Right-click it |
+| Hide or show the inspector | Press <kbd>]</kbd>, or use its toggle in the bar |
+| Hide or show Labels | Press <kbd>[</kbd>, or use the toggle on the rail |
 | See every shortcut | Press <kbd>?</kbd> |
 
-Select a record to open it in the inspector on the right: its type, its properties, the
-load that wrote it, and its relationships with their counts.
+The inspector is the sidebar on the right. With nothing selected, it gives an overview
+of the database. Select a record to open it there: its type, its properties, the load
+that wrote it, and its relationships with their counts. Foundry remembers whether the
+inspector is shown, per database.
+
+On a phone, Labels is in the navigation drawer, and the inspector opens as a sheet.
 
 Records are named the way the version says: by a name property, else by their keys.
 A record drawn with a dashed outline was reached outside the load you're reading; the
@@ -8398,11 +8470,11 @@ inspector names its load.
 
 The **Load** picker reads another load of the ontology. Links between the Explorer,
 Records, a record's page and a document keep the load you chose. The **Ontology**
-picker beside it opens another ontology's Explorer; **Explorer** in the sidebar opens
+picker beside it opens another ontology's Explorer; **Explorer** in the sidebar or on the rail opens
 the ontology you last opened.
 
 **Other data** shows what no load wrote: data the database held already, or that your
-own applications write. It is hidden while you read a load, and listed below the rail.
+own applications write. It is hidden while you read a load, and listed below the labels.
 
 ## Show Foundry's own records
 
@@ -8413,9 +8485,10 @@ is kept in this browser.
 
 ## Compare two loads
 
-Choose a second load under **Compare with**, or select **Compare with current** in
-[Data loads](/foundry/ontologies/load-data#manage-loads). The two loads are drawn side by
-side over **What changed**: the count of each type and link in each load. Open a type to
+Choose a second load under **Compare with**, or select **Compare with current** in a
+load's menu in [Data loads](/foundry/ontologies/load-data#manage-loads). The two loads are drawn side by
+side, each with its own bar, labels and inspector, over **What changed**: the count of
+each type and link in each load. Open a type to
 see the records added, removed and renamed between them, by key, and select one to find
 it on its side.
 
@@ -8440,8 +8513,9 @@ the load knows about one record.
 
 ## Read a type as a table
 
-In the Explorer, select **Records**. Choose a type at the top; the count beside it is
-how many records the load holds.
+In the Explorer, select **Records** in the bar. Choose a type in the panel beside the
+rail, or above the table while the panel is hidden; the count beside it is how many
+records the load holds.
 
 - **Search** finds records by name or key.
 - **Filter by field** keeps the records whose field matches a value.
@@ -8690,8 +8764,9 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 
 | Limit | Value |
 | --- | --- |
-| File types | `.md`, `.markdown`, `.txt` |
-| Size | 256 KiB per document |
+| File types | `.md`, `.markdown`, `.txt`, `.json`, `.csv`, `.tsv`, `.jsonl`, `.ndjson`, `.parquet`, `.pdf` |
+| Formats ontologies read | Markdown and text |
+| Size | 1 byte to 1 MiB per document |
 | Documents per workspace | 200 |
 | Name | 255 characters, no slash, backslash or control character |
 | Document sets per workspace | 20 |
@@ -8789,6 +8864,9 @@ Find the message Foundry shows, then its cause and fix.
 | Message or state | Cause and fix |
 | --- | --- |
 | Already uploaded: it's in … | The workspace has this file already, in the set named. Foundry keeps one copy. |
+| Only Markdown, text, JSON, CSV, TSV, JSONL, Parquet, or PDF files can be uploaded. | Save the file in one of these formats, with its extension. |
+| The file is larger than 1.0 MiB. | Split it into smaller documents. |
+| Ontologies don't read CSV documents yet. | Foundry keeps the file to view, but ontologies read only Markdown and text so far, and loads skip it. The same goes for JSON, TSV, JSONL, Parquet and PDF. |
 | A workspace holds up to 200 documents | Delete documents you no longer need in Data. |
 | A workspace holds up to 20 document sets | Delete an empty set, or move documents into the sets you have. |
 | There is a set named … already | Set names are unique in the workspace, ignoring case and accents. Choose another. |
@@ -8805,8 +8883,11 @@ Find the message Foundry shows, then its cause and fix.
 | Retrying | An attempt failed for a passing reason and Foundry will try again; the page says why and when. Nothing to do. |
 | Failed | The generation failed for good. Open it from **Schema versions** and select **Try again** to reopen the form with the same goal, connectors and document sets; choosing fewer tables or a clearer goal helps. |
 | A generation reads at most 20 document sets | Untick a set to choose another. |
+| One generation covers at most 50 tables | Choose fewer connectors. |
+| Syncing… you can continue once it's synced. | The connection you added on New ontology is on its first sync. Wait for it, or choose a connection that has synced. |
+| … is used by …. Choose another. | A database holds one ontology. Choose another database, or create a new one. |
 | Making a version current is refused | Someone else made another version current at the same time. The page now shows it; make yours current again if you still want it. |
-| A new database can't be created | The workspace has no Helix plan. Add one in the Helix dashboard's billing, or use a database you already have. |
+| A new database needs a Helix plan | The workspace has no Helix subscription. Select **Open Helix billing** to add one, or **Use an existing one** for a database you already have. |
 | The database is starting | A new database takes a few minutes to start. Pages read it again by themselves; a load waits for it. |
 | The ontology shows no database contents | You can't read the database's Helix project. Ask an owner for access to it. |
 
@@ -8820,7 +8901,7 @@ Find the message Foundry shows, then its cause and fix.
 | The tables synced again during the load | A source changed under the load. Start a new load to write the new snapshot. |
 | A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Open the document to see why, and [settle it](/foundry/explore/records-and-entities#settle-a-review). |
 | The load reads no documents | Its version reads no document sets. Generate a version that picks some. |
-| Delete failed | Select **Retry delete** in **Data loads**. |
+| Delete failed | Select **Retry delete** in the load's menu in **Data loads**. |
 
 ## Ask
 

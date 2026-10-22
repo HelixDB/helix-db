@@ -90,11 +90,11 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 
 ## Data
 - [Connect and sync data](https://docs.helix-db.com/foundry/data/connect-data): Find your way around Helix Foundry's Data section, add a source, test its credential, sync its tables and read what each table holds — Page type: Guide
-- [Upload and organise documents](https://docs.helix-db.com/foundry/data/documents): Upload Markdown and text files to a Helix Foundry workspace, keep them in document sets, and see which ontologies read each one — Page type: Guide
+- [Upload and organise documents](https://docs.helix-db.com/foundry/data/documents): Upload Markdown, text, JSON, CSV, Parquet, PDF and other files to a Helix Foundry workspace, keep them in document sets, view them, and see which ontologies read each one — Page type: Guide
 - [Connectors](https://docs.helix-db.com/foundry/data/connectors): What each Helix Foundry source needs, the permissions to give it, the tables it syncs and its limits — Page type: Reference
 
 ## Ontologies
-- [Create an ontology](https://docs.helix-db.com/foundry/ontologies/create-an-ontology): Create a Helix Foundry ontology on an existing Helix database or a new one, and read its overview — Page type: Guide
+- [Create an ontology](https://docs.helix-db.com/foundry/ontologies/create-an-ontology): Create a Helix Foundry ontology step by step on an existing Helix database or a new one, with its first draft, and read its overview — Page type: Guide
 - [Generate and version an ontology](https://docs.helix-db.com/foundry/ontologies/generate-and-version): Ask Helix Foundry's agent to draft an ontology from your synced tables and document sets, review each version, edit it, and choose the current one — Page type: Guide
 - [Load data into a Helix database](https://docs.helix-db.com/foundry/ontologies/load-data): Write an ontology's current version, your synced tables and your documents into its Helix database, and manage its loads — Page type: Guide
 
