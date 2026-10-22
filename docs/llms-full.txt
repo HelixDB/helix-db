@@ -8796,7 +8796,7 @@ Find the message Foundry shows, then its cause and fix.
 | Not read by its version | The document's set is in the version's reads, but no route reads it, so loads store it without reading it. [Edit the version](/foundry/ontologies/generate-and-version#edit-a-version) to route it, or generate again. |
 | An ontology doesn't read a new set | A version reads the sets its generation picked. Generate a version that picks the set, or edit the version to route it, then load it. |
 | … doesn't read it yet: you can't write to its database | You can't write to that ontology's database project, so the upload didn't start its reading. Its next load reads it. |
-| Its current load holds it, but its version doesn't read … | The document moved out of a set the version reads. The next load drops it. |
+| Its current load holds it, but its version doesn't read … | The document is in a set the current version doesn't read: it moved, or another version became current. The next load drops it. |
 
 ## Ontologies and generations
 
