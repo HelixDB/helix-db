@@ -8,8 +8,10 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 An ontology holds the types, links and rules that describe your data, with its
-versions, documents and loads. Each one is bound to one Helix database, which its loads
-write into. A workspace can have several ontologies, one per database.
+versions and loads. Each one is bound to one Helix database, which its loads write
+into. A workspace can have several ontologies, one per database, and each reads the
+workspace's [data](/foundry/data/connect-data) and
+[documents](/foundry/data/documents) its versions pick.
 
 **Ontologies** lists the workspace's ontologies with the database each one uses.
 
@@ -65,21 +67,25 @@ billing in the Helix dashboard and offers the databases you already have.
 
 An ontology's overview shows its current version as a scene or as a schema, and what
 needs doing next: a generated version to review, or a current version that isn't
-loaded yet.
+loaded yet. Its header links to **All versions**, to the documents the ontology reads,
+and to **Generate**.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/overview.png" alt="The Customer contracts overview with a Version 3 is ready to review callout and the current version's scene" />
 </Frame>
 
-The sidebar lists the ontology's pages: **Overview**, **Generations**, **Schema
-versions**, **Documents**, **Data loads** and **Explorer**.
+The sidebar lists the ontology's pages: **Overview**, **Schema versions** and **Data
+loads**. The [Explorer](/foundry/explore/explorer) and
+[Ask](/foundry/ask/ask-questions) are sections of their own, which open the ontology
+you last opened.
 
 ## Delete an ontology
 
-Select the bin on the overview. Foundry deletes the ontology, its versions and
-documents, and, in the background, everything its loads wrote into the database,
-including links your own data added to those records. The database and its other data
-stay. The database can take a new ontology once that removal finishes.
+Select the bin on the overview. Foundry deletes the ontology, its versions and loads,
+and, in the background, everything its loads wrote into the database, including links
+your own data added to those records. The database and its other data stay, and so do
+the workspace's documents. The database can take a new ontology once that removal
+finishes.
 
 ## Who can do what
 
@@ -93,7 +99,7 @@ the database's project sees the ontology without its database's details or conte
   <Card title="Generate an ontology" icon="wand-magic-sparkles" href="/foundry/ontologies/generate-and-version">
     Draft a version from your synced tables.
   </Card>
-  <Card title="Upload documents" icon="file-lines" href="/foundry/ontologies/documents">
+  <Card title="Upload documents" icon="file-lines" href="/foundry/data/documents">
     Add the files a load reads for names and facts.
   </Card>
 </CardGroup>
