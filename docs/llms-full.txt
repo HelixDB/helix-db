@@ -7827,8 +7827,9 @@ changes it:
 
 - **Connections**: how many are healthy, meaning their newest sync succeeded, and the
   kinds of source connected.
-- **Data health**: open issues: failed syncs, ontologies whose last load failed, and
-  documents that need review. **Needs attention** lists them, each with **Inspect**.
+- **Data health**: open issues, meaning failed syncs, ontologies whose last load
+  failed, and documents that need review. **Needs attention** lists them, each with
+  **Inspect**.
 - **Team**: the workspace's members.
 - **Plan**: Foundry Free, Pro or Max.
 
@@ -8059,8 +8060,8 @@ Open a document there to see its text as the load read it, shown as the document
 (Markdown rendered, text as it is), with names underlined, quoted facts tinted and
 anything that needs review marked. Beside it, **Facts**, **Entities** and **Needs
 review** list what the load found, each linked to its record, and **Details** describe
-the document. Until a load holds it, the document shows as uploaded. Use the **Load** picker to read the document as
-another load saw it.
+the document. Until a load holds it, the document shows as uploaded. Use the **Load**
+picker to read the document as another load saw it.
 
 ## Who can do what
 
@@ -8472,8 +8473,8 @@ inspector names its load.
 
 The **Load** picker reads another load of the ontology. Links between the Explorer,
 Records, a record's page and a document keep the load you chose. The **Ontology**
-picker beside it opens another ontology's Explorer; **Explorer** in the sidebar or on the rail opens
-the ontology you last opened.
+picker beside it opens another ontology's Explorer; **Explorer** in the sidebar or on
+the rail opens the ontology you last opened.
 
 **Other data** shows what no load wrote: data the database held already, or that your
 own applications write. It is hidden while you read a load, and listed below the labels.
@@ -8488,11 +8489,11 @@ is kept in this browser.
 ## Compare two loads
 
 Choose a second load under **Compare with**, or select **Compare with current** in a
-load's menu in [Data loads](/foundry/ontologies/load-data#manage-loads). The two loads are drawn side by
-side, each with its own bar, labels and inspector, over **What changed**: the count of
-each type and link in each load. Open a type to
-see the records added, removed and renamed between them, by key, and select one to find
-it on its side.
+load's menu in [Data loads](/foundry/ontologies/load-data#manage-loads). The two loads
+are drawn side by side, each with its own bar, labels and inspector, over **What
+changed**: the count of each type and link in each load. Open a type to see the
+records added, removed and renamed between them, by key, and select one to find it on
+its side.
 
 ## When a database is starting
 
