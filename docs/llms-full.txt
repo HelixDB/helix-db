@@ -8515,10 +8515,16 @@ changed**: the count of each type and link in each load. Open a type to see the
 records added, removed and renamed between them, by key, and select one to find it on
 its side.
 
-## When a database is starting
+## When there's nothing to read
 
-A database created in the last few minutes may not answer yet. The Explorer says it is
-starting and opens by itself once it answers.
+| The Explorer says | What to do |
+| --- | --- |
+| **No ontologies yet** | The workspace has no ontology. Owners and admins select **Create an ontology**. |
+| **Nothing loaded yet** | The ontology has no load. Owners and admins select **Load data**, which opens the Load dialog, or, while no version is current, **Finish setting up**, which opens the ontology's overview. Records and an entity's page say the same. |
+| The database is starting | A database created in the last few minutes may not answer yet. The Explorer opens by itself once it answers. |
+| **Queries are paused** | The workspace's Helix plan doesn't allow queries now. **Choose a plan**, or **Open Helix billing**, opens billing in the Helix dashboard. |
+
+Members see the same messages, without the buttons.
 
 ## Next steps
 
@@ -8600,7 +8606,11 @@ Write the question, or select a suggestion, then select the arrow or press
 A question is at most 4,000 characters.
 
 Ask reads one load: the current one, unless you choose another in the **Load** picker
-in the top bar. A load can be asked about once it is **Ready** or **Partial**.
+in the top bar. A load can be asked about once it is **Ready** or **Partial**. While
+the ontology has no load, a new thread says **Nothing loaded yet** in place of the
+composer, with **Load data** or, while no version is current, **Finish setting up**.
+With no ontology in the workspace, Ask says **No ontologies yet**, with **Create an
+ontology**.
 
 ## Read an answer
 
@@ -8926,11 +8936,13 @@ Find the message Foundry shows, then its cause and fix.
 | The load reads no documents | Its version reads no document sets. Generate a version that picks some. |
 | Delete failed | Select **Retry delete** in the load's menu in **Data loads**. |
 
-## Ask
+## Explorer and Ask
 
 | Message or state | Cause and fix |
 | --- | --- |
-| Pick a load to ask about | The ontology has no load yet. [Load](/foundry/ontologies/load-data) its current version. |
+| Nothing loaded yet | The ontology has no load. Select **Load data** to [load](/foundry/ontologies/load-data) its current version, or **Finish setting up** when no version is current. The Explorer, Records and entity pages say the same. |
+| No ontologies yet | The workspace has no ontology. Select **Create an ontology**, or ask an owner or admin. |
+| Queries are paused: this workspace has no active Helix plan | The Explorer, Records and entity pages can't read the database. Select **Choose a plan** for the Helix dashboard's billing. **Queries are paused for billing** means the plan's billing stopped them: **Open Helix billing**. |
 | … can't be asked about until it's written | The load is still writing. Wait for it to finish. |
 | You can't read this ontology's database | Ask reads the database a load wrote. Ask an owner for **Query read** on its Helix project. |
 | This ontology can't answer that | What the load holds doesn't say. Select **Draft a new version with this** to generate a version that can. |

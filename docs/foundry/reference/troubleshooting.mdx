@@ -80,11 +80,13 @@ Find the message Foundry shows, then its cause and fix.
 | The load reads no documents | Its version reads no document sets. Generate a version that picks some. |
 | Delete failed | Select **Retry delete** in the load's menu in **Data loads**. |
 
-## Ask
+## Explorer and Ask
 
 | Message or state | Cause and fix |
 | --- | --- |
-| Pick a load to ask about | The ontology has no load yet. [Load](/foundry/ontologies/load-data) its current version. |
+| Nothing loaded yet | The ontology has no load. Select **Load data** to [load](/foundry/ontologies/load-data) its current version, or **Finish setting up** when no version is current. The Explorer, Records and entity pages say the same. |
+| No ontologies yet | The workspace has no ontology. Select **Create an ontology**, or ask an owner or admin. |
+| Queries are paused: this workspace has no active Helix plan | The Explorer, Records and entity pages can't read the database. Select **Choose a plan** for the Helix dashboard's billing. **Queries are paused for billing** means the plan's billing stopped them: **Open Helix billing**. |
 | … can't be asked about until it's written | The load is still writing. Wait for it to finish. |
 | You can't read this ontology's database | Ask reads the database a load wrote. Ask an owner for **Query read** on its Helix project. |
 | This ontology can't answer that | What the load holds doesn't say. Select **Draft a new version with this** to generate a version that can. |

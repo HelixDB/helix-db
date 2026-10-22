@@ -81,10 +81,16 @@ its side.
   <img src="https://assets.helix-db.com/docs/foundry/explore/compare-diff.png" alt="What changed from one load to another: one Contract added, customers and invoices unchanged" />
 </Frame>
 
-## When a database is starting
+## When there's nothing to read
 
-A database created in the last few minutes may not answer yet. The Explorer says it is
-starting and opens by itself once it answers.
+| The Explorer says | What to do |
+| --- | --- |
+| **No ontologies yet** | The workspace has no ontology. Owners and admins select **Create an ontology**. |
+| **Nothing loaded yet** | The ontology has no load. Owners and admins select **Load data**, which opens the Load dialog, or, while no version is current, **Finish setting up**, which opens the ontology's overview. Records and an entity's page say the same. |
+| The database is starting | A database created in the last few minutes may not answer yet. The Explorer opens by itself once it answers. |
+| **Queries are paused** | The workspace's Helix plan doesn't allow queries now. **Choose a plan**, or **Open Helix billing**, opens billing in the Helix dashboard. |
+
+Members see the same messages, without the buttons.
 
 ## Next steps
 
