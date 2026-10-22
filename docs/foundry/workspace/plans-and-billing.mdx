@@ -17,12 +17,12 @@ the workspace holds.
 | Stripe, WorkOS and PostHog | ✓ | ✓ | ✓ |
 | Syncs and synced tables | ✓ | ✓ | ✓ |
 | Ontology generation and versions | ✓ | ✓ | ✓ |
-| PostgreSQL and MySQL | | ✓ | ✓ |
+| PostgreSQL, MySQL and Amazon S3 | | ✓ | ✓ |
 
 Max includes everything in Pro, and will add more.
 
-On Free, choosing PostgreSQL or MySQL in **Add data** says the source needs Pro, and
-offers owners and admins **Upgrade to Pro**.
+On Free, choosing PostgreSQL, MySQL or Amazon S3 in **Add data** says the source needs
+Pro, and offers owners and admins **Upgrade to Pro**.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/data/pro-gate.png" alt="Choosing PostgreSQL on Foundry Free: PostgreSQL connections need Foundry Pro, with Upgrade to Pro" />
@@ -51,7 +51,7 @@ offers owners and admins **Upgrade to Pro**.
 
   <Step title="Come back">
     Stripe returns you to **Plan & billing**, which checks the payment until the new plan
-    shows. PostgreSQL and MySQL are available at once.
+    shows. PostgreSQL, MySQL and Amazon S3 are available at once.
   </Step>
 </Steps>
 
@@ -70,8 +70,8 @@ card and confirm.
 ## Cancel or resume
 
 Select **Cancel Pro** (or **Cancel Max**) and confirm. The plan stays on until the end
-of the period, then the workspace moves to Free and its PostgreSQL and MySQL connections
-stop syncing. Until then, **Resume Pro** (or **Resume Max**) undoes the cancellation.
+of the period, then the workspace moves to Free and its PostgreSQL, MySQL and S3
+connections stop syncing. Until then, **Resume Pro** (or **Resume Max**) undoes the cancellation.
 
 ## Manage payment and invoices
 
@@ -83,7 +83,7 @@ offers **Update payment method**; cancelling and switching wait until it's paid.
 
 <CardGroup cols={2}>
   <Card title="Connectors" icon="plug" href="/foundry/data/connectors">
-    Set up a PostgreSQL or MySQL connection.
+    Set up a PostgreSQL, MySQL or S3 connection.
   </Card>
   <Card title="Members and roles" icon="users" href="/foundry/workspace/members-and-roles">
     Who can change the plan.
