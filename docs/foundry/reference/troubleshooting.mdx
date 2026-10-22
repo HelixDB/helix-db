@@ -41,6 +41,9 @@ Find the message Foundry shows, then its cause and fix.
 | Message or state | Cause and fix |
 | --- | --- |
 | Already uploaded: it's in … | The workspace has this file already, in the set named. Foundry keeps one copy. |
+| Only Markdown, text, JSON, CSV, TSV, JSONL, Parquet, or PDF files can be uploaded. | Save the file in one of these formats, with its extension. |
+| The file is larger than 1.0 MiB. | Split it into smaller documents. |
+| Ontologies don't read CSV documents yet. | Foundry keeps the file to view, but ontologies read only Markdown and text so far, and loads skip it. The same goes for JSON, TSV, JSONL, Parquet and PDF. |
 | A workspace holds up to 200 documents | Delete documents you no longer need in Data. |
 | A workspace holds up to 20 document sets | Delete an empty set, or move documents into the sets you have. |
 | There is a set named … already | Set names are unique in the workspace, ignoring case and accents. Choose another. |
@@ -57,8 +60,11 @@ Find the message Foundry shows, then its cause and fix.
 | Retrying | An attempt failed for a passing reason and Foundry will try again; the page says why and when. Nothing to do. |
 | Failed | The generation failed for good. Open it from **Schema versions** and select **Try again** to reopen the form with the same goal, connectors and document sets; choosing fewer tables or a clearer goal helps. |
 | A generation reads at most 20 document sets | Untick a set to choose another. |
+| One generation covers at most 50 tables | Choose fewer connectors. |
+| Syncing… you can continue once it's synced. | The connection you added on New ontology is on its first sync. Wait for it, or choose a connection that has synced. |
+| … is used by …. Choose another. | A database holds one ontology. Choose another database, or create a new one. |
 | Making a version current is refused | Someone else made another version current at the same time. The page now shows it; make yours current again if you still want it. |
-| A new database can't be created | The workspace has no Helix plan. Add one in the Helix dashboard's billing, or use a database you already have. |
+| A new database needs a Helix plan | The workspace has no Helix subscription. Select **Open Helix billing** to add one, or **Use an existing one** for a database you already have. |
 | The database is starting | A new database takes a few minutes to start. Pages read it again by themselves; a load waits for it. |
 | The ontology shows no database contents | You can't read the database's Helix project. Ask an owner for access to it. |
 

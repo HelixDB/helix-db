@@ -25,7 +25,8 @@ what the load reads and what it may spend; select **Load** to start it.
 - **Tables**: the synced tables the version's mappings read.
 - **Documents**: the [document sets](/foundry/data/documents) the version reads, the
   ones its generation picked, and how many documents they hold. A set no route reads is
-  stored, not read. Documents added to these sets later are read as they arrive.
+  stored, not read, and so are documents in formats ontologies don't read yet (anything
+  but Markdown and text). Documents added to these sets later are read as they arrive.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/load-dialog.png" alt="The Load version 3 into contracts dialog: two Stripe tables, one document from General, the spending caps and the limits" />
@@ -88,7 +89,7 @@ with the same models again costs nothing.
 | --- | --- |
 | Per load | $20 |
 | Per workspace, per month | $100 |
-| Documents | 200 in the workspace, 256 KiB each |
+| Documents | 200 in the workspace, 1 MiB each |
 | Loads kept per ontology | 5 |
 
 A load that reaches its cap stops **Partial**. The documents it didn't reach are read

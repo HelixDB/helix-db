@@ -1,6 +1,6 @@
 ---
 title: "Upload and organise documents"
-description: "Upload Markdown and text files to a Helix Foundry workspace, keep them in document sets, and see which ontologies read each one"
+description: "Upload Markdown, text, JSON, CSV, Parquet, PDF and other files to a Helix Foundry workspace, keep them in document sets, view them, and see which ontologies read each one"
 sidebarTitle: "Documents"
 pageType: "Guide"
 ---
@@ -46,10 +46,17 @@ it straight to storage and shows its progress.
 
 | Rule | Value |
 | --- | --- |
-| File types | Markdown (`.md`, `.markdown`) and text (`.txt`) |
-| Size | Up to 256 KiB each |
+| File types | Markdown (`.md`, `.markdown`), text (`.txt`), JSON (`.json`), CSV (`.csv`), TSV (`.tsv`), JSONL (`.jsonl`, `.ndjson`), Parquet (`.parquet`) and PDF (`.pdf`) |
+| Size | 1 byte to 1 MiB each |
 | Count | At most 200 documents in the workspace |
 | Name | At most 255 characters, with no slash, backslash or control character |
+
+<Note>
+  Ontologies read only Markdown and text documents so far. Foundry keeps the other
+  formats in their sets for you to view, and says so wherever they show: on the upload,
+  on the document's page, on its set and in Generate and the Load dialog. Loads skip
+  them.
+</Note>
 
 Each upload says which set it went into and which ontologies read that set.
 
@@ -67,13 +74,30 @@ file is in.
 
 ## A document's page
 
-Select a document in the explorer to open its page: its text, its set, its size and
-when it was uploaded. **Ontologies** lists each ontology that reads the document's set,
-or whose current load holds the document, with what its current load made of it and
-**Open in** to read it there.
+Select a document in the explorer to open its page: what it holds, its set, its size and
+when it was uploaded. Foundry shows each document by its type:
+
+| Type | Shown as |
+| --- | --- |
+| Markdown | Rendered, with headings, lists, tables and links; images show as their alt text and are never loaded |
+| Text | As it is |
+| JSON | A tree you open node by node |
+| CSV, TSV, JSONL and Parquet | A table of the first 5,000 rows, with the rows it couldn't read |
+| PDF | Its pages |
+
+Markdown, JSON, CSV, TSV and JSONL also have **Source**, to read the file's own text.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/data/document.png" alt="contract.md's page in Data with its text, and Customer contracts and Renewals under Ontologies with their statuses" />
+  <img src="https://assets.helix-db.com/docs/foundry/data/document-csv.png" alt="A CSV document's page in Data showing its rows as a table, and that ontologies don't read CSV documents yet" />
+</Frame>
+
+**Details** lists its media type, size, SHA-256 and ID. **Ontologies** lists each
+ontology that reads the document's set, or whose current load holds the document, with
+what its current load made of it and **Open in** to read it there. For a format
+ontologies don't read, it says so instead.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/document.png" alt="contract.md's page in Data with its Markdown rendered, and Customer contracts and Renewals under Ontologies with their statuses" />
 </Frame>
 
 Each ontology's status says where the document stands in its current load: **Not read
@@ -117,14 +141,19 @@ OpenAI models to find its names and facts and to check them.
 
 ## In an ontology
 
-An ontology's **Documents** page lists what it reads of the workspace's documents: those
-in the sets its version reads, and those its current load holds. Open it from the
-document count in the ontology's header, or from a load's **Documents read** and
-**Review documents**. It is read-only: **Open in Data** goes back to the documents in
-Data.
+An ontology's **Documents** lists what it reads of the workspace's documents: those in
+the sets its version reads, and those its current load holds. Open it from the
+ontology's pages in the Ontologies panel, from the document count in the ontology's
+header, or from a load's **Documents read** and **Review documents**. It is read-only:
+**Open in Data** goes back to the documents in Data.
+
+There, the Ontologies panel becomes the ontology's documents explorer: a row back to
+the ontology, a filter, and its sets as folders of their documents. Each document's dot
+says what the current load made of it: orange needs review, red couldn't be read,
+green read, grey waiting or not read. A set counts its documents that need review.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/documents.png" alt="Customer contracts' Documents page listing contract.md in General with one item needing review, and Open in Data" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/documents.png" alt="Customer contracts' Documents page listing contract.md in General with one item needing review, beside the ontology's documents explorer with General open and contract.md's orange dot" />
 </Frame>
 
 Open a document there to see its text as the load read it: names underlined, quoted

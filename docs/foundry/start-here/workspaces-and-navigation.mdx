@@ -35,20 +35,29 @@ workspace starts on Foundry Free.
   <img src="https://assets.helix-db.com/docs/foundry/start-here/workspaces.png" alt="The workspace picker listing the user's workspaces with a Create workspace button" />
 </Frame>
 
-To switch later, use the workspace menu at the top of the sidebar. Foundry remembers
-the workspace you chose in this browser.
+To switch later, use the workspace menu at the top of the sidebar, or the workspace's
+initial near the foot of the rail. Foundry remembers the workspace you chose in this
+browser.
 
 ## The sidebar
 
 The sidebar lists Foundry's sections: **Home**, **Ontologies**, **Explorer**, **Ask**
 and **Data**. The workspace menu sits at its top, and your account and **Settings** at
-its foot. While an ontology is open, its pages are listed under **Ontologies**.
+its foot.
 
-**Data** and **Ask** have a panel of their own: the Data explorer, and Ask's threads.
+Every section but Home has a panel of its own:
+
+| Section | Its panel |
+| --- | --- |
+| **Ontologies** | The workspace's ontologies, with the pages of the one open |
+| **Explorer** | The labels of the graph, or the types in Records |
+| **Ask** | The ontology's threads |
+| **Data** | The Data explorer: connections and documents as a tree |
+
 In those sections the sidebar shrinks to a slim rail of section icons, with the
 section's panel beside it. The toggle near the top of the rail hides the panel and
-shows it again; Foundry remembers the choice in this browser. In other sections, the
-toggle at the top of the sidebar collapses it to icons.
+shows it again; Foundry remembers the choice in this browser. On Home and in Settings,
+the toggle at the top of the sidebar collapses it to icons.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/data/overview.png" alt="The Data section: the rail of section icons, the Data explorer panel beside it, and the Data overview" />
@@ -63,11 +72,32 @@ sidebar, or the rail and the section's panel side by side.
 
 ## Home
 
-Home says where the workspace stands: its connections and synced tables, its
-ontologies, its members and its plan. Each card links to the page that changes it.
+Home says where the workspace stands, in four cards that each link to the page that
+changes it:
+
+- **Connections**: how many are healthy, meaning their newest sync succeeded, and the
+  kinds of source connected.
+- **Data health**: open issues: failed syncs, ontologies whose last load failed, and
+  documents that need review. **Needs attention** lists them, each with **Inspect**.
+- **Team**: the workspace's members.
+- **Plan**: Foundry Free, Pro or Max.
+
+Until the workspace has an ontology, **Get started** below them lists the steps to a
+first one, ticked as you go: connect data, sync it, add documents (optional), create an
+ontology, generate a draft, review it and make it current, load it, then explore or ask.
+Owners and admins get a button on each step that can be done now.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/start-here/home.png" alt="Home with the Data, Ontologies, Team and Plan cards" />
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/home-setup.png" alt="Home for a new workspace: the Connections, Data health, Team and Plan cards over the Get started checklist" />
+</Frame>
+
+Once there is one, Home shows the ontology you last opened instead: its current version
+as a map with its types, and how many records the current load holds of each. Pick
+another ontology in the card, or select **Open**. While the current version isn't
+loaded, the card says so and offers **Load it**.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/home.png" alt="Home with the Connections, Data health, Team and Plan cards, and the Customer contracts ontology card with its current version's types" />
 </Frame>
 
 ## Search with the command palette

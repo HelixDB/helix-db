@@ -12,6 +12,9 @@ links, mappings from your tables, routes for your documents, rules and the quest
 should answer. Each draft is stored as a new version beside the others. Nothing changes
 until you make a version current.
 
+[Creating an ontology](/foundry/ontologies/create-an-ontology) drafts its first
+version. **Generate** drafts the next ones.
+
 <Frame caption="Generate a draft, review it and make it current.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/ontology/generate-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/ontology/generate.webm"></video>
 </Frame>
@@ -32,6 +35,9 @@ until you make a version current.
     choice. Expand that choice to pick some of them; it then shows as partly chosen.
     Expand a connector to see its tables. A generation reads at most 50 tables.
 
+    **Add data** connects another source without leaving the form. Its first sync
+    shows in its row, and it is chosen once it has synced.
+
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/ontology/generate.png" alt="The Generate an ontology form with a goal, Stripe chosen, and PostgreSQL's two connectors expanded with one of them chosen" />
     </Frame>
@@ -42,7 +48,8 @@ until you make a version current.
     version reads. You pick whole sets, the folders of the Data explorer's Documents.
     The choice starts as the current version's sets, or none for a first generation.
     Leave every set unticked for a version that reads no documents. A generation reads
-    at most 20 sets.
+    at most 20 sets. **Upload documents**, or the upload button on a set's row, uploads
+    files from here and chooses the set they went into.
 
     The agent reads up to five of the newest documents in each set, with the set's
     description, and drafts routes for them: what each set's documents may fill. Loads
@@ -95,7 +102,7 @@ graph, with a tab for each part:
 
 | Tab | Shows |
 | --- | --- |
-| **Graph** | The agent's summary and the types and links as a scene or a schema |
+| **Graph** | The agent's summary, and the types and links as a schema; select a type to open it |
 | **Types** | Each type with its properties, keys and identifiers |
 | **Links** | How types connect, and what each link means |
 | **Mappings** | Which table and columns fill each type and link |
