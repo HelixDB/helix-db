@@ -237,6 +237,7 @@
             "group": "Data",
             "pages": [
               "foundry/data/connect-data",
+              "foundry/data/documents",
               "foundry/data/connectors"
             ]
           },
@@ -245,7 +246,6 @@
             "pages": [
               "foundry/ontologies/create-an-ontology",
               "foundry/ontologies/generate-and-version",
-              "foundry/ontologies/documents",
               "foundry/ontologies/load-data"
             ]
           },
@@ -1556,6 +1556,14 @@
     {
       "source": "/foundry/ask",
       "destination": "/foundry/ask/ask-questions"
+    },
+    {
+      "source": "/foundry/ontologies/documents",
+      "destination": "/foundry/data/documents"
+    },
+    {
+      "source": "/foundry/documents",
+      "destination": "/foundry/data/documents"
     }
   ],
   "search": {

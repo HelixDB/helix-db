@@ -1,0 +1,159 @@
+---
+title: "Upload and organise documents"
+description: "Upload Markdown and text files to a Helix Foundry workspace, keep them in document sets, and see which ontologies read each one"
+sidebarTitle: "Documents"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Documents carry what your tables don't: who signed a contract, what was agreed, who
+referred whom. They belong to the workspace and live in **Data**, in document sets:
+folders of documents an ontology reads together. A load reads the documents of the
+sets its version reads, and links the names they mention to the records your tables
+hold.
+
+## Document sets
+
+In the Data explorer, the **Documents** folder holds a folder per set, and each set
+holds its documents. A workspace gets a set named **General** with its first upload.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/overview.png" alt="The Data overview beside the Data explorer, whose Documents folder holds the General and Board minutes sets and their documents" />
+</Frame>
+
+Owners and admins manage the sets from their rows in the explorer:
+
+- **New set**, on the Documents row, names a set and gives it an optional description.
+  The agent that drafts the next version reads the description.
+- **Describe** changes a set's name and description.
+- The pencil beside a set's name, or <kbd>F2</kbd> on its row, renames it in place.
+- **Delete** removes a set that holds no documents. Move or delete its documents first.
+
+A workspace holds up to 20 sets. Set names are unique in the workspace, ignoring case
+and accents.
+
+## Upload
+
+Upload in any of these ways; Foundry checks each file before it uploads it, then sends
+it straight to storage and shows its progress.
+
+- **Upload documents**, in the explorer's head or on the Data overview, uploads into
+  General, or the oldest set when there is no General.
+- **Upload into**, on a set's row, uploads into that set.
+- Drop files onto a set in the explorer. Files dropped anywhere else on the explorer or
+  the Data overview go into General.
+
+| Rule | Value |
+| --- | --- |
+| File types | Markdown (`.md`, `.markdown`) and text (`.txt`) |
+| Size | Up to 256 KiB each |
+| Count | At most 200 documents in the workspace |
+| Name | At most 255 characters, with no slash, backslash or control character |
+
+Each upload says which set it went into and which ontologies read that set.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/documents-uploaded.png" alt="The Data explorer with contract.md uploaded into General, and a note that Renewals reads it with its first load" />
+</Frame>
+
+A workspace keeps one copy of each file. Uploading a file it already holds, under any
+name, doesn't add another: the upload says **Already uploaded** and names the set the
+file is in.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/upload-duplicate.png" alt="An upload of contract.md that says Already uploaded: it's in General" />
+</Frame>
+
+## A document's page
+
+Select a document in the explorer to open its page: its text, its set, its size and
+when it was uploaded. **Ontologies** lists each ontology that reads the document's set,
+or whose current load holds the document, with what its current load made of it and
+**Open in** to read it there.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/document.png" alt="contract.md's page in Data with its text, and Customer contracts and Renewals under Ontologies with their statuses" />
+</Frame>
+
+Each ontology's status says where the document stands in its current load: **Not read
+yet**, **Read**, **Needs review**, **Duplicate**, **Couldn't be read** or **Not read
+by its version**.
+
+On a document's page, owners and admins can:
+
+- **Move** it to another set (or use **Move to another set…** on its grip in the
+  explorer). Loads that read it keep what they read until their next load, and every
+  ontology that reads the new set reads it there.
+- **Delete** it. It's removed from Foundry at once; what loads read from it stays in
+  their ontologies' databases.
+- Rename it in place in the explorer, with the pencil beside its name. A rename may
+  change its extension.
+
+## How ontologies read documents
+
+An ontology doesn't read every document in the workspace. Each version reads the sets
+its generation picked:
+
+- **Generate** picks whole sets. The agent reads up to five of the newest documents in
+  each and drafts routes for them, which say what each set's documents may fill, such
+  as a contract's signing date and the customer it was signed with. See
+  [Generate and version](/foundry/ontologies/generate-and-version#generate-a-draft).
+- **Loads** read every document in the version's sets: its sections, the names it
+  mentions, and the facts it states, each with the quote it came from. A document in a
+  set no route reads is stored, not read, and shows **Not read by its version**. What
+  a load can't settle, such as a name the database doesn't hold, an ambiguous name, a
+  quote it couldn't verify or a fact that conflicts with your tables, goes to **Needs
+  review** instead of becoming a record.
+- A document uploaded or moved into a set the current load reads is read into that load
+  as it arrives.
+
+An existing ontology reads a new set only after a new generation picks it, or a
+[version edit](/foundry/ontologies/generate-and-version#edit-a-version) routes it, and
+that version is loaded.
+
+Reading documents uses AI models: a load sends each document's text to Anthropic and
+OpenAI models to find its names and facts and to check them.
+
+## In an ontology
+
+An ontology's **Documents** page lists what it reads of the workspace's documents: those
+in the sets its version reads, and those its current load holds. Open it from the
+document count in the ontology's header, or from a load's **Documents read** and
+**Review documents**. It is read-only: **Open in Data** goes back to the documents in
+Data.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/documents.png" alt="Customer contracts' Documents page listing contract.md in General with one item needing review, and Open in Data" />
+</Frame>
+
+Open a document there to see its text as the load read it: names underlined, quoted
+facts tinted and anything that needs review marked. Beside it, **Facts**, **Entities**
+and **Needs review** list what the load found, each linked to its record. Use the
+**Load** picker to read the document as another load saw it.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/document.png" alt="contract.md as the current load read it, with names underlined, facts tinted, and its two signed_with facts listed with their quotes" />
+</Frame>
+
+## Who can do what
+
+Owners and admins upload, move, rename and delete documents, and create, describe and
+delete sets. Members read them.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Generate an ontology" icon="wand-magic-sparkles" href="/foundry/ontologies/generate-and-version">
+    Pick the document sets a version reads.
+  </Card>
+  <Card title="Load data" icon="database" href="/foundry/ontologies/load-data">
+    Write tables and documents into the database.
+  </Card>
+  <Card title="Connect data" icon="plug" href="/foundry/data/connect-data">
+    The Data explorer, and how to arrange it.
+  </Card>
+  <Card title="Records and entities" icon="table" href="/foundry/explore/records-and-entities">
+    See every place a record comes from.
+  </Card>
+</CardGroup>
