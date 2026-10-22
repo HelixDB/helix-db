@@ -1,16 +1,17 @@
 ---
 title: "Helix Foundry quickstart"
-description: "Sign in, connect a source, generate an ontology, load it into a Helix database and explore it"
+description: "Sign in, connect a source, upload documents, generate an ontology, load it into a Helix database, explore it and ask it a question"
 sidebarTitle: "Quickstart"
 pageType: "Tutorial"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
-This tutorial takes a new workspace from sign-in to an explored graph. You need a
-Helix account and a source to read, such as a Stripe account. Owners and admins of a
-workspace can do every step. Members can follow along read-only; exploring a load also
-needs **Query read** on its database's Helix project.
+This tutorial takes a new workspace from sign-in to an explored graph and a first
+answer. You need a Helix account and a source to read, such as a Stripe account.
+Owners and admins of a workspace can do every step. Members can follow along
+read-only; exploring a load and asking about it also need **Query read** on its
+database's Helix project.
 
 <Frame caption="The steps below, end to end.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
@@ -48,6 +49,18 @@ needs **Query read** on its database's Helix project.
     See [Connect data](/foundry/data/connect-data) for every source and what it needs.
   </Step>
 
+  <Step title="Upload documents">
+    Optional. In **Data**, select **Upload documents** and choose Markdown or text
+    files, such as contracts. They go into the **General** document set, in the Data
+    explorer's **Documents** folder.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/data/documents-uploaded.png" alt="The Data explorer with contract.md uploaded into General" />
+    </Frame>
+
+    See [Documents](/foundry/data/documents) for sets and what they're for.
+  </Step>
+
   <Step title="Create an ontology">
     In **Ontologies**, select **New ontology**. Name it and choose the Helix database
     it loads into: one you have, or a new one on Helix's shared cluster.
@@ -59,11 +72,12 @@ needs **Query read** on its database's Helix project.
 
   <Step title="Generate a draft">
     On the ontology, select **Generate**. Say what the ontology should serve, choose the
-    connectors whose tables it reads, and select **Generate**. The page follows the
-    generation until it stores a new version.
+    connectors whose tables it reads and the document sets it reads, such as
+    **General**, and select **Generate**. The page follows the generation until it
+    stores a new version.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/ontology/generate.png" alt="The Generate an ontology form with a goal and the Stripe and Shop database connectors selected" />
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/generate.png" alt="The Generate an ontology form with a goal and its connectors grouped by kind" />
     </Frame>
   </Step>
 
@@ -72,17 +86,17 @@ needs **Query read** on its database's Helix project.
     **Make current**. Your earlier version stays, so you can roll back at any time.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/ontology/version.png" alt="An agent-drafted version with its Graph, Types, Links, Mappings, Rules, Questions and TOML tabs" />
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/version.png" alt="An agent-drafted version that reads General, with its Graph, Types, Links, Mappings, Sources, Rules, Questions, TOML and Edit tabs" />
     </Frame>
   </Step>
 
   <Step title="Load it">
-    In **Data loads**, select **Load data**. The dialog says which tables and documents
-    the load reads and what it may spend; select **Load**. When it finishes, it becomes
-    the current load.
+    In **Data loads**, select **Load data**. The dialog says which tables and document
+    sets the load reads and what it may spend; select **Load**. When it finishes, it
+    becomes the current load.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/ontology/load-dialog.png" alt="The Load version 3 into contracts dialog with the tables, documents, spending and limits" />
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/load-dialog.png" alt="The Load version 3 into contracts dialog with the tables, the documents from General, spending and limits" />
     </Frame>
   </Step>
 
@@ -95,19 +109,28 @@ needs **Query read** on its database's Helix project.
       <img src="https://assets.helix-db.com/docs/foundry/explore/explorer-node.png" alt="The Explorer with a customer selected and its properties and relationships in the inspector" />
     </Frame>
   </Step>
+
+  <Step title="Ask a question">
+    Select **Ask** in the sidebar, write a question or pick a suggestion, and select
+    the arrow. The answer cites the records, rows and quotes it came from.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ask/thread.png" alt="An Ask thread with its steps and an answer citing its sources" />
+    </Frame>
+  </Step>
 </Steps>
 
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Upload documents" icon="file-lines" href="/foundry/ontologies/documents">
-    Add contracts and notes so loads fill types from their text.
+  <Card title="Organise documents" icon="file-lines" href="/foundry/data/documents">
+    Keep contracts and notes in sets for your ontologies to read.
   </Card>
   <Card title="Invite your team" icon="user-plus" href="/foundry/workspace/members-and-roles">
     Invite members and admins to the workspace.
   </Card>
   <Card title="Connect a database" icon="database" href="/foundry/data/connectors">
-    PostgreSQL and MySQL need Foundry Pro.
+    PostgreSQL, MySQL and S3 need Foundry Pro.
   </Card>
   <Card title="Troubleshooting" icon="wrench" href="/foundry/reference/troubleshooting">
     What each error and waiting state means.

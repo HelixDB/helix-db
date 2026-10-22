@@ -1,6 +1,6 @@
 ---
 title: "Helix Foundry limits"
-description: "Every Helix Foundry limit in one place: syncs, generations, documents, loads, spending and reads"
+description: "Every Helix Foundry limit in one place: syncs, documents, generations, loads, questions, spending and reads"
 sidebarTitle: "Limits"
 pageType: "Reference"
 ---
@@ -17,18 +17,11 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |
+| Size of an S3 connection's tables, per sync | 20 GB |
 | PostHog event history | 1 to 365 days, 30 by default |
-| PostgreSQL and MySQL | Foundry Pro or Max |
-
-## Generations
-
-| Limit | Value |
-| --- | --- |
-| Goal | 2,000 characters |
-| Tables per generation | 50 |
-| Documents the agent sees | Names of the 50 most recently uploaded |
-| Attempts per generation | 3 |
-| Generations running per ontology | 1 |
+| PostgreSQL, MySQL and Amazon S3 | Foundry Pro or Max |
+| Your folders in the Data explorer | 50, at the root, holding connections only |
+| Folder name | 120 characters |
 
 ## Documents
 
@@ -38,6 +31,20 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Size | 256 KiB per document |
 | Documents per workspace | 200 |
 | Name | 255 characters, no slash, backslash or control character |
+| Document sets per workspace | 20 |
+| Set name | 120 characters, unique in the workspace ignoring case and accents |
+| Set description | 1,000 characters |
+
+## Generations
+
+| Limit | Value |
+| --- | --- |
+| Goal | 2,000 characters |
+| Tables per generation | 50 |
+| Document sets per generation | 20 |
+| Documents the agent reads | Up to 5 of the newest in each set |
+| Attempts per generation | 3 |
+| Generations running per ontology | 1 |
 
 ## Loads
 
@@ -47,6 +54,16 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Document reading spend, per workspace each month | $100 |
 | Loads kept per ontology | 5: the current one and the four newest others |
 | Loads or extracts running per ontology | 1 |
+
+## Ask
+
+| Limit | Value |
+| --- | --- |
+| Per question | $0.50, 10 steps and 2 minutes |
+| Question | 4,000 characters |
+| Questions running per workspace | 2 |
+| Questions per workspace, per hour | 30 |
+| Spend per workspace, per month | The budget shown at the foot of Ask's threads, apart from loads' |
 
 ## Explorer and Records
 

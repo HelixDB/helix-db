@@ -85,17 +85,17 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 
 ## Helix Foundry — Start Here
 - [What is Helix Foundry?](https://docs.helix-db.com/foundry/start-here/introduction): Helix Foundry connects your company's data, drafts an ontology across it, and loads it into a Helix database you can explore — Page type: Concept
-- [Helix Foundry quickstart](https://docs.helix-db.com/foundry/start-here/quickstart): Sign in, connect a source, generate an ontology, load it into a Helix database and explore it — Page type: Tutorial
-- [Workspaces and navigation](https://docs.helix-db.com/foundry/start-here/workspaces-and-navigation): Sign in to Helix Foundry, choose or create a workspace, and find your way with the sidebar, search and themes — Page type: Guide
+- [Helix Foundry quickstart](https://docs.helix-db.com/foundry/start-here/quickstart): Sign in, connect a source, upload documents, generate an ontology, load it into a Helix database, explore it and ask it a question — Page type: Tutorial
+- [Workspaces and navigation](https://docs.helix-db.com/foundry/start-here/workspaces-and-navigation): Sign in to Helix Foundry, choose or create a workspace, and find your way with the sidebar, its rail and panels, search and themes — Page type: Guide
 
 ## Data
-- [Connect and sync data](https://docs.helix-db.com/foundry/data/connect-data): Add a source to a Helix Foundry workspace, test its credential, sync its tables and read what each table holds — Page type: Guide
+- [Connect and sync data](https://docs.helix-db.com/foundry/data/connect-data): Find your way around Helix Foundry's Data section, add a source, test its credential, sync its tables and read what each table holds — Page type: Guide
+- [Upload and organise documents](https://docs.helix-db.com/foundry/data/documents): Upload Markdown and text files to a Helix Foundry workspace, keep them in document sets, and see which ontologies read each one — Page type: Guide
 - [Connectors](https://docs.helix-db.com/foundry/data/connectors): What each Helix Foundry source needs, the permissions to give it, the tables it syncs and its limits — Page type: Reference
 
 ## Ontologies
 - [Create an ontology](https://docs.helix-db.com/foundry/ontologies/create-an-ontology): Create a Helix Foundry ontology on an existing Helix database or a new one, and read its overview — Page type: Guide
-- [Generate and version an ontology](https://docs.helix-db.com/foundry/ontologies/generate-and-version): Ask Helix Foundry's agent to draft an ontology from your synced tables and documents, review each version, and choose the current one — Page type: Guide
-- [Upload documents](https://docs.helix-db.com/foundry/ontologies/documents): Upload Markdown and text files to a Helix Foundry ontology so generations and loads read the names and facts they hold — Page type: Guide
+- [Generate and version an ontology](https://docs.helix-db.com/foundry/ontologies/generate-and-version): Ask Helix Foundry's agent to draft an ontology from your synced tables and document sets, review each version, edit it, and choose the current one — Page type: Guide
 - [Load data into a Helix database](https://docs.helix-db.com/foundry/ontologies/load-data): Write an ontology's current version, your synced tables and your documents into its Helix database, and manage its loads — Page type: Guide
 
 ## Explore
@@ -103,15 +103,15 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Records and entities](https://docs.helix-db.com/foundry/explore/records-and-entities): Read a Helix Foundry load as tables by type, open a record's links and sources, and see everything about one entity — Page type: Guide
 
 ## Ask
-- [Ask questions of your data](https://docs.helix-db.com/foundry/ask/ask-questions): Ask a Helix Foundry ontology questions in plain language and get answers that cite where they came from. Coming soon. — Page type: Guide; Status: Preview
+- [Ask questions of your data](https://docs.helix-db.com/foundry/ask/ask-questions): Ask a Helix Foundry ontology's load questions in plain language, follow each step, and open the records, rows and quotes its answers cite — Page type: Guide
 
 ## Workspace
 - [Members and roles](https://docs.helix-db.com/foundry/workspace/members-and-roles): See who is in a Helix Foundry workspace, invite people, and what owners, admins and members can do — Page type: Guide
 - [Plans and billing](https://docs.helix-db.com/foundry/workspace/plans-and-billing): Compare Helix Foundry Free, Pro and Max, upgrade a workspace, switch tiers, cancel, resume and manage payment — Page type: Guide
 
 ## Reference
-- [Helix Foundry limits](https://docs.helix-db.com/foundry/reference/limits): Every Helix Foundry limit in one place: syncs, generations, documents, loads, spending and reads — Page type: Reference
-- [Troubleshooting Helix Foundry](https://docs.helix-db.com/foundry/reference/troubleshooting): What Helix Foundry's sign-in, connection, sync, generation, database and load messages mean, and what to do — Page type: Troubleshooting
+- [Helix Foundry limits](https://docs.helix-db.com/foundry/reference/limits): Every Helix Foundry limit in one place: syncs, documents, generations, loads, questions, spending and reads — Page type: Reference
+- [Troubleshooting Helix Foundry](https://docs.helix-db.com/foundry/reference/troubleshooting): What Helix Foundry's sign-in, connection, sync, document, generation, database, load and Ask messages mean, and what to do — Page type: Troubleshooting
 
 ## Using the helix CLI
 - [Getting started with HelixDB CLI](https://docs.helix-db.com/cli/getting-started): Install the CLI, run locally, or link a WorkOS-authenticated Cloud database — Page type: Tutorial
