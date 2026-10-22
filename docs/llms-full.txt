@@ -7773,7 +7773,9 @@ database's Helix project.
 
     See [Documents](/foundry/data/documents) for sets and what they're for.
 
-    See [Create an ontology](/foundry/ontologies/create-an-ontology) for each step.
+    See [Create an ontology](/foundry/ontologies/create-an-ontology) for each step. Until
+    the ontology is set up, its overview lists the steps left, so you can carry on from
+    there at any time.
 
 ## Next steps
 
@@ -7837,8 +7839,9 @@ Below the cards, a checklist lists the steps to a first ontology, ticked as you 
 connect data, sync it, add documents (optional), create an ontology, generate a draft,
 review it and make a version current, load it, then explore or ask. A new workspace
 sees **Get started**. Once there is an ontology, the checklist follows Home's ontology,
-the one you last opened (else the newest), as **Set up** and its name, and each step
-left links to that ontology's page for it. The checklist stays until that ontology has been loaded and
+the one you last opened (else the newest), as **Set up** and its name: generate,
+review and load go to the ontology's overview, which carries the setup on, and explore
+opens its Explorer. The checklist stays until that ontology has been loaded and
 explored or asked about. Owners and admins get a button on each step they can take
 now; members get **Explore** and **View progress**.
 
@@ -8252,14 +8255,23 @@ the step is in the page's address, so going back or reloading keeps your place.
     Helix's shared cluster, under the workspace's Helix plan. Its address is the name you
     give it, with a short suffix when another database already has it.
 
-You review the draft before it is used: make it current to load it. If the ontology
-was created but its generation couldn't start, the ontology opens saying why, with
-**Try again**, which opens Generate with your choices.
+You review the draft before it is used: make it current to load it. If you leave
+before then, the ontology's [overview](#the-overview) picks up where you stopped. If
+the ontology was created but its generation couldn't start, the ontology opens saying
+why, with **Try again**, which opens Generate with your choices.
+
+Members see the same steps, without the pickers or anything that changes the
+ontology.
+
+Once the ontology has been loaded and explored or asked about, the overview is its
+current version as a schema: each type as a card with its key and the table that fills
+it, joined by its links. Select a card to open that type; point at a link to read what
+it means. When a newer version is ready to review, the overview says so above it.
 
 Its header names the database and its Helix project, the status of the last load and
 when the ontology was created. It links to **All versions** and to the documents the
-ontology reads, and offers **Generate** and, once the current version can be loaded,
-**Load data**.
+ontology reads, and offers **Generate** once the ontology has a draft and, once the
+current version can be loaded, **Load data**.
 
 The [Explorer](/foundry/explore/explorer) and [Ask](/foundry/ask/ask-questions) are
 sections of their own, which open the ontology you last opened.
@@ -8294,7 +8306,9 @@ should answer. Each draft is stored as a new version beside the others. Nothing 
 until you make a version current.
 
 [Creating an ontology](/foundry/ontologies/create-an-ontology) drafts its first
-version. **Generate** drafts the next ones.
+version, and until the ontology is set up its
+[overview](/foundry/ontologies/create-an-ontology#the-overview) carries on from there:
+generate, review, make current, load. **Generate** drafts the next versions.
 
 A generation's page shows its goal, its tables and its steps. Open it from its
 version's page, where the version is named for it, or from a failed generation's row in
@@ -8347,8 +8361,8 @@ different tables.
 
 ## Make a version current
 
-Select **Make current** on a version's page, or on the overview's callout, and
-confirm. The current version is the one the overview shows and the one a load writes.
+Select **Make current** on a version's page, or on the overview, which offers it for a
+version ready to review, and confirm. The current version is the one the overview shows and the one a load writes.
 
 To roll back, make an older version current. If someone else makes another version
 current at the same time, Foundry refuses yours, says why, and shows the version that

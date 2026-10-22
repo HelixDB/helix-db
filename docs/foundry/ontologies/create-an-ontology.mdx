@@ -100,9 +100,10 @@ the step is in the page's address, so going back or reloading keeps your place.
   </Step>
 </Steps>
 
-You review the draft before it is used: make it current to load it. If the ontology
-was created but its generation couldn't start, the ontology opens saying why, with
-**Try again**, which opens Generate with your choices.
+You review the draft before it is used: make it current to load it. If you leave
+before then, the ontology's [overview](#the-overview) picks up where you stopped. If
+the ontology was created but its generation couldn't start, the ontology opens saying
+why, with **Try again**, which opens Generate with your choices.
 
 <Note>
   A new database comes with a first API key. Foundry never keeps or shows its token;
@@ -118,20 +119,40 @@ links to billing in the Helix dashboard and offers the databases you already hav
 
 ## The overview
 
-An ontology's overview shows its current version as a schema: each type as a card
-with its key and the table that fills it, joined by its links. Select a card to open
-that type; point at a link to read what it means. Above it, the overview says what
-needs doing next: a generated version to review, or a current version that isn't
-loaded yet.
+Until an ontology is set up, its overview carries the setup on, so you can always
+continue from there. **Set it up** lists the steps with the ones done ticked: Name and
+Database, then Data, Documents (optional), Goal (optional), **Generate a draft**,
+**Review and make a version current**, **Load it** and **Explore or ask**. The first
+step not done is open:
+
+- Before a draft, Data, Documents and Goal are the same pickers as on New ontology,
+  with **Add data** and **Upload documents** in place, then **Generate**.
+- While the agent drafts, the step follows it; if the draft failed, it says why, with
+  **Try again**.
+- A draft to review offers **Review** and **Make current**.
+- A current version not loaded yet offers **Load data**.
+- Once loaded, **Explore or ask** opens the Explorer or Ask.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/overview.png" alt="The Customer contracts overview: its database, last load and creation date, a Version 3 is ready to review callout, and version 1's schema" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/overview-setup.png" alt="The Renewals overview with Set it up, 5 of 7 done: its name, database, data, documents, goal, draft and current version ticked, and Load it open with Version 1 isn't loaded yet and Load data" />
+</Frame>
+
+Members see the same steps, without the pickers or anything that changes the
+ontology.
+
+Once the ontology has been loaded and explored or asked about, the overview is its
+current version as a schema: each type as a card with its key and the table that fills
+it, joined by its links. Select a card to open that type; point at a link to read what
+it means. When a newer version is ready to review, the overview says so above it.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/overview.png" alt="The Customer contracts overview, loaded: its database, last load and creation date, and version 3's schema with Contract, Customer and Invoice joined by Signed with and Billed to" />
 </Frame>
 
 Its header names the database and its Helix project, the status of the last load and
 when the ontology was created. It links to **All versions** and to the documents the
-ontology reads, and offers **Generate** and, once the current version can be loaded,
-**Load data**.
+ontology reads, and offers **Generate** once the ontology has a draft and, once the
+current version can be loaded, **Load data**.
 
 The [Explorer](/foundry/explore/explorer) and [Ask](/foundry/ask/ask-questions) are
 sections of their own, which open the ontology you last opened.
