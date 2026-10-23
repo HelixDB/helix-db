@@ -403,23 +403,28 @@ async fn run_case(
         .await
         .expect("late validation mutation re-entry step succeeds");
     assert_monotonic_step(&evidence);
-    let reentered = db
+    let reentered_status = db
         .get_index_operation(scope, operation_id)
         .await
-        .expect("re-entered operation remains readable")
-        .common()
-        .stage;
+        .expect("re-entered operation remains readable");
+    let reentered = reentered_status.common().stage;
     match definition {
-        ValidatedDynamicIndexDefinition::Secondary(_)
-            if !matches!(
-                stage,
-                IndexOperationStage::Scan | IndexOperationStage::CatchUp
-            ) =>
-        {
-            assert_eq!(
-                reentered,
-                IndexOperationStage::CatchUp,
-                "{definition:?} must leave {stage:?} for catch-up after late mutations"
+        // Validation and activation drain late deltas under their own gate:
+        // validation moves on with its releases, and activation completes
+        // in the same step.
+        ValidatedDynamicIndexDefinition::Secondary(_) if stage == IndexOperationStage::Validate => {
+            assert!(
+                matches!(
+                    reentered,
+                    IndexOperationStage::Validate | IndexOperationStage::Activate
+                ),
+                "{definition:?} must drain late mutations at {stage:?} and stay past catch-up, resumed at {reentered:?}"
+            );
+        }
+        ValidatedDynamicIndexDefinition::Secondary(_) if stage == IndexOperationStage::Activate => {
+            assert!(
+                matches!(reentered_status, IndexOperationStatus::Succeeded { .. }),
+                "{definition:?} must drain late mutations at {stage:?} and activate in that step: {reentered_status:?}"
             );
         }
         ValidatedDynamicIndexDefinition::Secondary(_) => {}

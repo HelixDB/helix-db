@@ -50,6 +50,7 @@ use super::{
 };
 
 mod all_index_validation;
+mod sustained_secondary_writes;
 mod text_build_reconciliation;
 
 const MAXIMUM_CONTROLLER_TURNS: usize = 4_096;
@@ -316,23 +317,28 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                 .await
                 .expect("public-boundary operation resumes after writes");
             assert_monotonic_step(&evidence);
-            let resumed = db
+            let resumed_status = db
                 .get_index_operation(scope, operation_id)
                 .await
-                .expect("public-boundary operation remains readable")
-                .common()
-                .stage;
+                .expect("public-boundary operation remains readable");
+            let resumed = resumed_status.common().stage;
             match shape.family() {
-                PublicMutationFamily::Secondary
-                    if matches!(
-                        stage,
-                        IndexOperationStage::Validate | IndexOperationStage::Activate
-                    ) =>
-                {
-                    assert_eq!(
-                        resumed,
-                        IndexOperationStage::CatchUp,
-                        "{shape:?} must re-enter CatchUp after a public write at {stage:?}"
+                // The gated step drains a write window's deltas itself:
+                // validation moves on with its releases, and activation
+                // completes in the same step.
+                PublicMutationFamily::Secondary if stage == IndexOperationStage::Validate => {
+                    assert!(
+                        matches!(
+                            resumed,
+                            IndexOperationStage::Validate | IndexOperationStage::Activate
+                        ),
+                        "{shape:?} must drain public writes at {stage:?} and stay past catch-up, resumed at {resumed:?}"
+                    );
+                }
+                PublicMutationFamily::Secondary if stage == IndexOperationStage::Activate => {
+                    assert!(
+                        matches!(resumed_status, IndexOperationStatus::Succeeded { .. }),
+                        "{shape:?} must drain public writes at {stage:?} and activate in that step: {resumed_status:?}"
                     );
                 }
                 PublicMutationFamily::Secondary => {}
@@ -1488,18 +1494,20 @@ async fn run_unique_activation_conflict_repair() {
             },
         )
         .await
-        .expect("activation-boundary duplicate returns to catch-up");
+        .expect("activation drains the duplicate's delta");
     assert_monotonic_step(&evidence);
-    assert_eq!(
-        db.get_index_operation(scope, operation_id)
-            .await
-            .expect("activation unique operation remains readable")
-            .common()
-            .stage,
-        IndexOperationStage::CatchUp
-    );
-    let blocked = drive_to_terminal(&db, &controller, scope, operation_id).await;
+    assert_eq!(evidence.outcome, LifecycleStepOutcome::Blocked);
+    let blocked = db
+        .get_index_operation(scope, operation_id)
+        .await
+        .expect("activation unique operation remains readable");
     assert!(matches!(blocked, IndexOperationStatus::Blocked { .. }));
+    assert_eq!(
+        blocked.common().stage,
+        IndexOperationStage::Activate,
+        "the gated activation drain blocks the duplicate before activating"
+    );
+    assert_identity_hidden(&db, scope, &definition).await;
 
     let repaired = vec![
         Property::string("$label", "ActivationUnique"),
@@ -1540,6 +1548,11 @@ pub(super) async fn run_all_index_validation_mutations() {
 /// Runs text builds whose scanned entities change before partition construction.
 pub(super) async fn run_text_build_reconciliation() {
     text_build_reconciliation::run().await;
+}
+
+/// Runs secondary builds that must activate while public writes never stop.
+pub(super) async fn run_secondary_sustained_writes() {
+    sustained_secondary_writes::run().await;
 }
 
 /// Interleaves source changes with two builds and proves unique repair/retry.
@@ -3230,12 +3243,12 @@ async fn mutate_edge_source(
 }
 
 /// Compares one active physical equality lookup with an exact ID set.
-async fn assert_equality<const N: usize>(
+async fn assert_equality(
     db: &HelixDB,
     scope: DataScope,
     definition: &ValidatedDynamicIndexDefinition,
     value: &str,
-    expected: [u64; N],
+    expected: impl IntoIterator<Item = u64>,
 ) {
     let record = crate::index_lifecycle::repository::load_index_record(
         db.lifecycle_test_writer_db()

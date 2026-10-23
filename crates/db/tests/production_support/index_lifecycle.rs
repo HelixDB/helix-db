@@ -627,11 +627,7 @@ pub(super) async fn run_multi_scope_discovery_contracts() {
 
 /// Creates a secondary lifecycle driver.
 fn secondary_driver() -> SecondaryIndexDriver {
-    SecondaryIndexDriver::with_catch_up_delay(
-        Arc::new(crate::index_lifecycle::IndexScopeGates::default()),
-        crate::config::SecondaryIndexLifecycleCatchUpTailDelayMillis::new(1)
-            .expect("test catch-up delay is positive"),
-    )
+    SecondaryIndexDriver::new(Arc::new(crate::index_lifecycle::IndexScopeGates::default()))
 }
 
 /// Builds one typed node-property key for the authoritative graph source.
