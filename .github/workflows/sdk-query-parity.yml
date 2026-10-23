@@ -72,6 +72,8 @@ jobs:
             tests/test_async_client.py
             scripts/run_embedded_parity.py
             scripts/run_server_parity.py
+            examples/parallel-research/research.py
+            examples/parallel-research/test_research.py
           )
           ruff format --check "${files[@]}"
           ruff check "${files[@]}"
