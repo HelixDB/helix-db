@@ -288,6 +288,7 @@ impl DbConfig {
             flush_interval: Some(profile.flush_interval()),
             l0_sst_size_bytes: EMBEDDED_L0_SST_BYTES,
             max_unflushed_bytes: EMBEDDED_MAX_UNFLUSHED_BYTES,
+            compression_codec: Some(super::cache::DEFAULT_COMPRESSION_CODEC),
             ..slatedb::Settings::default()
         };
 

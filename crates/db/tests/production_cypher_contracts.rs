@@ -829,6 +829,45 @@ async fn durable_cypher_data_survives_reopen_and_reader_mode_rejects_writes() {
 }
 
 #[tokio::test]
+async fn uncompressed_disk_database_reopens_under_the_compressed_embedded_default() {
+    let root = tempfile::tempdir().unwrap();
+    let source = HelixDbSource::Disk {
+        root: root.path().to_path_buf(),
+        database: "uncompressed".to_string(),
+    };
+    let defaults = source.embedded_default_config();
+    let mut uncompressed = defaults.slate().to_writer_settings(None);
+    uncompressed.compression_codec = None;
+    let db = HelixDB::open_with_config(
+        source.clone(),
+        source
+            .embedded_default_config()
+            .with_slate_settings(uncompressed),
+    )
+    .await
+    .unwrap();
+    run(&db, "UNWIND range(1,200) AS i CREATE (:Old {key:i})").await;
+    db.flush_writer().await.unwrap();
+    db.close().await.unwrap();
+
+    let reopened = HelixDB::open(source.clone()).await.unwrap();
+    assert_eq!(
+        run(&reopened, "MATCH (n:Old) RETURN count(n)").await.rows,
+        vec![vec![json!(200)]]
+    );
+    run(&reopened, "UNWIND range(1,100) AS i CREATE (:New {key:i})").await;
+    reopened.flush_writer().await.unwrap();
+    reopened.close().await.unwrap();
+
+    let again = HelixDB::open(source).await.unwrap();
+    assert_eq!(
+        run(&again, "MATCH (n) RETURN count(n)").await.rows,
+        vec![vec![json!(300)]]
+    );
+    again.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn equality_join_is_bounded_and_preserves_multiplicity_and_numeric_semantics() {
     let db = database().await;
     run(

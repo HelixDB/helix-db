@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "d105178194bde272d082e0c8abd1fbec2dcf3385" }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "d105178194bde272d082e0c8abd1fbec2dcf3385", features = ["zstd"] }
 slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "d105178194bde272d082e0c8abd1fbec2dcf3385", optional = true }
 http-body = { version = "1", optional = true }
 helix-ast = { path = "../ast" }
