@@ -1,6 +1,6 @@
 ---
 title: "Create an ontology"
-description: "Create a Helix Foundry ontology on an existing Helix database or a new one, and read its overview"
+description: "Create a Helix Foundry ontology step by step on an existing Helix database or a new one, with its first draft, and read its overview"
 sidebarTitle: "Create an ontology"
 pageType: "Guide"
 ---
@@ -8,78 +8,165 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 An ontology holds the types, links and rules that describe your data, with its
-versions, documents and loads. Each one is bound to one Helix database, which its loads
-write into. A workspace can have several ontologies, one per database.
+versions and loads. Each one is bound to one Helix database, which its loads write
+into. A workspace can have several ontologies, one per database, and each reads the
+workspace's [data](/foundry/data/connect-data) and
+[documents](/foundry/data/documents) its versions pick.
 
-**Ontologies** lists the workspace's ontologies with the database each one uses.
+<Frame caption="Create an ontology step by step, with its first draft.">
+  <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/ontology/create-an-ontology-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/ontology/create-an-ontology.webm"></video>
+</Frame>
+
+## The Ontologies panel
+
+In **Ontologies**, the panel beside the rail lists the workspace's ontologies, each
+with its database and a dot for the status of its last load. The open ontology's row
+holds its pages: **Overview**, **Documents** with how many it reads, **Schema
+versions** and **Data loads**. Owners and admins create an ontology with **+** in the
+panel's head. From eight ontologies, a filter finds one by name or database.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/ontologies.png" alt="The Ontologies page listing Customer contracts on the contracts database" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/ontologies.png" alt="The Ontologies panel listing Customer contracts on the contracts database, open on its pages, and Renewals on the subscriptions database" />
 </Frame>
+
+**Ontologies** on the rail opens the ontology you last opened in this browser, or the
+first one.
 
 ## Create one
 
+Select **New ontology**. The page walks through six steps, one at a time: each step
+you finish shrinks to a line saying what you chose, with **Edit** to change it. Select
+**Continue** to go on, or **Skip** on an optional step you leave empty. Your choices
+are kept in the browser tab until you create the ontology or select **Cancel**, and
+the step is in the page's address, so going back or reloading keeps your place.
+
 <Steps>
-  <Step title="Name it">
-    In **Ontologies**, select **New ontology** and give it a name, such as "Customer
-    contracts".
+  <Step title="Name">
+    Give the ontology a name, such as "Customer contracts".
   </Step>
 
-  <Step title="Choose its database">
+  <Step title="Database">
     **Use an existing one** lists the live databases in the workspace's Helix projects.
     A database another ontology uses is greyed out. Loads write beside anything the
     database already holds, and Foundry never deletes it.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology.png" alt="The New ontology form with the orders database selected" />
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology.png" alt="The New ontology page at its Database step, with the name Orders done and the orders database chosen; contracts and subscriptions are used by other ontologies" />
     </Frame>
 
-    **Create a new one** makes a database in the project you choose, on Helix's shared
-    cluster, under the workspace's Helix plan. Its address is the name you give it, with
-    a short suffix when another database already has it.
+    **Create a new one** makes a database in a project you choose, or a new project, on
+    Helix's shared cluster, under the workspace's Helix plan. Its address is the name you
+    give it, with a short suffix when another database already has it.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-database.png" alt="The New ontology form creating a database named orders-graph in the Staging project" />
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-database.png" alt="The Database step creating a database named orders-graph in the Staging project" />
     </Frame>
   </Step>
 
-  <Step title="Create it">
-    Select **Create ontology**. The ontology opens on its overview, ready for its first
-    [generation](/foundry/ontologies/generate-and-version).
+  <Step title="Data">
+    Choose the connectors whose synced tables the agent drafts from; every table a
+    chosen connector has synced goes in, up to 50 tables. Connectors are grouped by
+    kind, as in [Generate](/foundry/ontologies/generate-and-version#generate-a-draft).
+
+    If a source isn't connected yet, select **Add data** to connect it without leaving
+    the page. Its first sync shows in its row, and you can continue once it has synced.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology-data.png" alt="The Data step with the Stripe and Shop database connectors chosen, and Add data" />
+    </Frame>
+  </Step>
+
+  <Step title="Documents (optional)">
+    Choose the [document sets](/foundry/data/documents) the first version reads, up to
+    20. **Upload documents** uploads files from here, into **General** or the oldest
+    set, and the upload button on a set's row uploads into that set; the set the files
+    went into is then chosen.
+  </Step>
+
+  <Step title="Goal (optional)">
+    Say what the ontology should serve: the questions people will ask of it, in your
+    words, up to 2,000 characters. The goal names the generation. **Copy prompt for your
+    agent** has your own AI assistant help you write it, as on
+    [Generate](/foundry/ontologies/generate-and-version#generate-a-draft).
+  </Step>
+
+  <Step title="Review and create">
+    Check what you chose, then select **Create and generate**. Foundry makes the new
+    database if you asked for one, creates the ontology, and asks its agent for a first
+    draft. The generation's page opens and
+    [follows it](/foundry/ontologies/generate-and-version#follow-a-generation).
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology-review.png" alt="The Review and create step, with Orders, the orders database, Stripe and Shop database, General and a goal chosen, and Create and generate" />
+    </Frame>
   </Step>
 </Steps>
 
+You review the draft before it is used: make it current to load it. If you leave
+before then, the ontology's [overview](#the-overview) picks up where you stopped. If
+the ontology was created but its generation couldn't start, the ontology opens saying
+why, with **Try again**, which opens Generate with your choices.
+
 <Note>
   A new database comes with a first API key. Foundry never keeps or shows its token;
-  right after you create the ontology, its overview says so once and links to the
+  right after you create the ontology, the page says so once and links to the
   database's keys in the Helix dashboard, where you can revoke it or make your own.
 </Note>
 
 A new database takes a few minutes to start. Until it answers, the ontology's pages say
 it is starting and read it again by themselves, and a load waits for it.
 
-Creating a database needs a Helix plan on the workspace. Without one, the form links to
-billing in the Helix dashboard and offers the databases you already have.
+Creating a database needs a Helix plan on the workspace. Without one, the review step
+links to billing in the Helix dashboard and offers the databases you already have.
 
 ## The overview
 
-An ontology's overview shows its current version as a scene or as a schema, and what
-needs doing next: a generated version to review, or a current version that isn't
-loaded yet.
+Until an ontology is set up, its overview carries the setup on, so you can always
+continue from there. **Set it up** lists the steps with the ones done ticked: Name and
+Database, then Data, Documents (optional), Goal (optional), **Generate a draft**,
+**Review and make a version current**, **Load it** and **Explore or ask**. The first
+step not done is open:
+
+- Before a draft, Data, Documents and Goal are the same pickers as on New ontology,
+  with **Add data** and **Upload documents** in place, then **Generate**.
+- While the agent drafts, the step follows it; if the draft failed, it says why, with
+  **Try again**.
+- A draft to review offers **Review** and **Make current**.
+- A current version not loaded yet offers **Load data**.
+- Once loaded, **Explore or ask** opens the Explorer or Ask.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/overview.png" alt="The Customer contracts overview with a Version 3 is ready to review callout and the current version's scene" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/overview-setup.png" alt="The Renewals overview with Set it up, 5 of 7 done: its name, database, data, documents, goal, draft and current version ticked, and Load it open with Version 1 isn't loaded yet and Load data" />
 </Frame>
 
-The sidebar lists the ontology's pages: **Overview**, **Generations**, **Schema
-versions**, **Documents**, **Data loads** and **Explorer**.
+Members see the same steps, without the pickers or anything that changes the
+ontology.
+
+Once the ontology has been loaded and explored or asked about, the overview is its
+current version as a schema: each type as a card with its key and the table that fills
+it, joined by its links. Select a card to open that type; point at a link to read what
+it means. Above it, the overview follows a generation or load that is running, and
+says when a newer version is ready to review or the current one isn't loaded yet.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/overview.png" alt="The Customer contracts overview, loaded: its database, last load and creation date, and version 3's schema with Contract, Customer and Invoice joined by Signed with and Billed to" />
+</Frame>
+
+Its header names the database and its Helix project, the status of the last load and
+when the ontology was created. It links to **All versions** and to the documents the
+ontology reads, and offers **Generate** once the ontology has a draft and, once the
+current version can be loaded, **Load data**.
+
+The [Explorer](/foundry/explore/explorer) and [Ask](/foundry/ask/ask-questions) are
+sections of their own, which open the ontology you last opened.
 
 ## Delete an ontology
 
-Select the bin on the overview. Foundry deletes the ontology, its versions and
-documents, and, in the background, everything its loads wrote into the database,
-including links your own data added to those records. The database and its other data
-stay. The database can take a new ontology once that removal finishes.
+Select the bin on the overview. Foundry deletes the ontology, its versions and loads,
+and, in the background, everything its loads wrote into the database, including links
+your own data added to those records. The database and its other data stay, and so do
+the workspace's documents. The database can take a new ontology once that removal
+finishes.
 
 ## Who can do what
 
@@ -90,10 +177,10 @@ the database's project sees the ontology without its database's details or conte
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Generate an ontology" icon="wand-magic-sparkles" href="/foundry/ontologies/generate-and-version">
-    Draft a version from your synced tables.
+  <Card title="Generate and version" icon="wand-magic-sparkles" href="/foundry/ontologies/generate-and-version">
+    Review the draft, make it current, and draft new versions.
   </Card>
-  <Card title="Upload documents" icon="file-lines" href="/foundry/ontologies/documents">
+  <Card title="Upload documents" icon="file-lines" href="/foundry/data/documents">
     Add the files a load reads for names and facts.
   </Card>
 </CardGroup>

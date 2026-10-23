@@ -9,7 +9,7 @@ pageType: "Guide"
 
 The Explorer draws what a load wrote into the ontology's database: its records and how
 they connect. It reads the database with your session and never writes to it. Switch
-to **Records** at the top to read the same data as tables.
+to **Records** in the bar at the top to read the same data as tables.
 
 <Frame caption="Load, then search the graph and read a type as records.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/explore/load-and-explore-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/explore/load-and-explore.webm"></video>
@@ -18,23 +18,34 @@ to **Records** at the top to read the same data as tables.
 ## Read the graph
 
 The Explorer opens on a connected sample of the current load: records of its central
-types, their neighbors, and the links among them. The rail on the left lists the
-version's types and links with how many the load holds and how many are drawn.
+types, their neighbors, and the links among them. **Labels**, the panel beside the
+rail, lists the version's types and links with how many the load holds and how many are
+drawn. The slim bar above the graph holds the **Records** and **Graph** switch, the
+**Ontology**, **Load** and **Compare with** pickers, **Jump to a node**, what the graph
+holds, reload and the shortcuts.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/explore/explorer-node.png" alt="The Explorer with Globex Corporation selected, its properties and relationships in the inspector" />
+  <img src="https://assets.helix-db.com/docs/foundry/explore/explorer-node.png" alt="The Explorer: Labels beside the rail with the load's types and links, the bar with the Records and Graph switch and the Ontology, Load and Compare with pickers, and Globex Corporation selected, with its properties and relationships in the inspector on the right" />
 </Frame>
 
 | To | Do |
 | --- | --- |
 | Jump to a record by name, id or text | Press <kbd>/</kbd> and type, then <kbd>Enter</kbd> |
 | Load a record's neighbors | Double-click it, or use **Expand** in the inspector |
-| Draw more of a type | Select **+** beside it in the rail, 50 records at a time |
+| Draw more of a type | Select **+** beside it in Labels, 50 records at a time |
 | See every action on a record | Right-click it |
+| Hide or show the inspector | Press <kbd>]</kbd>, or use its toggle in the bar |
+| Hide or show Labels | Press <kbd>[</kbd>, or use the toggle on the rail |
 | See every shortcut | Press <kbd>?</kbd> |
 
-Select a record to open it in the inspector on the right: its type, its properties, the
-load that wrote it, and its relationships with their counts.
+The inspector is the sidebar on the right. With nothing selected, it gives an overview
+of the database. Select a record to open it there: its type, its properties, the load
+that wrote it, and its relationships with their counts. Foundry remembers whether the
+inspector is shown, per database.
+
+On an entity's page, in a compare and while the graph loads, the panel shows the
+ontology, its database, the load you're reading and links to the Graph and Records. On
+a phone, Labels is in the navigation drawer, and the inspector opens as a sheet.
 
 Records are named the way the version says: by a name property, else by their keys.
 A record drawn with a dashed outline was reached outside the load you're reading; the
@@ -43,10 +54,12 @@ inspector names its load.
 ## Choose a load
 
 The **Load** picker reads another load of the ontology. Links between the Explorer,
-Records, a record's page and a document keep the load you chose.
+Records, a record's page and a document keep the load you chose. The **Ontology**
+picker beside it opens another ontology's Explorer; **Explorer** in the sidebar or on
+the rail opens the ontology you last opened.
 
 **Other data** shows what no load wrote: data the database held already, or that your
-own applications write. It is hidden while you read a load, and listed below the rail.
+own applications write. It is hidden while you read a load, and listed below the labels.
 
 ## Show Foundry's own records
 
@@ -57,20 +70,27 @@ is kept in this browser.
 
 ## Compare two loads
 
-Choose a second load under **Compare with**, or select **Compare with current** in
-[Data loads](/foundry/ontologies/load-data#manage-loads). The two loads are drawn side by
-side over **What changed**: the count of each type and link in each load. Open a type to
-see the records added, removed and renamed between them, by key, and select one to find
-it on its side.
+Choose a second load under **Compare with**, or select **Compare with current** in a
+load's menu in [Data loads](/foundry/ontologies/load-data#manage-loads). The two loads
+are drawn side by side, each with its own bar, labels and inspector, over **What
+changed**: the count of each type and link in each load. Open a type to see the
+records added, removed and renamed between them, by key, and select one to find it on
+its side.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/explore/compare-diff.png" alt="What changed from one load to another: one Contract added, customers and invoices unchanged" />
 </Frame>
 
-## When a database is starting
+## When there's nothing to read
 
-A database created in the last few minutes may not answer yet. The Explorer says it is
-starting and opens by itself once it answers.
+| The Explorer says | What to do |
+| --- | --- |
+| **No ontologies yet** | The workspace has no ontology. Owners and admins select **Create an ontology**. |
+| **Nothing loaded yet** | The ontology has no load. Owners and admins select **Load data**, which opens the Load dialog, or, while no version is current, **Finish setting up**, which opens the ontology's overview. Records and an entity's page say the same. |
+| The database is starting | A database created in the last few minutes may not answer yet. The Explorer opens by itself once it answers. |
+| **Queries are paused** | The workspace's Helix plan doesn't allow queries now. **Choose a plan**, or **Open Helix billing**, opens billing in the Helix dashboard. |
+
+Members see the same messages, without the buttons.
 
 ## Next steps
 
@@ -79,6 +99,6 @@ starting and opens by itself once it answers.
     Read each type as a table, and a record's page.
   </Card>
   <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
-    Ask the graph questions in plain language. Coming soon.
+    Ask the graph questions in plain language.
   </Card>
 </CardGroup>

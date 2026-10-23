@@ -7,8 +7,9 @@ pageType: "Reference"
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-Foundry reads five kinds of source. Apps sync every table their credential can read;
-databases sync the tables you choose. Every credential only needs read access.
+Foundry reads six kinds of source. Apps sync every table their credential can read;
+databases and Amazon S3 sync the tables you choose. Every credential only needs read
+access.
 
 | Source | Credential | Plan |
 | --- | --- | --- |
@@ -17,6 +18,7 @@ databases sync the tables you choose. Every credential only needs read access.
 | [PostHog](#posthog) | Personal API key (`phx_`) | Free |
 | [PostgreSQL](#postgresql) | Database user and password | [Pro or Max](/foundry/workspace/plans-and-billing) |
 | [MySQL](#mysql) | Database user and password | [Pro or Max](/foundry/workspace/plans-and-billing) |
+| [Amazon S3](#amazon-s3) | IAM role, or an access key | [Pro or Max](/foundry/workspace/plans-and-billing) |
 
 ## Stripe
 
@@ -96,6 +98,48 @@ again.
 The same fields as PostgreSQL, with port `3306` and no schema: Foundry reads the
 database you name. Give the user `SELECT` on it only.
 
+## Amazon S3
+
+Foundry reads Parquet, JSON, JSON Lines and CSV files (plain, gzip, zstd or bzip2) from
+one folder of a bucket. Files with the same shape become one table, named after their
+folder or file name, and every sync reads them all again.
+
+| Field | Notes |
+| --- | --- |
+| Bucket | Required. Pasting an `s3://bucket/folder/` address fills both fields. |
+| Folder | Optional; the whole bucket without one. |
+| Access | **IAM role** (recommended) or **Access key**. |
+| Region (under **Advanced**) | Detected by the test. |
+| Endpoint (under **Advanced**, access key only) | For S3-compatible storage such as Cloudflare R2, MinIO, Backblaze B2 or Wasabi. |
+
+With an **IAM role**, Foundry assumes a role in your AWS account with the workspace's
+external ID, which the form shows with a **Copy** button. In AWS IAM, create a role
+with **Custom trust policy** and paste the trust policy the form shows, which requires
+that ID. Then give the role the inline permissions policy the form shows, which lists
+the folder and reads its files only, and paste the role's ARN. Foundry won't use a role
+whose trust policy doesn't require the external ID, and checks this on every test and
+sync with an ID that must fail, which your CloudTrail shows as a denied `AssumeRole`.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/s3-form.png" alt="The Amazon S3 form with the bucket and folder, IAM role access chosen and the workspace's external ID" />
+</Frame>
+
+With an **access key**, create an IAM user with the same permissions policy and an
+access key for it. Leave the secret blank when you edit the connection to keep the
+stored one.
+
+If the bucket uses a customer-managed KMS key, also allow `kms:Decrypt` on that key.
+AWS bills your account for the requests and for data transferred out of the bucket's
+region.
+
+The test lists each table with its format, files, size, columns and key, a preview of
+its rows, and any file Foundry can't read. Choose the tables to sync; the form adds up
+their size, and a connection syncs at most 20 GB.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/s3-tested.png" alt="A tested S3 folder with its customers, events and orders tables, Selected 1.2 GB of 20 GB, and two files Helix can't read" />
+</Frame>
+
 ## Network access for databases
 
 Foundry connects to a database over the internet from Helix's network, so the
@@ -111,6 +155,7 @@ redirects.
 | Limit | Value |
 | --- | --- |
 | Rows per table, per sync | 2,000,000. A larger table fails the sync: for a database, leave it out; for PostHog, shorten the event history. |
+| Size of an S3 connection's tables, per sync | 20 GB. Choose fewer tables, or a narrower folder. |
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |
@@ -122,6 +167,6 @@ redirects.
     Add a connection and follow its syncs.
   </Card>
   <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
-    Upgrade to Pro for PostgreSQL and MySQL.
+    Upgrade to Pro for PostgreSQL, MySQL and S3.
   </Card>
 </CardGroup>

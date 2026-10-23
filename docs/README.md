@@ -34,7 +34,7 @@ any name a reader is likely to type. Shortcut sources must not match a live rout
 | --- | --- | --- |
 | HelixDB | Start Here, Core Concepts, Query Guides | The engine in every run mode: setup, SDKs, data model, queries, indexes and search, HTTP API, error codes, troubleshooting |
 | Helix Cloud | Start Here, Connect and automate, Operate | Managed deployments only: account setup, connecting, architecture, MCP, security, tenancy, limits, gateway errors |
-| Helix Foundry | Start Here, Data, Ontologies, Explore, Ask, Workspace, Reference | The hosted Foundry website (foundry.helix-db.com): connecting and syncing sources, generating, loading and exploring ontologies, members and billing |
+| Helix Foundry | Start Here, Data, Ontologies, Explore, Ask, Workspace, Reference | The hosted Foundry website (foundry.helix-db.com): connecting and syncing sources, documents, generating, loading, exploring and asking ontologies, members and billing |
 | CLI Reference | Using the helix CLI, CLI Command Reference | The `helix` CLI: workflows, configuration, and one page per command |
 | Learn | One group per topic | Vendor-neutral explainers that answer one broad question each, such as "What is BM25?" |
 

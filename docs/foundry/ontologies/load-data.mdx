@@ -8,23 +8,36 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 A load writes the ontology's current version into its Helix database: your synced
-tables as its mappings shape them, then your documents. Each load is a complete copy,
-written beside the earlier ones, so you can compare them and switch back. Reads go to
-the current load.
+tables as its mappings shape them, then the documents of the sets the version reads.
+Each load is a complete copy, written beside the earlier ones, so you can compare them
+and switch back. Reads go to the current load.
 
-<Frame caption="Upload a document, load the current version, then explore it.">
+<Frame caption="Upload a document in Data, load the current version, then explore it.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/explore/load-and-explore-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/explore/load-and-explore.webm"></video>
 </Frame>
 
 ## Start a load
 
 You can load when the current version is an agent draft that finished. Select **Load
-data** on the overview or in **Data loads**. The dialog says what the load reads and
-what it may spend; select **Load** to start it.
+data** on the overview, on the version's page or in **Data loads**. Until the
+ontology's first load, its overview's setup steps stop at **Load it** and offer it
+there. The dialog says
+what the load reads and what it may spend; select **Load** to start it.
+
+- **Tables**: the synced tables the version's mappings read.
+- **Documents**: the [document sets](/foundry/data/documents) the version reads, the
+  ones its generation picked, and how many documents they hold. A set no route reads is
+  stored, not read, and so are documents in formats ontologies don't read yet (anything
+  but Markdown and text). Documents added to these sets later are read as they arrive.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/load-dialog.png" alt="The Load version 3 into contracts dialog listing tables, documents, spending and limits" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/load-dialog.png" alt="The Load version 3 into contracts dialog: two Stripe tables, one document from General, the spending caps and the limits" />
 </Frame>
+
+The version's page shows the same sets in its header, as **Reads …**. To read another
+set, generate a version that picks it, or
+[edit the version](/foundry/ontologies/generate-and-version#edit-a-version) to route it,
+then load that version.
 
 ## Follow a load
 
@@ -34,8 +47,12 @@ it reached the spending cap with its tables written but some documents unread, o
 **Failed**.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/load.png" alt="A ready, current load of version 3 with its summary and Open Explorer" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/load.png" alt="A ready, current load of version 3 with its summary, Review documents, Rule breaks and Open Explorer" />
 </Frame>
+
+When the load leaves items to review, **Review documents** opens the ontology's
+documents that need review. **Rule breaks** lists the records that break the version's
+constraints.
 
 The newest load that finishes **Ready** becomes current. A **Partial** load becomes
 current only when the ontology has no current load.
@@ -49,17 +66,20 @@ access to the database's Helix project.
 
 ## Manage loads
 
-**Data loads** lists the loads kept: the current one and the newest others, five in
-all. Older loads are deleted from the database in the background. Each row shows the
-load's version, status, node and fact counts, and its jobs.
+**Data loads**, among the ontology's pages in the Ontologies panel, lists the loads
+kept: the current one and the newest others, five in all. Older loads are deleted from
+the database in the background. Each row shows the load's version, status, node and
+fact counts, and its jobs. Select a row to open the load's page, with its steps and
+spend.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/loads.png" alt="Data loads listing two ready loads of version 3, one current" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/loads.png" alt="Data loads listing two ready loads of version 3, one current, each with Open, and the older one with its menu of more actions" />
 </Frame>
+
+**Open** reads the load in the Explorer. The **⋯** menu beside it holds the rest:
 
 | Action | Does |
 | --- | --- |
-| **Open** | The load's page, with its steps and spend |
 | **Compare with current** | The Explorer with the load and the current one side by side |
 | **Set current** | Makes a Ready or Partial load the one every page reads |
 | **Delete** | Removes what the load wrote, including links your own data added to its nodes. Never the current load or one still writing. |
@@ -74,7 +94,7 @@ with the same models again costs nothing.
 | --- | --- |
 | Per load | $20 |
 | Per workspace, per month | $100 |
-| Documents | 200 in the workspace, 256 KiB each |
+| Documents | 200 in the workspace, 1 MiB each |
 | Loads kept per ontology | 5 |
 
 A load that reaches its cap stops **Partial**. The documents it didn't reach are read
