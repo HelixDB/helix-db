@@ -7006,7 +7006,9 @@ if your deployment depends on one of them.
 
 Page type: Guide
 
-Multi-tenant architectures generally fall into one of three isolation levels.
+Multi-tenant architectures generally fall into one of three isolation levels. Helix Cloud
+isolates each database at the storage level, and lets you add row-level isolation for application
+tenants inside a database.
 
 ## Isolation levels
 
@@ -7016,11 +7018,34 @@ Multi-tenant architectures generally fall into one of three isolation levels.
 | **Namespace-level**      | Shared infrastructure, separate logical partitions (databases, schemas, or namespaces) per tenant.                          | Strong. Logical separation with shared compute.                  | Moderate. Shared compute, but metadata and indexes scale per tenant. |
 | **Row-level**            | Shared infrastructure, shared data structures. Tenants distinguished by a property on every record, enforced at query time. | Application-enforced. Relies on consistent query-time filtering. | Highest. All tenants share indexes, caches, and storage.             |
 
+## Storage-level isolation: tenant databases
+
+Every tenant database, whether on a GA shared plan or created inside a dedicated enterprise
+cluster, has its own database ID. Helix uses that ID as a storage tenant ID to give the database
+a namespace-level partition of the cluster's storage:
+
+- **Tenant-prefixed keys.** Every stored key (nodes, edges, properties, and index entries) is
+  prefixed with the tenant ID. Reads only scan their own prefix, so one database can never observe
+  another database's records.
+- **Per-database index catalogs.** Equality, range, vector, and text indexes are defined and built
+  per database. Index definitions and builds in one database do not affect another.
+- **Selected by the request, not the query.** The gateway reads the database from the
+  `X-Helix-Database-Id` header and rejects API keys scoped to a different database. Query bodies
+  cannot name or change it, so no query predicate is needed for this isolation. See
+  [HTTP API authentication](/database/helix-db/query-guides/http-api#authentication).
+
+Databases that share a cluster still share its compute, caches, and object storage. A
+database-specific cluster-mode endpoint serves the cluster's own unscoped database and rejects
+the database header.
+
+Create a tenant database with [`helix database create`](/cli/command-reference/database), using
+`--plan` for a shared plan or `--cluster` for a dedicated cluster.
+
 ## Row-level isolation in Helix Cloud
 
-Helix Cloud focuses on row-level isolation, which lets you implement any tenancy model at the
-application layer without structural constraints on the database. Adding a tenant is a write, not a
-provisioning event.
+Within a single database, use row-level isolation for your own application tenants. It lets you
+implement any tenancy model at the application layer without structural constraints on the
+database. Adding a tenant is a write, not a provisioning event.
 
 Assign a tenant identifier as a property on every node and edge, index it with an equality index,
 and filter every query on it so each request only sees its own tenant's data. This is the same
@@ -7205,9 +7230,11 @@ the request's tenant value to the text-search builder. See
 
 ## Stricter isolation requirements
 
-For workloads that require namespace-level or infrastructure-level tenant isolation (regulatory
-compliance, data residency, or dedicated-resource SLAs), contact us at
-[founders@helix-db.com](mailto:founders@helix-db.com) to discuss options.
+When application tenants need storage-level isolation, give each one its own
+[tenant database](#storage-level-isolation-tenant-databases) instead of a `tenant_id` property.
+For workloads that require infrastructure-level isolation (regulatory compliance, data residency,
+or dedicated-resource SLAs), contact us at [founders@helix-db.com](mailto:founders@helix-db.com)
+about dedicated clusters.
 
 # Guarantees
 
