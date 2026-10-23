@@ -161,11 +161,32 @@ impl Tracker {
     }
 }
 
+/// How a bitmap merge is validated before it is staged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Validation {
+    /// Resolve the stored row and apply the operand to it first. This reads the whole row, so its
+    /// cost grows with the number of members already stored.
+    AgainstStoredRow,
+    /// Stage the operand without reading the row. Only for an additions-only operand on a row whose
+    /// deltas are last-write-wins membership sets (the node and edge label rows): applying it gives
+    /// the same bitmap whether or not an added id is already a member, so reading the row would
+    /// only check that the stored row can be decoded.
+    Blind,
+}
+
+/// A merge staged without reading the stored row.
+struct BlindMerge {
+    key: Bytes,
+    tokens: Vec<u128>,
+    operand: Bytes,
+}
+
 /// Closed, capacity-bounded construction followed by one checked backend call.
 /// Key aliases carry their own admission beyond this batch's lifetime.
 pub(crate) struct Batch<'a> {
     view: super::View<'a>,
     entries: Vec<slatedb::DisjointMergeBatchEntry>,
+    blind: Vec<BlindMerge>,
     capacity: usize,
     totals: Totals,
     memory: Option<Reservation>,
@@ -183,6 +204,7 @@ impl<'a> Batch<'a> {
         Ok(Self {
             view,
             entries: Vec::with_capacity(capacity),
+            blind: Vec::new(),
             capacity,
             totals: Totals::default(),
             memory,
@@ -208,11 +230,22 @@ impl<'a> Batch<'a> {
         key: Key<'_>,
         delta: &equality::BitmapMembershipDelta,
     ) -> Result<Bytes> {
+        self.bitmap_with(key, delta, Validation::AgainstStoredRow)
+    }
+
+    /// Like [`Self::bitmap`], choosing how the merge is validated.
+    pub(crate) fn bitmap_with(
+        &mut self,
+        key: Key<'_>,
+        delta: &equality::BitmapMembershipDelta,
+        validation: Validation,
+    ) -> Result<Bytes> {
         let encoded = delta.prepare_encoding();
         self.push(
             key,
             encoded.encoded_len(),
             delta.members().map(u128::from),
+            validation,
             || encoded.encode(),
         )
     }
@@ -229,7 +262,13 @@ impl<'a> Batch<'a> {
             .outgoing_members()
             .map(u128::from)
             .chain(delta.incoming_members().map(|id| INCOMING | u128::from(id)));
-        self.push(key, encoded.encoded_len(), tokens, || encoded.encode())
+        self.push(
+            key,
+            encoded.encoded_len(),
+            tokens,
+            Validation::AgainstStoredRow,
+            || encoded.encode(),
+        )
     }
 
     fn push(
@@ -237,10 +276,11 @@ impl<'a> Batch<'a> {
         key: Key<'_>,
         operand_len: usize,
         tokens: impl Iterator<Item = u128>,
+        validation: Validation,
         encode: impl FnOnce() -> Bytes,
     ) -> Result<Bytes> {
         assert!(
-            self.entries.len() < self.capacity,
+            self.entries.len() + self.blind.len() < self.capacity,
             "merge batch exceeds its declared capacity"
         );
         // The typed roaring iterators expose cardinality without walking IDs.
@@ -265,12 +305,23 @@ impl<'a> Batch<'a> {
         let key = key.encode(self.view.tracking.map(|tracker| &tracker.budget))?;
         let operand = encode();
         assert_eq!(operand.len(), operand_len, "prepared merge operand length");
-        self.entries
-            .push(slatedb::DisjointMergeBatchEntry::from_tokens(
-                key.clone(),
-                tokens,
-                operand,
-            ));
+        match validation {
+            Validation::AgainstStoredRow => {
+                self.entries
+                    .push(slatedb::DisjointMergeBatchEntry::from_tokens(
+                        key.clone(),
+                        tokens,
+                        operand,
+                    ));
+            }
+            Validation::Blind => {
+                self.blind.push(BlindMerge {
+                    key: key.clone(),
+                    tokens: tokens.collect(),
+                    operand,
+                });
+            }
+        }
         self.totals = proposed;
         Ok(key)
     }
@@ -279,6 +330,7 @@ impl<'a> Batch<'a> {
         let Self {
             view,
             entries,
+            blind,
             totals,
             memory,
             ..
@@ -290,6 +342,16 @@ impl<'a> Batch<'a> {
         // history charge until the statement transaction aborts or completes.
         let result = view.raw.merge_disjoint_checked_batch(entries).await;
         drop(memory);
-        Ok(result?)
+        result?;
+        // Blind merges read nothing, so they stay O(operand) however large the stored row is.
+        for BlindMerge {
+            key,
+            tokens,
+            operand,
+        } in blind
+        {
+            view.raw.merge_disjoint_tokens(key, tokens, operand)?;
+        }
+        Ok(())
     }
 }

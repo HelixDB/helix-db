@@ -517,7 +517,27 @@ impl TopologyMutationRuntime {
         let mut staged_keys = Vec::with_capacity(count);
         for (row, delta) in bitmaps {
             let (delta, admission) = delta.into_parts();
-            staged_keys.push(merges.bitmap(merges::Key::Typed(row.key()), &delta)?);
+            // A label row is a plain membership set and its deltas are last-write-wins, so an
+            // additions-only delta gives the same bitmap whether or not an added id is already a
+            // member: a freshly allocated id, a node moving into the label through a `$label`
+            // update, or an id re-added after a removal in the same request. Validating such a
+            // merge against the stored row could only fail on a row or operand that cannot be
+            // decoded, and reading the row costs more with every entity under the label, so it is
+            // staged blind.
+            let validation = if delta.only_adds_members()
+                && matches!(
+                    row,
+                    BitmapRow::NodeLabel { .. } | BitmapRow::GlobalEdgeLabel { .. }
+                ) {
+                merges::Validation::Blind
+            } else {
+                merges::Validation::AgainstStoredRow
+            };
+            staged_keys.push(merges.bitmap_with(
+                merges::Key::Typed(row.key()),
+                &delta,
+                validation,
+            )?);
             let Some(admission) = admission else {
                 continue;
             };
