@@ -136,7 +136,7 @@ async fn unique_membership_reader_uses_batch_and_honors_cancellation() {
             assert_eq!(
                 super::QueryResponse::from_execution_result(result)
                     .unwrap()
-                    .returns()["result"]
+                    .json()["result"]
                     .as_array()
                     .unwrap()
                     .len(),
@@ -285,14 +285,15 @@ async fn unique_membership_preserves_tenant_and_prepared_snapshot() {
             .await
             .unwrap();
         let response = super::QueryResponse::from_execution_result(result).unwrap();
-        let rows = response.returns()["result"].as_array().unwrap();
+        let json = response.json();
+        let rows = json["result"].as_array().unwrap();
         assert_eq!(rows.len(), 5);
         assert!(rows
             .iter()
             .all(|row| row["tenant"] == tenant && row["key"].as_i64().unwrap() < 5));
         let fresh = db.execute_scoped(&plan, params, scope).await.unwrap();
         let fresh = super::QueryResponse::from_execution_result(fresh).unwrap();
-        assert_eq!(fresh.returns()["result"].as_array().unwrap().len(), 4);
+        assert_eq!(fresh.json()["result"].as_array().unwrap().len(), 4);
     }
     db.close().await.unwrap();
 }
@@ -548,13 +549,13 @@ async fn selective_equality_preserves_tenant_snapshot_and_churn_results() {
                         let expected = [0, 10, 20, 30].map(
                             |ordinal| serde_json::json!({"ordinal": ordinal + scope_index * 100}),
                         );
-                        assert_eq!(response.returns()["result"], serde_json::json!(expected));
+                        assert_eq!(response.json()["result"], serde_json::json!(expected));
                         let fresh = db
                             .execute_scoped(&plan, params.clone(), scope)
                             .await
                             .unwrap();
                         let fresh = super::QueryResponse::from_execution_result(fresh).unwrap();
-                        assert_eq!(fresh.returns()["result"], serde_json::json!([]));
+                        assert_eq!(fresh.json()["result"], serde_json::json!([]));
                         // Reinsert matching membership for the next node/edge iteration.
                         db.query_scoped(
                             query::QueryRequest::write(

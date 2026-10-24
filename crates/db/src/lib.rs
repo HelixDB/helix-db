@@ -2325,7 +2325,9 @@ impl HelixDB {
             .await
     }
 
-    /// Execute a plan with the non-forgeable catalog observation used to plan it.
+    /// Execute a plan with the non-forgeable catalog observation used to plan
+    /// it, keeping the whole interpreter result for test inspection.
+    #[cfg(any(test, feature = "production-coverage"))]
     pub(crate) async fn execute_prepared_scoped_controlled(
         &self,
         plan: &exec::ExecutablePlan,
@@ -2347,10 +2349,34 @@ impl HelixDB {
         .await
     }
 
+    /// Execute a prepared plan, keeping only its requested returns moved out
+    /// of the interpreter without copies.
+    /// The query service encodes nothing else.
+    pub(crate) async fn execute_prepared_returns_scoped_controlled(
+        &self,
+        plan: &exec::ExecutablePlan,
+        params: ParamBindings,
+        tenant_scope: DataScope,
+        execution_control: execution_control::ExecutionControl,
+        proof: CatalogRefreshProof,
+        search_consistency: helix_ast::query::SearchConsistency,
+    ) -> Result<execution::interpreter::ReturnedValues> {
+        Interpreter::new_scoped_controlled_prepared(
+            self,
+            params,
+            tenant_scope,
+            execution_control,
+            proof,
+        )
+        .with_search_consistency(search_consistency)
+        .execute_returns(plan)
+        .await
+    }
+
     /// Execute an SDK-built query request.
     pub async fn query(&self, request: QueryRequest) -> Result<JsonValue> {
         let query_metrics = self.embedded_query_metrics();
-        query_service::execute_query_on_observed(
+        query_service::execute_query_on_observed::<JsonValue>(
             self,
             request,
             query_service::QueryMode::Execute,
@@ -2358,7 +2384,7 @@ impl HelixDB {
             query_metrics.as_ref(),
         )
         .await
-        .map(|response| JsonValue::Object(response.returns().clone().into_iter().collect()))
+        .map(query_service::QueryResponse::into_value)
         .map_err(HelixDbError::from)
     }
 
@@ -2369,7 +2395,7 @@ impl HelixDB {
         tenant_scope: DataScope,
     ) -> Result<JsonValue> {
         let query_metrics = self.embedded_query_metrics();
-        query_service::execute_query_on_scoped_observed(
+        query_service::execute_query_on_scoped_observed::<JsonValue>(
             self,
             request,
             query_service::QueryMode::Execute,
@@ -2379,7 +2405,7 @@ impl HelixDB {
             execution_control::ExecutionControl::unlimited(),
         )
         .await
-        .map(|response| JsonValue::Object(response.returns().clone().into_iter().collect()))
+        .map(query_service::QueryResponse::into_value)
         .map_err(HelixDbError::from)
     }
 
@@ -2398,7 +2424,7 @@ impl HelixDB {
         let request = QueryRequest::from_json_slice(request_json)
             .map_err(|error| HelixDbError::InvalidQueryJson(error.to_string()))?;
         let query_metrics = self.embedded_query_metrics();
-        query_service::execute_query_on_scoped_observed(
+        query_service::execute_query_on_scoped_observed::<Vec<u8>>(
             self,
             request,
             query_service::QueryMode::Execute,
@@ -2408,8 +2434,7 @@ impl HelixDB {
             execution_control::ExecutionControl::unlimited(),
         )
         .await
-        .map_err(HelixDbError::from)?
-        .to_json_bytes()
+        .map(query_service::QueryResponse::into_json_bytes)
         .map_err(HelixDbError::from)
     }
 

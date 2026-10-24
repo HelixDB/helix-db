@@ -537,7 +537,7 @@ fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
     )
     .expect("diagnostic response converts");
 
-    assert_eq!(response.returns().get("count"), Some(&serde_json::json!(0)));
+    assert_eq!(response.json_bytes(), br#"{"count":0}"#);
     let missing_index = response
         .diagnostics()
         .insights
@@ -573,12 +573,7 @@ fn public_query_response_exposes_telemetry_safe_planner_diagnostics() {
     let diagnostics_json = serde_json::to_string(response.diagnostics())
         .expect("diagnostics serialize for metadata transports");
     assert!(!diagnostics_json.contains(SECRET_LITERAL));
-    assert_eq!(
-        response
-            .to_json_bytes()
-            .expect("public response serializes"),
-        br#"{"count":0}"#
-    );
+    assert_eq!(response.json_bytes(), br#"{"count":0}"#);
 
     let default_response =
         db::query_service::QueryResponse::from_execution_result(ExecutionResult {
@@ -3564,7 +3559,7 @@ async fn public_query_boundary_restricts_node_and_edge_text_search_to_the_curren
         serde_json::Value::Array(expected_nodes)
     );
     assert_eq!(response["single_node"], serde_json::json!([2]));
-    assert_eq!(response["empty_nodes"], serde_json::Value::Null);
+    assert_eq!(response["empty_nodes"], serde_json::json!([]));
     assert!(response["node_sacks"]
         .as_array()
         .unwrap()
@@ -5116,13 +5111,7 @@ async fn public_query_boundary_distinct_binding_projection_uses_storage_value_id
                 .iter()
                 .take(take)
                 .collect::<Vec<_>>());
-            // Known-empty scalar plans serialize as null; drained ones use [].
-            let actual = if take == 0 && actual["result"].is_null() {
-                serde_json::json!([])
-            } else {
-                actual["result"].clone()
-            };
-            assert_eq!(actual, expected);
+            assert_eq!(actual["result"], expected);
         }
     }
 
@@ -12318,4 +12307,95 @@ mod vector_object_store_warm {
             "warmed {warmed_gets} SST reads, unwarmed {unwarmed_gets}"
         );
     }
+}
+
+/// Every row return is an array: an entry that can match at most one row
+/// returns `[]` when it matches nothing, exactly as a collection does, and
+/// `[x]` when it matches. Scalar terminals keep their scalar empty values.
+#[tokio::test]
+async fn empty_at_most_one_row_returns_are_empty_arrays() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-empty-at-most-one".to_owned(),
+    })
+    .await
+    .unwrap();
+    let created = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "user",
+                    traversal::g().add_n("User", vec![("name", PropertyInput::from("Ada"))]),
+                )
+                .returning(["user"]),
+        ))
+        .await
+        .unwrap();
+    let id = created["user"][0]["$id"].as_u64().unwrap();
+    let missing = id + 1_000;
+
+    let response = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as("found", traversal::g().n(NodeRef::id(id)).id())
+                .var_as("missing", traversal::g().n(NodeRef::id(missing)).id())
+                .var_as(
+                    "missing_projection",
+                    traversal::g()
+                        .n(NodeRef::id(missing))
+                        .value_map(Some(vec!["$id", "name"])),
+                )
+                .var_as(
+                    "filtered_out",
+                    traversal::g()
+                        .n(NodeRef::id(id))
+                        .where_(Predicate::eq("name", "Grace"))
+                        .id(),
+                )
+                .var_as("missing_edge", traversal::g().e(EdgeRef::id(missing)).id())
+                .var_as(
+                    "first",
+                    traversal::g().n_with_label("User").limit(1usize).id(),
+                )
+                .var_as(
+                    "first_of_none",
+                    traversal::g().n_with_label("Missing").limit(1usize).id(),
+                )
+                .var_as(
+                    "empty_window",
+                    traversal::g().n_with_label("User").limit(0usize).id(),
+                )
+                .var_as("count", traversal::g().n(NodeRef::id(missing)).count())
+                .var_as("exists", traversal::g().n(NodeRef::id(missing)).exists())
+                .returning([
+                    "found",
+                    "missing",
+                    "missing_projection",
+                    "filtered_out",
+                    "missing_edge",
+                    "first",
+                    "first_of_none",
+                    "empty_window",
+                    "count",
+                    "exists",
+                ]),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response,
+        serde_json::json!({
+            "found": [id],
+            "missing": [],
+            "missing_projection": [],
+            "filtered_out": [],
+            "missing_edge": [],
+            "first": [id],
+            "first_of_none": [],
+            "empty_window": [],
+            "count": 0,
+            "exists": false,
+        })
+    );
+    db.close().await.unwrap();
 }

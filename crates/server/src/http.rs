@@ -249,15 +249,12 @@ fn cypher_error_response(error: db::cypher::Error) -> Response {
 }
 
 fn query_response(response: QueryResponse) -> Response {
-    match response.to_json_bytes() {
-        Ok(body) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            body,
-        )
-            .into_response(),
-        Err(error) => service_error_response(error),
-    }
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        response.into_json_bytes(),
+    )
+        .into_response()
 }
 
 pub(super) fn service_error_response(error: QueryServiceError) -> Response {

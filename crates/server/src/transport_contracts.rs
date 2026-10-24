@@ -75,12 +75,7 @@ impl QueryCorpusAdapter for ServiceAdapter {
             .execute_query(request)
             .await
             .map_err(|error| TestkitError::Adapter(error.to_string()))?;
-        serde_json::from_slice(
-            &response
-                .to_json_bytes()
-                .map_err(|error| TestkitError::Adapter(error.to_string()))?,
-        )
-        .map_err(Into::into)
+        serde_json::from_slice(response.json_bytes()).map_err(Into::into)
     }
 
     async fn close(&mut self) -> TestkitResult<()> {
@@ -236,7 +231,7 @@ fn transport_response_uses_empty_default_planner_diagnostics() {
     })
     .expect("empty execution result converts");
 
-    assert!(response.returns().is_empty());
+    assert_eq!(response.json_bytes(), b"{}");
     assert!(response.diagnostics().insights.is_empty());
 }
 
@@ -245,26 +240,14 @@ fn transport_response_preserves_declared_empty_return_shapes() {
     let response = QueryResponse::from_execution_result(ExecutionResult {
         last: None,
         variables: BTreeMap::new(),
-        returns: BTreeMap::from([
-            (
-                NonEmptyString::new("list").expect("return name is non-empty"),
-                ReturnedValue::EmptyList,
-            ),
-            (
-                NonEmptyString::new("object").expect("return name is non-empty"),
-                ReturnedValue::EmptyObject,
-            ),
-        ]),
+        returns: BTreeMap::from([(
+            NonEmptyString::new("list").expect("return name is non-empty"),
+            ReturnedValue::EmptyList,
+        )]),
     })
     .expect("shaped empty execution result converts");
 
-    assert_eq!(
-        response.returns(),
-        &BTreeMap::from([
-            ("list".to_string(), serde_json::json!([])),
-            ("object".to_string(), serde_json::Value::Null),
-        ])
-    );
+    assert_eq!(response.json_bytes(), br#"{"list":[]}"#);
 }
 
 #[test]
@@ -306,17 +289,8 @@ fn transport_response_preserves_ranked_public_element_metadata() {
     .expect("ranked execution result converts");
 
     assert_eq!(
-        response.returns(),
-        &BTreeMap::from([
-            (
-                "distance".to_string(),
-                serde_json::json!([{ "$id": 7, "$distance": 0.25 }]),
-            ),
-            (
-                "score".to_string(),
-                serde_json::json!([{ "$id": 9, "$score": 1.5 }]),
-            ),
-        ])
+        response.json_bytes(),
+        br#"{"distance":[{"$distance":0.25,"$id":7}],"score":[{"$id":9,"$score":1.5}]}"#
     );
 }
 
@@ -603,6 +577,114 @@ async fn embedded_service_http_and_grpc_match_the_shared_model_corpus() {
 }
 
 #[tokio::test]
+async fn transports_preserve_nested_values_folded_rows_and_edge_paths() {
+    use helix_ast::{graph, value};
+
+    let db = fresh_database("transport-nested-return-values").await;
+    let created = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "node",
+                    traversal::g().add_n(
+                        "Encoded",
+                        vec![(
+                            "payload",
+                            value::PropertyValue::Object(BTreeMap::from([(
+                                "nested".to_owned(),
+                                value::PropertyValue::Array(vec![
+                                    value::PropertyValue::F32Array(vec![0.1_f32, -0.0_f32]),
+                                    value::PropertyValue::String("quote\"\\ é".to_owned()),
+                                ]),
+                            )])),
+                        )],
+                    ),
+                )
+                .returning(["node"]),
+        ))
+        .await
+        .unwrap();
+    let node_id = created["node"][0]["$id"].as_u64().unwrap();
+    db.query(QueryRequest::write(
+        batch::write_batch()
+            .var_as(
+                "edge",
+                traversal::g().n(graph::NodeRef::id(node_id)).add_e(
+                    "LINKS",
+                    graph::NodeRef::id(node_id),
+                    Vec::<(String, value::PropertyInput)>::new(),
+                ),
+            )
+            .returning(["edge"]),
+    ))
+    .await
+    .unwrap();
+    let edge_ids = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as("ids", traversal::g().e_with_label("LINKS").id())
+                .returning(["ids"]),
+        ))
+        .await
+        .unwrap();
+    let edge_id = edge_ids["ids"][0].as_u64().unwrap();
+    let request = QueryRequest::read(
+        batch::read_batch()
+            .var_as("folded", traversal::g().n_with_label("Encoded").fold())
+            .var_as("exists", traversal::g().n_with_label("Encoded").exists())
+            .var_as("labels", traversal::g().n_with_label("Encoded").label())
+            .var_as(
+                "values",
+                traversal::g()
+                    .n_with_label("Encoded")
+                    .values(vec!["payload"]),
+            )
+            .var_as(
+                "edge_paths",
+                traversal::g()
+                    .n(graph::NodeRef::id(node_id))
+                    .out_e(Some("LINKS"))
+                    .in_n()
+                    .path(),
+            )
+            .var_as("missing", traversal::g().n(graph::NodeRef::id(u64::MAX)))
+            .returning([
+                "folded",
+                "exists",
+                "labels",
+                "values",
+                "edge_paths",
+                "missing",
+            ]),
+    );
+    let expected = serde_json::json!({
+        "folded": [{"$id": node_id}],
+        "exists": true,
+        "labels": ["Encoded"],
+        "values": [{"payload": {"nested": [[f64::from(0.1_f32), -0.0_f64], "quote\"\\ é"]}}],
+        "edge_paths": [{
+            "bindings": {},
+            "current": {"node": node_id},
+            "path": [{"node": node_id}, {"edge": edge_id}, {"node": node_id}],
+        }],
+        "missing": [],
+    });
+    assert_eq!(db.query(request.clone()).await.unwrap(), expected);
+    let mut http = HttpAdapter {
+        router: http::router(ServerState::new(
+            Arc::clone(&db),
+            None,
+            crate::StorageConfig::Memory,
+        )),
+        db: Arc::clone(&db),
+    };
+    assert_eq!(http.execute_query(request.clone()).await.unwrap(), expected);
+    let mut grpc = GrpcAdapter::start(db).await;
+    assert_eq!(grpc.execute_query(request).await.unwrap(), expected);
+    grpc.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn query_service_scoped_entry_points_execute_the_same_tenant_read() {
     let db = fresh_database("transport-query-service-tenant-scope").await;
     let service = HelixQueryService::new(Arc::clone(&db));
@@ -626,8 +708,8 @@ async fn query_service_scoped_entry_points_execute_the_same_tenant_read() {
         .await
         .expect("direct tenant-scoped read succeeds");
 
-    assert_eq!(service_response.returns(), direct_response.returns());
-    assert_eq!(service_response.returns().get("count"), Some(&0.into()));
+    assert_eq!(service_response.json_bytes(), direct_response.json_bytes());
+    assert_eq!(service_response.json_bytes(), br#"{"count":0}"#);
     db.close().await.unwrap();
 }
 
