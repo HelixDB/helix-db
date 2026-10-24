@@ -575,7 +575,6 @@ fn returned_value_to_json(
     match value {
         ReturnedValue::Present(value) => execution_value_to_json(value),
         ReturnedValue::EmptyList => Ok(JsonValue::Array(Vec::new())),
-        ReturnedValue::EmptyObject => Ok(JsonValue::Null),
     }
 }
 
@@ -2164,32 +2163,32 @@ mod tests {
             .execute_query(
                 QueryRequest::read(
                     read_batch()
-                        .var_as("present_object", g().n(NodeRef::id(0)))
+                        .var_as("present_point", g().n(NodeRef::id(0)))
                         .var_as("present_list", g().n_with_label("User"))
-                        .var_as("missing_object", g().n(NodeRef::id(999)))
+                        .var_as("missing_point", g().n(NodeRef::id(999)))
                         .var_as("missing_list", g().n_with_label("Missing"))
                         .var_as(
                             "empty_membership",
                             g().n_with_label("User")
                                 .where_(Predicate::is_in_param("orbit_id", "orbit_ids")),
                         )
-                        .var_as("bounded_object", g().n_with_label("Missing").limit(1usize))
+                        .var_as("bounded_point", g().n_with_label("Missing").limit(1usize))
                         .var_as("empty_fold", g().n(NodeRef::id(999)).fold())
                         .var_as("seed", g().n_with_label("Missing"))
                         .var_as_if(
-                            "skipped_object",
+                            "skipped_point",
                             BatchCondition::PrevNotEmpty,
                             g().n(NodeRef::id(0)),
                         )
                         .var_as("count", g().n_with_label("Missing").count())
                         .returning([
-                            "present_object",
-                            "missing_object",
+                            "present_point",
+                            "missing_point",
                             "missing_list",
                             "empty_membership",
-                            "bounded_object",
+                            "bounded_point",
                             "empty_fold",
-                            "skipped_object",
+                            "skipped_point",
                             "count",
                             "present_list",
                         ]),
@@ -2201,7 +2200,7 @@ mod tests {
 
         assert_eq!(
             response.to_json_bytes().unwrap(),
-            br#"{"bounded_object":null,"count":0,"empty_fold":[],"empty_membership":[],"missing_list":[],"missing_object":null,"present_list":[{"$id":0}],"present_object":[{"$id":0}],"skipped_object":null}"#
+            br#"{"bounded_point":[],"count":0,"empty_fold":[],"empty_membership":[],"missing_list":[],"missing_point":[],"present_list":[{"$id":0}],"present_point":[{"$id":0}],"skipped_point":[]}"#
         );
 
         let mutation = service
@@ -2294,7 +2293,7 @@ mod tests {
             ))
             .await
             .expect("non-empty for_each should replace the earlier binding");
-        assert_eq!(executed.to_json_bytes().unwrap(), br#"{"result":null}"#);
+        assert_eq!(executed.to_json_bytes().unwrap(), br#"{"result":[]}"#);
 
         let present_scalar = service
             .execute_query(

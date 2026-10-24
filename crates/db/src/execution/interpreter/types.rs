@@ -347,16 +347,14 @@ pub enum ExecutionValue {
 
 /// Normalized value for one declared query return.
 ///
-/// Empty collection and object results are distinct variants so response
-/// serialization cannot lose the planner-inferred shape.
+/// An empty row return is its own variant so response serialization writes
+/// `[]` whatever the empty execution value was.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReturnedValue {
     /// Preserve the existing serialization for a present value.
     Present(ExecutionValue),
-    /// Serialize an empty collection as `[]`.
+    /// Serialize an empty row return as `[]`.
     EmptyList,
-    /// Serialize an absent at-most-one value as `null`.
-    EmptyObject,
 }
 
 /// Runtime ownership for a value retained by interpreter state.
