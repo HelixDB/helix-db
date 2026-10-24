@@ -190,7 +190,7 @@ class ClientTests(unittest.TestCase):
             ).query(request)
 
         self.assertEqual(ctx.exception.status_code, 503)
-        self.assertEqual(ctx.exception.code, "WRITE_OUTCOME_UNKNOWN")
+        self.assertEqual(ctx.exception.code, "write_outcome_unknown")
         self.assertIs(ctx.exception.retryable, False)
         self.assertFalse(ctx.exception.is_retryable())
 
@@ -358,6 +358,13 @@ class ClientTests(unittest.TestCase):
                 b'"msg":"write outcome is unknown","retryable":false}',
                 "writer_fenced_commit_outcome_unknown",
             ),
+            (
+                b'{"error":"write_outcome_unknown",'
+                b'"msg":"write outcome is unknown; the operation was not replayed",'
+                b'"retryable":false}',
+                "write_outcome_unknown",
+            ),
+            # Helix Cloud gateways before the shared envelope.
             (
                 b'{"code":"WRITE_OUTCOME_UNKNOWN",'
                 b'"error":"write outcome is unknown","retryable":false}',
