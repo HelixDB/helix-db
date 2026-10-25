@@ -1961,6 +1961,11 @@ mod client_tests {
                 "writer_fenced_commit_outcome_unknown",
             ),
             (
+                r#"{"error":"write_outcome_unknown","msg":"write outcome is unknown; the operation was not replayed","retryable":false}"#,
+                "write_outcome_unknown",
+            ),
+            // Helix Cloud gateways before the shared envelope.
+            (
                 r#"{"code":"WRITE_OUTCOME_UNKNOWN","error":"write outcome is unknown","retryable":false}"#,
                 "WRITE_OUTCOME_UNKNOWN",
             ),
@@ -2009,7 +2014,7 @@ mod client_tests {
             .expect_err("lost response must be terminal");
 
         assert_eq!(error.status_code(), Some(503));
-        assert_eq!(error.remote_code(), Some("WRITE_OUTCOME_UNKNOWN"));
+        assert_eq!(error.remote_code(), Some("write_outcome_unknown"));
         assert_eq!(error.retryable(), Some(false));
         assert!(!error.is_conflict());
         assert!(!error.is_retryable());
