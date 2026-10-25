@@ -586,6 +586,37 @@ func TestFloatParametersAcceptEveryIntegerWidth(t *testing.T) {
 	}
 }
 
+func TestParamObjectRejectsInnerType(t *testing.T) {
+	// Object parameters have no element type in the query AST, so an inner
+	// type passed to ParamObject can never be serialized. It must be rejected
+	// instead of being silently dropped from the request.
+	request := NewReadQueryRequest(Read())
+	request.ParamObject("metadata", map[string]any{"nested": true}, ParamTypeString())
+	if err := request.Validate(); !errors.Is(err, ErrObjectParameterInnerType) {
+		t.Fatalf("object parameter with inner type should be rejected, got %v", err)
+	}
+	if _, err := json.Marshal(request); !errors.Is(err, ErrObjectParameterInnerType) {
+		t.Fatalf("marshaling object parameter with inner type should fail, got %v", err)
+	}
+
+	// The same value without an inner type stays valid and serializes as an
+	// object parameter.
+	valid := NewReadQueryRequest(Read())
+	valid.ParamObject("metadata", map[string]any{"nested": true})
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("object parameter without inner type failed: %v", err)
+	}
+	body, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"metadata":"object"`, `"metadata":{"nested":true}`} {
+		if !strings.Contains(string(body), expected) {
+			t.Fatalf("object parameter missing %s: %s", expected, body)
+		}
+	}
+}
+
 func TestTypedDateTimeParameterAcceptsSameValuesAsConvenienceHelper(t *testing.T) {
 	// The convenience helper ParamDateTime accepts DateTime, time.Time, RFC3339
 	// strings and epoch-millis ints. The low-level typed insertion path
