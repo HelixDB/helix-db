@@ -1,6 +1,6 @@
 ---
 title: "Helix Foundry limits"
-description: "Every Helix Foundry limit in one place: syncs, documents, generations, loads, questions, spending and reads"
+description: "Every Helix Foundry limit in one place: syncs, API sources, documents, generations, loads, questions, spending, the Helix MCP and reads"
 sidebarTitle: "Limits"
 pageType: "Reference"
 ---
@@ -9,28 +9,50 @@ pageType: "Reference"
 
 The limits Foundry applies, by area. Each guide explains what happens when you reach one.
 
-## Data
+## Connections
 
 | Limit | Value |
 | --- | --- |
-| Rows per table, per sync | 2,000,000 |
+| Scheduled syncs | Free once a day, Pro every hour, Max every 15 minutes |
+| Rows per table | 2,000,000, and 2 GiB |
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |
 | Size of an S3 connection's tables, per sync | 20 GB |
 | PostHog event history | 1 to 365 days, 30 by default |
-| PostgreSQL, MySQL and Amazon S3 | Foundry Pro or Max |
-| Your folders in the Data explorer | 50, at the root, holding connections only |
+| GitHub repositories | Up to 100 when none are named |
+| Documents a connection keeps, per set | The newest 1,000 |
+| Your folders in the Connectors explorer | 50, at the root, holding connections only |
 | Folder name | 120 characters |
+
+## API sources
+
+| Limit | Value |
+| --- | --- |
+| API sources per workspace | 20 |
+| Live send tokens per source | 10 |
+| Pieces per send | 500, with at most 1 MiB of data together |
+| Request body over HTTP | 2 MiB, arriving within 15 seconds |
+| Piece | 256 KiB of data, 64 levels deep; an id of 1 to 128 characters |
+| Fields per source | 200 |
+| Sends per source | 5 a second, in bursts of up to 20 |
+| Sends per workspace | 20 a second, in bursts of up to 50 |
+| Per workspace, per UTC day | 200,000 pieces and 1 GiB of data |
+| Rows per source | 2,000,000, and 2 GiB |
+| Sync after a send | About a minute |
+| Pieces read by entity extraction | The newest 500 |
+| Extraction no person started | $5 a month per source, $20 a month per workspace |
 
 ## Documents
 
 | Limit | Value |
 | --- | --- |
-| File types | `.md`, `.markdown`, `.txt`, `.json`, `.csv`, `.tsv`, `.jsonl`, `.ndjson`, `.parquet`, `.pdf` |
-| Formats ontologies read | Markdown and text |
-| Size | 1 byte to 1 MiB per document |
-| Documents per workspace | 200 |
+| File types | `.md`, `.markdown`, `.mdx`, `.txt`, `.pdf`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.parquet` |
+| Formats ontologies read | All of them: text and PDFs for names and facts, table files as tables |
+| Markdown, MDX and text | 1 byte to 1 MiB |
+| PDF | 3 MiB and 150 pages; its text at most 1 MiB. Scanned PDFs have no text to read. |
+| CSV, TSV, JSON, JSONL and Parquet | 3 MiB; up to 1,000 columns and 1 MiB per row or line |
+| Uploaded documents per workspace | 200; connections' documents don't count |
 | Name | 255 characters, no slash, backslash or control character |
 | Document sets per workspace | 20 |
 | Set name | 120 characters, unique in the workspace ignoring case and accents |
@@ -41,18 +63,21 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Limit | Value |
 | --- | --- |
 | Goal | 2,000 characters |
-| Tables per generation | 50 |
+| Tables per generation | 50, synced tables and table files together |
 | Document sets per generation | 20 |
 | Documents the agent reads | Up to 5 of the newest in each set |
 | Attempts per generation | 3 |
+| Spend per attempt | $5 |
 | Generations running per ontology | 1 |
+| Generations and version edits per workspace | 10 an hour |
 
 ## Loads
 
 | Limit | Value |
 | --- | --- |
-| Document reading spend, per load | $20 |
-| Document reading spend, per workspace each month | $100 |
+| Document reading spend, per load | $10 |
+| Document reading spend, per workspace each month | $50, of which work no person started may spend $40 |
+| Automatic refreshes | At most once per the plan's sync interval |
 | Loads kept per ontology | 5: the current one and the four newest others |
 | Loads or extracts running per ontology | 1 |
 
@@ -60,11 +85,20 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 
 | Limit | Value |
 | --- | --- |
-| Per question | $0.50, 10 steps and 2 minutes |
+| Per question | $0.50, 20 steps and 4 minutes |
 | Question | 4,000 characters |
 | Questions running per workspace | 2 |
 | Questions per workspace, per hour | 30 |
-| Spend per workspace, per month | The budget shown at the foot of Ask's threads, apart from loads' |
+| Spend per workspace, per month | $15, apart from loads' |
+
+## Helix MCP
+
+| Limit | Value |
+| --- | --- |
+| A confirmation for a change | One use, within 5 minutes |
+| Graph reads per call | 1 to 20 |
+| `helix_foundry_ask` waits for an answer | 25 seconds; longer questions carry on |
+| Feedback | 20 an hour per caller, 4,096 bytes each |
 
 ## Explorer and Records
 
@@ -89,7 +123,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
   <Card title="Troubleshooting" icon="wrench" href="/foundry/reference/troubleshooting">
     What to do when you reach a limit.
   </Card>
-  <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
-    What each plan includes.
+  <Card title="Usage" icon="gauge" href="/foundry/workspace/usage">
+    This month's spend against each cap.
   </Card>
 </CardGroup>

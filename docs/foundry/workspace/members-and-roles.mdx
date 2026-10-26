@@ -39,20 +39,26 @@ change a role, remove someone or manage pending invitations, use the
 
 | Action | Owner | Admin | Member |
 | --- | :---: | :---: | :---: |
-| See data, documents, ontologies, versions, loads and the plan | ✓ | ✓ | ✓ |
-| Explore, read records and ask questions | ✓ | ✓ | With **Query read** on the database's project |
+| See connections, documents, ontologies, versions, loads, the plan and usage | ✓ | ✓ | ✓ |
+| Ask questions, explore and read records | ✓ | ✓ | With **Query read** on the database's project |
 | Add, sync, edit and delete connections | ✓ | ✓ | |
+| Create API sources, and make and revoke their send tokens | ✓ | ✓ | |
 | Upload, move, rename and delete documents and sets | ✓ | ✓ | |
-| Arrange the Data explorer for the workspace | ✓ | ✓ | |
+| Arrange the Connectors explorer for the workspace | ✓ | ✓ | |
 | Create and delete ontologies | ✓ | ✓ | |
 | Generate, edit versions, make them current, load and settle reviews | ✓ | ✓ | |
 | Invite people | ✓ | ✓ | |
 | Upgrade, switch, cancel and manage billing | ✓ | ✓ | |
+| Choose where the workspace's AI runs, and bring its own key | ✓ | | |
 
 Reading what a load wrote, in the Explorer, Records, Ask and a document's text in an
 ontology, needs **Query read** on the database's Helix project; grant it in the Helix
 dashboard. Creating or deleting an ontology and loading also need write access to that
 project.
+
+An agent you connect through the [Helix MCP](/foundry/agents/helix-mcp) acts with your
+role and rights: it can do only what the table allows you, and it never adds connections,
+deletes anything, invites people or changes billing.
 
 ## Next steps
 

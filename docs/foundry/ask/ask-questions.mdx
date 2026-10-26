@@ -7,9 +7,10 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Ask answers questions about an ontology's load in plain language. Foundry's agent reads
-the load from the ontology's database step by step, and its answer cites each record,
-table row, quote and rule it used, so you can open every one.
+Ask answers questions about an ontology's load in plain language, and is Foundry's main
+page: Foundry opens on it. Foundry's agent reads the load from the ontology's database
+step by step, and its answer cites each record, table row, quote and rule it used, so
+you can open every one.
 
 <Frame caption="Ask a question, follow its steps, read the sourced answer, then follow up.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/ask/ask-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/ask/ask.webm"></video>
@@ -17,10 +18,11 @@ table row, quote and rule it used, so you can open every one.
 
 ## Start a thread
 
-Select **Ask** in the sidebar or on the rail. It opens the ontology you last opened;
-the **Ontology** picker at the top of the threads panel opens another. A new thread asks what you want
-to know about the ontology, with the composer in the middle of the page and, when
-Foundry has read the load's version, the version's questions as suggestions.
+Foundry opens on Ask, and **Ask** in the sidebar comes back to it. It opens the ontology
+you last opened, or the newest; the **Ontology** picker at the top of the page opens
+another. A new thread asks what you want to know about the ontology, with the composer
+in the middle of the page and, when Foundry has read the load's version, the version's
+questions as suggestions.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ask/new-thread.png" alt="A new Ask thread: What do you want to know about Customer contracts?, the composer, two suggested questions, and the Load picker in the top bar" />
@@ -42,9 +44,11 @@ ontology**.
 A thread is one column: each question, then its steps as they run, then the answer,
 with the composer pinned at the bottom.
 
-- **Steps** say what the agent read, such as the entities it found or the query it
-  ran, written as a path through the ontology's types and links. Each step's JSON is
-  behind a disclosure. A step that failed says why, and the agent carries on.
+- **Steps** say what the agent read. Its first step reads what the load holds: its
+  types and links and how many of each. Then it finds entities, reads them and their
+  evidence, runs queries written as a path through the ontology's types and links, and,
+  for what those can't say, queries the graph directly with a Helix read. Each step's
+  JSON is behind a disclosure. A step that failed says why, and the agent carries on.
 - **The answer** is plain text with numbered citations, then **Sources**: each record,
   fact, derived fact, table row, document quote, rule break or step it cites. Select one
   to open it: an entity's page, the row's table, the quote in its document, or the step.
@@ -62,11 +66,11 @@ before it is ready.
 
 ## Threads
 
-The threads panel, beside the sidebar's rail, lists the ontology's threads by their
-first question, grouped **Today**, **Previous 7 days** and **Older**. A thread being
-answered says so. **New thread** starts another. The foot of the panel shows what the
-workspace has spent on questions this month, out of its monthly budget; select it for
-the limits. Hide the panel with the toggle at the top of the rail.
+While Ask is open, the sidebar lists the ontology's threads under the sections, by
+their first question, grouped **Today**, **Previous 7 days** and **Older**. A thread
+being answered says so. **New thread** starts another. The foot of the list shows what
+the workspace has spent on questions this month, out of its monthly budget; select it
+for the limits.
 
 On a phone, Ask shows the threads first; choose one, or **New thread**, to open it.
 
@@ -89,15 +93,17 @@ thread.
 ## Limits and spending
 
 Ask uses AI models: it sends your question, and what each step reads from the load, to
-Anthropic models. Questions are billed against their own monthly budget, apart from
-loads'.
+the workspace's [AI models](/foundry/workspace/ai-models). Questions have their own
+monthly budget, apart from loads'; [Usage](/foundry/workspace/usage) shows both. Your
+agent can ask too, through the [Helix MCP](/foundry/agents/helix-mcp#ask-questions),
+within the same limits.
 
 | Limit | Value |
 | --- | --- |
-| Per question | $0.50, 10 steps and 2 minutes |
+| Per question | $0.50, 20 steps and 4 minutes |
 | Questions running per workspace | 2; others wait, queued |
 | Questions per workspace, per hour | 30 |
-| Per workspace, per month | The budget shown at the foot of the threads |
+| Per workspace, per month | $15, shown at the foot of the threads |
 | Question | 4,000 characters |
 
 ## Who can ask
