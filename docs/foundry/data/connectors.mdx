@@ -7,18 +7,25 @@ pageType: "Reference"
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-Foundry reads six kinds of source. Apps sync every table their credential can read;
-databases and Amazon S3 sync the tables you choose. Every credential only needs read
-access.
+Foundry reads ten kinds of source, and takes data your apps and agents send to an
+[API source](/foundry/data/api-sources). Apps sync every table their credential can
+read; databases and Amazon S3 sync the tables you choose. Every credential only needs
+read access, and every plan offers every kind: plans differ in
+[how often they sync](/foundry/data/connect-data#syncs-on-a-schedule).
 
-| Source | Credential | Plan |
+| Source | Credential | Syncs |
 | --- | --- | --- |
-| [Stripe](#stripe) | Restricted (`rk_`) or secret (`sk_`) API key | Free |
-| [WorkOS](#workos) | Secret API key (`sk_`) | Free |
-| [PostHog](#posthog) | Personal API key (`phx_`) | Free |
-| [PostgreSQL](#postgresql) | Database user and password | [Pro or Max](/foundry/workspace/plans-and-billing) |
-| [MySQL](#mysql) | Database user and password | [Pro or Max](/foundry/workspace/plans-and-billing) |
-| [Amazon S3](#amazon-s3) | IAM role, or an access key | [Pro or Max](/foundry/workspace/plans-and-billing) |
+| [Stripe](#stripe) | Restricted (`rk_`) or secret (`sk_`) API key | Customers, subscriptions, invoices, payments and more |
+| [WorkOS](#workos) | Secret API key (`sk_`) | Organizations, users, SSO and directories |
+| [PostHog](#posthog) | Personal API key (`phx_`) | Persons, groups and events |
+| [GitHub](#github) | Fine-grained (`github_pat_`) or classic (`ghp_`) token | Issues, pull requests, comments and reviews |
+| [Linear](#linear) | Personal API key (`lin_api_`) | Teams, projects, cycles, issues and comments |
+| [Cal.com](#cal-com) | API key (`cal_live_`) | Bookings, attendees, event types and schedules |
+| [Granola](#granola) | API key (`grn_`) | Meeting notes and attendees, kept as documents too |
+| [PostgreSQL](#postgresql) | Database user and password | The tables you choose |
+| [MySQL](#mysql) | Database user and password | The tables you choose |
+| [Amazon S3](#amazon-s3) | IAM role, or an access key | Parquet, JSON and CSV files as tables |
+| [API source](/foundry/data/api-sources) | None: senders use send tokens | The pieces your apps and agents send |
 
 ## Stripe
 
@@ -31,6 +38,10 @@ Syncs `customers`, `products`, `prices`, `coupons`, `promotion_codes`, `subscrip
 `subscription_items`, `invoices`, `invoice_line_items`, `charges`, `payment_intents`,
 `refunds`, `disputes`, `payouts` and `balance_transactions`. A table the key can't read
 is skipped and named after the test; the test fails only when the key can read none.
+
+Also give the key **Read** on **Events**. On Pro and Max, syncs then read only the
+objects that changed; without it, every sync reads every object in full, and the test
+warns you.
 
 ## WorkOS
 
@@ -64,6 +75,64 @@ Syncs `persons`, `person_distinct_ids` and `groups` in full, and `events` and
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/data/posthog-form.png" alt="The PostHog form with the personal API key, region, project ID and event history fields" />
+</Frame>
+
+## GitHub
+
+In GitHub, open **Settings** → **Developer settings** → **Fine-grained tokens** and
+create a token named "Helix Foundry". For an organization's repositories, choose the
+organization as the resource owner; it may need to approve the token. Choose the
+repositories to import, and set **Issues** and **Pull requests** to **Read-only**. A
+classic token (`ghp_…`) with the `repo` scope works too.
+
+| Field | Notes |
+| --- | --- |
+| Repositories | Optional: one `owner/name` per line. Blank syncs every repository the token can read, up to 100. |
+| Review history (days) | 1 to 365: how far back pull request reviews are read. |
+
+Syncs `repositories`, `users`, `labels`, `milestones`, `issues`, `pull_requests`,
+`issue_comments` and `pull_request_reviews`. Foundry never reads code.
+
+## Linear
+
+In Linear, open **Settings** → **Security & access** and create a personal API key named
+"Helix Foundry" with **Read** access. It reads every team you can see in Linear.
+
+Syncs `teams`, `users`, `projects`, `cycles`, `workflow_states`, `issue_labels`,
+`issues` and `comments`.
+
+## Cal.com
+
+In Cal.com, open **Settings** → **Developer** → **API keys** and create a key named
+"Helix Foundry". Turn on **Never expires**, or choose a long expiry: syncs stop when the
+key expires. Cal.com shows the key once. Cal.com keys can make changes, but Foundry only
+reads. Only Cal.com's cloud is supported.
+
+Syncs `users`, `teams`, `team_memberships`, `event_types`, `schedules`, `bookings`,
+`booking_attendees` and `booking_hosts`. Teams come with a Teams plan, and only a team
+admin's key reads the team's other members.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/calcom-form.png" alt="The Cal.com form with its steps and API key field" />
+</Frame>
+
+## Granola
+
+API keys come with Granola Business and Enterprise. In the Granola desktop app, open
+**Settings** → **Connectors** → **API keys** and select **Create new key**. Choose the
+**Personal notes** scope, and **Public notes** too for notes shared with your team.
+
+Syncs `notes`, with each note's summary, `note_attendees`, `note_folders`, `folders`
+and `spaces`. Foundry also keeps each note's summary as a Markdown document, in a
+**Notes** document set of the connection's own, which ontologies read like any other
+[documents](/foundry/data/documents).
+
+**Transcripts**, under the key, is off by default. Turn it on to keep each note's
+transcript as a document too, in a **Transcripts** set beside Notes. Transcripts are
+long: reading one into an ontology costs several times what a note does.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/granola-form.png" alt="The Granola form with its steps, the API key field and the Transcripts option" />
 </Frame>
 
 ## PostgreSQL
@@ -154,8 +223,10 @@ redirects.
 
 | Limit | Value |
 | --- | --- |
-| Rows per table, per sync | 2,000,000. A larger table fails the sync: for a database, leave it out; for PostHog, shorten the event history. |
+| Rows per table | 2,000,000, and 2 GiB. A larger table fails the sync: for a database, leave it out; for PostHog, shorten the event history. |
 | Size of an S3 connection's tables, per sync | 20 GB. Choose fewer tables, or a narrower folder. |
+| Documents a connection keeps, per set | The newest 1,000 |
+| Scheduled syncs | Free daily, Pro hourly, Max every 15 minutes |
 | One sync attempt | 2 hours |
 | Attempts per sync | 3 |
 | Syncs running per connection | 1 |
@@ -166,7 +237,7 @@ redirects.
   <Card title="Connect data" icon="plug" href="/foundry/data/connect-data">
     Add a connection and follow its syncs.
   </Card>
-  <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
-    Upgrade to Pro for PostgreSQL, MySQL and S3.
+  <Card title="API sources" icon="code" href="/foundry/data/api-sources">
+    Send data no connector reads.
   </Card>
 </CardGroup>

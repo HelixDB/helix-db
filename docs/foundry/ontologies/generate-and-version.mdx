@@ -1,6 +1,6 @@
 ---
 title: "Generate and version an ontology"
-description: "Ask Helix Foundry's agent to draft an ontology from your synced tables and document sets, review each version, edit it, and choose the current one"
+description: "Ask Helix Foundry's agent to draft an ontology from your synced tables, API sources and document sets, review each version, edit it, and choose the current one"
 sidebarTitle: "Generate and version"
 pageType: "Guide"
 ---
@@ -51,17 +51,31 @@ generate, review, make current, load. **Generate** drafts the next versions.
     </Frame>
   </Step>
 
+  <Step title="Choose its API sources">
+    Under **API sources**, choose the [API sources](/foundry/data/api-sources) it reads,
+    and how each is read: **Structured mappings** map its fields to types and
+    properties, like a table's columns; **Entity extraction** reads the text of its
+    newest 500 pieces for the entities and facts they describe, from the source's text
+    field, which owners and admins can choose here. A source can be chosen once its
+    first pieces have synced.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/generate-api-sources.png" alt="The API sources section of the Generate form, with Order lines chosen and read through Structured mappings" />
+    </Frame>
+  </Step>
+
   <Step title="Choose its documents">
     Under **Documents**, choose the [document sets](/foundry/data/documents) the new
-    version reads. You pick whole sets, the folders of the Data explorer's Documents.
+    version reads. You pick whole sets, the folders of the Connectors explorer's Documents.
     The choice starts as the current version's sets, or none for a first generation.
     Leave every set unticked for a version that reads no documents. A generation reads
     at most 20 sets. **Upload documents**, or the upload button on a set's row, uploads
     files from here and chooses the set they went into.
 
     The agent reads up to five of the newest documents in each set, with the set's
-    description, and drafts routes for them: what each set's documents may fill. Loads
-    of the new version read the documents of these sets, and only theirs.
+    description, and drafts routes for them: what each set's documents may fill. It
+    drafts mappings for the table files in them, as it does for synced tables. Loads of
+    the new version read the documents of these sets, and only theirs.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/ontology/generate-documents.png" alt="The Documents section of the Generate form, with General chosen and its contract.md listed, and Board minutes not chosen" />
@@ -79,7 +93,8 @@ A generation is **Queued**, then **Running**, then **Succeeded** or **Failed**. 
 can take several minutes. An attempt that fails for a passing reason is retried, up to
 three attempts; while it waits, the page says it is retrying, why, and when it runs
 next. Other failures, such as a draft the agent refused, fail at once. An ontology runs
-one generation at a time.
+one generation at a time, and a workspace starts at most 10 generations and version edits
+an hour.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/generation-done.png" alt="A succeeded generation that drafted version 4, with Review version 4" />
@@ -92,7 +107,8 @@ with the same goal, connectors and document sets.
 
 ## Schema versions
 
-**Schema versions** lists every version, newest first, named by the generation that
+**Schema versions**, on the ontology's overview below its schema, lists every version,
+newest first, named by the generation that
 drafted it, with the generations that failed among them. Each row shows the version's
 status, title, format and when it was made. Select a row to open the version, or a
 failed generation's row to see why it failed.

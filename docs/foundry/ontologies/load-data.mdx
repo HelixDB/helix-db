@@ -12,7 +12,7 @@ tables as its mappings shape them, then the documents of the sets the version re
 Each load is a complete copy, written beside the earlier ones, so you can compare them
 and switch back. Reads go to the current load.
 
-<Frame caption="Upload a document in Data, load the current version, then explore it.">
+<Frame caption="Upload a document in Connectors, load the current version, then explore it.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/explore/load-and-explore-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/explore/load-and-explore.webm"></video>
 </Frame>
 
@@ -24,11 +24,11 @@ ontology's first load, its overview's setup steps stop at **Load it** and offer 
 there. The dialog says
 what the load reads and what it may spend; select **Load** to start it.
 
-- **Tables**: the synced tables the version's mappings read.
+- **Tables**: the synced tables, API sources and table files the version's mappings
+  read.
 - **Documents**: the [document sets](/foundry/data/documents) the version reads, the
   ones its generation picked, and how many documents they hold. A set no route reads is
-  stored, not read, and so are documents in formats ontologies don't read yet (anything
-  but Markdown and text). Documents added to these sets later are read as they arrive.
+  stored, not read. Documents added to these sets later are read as they arrive.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/load-dialog.png" alt="The Load version 3 into contracts dialog: two Stripe tables, one document from General, the spending caps and the limits" />
@@ -57,16 +57,32 @@ constraints.
 The newest load that finishes **Ready** becomes current. A **Partial** load becomes
 current only when the ontology has no current load.
 
-- If a source synced again while the load ran, the load says so and offers a new one.
+- If a source synced again while the load ran, the load says so and offers a new one;
+  with automatic refreshes on, Foundry starts it itself.
 - If the database is new and still starting, the load waits and tries again by itself.
 - An ontology runs one load at a time.
 
 Loading, setting a load current and deleting one need owner or admin rights and write
 access to the database's Helix project.
 
+## Automatic refreshes
+
+Connections [sync on a schedule](/foundry/data/connect-data#syncs-on-a-schedule). When a
+sync changes a table the current load reads, or a connection's document it read is
+replaced or removed, the ontology owes a refresh: a load of its current version that
+Foundry starts itself. It runs at most once per the plan's interval (daily on Free,
+hourly on Pro, every 15 minutes on Max), and waits while another load or generation
+runs. A large API source adds 30 minutes per million rows to the wait. A refresh becomes
+current when it finishes, like any load.
+
+A refresh reads again only what changed: documents it read before, with the same text
+and models, cost nothing. When the month's
+[loads budget](/foundry/workspace/usage) is spent, a refresh still writes your tables
+and reuses what earlier loads read from documents, at no cost.
+
 ## Manage loads
 
-**Data loads**, among the ontology's pages in the Ontologies panel, lists the loads
+**Data loads**, on the ontology's overview below its schema, lists the loads
 kept: the current one and the newest others, five in all. Older loads are deleted from
 the database in the background. Each row shows the load's version, status, node and
 fact counts, and its jobs. Select a row to open the load's page, with its steps and
@@ -88,18 +104,19 @@ spend.
 ## Spending and limits
 
 Reading documents uses models, so it costs money; tables don't. Reading the same text
-with the same models again costs nothing.
+with the same models again costs nothing. [Usage](/foundry/workspace/usage), in the
+account menu, shows what the month's loads have spent.
 
 | Limit | Value |
 | --- | --- |
-| Per load | $20 |
-| Per workspace, per month | $100 |
-| Documents | 200 in the workspace, 1 MiB each |
+| Per load | $10 |
+| Per workspace, per month | $50, of which work no person started, such as refreshes, may spend $40 |
+| Uploaded documents | 200 in the workspace: 1 MiB each for text, 3 MiB for PDFs and table files |
 | Loads kept per ontology | 5 |
 
 A load that reaches its cap stops **Partial**. The documents it didn't reach are read
 into it once it's current and the month has budget left; a new load reads every
-document again. Once the workspace has spent $100 in a month, Foundry refuses new loads
+document again. Once the workspace has spent $50 in a month, Foundry refuses new loads
 until the next month, and new uploads aren't read.
 
 ## Next steps

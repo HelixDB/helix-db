@@ -19,26 +19,31 @@ workspace's [data](/foundry/data/connect-data) and
 
 ## The Ontologies panel
 
-In **Ontologies**, the panel beside the rail lists the workspace's ontologies, each
+In **Ontologies**, the panel beside the sidebar lists the workspace's ontologies, each
 with its database and a dot for the status of its last load. The open ontology's row
-holds its pages: **Overview**, **Documents** with how many it reads, **Schema
-versions** and **Data loads**. Owners and admins create an ontology with **+** in the
-panel's head. From eight ontologies, a filter finds one by name or database.
+holds its pages: **Overview**, which also lists its schema versions and data loads, and
+**Documents**, with how many it reads and the sets they're in. Owners and admins create
+an ontology with **+** in the panel's head. From eight ontologies, a filter finds one by
+name or database.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/ontologies.png" alt="The Ontologies panel listing Customer contracts on the contracts database, open on its pages, and Renewals on the subscriptions database" />
 </Frame>
 
-**Ontologies** on the rail opens the ontology you last opened in this browser, or the
-first one.
+**Ontologies** in the sidebar opens the ontology you last opened in this browser, or
+the first one.
 
 ## Create one
 
-Select **New ontology**. The page walks through six steps, one at a time: each step
-you finish shrinks to a line saying what you chose, with **Edit** to change it. Select
-**Continue** to go on, or **Skip** on an optional step you leave empty. Your choices
-are kept in the browser tab until you create the ontology or select **Cancel**, and
-the step is in the page's address, so going back or reloading keeps your place.
+Select **New ontology**. A workspace without an ontology opens on the same page, as
+**Create your first ontology**, with **Set up with your agent** above it to hand the
+steps to your agent through the [Helix MCP](/foundry/agents/helix-mcp#set-up-a-workspace-with-your-agent).
+
+The page walks through five steps, one at a time: each step you finish shrinks to a
+line saying what you chose, with **Edit** to change it. Select **Continue** to go on, or
+**Skip** on an optional step you leave empty. Your choices are kept in the browser tab
+until you create the ontology or select **Cancel**, and the step is in the page's
+address, so going back or reloading keeps your place.
 
 <Steps>
   <Step title="Name">
@@ -63,24 +68,27 @@ the step is in the page's address, so going back or reloading keeps your place.
     </Frame>
   </Step>
 
-  <Step title="Data">
-    Choose the connectors whose synced tables the agent drafts from; every table a
-    chosen connector has synced goes in, up to 50 tables. Connectors are grouped by
-    kind, as in [Generate](/foundry/ontologies/generate-and-version#generate-a-draft).
+  <Step title="Connect your data or upload documents">
+    Choose what the agent drafts from. Any of these will do, and you need at least one:
 
-    If a source isn't connected yet, select **Add data** to connect it without leaving
-    the page. Its first sync shows in its row, and you can continue once it has synced.
+    - **Tables**: the connectors whose synced tables it reads; every table a chosen
+      connector has synced goes in. Connectors are grouped by kind, as in
+      [Generate](/foundry/ontologies/generate-and-version#generate-a-draft).
+    - **API sources**: the [API sources](/foundry/data/api-sources) it reads, each
+      through structured mappings or by entity extraction.
+    - **Documents**: the [document sets](/foundry/data/documents) the first version
+      reads, up to 20.
+
+    A generation reads at most 50 tables, synced tables and table files together. If a
+    source isn't connected yet, select **Add data** to connect it without leaving the
+    page; its first sync shows in its row, and you can continue once it has synced.
+    **New API source** makes an API source in place. **Upload documents** uploads files
+    into **General** or the oldest set, and the upload button on a set's row uploads
+    into that set; the set the files went into is then chosen.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology-data.png" alt="The Data step with the Stripe and Shop database connectors chosen, and Add data" />
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology-data.png" alt="The step Connect your data or upload documents, with the Stripe and Shop database connectors and the General document set chosen, Add data and Upload documents" />
     </Frame>
-  </Step>
-
-  <Step title="Documents (optional)">
-    Choose the [document sets](/foundry/data/documents) the first version reads, up to
-    20. **Upload documents** uploads files from here, into **General** or the oldest
-    set, and the upload button on a set's row uploads into that set; the set the files
-    went into is then chosen.
   </Step>
 
   <Step title="Goal (optional)">
@@ -123,12 +131,13 @@ links to billing in the Helix dashboard and offers the databases you already hav
 
 Until an ontology is set up, its overview carries the setup on, so you can always
 continue from there. **Set it up** lists the steps with the ones done ticked: Name and
-Database, then Data, Documents (optional), Goal (optional), **Generate a draft**,
-**Review and make a version current**, **Load it** and **Explore or ask**. The first
-step not done is open:
+Database, then **Connect your data or upload documents**, Goal (optional), **Generate a
+draft**, **Review and make a version current**, **Load it** and **Explore or ask**. The
+first step not done is open, and **Set up with your agent** copies a prompt that carries
+on from there:
 
-- Before a draft, Data, Documents and Goal are the same pickers as on New ontology,
-  with **Add data** and **Upload documents** in place, then **Generate**.
+- Before a draft, the data and goal steps are the same as on New ontology, with **Add
+  data** and **Upload documents** in place, then **Generate**.
 - While the agent drafts, the step follows it; if the draft failed, it says why, with
   **Try again**.
 - A draft to review offers **Review** and **Make current**.
@@ -136,7 +145,7 @@ step not done is open:
 - Once loaded, **Explore or ask** opens the Explorer or Ask.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/overview-setup.png" alt="The Renewals overview with Set it up, 5 of 7 done: its name, database, data, documents, goal, draft and current version ticked, and Load it open with Version 1 isn't loaded yet and Load data" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/overview-setup.png" alt="The Renewals overview with Set it up, 5 of 7 required steps done: its name, database, data, goal, draft and current version ticked, Load it open with Version 1 isn't loaded yet and Load data, and Set up with your agent" />
 </Frame>
 
 Members see the same steps, without the pickers or anything that changes the
@@ -153,9 +162,11 @@ says when a newer version is ready to review or the current one isn't loaded yet
 </Frame>
 
 Its header names the database and its Helix project, the status of the last load and
-when the ontology was created. It links to **All versions** and to the documents the
-ontology reads, and offers **Generate** once the ontology has a draft and, once the
-current version can be loaded, **Load data**.
+when the ontology was created. It links to the documents the ontology reads, and offers
+**Generate** once the ontology has a draft and, once the current version can be loaded,
+**Load data**. Below the schema,
+[Schema versions](/foundry/ontologies/generate-and-version#schema-versions) lists every
+version and [Data loads](/foundry/ontologies/load-data#manage-loads) the loads kept.
 
 The [Explorer](/foundry/explore/explorer) and [Ask](/foundry/ask/ask-questions) are
 sections of their own, which open the ontology you last opened.
@@ -181,6 +192,6 @@ the database's project sees the ontology without its database's details or conte
     Review the draft, make it current, and draft new versions.
   </Card>
   <Card title="Upload documents" icon="file-lines" href="/foundry/data/documents">
-    Add the files a load reads for names and facts.
+    Add the files a load reads for names, facts and tables.
   </Card>
 </CardGroup>

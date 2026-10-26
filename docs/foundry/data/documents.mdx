@@ -1,6 +1,6 @@
 ---
 title: "Upload and organise documents"
-description: "Upload Markdown, text, JSON, CSV, Parquet, PDF and other files to a Helix Foundry workspace, keep them in document sets, view them, and see which ontologies read each one"
+description: "Upload Markdown, text, PDF, CSV, JSON, Parquet and other files to a Helix Foundry workspace, keep them in document sets, see how ontologies read each format, and which ontologies read each one"
 sidebarTitle: "Documents"
 pageType: "Guide"
 ---
@@ -8,19 +8,27 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 Documents carry what your tables don't: who signed a contract, what was agreed, who
-referred whom. They belong to the workspace and live in **Data**, in document sets:
-folders of documents an ontology reads together. A load reads the documents of the
-sets its version reads, and links the names they mention to the records your tables
-hold.
+referred whom. They belong to the workspace and live in **Connectors**, in document
+sets: folders of documents an ontology reads together. A load reads the documents of
+the sets its version reads: text and PDFs for the names and facts they hold, linked to
+the records your tables hold, and table files, such as CSV exports, as tables of their
+own.
 
 ## Document sets
 
-In the Data explorer, the **Documents** folder holds a folder per set, and each set
-holds its documents. A workspace gets a set named **General** with its first upload.
+In the Connectors explorer, the **Documents** folder holds a folder per set, and each
+set holds its documents. A workspace gets a set named **General** with its first upload.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/data/overview.png" alt="The Data overview beside the Data explorer, whose Documents folder holds the General and Board minutes sets and their documents" />
+  <img src="https://assets.helix-db.com/docs/foundry/data/overview.png" alt="The Connectors overview beside the Connectors explorer, whose Documents folder holds the General and Board minutes sets and their documents" />
 </Frame>
+
+Some connections write documents of their own, in sets of their own: Granola keeps each
+meeting note's summary in **Notes**, and its transcripts in **Transcripts** when you turn
+them on; an [API source](/foundry/data/api-sources) read by entity extraction keeps its
+newest 500 pieces in its set. Each sync updates them, so they can't be uploaded to,
+moved, renamed or deleted, and they don't count toward the workspace's uploads. A
+connection keeps the newest 1,000 documents of each of its sets.
 
 Owners and admins manage the sets from their rows in the explorer:
 
@@ -38,30 +46,26 @@ and accents.
 Upload in any of these ways; Foundry checks each file before it uploads it, then sends
 it straight to storage and shows its progress.
 
-- **Upload documents**, in the explorer's head or on the Data overview, uploads into
-  General, or the oldest set when there is no General.
+- **Upload documents**, in the explorer's head or on the Connectors overview, uploads
+  into General, or the oldest set when there is no General.
 - **Upload into**, on a set's row, uploads into that set.
 - Drop files onto a set in the explorer. Files dropped anywhere else on the explorer or
-  the Data overview go where **Upload documents** puts them.
+  the Connectors overview go where **Upload documents** puts them.
+- On New ontology and in Generate, **Upload documents** uploads in place.
 
-| Rule | Value |
-| --- | --- |
-| File types | Markdown (`.md`, `.markdown`), text (`.txt`), JSON (`.json`), CSV (`.csv`), TSV (`.tsv`), JSONL (`.jsonl`, `.ndjson`), Parquet (`.parquet`) and PDF (`.pdf`) |
-| Size | 1 byte to 1 MiB each |
-| Count | At most 200 documents in the workspace |
-| Name | At most 255 characters, with no slash, backslash or control character |
+| Format | Extensions | Size | Ontologies read it |
+| --- | --- | --- | --- |
+| Markdown, MDX and text | `.md`, `.markdown`, `.mdx`, `.txt` | Up to 1 MiB | As text, for its names and facts |
+| PDF | `.pdf` | Up to 3 MiB and 150 pages | As the text Foundry reads from it |
+| CSV, TSV, JSON, JSONL and Parquet | `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.parquet` | Up to 3 MiB | As a table of its own |
 
-<Note>
-  Ontologies read only Markdown and text documents so far. Foundry keeps the other
-  formats in their sets for you to view, and says so wherever they show: on the upload,
-  on the document's page, on its set and in Generate and the Load dialog. Loads skip
-  them.
-</Note>
+A workspace holds up to 200 uploaded documents. A name is at most 255 characters, with
+no slash, backslash or control character. Compressed files aren't taken.
 
 Each upload says which set it went into and which ontologies read that set.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/data/documents-uploaded.png" alt="The Data explorer with contract.md uploaded into General, and a note that Renewals reads it with its first load" />
+  <img src="https://assets.helix-db.com/docs/foundry/data/documents-uploaded.png" alt="The Connectors explorer with contract.md uploaded into General, and a note that Renewals reads it with its first load" />
 </Frame>
 
 A workspace keeps one copy of each file. Uploading a file it already holds, under any
@@ -79,25 +83,36 @@ when it was uploaded. Foundry shows each document by its type:
 
 | Type | Shown as |
 | --- | --- |
-| Markdown | Rendered, with headings, lists, tables and links; images show as their alt text and are never loaded |
+| Markdown and MDX | Rendered, with headings, lists, tables and links; images show as their alt text and are never loaded. MDX is never run: its components and expressions show as written |
 | Text | As it is |
 | JSON | A tree you open node by node |
 | CSV, TSV, JSONL and Parquet | A table of the first 5,000 rows, with the rows it couldn't read |
-| PDF | Its pages |
+| PDF | **Text**: the text Foundry read from it, page by page; **Pages**: its pages as they look |
 
 Markdown, JSON, CSV, TSV and JSONL also have **Source**, to read the file's own text.
 
+A table file's page also says how Foundry read it: its columns, as **Rows**. Until
+Foundry has read it, which takes a moment after the upload, a generation leaves it out.
+
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/data/document-csv.png" alt="A CSV document's page in Data showing its rows as a table, and that ontologies don't read CSV documents yet" />
+  <img src="https://assets.helix-db.com/docs/foundry/data/document-csv.png" alt="A CSV document's page in Connectors showing its rows as a table, how ontologies load it as a table of its own, and its details" />
+</Frame>
+
+A PDF's text is read once, after its upload. Until then, it says **Reading its text**,
+and a generation leaves it out. A scanned PDF has no text to read, so ontologies can't
+read it; it stays in its set to view. The same goes for a PDF that is encrypted,
+damaged, or longer than 150 pages.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/document-pdf.png" alt="A two-page master services agreement PDF in Connectors: the text Foundry read from each page, its Text and Pages tabs, the ontology that reads it and its details" />
 </Frame>
 
 **Details** lists its media type, size, SHA-256 and ID. **Ontologies** lists each
 ontology that reads the document's set, or whose current load holds the document, with
-what its current load made of it and **Open in** to read it there. For a format
-ontologies don't read, it says so instead.
+what its current load made of it and **Open in** to read it there.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/data/document.png" alt="contract.md's page in Data with its Markdown rendered, and Customer contracts and Renewals under Ontologies with their statuses" />
+  <img src="https://assets.helix-db.com/docs/foundry/data/document.png" alt="contract.md's page in Connectors with its Markdown rendered, and Customer contracts and Renewals under Ontologies with their statuses" />
 </Frame>
 
 Each ontology's status says where the document stands in its current load: **Not read
@@ -123,12 +138,15 @@ its generation picked:
   each and drafts routes for them, which say what each set's documents may fill, such
   as a contract's signing date and the customer it was signed with. See
   [Generate and version](/foundry/ontologies/generate-and-version#generate-a-draft).
-- **Loads** read every document in the version's sets: its sections, the names it
-  mentions, and the facts it states, each with the quote it came from. A document in a
-  set no route reads is stored, not read, and shows **Not read by its version**. What
-  a load can't settle, such as a name the database doesn't hold, an ambiguous name, a
-  quote it couldn't verify or a fact that conflicts with your tables, goes to **Needs
-  review** instead of becoming a record.
+- **Loads** read every text document and PDF in the version's sets: its sections, the
+  names it mentions, and the facts it states, each with the quote it came from. A
+  document in a set no route reads is stored, not read, and shows **Not read by its
+  version**. What a load can't settle, such as a name the database doesn't hold, an
+  ambiguous name, a quote it couldn't verify or a fact that conflicts with your tables,
+  goes to **Needs review** instead of becoming a record.
+- **Table files** are tables of their own, which a version's mappings load as they load
+  a synced table. Text in their cells isn't read for names and facts. A generation that
+  picks a set drafts mappings for the table files in it.
 - A document uploaded or moved into a set the current load reads is read into that load
   as it arrives.
 
@@ -136,8 +154,10 @@ An existing ontology reads a new set only after a new generation picks it, or a
 [version edit](/foundry/ontologies/generate-and-version#edit-a-version) routes it, and
 that version is loaded.
 
-Reading documents uses AI models: a load sends each document's text to Anthropic and
-OpenAI models to find its names and facts and to check them.
+Reading documents uses AI models: a load sends each document's text to the
+workspace's [AI models](/foundry/workspace/ai-models) to find its names and facts and
+to check them. What it costs counts toward the month's
+[loads cap](/foundry/workspace/usage).
 
 ## In an ontology
 
@@ -145,7 +165,7 @@ An ontology's **Documents** lists what it reads of the workspace's documents: th
 the sets its version reads, and those its current load holds. Open it from the
 ontology's pages in the Ontologies panel, from the document count in the ontology's
 header, or from a load's **Documents read** and **Review documents**. It is read-only:
-**Open in Data** goes back to the documents in Data.
+**Open in Connectors** goes back to the documents in Connectors.
 
 There, the Ontologies panel becomes the ontology's documents explorer: a row back to
 the ontology, a filter, and its sets as folders of their documents. Each document's dot
@@ -184,7 +204,7 @@ delete sets. Members read them.
     Write tables and documents into the database.
   </Card>
   <Card title="Connect data" icon="plug" href="/foundry/data/connect-data">
-    The Data explorer, and how to arrange it.
+    The Connectors explorer, and how to arrange it.
   </Card>
   <Card title="Records and entities" icon="table" href="/foundry/explore/records-and-entities">
     See every place a record comes from.
