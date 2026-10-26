@@ -42,7 +42,7 @@ def check(port):
                     branch["else_traversal"] = child
                 root = {"limit": {"input": {"choose": branch}, "count": {"literal": 1}}}
                 actual = query(port, root)
-                assert actual == (expected if matches or has_else else None), (root, actual)
+                assert actual == (expected if matches or has_else else []), (root, actual)
 
     # Full-input operators must reject scalar input even under zero demand.
     empty = {"has_label": {"input": {"nodes": {"reference": "all"}},
@@ -94,10 +94,6 @@ def check(port):
                         elif terminal == "exists":
                             expected = bool(expected)
                         actual = query(port, root, saved=saved_rows)
-                        # Existing empty scalar projections can serialize as
-                        # null for a known-empty plan or [] for a drained plan.
-                        if terminal == "id" and actual is None:
-                            actual = []
                         assert actual == expected, (root, actual, expected)
                         folded = {"fold": {"input": saved_rows}}
                         if operator == "inject":
@@ -115,8 +111,6 @@ def check(port):
                                 raise AssertionError(
                                     f"{operator} rejected folded operand with limit {take} and {terminal}"
                                 ) from error
-                            if terminal == "id" and actual is None:
-                                actual = []
                             assert actual == expected, (root, actual, expected)
 
     # Enter the repeat body with a large frontier before satisfying LIMIT 1.

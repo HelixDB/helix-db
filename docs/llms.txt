@@ -77,7 +77,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 
 ## Operate
 - [Security](https://docs.helix-db.com/database/helix-cloud/operate/security): Authenticate requests, handle API keys, and review encryption and enterprise security features — Page type: Reference
-- [Multi-tenancy](https://docs.helix-db.com/database/helix-cloud/operate/multi-tenancy): Isolate application tenants with row-level scoping and tenant-partitioned search indexes — Page type: Guide
+- [Multi-tenancy](https://docs.helix-db.com/database/helix-cloud/operate/multi-tenancy): Isolate tenants with storage-level tenant databases, row-level scoping, and tenant-partitioned search indexes — Page type: Guide
 - [Guarantees](https://docs.helix-db.com/database/helix-cloud/operate/guarantees): Atomicity, isolation, durability, index activation, and read-after-write behavior — Page type: Reference
 - [Limits](https://docs.helix-db.com/database/helix-cloud/operate/limits): Understand Helix Cloud request rate limits and database constraints — Page type: Reference
 - [Tradeoffs](https://docs.helix-db.com/database/helix-cloud/operate/tradeoffs): What the Helix Cloud architecture is optimized for, and where another system may fit better — Page type: Concept

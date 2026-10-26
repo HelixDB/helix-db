@@ -828,10 +828,10 @@ async fn batch_conditions_skip_regions_and_steps() {
     assert_eq!(
         response,
         serde_json::json!({
-            "skipped_region": null,
+            "skipped_region": [],
             "skipped_window": [],
             "skipped_list": [],
-            "skipped_single": null,
+            "skipped_single": [],
         })
     );
     for (previous, expected) in [
@@ -1084,11 +1084,11 @@ async fn indexed_windows_follow_range_order_and_equality_membership() {
             "intersect_last": [1],
             "intersect_all": [0, 1],
             "intersect_count": 2,
-            "intersect_empty": null,
+            "intersect_empty": [],
             "edge_intersect_first": [2],
             "edge_intersect_all": [2, 0],
             "edge_intersect_count": 2,
-            "edge_intersect_empty": null,
+            "edge_intersect_empty": [],
             "runtime_range_limit": [0, 1],
             "runtime_label_limit": [0],
         })
@@ -1380,7 +1380,7 @@ async fn indexed_membership_parameters_are_exact_for_every_domain_shape() {
             "empty",
             QueryValue::Array(Vec::new()),
             serde_json::json!({
-                "ids": [], "first": null, "count": 0, "ranked_count": 0,
+                "ids": [], "first": [], "count": 0, "ranked_count": 0,
                 "bucket_ids": [], "ordered": [],
             }),
         ),
@@ -1392,7 +1392,7 @@ async fn indexed_membership_parameters_are_exact_for_every_domain_shape() {
                     .collect(),
             ),
             serde_json::json!({
-                "ids": [], "first": null, "count": 0, "ranked_count": 0,
+                "ids": [], "first": [], "count": 0, "ranked_count": 0,
                 "bucket_ids": [], "ordered": [],
             }),
         ),
@@ -1483,7 +1483,7 @@ async fn indexed_membership_parameters_are_exact_for_every_domain_shape() {
             "empty",
             QueryValue::Array(Vec::new()),
             serde_json::json!({
-                "ids": [], "first": null, "count": 0, "heavy_count": 0,
+                "ids": [], "first": [], "count": 0, "heavy_count": 0,
                 "ordered": [], "scoped_count": 0,
             }),
         ),
