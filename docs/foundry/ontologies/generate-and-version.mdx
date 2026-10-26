@@ -1,6 +1,6 @@
 ---
 title: "Generate and version an ontology"
-description: "Ask Helix Foundry's agent to draft an ontology from your synced tables and documents, review each version, and choose the current one"
+description: "Ask Helix Foundry's agent to draft an ontology from your synced tables, API sources and document sets, review each version, edit it, and choose the current one"
 sidebarTitle: "Generate and version"
 pageType: "Guide"
 ---
@@ -8,9 +8,14 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 A generation asks Foundry's agent to draft a new version of an ontology: its types,
-links, mappings from your tables, rules and the questions it should answer. Each draft
-is stored as a new version beside the others. Nothing changes until you make a version
-current.
+links, mappings from your tables, routes for your documents, rules and the questions it
+should answer. Each draft is stored as a new version beside the others. Nothing changes
+until you make a version current.
+
+[Creating an ontology](/foundry/ontologies/create-an-ontology) drafts its first
+version, and until the ontology is set up its
+[overview](/foundry/ontologies/create-an-ontology#the-overview) carries on from there:
+generate, review, make current, load. **Generate** drafts the next versions.
 
 <Frame caption="Generate a draft, review it and make it current.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/ontology/generate-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/ontology/generate.webm"></video>
@@ -23,21 +28,57 @@ current.
     On the ontology, select **Generate**. Under **What should it serve?**, write the
     questions people will ask of it, in your words. The goal is optional, up to 2,000
     characters, and names the generation.
+
+    **Copy prompt for your agent** copies a prompt for your own AI assistant to write the
+    goal with you. It describes the tables and document sets you chose, quotes the goal
+    so far, and asks the assistant to draw on what it knows of your work, ask you at most
+    five questions, and reply with a goal you paste back here. Foundry sends nothing
+    itself.
   </Step>
 
   <Step title="Choose its tables">
-    Choose the connectors whose synced tables go in; every table a connector has synced
-    is included. Expand a connector to see its tables. A generation reads at most 50
-    tables.
-  </Step>
+    Under **Tables**, choose the connectors whose synced tables go in; every table a
+    chosen connector has synced is included. Connectors are grouped by kind: a kind
+    with one connector shows it on its own, and a kind with several nests them under one
+    choice. Expand that choice to pick some of them; it then shows as partly chosen.
+    Expand a connector to see its tables. A generation reads at most 50 tables.
 
-  <Step title="Check its documents">
-    The agent also sees the names of the ontology's 50 most recently uploaded
-    [documents](/foundry/ontologies/documents), so it can add types for what they hold,
-    such as a contract with a customer.
+    **Add data** connects another source without leaving the form. Its first sync
+    shows in its row, and it is chosen once it has synced.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/ontology/generate.png" alt="The Generate an ontology form with a goal, the Stripe connector's tables expanded and the Documents section" />
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/generate.png" alt="The Generate an ontology form with a goal and Copy prompt for your agent, Stripe chosen, and PostgreSQL's two connectors expanded with one of them chosen" />
+    </Frame>
+  </Step>
+
+  <Step title="Choose its API sources">
+    Under **API sources**, choose the [API sources](/foundry/data/api-sources) it reads,
+    and how each is read: **Structured mappings** map its fields to types and
+    properties, like a table's columns; **Entity extraction** reads the text of its
+    newest 500 pieces for the entities and facts they describe, from the source's text
+    field, which owners and admins can choose here. A source can be chosen once its
+    first pieces have synced.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/generate-api-sources.png" alt="The API sources section of the Generate form, with Order lines chosen and read through Structured mappings" />
+    </Frame>
+  </Step>
+
+  <Step title="Choose its documents">
+    Under **Documents**, choose the [document sets](/foundry/data/documents) the new
+    version reads. You pick whole sets, the folders of the Connectors explorer's Documents.
+    The choice starts as the current version's sets, or none for a first generation.
+    Leave every set unticked for a version that reads no documents. A generation reads
+    at most 20 sets. **Upload documents**, or the upload button on a set's row, uploads
+    files from here and chooses the set they went into.
+
+    The agent reads up to five of the newest documents in each set, with the set's
+    description, and drafts routes for them: what each set's documents may fill. It
+    drafts mappings for the table files in them, as it does for synced tables. Loads of
+    the new version read the documents of these sets, and only theirs.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/generate-documents.png" alt="The Documents section of the Generate form, with General chosen and its contract.md listed, and Board minutes not chosen" />
     </Frame>
   </Step>
 
@@ -52,50 +93,75 @@ A generation is **Queued**, then **Running**, then **Succeeded** or **Failed**. 
 can take several minutes. An attempt that fails for a passing reason is retried, up to
 three attempts; while it waits, the page says it is retrying, why, and when it runs
 next. Other failures, such as a draft the agent refused, fail at once. An ontology runs
-one generation at a time.
+one generation at a time, and a workspace starts at most 10 generations and version edits
+an hour.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/generation-done.png" alt="A succeeded generation that drafted version 4, with Review version 4" />
 </Frame>
 
-**Generations** lists every generation with its title, status and the version it
-drafted. Open one to see its goal, tables and steps. A failed generation offers **Try
-again**, which opens the form with the same goal and connectors.
+A generation's page shows its goal, its tables and its steps. Open it from its
+version's page, where the version is named for it, or from a failed generation's row in
+**Schema versions**. A failed generation offers **Try again**, which opens the form
+with the same goal, connectors and document sets.
+
+## Schema versions
+
+**Schema versions**, on the ontology's overview below its schema, lists every version,
+newest first, named by the generation that
+drafted it, with the generations that failed among them. Each row shows the version's
+status, title, format and when it was made. Select a row to open the version, or a
+failed generation's row to see why it failed.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/generations.png" alt="The Generations list with each generation's title, status and version" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/versions.png" alt="Schema versions listing versions 4 to 1 by title, version 3 current, and a failed generation among them" />
 </Frame>
 
 ## Review a version
 
-Select **Review version** on a generation, or open a version from **Schema versions**.
-An agent draft opens on its summary and its graph, with a tab for each part:
+Select **Review version** on a generation or in **Schema versions**. A version's header
+says whether it is current, its format, the document sets its loads read (**Reads …**)
+and the generation it was drafted for. An agent draft opens on its summary and its
+graph, with a tab for each part:
 
 | Tab | Shows |
 | --- | --- |
-| **Graph** | The agent's summary and the types and links as a scene or a schema |
-| **Types** | Each type with its properties and keys |
+| **Graph** | The agent's summary, and the types and links as a schema; select a type to open it |
+| **Types** | Each type with its properties, keys and identifiers |
 | **Links** | How types connect, and what each link means |
 | **Mappings** | Which table and columns fill each type and link |
-| **Rules** | Checks the data should pass |
+| **Sources** | For each type and link, which tables and document routes fill it |
+| **Rules** | Rules, constraints and relations the data should pass |
 | **Questions** | The questions the version is meant to answer |
 | **TOML** | The draft's `ontology.toml` and `mappings.toml` |
+| **Edit** | Changes to routes, identifiers, rules and constraints, as a new version |
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/version.png" alt="Version 3, an agent draft, with its summary and Graph tab" />
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/version.png" alt="Version 3, an agent draft that reads General, with its summary, Graph tab and the Sources and Edit tabs" />
 </Frame>
 
-Versions never change. Each generation drafts afresh rather than editing the current
-version, so to change a draft, generate again with a sharper goal or different tables.
+## Edit a version
+
+Versions never change. To change a finished agent draft without generating again, use
+its **Edit** tab, which makes a new version from your edits:
+
+1. Choose an item to edit, or **Add document route**, **Add rule** or **Add
+   constraint**, write it as TOML, and select **Stage item**. Stage as many as you need.
+2. Select **Preview edits**. Foundry checks the edits and says what they would change,
+   without storing a version.
+3. Select **Create version**, then **View new version**. Make it current and load it
+   to apply your edits.
+
+Edits cover document routes, the identifiers of a type, rules and constraints. A route
+that names a document set adds that set to the new version's reads, so an existing
+ontology can read a new set without a new generation. To change which tables fill a
+type, or the types and links themselves, generate again with a sharper goal or
+different tables.
 
 ## Make a version current
 
-Select **Make current** on a version, or in **Schema versions**, and confirm. The
-current version is the one the overview shows and the one a load writes.
-
-<Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/ontology/versions.png" alt="Schema versions listing three versions with their status, format and Make current" />
-</Frame>
+Select **Make current** on a version's page, or on the overview, which offers it for a
+version ready to review, and confirm. The current version is the one the overview shows and the one a load writes.
 
 To roll back, make an older version current. If someone else makes another version
 current at the same time, Foundry refuses yours, says why, and shows the version that
@@ -109,8 +175,8 @@ is current now.
 
 ## Who can do what
 
-Owners and admins generate and make versions current. Members see every generation and
-version.
+Owners and admins generate, edit versions and make them current. Members see every
+generation and version.
 
 ## Next steps
 
@@ -118,7 +184,7 @@ version.
   <Card title="Load data" icon="database" href="/foundry/ontologies/load-data">
     Write the current version into the ontology's database.
   </Card>
-  <Card title="Upload documents" icon="file-lines" href="/foundry/ontologies/documents">
-    Give the agent and your loads documents to read.
+  <Card title="Upload documents" icon="file-lines" href="/foundry/data/documents">
+    Put documents into sets for a version to read.
   </Card>
 </CardGroup>

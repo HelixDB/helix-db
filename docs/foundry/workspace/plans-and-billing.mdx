@@ -1,6 +1,6 @@
 ---
 title: "Plans and billing"
-description: "Compare Helix Foundry Free, Pro and Max, upgrade a workspace, switch tiers, cancel, resume and manage payment"
+description: "Compare Helix Foundry Free, Pro and Max, which differ in how often connectors sync, upgrade a workspace, switch tiers, cancel, resume and manage payment"
 sidebarTitle: "Plans and billing"
 pageType: "Guide"
 ---
@@ -14,22 +14,18 @@ the workspace holds.
 | | Free | Pro | Max |
 | --- | --- | --- | --- |
 | Price | $0 | $100 a month | $500 a month |
-| Stripe, WorkOS and PostHog | ✓ | ✓ | ✓ |
-| Syncs and synced tables | ✓ | ✓ | ✓ |
-| Ontology generation and versions | ✓ | ✓ | ✓ |
-| PostgreSQL and MySQL | | ✓ | ✓ |
+| Every connector: apps, PostgreSQL, MySQL, Amazon S3 and API sources | ✓ | ✓ | ✓ |
+| Ontology generation, versions, loads and Ask | ✓ | ✓ | ✓ |
+| [Scheduled syncs](/foundry/data/connect-data#syncs-on-a-schedule) | Daily | Hourly, reading only what changed | Every 15 minutes, reading only what changed |
+| [Automatic refreshes](/foundry/ontologies/load-data#automatic-refreshes) | Daily at most | Hourly at most | Every 15 minutes at most |
+| Your own [Anthropic key](/foundry/workspace/ai-models) | | ✓ | ✓ |
 
-Max includes everything in Pro, and will add more.
-
-On Free, choosing PostgreSQL or MySQL in **Add data** says the source needs Pro, and
-offers owners and admins **Upgrade to Pro**.
-
-<Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/data/pro-gate.png" alt="Choosing PostgreSQL on Foundry Free: PostgreSQL connections need Foundry Pro, with Upgrade to Pro" />
-</Frame>
+Max includes everything in Pro, and will add more. The monthly
+[spending caps](/foundry/workspace/usage) on loads and questions are the same on every
+plan.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/workspace/billing-free.png" alt="Plan & billing for a Free workspace with the Free, Pro and Max cards" />
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/billing-free.png" alt="Plan & billing for a Free workspace with the Free, Pro and Max cards: every connector on Free, hourly syncs on Pro and syncs every 15 minutes on Max" />
 </Frame>
 
 ## Upgrade
@@ -51,7 +47,7 @@ offers owners and admins **Upgrade to Pro**.
 
   <Step title="Come back">
     Stripe returns you to **Plan & billing**, which checks the payment until the new plan
-    shows. PostgreSQL and MySQL are available at once.
+    shows. Connections sync on the new plan's schedule from then on.
   </Step>
 </Steps>
 
@@ -70,8 +66,10 @@ card and confirm.
 ## Cancel or resume
 
 Select **Cancel Pro** (or **Cancel Max**) and confirm. The plan stays on until the end
-of the period, then the workspace moves to Free and its PostgreSQL and MySQL connections
-stop syncing. Until then, **Resume Pro** (or **Resume Max**) undoes the cancellation.
+of the period, then the workspace moves to Free: its connections sync once a day, and
+if it runs on its own model key, its AI work pauses until an owner chooses **Default**
+or the workspace is on Pro again (see [AI models](/foundry/workspace/ai-models#if-the-workspace-leaves-pro)).
+Until then, **Resume Pro** (or **Resume Max**) undoes the cancellation.
 
 ## Manage payment and invoices
 
@@ -82,8 +80,8 @@ offers **Update payment method**; cancelling and switching wait until it's paid.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Connectors" icon="plug" href="/foundry/data/connectors">
-    Set up a PostgreSQL or MySQL connection.
+  <Card title="Usage" icon="gauge" href="/foundry/workspace/usage">
+    This month's AI spend, against its caps.
   </Card>
   <Card title="Members and roles" icon="users" href="/foundry/workspace/members-and-roles">
     Who can change the plan.

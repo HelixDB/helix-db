@@ -237,7 +237,9 @@
             "group": "Data",
             "pages": [
               "foundry/data/connect-data",
-              "foundry/data/connectors"
+              "foundry/data/documents",
+              "foundry/data/connectors",
+              "foundry/data/api-sources"
             ]
           },
           {
@@ -245,7 +247,6 @@
             "pages": [
               "foundry/ontologies/create-an-ontology",
               "foundry/ontologies/generate-and-version",
-              "foundry/ontologies/documents",
               "foundry/ontologies/load-data"
             ]
           },
@@ -263,10 +264,18 @@
             ]
           },
           {
+            "group": "Agents",
+            "pages": [
+              "foundry/agents/helix-mcp"
+            ]
+          },
+          {
             "group": "Workspace",
             "pages": [
               "foundry/workspace/members-and-roles",
-              "foundry/workspace/plans-and-billing"
+              "foundry/workspace/plans-and-billing",
+              "foundry/workspace/ai-models",
+              "foundry/workspace/usage"
             ]
           },
           {
@@ -1556,6 +1565,14 @@
     {
       "source": "/foundry/ask",
       "destination": "/foundry/ask/ask-questions"
+    },
+    {
+      "source": "/foundry/ontologies/documents",
+      "destination": "/foundry/data/documents"
+    },
+    {
+      "source": "/foundry/documents",
+      "destination": "/foundry/data/documents"
     }
   ],
   "search": {

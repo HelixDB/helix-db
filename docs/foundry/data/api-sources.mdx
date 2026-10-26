@@ -1,0 +1,226 @@
+---
+title: "API sources"
+description: "Send pieces of data to Helix Foundry from your app or agent, over HTTP or the Helix MCP, with send-only tokens, and choose how ontologies read them"
+sidebarTitle: "API sources"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+An API source takes data that no connector reads: your app's records, or what an agent
+produces. Your apps and agents send it pieces of data, JSON objects each with an id,
+over HTTP or the [Helix MCP](/foundry/agents/helix-mcp). Foundry keeps every piece,
+merges them by id into one table, `events`, and learns its fields from what arrives.
+Ontologies read that table through mappings, or read each piece's text by entity
+extraction. API sources are on every plan.
+
+## Create an API source
+
+<Steps>
+  <Step title="Choose API source">
+    In **Connectors**, select **Add data**, then **API source** under **From your app or
+    agent**.
+  </Step>
+
+  <Step title="Name and describe it">
+    Give it a name, such as "Order lines", and say what each piece is. Foundry's agent
+    reads the description when it drafts an ontology from the source.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/data/api-source-form.png" alt="The API source form with the name Order lines and a description of what each piece is" />
+    </Frame>
+  </Step>
+
+  <Step title="Make a send token">
+    Select **Create API source**, then **Create a send token** for an app or agent that
+    sends on its own. Copy it at once, and put it in the sender's environment as
+    `HELIX_EVENT_TOKEN`.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/data/api-source-send.png" alt="Order lines is ready: a new send token to copy, the send tokens list, Copy prompt for the agent, and Send over HTTP with its curl command and pieces.json" />
+    </Frame>
+  </Step>
+</Steps>
+
+An agent can create one too, with the MCP's `create_event_source` action, after your
+confirmation.
+
+## Send tokens
+
+A send token, `hx_ev_…`, lets whoever holds it add pieces to one source and replace any
+piece in it by its id; it reads nothing. Foundry shows it once and keeps only its hash.
+The source's **Send tokens** list names each by its prefix, with when it was made and
+last used. **Revoke** turns a token off for good: senders using it are refused from then
+on, so make a new one for them. A source holds up to 10 live tokens. Give each app or
+agent that sends on its own a source of its own.
+
+Owners and admins make and revoke tokens. They can also send as themselves through the
+signed-in Helix MCP, without a token.
+
+## Send pieces
+
+The source's **Send pieces** panel has what a sender needs. **Copy prompt** copies
+instructions for Claude Code, Codex or another agent: how to connect, how to send and
+what each answer means.
+
+<Tabs>
+  <Tab title="Over HTTP">
+    `POST https://ingest.helix-db.com/v1/sources/{id}/pieces`, with the send token as
+    its bearer, from a server: never from a browser or an app on someone else's device,
+    which would hand them the token. The panel's curl reads the token from
+    `HELIX_EVENT_TOKEN` and sends `pieces.json`:
+
+    ```bash
+    printf 'Authorization: Bearer %s\n' "$HELIX_EVENT_TOKEN" | curl -sS -X POST \
+      "https://ingest.helix-db.com/v1/sources/<source id>/pieces" \
+      -H @- -H "Content-Type: application/json" --data-binary @pieces.json
+    ```
+
+    ```json pieces.json
+    {
+      "client_token": "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+      "pieces": [
+        {
+          "id": "ord-1042-1",
+          "occurred_at": "2026-10-23T09:30:00Z",
+          "data": { "order_id": "ord-1042", "customer": "Globex Corporation", "quantity": 250 }
+        }
+      ]
+    }
+    ```
+
+    The body is JSON in UTF-8, uncompressed, and `client_token` is required.
+  </Tab>
+  <Tab title="Over the Helix MCP">
+    `helix_foundry_send_pieces` takes the same pieces, with each piece's data as JSON
+    text in `data_json`. An agent that sends on its own uses the send token as its
+    bearer and sees only that tool. For Claude Code, in the project's `.mcp.json`:
+
+    ```json .mcp.json
+    {
+      "mcpServers": {
+        "helix-events": {
+          "type": "http",
+          "url": "https://mcp.helix-db.com/mcp",
+          "headers": { "Authorization": "Bearer ${HELIX_EVENT_TOKEN}" }
+        }
+      }
+    }
+    ```
+
+    For Codex, in `~/.codex/config.toml`:
+
+    ```toml
+    [mcp_servers.helix-events]
+    url = "https://mcp.helix-db.com/mcp"
+    bearer_token_env_var = "HELIX_EVENT_TOKEN"
+    ```
+
+    An agent you work with can instead send as you, through its
+    [signed-in Helix MCP](/foundry/agents/helix-mcp#connect-your-agent), if you're an
+    owner or admin.
+  </Tab>
+</Tabs>
+
+### What a piece is
+
+| Field | Rule |
+| --- | --- |
+| `id` | 1 to 128 printable ASCII characters, no spaces, unique within the send. A piece with an id the source holds replaces it. |
+| `occurred_at` | Optional: when it happened, as an RFC 3339 time. |
+| `data` | One JSON object, at most 256 KiB and 64 levels deep. Its top-level keys are the source's fields: at most 200 in a source, 1 to 64 bytes each. `id`, `received_at` and `occurred_at` can't be data keys. |
+
+A field keeps the JSON type it first had: string, number, boolean, object or array, and
+`null` is always allowed. A send that changes a field's type is refused and names both
+types.
+
+`client_token` is a new random value, such as a UUID, for each send: 16 to 64 printable
+ASCII characters. To retry a send, send it again with the same token and the same
+pieces; Foundry stores nothing new and answers `replayed: true`.
+
+### Answers
+
+A send that is stored answers 200, with the source's `capacity`, any `warning` and when
+its next sync is due (`next`). One bad piece refuses the whole send, and none of it is
+stored.
+
+| Status | Meaning |
+| --- | --- |
+| 400 | A piece or the send breaks a rule; the message says which, and `piece` is its place in `pieces`, from 1. |
+| 401 | The send token is missing, wrong or revoked. |
+| 404 | The source isn't the send token's own. |
+| 408 | The body took over 15 seconds to arrive. Send it again with the same `client_token`. |
+| 409 | The source is full or paused, or has all the fields it may have, as `reason` says. |
+| 413 | The body is over 2 MiB. Send fewer pieces at a time. |
+| 415 | Send JSON in UTF-8, uncompressed, with `Content-Type: application/json`. |
+| 429 | Too many sends: wait as long as `Retry-After` says, then retry with the same `client_token`. |
+| 500 to 504 | Wait a second, or as `Retry-After` says, then retry with the same `client_token`. |
+
+## Read an API source
+
+Pieces reach the source's table at its next sync, about a minute after they arrive, on
+every plan. The source's page lists its recent sends, its fields with the type each
+first had, its table and its documents, and how full it is.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/api-source.png" alt="The Order lines API source: its recent sends, its details with capacity, and its fields order_id, customer, product, quantity, unit_price and currency" />
+</Frame>
+
+A source holds at most 2,000,000 rows or 2 GiB. Its page and each answer warn from 80%;
+once it is full, sends are refused, so send new pieces to a new source before then.
+Foundry keeps every piece until you delete the source.
+
+## How ontologies read it
+
+On [New ontology](/foundry/ontologies/create-an-ontology) and in
+[Generate](/foundry/ontologies/generate-and-version#generate-a-draft), **API sources**
+lists the sources that have synced pieces. Choose one, and how it is read:
+
+- **Structured mappings** suit strictly structured JSON: ids, amounts, statuses, times.
+  Its fields map to types and properties, as a synced table's columns do, and every
+  piece is kept.
+- **Entity extraction** suits pieces whose body is text, such as an agent's reply or a
+  note: Foundry's agent reads the text and finds the entities and facts it describes.
+  Choose the source's **text field**, the top-level field holding each piece's text,
+  which must stay a string in every piece. Its newest 500 pieces become Markdown
+  documents in a set of the source's own, which loads read like any
+  [document](/foundry/data/documents).
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/ontology/generate-api-sources.png" alt="Generate's API sources section with Order lines chosen and read through Structured mappings" />
+</Frame>
+
+Extraction suits a few hundred pieces a month, not a steady stream. It costs about 1
+cent a piece for each ontology that reads it. Extraction no person started, as pieces
+arrive and at refreshes, spends at most $5 a month per source and $20 a month across
+the workspace's sources; past that, new pieces wait for next month. A load you start
+spends the [loads' budget](/foundry/workspace/usage) instead.
+
+When new pieces sync, ontologies that read the source
+[refresh by themselves](/foundry/ontologies/load-data#automatic-refreshes).
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| API sources per workspace | 20 |
+| Live send tokens per source | 10 |
+| Pieces per send | 500, with at most 1 MiB of data together, in a body of at most 2 MiB |
+| Piece | 256 KiB of data |
+| Fields per source | 200 |
+| Sends | 5 a second per source (bursts of 20), 20 a second per workspace (bursts of 50) |
+| Per workspace, per UTC day | 200,000 pieces and 1 GiB of data |
+| Rows per source | 2,000,000, and 2 GiB |
+| Pieces read by extraction | The newest 500 |
+| Extraction no person started | $5 a month per source, $20 a month per workspace |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Helix MCP" icon="robot" href="/foundry/agents/helix-mcp">
+    Connect your agent to Foundry.
+  </Card>
+  <Card title="Generate an ontology" icon="wand-magic-sparkles" href="/foundry/ontologies/generate-and-version">
+    Draft an ontology from your API sources.
+  </Card>
+</CardGroup>
