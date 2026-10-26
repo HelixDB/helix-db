@@ -238,7 +238,8 @@
             "pages": [
               "foundry/data/connect-data",
               "foundry/data/documents",
-              "foundry/data/connectors"
+              "foundry/data/connectors",
+              "foundry/data/api-sources"
             ]
           },
           {
@@ -263,10 +264,18 @@
             ]
           },
           {
+            "group": "Agents",
+            "pages": [
+              "foundry/agents/helix-mcp"
+            ]
+          },
+          {
             "group": "Workspace",
             "pages": [
               "foundry/workspace/members-and-roles",
-              "foundry/workspace/plans-and-billing"
+              "foundry/workspace/plans-and-billing",
+              "foundry/workspace/ai-models",
+              "foundry/workspace/usage"
             ]
           },
           {
