@@ -1,17 +1,17 @@
 ---
 title: "Helix Foundry quickstart"
-description: "Sign in, connect a source, upload documents, generate an ontology, load it into a Helix database, explore it and ask it a question"
+description: "Sign in, create a workspace's first ontology from a connected source and your documents, load it into a Helix database, ask it a question and explore it"
 sidebarTitle: "Quickstart"
 pageType: "Tutorial"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
-This tutorial takes a new workspace from sign-in to an explored graph and a first
-answer. You need a Helix account and a source to read, such as a Stripe account.
-Owners and admins of a workspace can do every step. Members can follow along
-read-only; exploring a load and asking about it also need **Query read** on its
-database's Helix project.
+This tutorial takes a new workspace from sign-in to a first answer and an explored
+graph. You need a Helix account and some data: a source to read, such as a Stripe
+account, or documents such as contracts. Owners and admins of a workspace can do every
+step. Members can follow along read-only once an ontology exists; asking about a load
+and exploring it also need **Query read** on its database's Helix project.
 
 <Frame caption="The path end to end: synced data, a generated draft, a load, the Explorer and Ask.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
@@ -35,40 +35,48 @@ database's Helix project.
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/start-here/create-workspace.png" alt="The Create a workspace dialog over the workspace picker" />
     </Frame>
+
+    A workspace without an ontology opens on **Create your first ontology**, which
+    takes you through the steps below. To hand them to your agent instead, select
+    **Copy prompt** under **Set up with your agent**, and paste it into Claude Code,
+    Codex or another agent with the [Helix MCP](/foundry/agents/helix-mcp).
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/start-here/onboarding.png" alt="Create your first ontology for a new workspace, with Set up with your agent above its Name step" />
+    </Frame>
   </Step>
 
-  <Step title="Connect and sync a source">
-    In **Data**, select **Add data**, choose the source, and follow its numbered steps
-    to create a read-only credential. Select **Test connection** to see what the
-    credential can read, then **Connect and sync**. The first sync starts at once.
+  <Step title="Name it and choose its database">
+    Name the ontology, then choose the Helix database its loads write into: one you have,
+    or a new one on Helix's shared cluster.
+  </Step>
+
+  <Step title="Connect your data or upload documents">
+    Choose what Foundry's agent drafts from. Select **Add data** to connect a source in
+    place: choose it, follow its numbered steps to create a read-only credential, select
+    **Test connection** to see what it can read, then **Connect and sync**. Its first
+    sync shows in its row.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/data/stripe-tested.png" alt="The Stripe connection form after a successful test, listing the objects the key can read" />
     </Frame>
 
-    See [Connect data](/foundry/data/connect-data) for every source and what it needs.
-  </Step>
-
-  <Step title="Upload documents">
-    Optional. In **Data**, select **Upload documents** and choose Markdown or text
-    files, such as contracts; ontologies don't read other formats yet. They go into the
-    **General** document set, in the Data explorer's **Documents** folder.
+    Select **Upload documents** for files such as contracts, notes, CSV exports or PDFs.
+    They go into the **General** document set, which is then chosen. Any of tables, API
+    sources and documents will do; you need at least one.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/data/documents-uploaded.png" alt="The Data explorer with contract.md uploaded into General" />
+      <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology-data.png" alt="The step Connect your data or upload documents, with the Stripe and Shop database connectors and the General document set chosen" />
     </Frame>
 
-    See [Documents](/foundry/data/documents) for sets and what they're for.
+    See [Connect data](/foundry/data/connect-data) for every source, and
+    [Documents](/foundry/data/documents) for what Foundry reads in each format.
   </Step>
 
-  <Step title="Create an ontology">
-    In **Ontologies**, select **New ontology**. The page walks you through it one step
-    at a time: name it, choose the Helix database it loads into (one you have, or a new
-    one on Helix's shared cluster), choose the connectors whose synced tables it reads
-    and, optionally, the document sets it reads, such as **General**, and say what it
-    should serve. Then select **Create and generate**: Foundry creates the ontology and
-    its agent drafts a first version. The page follows the generation until it stores
-    the version.
+  <Step title="Say what it should serve, and create it">
+    Optionally, write the questions people will ask of it, in your words. Then select
+    **Create and generate**: Foundry creates the ontology and its agent drafts a first
+    version. The page follows the generation until it stores the version.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology-review.png" alt="The New ontology page at its Review and create step, with the name, database, data, documents and goal chosen, and Create and generate" />
@@ -92,29 +100,32 @@ database's Helix project.
   <Step title="Load it">
     On the ontology's overview, select **Load data**. The dialog says which tables and
     document sets the load reads and what it may spend; select **Load**. When it
-    finishes, it becomes the current load.
+    finishes, it becomes the current load. From then on, Foundry
+    [refreshes it](/foundry/ontologies/load-data#automatic-refreshes) when your synced
+    data changes.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/ontology/load-dialog.png" alt="The Load version 3 into contracts dialog with the tables, the documents from General, spending and limits" />
     </Frame>
   </Step>
 
+  <Step title="Ask a question">
+    Select **Ask** in the sidebar; Foundry also opens on it. Write a question or pick a
+    suggestion, and select the arrow. The answer cites the records, rows and quotes it
+    came from, and the thread stays in the sidebar.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/ask/thread.png" alt="An Ask thread with its steps and an answer citing its sources, and the threads in the sidebar" />
+    </Frame>
+  </Step>
+
   <Step title="Explore it">
-    Select **Open Explorer**. The graph opens on a connected sample of the load. Search
+    Select **Explorer**. The graph opens on a connected sample of the load. Search
     with <kbd>/</kbd>, double-click a node to expand it, or switch to **Records** to read
     each type as a table.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/explore/explorer-node.png" alt="The Explorer with a customer selected and its properties and relationships in the inspector" />
-    </Frame>
-  </Step>
-
-  <Step title="Ask a question">
-    Select **Ask** on the rail, write a question or pick a suggestion, and select
-    the arrow. The answer cites the records, rows and quotes it came from.
-
-    <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/ask/thread.png" alt="An Ask thread with its steps and an answer citing its sources" />
     </Frame>
   </Step>
 </Steps>
@@ -128,8 +139,8 @@ database's Helix project.
   <Card title="Invite your team" icon="user-plus" href="/foundry/workspace/members-and-roles">
     Invite members and admins to the workspace.
   </Card>
-  <Card title="Connect a database" icon="database" href="/foundry/data/connectors">
-    PostgreSQL, MySQL and S3 need Foundry Pro.
+  <Card title="Use Foundry from your agent" icon="robot" href="/foundry/agents/helix-mcp">
+    Connect Claude Code or Codex through the Helix MCP.
   </Card>
   <Card title="Troubleshooting" icon="wrench" href="/foundry/reference/troubleshooting">
     What each error and waiting state means.

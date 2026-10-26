@@ -8,12 +8,15 @@ pageType: "Concept"
 <div className="flex flex-wrap gap-2"><Badge color="purple" size="sm">Concept</Badge></div>
 
 Helix Foundry turns the tools your company runs on into one connected graph. Connect
-sources such as Stripe or your PostgreSQL database, upload the documents your tables
-don't cover, let Foundry's agent draft an ontology across them, then load it into a
-Helix database, explore it as a graph or as records, and ask it questions.
+sources such as Stripe or your PostgreSQL database, send it your app's or agent's own
+data, upload the documents your tables don't cover, let Foundry's agent draft an
+ontology across them, then load it into a Helix database, ask it questions, and
+explore it as a graph or as records. Connectors keep syncing on a schedule, and
+ontologies refresh when their data changes.
 
-Foundry runs at [foundry.helix-db.com](https://foundry.helix-db.com). Sign in with the
-account you use for Helix Cloud; your workspaces come with it.
+Foundry runs at [foundry.helix-db.com](https://foundry.helix-db.com), and your agents
+reach it through the [Helix MCP](/foundry/agents/helix-mcp). Sign in with the account
+you use for Helix Cloud; your workspaces come with it.
 
 <Frame caption="The whole path in two minutes: synced data, a generated draft, a load, the Explorer and Ask.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
@@ -24,15 +27,16 @@ account you use for Helix Cloud; your workspaces come with it.
 | Concept | What it is |
 | --- | --- |
 | **Workspace** | Your team's space, shared with Helix Cloud. It holds connections, documents, ontologies, members and the Foundry plan. |
-| **Connection** | A source Foundry reads, with its credential. Each **sync** copies its tables into a snapshot Foundry keeps. |
-| **Document** | A file of the workspace, such as a contract, kept in Data. A load reads Markdown and text documents for the names and facts they hold; other formats, such as CSV, JSON or PDF, are kept to view. |
-| **Document set** | A folder of documents in Data. A version reads the sets its generation picked. |
+| **Connection** | A source Foundry reads, with its credential. Each **sync** copies its tables into a snapshot Foundry keeps, on the plan's schedule or when you ask. |
+| **API source** | A source your apps and agents send pieces of data to, over HTTP or the Helix MCP. |
+| **Document** | A file of the workspace, such as a contract, kept in Connectors. A load reads text and PDFs for the names and facts they hold, and table files such as CSV as tables. |
+| **Document set** | A folder of documents. A version reads the sets its generation picked. |
 | **Ontology** | The types, links and rules that describe your data, bound to one Helix database. |
-| **Generation** | A request to Foundry's agent to draft a new version of the ontology from your synced tables and the document sets you pick. |
+| **Generation** | A request to Foundry's agent to draft a new version of the ontology from the tables, API sources and document sets you pick. |
 | **Version** | One draft of the ontology. Versions never change; you choose which one is current. |
-| **Load** | One write of the current version into the ontology's database: your tables, then the documents of its sets. |
+| **Load** | One write of the current version into the ontology's database: your tables, then the documents of its sets. A **refresh** is a load Foundry starts itself when the data changed. |
+| **Ask** | Questions about a load in plain language, answered with the sources they came from. Foundry opens on it. |
 | **Explorer** | The graph and records view of a load, read from the database with your session. |
-| **Ask** | Questions about a load in plain language, answered with the sources they came from. |
 
 The work flows in one direction:
 
@@ -41,8 +45,12 @@ flowchart LR
   A[Connect data and upload documents] --> B[Generate a draft]
   B --> C[Review and make it current]
   C --> D[Load into the database]
-  D --> E[Explore and ask]
+  D --> E[Ask and explore]
+  A -. syncs .-> D
 ```
+
+You can do each step on the website, or have your agent do it through the
+[Helix MCP](/foundry/agents/helix-mcp), with your confirmation for every change.
 
 ## What Foundry does not do
 
@@ -57,9 +65,14 @@ flowchart LR
 
 A generation sends your synced tables, and up to five of the newest documents of each
 set it picks, to Foundry's agent, which drafts the version. A load sends your
-documents' text to Anthropic and OpenAI models, which find the names and facts they
-hold and check them. Reading tables into a load uses no models. Ask sends your question,
-and what each step reads from the load, to Anthropic models.
+documents' text to AI models, which find the names and facts they hold and check them.
+Reading tables into a load uses no models. Ask sends your question, and what each step
+reads from the load, to AI models.
+
+By default these run on hosted providers through Helix, today Anthropic's Claude models.
+On Pro or Max, an owner can run them on the workspace's own Anthropic key instead; see
+[AI models](/foundry/workspace/ai-models). What they cost counts against the
+workspace's [monthly caps](/foundry/workspace/usage).
 
 ## Next steps
 
@@ -75,5 +88,11 @@ and what each step reads from the load, to Anthropic models.
   </Card>
   <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
     Ask your data questions in plain language.
+  </Card>
+  <Card title="Use Foundry from your agent" icon="robot" href="/foundry/agents/helix-mcp">
+    Connect Claude Code, Codex or another agent through the Helix MCP.
+  </Card>
+  <Card title="Send data from your app" icon="code" href="/foundry/data/api-sources">
+    Push pieces of data to an API source.
   </Card>
 </CardGroup>
