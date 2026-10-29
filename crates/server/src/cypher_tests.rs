@@ -398,7 +398,7 @@ async fn grpc_cypher_rejections_use_native_codes_and_read_explain_options() {
         ),
         (
             vec![b' '; crate::MAX_QUERY_BODY_BYTES + 1],
-            tonic::Code::ResourceExhausted,
+            tonic::Code::InvalidArgument,
             "invalid_request_body",
         ),
     ] {
@@ -447,8 +447,8 @@ async fn grpc_cypher_rejections_use_native_codes_and_read_explain_options() {
         .explain_cypher(request(create.clone(), true, false))
         .await
         .unwrap_err();
-    assert_eq!(require_writer.code(), tonic::Code::Unavailable);
-    assert_eq!(error_code(&require_writer), "invalid_request_option");
+    assert_eq!(require_writer.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(error_code(&require_writer), "writer_mode_required");
     // A reader still plans a modifying statement, and refuses to run it.
     read_grpc
         .explain_cypher(request(create.clone(), false, false))

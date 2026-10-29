@@ -401,10 +401,7 @@ for (const [retryable, expected] of [
 
 {
   // A duplicate unique value answers 409 but is not a retryable conflict.
-  const error = await remoteError(
-    409,
-    '{"error":"unique_constraint_violation","msg":"taken","retryable":false}',
-  );
+  const error = await remoteError(409, '{"error":"unique_constraint_violation","msg":"taken","retryable":false}');
   assert.equal(error.statusCode, 409);
   assert.equal(error.code, "unique_constraint_violation");
   assert.equal(error.isConflict(), false);

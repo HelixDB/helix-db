@@ -151,7 +151,6 @@ impl HelixDbServer for GrpcService {
         } = request.into_inner();
         if body.len() > MAX_QUERY_BODY_BYTES {
             return Err(status_with_error_code(
-                tonic::Code::ResourceExhausted,
                 error_code::QueryErrorCode::InvalidRequestBody,
                 format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
             ));
@@ -165,7 +164,6 @@ impl HelixDbServer for GrpcService {
         };
         let query = parsed.map_err(|error| {
             status_with_error_code(
-                tonic::Code::InvalidArgument,
                 error_code::QueryErrorCode::InvalidQueryJson,
                 format!("invalid query JSON: {error}"),
             )
@@ -226,14 +224,12 @@ fn query_mode(warm_only: bool) -> QueryMode {
 fn cypher_request(body: &[u8]) -> Result<db::cypher::Request, Status> {
     if body.len() > MAX_QUERY_BODY_BYTES {
         return Err(status_with_error_code(
-            tonic::Code::ResourceExhausted,
             error_code::QueryErrorCode::InvalidRequestBody,
             format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
         ));
     }
     serde_json::from_slice(body).map_err(|error| {
         status_with_error_code(
-            tonic::Code::InvalidArgument,
             error_code::QueryErrorCode::InvalidQueryJson,
             error.to_string(),
         )
@@ -280,22 +276,19 @@ fn validate_options_for_request_type(
 ) -> Result<(), Status> {
     if warm_only && request_type != QueryRequestType::Read {
         return Err(status_with_error_code(
-            tonic::Code::InvalidArgument,
             error_code::QueryErrorCode::InvalidRequestOption,
             "warm_only is only valid for read requests",
         ));
     }
     if await_durable && request_type != QueryRequestType::Write {
         return Err(status_with_error_code(
-            tonic::Code::InvalidArgument,
             error_code::QueryErrorCode::InvalidRequestOption,
             "await_durable is only valid for write requests",
         ));
     }
     if require_writer && db_mode != db::HelixDbMode::Writer {
         return Err(status_with_error_code(
-            tonic::Code::Unavailable,
-            error_code::QueryErrorCode::InvalidRequestOption,
+            error_code::QueryErrorCode::WriterModeRequired,
             "request requires a writer but this server is read-only",
         ));
     }
@@ -303,19 +296,19 @@ fn validate_options_for_request_type(
 }
 
 pub(super) fn status_from_service_error(error: QueryServiceError) -> Status {
-    status_with_error_code(
-        tonic::Code::from_i32(error.classify().grpc_code()),
-        error.error_code(),
-        error.to_string(),
-    )
+    status_with_error_code(error.error_code(), error.to_string())
 }
 
+/// A status whose gRPC code is the error code's class code
+/// ([`error_code::QueryFailureClass::grpc_code`]).
 fn status_with_error_code(
-    status_code: tonic::Code,
     error_code: error_code::QueryErrorCode,
     message: impl Into<String>,
 ) -> Status {
-    let mut status = Status::new(status_code, message.into());
+    let mut status = Status::new(
+        tonic::Code::from_i32(error_code.failure_class().grpc_code()),
+        message.into(),
+    );
     status.metadata_mut().insert(
         HELIX_ERROR_CODE_METADATA,
         tonic::metadata::MetadataValue::from_static(error_code.as_str()),

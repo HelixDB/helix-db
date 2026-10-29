@@ -1025,7 +1025,7 @@ async fn grpc_rejects_malformed_and_oversized_queries_then_shuts_down_cleanly() 
         })
         .await
         .unwrap_err();
-    assert_eq!(oversized.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(oversized.code(), tonic::Code::InvalidArgument);
     assert_eq!(
         oversized
             .metadata()
@@ -1284,7 +1284,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
         })
         .await
         .unwrap_err();
-    assert_eq!(require_writer.code(), tonic::Code::Unavailable);
+    assert_eq!(require_writer.code(), tonic::Code::FailedPrecondition);
     assert_eq!(
         require_writer
             .metadata()
@@ -1292,7 +1292,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
             .expect("writer routing status includes an error code")
             .to_str()
             .expect("error codes are ASCII"),
-        "invalid_request_option"
+        "writer_mode_required"
     );
 
     let write_on_reader = read_transport
