@@ -25,15 +25,15 @@ use db::index_lifecycle::{
 use db::index_lifecycle_testing::{
     LifecycleTestController, LifecycleTestScheduling, LifecycleWorkTarget,
 };
-use db::query_service::{HelixQueryService, QueryFailureClass};
+use db::query_service::HelixQueryService;
 use db::search::vector::VectorDistanceMetric;
 use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken, PublicationLagHistogram};
 use helix_ast::error_code::QueryErrorCode;
+use helix_ast::error_code::QueryFailureClass;
 use helix_ast::graph::NodeRef;
 use helix_ast::query::{QueryRequest, SearchConsistency};
 use helix_ast::value::PropertyInput;
 use helix_ast::{batch, traversal};
-use helix_metrics::query::QueryErrorType;
 use helix_planner::{context, ir};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
@@ -261,16 +261,15 @@ async fn member_backpressure_rejects_whole_writes_until_publication_drains() {
     assert_eq!(error.error_code(), QueryErrorCode::IndexBackpressure);
     assert!(error.to_string().contains("pending_members"), "{error}");
 
-    // Transports classify backpressure as a retryable conflict.
+    // Transports report backpressure as a retryable rejection.
     let error = HelixQueryService::new(Arc::clone(&db))
         .execute_query(text_write(&["three"]))
         .await
         .expect_err("still saturated");
     assert_eq!(error.classify(), QueryFailureClass::Backpressure);
-    assert_eq!(
-        QueryErrorType::from(error.classify()),
-        QueryErrorType::Conflict
-    );
+    assert_eq!(error.classify().http_status(), 429);
+    assert_eq!(error.classify().retryable(), Some(true));
+    assert!(error.classify().rejects_before_commit());
     assert_eq!(error.error_code(), QueryErrorCode::IndexBackpressure);
 
     let error = db
@@ -291,7 +290,7 @@ async fn member_backpressure_rejects_whole_writes_until_publication_drains() {
     );
     assert_eq!(
         error.error_code().failure_class(),
-        helix_ast::error_code::QueryFailureClass::InvalidRequest
+        QueryFailureClass::InvalidRequest
     );
     assert_eq!(
         error.error_code(),
