@@ -386,8 +386,11 @@ impl HelixDbSource {
                 Ok((token.database().to_string(), token.object_store()))
             }
             Self::Disk { root, database } => {
+                // A write is durable once SlateDB's put returns, so every put fsyncs its file
+                // and directory. Without it, a crash or a writeback error the kernel never
+                // reports leaves a manifest naming an SST whose bytes never reached the disk.
                 let object_store: Arc<dyn ObjectStore> =
-                    Arc::new(LocalFileSystem::new_with_prefix(root)?);
+                    Arc::new(LocalFileSystem::new_with_prefix(root)?.with_fsync(true));
                 Ok((database, object_store))
             }
             Self::ObjectStorage {
@@ -4221,6 +4224,20 @@ mod tests {
         };
         assert_eq!(slate_db.block_bytes(), 512 * 1024 * 1024);
         assert_eq!(slate_db.metadata_bytes(), 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn disk_source_fsyncs_every_write() {
+        let root = tempfile::tempdir().expect("disk root");
+        let (database, object_store) = HelixDbSource::Disk {
+            root: root.path().to_path_buf(),
+            database: "disk-fsync".to_owned(),
+        }
+        .into_parts()
+        .expect("disk object store");
+        assert_eq!(database, "disk-fsync");
+        // LocalFileSystem shows its fsync setting only through Debug.
+        assert!(format!("{object_store:?}").contains("fsync: true"));
     }
 
     #[tokio::test]
