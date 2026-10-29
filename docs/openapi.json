@@ -204,6 +204,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "408": {
             "$ref": "#/components/responses/RequestTimeout"
           },
@@ -441,6 +444,16 @@
               }
             }
           },
+          "404": {
+            "description": "The statement reached a missing index.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
           "408": {
             "description": "The Helix Cloud query exceeded its wall-clock limit.",
             "content": {
@@ -452,7 +465,7 @@
             }
           },
           "409": {
-            "description": "Native storage transaction conflict.",
+            "description": "A storage transaction conflict (`transaction_conflict`, `retryable: true`) or a conflict with the database's state, such as `unique_constraint_violation` (`retryable: false`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -795,8 +808,18 @@
           }
         }
       },
+      "NotFound": {
+        "description": "The query named a node, edge, index or index operation that does not exist.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            }
+          }
+        }
+      },
       "RequestTimeout": {
-        "description": "The Helix Cloud query exceeded its wall-clock limit.",
+        "description": "The query exceeded its deadline (`query_deadline_exceeded`), or a Helix Cloud query exceeded its wall-clock limit. A write may have committed.",
         "content": {
           "application/json": {
             "schema": {
@@ -806,7 +829,7 @@
         }
       },
       "Conflict": {
-        "description": "The transaction conflicted with concurrent work and can be retried.",
+        "description": "A conflict. `transaction_conflict` (`retryable: true`) lost to concurrent work and can be retried; a conflict with the database's state, such as `unique_constraint_violation` (`retryable: false`), committed nothing and fails again when resent.",
         "content": {
           "application/json": {
             "schema": {
@@ -858,7 +881,7 @@
         }
       },
       "Unavailable": {
-        "description": "A required writer or ready database is unavailable.",
+        "description": "A required writer or ready database is unavailable, or, with `retryable: false`, a write's commit outcome is unknown.",
         "content": {
           "application/json": {
             "schema": {

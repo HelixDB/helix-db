@@ -53,6 +53,12 @@ database engine behind it use the same envelope; see the
 The text in `msg` can include request-specific details. The `error` values and
 HTTP statuses above are the compatibility surface.
 
+Database engine failures pass through with the engine's code and its
+[class status](/database/helix-db/query-guides/error-handling#failure-classes),
+for example HTTP 409 `unique_constraint_violation` with `"retryable": false` when
+another node already owns a unique value. The gateway reports a failed write as
+`write_outcome_unknown` only when the engine cannot prove it committed nothing.
+
 ## Cypher errors
 
 `POST /v2/cypher` and `POST /v2/cypher/explain` use the same envelope and gateway

@@ -46,10 +46,35 @@ code and `msg` for the readable message:
 }
 ```
 
-The response never adds a separate `code` field. HTTP status classifications
-are unchanged, so use both the status and static code when deciding whether to
-retry. A non-JSON response from an older proxy or intermediary is still exposed
-by each SDK as readable details with no code.
+The response never adds a separate `code` field. A non-JSON response from an
+older proxy or intermediary is still exposed by each SDK as readable details
+with no code.
+
+## Failure classes
+
+Every code belongs to exactly one class, and the class alone sets the HTTP
+status, the gRPC status, the `retryable` field and whether a failed write is
+proven to have committed nothing. The [reference](#error-code-reference) lists
+each code's status.
+
+| Class | HTTP | gRPC | `retryable` | A failed write |
+| --- | --- | --- | --- | --- |
+| Invalid request | 400 | `INVALID_ARGUMENT` | absent | Committed nothing |
+| Planning | 400 | `INVALID_ARGUMENT` | absent | Committed nothing |
+| Not found | 404 | `NOT_FOUND` | absent | Committed nothing |
+| Request timeout | 408 | `DEADLINE_EXCEEDED` | absent | May have committed |
+| Transaction conflict | 409 | `ABORTED` | `true` | Committed nothing |
+| Conflict with database state | 409 | `FAILED_PRECONDITION` | `false` | Committed nothing |
+| Index backpressure | 429 | `RESOURCE_EXHAUSTED` | `true` | Committed nothing |
+| Resource limit | 429 | `RESOURCE_EXHAUSTED` | absent | Committed nothing |
+| Internal failure | 500 | `INTERNAL` | absent | May have committed |
+| Unavailable | 503 | `FAILED_PRECONDITION` | absent | Committed nothing |
+| Commit outcome unknown | 503 | `UNAVAILABLE` | `false` | May have committed |
+
+HTTP 409 has two classes. `transaction_conflict` (`retryable: true`) can succeed
+when resent unchanged. A conflict with the database's state, such as
+`unique_constraint_violation` (`retryable: false`), fails again until that
+state changes: choose another value or reconcile first.
 
 ## Cypher errors
 
@@ -155,9 +180,9 @@ being collapsed or rejected.
 ## Other query boundaries
 
 For gRPC, the status message remains human-readable and the same static code is
-attached as ASCII metadata under `helix-error-code`. Active-text mutation admission
-failures use `InvalidArgument`, matching their HTTP 400 classification, and
-`index_backpressure` uses `ResourceExhausted`, matching HTTP 429.
+attached as ASCII metadata under `helix-error-code`. The gRPC status is the
+code's [class](#failure-classes) status, so `unique_constraint_violation` is
+`FAILED_PRECONDITION` and `index_backpressure` is `RESOURCE_EXHAUSTED`.
 
 Embedded Rust errors expose `error_code()`. UniFFI errors carry two explicit
 fields named `error` and `msg`; generated Python, Node, and Go bindings pass
@@ -171,8 +196,9 @@ code from exception text.
 - A code describes the failure, not whether replaying a particular mutation is
   safe. Retry only idempotent work or work protected by an application-level
   idempotency key.
-- `transaction_conflict` is the only HTTP conflict classification and is
-  normally retryable with bounded backoff.
+- `transaction_conflict` (HTTP 409, `retryable: true`) is normally retryable
+  with bounded backoff. Other 409s conflict with the database's state and carry
+  `retryable: false`; branch on the code, not the status alone.
 - `index_backpressure` (HTTP 429) rejects the whole request before it takes
   effect and carries `retryable: true`. Retry it unchanged with bounded backoff;
   see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
@@ -185,8 +211,7 @@ code from exception text.
 ## Error-code reference
 
 “Correctable” means whether a caller can change its request or deployment state
-to address the failure. Statuses list the current HTTP behavior; `400/503` and
-`400/500` indicate that the same code can arise at more than one boundary.
+to address the failure. Each code has one HTTP status at every boundary.
 
 ### Request validation
 
@@ -195,8 +220,9 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 | `invalid_request` | The request is incompatible with the selected query mode. | 400 | After fixing the request | Yes |
 | `invalid_query_json` | The query body cannot be decoded as query JSON. | 400 | After fixing the body | Yes |
 | `invalid_request_body` | The transport cannot read the body or it exceeds the body limit. | 400 | After fixing the body | Yes |
-| `invalid_request_option` | A header or transport option is invalid; writer routing can also be unavailable. | 400/503 | After fixing the option or routing | Yes |
+| `invalid_request_option` | A header or transport option is invalid; writer routing can also be unavailable. | 400 | After fixing the option or routing | Yes |
 | `invalid_query` | An embedded or encoded query payload is invalid. | 500 | After fixing the query | Yes |
+| `unbound_parameter` | The query reads a parameter the request did not bind. | 400 | After binding the parameter | Yes |
 
 ### Planning
 
@@ -240,14 +266,14 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
-| `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 500 | With a larger deadline or less work | Sometimes |
-| `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `resource_limit` / `memory_limit` with HTTP 429. | 500 (native), 429 (Cypher) | After reducing retained data or increasing the embedded query budget | Sometimes |
-| `invalid_node_id` | A supplied node ID is invalid. | 500 | After fixing the ID | Yes |
-| `node_not_found` | A requested node does not exist. | 500 | After fixing state or ID | Yes |
-| `edge_not_found` | A requested edge does not exist. | 500 | After fixing state or endpoints | Yes |
-| `invalid_vector_configuration` | Vector index configuration is invalid. | 500 | After fixing configuration | Yes |
-| `unique_constraint_violation` | A unique index already owns the requested value. | 500 | After choosing a unique value | Yes |
-| `unsupported_unique_index_value_type` | A unique index does not support the value type. | 500 | After changing the value | Yes |
+| `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 408 | With a larger deadline or less work | Sometimes |
+| `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `resource_limit` / `memory_limit` with HTTP 429. | 429 | After reducing retained data or increasing the embedded query budget | Sometimes |
+| `invalid_node_id` | A supplied node ID is invalid. | 400 | After fixing the ID | Yes |
+| `node_not_found` | A requested node does not exist. | 404 | After fixing state or ID | Yes |
+| `edge_not_found` | A requested edge does not exist. | 404 | After fixing state or endpoints | Yes |
+| `invalid_vector_configuration` | Vector index configuration is invalid. | 400 | After fixing configuration | Yes |
+| `unique_constraint_violation` | A unique index already owns the requested value. | 409 | After choosing a unique value | Yes |
+| `unsupported_unique_index_value_type` | A unique index does not support the value type. | 400 | After changing the value | Yes |
 | `invalid_vector_dimension` | A vector has the wrong dimension. | 400 | After fixing the vector | Yes |
 | `invalid_vector_component` | A vector contains a non-finite component. | 400 | After fixing the vector | Yes |
 | `vector_component_magnitude_exceeded` | A component exceeds the score-safe magnitude. | 400 | After normalizing the vector | Yes |
@@ -280,26 +306,26 @@ embedded configurations may override it.
 
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
-| `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
-| `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
+| `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 503 | After authority recovery | Operational |
+| `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 400 | After changing worker mode | Operational |
 | `active_text_mutation_limit_exceeded` | One indexed text document exceeded a hard per-document admission limit. | 400 | Shorten the text before retrying | Yes |
 | `index_operation_batch_too_large` | One write staged more queued vector/text index work than a single transaction can carry, or a text search in it would analyze more of its own text than a `strong` text search may (512 MiB of analysis by default). | 400 | Split the write before retrying | Yes |
-| `index_build_blocked` | A write would exceed a vector or text index's unpublished-work limit while the index's build is blocked; nothing publishes that work until the build is retried or aborted. | 500 | After retrying or aborting the blocked build | Yes |
-| `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
+| `index_build_blocked` | A write would exceed a vector or text index's unpublished-work limit while the index's build is blocked; nothing publishes that work until the build is retried or aborted. | 409 | After retrying or aborting the blocked build | Yes |
+| `invalid_index_source_data` | Existing graph data violates an index source contract. | 400 | After correcting source data | Yes |
 | `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
-| `invalid_secondary_index_value` | A value violates a secondary-index contract. | 500 | After fixing the value | Yes |
+| `invalid_secondary_index_value` | A value violates a secondary-index contract. | 400 | After fixing the value | Yes |
 | `identifier_exhausted` | A bounded non-index-specific identifier namespace is exhausted. | 500 | No immediate retry | Operational |
 | `index_id_exhausted` | The logical index ID namespace is exhausted. | 500 | No immediate retry | Operational |
 | `vector_physical_id_exhausted` | The vector physical index ID namespace is exhausted. | 500 | No immediate retry | Operational |
 | `index_generation_exhausted` | The index generation namespace is exhausted. | 500 | No immediate retry | Operational |
 | `index_revision_exhausted` | The index revision namespace is exhausted. | 500 | No immediate retry | Operational |
 | `index_operation_revision_exhausted` | The index-operation revision namespace is exhausted. | 500 | No immediate retry | Operational |
-| `index_already_exists` | An index with the requested identity already exists. | 500 | After using idempotent creation or a new name | Yes |
-| `index_definition_conflict` | An existing index has a conflicting definition. | 500 | After reconciling definitions | Yes |
-| `index_busy` | The index is already changing lifecycle state. | 500 | After the active operation completes | Yes |
-| `index_operation_not_found` | The requested index operation does not exist. | 500 | After fixing the operation ID | Yes |
-| `index_operation_not_abortable` | The requested operation can no longer be aborted. | 500 | No | No |
-| `index_not_found` | The required logical or physical index does not exist. | 400/500 | After creating or selecting the index | Yes |
+| `index_already_exists` | An index with the requested identity already exists. | 409 | After using idempotent creation or a new name | Yes |
+| `index_definition_conflict` | An existing index has a conflicting definition. | 409 | After reconciling definitions | Yes |
+| `index_busy` | The index is already changing lifecycle state. | 409 | After the active operation completes | Yes |
+| `index_operation_not_found` | The requested index operation does not exist. | 404 | After fixing the operation ID | Yes |
+| `index_operation_not_abortable` | The requested operation can no longer be aborted. | 409 | No | No |
+| `index_not_found` | The required logical or physical index does not exist. | 404 | After creating or selecting the index | Yes |
 
 ### Retryable conflicts
 
@@ -307,23 +333,23 @@ embedded configurations may override it.
 | --- | --- | --- | --- | --- |
 | `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
 | `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes, or a `strong` text search would analyze more unpublished text in its partition than its bound allows (512 MiB of analysis by default), or a `strong` vector search would score more unpublished vector work than its bound allows (by default the index's retained-byte limit, which writes reach first). | 429 | Yes, bounded backoff | No request change required |
-| `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
-| `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
-| `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |
+| `request_read_view_changed` | A standalone reader changed views during the request. | 409 | Yes, bounded retry | No request change required |
+| `stale_index_generation` | A retained handle refers to a stale index generation. | 409 | Yes, reacquire state | No request change required |
 
 ### Availability and migration
 
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
-| `database_closed` | The database handle is closed. | 500 | After reopening | Operational |
+| `database_closed` | The database handle is closed. | 503 | After reopening | Operational |
 | `invalid_configuration` | Database configuration is invalid. | 500 | After fixing configuration | Operational |
-| `migration_stepping_requires_disabled_mode` | Explicit migration stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
-| `migration_required` | Existing storage requires an explicit migration. | 500 | After migration | Operational |
-| `writer_migration_required` | A writer must open and migrate existing storage. | 500 | After writer migration | Operational |
+| `migration_stepping_requires_disabled_mode` | Explicit migration stepping requires disabled worker mode. | 400 | After changing worker mode | Operational |
+| `migration_required` | Existing storage requires an explicit migration. | 503 | After migration | Operational |
+| `writer_migration_required` | A writer must open and migrate existing storage. | 503 | After writer migration | Operational |
 | `unsupported_index_storage_version` | Stored index data is newer than this binary supports. | 500 | After upgrading the binary | Operational |
 | `writer_mode_required` | The operation requires a writer handle. | 503 | On a writer | Operational |
-| `reader_mode_required` | The operation requires a standalone reader handle. | 500 | On a reader | Operational |
-| `query_cancelled_by_reader_retirement` | Reader retirement cancelled the query before the reader closed. | 500 | After routing to another reader | Operational |
+| `reader_mode_required` | The operation requires a standalone reader handle. | 503 | On a reader | Operational |
+| `query_cancelled_by_reader_retirement` | Reader retirement cancelled the query before the reader closed. | 503 | After routing to another reader | Operational |
+| `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 503 | Only with idempotency protection | No |
 
 ### Internal failures
 

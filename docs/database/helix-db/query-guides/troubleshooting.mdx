@@ -70,9 +70,15 @@ options are also rejected in embedded mode because no routing gateway is present
 
 ## Request returns HTTP 409
 
-A conflict means the request could not commit against current transactional state.
-Retry the entire idempotent transaction with bounded backoff. Do not retry only part of
-a multi-mutation request.
+Branch on the `error` code. A `transaction_conflict` (`retryable: true`) means the
+request could not commit against current transactional state. Retry the entire
+idempotent transaction with bounded backoff. Do not retry only part of a
+multi-mutation request.
+
+Any other 409 (`retryable: false`) conflicts with the database's state and
+committed nothing, for example `unique_constraint_violation` when another node
+already owns a unique value. Resending it unchanged fails again: choose another
+value or update the existing node.
 
 For non-idempotent business actions, attach an application-level idempotency key or
 read the latest state before deciding whether to resubmit.

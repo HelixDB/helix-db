@@ -786,6 +786,33 @@ mod tests {
         }
     }
 
+    /// The public error reference lists every code once, with the HTTP status
+    /// of its class, so the documentation cannot drift from the transports.
+    #[test]
+    fn the_error_reference_documents_each_code_with_its_class_status() {
+        let reference =
+            include_str!("../../../docs/database/helix-db/query-guides/error-handling.mdx");
+        let documented: std::collections::HashMap<_, _> = reference
+            .lines()
+            .filter_map(|line| {
+                // | `code` | meaning | HTTP | retry | correctable |
+                let cells: Vec<_> = line.split('|').map(str::trim).collect();
+                let [_, code, _, status, _, _, _] = cells.as_slice() else {
+                    return None;
+                };
+                let code = code.strip_prefix('`')?.strip_suffix('`')?;
+                Some((code.parse::<QueryErrorCode>().ok()?, *status))
+            })
+            .collect();
+        for code in QueryErrorCode::ALL {
+            assert_eq!(
+                documented.get(code).copied(),
+                Some(code.failure_class().http_status().to_string().as_str()),
+                "{code}"
+            );
+        }
+    }
+
     #[test]
     fn unknown_code_preserves_the_original_wire_value() {
         let error = "future_error".parse::<QueryErrorCode>().unwrap_err();
