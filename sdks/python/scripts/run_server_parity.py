@@ -372,7 +372,7 @@ def _query_with_conflict_retry_sync(client: Client, request: QueryRequest) -> ob
         except HelixError as error:
             if (
                 error.kind != "Remote"
-                or error.status_code != 409
+                or error.code != "transaction_conflict"
                 or attempt + 1 == TRANSACTION_CONFLICT_ATTEMPTS
             ):
                 raise
@@ -387,7 +387,7 @@ async def _query_with_conflict_retry_async(client: AsyncClient, request: QueryRe
         except HelixError as error:
             if (
                 error.kind != "Remote"
-                or error.status_code != 409
+                or error.code != "transaction_conflict"
                 or attempt + 1 == TRANSACTION_CONFLICT_ATTEMPTS
             ):
                 raise

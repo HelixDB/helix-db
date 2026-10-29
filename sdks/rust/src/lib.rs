@@ -435,9 +435,14 @@ impl RemoteError {
         &self.raw_body
     }
 
-    /// Return whether the status is HTTP 409 Conflict.
+    /// Return whether a transaction conflict aborted the request, so resending
+    /// it unchanged may succeed.
+    ///
+    /// This reads the `transaction_conflict` code, not the status: HTTP 409
+    /// also reports conflicts with the database's state, such as
+    /// `unique_constraint_violation`, which fail again when resent.
     pub fn is_conflict(&self) -> bool {
-        self.status_code == StatusCode::CONFLICT.as_u16()
+        self.code() == Some(QueryErrorCode::TransactionConflict.as_str())
     }
 
     /// Return whether the status is HTTP 429 Too Many Requests.
@@ -572,7 +577,8 @@ impl HelixError {
         Some(error.raw_body())
     }
 
-    /// Return whether the server reported an HTTP conflict.
+    /// Return whether a transaction conflict aborted the request
+    /// ([`RemoteError::is_conflict`]).
     pub fn is_conflict(&self) -> bool {
         matches!(self, Self::RemoteError(error) if error.is_conflict())
     }
@@ -1947,9 +1953,32 @@ mod client_tests {
             Some(&serde_json::json!({"retryable": true}))
         );
         assert_eq!(error.raw_response_body(), Some(body));
-        assert!(error.is_conflict());
+        // Only the transaction conflict code is a conflict, whatever the status.
+        assert!(!error.is_conflict());
         assert!(!error.is_rate_limited());
         assert_eq!(error.retryable(), None);
+        assert!(!error.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn only_transaction_conflicts_are_conflicts_among_409s() {
+        let error = request_remote_error(
+            409,
+            r#"{"error":"transaction_conflict","msg":"retry","retryable":true}"#,
+        )
+        .await;
+        assert!(error.is_conflict());
+        assert!(error.is_retryable());
+
+        let error = request_remote_error(
+            409,
+            r#"{"error":"unique_constraint_violation","msg":"taken","retryable":false}"#,
+        )
+        .await;
+        assert_eq!(error.status_code(), Some(409));
+        assert_eq!(error.remote_code(), Some("unique_constraint_violation"));
+        assert!(!error.is_conflict());
+        assert_eq!(error.retryable(), Some(false));
         assert!(!error.is_retryable());
     }
 
@@ -2033,7 +2062,7 @@ mod client_tests {
                 Some(format!("status {status}").as_str())
             );
             assert_eq!(error.raw_response_body(), Some(body.as_str()));
-            assert_eq!(error.is_conflict(), status == 409);
+            assert!(!error.is_conflict());
             assert_eq!(error.is_rate_limited(), status == 429);
         }
     }

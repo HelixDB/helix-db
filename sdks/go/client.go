@@ -54,9 +54,17 @@ func (e *HelixError) Error() string {
 
 func (e *HelixError) Unwrap() error { return e.Err }
 
+// QueryErrorCodeTransactionConflict marks a request a transaction conflict
+// aborted; resending it unchanged may succeed.
+const QueryErrorCodeTransactionConflict QueryErrorCode = "transaction_conflict"
+
+// IsConflict reports whether a transaction conflict aborted the request, so
+// resending it unchanged may succeed. It reads the transaction_conflict code,
+// not the status: HTTP 409 also reports conflicts with the database's state,
+// such as unique_constraint_violation, which fail again when resent.
 func IsConflict(err error) bool {
 	var helixErr *HelixError
-	return errors.Is(err, ErrConflict) || errors.As(err, &helixErr) && helixErr.Kind == ErrorRemote && helixErr.StatusCode == http.StatusConflict
+	return errors.Is(err, ErrConflict) || errors.As(err, &helixErr) && helixErr.Kind == ErrorRemote && helixErr.Code == QueryErrorCodeTransactionConflict
 }
 
 // IsRetryable reports whether a failure is explicitly retryable. Remote
@@ -384,7 +392,7 @@ func (c *Client) Exec(ctx context.Context, req Request, out any, opts ...ExecOpt
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		remoteErr := decodeRemoteError(respBody, resp.Status, resp.StatusCode)
-		if resp.StatusCode == http.StatusConflict {
+		if remoteErr.Code == QueryErrorCodeTransactionConflict {
 			remoteErr.Err = ErrConflict
 		}
 		return remoteErr
