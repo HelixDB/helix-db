@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use db::query_service::{QueryFailureClass, QueryMode, QueryServiceError};
+use db::query_service::{QueryMode, QueryServiceError};
 use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use tokio::sync::watch;
@@ -303,17 +303,11 @@ fn validate_options_for_request_type(
 }
 
 pub(super) fn status_from_service_error(error: QueryServiceError) -> Status {
-    let code = match error.classify() {
-        QueryFailureClass::CommitOutcomeUnknown => tonic::Code::Unavailable,
-        QueryFailureClass::Conflict => tonic::Code::Aborted,
-        QueryFailureClass::Backpressure => tonic::Code::ResourceExhausted,
-        QueryFailureClass::InvalidRequest | QueryFailureClass::Planning => {
-            tonic::Code::InvalidArgument
-        }
-        QueryFailureClass::WriterModeRequired => tonic::Code::FailedPrecondition,
-        QueryFailureClass::Execution | QueryFailureClass::Internal => tonic::Code::Internal,
-    };
-    status_with_error_code(code, error.error_code(), error.to_string())
+    status_with_error_code(
+        tonic::Code::from_i32(error.classify().grpc_code()),
+        error.error_code(),
+        error.to_string(),
+    )
 }
 
 fn status_with_error_code(
@@ -364,8 +358,19 @@ mod tests {
                 QueryServiceError::Db(db::error::HelixDbError::IndexNotFound(
                     "documents".to_string(),
                 )),
-                tonic::Code::Internal,
+                tonic::Code::NotFound,
                 "index_not_found",
+            ),
+            (
+                QueryServiceError::Db(db::error::HelixDbError::UniqueConstraintViolation {
+                    label: "User".to_string(),
+                    property: "email".to_string(),
+                    value: "\"taken@example.com\"".to_string(),
+                    existing_node_id: 1,
+                    attempted_node_id: 2,
+                }),
+                tonic::Code::FailedPrecondition,
+                "unique_constraint_violation",
             ),
         ];
 
@@ -410,6 +415,17 @@ mod tests {
                 )),
                 tonic::Code::Aborted,
                 Some("transaction_conflict"),
+            ),
+            (
+                db::cypher::Error::Storage(db::error::HelixDbError::UniqueConstraintViolation {
+                    label: "User".to_string(),
+                    property: "email".to_string(),
+                    value: "\"taken@example.com\"".to_string(),
+                    existing_node_id: 1,
+                    attempted_node_id: 2,
+                }),
+                tonic::Code::FailedPrecondition,
+                Some("unique_constraint_violation"),
             ),
             (
                 db::cypher::Error::Json(serde_json::from_str::<u8>("x").expect_err("invalid JSON")),

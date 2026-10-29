@@ -141,6 +141,27 @@ impl core::fmt::Display for IndexOperationBatchResource {
     }
 }
 
+/// Where a query read a parameter the request did not bind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParameterUse {
+    /// A value, ID list, bound or expression input.
+    Value,
+    /// A count window size.
+    CountWindow,
+    /// The list a `foreach` iterates.
+    ForEach,
+}
+
+impl core::fmt::Display for ParameterUse {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+            Self::Value => "parameter",
+            Self::CountWindow => "count window parameter",
+            Self::ForEach => "foreach parameter",
+        })
+    }
+}
+
 /// Serialized resource whose Active text-mutation preflight exceeded policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTextMutationResource {
@@ -471,6 +492,15 @@ pub enum HelixDbError {
     #[error("Query error: {0}")]
     Query(String),
 
+    /// The query read a parameter the request did not bind.
+    #[error("Query error: {used_as} `{name}` is not bound")]
+    UnboundParameter {
+        /// How the query read the parameter.
+        used_as: ParameterUse,
+        /// Parameter name.
+        name: String,
+    },
+
     /// Query planning failed before execution started.
     #[error("planner error: {0}")]
     Planner(#[from] helix_planner::error::PlannerError),
@@ -726,6 +756,7 @@ impl HelixDbError {
             }
             Self::InvalidVectorConfig(_) => error_code::QueryErrorCode::InvalidVectorConfiguration,
             Self::Query(_) => error_code::QueryErrorCode::InvalidQuery,
+            Self::UnboundParameter { .. } => error_code::QueryErrorCode::UnboundParameter,
             Self::Planner(error) => error.error_code(),
             Self::InvalidQueryJson(_) => error_code::QueryErrorCode::InvalidQueryJson,
             Self::WriterModeRequired { .. } => error_code::QueryErrorCode::WriterModeRequired,
@@ -806,7 +837,7 @@ impl HelixDbError {
     /// later succeed.
     #[must_use]
     pub fn is_index_backpressure(&self) -> bool {
-        self.error_code().is_retryable_backpressure()
+        self.error_code() == error_code::QueryErrorCode::IndexBackpressure
     }
 
     /// Returns true when the error represents a retryable transaction conflict.
@@ -814,27 +845,6 @@ impl HelixDbError {
     pub fn is_transaction_conflict(&self) -> bool {
         matches!(self, Self::TransactionConflict(_))
             || matches!(self, Self::Storage(storage_err) if storage_err.kind() == ErrorKind::Transaction)
-    }
-
-    /// Returns true for caller-controlled vector input or active-text admission failures.
-    ///
-    /// Query transports and telemetry share this classification. Storage failures,
-    /// invalid persisted rows, and unknown commit outcomes are deliberately excluded.
-    /// This does not classify arbitrary string-based `Query` errors as caller mistakes.
-    ///
-    /// ```
-    /// use db::error::{ActiveTextMutationResource, HelixDbError};
-    /// let error = HelixDbError::ActiveTextMutationLimitExceeded {
-    ///     resource: ActiveTextMutationResource::Entities,
-    ///     observed: 513,
-    ///     limit: 512,
-    /// };
-    /// assert!(error.is_invalid_input());
-    /// assert!(!error.is_transaction_conflict());
-    /// ```
-    #[must_use]
-    pub fn is_invalid_input(&self) -> bool {
-        self.error_code().is_invalid_database_input()
     }
 
     /// Returns true when a public vector failed caller-controlled validation.
@@ -928,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_input_classification_does_not_hide_internal_or_ambiguous_failures() {
+    fn invalid_request_classification_does_not_hide_internal_or_ambiguous_failures() {
         for error in [
             HelixDbError::WriterFencedCommitOutcomeUnknown,
             HelixDbError::InvariantViolation("corrupt row".to_string()),
@@ -937,7 +947,11 @@ mod tests {
             HelixDbError::Query("execution failure".to_string()),
             HelixDbError::IndexBusy { state: "building" },
         ] {
-            assert!(!error.is_invalid_input());
+            assert_ne!(
+                error.error_code().failure_class(),
+                error_code::QueryFailureClass::InvalidRequest,
+                "{error}"
+            );
         }
     }
 
@@ -961,7 +975,10 @@ mod tests {
         assert!(invalid_inputs
             .iter()
             .all(HelixDbError::is_invalid_vector_input));
-        assert!(invalid_inputs.iter().all(HelixDbError::is_invalid_input));
+        assert!(invalid_inputs
+            .iter()
+            .all(|error| error.error_code().failure_class()
+                == error_code::QueryFailureClass::InvalidRequest));
 
         assert!(
             !HelixDbError::InvalidVectorItem(VectorItemDecodeError::HeaderMismatch)
@@ -1029,6 +1046,13 @@ mod tests {
                 Code::EdgeNotFound,
             ),
             (HelixDbError::DatabaseClosed, Code::DatabaseClosed),
+            (
+                HelixDbError::UnboundParameter {
+                    used_as: ParameterUse::ForEach,
+                    name: "events".to_string(),
+                },
+                Code::UnboundParameter,
+            ),
             (
                 HelixDbError::Config("invalid".to_string()),
                 Code::InvalidConfiguration,
@@ -1251,7 +1275,10 @@ mod tests {
     fn planner_failures_keep_planner_codes_and_message() {
         let unsupported = HelixDbError::Planner(PlannerError::UnsupportedEdgeAllTarget);
         assert_eq!(unsupported.index_error_code(), None);
-        assert!(!unsupported.is_invalid_input());
+        assert_eq!(
+            unsupported.error_code().failure_class(),
+            error_code::QueryFailureClass::Planning
+        );
         assert_eq!(
             unsupported.to_string(),
             format!("planner error: {}", PlannerError::UnsupportedEdgeAllTarget)
@@ -1259,12 +1286,39 @@ mod tests {
 
         let missing_index = HelixDbError::from(missing_text_index());
         assert_eq!(missing_index.index_error_code(), Some("index_not_found"));
-        assert!(!missing_index.is_invalid_input());
+        assert_eq!(
+            missing_index.error_code().failure_class(),
+            error_code::QueryFailureClass::NotFound
+        );
         assert!(!missing_index.is_transaction_conflict());
     }
 
     #[test]
     fn rich_error_variants_render_contract_fields() {
+        for (used_as, rendered) in [
+            (
+                ParameterUse::Value,
+                "Query error: parameter `ids` is not bound",
+            ),
+            (
+                ParameterUse::CountWindow,
+                "Query error: count window parameter `ids` is not bound",
+            ),
+            (
+                ParameterUse::ForEach,
+                "Query error: foreach parameter `ids` is not bound",
+            ),
+        ] {
+            let error = HelixDbError::UnboundParameter {
+                used_as,
+                name: "ids".to_string(),
+            };
+            assert_eq!(error.to_string(), rendered);
+            assert_eq!(
+                error.error_code().failure_class(),
+                error_code::QueryFailureClass::InvalidRequest
+            );
+        }
         assert_eq!(
             HelixDbError::UniqueConstraintViolation {
                 label: "User".to_string(),
@@ -1378,7 +1432,10 @@ mod tests {
                 observed: 513,
                 limit: 512,
             };
-            assert!(error.is_invalid_input());
+            assert_eq!(
+                error.error_code().failure_class(),
+                error_code::QueryFailureClass::InvalidRequest
+            );
             assert!(!error.is_transaction_conflict());
             assert_eq!(error.error_code(), Code::ActiveTextMutationLimitExceeded);
         }

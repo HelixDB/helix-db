@@ -8,7 +8,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use db::query_service::{QueryFailureClass, QueryMode, QueryResponse, QueryServiceError};
+use db::query_service::{QueryMode, QueryResponse, QueryServiceError};
 use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use serde::Serialize;
@@ -262,31 +262,12 @@ fn query_response(response: QueryResponse) -> Response {
 
 pub(super) fn service_error_response(error: QueryServiceError) -> Response {
     let class = error.classify();
-    let status = match class {
-        QueryFailureClass::CommitOutcomeUnknown | QueryFailureClass::WriterModeRequired => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        QueryFailureClass::Conflict => StatusCode::CONFLICT,
-        QueryFailureClass::Backpressure => StatusCode::TOO_MANY_REQUESTS,
-        QueryFailureClass::InvalidRequest | QueryFailureClass::Planning => StatusCode::BAD_REQUEST,
-        QueryFailureClass::Execution | QueryFailureClass::Internal => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    };
     error_response_with_retryable(
-        status,
+        StatusCode::from_u16(class.http_status())
+            .expect("query failure classes use valid HTTP statuses"),
         error.error_code(),
         error.to_string(),
-        match class {
-            QueryFailureClass::CommitOutcomeUnknown => Some(false),
-            QueryFailureClass::Backpressure => Some(true),
-            QueryFailureClass::Conflict
-            | QueryFailureClass::InvalidRequest
-            | QueryFailureClass::Planning
-            | QueryFailureClass::WriterModeRequired
-            | QueryFailureClass::Execution
-            | QueryFailureClass::Internal => None,
-        },
+        class.retryable(),
     )
 }
 

@@ -1066,7 +1066,11 @@ fn a_transaction_over_a_limit_on_its_own_is_a_hard_batch_error() {
         }
     ));
     assert!(!error.is_index_backpressure(), "{error}");
-    assert!(error.is_invalid_input(), "{error}");
+    assert_eq!(
+        error.error_code().failure_class(),
+        helix_ast::error_code::QueryFailureClass::InvalidRequest,
+        "{error}"
+    );
     assert_eq!(usage(&backlog, 1), BacklogUsage::default());
     // Repeated operations for one member count once.
     backlog

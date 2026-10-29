@@ -289,7 +289,10 @@ async fn member_backpressure_rejects_whole_writes_until_publication_drains() {
         ),
         "{error}"
     );
-    assert!(error.is_invalid_input() && !error.is_index_backpressure());
+    assert_eq!(
+        error.error_code().failure_class(),
+        helix_ast::error_code::QueryFailureClass::InvalidRequest
+    );
     assert_eq!(
         error.error_code(),
         QueryErrorCode::IndexOperationBatchTooLarge

@@ -613,7 +613,10 @@ async fn oversized_text_is_rejected_before_commit_instead_of_blocking_publicatio
         ),
         "{error:?}"
     );
-    assert!(error.is_invalid_input());
+    assert_eq!(
+        error.error_code().failure_class(),
+        helix_ast::error_code::QueryFailureClass::InvalidRequest
+    );
     assert_eq!(
         node_count(&db).await,
         0,
