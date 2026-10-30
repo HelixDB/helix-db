@@ -19,6 +19,41 @@ async fn id_allocator_concurrent_first_allocations_share_one_lease() {
     db::production_coverage::id_allocator_concurrent_first_allocation_contract().await;
 }
 
+/// Verifies a raw SlateDB write conflict reports the transaction-conflict code.
+///
+/// The overlapping transactions force the conflict, so this arm's coverage does not depend on
+/// another test's writers happening to collide.
+#[tokio::test]
+async fn storage_write_conflict_reports_transaction_conflict_code() {
+    let storage = slatedb::Db::builder(
+        "storage-write-conflict",
+        std::sync::Arc::new(slatedb::object_store::memory::InMemory::new()),
+    )
+    .build()
+    .await
+    .expect("in-memory database opens");
+    let first = storage
+        .begin(slatedb::IsolationLevel::Snapshot)
+        .await
+        .expect("first transaction begins");
+    let second = storage
+        .begin(slatedb::IsolationLevel::Snapshot)
+        .await
+        .expect("second transaction begins");
+    first.put(b"key", b"first").expect("first write buffers");
+    second.put(b"key", b"second").expect("second write buffers");
+    first.commit().await.expect("first transaction commits");
+    let conflict = second
+        .commit()
+        .await
+        .expect_err("second transaction conflicts");
+
+    assert_eq!(
+        db::error::HelixDbError::from(conflict).error_code(),
+        helix_ast::error_code::QueryErrorCode::TransactionConflict,
+    );
+}
+
 /// Verifies graph mutation no-op detection preserves exact V1 representation.
 #[test]
 fn graph_mutation_representation_is_recursive_and_bit_exact() {
