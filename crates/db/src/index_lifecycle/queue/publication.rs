@@ -2196,6 +2196,7 @@ impl FailureKind {
             | HelixDbError::InvalidVectorConfig(_)
             | HelixDbError::InvalidVectorItem(_)
             | HelixDbError::Query(_)
+            | HelixDbError::UnboundParameter { .. }
             | HelixDbError::Planner(_)
             | HelixDbError::InvalidQueryJson(_)
             | HelixDbError::WriterModeRequired { .. }

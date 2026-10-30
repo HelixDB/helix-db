@@ -20,9 +20,10 @@ impl<'db> ExecutionContext<'db> {
             return ast_ids(value, param);
         }
         let Some(value) = self.params.query_values.get(param) else {
-            return Err(HelixDbError::Query(format!(
-                "parameter `{param}` is not bound"
-            )));
+            return Err(HelixDbError::UnboundParameter {
+                used_as: crate::error::ParameterUse::Value,
+                name: param.to_string(),
+            });
         };
         query_parameter_ids(value, param)
     }

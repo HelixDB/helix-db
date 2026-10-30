@@ -817,7 +817,9 @@ func TestClientExec(t *testing.T) {
 
 func TestClientExecConflictError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "conflict", http.StatusConflict)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"transaction_conflict","msg":"conflict","retryable":true}`))
 	}))
 	defer server.Close()
 	client, err := NewClient(server.URL)
@@ -844,7 +846,30 @@ func TestClientExecConflictError(t *testing.T) {
 		t.Fatal("expected errors.Is to detect ErrConflict")
 	}
 	if !IsConflict(err) {
-		t.Fatal("expected IsConflict to detect HTTP 409")
+		t.Fatal("expected IsConflict to detect a transaction conflict")
+	}
+}
+
+func TestClientExecUniqueViolationIsNotAConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"unique_constraint_violation","msg":"taken","retryable":false}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out findUsersResponse
+	err = client.Exec(context.Background(), findUsers("acme", 25), &out)
+	var helixErr *HelixError
+	if !errors.As(err, &helixErr) || helixErr.StatusCode != http.StatusConflict || helixErr.Code != "unique_constraint_violation" {
+		t.Fatalf("expected a 409 unique_constraint_violation, got %v", err)
+	}
+	if IsConflict(err) || errors.Is(err, ErrConflict) || IsRetryable(err) {
+		t.Fatal("a duplicate unique value is neither a conflict nor retryable")
 	}
 }
 

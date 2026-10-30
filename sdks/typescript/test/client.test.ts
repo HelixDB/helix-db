@@ -298,7 +298,8 @@ assert.throws(
   assert.deepEqual(error.serverDetails, { retryable: true });
   assert.equal(error.rawBody, body);
   assert.equal(error.details, "write conflict");
-  assert.equal(error.isConflict(), true);
+  // Only the transaction conflict code is a conflict, whatever the status.
+  assert.equal(error.isConflict(), false);
   assert.equal(error.isRateLimited(), false);
   assert.equal(error.retryable, undefined);
   assert.equal(error.isRetryable(), false);
@@ -398,6 +399,16 @@ for (const [retryable, expected] of [
   assert.equal(HelixError.embedded("bad input", "invalid_query").isRetryable(), false);
 }
 
+{
+  // A duplicate unique value answers 409 but is not a retryable conflict.
+  const error = await remoteError(409, '{"error":"unique_constraint_violation","msg":"taken","retryable":false}');
+  assert.equal(error.statusCode, 409);
+  assert.equal(error.code, "unique_constraint_violation");
+  assert.equal(error.isConflict(), false);
+  assert.equal(error.retryable, false);
+  assert.equal(error.isRetryable(), false);
+}
+
 for (const status of [400, 401, 403, 409, 429, 503]) {
   const body = JSON.stringify({ message: `status ${status}`, code: "test_error" });
   const error = await remoteError(status, body);
@@ -406,7 +417,7 @@ for (const status of [400, 401, 403, 409, 429, 503]) {
   assert.equal(error.code, "test_error");
   assert.equal(error.serverMessage, `status ${status}`);
   assert.equal(error.rawBody, body);
-  assert.equal(error.isConflict(), status === 409);
+  assert.equal(error.isConflict(), false);
   assert.equal(error.isRateLimited(), status === 429);
 }
 

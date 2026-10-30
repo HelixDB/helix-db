@@ -192,6 +192,9 @@ func TestCypherConflictAndWarmNoContent(t *testing.T) {
 	status := http.StatusConflict
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
+		if status == http.StatusConflict {
+			_, _ = w.Write([]byte(`{"error":"transaction_conflict","msg":"retry","retryable":true}`))
+		}
 	}))
 	defer server.Close()
 	client, err := NewClient(server.URL)

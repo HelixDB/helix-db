@@ -41,7 +41,7 @@ database engine behind it use the same envelope; see the
 |  402 | `tenant_disabled`        | `tenant query processing is disabled because credit is exhausted`           | Query processing is disabled because the tenant has exhausted its credit. | Resolve the account state before retrying.                               |
 |  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation.                       | Use a key with the required permission.                                  |
 |  408 | `query_timeout`          | `query exceeded its wall-clock limit`                                       | The query exceeded its wall-clock limit.                                  | Reconcile timed-out writes before considering a retry.                   |
-|  409 | `transaction_conflict`   | `request conflicted with a concurrent write; please retry`                  | A concurrent write prevented the transaction from committing.             | Retry the whole idempotent transaction with bounded backoff.             |
+|  409 | `transaction_conflict`   | The database's conflict diagnostic                                          | A concurrent write prevented the transaction from committing. The body includes `"retryable": true`. | Retry the whole idempotent transaction with bounded backoff.             |
 |  413 | `payload_too_large`      | `request body exceeds the maximum allowed size`                             | The query request exceeds the gateway body-size limit.                    | Reduce the request size.                                                 |
 |  429 | `rate_limited`           | `rate limit exceeded`                                                       | The database's request bucket has no token available.                     | Honor `Retry-After`; see [Limits](/database/helix-cloud/operate/limits). |
 |  500 | `internal_error`         | An internal or backend diagnostic                                           | An unexpected gateway or backend error occurred.                          | Retry only if the operation is safe; contact support if persistent.      |
@@ -52,6 +52,12 @@ database engine behind it use the same envelope; see the
 
 The text in `msg` can include request-specific details. The `error` values and
 HTTP statuses above are the compatibility surface.
+
+Database engine failures pass through with the engine's code and its
+[class status](/database/helix-db/query-guides/error-handling#failure-classes),
+for example HTTP 409 `unique_constraint_violation` with `"retryable": false` when
+another node already owns a unique value. The gateway reports a failed write as
+`write_outcome_unknown` only when the engine cannot prove it committed nothing.
 
 ## Cypher errors
 

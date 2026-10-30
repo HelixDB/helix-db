@@ -23,6 +23,13 @@ const cases = [
     message: "diagnostic wording changed",
   },
   {
+    status: 409,
+    body: '{"error":"unique_constraint_violation","msg":"taken","retryable":false}',
+    code: "unique_constraint_violation",
+    message: "taken",
+    retryable: false,
+  },
+  {
     status: 503,
     body: '{"error":"writer_fenced_commit_outcome_unknown","msg":"unknown outcome","retryable":false}',
     code: "writer_fenced_commit_outcome_unknown",
@@ -76,7 +83,7 @@ for (const fixture of cases) {
         assert.equal(error.serverMessage, fixture.message);
         assert.equal(error.rawBody, fixture.body);
         assert.equal(error.retryable, fixture.retryable);
-        assert.equal(error.isConflict(), fixture.status === 409);
+        assert.equal(error.isConflict(), fixture.code === "transaction_conflict");
         assert.equal(error.isRetryable(), false);
         return true;
       });

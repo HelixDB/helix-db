@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use helix_ast::batch::{BatchQuery, ReadBatch, WriteBatch};
+use helix_ast::error_code::QueryFailureClass;
 use helix_ast::query::{QueryRequest, QueryRequestType, QueryValue};
 use helix_metrics::{query, query::transport::OssQueryMetrics};
 use helix_planner::{context::ParamBindings, diagnostics::PlannerDiagnostics, ir::NonEmptyString};
@@ -279,23 +280,69 @@ pub(crate) async fn execute_query_on_scoped_observed(
     result
 }
 
-/// How telemetry and transports bucket a failed Cypher statement. Database
-/// failures classify exactly as they do for native queries.
+/// How telemetry buckets a failed Cypher statement. Database failures
+/// classify exactly as they do for native queries.
 fn cypher_failure_class(error: &crate::cypher::Error) -> QueryFailureClass {
     use helix_cypher::api::ErrorClass;
-    use helix_planner::relational::ErrorPhase;
 
     match error {
-        crate::cypher::Error::Query(error) => match (ErrorClass::of(error), error.phase) {
-            (ErrorClass::InvalidQuery, ErrorPhase::Compile) => QueryFailureClass::InvalidRequest,
-            (ErrorClass::InvalidQuery, ErrorPhase::Runtime) | (ErrorClass::ResourceLimit, _) => {
-                QueryFailureClass::Execution
-            }
-            (ErrorClass::WriterRequired, _) => QueryFailureClass::WriterModeRequired,
-            (ErrorClass::Internal, _) => QueryFailureClass::Planning,
+        crate::cypher::Error::Query(error) => match ErrorClass::of(error) {
+            ErrorClass::InvalidQuery => QueryFailureClass::InvalidRequest,
+            ErrorClass::ResourceLimit => QueryFailureClass::ResourceLimit,
+            ErrorClass::WriterRequired => QueryFailureClass::Unavailable,
+            ErrorClass::Internal => QueryFailureClass::Planning,
         },
-        crate::cypher::Error::Storage(error) => QueryFailureClass::of_db(error),
+        crate::cypher::Error::Storage(error) => error.error_code().failure_class(),
         crate::cypher::Error::Json(_) => QueryFailureClass::Internal,
+    }
+}
+
+/// The telemetry bucket and message of a failure class. Classes that share a
+/// bucket keep their own message.
+fn telemetry_error(class: QueryFailureClass) -> query::QueryError {
+    let (error_type, message) = match class {
+        QueryFailureClass::InvalidRequest => (
+            query::QueryErrorType::InvalidRequest,
+            "query request was invalid",
+        ),
+        QueryFailureClass::NotFound => (
+            query::QueryErrorType::InvalidRequest,
+            "query named something that does not exist",
+        ),
+        QueryFailureClass::Planning => (query::QueryErrorType::Planning, "query planning failed"),
+        QueryFailureClass::Conflict => (
+            query::QueryErrorType::Conflict,
+            "query conflicted with another transaction",
+        ),
+        QueryFailureClass::StateConflict => (
+            query::QueryErrorType::Conflict,
+            "query conflicted with the database state",
+        ),
+        QueryFailureClass::Backpressure => (
+            query::QueryErrorType::Conflict,
+            "query was rejected by index backpressure",
+        ),
+        QueryFailureClass::ResourceLimit => (
+            query::QueryErrorType::Execution,
+            "query exceeded its resource budget",
+        ),
+        QueryFailureClass::Timeout => (
+            query::QueryErrorType::Execution,
+            "query exceeded its deadline",
+        ),
+        QueryFailureClass::Unavailable => (
+            query::QueryErrorType::Execution,
+            "database could not serve the query",
+        ),
+        QueryFailureClass::CommitOutcomeUnknown => (
+            query::QueryErrorType::Execution,
+            "query commit outcome is unknown",
+        ),
+        QueryFailureClass::Internal => (query::QueryErrorType::Execution, "query execution failed"),
+    };
+    query::QueryError {
+        error_type,
+        message: message.to_owned(),
     }
 }
 
@@ -353,25 +400,9 @@ impl QueryObservation {
             None => query::QueryOutcome::Succeeded {
                 warnings: Vec::new(),
             },
-            Some(class) => {
-                // Backpressure shares the conflict bucket but not its cause.
-                let message = match class {
-                    QueryFailureClass::InvalidRequest => "query request was invalid",
-                    QueryFailureClass::Planning => "query planning failed",
-                    QueryFailureClass::CommitOutcomeUnknown
-                    | QueryFailureClass::WriterModeRequired
-                    | QueryFailureClass::Execution => "query execution failed",
-                    QueryFailureClass::Conflict => "query conflicted with another transaction",
-                    QueryFailureClass::Backpressure => "query was rejected by index backpressure",
-                    QueryFailureClass::Internal => "query response serialization failed",
-                };
-                query::QueryOutcome::Failed {
-                    errors: vec![query::QueryError {
-                        error_type: class.into(),
-                        message: message.to_owned(),
-                    }],
-                }
-            }
+            Some(class) => query::QueryOutcome::Failed {
+                errors: vec![telemetry_error(class)],
+            },
         };
         query::QueryEvent::now(
             self.name,
@@ -734,81 +765,11 @@ pub enum QueryServiceError {
     Serialize(simd_json::Error),
 }
 
-/// Transport- and telemetry-neutral failure class shared by HTTP, gRPC and metrics.
-///
-/// Every [`QueryServiceError`] maps to exactly one class through
-/// [`QueryServiceError::classify`]; transports and telemetry then map the class
-/// to their own status or bucket so the three cannot drift apart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryFailureClass {
-    /// The writer was fenced mid-commit and durability is unknown; never retry blindly.
-    CommitOutcomeUnknown,
-    /// A transaction conflict that is safe to retry.
-    Conflict,
-    /// Asynchronous index work is saturated: either a write was rejected
-    /// before commit, or a strong search, in a read or a write request, found
-    /// more superseded results ahead of its answer than it may skip. Nothing
-    /// was committed, and the unchanged request is safe to retry once
-    /// outstanding index work is published. Telemetry buckets it with
-    /// [`Self::Conflict`] as [`query::QueryErrorType::Conflict`]: both reject
-    /// the whole request, and a retry may succeed.
-    Backpressure,
-    /// The request itself or the data it carried was invalid.
-    InvalidRequest,
-    /// Query planning failed before execution started.
-    Planning,
-    /// The operation needs a writer handle but this handle is not one.
-    WriterModeRequired,
-    /// Execution failed inside the database.
-    Execution,
-    /// The response could not be serialized.
-    Internal,
-}
-
-impl From<QueryFailureClass> for query::QueryErrorType {
-    fn from(class: QueryFailureClass) -> Self {
-        match class {
-            QueryFailureClass::Conflict | QueryFailureClass::Backpressure => Self::Conflict,
-            QueryFailureClass::InvalidRequest => Self::InvalidRequest,
-            QueryFailureClass::Planning => Self::Planning,
-            QueryFailureClass::CommitOutcomeUnknown
-            | QueryFailureClass::WriterModeRequired
-            | QueryFailureClass::Execution => Self::Execution,
-            QueryFailureClass::Internal => Self::Internal,
-        }
-    }
-}
-
-impl QueryFailureClass {
-    /// Classify a database failure, whichever query language reached it.
-    fn of_db(error: &HelixDbError) -> Self {
-        if matches!(error, HelixDbError::WriterFencedCommitOutcomeUnknown) {
-            Self::CommitOutcomeUnknown
-        } else if error.is_transaction_conflict() {
-            Self::Conflict
-        } else if error.is_index_backpressure() {
-            Self::Backpressure
-        } else if matches!(error, HelixDbError::Planner(_)) {
-            Self::Planning
-        } else if error.is_invalid_input() {
-            Self::InvalidRequest
-        } else if matches!(error, HelixDbError::WriterModeRequired { .. }) {
-            Self::WriterModeRequired
-        } else {
-            Self::Execution
-        }
-    }
-}
-
 impl QueryServiceError {
-    /// Classify this failure for transports and telemetry.
+    /// Classify this failure for transports and telemetry: the class of its
+    /// public [`Self::error_code`].
     pub fn classify(&self) -> QueryFailureClass {
-        match self {
-            Self::Db(error) => QueryFailureClass::of_db(error),
-            Self::InvalidRequest(_) => QueryFailureClass::InvalidRequest,
-            Self::Planner(_) => QueryFailureClass::Planning,
-            Self::JsonSerialize(_) | Self::Serialize(_) => QueryFailureClass::Internal,
-        }
+        self.error_code().failure_class()
     }
 
     /// Returns true when the request can be retried after a transaction conflict.
@@ -2638,15 +2599,32 @@ mod tests {
             ),
             (
                 QueryServiceError::Db(HelixDbError::WriterModeRequired { actual: "reader" }),
-                QueryFailureClass::WriterModeRequired,
+                QueryFailureClass::Unavailable,
             ),
             (
                 QueryServiceError::Db(HelixDbError::Query("execution".to_owned())),
-                QueryFailureClass::Execution,
+                QueryFailureClass::Internal,
             ),
             (
                 QueryServiceError::Db(HelixDbError::IndexNotFound("documents".to_owned())),
-                QueryFailureClass::Execution,
+                QueryFailureClass::NotFound,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::UniqueConstraintViolation {
+                    label: "User".to_owned(),
+                    property: "email".to_owned(),
+                    value: "\"taken@example.com\"".to_owned(),
+                    existing_node_id: 1,
+                    attempted_node_id: 2,
+                }),
+                QueryFailureClass::StateConflict,
+            ),
+            (
+                QueryServiceError::Db(HelixDbError::UnboundParameter {
+                    used_as: crate::error::ParameterUse::Value,
+                    name: "ids".to_owned(),
+                }),
+                QueryFailureClass::InvalidRequest,
             ),
             (
                 QueryServiceError::JsonSerialize(json_error),
@@ -2698,11 +2676,11 @@ mod tests {
                     "division_by_zero",
                     "x",
                 )),
-                QueryFailureClass::Execution,
+                QueryFailureClass::InvalidRequest,
             ),
             (
                 Error::Query(QueryError::runtime("resource_limit", "memory_limit", "x")),
-                QueryFailureClass::Execution,
+                QueryFailureClass::ResourceLimit,
             ),
             (
                 Error::Query(QueryError::compile(
@@ -2710,7 +2688,17 @@ mod tests {
                     "writer_required",
                     "x",
                 )),
-                QueryFailureClass::WriterModeRequired,
+                QueryFailureClass::Unavailable,
+            ),
+            (
+                Error::Storage(HelixDbError::UniqueConstraintViolation {
+                    label: "User".to_owned(),
+                    property: "email".to_owned(),
+                    value: "\"taken@example.com\"".to_owned(),
+                    existing_node_id: 1,
+                    attempted_node_id: 2,
+                }),
+                QueryFailureClass::StateConflict,
             ),
             (
                 Error::Query(QueryError::compile(
@@ -2740,34 +2728,29 @@ mod tests {
 
     #[test]
     fn query_failure_classes_map_to_telemetry_error_types() {
+        use query::QueryErrorType as Type;
         let cases = [
-            (
-                QueryFailureClass::CommitOutcomeUnknown,
-                query::QueryErrorType::Execution,
-            ),
-            (QueryFailureClass::Conflict, query::QueryErrorType::Conflict),
-            (
-                QueryFailureClass::Backpressure,
-                query::QueryErrorType::Conflict,
-            ),
-            (
-                QueryFailureClass::InvalidRequest,
-                query::QueryErrorType::InvalidRequest,
-            ),
-            (QueryFailureClass::Planning, query::QueryErrorType::Planning),
-            (
-                QueryFailureClass::WriterModeRequired,
-                query::QueryErrorType::Execution,
-            ),
-            (
-                QueryFailureClass::Execution,
-                query::QueryErrorType::Execution,
-            ),
-            (QueryFailureClass::Internal, query::QueryErrorType::Internal),
+            (QueryFailureClass::InvalidRequest, Type::InvalidRequest),
+            (QueryFailureClass::NotFound, Type::InvalidRequest),
+            (QueryFailureClass::Planning, Type::Planning),
+            (QueryFailureClass::Conflict, Type::Conflict),
+            (QueryFailureClass::StateConflict, Type::Conflict),
+            (QueryFailureClass::Backpressure, Type::Conflict),
+            (QueryFailureClass::ResourceLimit, Type::Execution),
+            (QueryFailureClass::Timeout, Type::Execution),
+            (QueryFailureClass::Unavailable, Type::Execution),
+            (QueryFailureClass::CommitOutcomeUnknown, Type::Execution),
+            (QueryFailureClass::Internal, Type::Execution),
         ];
 
+        let mut messages = std::collections::BTreeSet::new();
         for (class, expected) in cases {
-            assert_eq!(query::QueryErrorType::from(class), expected, "{class:?}");
+            let error = telemetry_error(class);
+            assert_eq!(error.error_type, expected, "{class:?}");
+            assert!(
+                messages.insert(error.message),
+                "{class:?} has its own message"
+            );
         }
     }
 
@@ -2779,7 +2762,7 @@ mod tests {
             limit: 512,
         });
         assert_eq!(
-            query::QueryErrorType::from(error.classify()),
+            telemetry_error(error.classify()).error_type,
             query::QueryErrorType::InvalidRequest
         );
         assert!(!error.is_commit_outcome_unknown());
@@ -2807,16 +2790,16 @@ mod tests {
         assert_eq!(observation.query_type, query::QueryType::Read);
 
         assert_eq!(
-            query::QueryErrorType::from(
-                QueryServiceError::InvalidRequest("invalid".to_owned()).classify()
-            ),
+            telemetry_error(QueryServiceError::InvalidRequest("invalid".to_owned()).classify())
+                .error_type,
             query::QueryErrorType::InvalidRequest
         );
         assert_eq!(
-            query::QueryErrorType::from(
+            telemetry_error(
                 QueryServiceError::Db(HelixDbError::TransactionConflict("conflict".to_owned()))
                     .classify()
-            ),
+            )
+            .error_type,
             query::QueryErrorType::Conflict
         );
         let invalid_vector_inputs = [
@@ -2836,23 +2819,25 @@ mod tests {
         ];
         for error in invalid_vector_inputs {
             assert_eq!(
-                query::QueryErrorType::from(QueryServiceError::Db(error).classify()),
+                telemetry_error(QueryServiceError::Db(error).classify()).error_type,
                 query::QueryErrorType::InvalidRequest
             );
         }
         assert_eq!(
-            query::QueryErrorType::from(
+            telemetry_error(
                 QueryServiceError::Db(HelixDbError::InvalidVectorItem(
                     crate::search::vector::VectorItemDecodeError::HeaderMismatch
                 ))
                 .classify()
-            ),
+            )
+            .error_type,
             query::QueryErrorType::Execution
         );
         assert_eq!(
-            query::QueryErrorType::from(
+            telemetry_error(
                 QueryServiceError::Db(HelixDbError::Query("execution".to_owned())).classify()
-            ),
+            )
+            .error_type,
             query::QueryErrorType::Execution
         );
 
@@ -2878,7 +2863,7 @@ mod tests {
         )
         .expect("telemetry JSON");
         assert!(!encoded.contains("secret@example.com"));
-        assert!(encoded.contains("query execution failed"));
+        assert!(encoded.contains("query conflicted with the database state"));
 
         // A strong read search rejected by backpressure is bucketed with
         // conflicts but not described as one.

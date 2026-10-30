@@ -625,7 +625,7 @@ async fn query_service_scoped_entry_points_execute_the_same_tenant_read() {
 #[tokio::test]
 async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
     use db::error::HelixDbError;
-    use db::query_service::QueryFailureClass;
+    use helix_ast::error_code::QueryFailureClass;
     use helix_planner::error::PlannerError;
 
     struct Case {
@@ -650,9 +650,26 @@ async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
             class: QueryFailureClass::Conflict,
             error: || QueryServiceError::Db(HelixDbError::TransactionConflict("retry".to_string())),
             http_status: StatusCode::CONFLICT,
-            retryable: None,
+            retryable: Some(true),
             grpc_code: tonic::Code::Aborted,
             code: "transaction_conflict",
+        },
+        // A duplicate unique value answers 409 too, but resending it fails again.
+        Case {
+            class: QueryFailureClass::StateConflict,
+            error: || {
+                QueryServiceError::Db(HelixDbError::UniqueConstraintViolation {
+                    label: "User".to_string(),
+                    property: "email".to_string(),
+                    value: "<hashed secondary value>".to_string(),
+                    existing_node_id: 1,
+                    attempted_node_id: 2,
+                })
+            },
+            http_status: StatusCode::CONFLICT,
+            retryable: Some(false),
+            grpc_code: tonic::Code::FailedPrecondition,
+            code: "unique_constraint_violation",
         },
         Case {
             class: QueryFailureClass::Backpressure,
@@ -705,7 +722,7 @@ async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
         // Waiting cannot clear a blocked build's saturation, so it is not
         // retryable backpressure.
         Case {
-            class: QueryFailureClass::Execution,
+            class: QueryFailureClass::StateConflict,
             error: || {
                 QueryServiceError::Db(HelixDbError::IndexBuildBlocked {
                     scope: db::encoding::keys::scope::DataScope::LegacyUnscoped,
@@ -716,9 +733,9 @@ async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
                     limit: 250_000,
                 })
             },
-            http_status: StatusCode::INTERNAL_SERVER_ERROR,
-            retryable: None,
-            grpc_code: tonic::Code::Internal,
+            http_status: StatusCode::CONFLICT,
+            retryable: Some(false),
+            grpc_code: tonic::Code::FailedPrecondition,
             code: "index_build_blocked",
         },
         Case {
@@ -738,7 +755,7 @@ async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
             code: "unsupported_edge_all_target",
         },
         Case {
-            class: QueryFailureClass::WriterModeRequired,
+            class: QueryFailureClass::Unavailable,
             error: || QueryServiceError::Db(HelixDbError::WriterModeRequired { actual: "reader" }),
             http_status: StatusCode::SERVICE_UNAVAILABLE,
             retryable: None,
@@ -746,12 +763,57 @@ async fn failure_classes_map_to_the_documented_http_and_grpc_statuses() {
             code: "writer_mode_required",
         },
         Case {
-            class: QueryFailureClass::Execution,
+            class: QueryFailureClass::NotFound,
             error: || QueryServiceError::Db(HelixDbError::IndexNotFound("documents".to_string())),
+            http_status: StatusCode::NOT_FOUND,
+            retryable: None,
+            grpc_code: tonic::Code::NotFound,
+            code: "index_not_found",
+        },
+        Case {
+            class: QueryFailureClass::NotFound,
+            error: || QueryServiceError::Db(HelixDbError::NodeNotFound(7)),
+            http_status: StatusCode::NOT_FOUND,
+            retryable: None,
+            grpc_code: tonic::Code::NotFound,
+            code: "node_not_found",
+        },
+        Case {
+            class: QueryFailureClass::InvalidRequest,
+            error: || {
+                QueryServiceError::Db(HelixDbError::UnboundParameter {
+                    used_as: db::error::ParameterUse::Value,
+                    name: "ids".to_string(),
+                })
+            },
+            http_status: StatusCode::BAD_REQUEST,
+            retryable: None,
+            grpc_code: tonic::Code::InvalidArgument,
+            code: "unbound_parameter",
+        },
+        Case {
+            class: QueryFailureClass::ResourceLimit,
+            error: || QueryServiceError::Db(HelixDbError::QueryMemoryLimitExceeded),
+            http_status: StatusCode::TOO_MANY_REQUESTS,
+            retryable: None,
+            grpc_code: tonic::Code::ResourceExhausted,
+            code: "query_memory_limit_exceeded",
+        },
+        Case {
+            class: QueryFailureClass::Timeout,
+            error: || QueryServiceError::Db(HelixDbError::QueryDeadlineExceeded),
+            http_status: StatusCode::REQUEST_TIMEOUT,
+            retryable: None,
+            grpc_code: tonic::Code::DeadlineExceeded,
+            code: "query_deadline_exceeded",
+        },
+        Case {
+            class: QueryFailureClass::Internal,
+            error: || QueryServiceError::Db(HelixDbError::Query("execution".to_string())),
             http_status: StatusCode::INTERNAL_SERVER_ERROR,
             retryable: None,
             grpc_code: tonic::Code::Internal,
-            code: "index_not_found",
+            code: "invalid_query",
         },
         Case {
             class: QueryFailureClass::Internal,
@@ -851,7 +913,7 @@ async fn missing_text_index_preserves_the_public_error_code() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let body = to_bytes(response.into_body(), MAX_QUERY_BODY_BYTES)
         .await
         .unwrap();
@@ -870,7 +932,7 @@ async fn missing_text_index_preserves_the_public_error_code() {
         })
         .await
         .unwrap_err();
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(status.code(), tonic::Code::NotFound);
     assert_eq!(
         status.metadata().get("helix-error-code").unwrap(),
         "index_not_found"
@@ -963,7 +1025,7 @@ async fn grpc_rejects_malformed_and_oversized_queries_then_shuts_down_cleanly() 
         })
         .await
         .unwrap_err();
-    assert_eq!(oversized.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(oversized.code(), tonic::Code::InvalidArgument);
     assert_eq!(
         oversized
             .metadata()
@@ -1222,7 +1284,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
         })
         .await
         .unwrap_err();
-    assert_eq!(require_writer.code(), tonic::Code::Unavailable);
+    assert_eq!(require_writer.code(), tonic::Code::FailedPrecondition);
     assert_eq!(
         require_writer
             .metadata()
@@ -1230,7 +1292,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
             .expect("writer routing status includes an error code")
             .to_str()
             .expect("error codes are ASCII"),
-        "invalid_request_option"
+        "writer_mode_required"
     );
 
     let write_on_reader = read_transport
@@ -1462,5 +1524,145 @@ async fn health_counts_the_index_entities_the_worker_holds_back() {
         .unwrap()
         .into_inner();
     assert_eq!(health.blocked_index_entity_count, 1);
+    grpc.close().await.unwrap();
+}
+
+/// A duplicate unique value is a definitive conflict on every transport: HTTP
+/// 409 with `retryable: false`, gRPC `FAILED_PRECONDITION` with the public
+/// code, and a Cypher 409. None of the rejected writes commits anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn duplicate_unique_values_are_definitive_conflicts_on_every_transport() {
+    let db = fresh_database("transport-unique-conflict").await;
+    let receipt = write_retrying(&db, || {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "index",
+                    traversal::g().create_index_if_not_exists(IndexSpec::node_unique_equality(
+                        "User", "email",
+                    )),
+                )
+                .returning(["index"]),
+        )
+    })
+    .await;
+    let operation = operation_id(&receipt).expect("the unique index build was accepted");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let status = db
+                .query(QueryRequest::read(
+                    batch::read_batch()
+                        .var_as("status", traversal::g().get_index_operation(&operation))
+                        .returning(["status"]),
+                ))
+                .await
+                .unwrap();
+            match status["status"]["status"].as_str() {
+                Some("succeeded") => break,
+                Some("queued" | "running") => tokio::time::sleep(Duration::from_millis(10)).await,
+                other => panic!("the unique index build did not succeed: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("the unique index activates");
+    let add_user = |name: &str| {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "user",
+                    traversal::g().add_n(
+                        "User",
+                        vec![
+                            (
+                                "email",
+                                helix_ast::value::PropertyInput::from("taken@example.com"),
+                            ),
+                            ("name", helix_ast::value::PropertyInput::from(name)),
+                        ],
+                    ),
+                )
+                .returning(["user"]),
+        )
+    };
+    write_retrying(&db, || add_user("first")).await;
+    let users = || async {
+        db.query(QueryRequest::read(
+            batch::read_batch()
+                .var_as("count", traversal::g().n_with_label("User").count())
+                .returning(["count"]),
+        ))
+        .await
+        .unwrap()["count"]
+            .clone()
+    };
+
+    let router = http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        crate::StorageConfig::Memory,
+    ));
+    let response = router
+        .clone()
+        .oneshot(
+            HttpRequest::post("/v2/query")
+                .header("content-type", "application/json")
+                .body(Body::from(simd_json::to_vec(&add_user("http")).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), MAX_QUERY_BODY_BYTES)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["error"], "unique_constraint_violation");
+    assert_eq!(body["retryable"], false);
+    assert!(!body["msg"].as_str().unwrap().contains("taken@example.com"));
+
+    let response = router
+        .oneshot(
+            HttpRequest::post("/v2/cypher")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&db::cypher::Request::new(
+                        "CREATE (:User {email: 'taken@example.com', name: 'cypher'})",
+                    ))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), MAX_QUERY_BODY_BYTES)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["error"], "unique_constraint_violation");
+    assert_eq!(body["retryable"], false);
+
+    let mut grpc = GrpcAdapter::start(Arc::clone(&db)).await;
+    let status = grpc
+        .raw_query(QueryJsonRequest {
+            body: simd_json::to_vec(&add_user("grpc")).unwrap().into(),
+            warm_only: false,
+            require_writer: false,
+            await_durable: true,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        status.metadata().get("helix-error-code").unwrap(),
+        "unique_constraint_violation"
+    );
+
+    assert_eq!(users().await, serde_json::json!(1));
     grpc.close().await.unwrap();
 }
