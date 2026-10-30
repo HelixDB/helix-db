@@ -97,6 +97,40 @@ pub async fn index_driver_failure_classification_contract() {
     crate::index_lifecycle::outbox::driver_failure_classification_contract().await;
 }
 
+/// Verifies concurrent first allocations share one lease instead of restarting from storage.
+///
+/// SlateDB writes on a separate task, so on a current-thread runtime the first caller stays
+/// suspended in its lease write, holding the extension lock with the lease unpublished. The
+/// second caller therefore always takes the initialized branch once it gets that lock, which
+/// keeps this branch's coverage independent of scheduling.
+pub async fn id_allocator_concurrent_first_allocation_contract() {
+    let db = slatedb::Db::builder(
+        "id-allocator-first-allocation",
+        std::sync::Arc::new(slatedb::object_store::memory::InMemory::new()),
+    )
+    .build()
+    .await
+    .expect("in-memory database opens");
+    let allocator = crate::id_allocator::NodeIdAllocator::new_with_refill_threshold(
+        std::sync::Arc::new(db),
+        10,
+        0,
+    );
+
+    let mut first = std::pin::pin!(allocator.allocate());
+    assert!(
+        futures::poll!(&mut first).is_pending(),
+        "the first caller must suspend before publishing its lease",
+    );
+    let (first, second) = tokio::join!(first, allocator.allocate());
+
+    assert_eq!(
+        [first.expect("first ID"), second.expect("second ID")],
+        [0, 1],
+        "the second caller must claim from the first caller's lease",
+    );
+}
+
 /// Runs graph-first legacy-definition migration contracts with one-row batches.
 pub async fn migration_definition_contracts() {
     crate::migrations::production_contracts::run_migration_contracts().await;

@@ -13,6 +13,12 @@ async fn index_driver_failure_classification_preserves_retry_boundaries() {
     db::production_coverage::index_driver_failure_classification_contract().await;
 }
 
+/// Verifies concurrent first allocations share one ID lease.
+#[tokio::test]
+async fn id_allocator_concurrent_first_allocations_share_one_lease() {
+    db::production_coverage::id_allocator_concurrent_first_allocation_contract().await;
+}
+
 /// Verifies graph mutation no-op detection preserves exact V1 representation.
 #[test]
 fn graph_mutation_representation_is_recursive_and_bit_exact() {
