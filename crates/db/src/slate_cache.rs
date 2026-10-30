@@ -88,9 +88,12 @@ impl SlateDbCache {
 /// gets the same id, so its writer and readers on a shared hybrid cache, and
 /// a reopen on the same disk root, read each other's blocks. Different
 /// databases on one cache get different ids, which keeps SlateDB's per-id
-/// cache flushes and evictions to their own database. `0` is never
-/// returned: SlateDB decodes keys written before it scoped them to `0`.
+/// cache flushes and evictions to their own database. The path is
+/// normalized as SlateDB normalizes it, so every spelling of one database
+/// path shares an id. `0` is never returned: SlateDB decodes keys written
+/// before it scoped them to `0`.
 pub(crate) fn db_cache_id(path: &str, object_store: &dyn ObjectStore) -> u64 {
+    let path = slatedb::object_store::path::Path::from(path);
     let identity = format!("{object_store}\0{path}");
     xxhash_rust::xxh3::xxh3_64(identity.as_bytes()).max(1)
 }
@@ -684,6 +687,7 @@ mod tests {
         let id = db_cache_id("tenant-a/db", &store);
         assert_ne!(id, 0);
         assert_eq!(id, db_cache_id("tenant-a/db", &InMemory::new()));
+        assert_eq!(id, db_cache_id("/tenant-a/db/", &store));
         assert_ne!(id, db_cache_id("tenant-b/db", &store));
         let local = slatedb::object_store::local::LocalFileSystem::new();
         assert_ne!(id, db_cache_id("tenant-a/db", &local));
