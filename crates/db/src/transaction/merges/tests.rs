@@ -230,9 +230,13 @@ async fn batch_and_entry_rejection_precede_encoding_and_backend_writes() {
     let mut batch = transaction.merge_batch(1).unwrap();
     let held = budget.reserve(budget.available()).unwrap();
     let (result, allocations) = allocation_testing::observe(|| {
-        batch.push(Key::Typed(bitmap_key(1)), 1, std::iter::once(1), || {
-            panic!("encoder ran before admission")
-        })
+        batch.push(
+            Key::Typed(bitmap_key(1)),
+            1,
+            std::iter::once(1),
+            Validation::AgainstStoredRow,
+            || panic!("encoder ran before admission"),
+        )
     });
     assert!(matches!(
         result,
@@ -555,6 +559,7 @@ async fn missing_cardinality_and_key_admission_failure_never_invoke_the_encoder(
         Key::Typed(bitmap_key(1)),
         1,
         std::iter::from_fn(|| Some(1)),
+        Validation::AgainstStoredRow,
         || panic!("unknown cardinality encoded"),
     );
     assert!(matches!(
@@ -570,9 +575,13 @@ async fn missing_cardinality_and_key_admission_failure_never_invoke_the_encoder(
     let additional =
         Batch::construction_bytes(1, entry) - Batch::construction_bytes(1, Totals::default());
     let held = budget.reserve(budget.available() - additional).unwrap();
-    let result = batch.push(Key::Typed(bitmap_key(1)), 1, std::iter::once(1), || {
-        panic!("rejected key encoded operand")
-    });
+    let result = batch.push(
+        Key::Typed(bitmap_key(1)),
+        1,
+        std::iter::once(1),
+        Validation::AgainstStoredRow,
+        || panic!("rejected key encoded operand"),
+    );
     assert!(matches!(
         result,
         Err(HelixDbError::QueryMemoryLimitExceeded)
@@ -583,5 +592,136 @@ async fn missing_cardinality_and_key_admission_failure_never_invoke_the_encoder(
     owner.merge_batch(0).unwrap().stage().await.unwrap();
     drop(owner);
     assert_eq!(budget.available(), 1024 * 1024);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn blind_merges_stage_without_reading_the_stored_row() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "merge-blind".into(),
+    })
+    .await
+    .unwrap();
+    // A corrupt stored row makes any read-and-validate fail, so succeeding proves nothing was read.
+    db.inner_db()
+        .put(bitmap_key(2).to_bytes(), b"corrupt")
+        .await
+        .unwrap();
+    let mut delta = equality::BitmapMembershipDelta::default();
+    delta.add(1);
+    assert!(delta.only_adds_members());
+
+    let transaction = Owned::begin(&db.inner_db(), None).await.unwrap();
+    let mut batch = transaction.merge_batch(1).unwrap();
+    drop(
+        batch
+            .bitmap_with(
+                Key::Typed(bitmap_key(2)),
+                &delta,
+                Validation::AgainstStoredRow,
+            )
+            .unwrap(),
+    );
+    assert!(
+        batch.stage().await.is_err(),
+        "the control must read the row"
+    );
+    drop(transaction);
+
+    let transaction = Owned::begin(&db.inner_db(), None).await.unwrap();
+    let mut batch = transaction.merge_batch(1).unwrap();
+    drop(
+        batch
+            .bitmap_with(Key::Typed(bitmap_key(2)), &delta, Validation::Blind)
+            .unwrap(),
+    );
+    batch.stage().await.unwrap();
+    // Not committed: flushing a merge onto the deliberately corrupt row would fail by design.
+    drop(transaction);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn blind_and_checked_merges_compose_into_one_row() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "merge-blind-compose".into(),
+    })
+    .await
+    .unwrap();
+    let key = bitmap_key(3).to_bytes();
+    for (id, validation) in [
+        (1, Validation::AgainstStoredRow),
+        (2, Validation::Blind),
+        (3, Validation::Blind),
+        (4, Validation::AgainstStoredRow),
+    ] {
+        let mut delta = equality::BitmapMembershipDelta::default();
+        delta.add(id);
+        let transaction = Owned::begin(&db.inner_db(), None).await.unwrap();
+        let mut batch = transaction.merge_batch(1).unwrap();
+        drop(
+            batch
+                .bitmap_with(Key::Encoded(&key), &delta, validation)
+                .unwrap(),
+        );
+        batch.stage().await.unwrap();
+        transaction.commit().await.unwrap();
+    }
+    let value = db.inner_db().get(&key).await.unwrap().unwrap();
+    let expected = [1_u64, 2, 3, 4]
+        .into_iter()
+        .collect::<roaring::RoaringTreemap>();
+    assert_eq!(
+        equality::SecondaryEqualityBitmapValue::decode(&value)
+            .unwrap()
+            .ids(),
+        &expected
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn blind_merge_of_an_already_present_member_matches_the_checked_merge() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "merge-blind-present".into(),
+    })
+    .await
+    .unwrap();
+    // The same history on two rows: ids 1 and 2 are stored, then id 2 (already a member, as when a
+    // node is re-added to a label after a removal in the same request) and id 3 are added again.
+    let blind_key = bitmap_key(4).to_bytes();
+    let checked_key = bitmap_key(5).to_bytes();
+    for (key, validation) in [
+        (&blind_key, Validation::Blind),
+        (&checked_key, Validation::AgainstStoredRow),
+    ] {
+        for ids in [vec![1_u64, 2], vec![2, 3]] {
+            let mut delta = equality::BitmapMembershipDelta::default();
+            for id in ids {
+                delta.add(id);
+            }
+            let transaction = Owned::begin(&db.inner_db(), None).await.unwrap();
+            let mut batch = transaction.merge_batch(1).unwrap();
+            drop(
+                batch
+                    .bitmap_with(Key::Encoded(key), &delta, validation)
+                    .unwrap(),
+            );
+            batch.stage().await.unwrap();
+            transaction.commit().await.unwrap();
+        }
+    }
+    let expected = [1_u64, 2, 3]
+        .into_iter()
+        .collect::<roaring::RoaringTreemap>();
+    for key in [&blind_key, &checked_key] {
+        let value = db.inner_db().get(key).await.unwrap().unwrap();
+        assert_eq!(
+            equality::SecondaryEqualityBitmapValue::decode(&value)
+                .unwrap()
+                .ids(),
+            &expected
+        );
+    }
     db.close().await.unwrap();
 }
