@@ -61,8 +61,12 @@ pub(in crate::execution::interpreter) fn required_for(
     match op {
         exec::ExecOp::Access { plan } => required_for_access(plan),
         exec::ExecOp::Count { plan } => required_for_count(plan),
-        exec::ExecOp::KvRead(_)
-        | exec::ExecOp::Reserved { .. }
+        // A KV read lists or gets element rows (node property rows and edge endpoint rows). Those rows are
+        // staged eagerly in the request transaction, so the read sees them without a flush; only the
+        // topology and secondary families are deferred. Flushing before it re-merged every shared row a
+        // preceding mutation touched once per read (`g().n(id).add_e(..)` repeated in one batch).
+        exec::ExecOp::KvRead(_) => RequiredMutationVisibility::NONE,
+        exec::ExecOp::Reserved { .. }
         | exec::ExecOp::Barrier { .. }
         | exec::ExecOp::IndexDdl { .. } => RequiredMutationVisibility::ALL,
         exec::ExecOp::Expand { .. } | exec::ExecOp::ShortestPath { .. } => {
@@ -406,6 +410,19 @@ mod tests {
             },
         ] {
             assert_eq!(count(plan), RequiredMutationVisibility::ALL);
+        }
+    }
+
+    #[test]
+    fn element_kv_reads_flush_nothing() {
+        for keyspace in [
+            exec::ElementKeyspace::NodeProperty,
+            exec::ElementKeyspace::EdgeEndpoints,
+        ] {
+            let read = exec::ExecOp::KvRead(exec::KvReadPlan::Get {
+                key: keyspace.point_key(7),
+            });
+            assert_eq!(required_for(&read), RequiredMutationVisibility::NONE);
         }
     }
 
