@@ -5,6 +5,8 @@
 //! metadata DTOs, and the direct HNSW facade are exercised by the feature-gated
 //! internal production-contract target instead of being kept public for tests.
 
+#![recursion_limit = "256"]
+
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use db::config::{self, VectorIndexDefinition};

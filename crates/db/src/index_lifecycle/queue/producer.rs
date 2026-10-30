@@ -392,8 +392,8 @@ impl QueuedMutationCollector {
     /// `text_limits` (see
     /// [`crate::index_lifecycle::text::active_batch::TextDocumentFootprint`]),
     /// so the publisher never meets an entity it cannot publish. Each operand
-    /// must fit `max_operand_bytes`, the durable WAL entry bound for one queue
-    /// key in one transaction.
+    /// must fit `max_operand_bytes`, the operand ceiling for one queue key in
+    /// one transaction.
     pub(crate) fn finalize(
         &self,
         max_operand_bytes: u64,

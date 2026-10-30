@@ -1245,7 +1245,10 @@ impl HelixDB {
                         "configured SlateDB cache mode must build a cache".into(),
                     ));
                 };
-                builder = builder.with_db_cache(Arc::clone(cache.cache()));
+                builder = builder.with_db_cache(
+                    Arc::clone(cache.cache()),
+                    slate_cache::db_cache_id(&path, object_store.as_ref()),
+                );
             }
         }
         let stage_started = Instant::now();
@@ -1525,7 +1528,10 @@ impl HelixDB {
                         "configured SlateDB cache mode must build a cache".into(),
                     ));
                 };
-                builder = builder.with_db_cache(Arc::clone(cache.cache()));
+                builder = builder.with_db_cache(
+                    Arc::clone(cache.cache()),
+                    slate_cache::db_cache_id(&path, object_store.as_ref()),
+                );
             }
         }
         #[cfg(feature = "async-index-benchmark")]
@@ -1722,14 +1728,7 @@ impl HelixDB {
         // themselves may hold at once.
         let index_queue_store = Arc::new(index_lifecycle::queue::storage::QueueStore::new(
             queue_tuning.layout(),
-            queue_tuning.effective_operand_bytes(
-                config
-                    .db()
-                    .slate()
-                    .to_writer_settings(None)
-                    .wal_replay
-                    .max_inflight_bytes,
-            ),
+            queue_tuning.max_operand_bytes().get(),
             queue_tuning.max_retained_bytes().get().saturating_mul(
                 u64::try_from(lifecycle_throughput.concurrency().publication_tasks().get())
                     .unwrap_or(u64::MAX),

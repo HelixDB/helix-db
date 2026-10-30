@@ -212,10 +212,6 @@ fn db_config_builders_preserve_checked_runtime_contracts() {
 fn slate_settings_reach_writer_settings_and_reader_options() {
     let slate = slatedb::Settings {
         flush_interval: Some(std::time::Duration::from_secs(7)),
-        wal_replay: slatedb::config::WalReplaySettings {
-            max_concurrent_objects: 17,
-            max_inflight_bytes: 23 * 1024 * 1024,
-        },
         ..Default::default()
     };
     let helix = HelixConfig::new(DbConfig::new().with_slate_settings(slate));
@@ -225,11 +221,8 @@ fn slate_settings_reach_writer_settings_and_reader_options() {
         Some(std::time::Duration::from_secs(7))
     );
     assert_eq!(
-        helix.db().slate().to_reader_options(None).wal_replay,
-        slatedb::config::WalReplaySettings {
-            max_concurrent_objects: 17,
-            max_inflight_bytes: 23 * 1024 * 1024,
-        }
+        helix.db().slate().to_reader_options(None).wal_poll_interval,
+        std::time::Duration::from_secs(1)
     );
 }
 

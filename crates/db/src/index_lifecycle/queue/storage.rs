@@ -459,7 +459,7 @@ impl RetainedQueues {
     }
 }
 
-/// Queue storage bound to one database's layout and WAL entry bound.
+/// Queue storage bound to one database's layout and operand ceiling.
 #[derive(Debug)]
 pub(crate) struct QueueStore {
     layout: QueueLayout,
@@ -492,8 +492,7 @@ impl QueueStore {
         &self.retained
     }
 
-    /// Returns the per-transaction operand ceiling for one queue key: the
-    /// configured ceiling clamped to the WAL replay entry bound.
+    /// Returns the configured per-transaction operand ceiling for one queue key.
     pub(crate) const fn max_operand_bytes(&self) -> u64 {
         self.max_operand_bytes
     }
@@ -676,7 +675,7 @@ impl QueueStore {
 
     /// Returns the most operation IDs one acknowledgement of `target` may
     /// name so that it alone fits `budget` and, for the map layout, its
-    /// operand fits the same WAL entry bound producer operands respect.
+    /// operand fits the same operand ceiling producer operands respect.
     ///
     /// A map acknowledgement is one merge operand; a row acknowledgement
     /// deletes one fixed-width row key per ID. At least one ID is always

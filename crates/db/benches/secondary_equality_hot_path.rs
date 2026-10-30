@@ -1,5 +1,7 @@
 //! Fixed V3/V4 secondary-equality hot-path benchmark.
 
+#![recursion_limit = "256"]
+
 use db::bench_internals::{
     benchmark_million_sequential_id_bitmap, SecondaryEqualityHotPathFixture,
     SecondaryEqualityInsertMode, SecondaryEqualityReadMode,

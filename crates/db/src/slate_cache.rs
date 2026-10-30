@@ -27,6 +27,7 @@ use std::sync::{Arc, LazyLock};
 
 use foyer::DeviceBuilder;
 use slatedb::db_cache::{foyer_hybrid, CachedEntry, CachedKey, DbCache};
+use slatedb::object_store::ObjectStore;
 
 use crate::config;
 use crate::error::{HelixDbError, Result};
@@ -79,6 +80,19 @@ impl SlateDbCache {
         }
         Ok(())
     }
+}
+
+/// SlateDB's `db_cache_id` for the database at `path` in `object_store`.
+///
+/// SlateDB prefixes every cache key with this id. Every open of one database
+/// gets the same id, so its writer and readers on a shared hybrid cache, and
+/// a reopen on the same disk root, read each other's blocks. Different
+/// databases on one cache get different ids, which keeps SlateDB's per-id
+/// cache flushes and evictions to their own database. `0` is never
+/// returned: SlateDB decodes keys written before it scoped them to `0`.
+pub(crate) fn db_cache_id(path: &str, object_store: &dyn ObjectStore) -> u64 {
+    let identity = format!("{object_store}\0{path}");
+    xxhash_rust::xxh3::xxh3_64(identity.as_bytes()).max(1)
 }
 
 /// A built hybrid cache and the settings, with a canonical root, it was
@@ -261,13 +275,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use slatedb::object_store::memory::InMemory;
-    use slatedb::object_store::ObjectStore;
-
     use super::*;
     use crate::encoding::keys::scope::DataScope;
     use crate::error::WriterMigrationRequirement;
     use crate::{HelixDB, HelixDbSource, ManagedWriterOpenIntent, ProcessLocalDatabaseToken};
+    use slatedb::object_store::memory::InMemory;
 
     /// Time allowed for a closed handle's tasks to drop their cache handles.
     const RELEASE_DEADLINE: Duration = Duration::from_secs(10);
@@ -664,6 +676,17 @@ mod tests {
             .await
             .expect("a later open reads through the cache");
         reader.close().await.expect("reader closes");
+    }
+
+    #[test]
+    fn db_cache_id_is_stable_per_database_and_never_zero() {
+        let store = InMemory::new();
+        let id = db_cache_id("tenant-a/db", &store);
+        assert_ne!(id, 0);
+        assert_eq!(id, db_cache_id("tenant-a/db", &InMemory::new()));
+        assert_ne!(id, db_cache_id("tenant-b/db", &store));
+        let local = slatedb::object_store::local::LocalFileSystem::new();
+        assert_ne!(id, db_cache_id("tenant-a/db", &local));
     }
 
     /// A managed reader and writer on one root, as during a role handoff,

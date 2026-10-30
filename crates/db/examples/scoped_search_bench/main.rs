@@ -43,6 +43,8 @@
 //! BENCH_DIR=/tmp/bench cargo run --release -p db --example scoped_search_bench -- query
 //! ```
 
+#![recursion_limit = "256"]
+
 mod batch;
 mod fixture;
 mod probe;
