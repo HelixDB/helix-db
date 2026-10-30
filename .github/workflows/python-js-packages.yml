@@ -115,6 +115,38 @@ jobs:
           path: bindings/uniffi/dist/*
           if-no-files-found: error
 
+  python-example:
+    name: Python example (${{ matrix.python-version }})
+    needs: python-embedded
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lowest version the SDK supports and the version the other jobs use.
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: helix-db-python
+          path: sdk-dist
+      - uses: actions/download-artifact@v5
+        with:
+          name: helix-db-embedded-python-manylinux-x86_64
+          path: embedded-dist
+      - name: Install the built wheels and the example's MCP client
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall sdk-dist/*.whl embedded-dist/*.whl
+          python -m pip install "$(grep '^mcp==' sdks/python/examples/parallel-research/requirements.txt)"
+      - name: Run the example against a mocked Parallel endpoint
+        working-directory: sdks/python/examples/parallel-research
+        run: python -m unittest discover -v
+
   javascript:
     name: JavaScript packages
     needs: python-embedded
