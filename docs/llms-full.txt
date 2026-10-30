@@ -5833,9 +5833,10 @@ durability waits on reads are rejected with `400 Bad Request`.
 - `404` reports that the query named a node, edge, index or index operation
   that does not exist.
 - `408` reports that a query exceeded its deadline. A write may have committed.
-- `409` reports a conflict. A `transaction_conflict` carries `retryable: true`:
-  retry the whole transaction only when it is idempotent or protected by an
-  application idempotency key. A conflict with the database's state, such as
+- `409` reports a conflict; branch on `retryable`. A retryable conflict, such
+  as `transaction_conflict`, carries `retryable: true`: retry the whole
+  transaction only when it is idempotent or protected by an application
+  idempotency key. A conflict with the database's state, such as
   `unique_constraint_violation`, carries `retryable: false` and committed
   nothing; resending it unchanged fails again.
 - `413` reports that a Helix Cloud request body exceeded 2 MiB. The gateway
@@ -6010,7 +6011,7 @@ each code's status.
 | Planning | 400 | `INVALID_ARGUMENT` | absent | Committed nothing |
 | Not found | 404 | `NOT_FOUND` | absent | Committed nothing |
 | Request timeout | 408 | `DEADLINE_EXCEEDED` | absent | May have committed |
-| Transaction conflict | 409 | `ABORTED` | `true` | Committed nothing |
+| Retryable conflict | 409 | `ABORTED` | `true` | Committed nothing |
 | Conflict with database state | 409 | `FAILED_PRECONDITION` | `false` | Committed nothing |
 | Index backpressure | 429 | `RESOURCE_EXHAUSTED` | `true` | Committed nothing |
 | Resource limit | 429 | `RESOURCE_EXHAUSTED` | absent | Committed nothing |
@@ -6018,10 +6019,17 @@ each code's status.
 | Unavailable | 503 | `FAILED_PRECONDITION` | absent | Committed nothing |
 | Commit outcome unknown | 503 | `UNAVAILABLE` | `false` | May have committed |
 
-HTTP 409 has two classes. `transaction_conflict` (`retryable: true`) can succeed
-when resent unchanged. A conflict with the database's state, such as
+HTTP 409 has two classes, so branch on `retryable` rather than the status. A
+retryable conflict (`transaction_conflict`, `request_read_view_changed` or
+`stale_index_generation`, with `retryable: true`) can succeed when resent
+unchanged. A conflict with the database's state, such as
 `unique_constraint_violation` (`retryable: false`), fails again until that
 state changes: choose another value or reconcile first.
+
+An index-management request with several create, drop, retry or abort
+operations commits each operation as it runs. If a later operation fails, the
+earlier ones stay committed, so read the index state before resending such a
+batch.
 
 ## Cypher errors
 
@@ -6139,9 +6147,11 @@ code from exception text.
 - A code describes the failure, not whether replaying a particular mutation is
   safe. Retry only idempotent work or work protected by an application-level
   idempotency key.
-- `transaction_conflict` (HTTP 409, `retryable: true`) is normally retryable
-  with bounded backoff. Other 409s conflict with the database's state and carry
-  `retryable: false`; branch on the code, not the status alone.
+- HTTP 409 with `retryable: true` (`transaction_conflict`,
+  `request_read_view_changed`, `stale_index_generation`) is normally retryable
+  with bounded backoff. A 409 with `retryable: false` conflicts with the
+  database's state and fails again when resent; branch on `retryable` or the
+  code, not the status alone.
 - `index_backpressure` (HTTP 429) rejects the whole request before it takes
   effect and carries `retryable: true`. Retry it unchanged with bounded backoff;
   see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
@@ -6401,15 +6411,15 @@ options are also rejected in embedded mode because no routing gateway is present
 
 ## Request returns HTTP 409
 
-Branch on the `error` code. A `transaction_conflict` (`retryable: true`) means the
-request could not commit against current transactional state. Retry the entire
-idempotent transaction with bounded backoff. Do not retry only part of a
-multi-mutation request.
+Branch on `retryable`. A 409 with `retryable: true` (`transaction_conflict`,
+`request_read_view_changed` or `stale_index_generation`) means the request could
+not commit against current state. Retry the entire idempotent transaction with
+bounded backoff. Do not retry only part of a multi-mutation request.
 
-Any other 409 (`retryable: false`) conflicts with the database's state and
-committed nothing, for example `unique_constraint_violation` when another node
-already owns a unique value. Resending it unchanged fails again: choose another
-value or update the existing node.
+A 409 with `retryable: false` conflicts with the database's state and committed
+nothing, for example `unique_constraint_violation` when another node already
+owns a unique value. Resending it unchanged fails again: choose another value
+or update the existing node.
 
 For non-idempotent business actions, attach an application-level idempotency key or
 read the latest state before deciding whether to resubmit.

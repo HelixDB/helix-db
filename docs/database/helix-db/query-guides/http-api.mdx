@@ -152,9 +152,10 @@ durability waits on reads are rejected with `400 Bad Request`.
 - `404` reports that the query named a node, edge, index or index operation
   that does not exist.
 - `408` reports that a query exceeded its deadline. A write may have committed.
-- `409` reports a conflict. A `transaction_conflict` carries `retryable: true`:
-  retry the whole transaction only when it is idempotent or protected by an
-  application idempotency key. A conflict with the database's state, such as
+- `409` reports a conflict; branch on `retryable`. A retryable conflict, such
+  as `transaction_conflict`, carries `retryable: true`: retry the whole
+  transaction only when it is idempotent or protected by an application
+  idempotency key. A conflict with the database's state, such as
   `unique_constraint_violation`, carries `retryable: false` and committed
   nothing; resending it unchanged fails again.
 - `413` reports that a Helix Cloud request body exceeded 2 MiB. The gateway

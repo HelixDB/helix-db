@@ -238,8 +238,8 @@ pub enum QueryFailureClass {
     /// The request names a node, edge, index or index operation that does not
     /// exist.
     NotFound,
-    /// A transaction conflict aborted the request; an unchanged retry may
-    /// succeed.
+    /// Concurrent work aborted the request: a transaction conflict, a changed
+    /// reader view or a stale index generation. An unchanged retry may succeed.
     Conflict,
     /// The request conflicts with the database's current state, such as a
     /// unique value another node already owns or an index that is busy.
@@ -332,6 +332,11 @@ impl QueryFailureClass {
     /// commit starts, or, for [`Self::Conflict`], when the commit itself
     /// aborts. Timeouts, unknown commit outcomes and internal failures can
     /// follow a durable commit, so a caller must reconcile rather than resend.
+    ///
+    /// The guarantee covers the failing operation. An index-management request
+    /// with several create, drop, retry or abort operations commits each one
+    /// on its own, so a lifecycle failure after the first leaves the earlier
+    /// operations committed (HEL-991).
     ///
     /// ```
     /// use helix_ast::error_code::QueryFailureClass;
