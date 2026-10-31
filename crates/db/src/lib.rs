@@ -1626,11 +1626,8 @@ impl HelixDB {
         )
         .expect("secondary output ceiling is a valid family batch limit");
         let secondary_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> = Arc::new(
-            index_lifecycle::secondary::SecondaryIndexDriver::with_catch_up_delay(
-                Arc::clone(&index_scope_gates),
-                secondary_tuning.catch_up_tail_delay_millis(),
-            )
-            .with_scan_tuning(lifecycle_throughput.scan()),
+            index_lifecycle::secondary::SecondaryIndexDriver::new(Arc::clone(&index_scope_gates))
+                .with_scan_tuning(lifecycle_throughput.scan()),
         );
         let vector_driver = index_lifecycle::vector::VectorIndexDriver::new(
             Arc::clone(&index_scope_gates),

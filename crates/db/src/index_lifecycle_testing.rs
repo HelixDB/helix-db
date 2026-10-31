@@ -168,6 +168,12 @@ pub async fn run_deterministic_text_build_reconciliation_contracts() {
     contracts::run_text_build_reconciliation().await;
 }
 
+/// Runs secondary builds that must activate under uninterrupted public writes.
+pub async fn run_secondary_sustained_write_contracts() {
+    let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;
+    contracts::run_secondary_sustained_writes().await;
+}
+
 /// Runs public secondary/vector writes at every exact build boundary.
 pub async fn run_secondary_vector_public_boundary_contracts() {
     let _guard = LIFECYCLE_CONTRACT_LOCK.lock().await;
