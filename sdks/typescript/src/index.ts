@@ -228,7 +228,9 @@ function remoteError(body: string, fallback: string, statusCode: number): HelixE
   return HelixError.remote(statusCode, body, fallback);
 }
 
-type ClientBackend = { kind: "server"; url: URL; apiKey?: string; databaseId?: string } | { kind: "embedded"; native: NativeHelixDB };
+type ClientBackend =
+  | { kind: "server"; url: URL; apiKey?: string; databaseId?: string; requireDatabaseId: boolean }
+  | { kind: "embedded"; native: NativeHelixDB };
 
 /** Complete query request handed from {@link QueryBuilder} to {@link QueryExecutionRequest}. */
 interface RequestParts {
@@ -330,7 +332,7 @@ export class Client {
 
   constructor(url?: string | null) {
     try {
-      this.backend = { kind: "server", url: new URL(url ?? DEFAULT_URL) };
+      this.backend = { kind: "server", url: new URL(url ?? DEFAULT_URL), requireDatabaseId: false };
     } catch (error) {
       throw HelixError.invalidUrl(error instanceof Error ? error.message : String(error));
     }
@@ -344,6 +346,17 @@ export class Client {
 
   static server(url?: string | null): Client {
     return new Client(url);
+  }
+
+  /** Create a managed Helix Cloud client with a required database ID. */
+  static managed(url: string | null | undefined, databaseId: string): Client {
+    validateDatabaseId(databaseId, true);
+    const client = new Client(url);
+    if (client.backend.kind === "server") {
+      client.backend.databaseId = databaseId;
+      client.backend.requireDatabaseId = true;
+    }
+    return client;
   }
 
   static async embedded(source: HelixDbSource, cache?: EmbeddedCacheConfig): Promise<Client> {
@@ -472,7 +485,7 @@ export class QueryBuilder<R = unknown> {
   /** Attach a query and target `POST /v2/query`. */
   query(query: QueryRequest): QueryExecutionRequest<R> {
     return new QueryExecutionRequest<R>({
-      backend: this.backend,
+      backend: snapshotBackend(this.backend),
       headers: { ...this.headers },
       query,
     });
@@ -481,13 +494,17 @@ export class QueryBuilder<R = unknown> {
   /** Attach one Cypher statement and target `POST /v2/cypher` or `POST /v2/cypher/explain`. */
   cypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): CypherExecutionRequest {
     return new CypherExecutionRequest({
-      backend: this.backend,
+      backend: snapshotBackend(this.backend),
       headers: { ...this.headers },
       query,
       parameters,
       queryName,
     });
   }
+}
+
+function snapshotBackend(backend: ClientBackend): ClientBackend {
+  return backend.kind === "server" ? { ...backend } : backend;
 }
 
 export class QueryExecutionRequest<R = unknown> {
@@ -517,6 +534,7 @@ export class QueryExecutionRequest<R = unknown> {
       throw HelixError.invalidUrl(error instanceof Error ? error.message : String(error));
     }
 
+    validateDatabaseId(backend.databaseId, backend.requireDatabaseId);
     const requestHeaders: Record<string, string> = { ...headers };
     if (backend.apiKey !== undefined) requestHeaders["Authorization"] = `Bearer ${backend.apiKey}`;
     if (backend.databaseId !== undefined) requestHeaders["x-helix-database-id"] = backend.databaseId;
@@ -619,6 +637,7 @@ export class CypherExecutionRequest {
     }
 
     const url = new URL(route.path, backend.url);
+    validateDatabaseId(backend.databaseId, backend.requireDatabaseId);
     const requestHeaders: Record<string, string> = { ...headers };
     if (backend.apiKey !== undefined) requestHeaders["Authorization"] = `Bearer ${backend.apiKey}`;
     if (backend.databaseId !== undefined) requestHeaders["x-helix-database-id"] = backend.databaseId;
@@ -636,6 +655,15 @@ export class CypherExecutionRequest {
     } catch (error) {
       throw HelixError.serialization(String(error));
     }
+  }
+}
+
+function validateDatabaseId(databaseId: string | undefined, required: boolean): void {
+  if (required && databaseId === undefined) {
+    throw HelixError.invalidRequest("managed clients require a database ID");
+  }
+  if (databaseId !== undefined && databaseId.trim().length === 0) {
+    throw HelixError.invalidRequest("database ID must not be empty");
   }
 }
 
