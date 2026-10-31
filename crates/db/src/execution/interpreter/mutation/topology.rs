@@ -1609,7 +1609,7 @@ mod tests {
             SweepBenchmarkStrategy::ExclusiveReadModifyWrite if present => {
                 let additions = ids.clone().collect::<RoaringTreemap>();
                 transaction
-                    .merge_commutative(
+                    .merge(
                         node_label_key(DataScope::LegacyUnscoped, LABEL),
                         secondary::SecondaryEqualityValue::encode_ids(&additions),
                     )
@@ -1619,7 +1619,7 @@ mod tests {
                     adjacency.add_out(id);
                 }
                 transaction
-                    .merge_commutative(
+                    .merge(
                         DataKey::Data {
                             scope: DataScope::LegacyUnscoped,
                             kind: DataKeyKind::Adjacency(AdjacencyKey::new(PARENT_ID)),

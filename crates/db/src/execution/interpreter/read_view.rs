@@ -509,7 +509,7 @@ mod tests {
         let reader = slatedb::DbReader::open(
             "reader-read-view",
             object_store,
-            None,
+            slatedb::DbReaderMode::ManagedCheckpoint,
             slatedb::config::DbReaderOptions {
                 manifest_poll_interval: std::time::Duration::from_millis(10),
                 ..slatedb::config::DbReaderOptions::default()

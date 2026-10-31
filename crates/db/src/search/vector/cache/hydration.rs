@@ -608,7 +608,7 @@ mod tests {
         let reader = slatedb::DbReader::open(
             "vector-cache-reader-hydration",
             object_store,
-            None,
+            slatedb::DbReaderMode::ManagedCheckpoint,
             slatedb::config::DbReaderOptions {
                 manifest_poll_interval: std::time::Duration::from_millis(10),
                 wal_poll_interval: std::time::Duration::from_millis(10),

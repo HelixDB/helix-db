@@ -166,9 +166,11 @@ fn public_object_store_cache_settings_expose_their_validated_bounds() {
     assert_eq!(settings.max_open_file_handles(), 8);
     assert_eq!(settings.to_slate_options().max_open_file_handles, 8);
     // A server whose SSTs are already on local disk stops caching its writes.
-    assert!(settings.to_slate_options().cache_puts);
+    let options = settings.to_slate_options();
+    assert!(options.cache_on_flush && options.cache_on_compaction);
     let reads_only = settings.clone().with_cache_puts(false);
-    assert!(!reads_only.to_slate_options().cache_puts);
+    let options = reads_only.to_slate_options();
+    assert!(!options.cache_on_flush && !options.cache_on_compaction);
     assert_eq!(reads_only.with_cache_puts(true), settings);
 }
 

@@ -286,7 +286,7 @@ fn slate_object_store_cache_settings_project_all_slate_options() {
     );
     assert_eq!(options.max_cache_size_bytes, Some(512));
     assert_eq!(options.part_size_bytes, 4096);
-    assert!(options.cache_puts);
+    assert!(options.cache_on_flush && options.cache_on_compaction);
     assert_eq!(
         options.preload_disk_cache_on_startup,
         Some(slatedb::config::PreloadLevel::AllSst)

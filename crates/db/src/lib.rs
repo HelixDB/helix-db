@@ -3837,7 +3837,7 @@ where
             manifest
                 .compacted()
                 .iter()
-                .flat_map(|run| run.sst_views.iter().map(|view| view.sst.id)),
+                .flat_map(|run| run.sst_views().iter().map(|view| view.sst.id)),
         )
         .chain(manifest.segments().iter().flat_map(|segment| {
             segment
@@ -3848,7 +3848,7 @@ where
                     segment
                         .compacted()
                         .iter()
-                        .flat_map(|run| run.sst_views.iter().map(|view| view.sst.id)),
+                        .flat_map(|run| run.sst_views().iter().map(|view| view.sst.id)),
                 )
         }))
         .collect::<Vec<_>>();
