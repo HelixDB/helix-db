@@ -5402,8 +5402,15 @@ pub(crate) mod production_contracts {
         );
     }
 
+    /// Commits one row per migration and lifecycle batch; flushes every
+    /// millisecond so those commits do not each wait out SlateDB's 100 ms
+    /// default.
     fn one_row_config() -> DbConfig {
         DbConfig::new()
+            .with_slate_settings(slatedb::Settings {
+                flush_interval: Some(std::time::Duration::from_millis(1)),
+                ..slatedb::Settings::default()
+            })
             .with_migration_tuning(MigrationTuning::default().with_batch_rows(
                 MigrationBatchRows::new(1).expect("one migration row is positive"),
             ))
