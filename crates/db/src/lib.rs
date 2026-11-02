@@ -379,7 +379,7 @@ impl HelixDbSource {
     /// The database path, its object store, and whether a writer's garbage
     /// collector may advance boundary files on that store.
     fn into_parts(self) -> Result<(String, Arc<dyn ObjectStore>, GcBoundaryFiles)> {
-        // LocalFileSystem has no conditional overwrite to advance them with.
+        // LocalFileSystem cannot advance GC boundary files: it has no conditional overwrite.
         let gc_boundary_files = match &self {
             Self::Disk { .. } => GcBoundaryFiles::Off,
             Self::InMemory { .. } | Self::InMemoryToken { .. } | Self::ObjectStorage { .. } => {
