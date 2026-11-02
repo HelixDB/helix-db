@@ -1,14 +1,14 @@
 //! Deterministic one-transaction vector batch benchmark.
 //!
 //! Run with:
-//! `cargo bench -p db --features production-coverage --bench vector_batch_insert`
+//! `cargo bench -p db --features bench-internals --bench vector_batch_insert`
 
 mod benchmark {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    use db::production_coverage::{
+    use db::bench_internals::{
         VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
         VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
     };

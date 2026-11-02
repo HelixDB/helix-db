@@ -12237,3 +12237,55 @@ async fn empty_at_most_one_row_returns_are_empty_arrays() {
     );
     db.close().await.unwrap();
 }
+
+/// Verifies a raw SlateDB write conflict reports the transaction-conflict code.
+///
+/// The overlapping transactions force the conflict, so this arm's coverage does not depend on
+/// another test's writers happening to collide.
+#[tokio::test]
+async fn storage_write_conflict_reports_transaction_conflict_code() {
+    let storage = slatedb::Db::builder(
+        "storage-write-conflict",
+        std::sync::Arc::new(slatedb::object_store::memory::InMemory::new()),
+    )
+    .build()
+    .await
+    .expect("in-memory database opens");
+    let first = storage
+        .begin(slatedb::IsolationLevel::Snapshot)
+        .await
+        .expect("first transaction begins");
+    let second = storage
+        .begin(slatedb::IsolationLevel::Snapshot)
+        .await
+        .expect("second transaction begins");
+    first.put(b"key", b"first").expect("first write buffers");
+    second.put(b"key", b"second").expect("second write buffers");
+    first.commit().await.expect("first transaction commits");
+    let conflict = second
+        .commit()
+        .await
+        .expect_err("second transaction conflicts");
+
+    assert_eq!(
+        db::error::HelixDbError::from(conflict).error_code(),
+        helix_ast::error_code::QueryErrorCode::TransactionConflict,
+    );
+}
+
+/// Verifies process-local writer identity and readiness through the public boundary.
+#[test]
+fn process_local_runtime_dependencies_preserve_identity_and_readiness() {
+    assert!(db::IndexRuntimeReadiness::Ready.is_ready());
+    assert_eq!(db::IndexRuntimeReadiness::Ready.code(), "ready");
+    assert!(db::ProcessLocalDatabaseToken::new("").is_err());
+
+    let token = db::ProcessLocalDatabaseToken::new("production-runtime-dependencies")
+        .expect("a non-empty process-local database path validates");
+    let cloned = token.clone();
+    assert_eq!(token.database_id(), cloned.database_id());
+    let debug = format!("{token:?}");
+    assert!(debug.contains("ProcessLocalDatabaseToken"));
+    assert!(debug.contains("production-runtime-dependencies"));
+    assert!(!debug.contains("object_store"));
+}
