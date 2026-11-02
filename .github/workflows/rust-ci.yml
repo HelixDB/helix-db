@@ -155,7 +155,7 @@ jobs:
           --test production_text_queue_contracts
 
   doctests:
-    name: Doctests, benches, and planner corpus
+    name: Doctests and planner corpus
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -165,8 +165,30 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --locked --workspace --doc
-      - run: cargo test --locked --workspace --benches
       - run: scripts/planner-normalized-corpus.sh
+
+  benches:
+    name: Benches in test mode
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # `--benches` also selects every library (libs default to
+      # `bench = true`) and would rerun the unit tests, so name the
+      # default-feature benches. Feature-gated benches run on demand.
+      - run: >-
+          cargo test --locked
+          -p db -p helix-planner -p helix-graph-algorithms -p helix-ast-bench
+          --bench embedded_write_latency --bench projection_materialization
+          --bench property_row_reads --bench write_path_mutations
+          --bench planner_scalability --bench v2_plan_quality
+          --bench graph_algorithms
+          --bench ast_memory --bench ast_parse --bench ast_rss
+          --bench ast_throughput --bench planner_alloc --bench planner_arena
 
   benchmark-feature:
     name: Async index benchmark feature
