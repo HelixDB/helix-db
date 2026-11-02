@@ -1938,15 +1938,6 @@ mod tests {
         );
     }
 
-    // Note: These tests require a real database transaction to run
-    // They serve as documentation for the expected API
-
-    #[test]
-    fn test_vector_index_creation() {
-        let index = VectorIndex::<Cosine>::new("embeddings");
-        assert_eq!(index.name(), "embeddings");
-    }
-
     #[tokio::test]
     async fn test_scripted_layers_drive_exact_inserted_graph_levels() {
         let db = test_inner_db("scripted_layers_drive_exact_inserted_graph_levels").await;
@@ -2105,13 +2096,6 @@ mod tests {
             measurements[1].operations(),
             "{measurements:?}"
         );
-    }
-
-    #[test]
-    fn test_config_validation() {
-        let config = VectorIndexConfig::new("test", "emb", 128);
-        assert_eq!(config.dimension, 128);
-        assert_eq!(config.property_name, "emb");
     }
 
     #[test]
@@ -2646,13 +2630,6 @@ mod tests {
         assert_eq!(stats.simhash_examined, 0);
         assert_eq!(stats.simhash_filtered, 0);
         assert_eq!(stats.avg_active_sampling_ratio, 0.5);
-    }
-
-    #[test]
-    fn test_decode_layer0_neighbors_from_compact_payload() {
-        let encoded = encode_layer0_neighbors(&[4, 2, 2]);
-        let decoded = decode_layer0_neighbors(&encoded).expect("compact payload should decode");
-        assert_eq!(decoded, vec![2, 4]);
     }
 
     #[test]

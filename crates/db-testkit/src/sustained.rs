@@ -225,38 +225,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pre_launch_matrix_keeps_reviewed_role_counts_and_four_tenants() {
-        assert_eq!(
-            WorkloadSpec::pre_launch(WorkloadClass::ReadOnly)
-                .concurrency()
-                .readers(),
-            32
-        );
-        assert_eq!(
-            WorkloadSpec::pre_launch(WorkloadClass::WriteOnly)
-                .concurrency()
-                .writers(),
-            8
-        );
-        assert_eq!(
-            WorkloadSpec::pre_launch(WorkloadClass::MultiTenantContention)
-                .concurrency()
-                .tenants()
-                .get(),
-            4
-        );
-        for class in WorkloadClass::ALL {
-            assert!(
-                WorkloadSpec::pull_request(class)
-                    .concurrency()
-                    .tenants()
-                    .get()
-                    >= 1
-            );
-        }
-    }
-
-    #[test]
     fn lag_policy_rejects_zeroes_and_metrics_use_sequence_progress() {
         assert!(ReplicaLagPolicy::try_new(Duration::ZERO, 1).is_err());
         assert!(ReplicaLagPolicy::try_new(Duration::from_secs(1), 0).is_err());

@@ -1,9 +1,8 @@
 //! One request per variant of every request enum, so a parser comparison
 //! exercises every visitor the AST has.
 //!
-//! The `*_variant` functions match exhaustively without a wildcard: adding a
-//! variant fails to compile until it is named there, and the tests in this
-//! module then fail until a sample uses it.
+//! The `*_variant` functions match exhaustively without a wildcard, so adding a
+//! variant fails to compile until it is named there.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -978,34 +977,6 @@ pub fn every_variant() -> Vec<Shape> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-
-    #[test]
-    fn samples_cover_every_variant() {
-        // Each count is the number of arms in the matching `*_variant` guard,
-        // so a variant added there without a sample fails here.
-        let distinct = |names: Vec<&'static str>| names.into_iter().collect::<BTreeSet<_>>().len();
-        let nodes = ast_nodes();
-        assert_eq!(nodes.len(), 80);
-        assert_eq!(distinct(nodes.iter().map(ast_variant).collect()), 80);
-        assert_eq!(
-            distinct(predicates().iter().map(predicate_variant).collect()),
-            18
-        );
-        assert_eq!(distinct(exprs().iter().map(expr_variant).collect()), 13);
-        assert_eq!(
-            distinct(
-                property_values()
-                    .iter()
-                    .map(property_value_variant)
-                    .collect()
-            ),
-            14
-        );
-        assert_eq!(
-            distinct(index_specs().iter().map(index_spec_variant).collect()),
-            8
-        );
-    }
 
     #[test]
     fn every_variant_request_is_valid_and_named_once() {

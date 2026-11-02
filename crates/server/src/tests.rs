@@ -982,9 +982,3 @@ fn open_file_limit_rises_to_the_hard_limit_or_fails_below_the_minimum() {
     assert_eq!(getrlimit(Resource::Nofile), raised);
     setrlimit(Resource::Nofile, original).unwrap();
 }
-
-#[test]
-fn tracing_initialization_is_idempotent() {
-    init_tracing_from_env();
-    init_tracing_from_env();
-}

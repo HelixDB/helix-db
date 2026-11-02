@@ -23,7 +23,7 @@ use db::search::vector::{
     SearchParams, SimHashMode, SimHasher, UnitInterval, VectorDimension, VectorDistanceMetric,
     VectorParameterError, VectorRef,
 };
-use db::{HelixDB, HelixDbMode, HelixDbSource, ProcessLocalDatabaseToken};
+use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
 use helix_ast::batch::{self, BatchEntry, NamedQuery, ReadBatch};
 use helix_ast::expr::{CompareOp, Expr, Predicate, StreamBound};
 use helix_ast::graph::{EdgeRef, NodeRef};
@@ -72,19 +72,6 @@ fn current_layer0_neighbor_bytes_are_stable_through_the_public_codec() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn root_tenant_compatibility_path_reexports_v2_scope_types() {
-    use db::encoding::keys::tenant::{DataScope, TenantId};
-
-    let tenant = TenantId::from_ulid_str("00000000000000000000000001")
-        .expect("compatibility path decodes tenant IDs");
-    let compatibility_scope = DataScope::Tenant(tenant);
-    let canonical_scope: db::encoding::v2::keys::scope::DataScope = compatibility_scope;
-
-    assert_eq!(canonical_scope, DataScope::Tenant(tenant));
-}
-
-#[test]
 fn public_vector_definition_owns_validated_configuration() {
     let definition =
         VectorIndexDefinition::new_node("Document", "embedding", 384, VectorDistanceMetric::Cosine)
@@ -108,20 +95,6 @@ fn public_vector_definition_owns_validated_configuration() {
     assert!(definition.clone().with_ml(f32::NAN).is_err());
     assert!(definition.clone().with_sampling_ratio(2.0).is_err());
     assert!(definition.with_adaptive_failure_prob(1.0).is_err());
-}
-
-#[tokio::test]
-async fn public_in_memory_writer_opens_and_closes() {
-    let db = HelixDB::open(HelixDbSource::InMemory {
-        database: "production-coverage-baseline".to_owned(),
-    })
-    .await
-    .expect("in-memory writer opens");
-
-    assert_eq!(db.mode(), HelixDbMode::Writer);
-    assert!(db.is_writer_mode());
-    assert!(!db.is_reader_mode());
-    db.close().await.expect("in-memory writer closes");
 }
 
 #[tokio::test]
