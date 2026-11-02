@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "uncovered_non_vector_source_lines": {
-    "count": 9957,
-    "sha256": "7ce562bfd04f85595cc6fd31ef5fe1ffcbb873a211cb2b0f2bb5126313779e78",
+    "count": 9892,
+    "sha256": "8351740b89f3f7ae7b8c6810f0e0904e623e60ebb7e5d68292380433f9351dd1",
     "classification": "test-required",
     "reason": "Every uncovered production source line outside vector search and its stochastic vector key/value codecs remains in the explicit production-linked test backlog. The digest makes additions, removals, and newly covered lines require a reviewed baseline update; vector code remains enforced by the whole-DB and dedicated vector thresholds plus finer named-test, architecture, invariant, and platform classifications."
   },
