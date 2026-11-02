@@ -332,6 +332,186 @@ async fn server_open_prunes_foyer_partitions_a_smaller_hybrid_cache_no_longer_ow
     }
 }
 
+#[tokio::test]
+async fn disk_storage_collects_manifests_and_compactions_without_boundary_files() {
+    async fn wait_until(done: impl Fn() -> bool, what: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    // A caller's LocalFileSystem store keeps SlateDB's boundary files on.
+    async fn open_boundary_writer(
+        root: &std::path::Path,
+        database: &str,
+        config: config::DbConfig,
+    ) -> HelixDB {
+        HelixDB::open_with_object_store_and_config(
+            database,
+            Arc::new(
+                slatedb::object_store::local::LocalFileSystem::new_with_prefix(root)
+                    .expect("local object store"),
+            ),
+            config,
+        )
+        .await
+        .expect("boundary-file writer opens")
+    }
+
+    let root = tempfile::tempdir().expect("disk root");
+    let ids = |database: &str, kind: &str| {
+        let suffix = format!(".{kind}");
+        let mut ids = std::fs::read_dir(root.path().join(database).join(kind))
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.expect("readable entry").file_name())
+                    .filter_map(|name| name.to_str()?.strip_suffix(&suffix)?.parse::<u64>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        ids.sort_unstable();
+        ids
+    };
+    let boundary = |database: &str, kind: &str| {
+        std::fs::read_to_string(
+            root.path()
+                .join(database)
+                .join("gc")
+                .join(format!("{kind}.boundary")),
+        )
+        .ok()
+    };
+    // Every 50 ms, delete each manifest and compactions file the GC model allows.
+    let collect = slatedb::config::GarbageCollectorDirectoryOptions {
+        interval: Some(Duration::from_millis(50)),
+        min_age: Duration::ZERO,
+        dry_run: false,
+    };
+    let collecting = || {
+        config::DbConfig::new().with_slate_settings(slatedb::Settings {
+            garbage_collector_options: Some(slatedb::config::GarbageCollectorOptions {
+                manifest_options: Some(collect),
+                compactions_options: Some(collect),
+                ..slatedb::config::GarbageCollectorOptions::default()
+            }),
+            ..slatedb::Settings::default()
+        })
+    };
+    let disk = |database: &str| HelixDbSource::Disk {
+        root: root.path().to_path_buf(),
+        database: database.to_owned(),
+    };
+    let write = |name: &str| {
+        QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "document",
+                    traversal::g().add_n("Document", vec![("name", PropertyInput::from(name))]),
+                )
+                .returning(Vec::<String>::new()),
+        )
+    };
+    let count = || {
+        QueryRequest::read(
+            batch::read_batch()
+                .var_as("count", traversal::g().n_with_label("Document").count())
+                .returning(["count"]),
+        )
+    };
+    let collected = |database: &str| {
+        ids(database, "manifest").len() == 1 && ids(database, "compactions").len() <= 1
+    };
+
+    // A directory an older Helix collected with boundary files on, as a
+    // caller's LocalFileSystem store still does: its first collection wrote
+    // the boundary file, and every later advance fails with NotImplemented.
+    let upgraded = "disk-gc-upgraded";
+    for name in ["alpha", "beta"] {
+        let db = open_boundary_writer(root.path(), upgraded, collecting()).await;
+        db.query(write(name)).await.expect("write lands");
+        db.close().await.expect("boundary-file writer closes");
+    }
+    let db = open_boundary_writer(root.path(), upgraded, collecting()).await;
+    wait_until(
+        || boundary(upgraded, "manifest").is_some(),
+        "the first collection writes the manifest boundary",
+    )
+    .await;
+    db.query(write("gamma")).await.expect("write lands");
+    db.close().await.expect("boundary-file writer closes");
+    let db = open_boundary_writer(root.path(), upgraded, collecting()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let manifest_boundary = boundary(upgraded, "manifest")
+        .expect("boundary file stays")
+        .trim()
+        .parse::<u64>()
+        .expect("boundary is an ID");
+    let stuck = ids(upgraded, "manifest");
+    assert!(
+        stuck.len() >= 2 && stuck.iter().all(|id| *id > manifest_boundary),
+        "with boundary files on, manifests past {manifest_boundary} stay: {stuck:?}"
+    );
+    db.close().await.expect("boundary-file writer closes");
+
+    // Disk storage collects them from its first pass, and leaves the old
+    // boundary files as they are: writers still check them, and nothing may
+    // delete one.
+    let boundaries = || {
+        (
+            boundary(upgraded, "manifest"),
+            boundary(upgraded, "compactions"),
+        )
+    };
+    let before = boundaries();
+    let db = HelixDB::open_for_server(disk(upgraded), collecting())
+        .await
+        .expect("disk writer opens the upgraded directory");
+    wait_until(
+        || collected(upgraded),
+        "disk storage collects the upgraded directory",
+    )
+    .await;
+    assert_eq!(boundaries(), before);
+    db.query(write("delta")).await.expect("write lands");
+    db.close().await.expect("disk writer closes");
+    let db = HelixDB::open_for_server(disk(upgraded), collecting())
+        .await
+        .expect("disk writer reopens");
+    assert_eq!(
+        db.query(count()).await.expect("count reads"),
+        serde_json::json!({ "count": 4 })
+    );
+    wait_until(
+        || collected(upgraded),
+        "disk storage collects after a restart",
+    )
+    .await;
+    assert_eq!(boundaries(), before);
+    db.close().await.expect("disk writer closes");
+
+    // A new disk directory never writes a boundary file.
+    let fresh = "disk-gc-fresh";
+    for name in ["alpha", "beta", "gamma"] {
+        let db = HelixDB::open_for_server(disk(fresh), collecting())
+            .await
+            .expect("disk writer opens");
+        db.query(write(name)).await.expect("write lands");
+        wait_until(|| collected(fresh), "disk storage collects a new directory").await;
+        db.close().await.expect("disk writer closes");
+    }
+    let db = HelixDB::open_for_server(disk(fresh), collecting())
+        .await
+        .expect("disk writer reopens");
+    assert_eq!(
+        db.query(count()).await.expect("count reads"),
+        serde_json::json!({ "count": 3 })
+    );
+    db.close().await.expect("disk writer closes");
+    assert!(!root.path().join(fresh).join("gc").exists());
+}
+
 #[test]
 fn server_open_trims_an_unwarmed_full_text_disk_tier_to_its_budget() {
     run_high_stack_contract(
