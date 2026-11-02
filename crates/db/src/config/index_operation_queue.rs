@@ -192,6 +192,10 @@ pub struct IndexOperationQueueTuning {
     start_paused: bool,
     /// Per-search source-input budget for eventual pending overlays.
     eventual_search_budget: u64,
+    /// Lowered suppression limit of overlaid searches; `None` keeps the
+    /// search default of 800 results.
+    #[cfg(test)]
+    max_suppressed_search_results: Option<usize>,
     /// Most committed pending vector work one strong search decodes and
     /// scores; `None` follows `max_retained_bytes`.
     strong_vector_search_max_pending_bytes: Option<NonZeroU64>,
@@ -214,6 +218,8 @@ impl Default for IndexOperationQueueTuning {
             #[cfg(test)]
             start_paused: false,
             eventual_search_budget: EVENTUAL_SEARCH_SOURCE_INPUT_BYTES,
+            #[cfg(test)]
+            max_suppressed_search_results: None,
             strong_vector_search_max_pending_bytes: None,
             strong_text_search_max_analysis_bytes: NonZeroU64::new(
                 DEFAULT_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES,
@@ -354,6 +360,26 @@ impl IndexOperationQueueTuning {
     pub(crate) const fn with_eventual_search_budget_for_tests(mut self, bytes: u64) -> Self {
         self.eventual_search_budget = bytes;
         self
+    }
+
+    /// Lowers the most superseded results one overlaid search may skip (800
+    /// outside tests) so tests reach that limit with a handful of documents.
+    ///
+    /// Test builds only: the limit is a fixed search bound, not product
+    /// policy, so product builds read the constant and carry no field.
+    #[cfg(test)]
+    pub(crate) const fn with_max_suppressed_search_results_for_tests(
+        mut self,
+        results: usize,
+    ) -> Self {
+        self.max_suppressed_search_results = Some(results);
+        self
+    }
+
+    /// Returns the suppression limit a test lowered, if any.
+    #[cfg(test)]
+    pub(crate) const fn max_suppressed_search_results_for_tests(self) -> Option<usize> {
+        self.max_suppressed_search_results
     }
 
     /// Returns the per-search eventual overlay budget (128 MiB outside tests).

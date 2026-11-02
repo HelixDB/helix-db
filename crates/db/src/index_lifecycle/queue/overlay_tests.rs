@@ -691,24 +691,6 @@ pub(super) async fn add_many(
     ids
 }
 
-/// Deletes `ids` in batched writes.
-async fn delete_many(db: &HelixDB, ids: &[u64]) {
-    for chunk in ids.chunks(100) {
-        write(db, || {
-            QueryRequest::write(chunk.iter().enumerate().fold(
-                batch::write_batch(),
-                |batch, (index, id)| {
-                    batch.var_as(
-                        &format!("d{index}"),
-                        traversal::g().n(NodeRef::from(*id)).drop(),
-                    )
-                },
-            ))
-        })
-        .await;
-    }
-}
-
 #[tokio::test]
 async fn restricted_search_at_its_result_cap_excludes_superseded_candidates() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -772,122 +754,22 @@ async fn restricted_search_at_its_result_cap_excludes_superseded_candidates() {
     db.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn overlay_widening_is_bounded_and_fails_explicitly_past_its_suppression_limit() {
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let db = open(
-        "overlay-widening-bound",
-        store,
-        queued(IndexOperationQueueTuning::default()),
+/// Suppression limit the overlay tests below lower their databases to, so a
+/// handful of documents crosses it instead of 800.
+const SUPPRESSION_LIMIT: usize = 8;
+
+/// Queued mode whose overlaid searches skip at most [`SUPPRESSION_LIMIT`]
+/// superseded results, flushing its WAL every millisecond so each commit
+/// does not wait out the default 100 ms.
+fn suppressing() -> DbConfig {
+    queued(
+        IndexOperationQueueTuning::default()
+            .with_max_suppressed_search_results_for_tests(SUPPRESSION_LIMIT),
     )
-    .await;
-    install(&db, None).await;
-    // Identical bodies tie on BM25, so text ranks them by ID like the line
-    // ranks them by distance.
-    let ids = add_many(&db, (0..802).map(|index| [index as f32, 0.0])).await;
-    drain(&db, target(&db, QueueFamily::Vector).await).await;
-    drain(&db, target(&db, QueueFamily::Text).await).await;
-    let nearest = |found: Vec<(u64, u64)>| found.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
-
-    // Re-embedded and rewritten neighbours are answered by their exact
-    // pending scores, so superseding more results than the bound does not
-    // widen past it. The repeated term outranks every physical hit.
-    for (chunk_index, chunk) in ids[..801].chunks(100).enumerate() {
-        write(&db, || {
-            QueryRequest::write(chunk.iter().enumerate().fold(
-                batch::write_batch(),
-                |batch, (index, id)| {
-                    let position = (chunk_index * 100 + index) as f32 + 0.25;
-                    batch.var_as(
-                        &format!("d{index}"),
-                        traversal::g()
-                            .n(NodeRef::from(*id))
-                            .set_property("embedding", vec![position, 0.0])
-                            .set_property("body", "alpha alpha".to_string()),
-                    )
-                },
-            ))
-        })
-        .await;
-    }
-    let pending_vector = vector_search(&db, [0.0, 0.0], 1, None, SearchConsistency::Strong).await;
-    let pending_text = text_search(&db, "alpha", 1, None, SearchConsistency::Strong).await;
-    assert_eq!(nearest(pending_vector.clone()), [ids[0]]);
-    assert_eq!(nearest(pending_text.clone()), [ids[0]]);
-    drain(&db, target(&db, QueueFamily::Vector).await).await;
-    drain(&db, target(&db, QueueFamily::Text).await).await;
-    // The pending scores are exactly the published ones.
-    assert_eq!(
-        vector_search(&db, [0.0, 0.0], 1, None, SearchConsistency::Strong).await,
-        pending_vector
-    );
-    assert_eq!(
-        text_search(&db, "alpha", 1, None, SearchConsistency::Strong).await,
-        pending_text
-    );
-
-    // Exactly the bound of superseded results ahead of the answer: the
-    // widened search still completes.
-    delete_many(&db, &ids[..800]).await;
-    assert_eq!(
-        nearest(vector_search(&db, [0.0, 0.0], 1, None, SearchConsistency::Strong).await),
-        [ids[800]]
-    );
-    assert_eq!(
-        nearest(text_search(&db, "alpha", 1, None, SearchConsistency::Strong).await),
-        [ids[800]]
-    );
-
-    // One more superseded result ahead: the search fails with retryable
-    // backpressure instead of widening with the backlog.
-    delete(&db, ids[800]).await;
-    for request in [
-        QueryRequest::read(
-            batch::read_batch()
-                .var_as(
-                    "hits",
-                    traversal::g().vector_search_nodes("Doc", "embedding", vec![0.0, 0.0], 1, None),
-                )
-                .returning(["hits"]),
-        ),
-        QueryRequest::read(
-            batch::read_batch()
-                .var_as(
-                    "hits",
-                    traversal::g().text_search_nodes("Doc", "body", "alpha", 1, None),
-                )
-                .returning(["hits"]),
-        ),
-    ] {
-        let error = db
-            .query(request)
-            .await
-            .expect_err("more superseded results than the bound must not widen silently");
-        assert!(error.is_index_backpressure(), "unexpected error: {error}");
-    }
-    // Eventual search overlays only the oldest 800 deletes instead. The newest
-    // keeps its published row, whose deleted node is not returned.
-    assert_eq!(
-        nearest(vector_search(&db, [0.0, 0.0], 2, None, SearchConsistency::Eventual).await),
-        [ids[801]]
-    );
-    assert_eq!(
-        nearest(text_search(&db, "alpha", 2, None, SearchConsistency::Eventual).await),
-        [ids[801]]
-    );
-
-    // Publication drains the backlog and the same searches succeed.
-    drain(&db, target(&db, QueueFamily::Vector).await).await;
-    drain(&db, target(&db, QueueFamily::Text).await).await;
-    assert_eq!(
-        nearest(vector_search(&db, [0.0, 0.0], 1, None, SearchConsistency::Strong).await),
-        [ids[801]]
-    );
-    assert_eq!(
-        nearest(text_search(&db, "alpha", 1, None, SearchConsistency::Strong).await),
-        [ids[801]]
-    );
-    db.close().await.unwrap();
+    .with_slate_settings(slatedb::Settings {
+        flush_interval: Some(std::time::Duration::from_millis(1)),
+        ..slatedb::Settings::default()
+    })
 }
 
 /// Rewrites each of `ids` to a far embedding and a body without `"alpha"`, in
@@ -913,64 +795,138 @@ async fn move_away(db: &HelixDB, ids: &[u64]) {
     }
 }
 
+/// Overlay widening is bounded by the suppression limit. Pending results that
+/// rank ahead settle without widening, exactly the limit of superseded
+/// results ahead still settles, and one more fails a strong search with
+/// retryable backpressure while an eventual search overlays only the oldest
+/// limit's worth and serves the rest as published, until publication.
 #[tokio::test]
-async fn past_the_suppression_limit_strong_search_fails_and_eventual_search_degrades() {
+async fn overlay_widening_is_bounded_and_past_its_suppression_limit_only_eventual_search_answers() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let db = open(
-        "overlay-suppression-consistency",
-        store,
-        queued(IndexOperationQueueTuning::default()),
+    let db = open("overlay-widening-bound", store, suppressing()).await;
+    install(&db, None).await;
+    // Identical bodies tie on BM25, so text ranks them by ID like the line
+    // ranks them by distance.
+    let ids = add_many(
+        &db,
+        (0..SUPPRESSION_LIMIT + 3).map(|index| [index as f32, 0.0]),
     )
     .await;
-    install(&db, None).await;
-    let ids = add_many(&db, (0..802).map(|index| [index as f32, 0.0])).await;
     drain(&db, target(&db, QueueFamily::Vector).await).await;
     drain(&db, target(&db, QueueFamily::Text).await).await;
-    // 801 pending rewrites move the nearest documents away and stop them
-    // matching, so each one's published result lies ahead of the answer.
-    move_away(&db, &ids[..801]).await;
     let nearest = |found: Vec<(u64, u64)>| found.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    let strong_fails = async || {
+        for request in [
+            QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "hits",
+                        traversal::g().vector_search_nodes(
+                            "Doc",
+                            "embedding",
+                            vec![0.0, 0.0],
+                            1,
+                            None,
+                        ),
+                    )
+                    .returning(["hits"]),
+            ),
+            QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "hits",
+                        traversal::g().text_search_nodes("Doc", "body", "alpha", 1, None),
+                    )
+                    .returning(["hits"]),
+            ),
+        ] {
+            let error = db
+                .query(request)
+                .await
+                .expect_err("more superseded results than the bound must not widen silently");
+            assert!(error.is_index_backpressure(), "unexpected error: {error}");
+        }
+    };
 
-    // Strong search never answers without every committed change.
-    for request in [
-        QueryRequest::read(
-            batch::read_batch()
-                .var_as(
-                    "hits",
-                    traversal::g().vector_search_nodes("Doc", "embedding", vec![0.0, 0.0], 1, None),
+    // Re-embedded and rewritten neighbours are answered by their exact
+    // pending scores, so superseding more results than the bound does not
+    // widen past it. The repeated term outranks every physical hit.
+    write(&db, || {
+        QueryRequest::write(ids[..=SUPPRESSION_LIMIT].iter().enumerate().fold(
+            batch::write_batch(),
+            |batch, (index, id)| {
+                batch.var_as(
+                    &format!("d{index}"),
+                    traversal::g()
+                        .n(NodeRef::from(*id))
+                        .set_property("embedding", vec![index as f32 + 0.25, 0.0])
+                        .set_property("body", "alpha alpha".to_string()),
                 )
-                .returning(["hits"]),
-        ),
-        QueryRequest::read(
-            batch::read_batch()
-                .var_as(
-                    "hits",
-                    traversal::g().text_search_nodes("Doc", "body", "alpha", 1, None),
-                )
-                .returning(["hits"]),
-        ),
-    ] {
-        let error = db
-            .query(request)
-            .await
-            .expect_err("strong search must not skip the limit's worth of superseded results");
-        assert!(error.is_index_backpressure(), "unexpected error: {error}");
-    }
+            },
+        ))
+    })
+    .await;
+    let pending_vector = vector_search(&db, [0.0, 0.0], 1, None, SearchConsistency::Strong).await;
+    let pending_text = text_search(&db, "alpha", 1, None, SearchConsistency::Strong).await;
+    assert_eq!(nearest(pending_vector.clone()), [ids[0]]);
+    assert_eq!(nearest(pending_text.clone()), [ids[0]]);
+    drain(&db, target(&db, QueueFamily::Vector).await).await;
+    drain(&db, target(&db, QueueFamily::Text).await).await;
+    // The pending scores are exactly the published ones.
+    assert_eq!(
+        vector_search(&db, [0.0, 0.0], 1, None, SearchConsistency::Strong).await,
+        pending_vector
+    );
+    assert_eq!(
+        text_search(&db, "alpha", 1, None, SearchConsistency::Strong).await,
+        pending_text
+    );
 
-    // Eventual search overlays the oldest 800 rewrites and serves the newest
-    // from its published row, exactly as before that rewrite.
+    // Exactly the bound of rewrites that stop matching ahead of the answer:
+    // the widened search still completes.
+    move_away(&db, &ids[..SUPPRESSION_LIMIT]).await;
+    assert_eq!(
+        nearest(vector_search(&db, [0.0, 0.0], 1, None, SearchConsistency::Strong).await),
+        [ids[SUPPRESSION_LIMIT]]
+    );
+    assert_eq!(
+        nearest(text_search(&db, "alpha", 1, None, SearchConsistency::Strong).await),
+        [ids[SUPPRESSION_LIMIT]]
+    );
+
+    // One more: strong search never answers without every committed change.
+    update(&db, ids[SUPPRESSION_LIMIT], [20_000.0, 0.0], "beta").await;
+    strong_fails().await;
+    // Eventual search overlays the oldest rewrites and serves the newest from
+    // its published row, exactly as before that rewrite.
     assert_eq!(
         vector_search(&db, [0.0, 0.0], 1, None, SearchConsistency::Eventual).await,
-        [(ids[800], 640_000.0_f64.to_bits())]
+        [(
+            ids[SUPPRESSION_LIMIT],
+            (SUPPRESSION_LIMIT as f64 + 0.25).powi(2).to_bits()
+        )]
     );
     assert_eq!(
         nearest(text_search(&db, "alpha", 1, None, SearchConsistency::Eventual).await),
-        [ids[800]]
+        [ids[SUPPRESSION_LIMIT]]
     );
     // A search whose answer needs no widening still overlays every rewrite.
     assert_eq!(
-        nearest(vector_search(&db, [10_800.0, 0.0], 1, None, SearchConsistency::Eventual).await),
-        [ids[800]]
+        nearest(vector_search(&db, [20_000.0, 0.0], 1, None, SearchConsistency::Eventual).await),
+        [ids[SUPPRESSION_LIMIT]]
+    );
+
+    // A delete past the limit keeps its published row, whose deleted node is
+    // not returned.
+    delete(&db, ids[SUPPRESSION_LIMIT + 1]).await;
+    strong_fails().await;
+    assert_eq!(
+        nearest(vector_search(&db, [0.0, 0.0], 2, None, SearchConsistency::Eventual).await),
+        [ids[SUPPRESSION_LIMIT]]
+    );
+    assert_eq!(
+        nearest(text_search(&db, "alpha", 2, None, SearchConsistency::Eventual).await),
+        [ids[SUPPRESSION_LIMIT]]
     );
 
     // Once published, both consistencies agree on the fresh answer.
@@ -979,12 +935,12 @@ async fn past_the_suppression_limit_strong_search_fails_and_eventual_search_degr
     for consistency in [SearchConsistency::Strong, SearchConsistency::Eventual] {
         assert_eq!(
             nearest(vector_search(&db, [0.0, 0.0], 1, None, consistency).await),
-            [ids[801]],
+            [ids[SUPPRESSION_LIMIT + 2]],
             "{consistency:?}"
         );
         assert_eq!(
             nearest(text_search(&db, "alpha", 1, None, consistency).await),
-            [ids[801]],
+            [ids[SUPPRESSION_LIMIT + 2]],
             "{consistency:?}"
         );
     }
@@ -1043,46 +999,31 @@ fn change_and_search(
     })))
 }
 
-#[test]
-fn write_batch_searches_widen_past_every_change_of_their_own() {
-    // The move-away write batch has 902 statements, so the planner's
-    // recursive reachability walk runs over 2,000 frames deep and exceeds the
-    // default debug test thread stack; production sizing is unchanged.
-    std::thread::Builder::new()
-        .name("overlay-local-suppression".to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("overlay test runtime builds")
-                .block_on(write_batch_searches_widen_past_every_change_of_their_own_contract());
-        })
-        .expect("overlay test thread starts")
-        .join()
-        .expect("overlay test completes");
-}
-
-async fn write_batch_searches_widen_past_every_change_of_their_own_contract() {
+/// A write batch's own changes ahead of its answer never count toward the
+/// suppression limit, since no publication clears them, so its searches
+/// widen past twice the limit of them. Committed and unpublished, the same
+/// changes fail a strong search.
+#[tokio::test]
+async fn write_batch_searches_widen_past_every_change_of_their_own() {
+    let local = 2 * SUPPRESSION_LIMIT;
     for change in [AheadChange::Delete, AheadChange::MoveAway] {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = open(
             &format!("overlay-local-suppression-{change:?}"),
             store,
-            queued(IndexOperationQueueTuning::default()),
+            suppressing(),
         )
         .await;
         install(&db, None).await;
-        let ids = add_many(&db, (0..901).map(|index| [index as f32, 0.0])).await;
+        let ids = add_many(&db, (0..=local).map(|index| [index as f32, 0.0])).await;
         drain(&db, target(&db, QueueFamily::Vector).await).await;
         drain(&db, target(&db, QueueFamily::Text).await).await;
 
-        // The batch's own changes put 900 published results ahead of the
-        // answer. No publication can clear them, so they never count toward
-        // the suppression limit.
+        // The batch's own changes put twice the limit of published results
+        // ahead of the answer, and the search still settles.
         let result = db
             .query(change_and_search(
-                &ids[..900],
+                &ids[..local],
                 change,
                 &[QueueFamily::Vector, QueueFamily::Text],
             ))
@@ -1092,12 +1033,12 @@ async fn write_batch_searches_widen_past_every_change_of_their_own_contract() {
         let local_text = hits(&result, "text_hits");
         assert_eq!(
             local_vector,
-            [(ids[900], 810_000.0_f64.to_bits())],
+            [(ids[local], (local as f64).powi(2).to_bits())],
             "{change:?}"
         );
         assert_eq!(
             local_text.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            [ids[900]],
+            [ids[local]],
             "{change:?}"
         );
 
@@ -1153,20 +1094,21 @@ async fn write_batch_searches_widen_past_every_change_of_their_own_contract() {
 #[tokio::test]
 async fn write_batch_searches_fail_with_backpressure_only_past_committed_work() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let db = open(
-        "overlay-local-committed-suppression",
-        store,
-        queued(IndexOperationQueueTuning::default()),
+    let db = open("overlay-local-committed-suppression", store, suppressing()).await;
+    install(&db, None).await;
+    let committed = SUPPRESSION_LIMIT + 1;
+    let ids = add_many(
+        &db,
+        (0..=committed + SUPPRESSION_LIMIT).map(|index| [index as f32, 0.0]),
     )
     .await;
-    install(&db, None).await;
-    let ids = add_many(&db, (0..902).map(|index| [index as f32, 0.0])).await;
     drain(&db, target(&db, QueueFamily::Vector).await).await;
     drain(&db, target(&db, QueueFamily::Text).await).await;
-    // 801 committed rewrites ahead of the answer, then 100 of the batch's own
-    // deletes behind them.
-    move_away(&db, &ids[..801]).await;
-    let local = &ids[801..901];
+    // One committed rewrite past the limit ahead of the answer, then as many
+    // of the batch's own deletes as the limit behind them.
+    move_away(&db, &ids[..committed]).await;
+    let local = &ids[committed..committed + SUPPRESSION_LIMIT];
+    let answer = committed + SUPPRESSION_LIMIT;
 
     for family in [QueueFamily::Vector, QueueFamily::Text] {
         let error = db
@@ -1175,9 +1117,9 @@ async fn write_batch_searches_fail_with_backpressure_only_past_committed_work() 
             .expect_err("committed work past the limit still fails the search");
         assert!(error.is_index_backpressure(), "{family:?}: {error}");
         assert!(
-            error
-                .to_string()
-                .contains("suppressed_search_results would reach 801, limit 800"),
+            error.to_string().contains(&format!(
+                "suppressed_search_results would reach {committed}, limit {SUPPRESSION_LIMIT}"
+            )),
             "{family:?}: only committed results count: {error}"
         );
     }
@@ -1196,14 +1138,14 @@ async fn write_batch_searches_fail_with_backpressure_only_past_committed_work() 
         .unwrap();
     assert_eq!(
         hits(&result, "vector_hits"),
-        [(ids[901], 811_801.0_f64.to_bits())]
+        [(ids[answer], (answer as f64).powi(2).to_bits())]
     );
     assert_eq!(
         hits(&result, "text_hits")
             .into_iter()
             .map(|(id, _)| id)
             .collect::<Vec<_>>(),
-        [ids[901]]
+        [ids[answer]]
     );
     db.close().await.unwrap();
 }

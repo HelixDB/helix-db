@@ -62,6 +62,28 @@ impl<'db> ExecutionContext<'db> {
             limit.access_limit,
         ))
     }
+
+    /// [`MAX_SUPPRESSED_SEARCH_RESULTS`] for this database.
+    ///
+    /// Test builds read a lower limit when the database's queue tuning sets
+    /// one (`with_max_suppressed_search_results_for_tests`), so overlay tests
+    /// cross it with a handful of documents rather than 800. Every other
+    /// build reads the constant.
+    pub(in crate::execution::interpreter::access::search) fn max_suppressed_search_results(
+        &self,
+    ) -> usize {
+        #[cfg(test)]
+        let limit = self
+            .db
+            .config()
+            .db()
+            .index_operation_queue()
+            .max_suppressed_search_results_for_tests()
+            .unwrap_or(MAX_SUPPRESSED_SEARCH_RESULTS);
+        #[cfg(not(test))]
+        let limit = MAX_SUPPRESSED_SEARCH_RESULTS;
+        limit
+    }
 }
 
 /// Hard ceiling applied to every search result count that has no narrower
