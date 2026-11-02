@@ -393,6 +393,10 @@ fn local_runtime_commands_have_cross_platform_no_daemon_smoke_coverage() {
         .unwrap_or_default();
     assert!(dev.contains("local"), "{status}");
     assert!(status.contains("not created"));
+    assert!(
+        !fixture.helix_home().join("credentials").exists(),
+        "local commands never create Cloud credentials"
+    );
 
     let logs = stdout(
         fixture

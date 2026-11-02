@@ -139,18 +139,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::HelixDbError;
 
-#[cfg(test)]
-use crate::encoding::v2::keys::indexes::vector::{
-    VectorEntryCandidateKey, VectorEntryCandidateNodeKey, VectorIndexMetadataKey,
-    VectorIndexPrefixKey, VectorItemKey, VectorLayer0NeighborsKey, VectorUpperVectorKey,
-};
 use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorMetadataScanPrefix};
-#[cfg(test)]
-use crate::encoding::v2::keys::indexes::vector::{
-    VectorReverseEdgeKey, VectorReverseEdgePrefixKey,
-};
-#[cfg(test)]
-use crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey as VectorTxnGuardKey;
 use crate::encoding::v2::values::indexes::vector as vector_values;
 use crate::encoding::NodeId;
 

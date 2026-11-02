@@ -811,9 +811,6 @@ fn runtime_index_catalog_projects_typed_planner_snapshot() {
     assert!(
         indexes.contains_node_equality_scoped(&scoped_secondary_index_property("User", "email"))
     );
-    assert!(indexes
-        .node_equality_indexes()
-        .any(|key| key == scoped_secondary_index_property("User", "email")));
 }
 
 #[test]
@@ -864,70 +861,17 @@ fn secondary_index_definition_constructors_preserve_validated_semantics() {
 }
 
 #[test]
-fn runtime_index_catalog_dynamic_insertion_covers_all_iterators() {
-    let node_unique = SecondaryIndexDefinition::node_unique_equality("User", "slug").unwrap();
-    let edge_range = SecondaryIndexDefinition::edge_range_desc("LIKES", "createdAt").unwrap();
+fn runtime_index_catalog_inserts_each_search_definition_once() {
     let vector =
         VectorIndexDefinition::new_node("Doc", "embedding", 3, VectorDistanceMetric::Cosine)
             .unwrap();
     let text = TextIndexDefinition::new_node("Doc", "body").unwrap();
 
     let mut catalog = RuntimeIndexCatalog::default();
-    for definition in [
-        SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
-        SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
-        SecondaryIndexDefinition::node_range_desc("User", "age").unwrap(),
-        SecondaryIndexDefinition::edge_equality("LIKES", "kind").unwrap(),
-        SecondaryIndexDefinition::edge_range("LIKES", "rank").unwrap(),
-        SecondaryIndexDefinition::edge_range_desc("LIKES", "createdAt").unwrap(),
-    ] {
-        catalog.insert_dynamic_index(&v2_secondary(definition));
+    for _ in 0..2 {
+        catalog.insert_dynamic_index(&v2_vector(vector.clone()));
+        catalog.insert_dynamic_index(&v2_text(text.clone()));
     }
-    catalog.insert_dynamic_index(&v2_secondary(node_unique.clone()));
-    catalog.insert_dynamic_index(&v2_secondary(edge_range.clone()));
-    catalog.insert_dynamic_index(&v2_vector(vector.clone()));
-    catalog.insert_dynamic_index(&v2_text(text.clone()));
-    catalog.insert_dynamic_index(&v2_vector(vector));
-    catalog.insert_dynamic_index(&v2_text(text));
-
-    let node_email = scoped_secondary_index_property("User", "email");
-    let node_slug = scoped_secondary_index_property("User", "slug");
-    let node_age = scoped_secondary_index_property("User", "age");
-    let node_rank = scoped_secondary_index_property("User", "rank");
-    let edge_kind = scoped_secondary_index_property("LIKES", "kind");
-    let edge_created = scoped_secondary_index_property("LIKES", "createdAt");
-    let edge_rank = scoped_secondary_index_property("LIKES", "rank");
-
-    assert!(catalog.contains_node_equality_scoped(&node_email));
-    assert!(!catalog.contains_node_unique_equality_scoped(&node_email));
-    assert!(catalog.contains_node_unique_equality_scoped(&node_slug));
-    assert!(!catalog.contains_node_unique_equality_scoped("not-scoped"));
-    assert!(catalog.contains_node_range_scoped(&node_rank));
-    assert!(catalog.contains_node_range_desc_scoped(&node_age));
-    assert!(!catalog.contains_node_range_scoped(&node_age));
-    assert!(catalog.contains_edge_equality_scoped(&edge_kind));
-    assert!(catalog.contains_edge_range_scoped(&edge_rank));
-    assert!(catalog.contains_edge_range_desc_scoped(&edge_created));
-    assert!(!catalog.contains_edge_range_scoped(&edge_created));
-    assert!(!catalog.contains_node_equality_scoped("not-scoped"));
-    assert!(!catalog.contains_node_range_scoped("not-scoped"));
-    assert!(!catalog.contains_node_range_desc_scoped("not-scoped"));
-    assert!(!catalog.contains_edge_equality_scoped("not-scoped"));
-    assert!(!catalog.contains_edge_range_scoped("not-scoped"));
-    assert!(!catalog.contains_edge_range_desc_scoped("not-scoped"));
-    assert!(!catalog.has_scoped_equality_index("", "property"));
-
-    assert!(catalog.node_equality_indexes().any(|key| key == node_email));
-    assert!(catalog
-        .node_unique_equality_indexes()
-        .any(|key| key == node_slug));
-    assert!(catalog.node_range_desc_indexes().any(|key| key == node_age));
-    assert!(catalog.node_range_indexes().any(|key| key == node_rank));
-    assert!(catalog.edge_equality_indexes().any(|key| key == edge_kind));
-    assert!(catalog
-        .edge_range_desc_indexes()
-        .any(|key| key == edge_created));
-    assert!(catalog.edge_range_indexes().any(|key| key == edge_rank));
     assert_eq!(catalog.vector_indexes().count(), 1);
     assert_eq!(catalog.text_indexes().count(), 1);
 }

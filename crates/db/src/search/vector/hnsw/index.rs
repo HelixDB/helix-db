@@ -1655,9 +1655,7 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
 
     use super::*;
-    use crate::encoding::v2::values::indexes::vector::{
-        decode_layer0_neighbors, encode_layer0_neighbors,
-    };
+    use crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors;
     use crate::search::vector::cache::store::VectorMemoryDirtyRows;
     use crate::search::vector::distance::{Cosine, Euclidean};
     use crate::search::vector::{SimHash, VectorConfigError, VectorDimensionError};
