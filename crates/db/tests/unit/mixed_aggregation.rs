@@ -1,7 +1,7 @@
 /// Frontends may normalize these expressions into separate projections, but
 /// the shared validated plan still accepts aggregates inside scalar expressions.
-#[cfg_attr(test, tokio::test)]
-pub async fn mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values() {
+#[tokio::test]
+async fn mixed_aggregate_common_plans_preserve_groups_empty_input_and_graph_values() {
     use crate::{
         cypher::{output, Limits},
         execution::interpreter::Interpreter,

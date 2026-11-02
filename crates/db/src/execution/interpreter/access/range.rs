@@ -53,39 +53,39 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    let handle =
-                        active_range_handle_in_view(self, reader.as_ref(), &identity, direction)
-                            .await?;
-                    crate::index_lifecycle::secondary::OrderedRangeCursor::open(
-                        reader.as_ref(),
-                        handle,
-                        query,
-                        iteration,
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        let handle =
+                            active_range_handle_in_view(self, reader.as_ref(), &identity, direction)
+                                .await?;
+                        crate::index_lifecycle::secondary::OrderedRangeCursor::open(
+                            reader.as_ref(),
+                            handle,
+                            query,
+                            iteration,
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        let handle =
+                            active_range_handle_in_view(self, writer.db(), &identity, direction)
+                                .await?;
+                        crate::index_lifecycle::secondary::OrderedRangeCursor::open(
+                            writer.db(),
+                            handle,
+                            query,
+                            iteration,
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    let handle =
-                        active_range_handle_in_view(self, writer.db(), &identity, direction)
-                            .await?;
-                    crate::index_lifecycle::secondary::OrderedRangeCursor::open(
-                        writer.db(),
-                        handle,
-                        query,
-                        iteration,
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "range cursor escaped request read view".into(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "range cursor escaped request read view".into(),
+            )),
+        )
     }
 
     pub(in crate::execution::interpreter) async fn next_range_cursor(
@@ -98,17 +98,17 @@ impl<'db> ExecutionContext<'db> {
         if let Some(view) = self.request_read_view() {
             return cursor.next(view, self).await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => cursor.next(reader.as_ref(), self).await,
-                HelixStorage::Writer(writer) => cursor.next(writer.db(), self).await,
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "range cursor escaped request read view".into(),
-        ))
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => cursor.next(reader.as_ref(), self).await,
+                    HelixStorage::Writer(writer) => cursor.next(writer.db(), self).await,
+                }
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "range cursor escaped request read view".into(),
+            )),
+        )
     }
 
     pub(in crate::execution::interpreter) async fn node_range_index_count_with_membership(
@@ -252,49 +252,49 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    scan_managed_range_in_view(
-                        self,
-                        reader.as_ref(),
-                        &identity,
-                        query,
-                        direction,
-                        iteration,
-                        membership,
-                        limit,
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        scan_managed_range_in_view(
+                            self,
+                            reader.as_ref(),
+                            &identity,
+                            query,
+                            direction,
+                            iteration,
+                            membership,
+                            limit,
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        scan_managed_range_in_view(
+                            self,
+                            writer.db(),
+                            &identity,
+                            query,
+                            direction,
+                            iteration,
+                            membership,
+                            limit,
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    scan_managed_range_in_view(
-                        self,
-                        writer.db(),
-                        &identity,
-                        query,
-                        direction,
-                        iteration,
-                        membership,
-                        limit,
-                    )
-                    .await
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                match element_kind {
+                    crate::index_lifecycle::IndexElementKind::Node => {
+                        "node secondary range lookup escaped its request read view"
+                    }
+                    crate::index_lifecycle::IndexElementKind::Edge => {
+                        "edge secondary range lookup escaped its request read view"
+                    }
                 }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            match element_kind {
-                crate::index_lifecycle::IndexElementKind::Node => {
-                    "node secondary range lookup escaped its request read view"
-                }
-                crate::index_lifecycle::IndexElementKind::Edge => {
-                    "edge secondary range lookup escaped its request read view"
-                }
-            }
-            .to_string(),
-        ))
+                .to_string(),
+            )),
+        )
     }
 }
 

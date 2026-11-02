@@ -143,7 +143,7 @@ impl PreparedMemberships {
         });
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::execution::interpreter) fn len(&self) -> usize {
         self.0.len()
     }

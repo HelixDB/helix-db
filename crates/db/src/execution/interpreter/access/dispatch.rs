@@ -119,8 +119,7 @@ fn truncate_search_results(
     }
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[cfg_attr(all(feature = "production-coverage", not(test)), allow(dead_code))]
+#[cfg(test)]
 pub(super) mod tests {
     use helix_ast::expr::Predicate;
     use helix_ast::value::PropertyValue;
@@ -1024,14 +1023,5 @@ pub(super) mod tests {
                 .await
                 .is_err());
         }
-    }
-
-    #[cfg(all(feature = "production-coverage", not(test)))]
-    pub(in crate::execution::interpreter::access) async fn run_production_contracts() {
-        truncate_search_results_applies_optional_positive_limit();
-        access_dispatch_covers_node_equality_and_edge_source_variants().await;
-        exact_access_dispatch_covers_bitmap_unique_scan_and_dynamic_families().await;
-        exact_access_dispatch_rejects_each_invalid_dynamic_and_set_driver_contract().await;
-        exact_access_dispatch_propagates_scan_predicate_index_and_search_failures().await;
     }
 }
