@@ -478,6 +478,38 @@ def validate_rust_ci_paths(root: Path) -> list[str]:
     return errors
 
 
+LIFECYCLE_TESTING_UNIT_MODULE = re.compile(
+    r'#\[cfg\(all\(test, feature = "index-lifecycle-testing"\)\)\]\s*'
+    r'(?:#\[path = "[^"]*"\]\s*)?(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+)'
+)
+
+
+def validate_lifecycle_testing_unit_tests(root: Path) -> list[str]:
+    """Keep feature-gated unit tests where the contracts job selects them.
+
+    `--all-targets` builds the library without `index-lifecycle-testing`, so a
+    workflow runs the library's `lifecycle_testing_tests` modules by name.
+    """
+    errors = []
+    gated = False
+    for path in sorted((root / "crates" / "db" / "src").rglob("*.rs")):
+        for match in LIFECYCLE_TESTING_UNIT_MODULE.finditer(path.read_text()):
+            gated = True
+            if match.group("name") != "lifecycle_testing_tests":
+                errors.append(
+                    f"{path.relative_to(root)}: index-lifecycle-testing unit tests must "
+                    f"live in a `lifecycle_testing_tests` module, not {match.group('name')!r}"
+                )
+    selected = any(
+        "--lib" in command and "lifecycle_testing_tests" in command
+        for path in (root / ".github" / "workflows").glob("*.yml")
+        for command in commands(path)
+    )
+    if gated and not selected:
+        errors.append("no workflow runs the library's lifecycle_testing_tests modules")
+    return errors
+
+
 def validate_fuzz_matrices(root: Path, catalog: Catalog) -> list[str]:
     errors = []
     for path in (root / ".github" / "workflows").glob("*.yml"):
@@ -807,10 +839,10 @@ def validate_codec_architecture(root: Path) -> list[str]:
             or relative_path == "crates/db/src/migrations.rs"
             or relative_path.startswith("crates/db/src/migrations/")
             or relative_path == "crates/db/tests/public_encoding_compatibility.rs"
-            or relative_path == "crates/db/tests/production_support/v1_migration.rs"
-            or relative_path.startswith("crates/db/tests/production_support/v1_migration/")
-            or relative_path
-            == "crates/db/tests/production_support/migration_text_rebuild.rs"
+            or relative_path == "crates/db/tests/unit/v1_migration.rs"
+            or relative_path.startswith("crates/db/tests/unit/v1_migration/")
+            or relative_path == "crates/db/tests/unit/legacy_text_fixtures.rs"
+            or relative_path == "crates/db/tests/unit/migration_lifecycle_contracts.rs"
         )
 
     for path in (root / "crates").rglob("*.rs"):
@@ -858,6 +890,7 @@ def main() -> int:
     errors.extend(validate_feature_gated_tests_run(root, catalog))
     errors.extend(validate_benches_run(root, catalog))
     errors.extend(validate_rust_ci_paths(root))
+    errors.extend(validate_lifecycle_testing_unit_tests(root))
     errors.extend(validate_fuzz_matrices(root, catalog))
     errors.extend(validate_inventory(root, catalog))
     errors.extend(validate_codec_architecture(root))

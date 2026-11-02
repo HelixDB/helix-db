@@ -154,25 +154,22 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
       # The archive skips targets whose required features are off. List every
-      # db test target that requires `production-coverage` or
-      # `index-lifecycle-testing` (but not `production-scale`) here; the
-      # target-reference validator fails when one is missing. Nextest runs
+      # db test target that requires `index-lifecycle-testing` (but not
+      # `production-scale`) here; the target-reference validator fails when
+      # one is missing. Unit tests that need the feature live in
+      # `lifecycle_testing_tests` modules; the filter runs only those from the
+      # library, so the archive's unit tests do not run twice. Nextest runs
       # each test in its own process, so suites that serialize on a
       # process-wide lock still run in parallel.
       - run: >-
           cargo nextest run --profile ci --locked -p db
-          --features production-coverage,index-lifecycle-testing
+          --features index-lifecycle-testing
+          --lib
           --test index_lifecycle_contracts
-          --test production_index_lifecycle_contracts
           --test production_index_operation_queue
-          --test production_internal_contracts
-          --test production_migration_contracts
-          --test production_queue_admission_memory
-          --test production_queue_publication
-          --test production_secondary_equality_hot_path_contracts
           --test production_text_correctness_regressions
-          --test production_text_lifecycle
           --test production_text_queue_contracts
+          -E 'kind(test) or test(/::lifecycle_testing_tests::/)'
 
   doctests:
     name: Doctests and planner corpus
@@ -215,7 +212,7 @@ jobs:
       - name: Lint feature-gated benches
         run: >-
           cargo clippy --locked -p db
-          --features production-coverage,index-lifecycle-testing
+          --features bench-internals,index-lifecycle-testing
           --bench secondary_equality_hot_path --bench secondary_equality_read_scale
           --bench vector_batch_insert --bench vector_memory_store
           --bench text_transaction_batching --bench fts_prefilter

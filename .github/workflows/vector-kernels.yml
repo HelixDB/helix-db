@@ -32,25 +32,26 @@ jobs:
           - kernel: x86_64 scalar reference
             runner: ubuntu-24.04
             rustflags: -C target-cpu=x86-64
-            features: production-coverage,force-vector-scalar-kernel
+            feature-args: --features force-vector-scalar-kernel
           - kernel: x86_64 SSE4.1
             runner: ubuntu-24.04
             rustflags: -C target-cpu=x86-64 -C target-feature=+sse4.1,-avx,-avx2,-fma
-            features: production-coverage
+            feature-args: ""
           - kernel: x86_64 AVX FMA
             runner: ubuntu-24.04
             rustflags: -C target-cpu=x86-64 -C target-feature=+sse4.1,+avx,+avx2,+fma
-            features: production-coverage
+            feature-args: ""
           - kernel: aarch64 scalar reference
             runner: ubuntu-24.04-arm
             rustflags: ""
-            features: production-coverage,force-vector-scalar-kernel
+            feature-args: --features force-vector-scalar-kernel
           - kernel: aarch64 NEON
             runner: ubuntu-24.04-arm
             rustflags: -C target-feature=+neon
-            features: production-coverage
+            feature-args: ""
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 10
+    # Builds the library's unit-test binary before the one kernel test runs.
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -58,7 +59,10 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Exercise scalar and native kernels directly
-        run: >-
-          cargo test -p db --features ${{ matrix.features }}
-          --test production_internal_contracts
-          vector_distance_neighbors_exercise_metric_and_graph_invariants
+        # `--exact` selects the one kernel contract; fail if it was renamed
+        # away rather than pass after running nothing.
+        run: |
+          cargo test -p db --lib ${{ matrix.feature-args }} -- --exact \
+            search::vector::distance_neighbor_tests::distance_neighbors_exercise_metric_and_graph_invariants \
+            | tee kernel-test.log
+          grep -q "test result: ok. 1 passed" kernel-test.log
