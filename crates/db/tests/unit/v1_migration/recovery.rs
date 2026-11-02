@@ -354,8 +354,6 @@ async fn run_case(
 /// Runs every graph/bootstrap boundary plus both physical-cleanup
 /// deletion boundaries through interruption, durable inspection, and reopen.
 pub async fn v1_graph_crash_recovery_contract() -> Vec<V1CrashRecoveryObservation> {
-    let _failpoint_guard =
-        crate::migrations::production_contracts::failpoint_contract_guard().await;
     let mut observations = Vec::with_capacity(BLOCKING_BOUNDARIES.len() + CLEANUP_BOUNDARIES.len());
     for failpoint in BLOCKING_BOUNDARIES {
         observations.push(run_case(failpoint, false).await);

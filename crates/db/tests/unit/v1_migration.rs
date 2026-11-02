@@ -6,11 +6,17 @@
 //! normal writer bootstrap. They intentionally do not call migration stages or
 //! index drivers directly.
 
+#[path = "v1_migration/collision.rs"]
 mod collision;
+#[path = "v1_migration/failure.rs"]
 mod failure;
+#[path = "v1_migration/prefix.rs"]
 mod prefix;
+#[path = "v1_migration/recovery.rs"]
 mod recovery;
+#[path = "v1_migration/retirement.rs"]
 mod retirement;
+#[path = "v1_migration/semantics.rs"]
 mod semantics;
 
 use std::sync::Arc;
@@ -38,26 +44,17 @@ use crate::index_lifecycle::{
 use crate::search::vector::VectorDistanceMetric;
 use crate::{DbConfig, HelixDB};
 
-pub use collision::{
-    v1_property_hash_collision_migration_contract, V1CollisionIndexObservation,
-    V1CollisionMigrationObservation,
-};
-pub use failure::{
+pub(super) use collision::v1_property_hash_collision_migration_contract;
+pub(super) use failure::{
     v1_malformed_catalog_failure_preservation_contract, v1_range_failure_preservation_contract,
-    v1_unique_failure_preservation_contract, V1MalformedCatalogObservation,
-    V1RangeFailureCaseObservation, V1RangeFailureMigrationObservation,
-    V1UniqueMigrationObservation,
+    v1_unique_failure_preservation_contract,
 };
-pub use prefix::{v1_prefix_successor_contract, V1PrefixSuccessorObservation};
-pub use recovery::{v1_graph_crash_recovery_contract, V1CrashRecoveryObservation};
-pub use retirement::{
-    v1_secondary_retirement_failpoint_contract, V1RetirementFailpointObservation,
-};
-pub use semantics::{
-    v1_equality_semantics_migration_contract, v1_range_semantics_migration_contract, V1ElementKind,
-    V1EqualityMigrationObservation, V1EqualityQueryObservation, V1OracleValue, V1RangeAccess,
-    V1RangeBound, V1RangeCaseObservation, V1RangeDirection, V1RangeMigrationObservation,
-    V1SemanticRow,
+pub(super) use prefix::v1_prefix_successor_contract;
+pub(super) use recovery::v1_graph_crash_recovery_contract;
+pub(super) use retirement::v1_secondary_retirement_failpoint_contract;
+pub(super) use semantics::{
+    v1_equality_semantics_migration_contract, v1_range_semantics_migration_contract, V1OracleValue,
+    V1RangeBound, V1RangeDirection,
 };
 
 const NODE_ZERO_PREFIX: u64 = 0x0000_0000_0000_0001;

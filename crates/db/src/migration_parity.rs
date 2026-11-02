@@ -1,10 +1,10 @@
 #![allow(deprecated)]
 
-//! Feature-gated migration diagnostics.
+//! Migration diagnostics for tests and `index-lifecycle-testing`.
 //!
-//! This module is intentionally excluded from the default crate surface. The
-//! production migration contract tests use it to observe persisted index state
-//! and damage text statistics before and after storage-format migrations.
+//! This module is intentionally excluded from the default crate surface.
+//! Migration and text contracts use it to observe persisted index state and
+//! damage text statistics before and after storage-format migrations.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};

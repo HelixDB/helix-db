@@ -402,8 +402,6 @@ async fn run_case(
 /// Interrupts every edge-secondary retirement lane immediately before and
 /// after its atomic catalog/physical-row commit, then cold-reopens it.
 pub async fn v1_secondary_retirement_failpoint_contract() -> Vec<V1RetirementFailpointObservation> {
-    let _failpoint_guard =
-        crate::migrations::production_contracts::failpoint_contract_guard().await;
     let mut observations = Vec::with_capacity(4);
     for family in Family::ALL {
         observations.push(

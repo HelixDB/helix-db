@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-//! Feature-gated populated legacy-text migration fixtures.
+//! Populated legacy-text migration fixtures.
 //!
 //! These helpers construct only deployed graph, catalog, text-metadata, and
 //! blob representations. Migration itself always runs through the ordinary
