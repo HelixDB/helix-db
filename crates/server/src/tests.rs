@@ -203,9 +203,40 @@ async fn http_transport_completion_joins_peer_before_database_close() {
 
 #[tokio::test]
 async fn embedding_shutdown_closes_both_transports_and_database() {
-    run_with_shutdown(memory_config("server-owned-shutdown"), async {})
-        .await
-        .unwrap();
+    // Reserve two distinct ports, then free them for the server.
+    let listeners = [
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+    ];
+    let addresses = listeners
+        .each_ref()
+        .map(|listener| listener.local_addr().unwrap());
+    drop(listeners);
+    let mut config = memory_config("server-owned-shutdown");
+    [config.http_addr, config.grpc_addr] = addresses;
+
+    // Shutdown is signalled only once both transports accept connections. The
+    // runner returns `Ok` only after joining both transports and closing the
+    // database without error.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        run_with_shutdown(config, async move {
+            for address in addresses {
+                while tokio::net::TcpStream::connect(address).await.is_err() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        }),
+    )
+    .await
+    .expect("both transports start and shut down")
+    .expect("both transports join and the database closes");
+    for address in addresses {
+        assert!(
+            std::net::TcpStream::connect(address).is_err(),
+            "{address} still accepts connections after shutdown"
+        );
+    }
 }
 
 #[tokio::test]

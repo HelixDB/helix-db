@@ -1101,15 +1101,15 @@ mod tests {
     #[tokio::test]
     async fn unchanged_active_document_stages_no_vector_work() {
         let db = test_db("vector-active-unchanged-document").await;
+        let physical_index_id = VectorPhysicalIndexId::new(51).unwrap();
         let (target, _) = active_target(
             validated_definition(None, VectorDistanceMetric::Euclidean),
-            VectorPhysicalLayout::Unpartitioned {
-                physical_index_id: VectorPhysicalIndexId::new(51).unwrap(),
-            },
+            VectorPhysicalLayout::Unpartitioned { physical_index_id },
         );
         let mutations = VectorMutationSet {
             targets: vec![target],
         };
+        let cache_writes = VectorCacheWriteSet::default();
         let properties = vec![
             property("$label", PropertyValue::String("Document".to_string())),
             property("embedding", PropertyValue::F32Array(vec![1.0, 2.0, 3.0])),
@@ -1123,7 +1123,7 @@ mod tests {
             &db,
             &transaction,
             &mutations,
-            &VectorCacheWriteSet::default(),
+            &cache_writes,
             &[VectorEntityMutation::new(
                 IndexElementKind::Node,
                 9,
@@ -1133,7 +1133,19 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(cache_writes.entries().is_empty());
         transaction.commit().await.unwrap();
+        for lane in VectorStorageLane::ALL {
+            let prefix = DataKey::data_prefix(
+                DataScope::LegacyUnscoped,
+                lane.prefix_key(physical_index_id.get()).to_bytes(),
+            );
+            let mut rows = db.scan_prefix(prefix, ..).await.unwrap();
+            assert!(
+                rows.next().await.unwrap().is_none(),
+                "an unchanged document staged rows in {lane:?}"
+            );
+        }
         db.close().await.unwrap();
     }
 
