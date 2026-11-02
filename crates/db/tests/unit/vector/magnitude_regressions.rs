@@ -134,7 +134,8 @@ fn record_rejection(
 }
 
 /// Characterizes the independent limit oracle and every current float kernel.
-pub(crate) fn run_oracle_and_kernel_contracts() {
+#[test]
+fn oracle_and_kernels_cover_numeric_boundaries() {
     for dimension in [1_usize, 15, 16, 17, 31, 32, 33, 1536, u32::MAX as usize] {
         for metric in [
             VectorDistanceMetric::Euclidean,
@@ -328,7 +329,8 @@ pub(crate) fn run_oracle_and_kernel_contracts() {
 }
 
 /// Proves accepted bytes/scores remain frozen and cosine keeps its full finite domain.
-pub(crate) async fn run_golden_and_cosine_contracts() {
+#[tokio::test]
+async fn golden_inputs_preserve_existing_semantics() {
     let item = Item::<Euclidean>::new(vec![1.0, -2.0]);
     let mut expected = Vec::new();
     expected.extend_from_slice(&0.0_f32.to_ne_bytes());
@@ -363,7 +365,8 @@ pub(crate) async fn run_golden_and_cosine_contracts() {
 }
 
 /// Requires current-row decoding to reject finite values outside the oracle domain.
-pub(crate) fn run_current_row_decode_contracts() {
+#[test]
+fn current_rows_fail_closed() {
     let dimension = VectorDimension::try_new(DIMENSION).unwrap();
     let euclidean_limit =
         magnitude_oracle::inclusive_limit(VectorDistanceMetric::Euclidean, DIMENSION).unwrap();
@@ -486,7 +489,8 @@ async fn exercise_mutation_rejection<D: Distance>(
 }
 
 /// Requires insert and upsert to reject before any row mutation.
-pub(crate) async fn run_mutation_contracts() {
+#[tokio::test]
+async fn mutations_reject_before_state_changes() {
     let mut failures = exercise_mutation_rejection::<Euclidean>(
         "production-vector-magnitude-euclidean-mutation",
         VectorDistanceMetric::Euclidean,
@@ -576,7 +580,8 @@ async fn exercise_search_rejection<D: Distance>(
 }
 
 /// Requires unrestricted search to reject before an invalid score reaches ordering.
-pub(crate) async fn run_search_contracts() {
+#[tokio::test]
+async fn queries_reject_before_hnsw_scoring() {
     let mut failures = exercise_search_rejection::<Euclidean>(
         "production-vector-magnitude-euclidean-search",
         VectorDistanceMetric::Euclidean,
@@ -595,7 +600,8 @@ pub(crate) async fn run_search_contracts() {
 }
 
 /// Requires restricted search to enforce the same numeric domain.
-pub(crate) async fn run_restricted_search_contracts() {
+#[tokio::test]
+async fn restricted_queries_match_unrestricted_validation() {
     let mut failures = exercise_search_rejection::<Euclidean>(
         "production-vector-magnitude-euclidean-restricted",
         VectorDistanceMetric::Euclidean,
@@ -688,7 +694,8 @@ async fn exercise_legacy_rejection<D: Distance>(
 }
 
 /// Requires frozen legacy physical validation to fail before adoption.
-pub(crate) async fn run_legacy_validation_contracts() {
+#[tokio::test]
+async fn legacy_rows_block_adoption_validation() {
     let mut failures = Vec::new();
     if let Some(failure) = exercise_legacy_rejection::<Euclidean>(
         "production-vector-magnitude-euclidean-legacy",

@@ -1,6 +1,6 @@
 //! Production contracts for active f32 and policy-neutral vector primitives.
 //!
-//! This feature-gated child module executes the real byte-view, SimHash,
+//! This child module executes the real byte-view, SimHash,
 //! candidate-ordering, typed-result, and query-local randomness boundaries.
 //! It deliberately excludes reserved f16, binary, and binary-quantized codecs
 //! and performs no database I/O, so coverage cannot introduce or migrate a
@@ -107,7 +107,8 @@ impl<const WORD_SIZE: usize> Distance for InvalidWordDistance<WORD_SIZE> {
 }
 
 /// Exercises every typed vector-item decoder result without future codecs.
-fn run_item_decoder_contracts() {
+#[test]
+fn item_decoder_contracts() {
     let dimension = VectorDimension::try_new(3).unwrap();
     let item = Item::<distance::Cosine>::new(vec![1.0, 2.0, 3.0]);
     let encoded = encode_item(&item);
@@ -201,7 +202,8 @@ fn run_item_decoder_contracts() {
 }
 
 /// Exercises both allocation-free f32 SimHash paths and their closed errors.
-fn run_simhash_byte_view_contracts() {
+#[test]
+fn simhash_byte_view_contracts() {
     let values = [
         0.0,
         -0.0,
@@ -266,9 +268,8 @@ fn run_simhash_byte_view_contracts() {
 }
 
 /// Exercises every active primitive boundary without creating an alternate codec.
-pub(crate) fn run() {
-    run_item_decoder_contracts();
-    run_simhash_byte_view_contracts();
+#[test]
+fn active_primitive_contracts() {
     let item = Item::<distance::Cosine>::new(vec![3.0, 4.0]);
     let cloned = item.clone();
     assert_eq!(cloned.vector.to_vec(), [3.0, 4.0]);

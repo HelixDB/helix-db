@@ -107,11 +107,8 @@ fn float_simd() -> FloatSimd {
     *SIMD.get_or_init(detect_float_simd)
 }
 
-/// Return whether production coverage explicitly selected the scalar kernel.
-#[cfg(all(
-    feature = "production-coverage",
-    feature = "force-vector-scalar-kernel"
-))]
+/// Return whether the build explicitly selected the scalar kernel.
+#[cfg(all(test, feature = "force-vector-scalar-kernel"))]
 pub(crate) fn is_forced_scalar_kernel() -> bool {
     float_simd() == FloatSimd::Scalar
 }

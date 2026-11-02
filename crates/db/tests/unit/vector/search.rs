@@ -1,6 +1,6 @@
 //! Production contracts for the single vector-search session.
 //!
-//! This feature-gated child module verifies deterministic helper policies,
+//! This child module verifies deterministic helper policies,
 //! request validation, empty and populated sessions, layer reads, recovery,
 //! and optional observation through the real production implementation. It
 //! uses only current vector rows in isolated in-memory databases.
@@ -19,7 +19,7 @@ use crate::encoding::v2::keys::indexes::vector::{
 use crate::encoding::v2::values::indexes::vector::entry_candidate::encode_entry_candidate_layer;
 use crate::search::vector::distance::{Cosine, Distance};
 use crate::search::vector::hnsw::mutation::VectorInsertContract;
-use crate::search::vector::read_fault_production_support::{FaultingRead, ReadFault};
+use crate::search::vector::read_fault::{FaultingRead, ReadFault};
 use crate::search::vector::storage::{VectorRows, VectorWriteRows};
 use crate::search::vector::{
     encode_item, Item, MeasuredVectorTransaction, SimHashMode, VectorIndexConfig,
@@ -51,7 +51,8 @@ impl Distance for UnboundSearchDistance {
 impl crate::search::vector::distance::sealed::Sealed for UnboundSearchDistance {}
 
 /// Verifies deterministic prefetch ranking and deferred visited-state ownership.
-fn run_helper_contracts() {
+#[test]
+fn helper_contracts() {
     let off = SearchParams::new(1)
         .unwrap()
         .with_simhash_mode(SimHashMode::Off);
@@ -134,7 +135,8 @@ fn run_helper_contracts() {
 }
 
 /// Verifies validation, empty state, typed layer reads, and populated search.
-async fn run_session_contracts() {
+#[tokio::test]
+async fn session_contracts() {
     let db = Db::open(
         "production-vector-search-contract",
         Arc::new(InMemory::new()),
@@ -1128,10 +1130,4 @@ async fn run_corruption_contracts(db: &Db, index: &VectorIndex<Cosine>) {
         entry
     );
     txn.rollback();
-}
-
-/// Exercises helper policy, validation, traversal, recovery, and observation.
-pub(crate) async fn run() {
-    run_helper_contracts();
-    run_session_contracts().await;
 }

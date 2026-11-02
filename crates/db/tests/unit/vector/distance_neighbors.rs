@@ -1,6 +1,6 @@
 //! Production contracts for active distance kernels and canonical neighbors.
 //!
-//! This feature-gated child module verifies closed f32 metric identity,
+//! This child module verifies closed f32 metric identity,
 //! scalar/architecture-dispatched arithmetic equivalence, dimension rejection,
 //! and every constructible bounded-neighbor transition. It never enables a
 //! reserved codec and proves canonical runtime state still enters the existing
@@ -47,7 +47,8 @@ impl distance::Distance for UnsupportedDistance {
 impl distance::sealed::Sealed for UnsupportedDistance {}
 
 /// Exercises active f32 semantics and every valid bounded-neighbor transition.
-pub(crate) fn run() {
+#[test]
+fn distance_neighbors_exercise_metric_and_graph_invariants() {
     #[cfg(feature = "force-vector-scalar-kernel")]
     assert!(spaces::simple::is_forced_scalar_kernel());
 

@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "production-coverage", allow(dead_code))]
-
 use std::collections::HashSet;
 #[cfg(test)]
 use std::fmt;
@@ -463,7 +461,7 @@ fn exact_ids(
         .collect()
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+#[test]
 fn admission_scans_exactly_by_candidate_cardinality_and_bytes() {
     let params = SearchParams::new(10).unwrap();
     let candidates = |count: u64| {
@@ -570,7 +568,7 @@ fn admission_scans_exactly_by_candidate_cardinality_and_bytes() {
     assert_eq!(two.deterministic_sample_ids(8), vec![3, 7]);
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+#[test]
 fn restricted_result_count_clamps_before_enforcing_the_payload_limit() {
     assert_eq!(
         RestrictedResultCount::try_new(MAX_RESTRICTED_RESULT_COUNT, 1_000)
@@ -608,7 +606,7 @@ fn restricted_result_count_clamps_before_enforcing_the_payload_limit() {
     assert!(budgets.vector_payloads >= k.get());
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+#[test]
 fn candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit() {
     assert!(matches!(
         RestrictedVectorCandidates::from_ids([]).unwrap(),
@@ -627,7 +625,7 @@ fn candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit() {
     assert!(error.to_string().contains("at most 1000000"));
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+#[test]
 fn empty_candidates_accept_any_result_count_and_absorb_exclusions() {
     let empty = RestrictedVectorCandidates::from_ids([]).unwrap();
     empty.validate_result_count(1).unwrap();
@@ -656,7 +654,7 @@ fn empty_candidates_accept_any_result_count_and_absorb_exclusions() {
 
 /// An exact bitmap becomes the same candidate set as its IDs would, and is
 /// held to the same unique-candidate limit.
-#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+#[test]
 fn bitmap_candidates_match_id_candidates_and_their_limit() {
     assert!(matches!(
         RestrictedVectorCandidates::from_bitmap(RoaringTreemap::new()),
@@ -691,7 +689,7 @@ fn bitmap_candidates_match_id_candidates_and_their_limit() {
     assert_eq!(over_limit.to_string(), id_error.to_string());
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn oversized_result_count_rejects_before_index_metadata_io() {
     let db = Arc::new(
         slatedb::Db::open(
@@ -721,7 +719,7 @@ async fn oversized_result_count_rejects_before_index_metadata_io() {
     );
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn empty_candidates_short_circuit_before_index_metadata_io() {
     let db = Arc::new(
         slatedb::Db::open("restricted-empty-short-circuit", Arc::new(InMemory::new()))
@@ -757,7 +755,7 @@ async fn empty_candidates_short_circuit_before_index_metadata_io() {
     assert_eq!(observed.distance_computations, 0);
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn unbound_metric_rejects_after_metadata_without_vector_reads() {
     let db = Arc::new(
         slatedb::Db::open("restricted-unbound-metric", Arc::new(InMemory::new()))
@@ -861,14 +859,14 @@ async fn assert_exact_metric<D: Distance>(name: &str) {
     );
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn exact_scan_is_correct_and_tie_stable_for_every_active_metric() {
     assert_exact_metric::<Cosine>("restricted-exact-cosine").await;
     assert_exact_metric::<Euclidean>("restricted-exact-euclidean").await;
     assert_exact_metric::<Manhattan>("restricted-exact-manhattan").await;
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn exact_scan_omits_absent_ids_but_rejects_missing_companion_rows() {
     const ENTITY_COUNT: u64 = 32;
     let (db, index) = seed_index("restricted-corruption", ENTITY_COUNT, 8).await;
@@ -929,7 +927,7 @@ async fn exact_scan_omits_absent_ids_but_rejects_missing_companion_rows() {
         .contains("missing canonical vector payload for node 2"));
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn exact_scan_spans_fetch_batches_and_fails_closed_in_later_batches() {
     const ENTITY_COUNT: u64 = 2 * FETCH_BATCH_SIZE as u64 + 1;
     const DIMENSION: usize = 8;
@@ -1031,7 +1029,7 @@ async fn exact_scan_spans_fetch_batches_and_fails_closed_in_later_batches() {
     )));
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn wide_payload_sized_exact_scans_fetch_within_the_byte_budget() {
     // Payload-sized scopes are exact at any width. At 16,384-d the byte budget
     // holds 384 vectors, so a 385-candidate scope needs a second fetch instead
@@ -1121,7 +1119,7 @@ async fn wide_payload_sized_exact_scans_fetch_within_the_byte_budget() {
     }
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn directory_lifecycle_tracks_insert_upsert_and_delete() {
     let db = Arc::new(
         slatedb::Db::open("restricted-directory-lifecycle", Arc::new(InMemory::new()))
@@ -1206,7 +1204,7 @@ async fn directory_lifecycle_tracks_insert_upsert_and_delete() {
         .is_empty());
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn directory_entries_seed_vectors_without_re_reading_point_simhash_rows() {
     const ENTITY_COUNT: u64 = 300;
     let (db, index) =
@@ -1235,7 +1233,7 @@ async fn directory_entries_seed_vectors_without_re_reading_point_simhash_rows() 
     assert!(stats.directory_decoded_bytes <= DIRECTORY_MAX_DECODED_BYTES);
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn directoryless_acorn_crosses_a_three_edge_filtered_gulf_without_nonmember_vectors() {
     let (db, index) = seed_three_edge_filtered_gulf::<Cosine>("restricted-three-edge-gulf").await;
     let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
@@ -1268,7 +1266,7 @@ async fn directoryless_acorn_crosses_a_three_edge_filtered_gulf_without_nonmembe
         .await;
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn directoryless_bridge_missing_simhash_fails_closed() {
     let (db, index) =
         seed_three_edge_filtered_gulf::<Cosine>("restricted-bridge-missing-simhash").await;
@@ -1297,7 +1295,7 @@ async fn directoryless_bridge_missing_simhash_fails_closed() {
     assert!(error.to_string().contains("missing simhash for node 2"));
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn directoryless_bridge_corrupt_simhash_fails_closed() {
     let (db, index) =
         seed_three_edge_filtered_gulf::<Cosine>("restricted-bridge-corrupt-simhash").await;
@@ -1327,7 +1325,7 @@ async fn directoryless_bridge_corrupt_simhash_fails_closed() {
     assert!(error.to_string().contains("invalid simhash row for node 2"));
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+#[test]
 fn bridge_enqueue_prefers_known_ranks_and_queues_each_node_once() {
     let query_hash = crate::search::vector::SimHash::from_bits(0);
     let mut bridge_state = RestrictedBridgeState {
@@ -1363,7 +1361,7 @@ fn bridge_enqueue_prefers_known_ranks_and_queues_each_node_once() {
     assert!(bridge_state.queue.is_empty());
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+#[test]
 fn estimated_bridges_keep_their_lowest_rediscovered_estimate() {
     // Node 1 has rank 4. Node 7 is first reached from a far row and node 8
     // from a row whose estimate ties node 1's rank.
@@ -1408,7 +1406,7 @@ fn estimated_bridges_keep_their_lowest_rediscovered_estimate() {
     assert_eq!(stats.bridge_frontier_pushes, 4);
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn bridges_beyond_the_rank_window_are_ranked_before_expansion() {
     // Entry 5 faces the query, so bridges 100, 101, and 102 all inherit a low
     // estimate. The rank window ranks 100 and 101 as orthogonal; 102 still
@@ -1450,7 +1448,7 @@ async fn bridges_beyond_the_rank_window_are_ranked_before_expansion() {
     );
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn later_rank_reads_rank_one_bridge_per_slot_still_open() {
     // Bridges 10 to 13 hold the lowest estimate and fill the first read's
     // window of two per slot, but only 10 faces the query. Bridges 14 and 15
@@ -1536,7 +1534,7 @@ async fn assert_directoryless_filtered_metric<D: Distance>(name: &str) {
         .all(|result| candidates.contains(result.entity_id())));
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_region() {
     let (db, index) = seed_filtered_graph::<Cosine>(
         "restricted-guided-bridge",
@@ -1603,7 +1601,7 @@ async fn simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_regi
     assert!(stats.bridge_frontier_pushes >= 3);
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id() {
     // Both bridges inherit the same rank from node 1; only their own SimHash
     // rows can put node 3 (towards the query) ahead of node 2.
@@ -1671,7 +1669,7 @@ async fn simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id() {
     assert_eq!(stats.vector_payload_requests, 1);
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn bridge_simhash_reads_stay_within_the_rank_window() {
     // Every seventh ring node is allowed and no power-of-two skip is a
     // multiple of seven, so allowed nodes are only reachable through bridges.
@@ -1706,7 +1704,7 @@ async fn bridge_simhash_reads_stay_within_the_rank_window() {
         .all(|result| candidates.contains(result.entity_id())));
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), test)]
+#[test]
 fn bridge_batches_grow_from_the_expanded_batch_and_halve_back_to_the_floor() {
     let floor = BridgeBatchSize::FLOOR;
     assert_eq!(floor.get(), BRIDGE_BATCH_SIZE);
@@ -1741,7 +1739,7 @@ fn bridge_batches_grow_from_the_expanded_batch_and_halve_back_to_the_floor() {
     }
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn disconnected_walks_spend_the_bridge_budget_in_logarithmic_rounds() {
     // No allowed node is in the graph, so every bridge round finds nothing and
     // the walk can only spend its bridge budget. A fixed 32-bridge batch would
@@ -1836,7 +1834,7 @@ async fn early_exit_search<D: Distance>(name: &str) -> (Vec<SearchResult>, Restr
     (results, stats)
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn beam_completion_waits_for_every_queued_bridge_for_every_metric() {
     // SimHash ranks do not bound distance for any metric, so the walk expands
     // the whole opposite-facing bridge chain before stopping.
@@ -1859,7 +1857,7 @@ async fn beam_completion_waits_for_every_queued_bridge_for_every_metric() {
     }
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn queued_bridges_are_expanded_whatever_their_rank_estimate() {
     // Entry 5 faces away from the query. Its 32 far neighbours resolve to high
     // SimHash ranks and bridge 200 inherits a high rank from 5, yet 200 lies
@@ -2006,7 +2004,7 @@ const BEAM_BEHIND_BRIDGE_BUDGETS: FilteredGraphBudgets = FilteredGraphBudgets {
     directory_seeds: 0,
 };
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn beam_completion_waits_for_a_queued_bridge_to_the_nearest_node() {
     let allowed = [1_001, 1_002, 1_003, 1_004];
     let RestrictedVectorCandidates::NonEmpty(candidates) =
@@ -2035,7 +2033,7 @@ async fn beam_completion_waits_for_a_queued_bridge_to_the_nearest_node() {
     );
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn spent_bridge_budget_lets_a_complete_beam_stop_the_walk() {
     // With only the entry bridge affordable, bridge 200 can never be
     // expanded, so the queued bridge no longer holds the beam open.
@@ -2060,7 +2058,7 @@ async fn spent_bridge_budget_lets_a_complete_beam_stop_the_walk() {
     );
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn routing_budget_stops_before_popping_unreadable_frontier_candidates() {
     // Thirty-two allowed seeds with empty rows fill the beam. A 20-row routing
     // budget expands 16 and then 4 of them, and the 12 left unexpanded must
@@ -2096,7 +2094,7 @@ async fn routing_budget_stops_before_popping_unreadable_frontier_candidates() {
     );
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn explicit_filtered_budgets_record_the_exact_termination_reason() {
     let (db, index) =
         seed_three_edge_filtered_gulf::<Cosine>("restricted-budget-termination").await;
@@ -2219,7 +2217,7 @@ async fn explicit_filtered_budgets_record_the_exact_termination_reason() {
     );
 }
 
-#[cfg_attr(all(test, not(feature = "production-coverage")), tokio::test)]
+#[tokio::test]
 async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
     const ENTITY_COUNT: u64 = 2_048;
     const DIMENSION: usize = 8;
@@ -2280,41 +2278,10 @@ async fn exact_and_filter_aware_paths_enforce_membership_and_recall_budgets() {
     assert!(recall_at_10 >= 0.95, "recall@10 was {recall_at_10}");
 }
 
-#[cfg(feature = "production-coverage")]
-pub(crate) async fn run() {
-    admission_scans_exactly_by_candidate_cardinality_and_bytes();
-    restricted_result_count_clamps_before_enforcing_the_payload_limit();
-    candidate_states_deduplicate_reject_overflow_and_keep_empty_explicit();
-    empty_candidates_accept_any_result_count_and_absorb_exclusions();
-    bitmap_candidates_match_id_candidates_and_their_limit();
-    oversized_result_count_rejects_before_index_metadata_io().await;
-    empty_candidates_short_circuit_before_index_metadata_io().await;
-    unbound_metric_rejects_after_metadata_without_vector_reads().await;
-    exact_scan_is_correct_and_tie_stable_for_every_active_metric().await;
-    exact_scan_omits_absent_ids_but_rejects_missing_companion_rows().await;
-    exact_scan_spans_fetch_batches_and_fails_closed_in_later_batches().await;
-    wide_payload_sized_exact_scans_fetch_within_the_byte_budget().await;
-    directory_lifecycle_tracks_insert_upsert_and_delete().await;
-    directory_entries_seed_vectors_without_re_reading_point_simhash_rows().await;
-    directoryless_acorn_crosses_a_three_edge_filtered_gulf_without_nonmember_vectors().await;
-    directoryless_bridge_missing_simhash_fails_closed().await;
-    directoryless_bridge_corrupt_simhash_fails_closed().await;
-    bridge_enqueue_prefers_known_ranks_and_queues_each_node_once();
-    estimated_bridges_keep_their_lowest_rediscovered_estimate();
-    bridges_beyond_the_rank_window_are_ranked_before_expansion().await;
-    later_rank_reads_rank_one_bridge_per_slot_still_open().await;
-    simhash_guides_one_bounded_bridge_toward_the_relevant_disconnected_region().await;
-    simhash_ranks_bridges_even_when_the_nearer_bridge_has_the_higher_id().await;
-    bridge_simhash_reads_stay_within_the_rank_window().await;
-    bridge_batches_grow_from_the_expanded_batch_and_halve_back_to_the_floor();
-    disconnected_walks_spend_the_bridge_budget_in_logarithmic_rounds().await;
-    beam_completion_waits_for_every_queued_bridge_for_every_metric().await;
-    queued_bridges_are_expanded_whatever_their_rank_estimate().await;
-    beam_completion_waits_for_a_queued_bridge_to_the_nearest_node().await;
-    spent_bridge_budget_lets_a_complete_beam_stop_the_walk().await;
-    routing_budget_stops_before_popping_unreadable_frontier_candidates().await;
-    explicit_filtered_budgets_record_the_exact_termination_reason().await;
-    exact_and_filter_aware_paths_enforce_membership_and_recall_budgets().await;
+/// Covers a full exact fetch batch, request validation, missing and empty
+/// indexes, and the remaining restricted-search entry-point boundaries.
+#[tokio::test]
+async fn full_batch_exact_scan_and_entry_point_validation() {
     const FULL_BATCH: u64 = FETCH_BATCH_SIZE as u64;
     let (exact_db, exact_index) =
         seed_index("restricted-production-full-exact-batch", FULL_BATCH, 8).await;

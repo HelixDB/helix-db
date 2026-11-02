@@ -36,7 +36,6 @@ pub(crate) fn inclusive_limit(metric: VectorDistanceMetric, dimension: usize) ->
 }
 
 /// Returns the exact unrounded f64 limit for rounding assertions.
-#[cfg(feature = "production-coverage")]
 pub(crate) fn exact_limit(metric: VectorDistanceMetric, dimension: usize) -> Option<f64> {
     assert!(dimension > 0, "oracle dimensions are non-zero");
     let factor = match metric {
@@ -67,7 +66,6 @@ pub(crate) fn next_up(value: f32) -> f32 {
 }
 
 /// Reports whether every component is inside the metric-specific oracle domain.
-#[cfg(feature = "production-coverage")]
 pub(crate) fn accepts(metric: VectorDistanceMetric, dimension: usize, vector: &[f32]) -> bool {
     if vector.len() != dimension || vector.iter().any(|value| !value.is_finite()) {
         return false;
@@ -79,7 +77,6 @@ pub(crate) fn accepts(metric: VectorDistanceMetric, dimension: usize, vector: &[
 }
 
 /// Computes the descriptor-defined squared-Euclidean score in f64.
-#[cfg(feature = "production-coverage")]
 pub(crate) fn squared_euclidean(left: &[f32], right: &[f32]) -> f64 {
     assert_eq!(left.len(), right.len());
     left.iter()
@@ -92,7 +89,6 @@ pub(crate) fn squared_euclidean(left: &[f32], right: &[f32]) -> f64 {
 }
 
 /// Computes Manhattan distance in f64.
-#[cfg(feature = "production-coverage")]
 pub(crate) fn manhattan(left: &[f32], right: &[f32]) -> f64 {
     assert_eq!(left.len(), right.len());
     left.iter()

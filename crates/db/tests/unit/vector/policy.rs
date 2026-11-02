@@ -1,6 +1,6 @@
 //! Production contracts for pure layer-zero vector policy decisions.
 //!
-//! This feature-gated child module exercises the production policy ADTs through
+//! This child module exercises the production policy ADTs through
 //! deployed configuration projections. It performs no I/O and consumes no
 //! randomness, so each assertion isolates filtering, pre-sampling, sampling,
 //! and adaptive-threshold behavior as deterministic contract boundaries.
@@ -49,7 +49,8 @@ fn adaptive_bypass_policy(mode: SimHashMode) -> AdaptiveBypassPolicy {
 }
 
 /// Verifies the complete metric, mode, and adaptive-flag compatibility table.
-fn run_compatibility_contracts() {
+#[test]
+fn compatibility_contracts() {
     for metric in [
         ActiveMetricKind::Cosine,
         ActiveMetricKind::Euclidean,
@@ -82,7 +83,8 @@ fn run_compatibility_contracts() {
 }
 
 /// Verifies bypass, fixed threshold, and pre/post sampling activation behavior.
-fn run_fixed_and_bypass_contracts() {
+#[test]
+fn fixed_and_bypass_contracts() {
     assert!(SearchBeamWidth::try_new(0, ResultCount::try_new(1).unwrap()).is_err());
     let fixed = Layer0Policy::from_deployed(
         ActiveMetricKind::Cosine,
@@ -146,7 +148,8 @@ fn run_fixed_and_bypass_contracts() {
 }
 
 /// Verifies adaptive cold-start, quality, threshold, and candidate weighting bounds.
-fn run_adaptive_contracts() {
+#[test]
+fn adaptive_contracts() {
     let policy = Layer0Policy::from_deployed(
         ActiveMetricKind::Cosine,
         SimHashMode::Adaptive,
@@ -242,11 +245,4 @@ fn run_adaptive_contracts() {
     );
     assert!(combined.trigger.includes_read_budget());
     assert!(combined.trigger.includes_low_yield());
-}
-
-/// Exercises every active production filtering and sampling policy branch.
-pub(crate) fn run() {
-    run_compatibility_contracts();
-    run_fixed_and_bypass_contracts();
-    run_adaptive_contracts();
 }

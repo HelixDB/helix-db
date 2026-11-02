@@ -1,6 +1,6 @@
 //! Production contracts for request-scoped vector reads.
 //!
-//! This feature-gated child module exercises every `DbReadOps` delegation arm
+//! This child module exercises every `DbReadOps` delegation arm
 //! for transaction and snapshot views plus descriptor-bound reader
 //! construction. Cache access is proven by exact generation and snapshot
 //! sequence; every mismatch falls back to storage without changing persisted
@@ -60,7 +60,8 @@ async fn assert_option_reads(read: &(impl DbReadOps + Sync)) {
 }
 
 /// Exercises transaction/snapshot delegation and exact-generation cache guards.
-pub(crate) async fn run() {
+#[tokio::test]
+async fn transaction_and_snapshot_reads_delegate_and_guard_generations() {
     let db = Db::open("production-vector-read-boundary", Arc::new(InMemory::new()))
         .await
         .unwrap();

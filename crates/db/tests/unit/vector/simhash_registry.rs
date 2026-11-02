@@ -1,6 +1,6 @@
 //! Production contracts for the bounded deterministic SimHasher registry.
 //!
-//! This feature-gated child module exercises the real registry's typed limit,
+//! This child module exercises the real registry's typed limit,
 //! identity, admission, eviction, recreation, and concurrent publication
 //! boundaries. It creates only process-local projection tables; no key, value,
 //! catalog, or physical vector representation is involved.
@@ -21,7 +21,8 @@ fn identity(dimension: usize, seed: u64) -> SimHashIdentity {
 }
 
 /// Verifies non-zero limits and exact checked dimension admission.
-fn run_limit_contracts() {
+#[test]
+fn limit_contracts() {
     assert!(matches!(
         SimHasherRegistryLimits::try_new(0, 1),
         Err(SimHasherRegistryError::ZeroByteLimit)
@@ -63,7 +64,8 @@ fn run_limit_contracts() {
 }
 
 /// Verifies failed construction is shared and remains evictable under limits.
-fn run_construction_failure_contracts() {
+#[test]
+fn construction_failure_contracts() {
     let impossible_dimension = usize::MAX / (64 * core::mem::size_of::<f32>());
     let registry = SimHasherRegistry::new(SimHasherRegistryLimits::try_new(usize::MAX, 1).unwrap());
     let impossible = identity(impossible_dimension, 42);
@@ -79,7 +81,8 @@ fn run_construction_failure_contracts() {
 }
 
 /// Verifies complete identity projection and unsupported algorithm rejection.
-fn run_identity_contracts() {
+#[test]
+fn identity_contracts() {
     let current = identity(3, 42);
     assert_eq!(current.dimension().get(), 3);
     assert_eq!(current.seed(), 42);
@@ -98,7 +101,8 @@ fn run_identity_contracts() {
 }
 
 /// Verifies ready-entry reuse, LRU eviction, and deterministic recreation.
-fn run_eviction_contracts() {
+#[test]
+fn eviction_contracts() {
     let bytes = SimHasher::allocation_bytes(3).unwrap();
     let registry = SimHasherRegistry::new(
         SimHasherRegistryLimits::try_new(bytes.checked_mul(2).unwrap(), 2).unwrap(),
@@ -122,7 +126,8 @@ fn run_eviction_contracts() {
 }
 
 /// Verifies concurrent misses publish one shared deterministic instance.
-fn run_single_flight_contract() {
+#[test]
+fn single_flight_contract() {
     let registry = Arc::new(SimHasherRegistry::default());
     let barrier = Arc::new(Barrier::new(8));
     let handles = (0..8)
@@ -146,11 +151,12 @@ fn run_single_flight_contract() {
 
 /// Verifies a distinct identity waits while the only slot is constructing.
 ///
-/// The feature-gated child installs the registry's valid reserved state
+/// The test child installs the registry's valid reserved state
 /// directly, then waits for the requesting thread to enter the production
 /// capacity loop before publishing the reservation's completion. This avoids
 /// using constructor timing as a concurrency oracle.
-fn run_capacity_wait_contract() {
+#[test]
+fn capacity_wait_contract() {
     let candidate_bytes = SimHasher::allocation_bytes(3).unwrap();
     let registry = Arc::new(SimHasherRegistry::new(
         SimHasherRegistryLimits::try_new(candidate_bytes, 1).unwrap(),
@@ -185,14 +191,4 @@ fn run_capacity_wait_contract() {
     }
     registry.changed.notify_all();
     assert_eq!(waiter.join().unwrap().dimension(), 3);
-}
-
-/// Exercises every reachable registry identity, limit, eviction, and reuse contract.
-pub(crate) fn run() {
-    run_limit_contracts();
-    run_identity_contracts();
-    run_eviction_contracts();
-    run_construction_failure_contracts();
-    run_single_flight_contract();
-    run_capacity_wait_contract();
 }

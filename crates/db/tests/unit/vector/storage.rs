@@ -1,6 +1,6 @@
 //! Production contracts for the typed vector-row storage boundary.
 //!
-//! This feature-gated child module exercises tenant-scoped key construction,
+//! This child module exercises tenant-scoped key construction,
 //! current row codecs, opaque canonical/candidate/reverse tokens, measured
 //! writes, and exhaustive lane cleanup. It uses only canonical `encoding::v2`
 //! keys and values in isolated databases, so deployed bytes remain unchanged.
@@ -18,7 +18,7 @@ use crate::encoding::keys::scope::TenantId;
 use crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey;
 use crate::encoding::v2::values::indexes::vector::simhash::encode_simhash;
 use crate::index_lifecycle::{ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition};
-use crate::search::vector::read_fault_production_support::{FaultingRead, ReadFault};
+use crate::search::vector::read_fault::{FaultingRead, ReadFault};
 use crate::search::vector::{distance, encode_item, Item, VectorDistanceMetric, VectorIndexConfig};
 
 fn legacy_definition() -> ValidatedVectorIndexDefinition {
@@ -34,7 +34,8 @@ fn legacy_definition() -> ValidatedVectorIndexDefinition {
 }
 
 /// Exercises every frozen physical value codec used by adoption validation.
-fn run_legacy_validation_codec_contracts() {
+#[test]
+fn legacy_validation_codec_contracts() {
     let physical_name = "production-legacy-validation-codecs";
     let index_id = index_id_from_name(physical_name);
     let definition = legacy_definition();
@@ -153,7 +154,8 @@ fn run_legacy_validation_codec_contracts() {
 }
 
 /// Exercises exact migration-read absence, corruption, and payload outcomes.
-async fn run_legacy_migration_read_contracts() {
+#[tokio::test]
+async fn legacy_migration_read_contracts() {
     let db = Db::open(
         "production-legacy-migration-reads",
         Arc::new(InMemory::new()),
@@ -246,7 +248,8 @@ async fn run_legacy_migration_read_contracts() {
     db.close().await.unwrap();
 }
 
-async fn run_simhash_directory_contracts() {
+#[tokio::test]
+async fn simhash_directory_contracts() {
     let db = Db::open(
         "production-vector-storage-simhash-directory",
         Arc::new(InMemory::new()),
@@ -292,7 +295,8 @@ async fn run_simhash_directory_contracts() {
 }
 
 /// Exercises directory publication inputs, validation modes, backfill, and cleanup.
-async fn run_simhash_directory_migration_contracts() {
+#[tokio::test]
+async fn simhash_directory_migration_contracts() {
     let db = Db::open(
         "production-vector-storage-directory-migration",
         Arc::new(InMemory::new()),
@@ -1193,7 +1197,8 @@ async fn run_simhash_directory_migration_contracts() {
 }
 
 /// Exercises row and byte checkpoints, cursors, and terminal entry-point proofs.
-async fn run_legacy_validation_scan_contracts() {
+#[tokio::test]
+async fn legacy_validation_scan_contracts() {
     let db = Db::open(
         "production-legacy-validation-scans",
         Arc::new(InMemory::new()),
@@ -1404,7 +1409,8 @@ async fn run_legacy_validation_scan_contracts() {
 }
 
 /// Exercises all terminal entry-point proofs without rewriting physical rows.
-async fn run_legacy_validation_entry_point_contracts() {
+#[tokio::test]
+async fn legacy_validation_entry_point_contracts() {
     #[derive(Clone, Copy)]
     enum Fixture {
         MissingSimHash,
@@ -1563,7 +1569,8 @@ async fn run_legacy_validation_entry_point_contracts() {
 }
 
 /// Verifies legacy bytes, tenant isolation, and opaque canonical ordering.
-fn run_keyspace_contracts() {
+#[test]
+fn keyspace_contracts() {
     let physical_name = "production-typed-row-keyspace";
     let index_id = index_id_from_name(physical_name);
     let logical = VectorKey::IndexMetadata(VectorIndexMetadataKey::new(index_id));
@@ -1602,7 +1609,8 @@ fn run_keyspace_contracts() {
 }
 
 /// Verifies every current typed read/write family and cross-keyspace rejection.
-async fn run_row_contracts() {
+#[tokio::test]
+async fn row_contracts() {
     let db = Db::open("production-typed-vector-rows", Arc::new(InMemory::new()))
         .await
         .unwrap();
@@ -1984,7 +1992,8 @@ async fn run_row_contracts() {
 }
 
 /// Verifies malformed and identity-mismatched rows fail at the storage boundary.
-async fn run_corruption_contracts() {
+#[tokio::test]
+async fn corruption_contracts() {
     let db = Db::open(
         "production-corrupt-typed-vector-rows",
         Arc::new(InMemory::new()),
@@ -2062,7 +2071,8 @@ async fn run_corruption_contracts() {
 }
 
 /// Verifies every typed storage read propagates its backend operation failure.
-async fn run_read_fault_contracts() {
+#[tokio::test]
+async fn read_fault_contracts() {
     let db = Db::open(
         "production-vector-storage-read-faults",
         Arc::new(InMemory::new()),
@@ -2107,7 +2117,8 @@ async fn run_read_fault_contracts() {
 /// Exercises scoped keys, typed row codecs, opaque tokens, and lane cleanup.
 /// Proves the concurrent batch policy returns the same rows, in caller order,
 /// as one `multi_get` when a batch spans more runs than run at once.
-async fn run_batch_read_contracts() {
+#[tokio::test]
+async fn batch_read_contracts() {
     let db = Db::open("production-vector-batch-reads", Arc::new(InMemory::new()))
         .await
         .unwrap();
@@ -2155,18 +2166,4 @@ async fn run_batch_read_contracts() {
         assert_eq!(rows, expected, "{batch_reads:?}");
     }
     db.close().await.unwrap();
-}
-
-pub(crate) async fn run() {
-    run_legacy_validation_codec_contracts();
-    run_legacy_migration_read_contracts().await;
-    run_simhash_directory_contracts().await;
-    run_simhash_directory_migration_contracts().await;
-    run_legacy_validation_scan_contracts().await;
-    run_legacy_validation_entry_point_contracts().await;
-    run_keyspace_contracts();
-    run_row_contracts().await;
-    run_batch_read_contracts().await;
-    run_corruption_contracts().await;
-    run_read_fault_contracts().await;
 }

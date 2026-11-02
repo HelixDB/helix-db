@@ -1,6 +1,6 @@
 //! Production contracts for descriptor-bound vector generation capabilities.
 //!
-//! This feature-gated child module exercises the real capability constructors
+//! This child module exercises the real capability constructors
 //! through canonical V2 lifecycle records. It proves physical, operation,
 //! metric, layout, and descriptor mismatches fail closed without introducing a
 //! test-only row format or enabling any reserved vector codec.
@@ -145,7 +145,8 @@ fn identity(element_kind: IndexElementKind, physical_name: &str) -> VectorGenera
 }
 
 /// Exercises every constructible generation authority and fail-closed branch.
-pub(crate) fn run() {
+#[test]
+fn generation_handles_retain_descriptor_bound_authority() {
     assert!(matches!(
         VectorGenerationIdentity::try_new(
             DataScope::LegacyUnscoped,

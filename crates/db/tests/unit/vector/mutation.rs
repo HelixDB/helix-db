@@ -1,6 +1,6 @@
 //! Production contracts for operation-local vector mutation state.
 //!
-//! This feature-gated child module verifies the closed neighbor-cache ADT,
+//! This child module verifies the closed neighbor-cache ADT,
 //! fresh-row proof, bounded eviction, entry-candidate cleanup, stale-root
 //! repair, and typed neighbor writes. Storage fixtures use only existing vector
 //! keys and codecs in isolated databases, so no alternate format is introduced.
@@ -54,7 +54,8 @@ fn neighbors(owner: NodeId, nodes: Vec<NodeId>) -> NeighborRowValue {
 }
 
 /// Verifies row identity, values, first-original retention, and flushing.
-fn run_value_contracts() {
+#[test]
+fn value_contracts() {
     let node = NeighborRowId::new(HnswLayer::from_deployed(3), VectorEntityId::Node(42));
     assert_eq!(node.storage_parts(), (3, 42));
     assert_eq!(node.layer().number(), 3);
@@ -81,7 +82,8 @@ fn run_value_contracts() {
 /// A namespace sees a touch older than its newest entry only after another
 /// namespace of its session renumbered the shared sequence; a repeated touch
 /// keeps the value's place.
-fn run_recency_order_contract() {
+#[test]
+fn recency_order_contract() {
     let simhash = |touch| CachedSimHash {
         value: None,
         last_touch: CacheSequence(touch),
@@ -1581,7 +1583,8 @@ async fn run_build_session_flush_edge_contract<D: Distance>() {
     assert!(!cache.neighbor(upper).unwrap().is_dirty());
 }
 
-async fn run_build_session_reuse_contract() {
+#[tokio::test]
+async fn build_session_reuse_contract() {
     use crate::encoding::v2::keys::scope::DataScope;
 
     let identity = session_identity(DataScope::LegacyUnscoped, 61);
@@ -1666,7 +1669,8 @@ async fn run_build_session_reuse_contract() {
 /// Namespaces the entity created are dropped whole, rows it changed in an
 /// existing namespace are invalidated, state admitted earlier survives, and
 /// journal entries whose namespace is no longer cached are skipped.
-fn run_build_session_discard_contract() {
+#[test]
+fn build_session_discard_contract() {
     use crate::encoding::v2::keys::scope::DataScope;
     type Cache = MutationOpCache<Cosine>;
 
@@ -1749,7 +1753,8 @@ fn run_build_session_discard_contract() {
 /// empties every buffer, so no item a mutation loaded stays referenced
 /// outside the cache budget, and releases only the buffers a mutation grew
 /// past the retained bound.
-fn run_build_session_scratch_contract() {
+#[test]
+fn build_session_scratch_contract() {
     use crate::encoding::v2::keys::scope::DataScope;
 
     let first = session_identity(DataScope::LegacyUnscoped, 81);
@@ -1790,7 +1795,8 @@ fn run_build_session_scratch_contract() {
     assert_eq!(session.scratch.frontier.capacity(), lent);
 }
 
-async fn run_unbound_metric_rejection_contract() {
+#[tokio::test]
+async fn unbound_metric_rejection_contract() {
     let db = session_test_db("production-vector-unbound-mutation").await;
     let index_name = "production-vector-unbound-mutation-index";
     let bound = VectorIndex::<Cosine>::new(index_name);
@@ -1840,27 +1846,42 @@ async fn run_unbound_metric_rejection_contract() {
     transaction.rollback();
 }
 
-/// Exercises every constructible cache, repair, and typed graph-write transition.
-pub(crate) async fn run() {
-    run_value_contracts();
-    run_recency_order_contract();
+#[test]
+fn cache_contracts_for_every_metric() {
     run_cache_contracts::<Cosine>();
     run_cache_contracts::<Euclidean>();
     run_cache_contracts::<Manhattan>();
+}
+
+#[test]
+fn build_session_identity_for_every_metric() {
     run_build_session_identity_contract::<Cosine>();
     run_build_session_identity_contract::<Euclidean>();
     run_build_session_identity_contract::<Manhattan>();
+}
+
+#[tokio::test]
+async fn build_session_limits_for_every_metric() {
     run_build_session_limit_contract::<Cosine>().await;
     run_build_session_limit_contract::<Euclidean>().await;
     run_build_session_limit_contract::<Manhattan>().await;
+}
+
+#[tokio::test]
+async fn build_session_flush_recovery_for_every_metric() {
     run_build_session_flush_recovery_contract::<Cosine>().await;
     run_build_session_flush_recovery_contract::<Euclidean>().await;
     run_build_session_flush_recovery_contract::<Manhattan>().await;
+}
+
+#[tokio::test]
+async fn build_session_flush_edge_contract() {
     run_build_session_flush_edge_contract::<Cosine>().await;
-    run_build_session_reuse_contract().await;
-    run_build_session_discard_contract();
-    run_build_session_scratch_contract();
-    run_unbound_metric_rejection_contract().await;
+}
+
+/// Exercises entry repair, neighbor writes, graph deletes, and clean-row transitions.
+#[tokio::test]
+async fn repair_and_graph_write_contracts() {
     let db = Db::open(
         "production-vector-mutation-contracts",
         Arc::new(InMemory::new()),

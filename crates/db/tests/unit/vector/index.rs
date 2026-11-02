@@ -1,6 +1,6 @@
 //! Production contracts for the vector-index facade.
 //!
-//! This feature-gated child module exercises descriptor-bound projection
+//! This child module exercises descriptor-bound projection
 //! identity, write-once dimension proof, DDL validation, current typed row
 //! lookup, bounded operation-local caching, fail-closed corruption handling,
 //! search diagnostics, and exhaustive drop. Fixtures use only the deployed
@@ -22,7 +22,7 @@ use crate::encoding::v2::keys::indexes::vector::{
 use crate::index_lifecycle::ValidatedVectorIndexDefinition;
 use crate::search::vector::distance::{self, Cosine};
 use crate::search::vector::generation::{CURRENT_SIMHASH_ALGORITHM_VERSION, CURRENT_SIMHASH_SEED};
-use crate::search::vector::read_fault_production_support::{FaultingRead, ReadFault};
+use crate::search::vector::read_fault::{FaultingRead, ReadFault};
 use crate::search::vector::unaligned_vector::UnalignedVector;
 use crate::search::vector::VectorReadView;
 use crate::search::vector::{
@@ -56,7 +56,8 @@ impl Distance for UnboundDistance {
 impl crate::search::vector::distance::sealed::Sealed for UnboundDistance {}
 
 /// Verifies handle identity, managed projection binding, and dimension proof.
-fn run_handle_contracts() {
+#[test]
+fn handle_contracts() {
     let index = VectorIndex::<Cosine>::new("production-vector-index-handle");
     assert_eq!(index.name(), "production-vector-index-handle");
     assert_eq!(index.id(), index.row_keyspace().index_id());
@@ -1032,8 +1033,8 @@ where
 }
 
 /// Exercises vector facade identity, DDL, typed row, and corruption contracts.
-pub(crate) async fn run() {
-    run_handle_contracts();
+#[tokio::test]
+async fn facade_ddl_row_and_metric_contracts() {
     let db = Db::open(
         "production-vector-index-contracts",
         Arc::new(InMemory::new()),

@@ -1,6 +1,6 @@
 //! Production contracts for the resident vector-memory boundary.
 //!
-//! This feature-gated child module verifies that cache capability variants,
+//! This child module verifies that cache capability variants,
 //! transaction-local and commit-window fences, managed lookup, bounded
 //! hydration, shutdown, and corruption handling use the real production key
 //! and value codecs. It writes only isolated in-memory databases and does not
@@ -23,7 +23,7 @@ use crate::encoding::v2::keys::indexes::vector::{
 use crate::encoding::v2::values::indexes::vector::{
     neighbors::encode_upper_neighbors, simhash::encode_simhash,
 };
-use crate::search::vector::read_fault_production_support::{FaultingRead, ReadFault};
+use crate::search::vector::read_fault::{FaultingRead, ReadFault};
 use crate::search::vector::storage::VectorRowKeyspace;
 
 /// Opens an isolated in-memory SlateDB for cache and hydration contracts.
@@ -47,7 +47,8 @@ fn put_row(
 }
 
 /// Verifies every valid cache capability and dirty-row ownership transition.
-async fn run_capability_and_fence_contracts() {
+#[tokio::test]
+async fn capability_and_fence_contracts() {
     let store = Arc::new(VectorMemoryStore::new(DataScope::LegacyUnscoped, 42, 10));
     assert_eq!(store.scope(), DataScope::LegacyUnscoped);
     assert_eq!(store.index_id(), 42);
@@ -125,7 +126,8 @@ async fn run_capability_and_fence_contracts() {
 }
 
 /// Verifies managed cache hits, misses, dirty bypass, and corrupt SimHash rows.
-async fn run_managed_lookup_contracts() {
+#[tokio::test]
+async fn managed_lookup_contracts() {
     let db = test_db("production_vector_memory_managed_lookup").await;
     let keyspace = VectorRowKeyspace::new(
         "vector:memory:resident-snapshot".to_string(),
@@ -385,7 +387,8 @@ async fn run_managed_lookup_contracts() {
 }
 
 /// Verifies strict, bounded, and shutdown hydration outcomes.
-async fn run_hydration_contracts() {
+#[tokio::test]
+async fn hydration_contracts() {
     let db = test_db("production_vector_memory_hydration").await;
     let keyspace = VectorRowKeyspace::new(
         "vector:memory:hydration".to_string(),
@@ -678,7 +681,8 @@ async fn run_hydration_contracts() {
 
 /// Verifies the slab layout: inline and spilled neighbor layers, open and
 /// sealed chunk reads, bounded chunk sizing, released ids, and exact charges.
-async fn run_slab_layout_contracts() {
+#[tokio::test]
+async fn slab_layout_contracts() {
     let row = |chunk| SlabRow {
         chunk,
         offset: 0,
@@ -887,12 +891,4 @@ async fn run_slab_layout_contracts() {
         assert_eq!(summary.loaded_entries, loaded, "budget {budget}");
         assert_eq!(summary.estimated_bytes, charged, "budget {budget}");
     }
-}
-
-/// Exercises resident-cache ownership, reads, hydration, and fail-closed edges.
-pub(crate) async fn run() {
-    run_capability_and_fence_contracts().await;
-    run_managed_lookup_contracts().await;
-    run_hydration_contracts().await;
-    run_slab_layout_contracts().await;
 }

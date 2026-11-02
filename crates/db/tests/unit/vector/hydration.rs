@@ -1,8 +1,7 @@
 //! Production contracts for descriptor-bound vector cache hydration.
 //!
-//! The feature-gated runner exercises the real Active-generation loader using
-//! current V1 vector and Index V2 mapping rows. It deliberately lives outside
-//! the measured production tree and changes no persisted representation.
+//! The contracts exercise the real Active-generation loader using current V1
+//! vector and Index V2 mapping rows and change no persisted representation.
 
 use bytes::Bytes;
 use slatedb::object_store::memory::InMemory;
@@ -296,7 +295,8 @@ async fn put_partition_mapping(
 }
 
 /// Covers empty inventories, family filtering, and zero-entry publication rules.
-async fn run_empty_contracts() {
+#[tokio::test]
+async fn empty_contracts() {
     assert_eq!(
         VectorCacheHydrationBudget::from_optional_bytes(Some(7)).bytes(),
         Some(7)
@@ -390,7 +390,8 @@ async fn run_empty_contracts() {
 }
 
 /// Covers initial publication, immutable refresh, and deterministic budget shares.
-async fn run_refresh_and_budget_contracts() {
+#[tokio::test]
+async fn refresh_and_budget_contracts() {
     let db = raw_db("production-vector-hydration-refresh").await;
     let scope = DataScope::LegacyUnscoped;
     let (active, physical) = active_vector(scope, 2, 21, false);
@@ -550,7 +551,8 @@ async fn run_refresh_and_budget_contracts() {
 }
 
 /// Covers partition mapping validation, scope identity, and duplicate ownership.
-async fn run_partition_contracts() {
+#[tokio::test]
+async fn partition_contracts() {
     let scope = DataScope::LegacyUnscoped;
     let db = raw_db("production-vector-hydration-partition").await;
     let index_id = IndexId::new(5).unwrap();
@@ -836,7 +838,8 @@ async fn run_partition_contracts() {
 }
 
 /// Covers cancellation and malformed physical-row failure without publication.
-async fn run_shutdown_and_corruption_contracts() {
+#[tokio::test]
+async fn shutdown_and_corruption_contracts() {
     let scope = DataScope::LegacyUnscoped;
     let db = raw_db("production-vector-hydration-shutdown").await;
     let (active, physical) = active_vector(scope, 10, 101, false);
@@ -914,7 +917,8 @@ async fn run_shutdown_and_corruption_contracts() {
 
 /// Exercises every production hydration ownership and admission boundary.
 /// Repeated passes reuse the same resident store and never re-fetch its SSTs.
-async fn run_idle_refresh_contracts() {
+#[tokio::test]
+async fn idle_refresh_contracts() {
     let object_store = Arc::new(CountingObjectStore::default());
     let mut settings = slatedb::config::Settings::default();
     settings.object_store_cache_options.root_folder = None;
@@ -1187,7 +1191,8 @@ impl ObjectStore for GatedSstStore {
 /// Proves a reader drops only the load it outruns: while one target's load
 /// waits on a held compacted-SST read, the reader replays newer WAL, so that
 /// load publishes nothing and the next target loads from a fresh snapshot.
-async fn run_reader_outrun_contracts() {
+#[tokio::test]
+async fn reader_outrun_contracts() {
     let path = "vector-cache-reader-outrun";
     let gate = Arc::new(GatedSstStore {
         inner: InMemory::new(),
@@ -1298,7 +1303,8 @@ async fn run_reader_outrun_contracts() {
 
 /// Drives every exit and outcome of the reader refresh loop with scripted
 /// passes, so no assertion depends on timing.
-async fn run_reader_refresh_contracts() {
+#[tokio::test]
+async fn reader_refresh_contracts() {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
@@ -1430,7 +1436,8 @@ impl slatedb::DbReadOps for ScanRecorder<'_> {
 /// bytes rounded up to whole parts; scans with part-sized read-ahead, one
 /// fetch task and no block caching; stops at its budget across targets in
 /// order; and charges and skips a target it cannot finish.
-async fn run_part_warm_contracts() {
+#[tokio::test]
+async fn part_warm_contracts() {
     let scope = DataScope::LegacyUnscoped;
     let db = raw_db("vector-part-warm-contract").await;
     let (_, first) = active_vector(scope, 1, 11, false);
@@ -1632,9 +1639,9 @@ async fn run_part_warm_contracts() {
     .await;
     assert_eq!(summary.read, PartWarm::BudgetExhausted(hot_bytes));
     assert_eq!((summary.warmed_targets, summary.failed_targets), (0, 1));
-    let unreadable = crate::search::vector::read_fault_production_support::FaultingRead::new(
+    let unreadable = crate::search::vector::read_fault::FaultingRead::new(
         &db,
-        crate::search::vector::read_fault_production_support::ReadFault::Scan,
+        crate::search::vector::read_fault::ReadFault::Scan,
     );
     let summary = crate::search::vector::warm_object_store_parts(
         &unreadable,
@@ -1646,15 +1653,4 @@ async fn run_part_warm_contracts() {
     assert_eq!(summary.read, PartWarm::Complete(0));
     assert_eq!((summary.warmed_targets, summary.failed_targets), (0, 2));
     db.close().await.expect("warm fixture closes");
-}
-
-pub(crate) async fn run() {
-    run_part_warm_contracts().await;
-    run_idle_refresh_contracts().await;
-    run_empty_contracts().await;
-    run_refresh_and_budget_contracts().await;
-    run_partition_contracts().await;
-    run_shutdown_and_corruption_contracts().await;
-    run_reader_outrun_contracts().await;
-    run_reader_refresh_contracts().await;
 }

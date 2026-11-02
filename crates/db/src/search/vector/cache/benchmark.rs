@@ -1,4 +1,4 @@
-//! Feature-gated fixture for resident vector-memory hydration benchmarks.
+//! Fixture for resident vector-memory hydration benchmarks (`bench-internals`).
 //!
 //! The fixture writes an HNSW-shaped vector-memory prefix (upper neighbors,
 //! SimHashes, upper vectors, and skipped layer-0 rows) with the production
@@ -230,5 +230,50 @@ impl VectorMemoryBenchmarkStore {
                     + usize::from(self.store.get_simhash(node_id).is_some())
             })
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape};
+
+    /// Exercises the vector-memory hydration harness end to end: a fixture
+    /// large enough to flush mid-build, a hydration that admits every upper
+    /// and SimHash row, and lookups that read each upper node back.
+    #[tokio::test]
+    async fn hydrates_every_memory_row() {
+        let directory = tempfile::tempdir().expect("benchmark directory");
+        let shape = VectorMemoryBenchmarkShape {
+            nodes: 5_000,
+            dimensions: 4,
+            max_neighbors: 4,
+        };
+        let fixture = VectorMemoryBenchmarkFixture::build(directory.path(), shape)
+            .await
+            .expect("small vector-memory fixture builds");
+        assert!(!fixture.upper_nodes().is_empty());
+        assert!(fixture.upper_nodes().is_sorted());
+        assert!(fixture.upper_rows() > fixture.upper_nodes().len());
+
+        let hydrated = fixture.hydrate().await.expect("fixture hydrates");
+        assert_eq!(
+            hydrated.loaded_entries,
+            fixture.upper_rows() + 5_000,
+            "every upper row and SimHash is admitted; layer-0 rows are skipped"
+        );
+        assert!(hydrated.charged_bytes > 0);
+        assert!(!hydrated.elapsed.is_zero(), "the load is timed");
+        let vector_bytes = 4 + 4 * 4;
+        assert!(
+            hydrated.lookup(fixture.upper_nodes()) > fixture.upper_nodes().len() * vector_bytes,
+            "every upper node returns its vector, layer-1 neighbors, and SimHash"
+        );
+        assert_eq!(
+            hydrated.lookup(&[u64::MAX]),
+            0,
+            "unknown nodes read nothing"
+        );
+        drop(hydrated);
+        fixture.close().await.expect("fixture closes");
     }
 }

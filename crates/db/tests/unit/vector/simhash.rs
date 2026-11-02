@@ -1,6 +1,6 @@
 //! Production contracts for transactional SimHash rows.
 //!
-//! This feature-gated child module exercises compatibility and scoped cache
+//! This child module exercises compatibility and scoped cache
 //! construction, descriptor-bound registry admission, current f32 hashing,
 //! measured writes, typed reads, corruption rejection, and deletion. It uses
 //! the deployed dedicated SimHash key and value codecs without adding a format.
@@ -17,7 +17,8 @@ use crate::encoding::keys::scope::{DataScope, TenantId};
 use crate::search::vector::{SimHasherRegistryLimits, VectorDimension, VectorDistanceMetric};
 
 /// Verifies every fallible cache-construction and descriptor-identity boundary.
-fn run_constructor_contracts() {
+#[test]
+fn constructor_contracts() {
     assert!(matches!(
         SimHashCache::try_new(1, 0),
         Err(SimHasherRegistryError::ZeroDimension)
@@ -68,7 +69,8 @@ fn run_constructor_contracts() {
 }
 
 /// Verifies missing, present, corrupt, measured, and deleted row transitions.
-async fn run_transaction_contracts() {
+#[tokio::test]
+async fn transaction_contracts() {
     let db = Db::open(
         "production-vector-simhash-contracts",
         Arc::new(InMemory::new()),
@@ -141,10 +143,4 @@ async fn run_transaction_contracts() {
         Err(HelixDbError::Encoding(_))
     ));
     txn.rollback();
-}
-
-/// Exercises constructors and every transactional current-row state.
-pub(crate) async fn run() {
-    run_constructor_contracts();
-    run_transaction_contracts().await;
 }

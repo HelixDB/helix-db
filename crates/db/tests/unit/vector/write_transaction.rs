@@ -1,6 +1,6 @@
 //! Production contracts for measured vector write transactions.
 //!
-//! This feature-gated child module verifies the last-write-wins recorder,
+//! This child module verifies the last-write-wins recorder,
 //! checkpoint identity, SlateDB read delegation, and deterministic pre-write
 //! failures used by bounded lifecycle builders. All writes remain uncommitted
 //! in isolated in-memory databases, so no persisted key or value format changes.
@@ -14,7 +14,8 @@ use slatedb::{DbReadOps, IsolationLevel};
 use super::*;
 
 /// Verifies final measurement, checkpoints, read delegation, and fault seams.
-async fn run_measured_transaction_contract() {
+#[tokio::test]
+async fn measured_transaction_contract() {
     let db = slatedb::Db::open(
         "production-vector-write-transaction",
         Arc::new(InMemory::new()),
@@ -117,7 +118,8 @@ async fn run_measured_transaction_contract() {
 }
 
 /// Verifies one recorder retains cumulative identity across short transaction borrows.
-async fn run_shared_recorder_contract() {
+#[tokio::test]
+async fn shared_recorder_contract() {
     let db = slatedb::Db::open(
         "production-vector-write-recorder",
         Arc::new(InMemory::new()),
@@ -161,7 +163,8 @@ async fn run_shared_recorder_contract() {
 
 /// Verifies a plan dirties only its namespace's resident rows and fails closed
 /// on a write outside the handle's data scope or with a non-vector key.
-async fn run_planned_cache_contract() {
+#[tokio::test]
+async fn planned_cache_contract() {
     use crate::encoding::keys::scope::DataScope;
     use crate::encoding::v2::keys::indexes::vector::{
         VectorIndexMetadataKey, VectorKey, VectorLayer0NeighborsKey, VectorSimHashKey,
@@ -281,11 +284,4 @@ async fn run_planned_cache_contract() {
         "a non-vector key fails closed"
     );
     txn.rollback();
-}
-
-/// Exercises measured-write replacement, delegation, and failure boundaries.
-pub(crate) async fn run() {
-    run_measured_transaction_contract().await;
-    run_shared_recorder_contract().await;
-    run_planned_cache_contract().await;
 }

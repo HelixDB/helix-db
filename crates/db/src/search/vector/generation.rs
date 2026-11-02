@@ -6,7 +6,7 @@
 //! identity to the same scope, logical index, generation, physical ID, and
 //! record revision. No physical namespace is derived from a display name.
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 use std::num::NonZeroU64;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -44,7 +44,7 @@ impl VectorGenerationIdentity {
     ///
     /// Every independent identity axis is explicit so tests cannot silently
     /// inherit a default and miss cache-aliasing regressions.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     #[allow(
         clippy::too_many_arguments,
         reason = "the test contract must expose every independent generation identity axis"
@@ -105,7 +105,7 @@ impl VectorGenerationIdentity {
     }
 
     /// Returns the entity kind used by test-only capability construction.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) const fn entity_kind(&self) -> IndexElementKind {
         self.entity_kind
     }
@@ -462,7 +462,7 @@ impl ValidatedVectorGenerationHandle {
     }
 
     /// Constructs a current f32 capability from canonical generation state.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn create_current<D: Distance>(
         identity: VectorGenerationIdentity,
     ) -> Result<Self, VectorGenerationValidationError> {
@@ -583,7 +583,7 @@ impl ValidatedVectorGenerationHandle {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum VectorGenerationValidationError {
     /// Test-constructed physical names are never empty.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     #[error("physical vector generation name must not be empty")]
     EmptyPhysicalName,
     /// A non-vector active handle cannot authorize vector rows.
@@ -624,9 +624,9 @@ pub(crate) enum VectorGenerationValidationError {
     InvalidDimension(#[from] VectorDimensionError),
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/generation.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/vector/generation.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {

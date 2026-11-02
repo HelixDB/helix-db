@@ -1,6 +1,6 @@
 //! Production-codec contracts for the vector memory-registry state machine.
 //!
-//! This module is attached as a feature-gated child of the production registry
+//! This module is attached as a test child of the production registry
 //! module, which gives the scenarios access to private state-machine boundaries
 //! without widening the default crate API. The contracts exercise the real
 //! registry, descriptor identity, memory store, and write-cache types; they
@@ -92,7 +92,8 @@ fn cleanup_authority() -> ValidatedVectorCleanupAuthority {
 }
 
 /// Retention must obey the same commit and retirement fences as publication.
-async fn run_retention_contracts() {
+#[tokio::test]
+async fn retention_contracts() {
     let registry = VectorCacheRegistry::default();
     let handle = validated(1);
     let budget = store::VectorMemoryAdmissionBudget::Bounded(4096);
@@ -194,7 +195,8 @@ fn prepare_commit_for(
 }
 
 /// Commit-fenced visibility, fence ownership, and unresolved-commit invalidation.
-async fn run_commit_fence_contracts() {
+#[tokio::test]
+async fn commit_fence_contracts() {
     let registry = VectorCacheRegistry::new(VectorCacheVisibility::CommitFenced);
     let handle = validated(1);
     let identity = VectorCacheIdentity::from_validated(&handle);
@@ -319,7 +321,8 @@ async fn run_commit_fence_contracts() {
 /// stopped by runtime shutdown invalidates without evicting; an error returned
 /// after the batch may have applied evicts, yet the store stays unattachable
 /// because the stopped commit was never evicted from it.
-async fn run_commit_outcome_contracts() {
+#[tokio::test]
+async fn commit_outcome_contracts() {
     let db = slatedb::Db::open(
         "production-vector-cache-commit-outcomes",
         Arc::new(slatedb::object_store::memory::InMemory::new()),
@@ -419,15 +422,9 @@ async fn run_commit_outcome_contracts() {
     ));
 }
 
-/// Exercises cache identity, hydration, refresh, read-guard, retirement, and commit arms.
-///
-/// The owning module re-exports this runner only under `production-coverage`.
-/// The integration harness invokes it as one contract so the measured lines
-/// belong to production modules rather than to this support source.
-pub(crate) async fn run() {
-    run_retention_contracts().await;
-    run_commit_fence_contracts().await;
-    run_commit_outcome_contracts().await;
+/// Exercises cache identity, hydration, refresh, read-guard, and retirement arms.
+#[tokio::test]
+async fn identity_hydration_and_read_guard_contracts() {
     // A registry that never saw the identity's scope has nothing to forget.
     assert!(!VectorCacheRegistry::default().forget_validated_closed(&validated(1)));
     let first = VectorCacheIdentity::from_validated(&validated(1));
