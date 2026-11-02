@@ -379,27 +379,26 @@ impl HelixDbSource {
     /// The database path, its object store, and whether a writer's garbage
     /// collector may advance boundary files on that store.
     fn into_parts(self) -> Result<(String, Arc<dyn ObjectStore>, GcBoundaryFiles)> {
-        match self {
+        // LocalFileSystem has no conditional overwrite to advance them with.
+        let gc_boundary_files = match &self {
+            Self::Disk { .. } => GcBoundaryFiles::Off,
+            Self::InMemory { .. } | Self::InMemoryToken { .. } | Self::ObjectStorage { .. } => {
+                GcBoundaryFiles::AsConfigured
+            }
+        };
+        let (path, object_store): (String, Arc<dyn ObjectStore>) = match self {
             Self::InMemory { database } => {
                 let token = ProcessLocalDatabaseToken::new(database)?;
-                Ok((
-                    token.database().to_string(),
-                    token.object_store(),
-                    GcBoundaryFiles::AsConfigured,
-                ))
+                (token.database().to_string(), token.object_store())
             }
-            Self::InMemoryToken { token } => Ok((
-                token.database().to_string(),
-                token.object_store(),
-                GcBoundaryFiles::AsConfigured,
-            )),
+            Self::InMemoryToken { token } => (token.database().to_string(), token.object_store()),
             Self::Disk { root, database } => {
                 // A write is durable once SlateDB's put returns, so every put fsyncs its file
                 // and directory. Without it, a crash or a writeback error the kernel never
                 // reports leaves a manifest naming an SST whose bytes never reached the disk.
                 let object_store: Arc<dyn ObjectStore> =
                     Arc::new(LocalFileSystem::new_with_prefix(root)?.with_fsync(true));
-                Ok((database, object_store, GcBoundaryFiles::Off))
+                (database, object_store)
             }
             Self::ObjectStorage {
                 database,
@@ -417,13 +416,10 @@ impl HelixDbSource {
                 }
                 #[cfg(feature = "async-index-benchmark")]
                 let builder = builder.with_http_connector(benchmark::io::Connector::default());
-                Ok((
-                    database,
-                    Arc::new(builder.build()?),
-                    GcBoundaryFiles::AsConfigured,
-                ))
+                (database, Arc::new(builder.build()?))
             }
-        }
+        };
+        Ok((path, object_store, gc_boundary_files))
     }
 }
 
@@ -1030,14 +1026,7 @@ impl HelixDB {
         database: impl Into<String>,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self> {
-        let db = Self::open_writer_inner(
-            database.into(),
-            object_store,
-            GcBoundaryFiles::AsConfigured,
-            DbConfig::new(),
-        )
-        .await?;
-        Ok(db.with_embedded_query_metrics().await)
+        Self::open_with_object_store_and_config(database, object_store, DbConfig::new()).await
     }
 
     /// Open a read/write database handle backed by a caller-provided object store and config.

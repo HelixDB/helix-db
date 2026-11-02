@@ -510,6 +510,34 @@ async fn disk_storage_collects_manifests_and_compactions_without_boundary_files(
     );
     db.close().await.expect("disk writer closes");
     assert!(!root.path().join(fresh).join("gc").exists());
+
+    // So does a managed writer, from its bootstrap through a failover.
+    let managed = "disk-gc-managed";
+    for (epoch, intent, name) in [
+        (1, db::ManagedWriterOpenIntent::Bootstrap, "alpha"),
+        (2, db::ManagedWriterOpenIntent::Failover, "beta"),
+    ] {
+        let db = HelixDB::open_managed_writer_with_config(
+            disk(managed),
+            collecting(),
+            std::num::NonZeroU64::new(epoch).expect("nonzero epoch"),
+            intent,
+        )
+        .await
+        .expect("managed disk writer opens");
+        db.query(write(name)).await.expect("write lands");
+        wait_until(
+            || collected(managed),
+            "a managed disk writer collects its directory",
+        )
+        .await;
+        assert_eq!(
+            db.query(count()).await.expect("count reads"),
+            serde_json::json!({ "count": epoch })
+        );
+        db.close().await.expect("managed disk writer closes");
+    }
+    assert!(!root.path().join(managed).join("gc").exists());
 }
 
 #[test]
