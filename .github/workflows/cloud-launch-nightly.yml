@@ -142,22 +142,10 @@ jobs:
           --test production_index_lifecycle_scale index_lifecycle_vector_ci_contract
           -- --exact --nocapture --test-threads=1
 
-  coverage:
-    name: ${{ matrix.name }}
+  coverage-report:
+    name: Coverage report
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Planner all-target coverage
-            script: scripts/workspace-coverage.sh planner
-          - name: DB all-target coverage
-            script: scripts/workspace-coverage.sh db
-          - name: DB production coverage
-            script: scripts/db-production-coverage.sh
-          - name: Server production coverage
-            script: scripts/server-production-coverage.sh
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -165,4 +153,6 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: ${{ matrix.script }}
+      # Informational only: there are no thresholds, so this fails only when a
+      # test fails.
+      - run: cargo llvm-cov --workspace --summary-only
