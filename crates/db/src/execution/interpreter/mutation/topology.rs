@@ -544,7 +544,7 @@ impl TopologyMutationRuntime {
             staged_keys.push(merges.adjacency(merges::Key::Typed(key), &delta)?);
         }
 
-        merges.stage().await?;
+        merges.stage()?;
         self.staged_keys.extend(staged_keys);
         drop(key_vector_memory);
         let Some(memory) = self.staged_memory.as_mut() else {
@@ -794,8 +794,13 @@ mod tests {
         }
     }
 
+    /// A row corrupted outside Helix never blocks a write or a memtable flush.
+    ///
+    /// Staging never reads the stored row, so the delta commits. The corrupt
+    /// base is already in L0, so the flushed memtable holds only the delta and
+    /// its L0 table builds; reads that resolve the row fail closed instead.
     #[tokio::test]
-    async fn corrupt_topology_rows_fail_closed() {
+    async fn corrupt_stored_topology_rows_never_fail_a_flush() {
         let scope = DataScope::LegacyUnscoped;
         for row in [
             "node-label",
@@ -824,7 +829,20 @@ mod tests {
                 _ => unreachable!("the fixture lists every topology row"),
             };
             let corrupt = Bytes::from_static(b"corrupt-topology-value");
+            let validated = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            assert!(
+                crate::transaction::Mutation::put(&validated, &key, &corrupt).is_err(),
+                "{row}"
+            );
+            drop(validated);
             db.put(&key, corrupt.clone()).await.unwrap();
+            let memtable = slatedb::config::FlushOptions {
+                flush_type: slatedb::config::FlushType::MemTable,
+            };
+            db.flush_with_options(memtable.clone()).await.unwrap();
 
             let transaction = db
                 .begin(IsolationLevel::SerializableSnapshot)
@@ -845,9 +863,29 @@ mod tests {
                     .unwrap(),
                 _ => unreachable!("the fixture lists every topology row"),
             }
-            assert!(runtime.flush(&transaction).await.is_err(), "{row}");
-            transaction.rollback();
-            assert_eq!(db.get(&key).await.unwrap(), Some(corrupt), "{row}");
+            runtime.prepare(&transaction).await.unwrap();
+            runtime.consume_prepared().unwrap();
+            assert!(transaction.get(&key).await.is_err(), "{row}");
+            transaction.commit().await.unwrap();
+            db.flush_with_options(memtable.clone()).await.unwrap();
+            assert!(db.get(&key).await.is_err(), "{row}");
+
+            // The database keeps accepting and flushing writes.
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let mut runtime = TopologyMutationRuntime::default();
+            runtime.add_node_label(scope, "Healthy", 2).unwrap();
+            runtime.prepare(&transaction).await.unwrap();
+            runtime.consume_prepared().unwrap();
+            transaction.commit().await.unwrap();
+            db.flush_with_options(memtable).await.unwrap();
+            assert!(db
+                .get(node_label_key(scope, "Healthy"))
+                .await
+                .unwrap()
+                .is_some());
             db.close().await.unwrap();
         }
     }

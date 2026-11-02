@@ -1,24 +1,30 @@
-//! Admission for canonical checked-disjoint merge construction and history.
+//! Admission for canonical disjoint membership merges and their history.
 //!
-//! A batch owns transient frames, discriminator construction and backend batch
-//! containers. Its transaction retains copied operands, operation histories and
-//! conflict metadata through commit. Monotone totals bound unique keys/tokens
-//! by all submitted entries, without another per-member or per-key index. This
-//! deliberately retains a conservative bound after a rejected backend batch.
+//! A batch owns transient frames, discriminator construction and validation
+//! working memory. Its transaction retains copied operands, operation histories
+//! and conflict metadata through commit. Monotone totals bound unique
+//! keys/tokens by all submitted entries, without another per-member or per-key
+//! index.
 //!
-//! SlateDB's untracked existing-row reads and full merge validation are separate
-//! working memory: input lengths cannot bound an arbitrarily large existing row.
-//! Upstream secondary-index collection is also outside this construction scope.
+//! Staging never reads the stored row. Each operand is validated on its own with
+//! the merge operator's decoders, so a write costs the size of its delta, not
+//! the size of the row it changes. Stored rows stay decodable because full-value
+//! puts to these rows are validated by [`super::Mutation::put`]. Upstream
+//! secondary-index collection is outside this construction scope.
+
+use std::collections::HashSet;
 
 use bytes::Bytes;
 use helix_planner::relational::allocation;
 use parking_lot::Mutex;
+use slatedb::MergeOperator;
 
 use crate::{
     encoding::v2::{
         keys::DataKey,
         values::{adjacency, indexes::equality},
     },
+    merge_operator::HelixMergeOperator,
     query_resources::{Budget, Reservation},
     HelixDbError, Result,
 };
@@ -161,11 +167,27 @@ impl Tracker {
     }
 }
 
-/// Closed, capacity-bounded construction followed by one checked backend call.
+/// Membership row family of one operand. It selects the allocation-free
+/// preflight that bounds the operand's validation decode before it runs.
+#[derive(Clone, Copy)]
+enum Family {
+    Bitmap,
+    Adjacency,
+}
+
+/// One encoded operand awaiting validation and staging.
+struct Entry {
+    family: Family,
+    key: Bytes,
+    tokens: Vec<u128>,
+    operand: Bytes,
+}
+
+/// Closed, capacity-bounded construction followed by all-or-nothing staging.
 /// Key aliases carry their own admission beyond this batch's lifetime.
 pub(crate) struct Batch<'a> {
     view: super::View<'a>,
-    entries: Vec<slatedb::DisjointMergeBatchEntry>,
+    entries: Vec<Entry>,
     capacity: usize,
     totals: Totals,
     memory: Option<Reservation>,
@@ -190,13 +212,12 @@ impl<'a> Batch<'a> {
     }
 
     fn construction_bytes(capacity: usize, totals: Totals) -> usize {
-        // Input Vec plus growing backend prepared/key SmallVecs and key set.
-        // Encoders write exact frames; another frame bounds roaring run-header
-        // scratch even for decoded/optimized deltas. Keys have separate owners.
+        // Entry Vec plus the duplicate-key set built while staging. Encoders
+        // write exact frames; another frame bounds roaring run-header scratch
+        // even for decoded/optimized deltas. Keys have separate owners. Each
+        // entry's token Vec is reused in place by the backend before its Arc.
         capacity
-            .saturating_mul(
-                4 * size_of::<slatedb::DisjointMergeBatchEntry>() + 4 * size_of::<Bytes>(),
-            )
+            .saturating_mul(4 * size_of::<Entry>() + 4 * size_of::<Bytes>())
             .saturating_add(allocation::hash_table_bytes::<Bytes, ()>(capacity))
             .saturating_add(totals.operands.saturating_mul(2))
             .saturating_add(totals.tokens.saturating_mul(4 * size_of::<u128>()))
@@ -210,6 +231,7 @@ impl<'a> Batch<'a> {
     ) -> Result<Bytes> {
         let encoded = delta.prepare_encoding();
         self.push(
+            Family::Bitmap,
             key,
             encoded.encoded_len(),
             delta.members().map(u128::from),
@@ -229,11 +251,18 @@ impl<'a> Batch<'a> {
             .outgoing_members()
             .map(u128::from)
             .chain(delta.incoming_members().map(|id| INCOMING | u128::from(id)));
-        self.push(key, encoded.encoded_len(), tokens, || encoded.encode())
+        self.push(
+            Family::Adjacency,
+            key,
+            encoded.encoded_len(),
+            tokens,
+            || encoded.encode(),
+        )
     }
 
     fn push(
         &mut self,
+        family: Family,
         key: Key<'_>,
         operand_len: usize,
         tokens: impl Iterator<Item = u128>,
@@ -265,31 +294,83 @@ impl<'a> Batch<'a> {
         let key = key.encode(self.view.tracking.map(|tracker| &tracker.budget))?;
         let operand = encode();
         assert_eq!(operand.len(), operand_len, "prepared merge operand length");
-        self.entries
-            .push(slatedb::DisjointMergeBatchEntry::from_tokens(
-                key.clone(),
-                tokens,
-                operand,
-            ));
+        let tokens = tokens.collect::<Vec<_>>();
+        assert!(
+            !tokens.is_empty(),
+            "disjoint merge discriminators cannot be empty"
+        );
+        self.entries.push(Entry {
+            family,
+            key: key.clone(),
+            tokens,
+            operand,
+        });
         self.totals = proposed;
         Ok(key)
     }
 
-    pub(crate) async fn stage(self) -> Result<()> {
+    /// Validates every entry, then stages each in push order.
+    ///
+    /// A batch with a repeated key or an operand the merge operator cannot
+    /// decode stages nothing. Validation never reads the stored row. The
+    /// construction reservation, grown by the largest validation decode, lives
+    /// until the last operand is staged.
+    pub(crate) fn stage(self) -> Result<()> {
         let Self {
             view,
             entries,
+            capacity,
             totals,
-            memory,
-            ..
+            mut memory,
         } = self;
+        let mut keys = HashSet::with_capacity(entries.len());
+        entries.iter().try_for_each(|entry| {
+            keys.insert(&entry.key).then_some(()).ok_or_else(|| {
+                HelixDbError::Storage(slatedb::Error::invalid(format!(
+                    "disjoint merge batch contains duplicate key {:?}",
+                    entry.key
+                )))
+            })
+        })?;
+        drop(keys);
+        memory
+            .as_mut()
+            .map(|memory| {
+                // Allocation-free preflight bounds each decode; one runs at a time.
+                let decode = entries.iter().try_fold(0, |largest, entry| {
+                    let bound = match entry.family {
+                        Family::Bitmap => {
+                            equality::SecondaryEqualityBitmapValue::prepare(&entry.operand)?
+                                .allocation_bound()
+                        }
+                        Family::Adjacency => {
+                            adjacency::prepare_edges(&entry.operand)?.allocation_bound()
+                        }
+                    };
+                    Ok::<_, HelixDbError>(largest.max(bound))
+                })?;
+                memory.resize(Self::construction_bytes(capacity, totals).saturating_add(decode))
+            })
+            .transpose()?;
+        let operator = HelixMergeOperator::new();
+        entries.iter().try_for_each(|entry| {
+            operator
+                .validate_merge_with_base(&entry.key, None, std::slice::from_ref(&entry.operand))
+                .map_err(|error| {
+                    HelixDbError::Storage(
+                        slatedb::Error::invalid("merge operator error".to_owned())
+                            .with_source(Box::new(error)),
+                    )
+                })
+        })?;
         view.merges
             .map(|tracker| tracker.retain(totals))
             .transpose()?;
-        // No ledger lock crosses an await. A backend error leaves a conservative
-        // history charge until the statement transaction aborts or completes.
-        let result = view.raw.merge_disjoint_checked_batch(entries).await;
+        entries.into_iter().try_for_each(|entry| {
+            view.raw
+                .merge_disjoint_tokens(entry.key, entry.tokens, entry.operand)
+        })?;
         drop(memory);
-        Ok(result?)
+        Ok(())
     }
 }

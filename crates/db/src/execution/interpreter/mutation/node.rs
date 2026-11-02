@@ -527,12 +527,25 @@ mod tests {
         rows
     }
 
+    /// A membership row corrupted outside Helix never fails a memtable flush.
+    ///
+    /// Staging a removal never reads the row it changes, so a cascade delete
+    /// either commits or, when it must read the corrupt row, rejects without
+    /// writing anything. Either way the next memtable flush builds.
     #[tokio::test]
-    async fn rejected_cascade_delete_preserves_every_graph_and_index_row() {
+    async fn cascade_delete_over_a_corrupt_row_is_atomic_and_never_fails_a_flush() {
+        for corrupted in std::iter::once(None).chain((0..8).map(Some)) {
+            cascade_delete_over_a_corrupt_row(corrupted).await;
+        }
+    }
+
+    async fn cascade_delete_over_a_corrupt_row(corrupted: Option<usize>) {
         let scope = keys::scope::DataScope::LegacyUnscoped;
-        let config = test_support::in_memory_config("mutation-corrupt-cascade-delete")
-            .with_equality_index("User", "status")
-            .with_edge_equality_index("FOLLOWS", "status");
+        let config = test_support::in_memory_config(&format!(
+            "mutation-corrupt-cascade-delete-{corrupted:?}"
+        ))
+        .with_equality_index("User", "status")
+        .with_edge_equality_index("FOLLOWS", "status");
         let db = test_support::open_db_with_config(config).await;
         let target = test_support::add_node_with_properties(
             &db,
@@ -676,45 +689,51 @@ mod tests {
             2,
         );
 
-        for (name, key) in cases {
-            let original = db
-                .inner_db()
-                .get(&key)
-                .await
-                .unwrap()
-                .unwrap_or_else(|| panic!("{name} fixture row exists"));
+        let memtable = slatedb::config::FlushOptions {
+            flush_type: slatedb::config::FlushType::MemTable,
+        };
+        let corrupt = corrupted.map(|case| cases[case].clone());
+        if let Some((name, key)) = &corrupt {
+            assert!(
+                db.inner_db().get(key).await.unwrap().is_some(),
+                "{name} fixture row exists"
+            );
             db.inner_db()
-                .put(&key, Bytes::from_static(b"corrupt-membership-row"))
+                .put(key, Bytes::from_static(b"corrupt-membership-row"))
                 .await
                 .unwrap();
-            let before = all_rows(&db).await;
-            db.execute(
+            db.inner_db()
+                .flush_with_options(memtable.clone())
+                .await
+                .unwrap();
+        }
+        let before = all_rows(&db).await;
+        let outcome = db
+            .execute(
                 &drop_node,
                 context::ParamBindings::default()
-                    .with_value(node_param.clone(), AstPropertyValue::I64(target as i64)),
+                    .with_value(node_param, AstPropertyValue::I64(target as i64)),
             )
-            .await
-            .expect_err("corrupt membership rows reject the cascade delete");
-            assert_eq!(all_rows(&db).await, before, "{name}");
-            for record_key in [&node_key, &outgoing_key, &incoming_key] {
-                assert!(
-                    db.inner_db().get(record_key).await.unwrap().is_some(),
-                    "{name} preserves node and edge records"
-                );
+            .await;
+        let deleted = match outcome {
+            Ok(_) => true,
+            Err(error) => {
+                assert!(corrupt.is_some(), "an intact fixture deletes: {error}");
+                assert_eq!(all_rows(&db).await, before, "{corrupt:?}");
+                false
             }
-            db.inner_db().put(&key, original).await.unwrap();
-        }
-
-        db.execute(
-            &drop_node,
-            context::ParamBindings::default()
-                .with_value(node_param, AstPropertyValue::I64(target as i64)),
-        )
-        .await
-        .expect("the repaired fixture still permits a complete cascade delete");
+        };
         for record_key in [&node_key, &outgoing_key, &incoming_key] {
-            assert!(db.inner_db().get(record_key).await.unwrap().is_none());
+            assert_eq!(
+                db.inner_db().get(record_key).await.unwrap().is_none(),
+                deleted,
+                "{corrupt:?}"
+            );
         }
+        db.inner_db()
+            .flush_with_options(memtable)
+            .await
+            .unwrap_or_else(|error| panic!("{corrupt:?} failed a memtable flush: {error}"));
         db.close().await.unwrap();
     }
 

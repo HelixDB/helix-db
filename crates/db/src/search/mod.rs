@@ -394,7 +394,7 @@ pub fn decode_roaring_treemap(data: &[u8]) -> Result<RoaringTreemap, HelixDbErro
     Ok(SecondaryEqualityValue::decode(data)?.into_ids())
 }
 
-async fn stage_shared_bitmap_membership(
+fn stage_shared_bitmap_membership(
     txn: &DbTransaction,
     key: &Bytes,
     entity_id: u64,
@@ -406,9 +406,9 @@ async fn stage_shared_bitmap_membership(
     } else {
         delta.remove(entity_id);
     }
-    txn.merge_disjoint_tokens_checked(key, [u128::from(entity_id)], delta.encode())
-        .await?;
-    Ok(())
+    let mut merges = crate::transaction::Mutation::merge_batch(txn, 1)?;
+    merges.bitmap(crate::transaction::merges::Key::Encoded(key), &delta)?;
+    merges.stage()
 }
 
 /// Add a node to an equality index
@@ -437,7 +437,7 @@ pub async fn add_to_equality_index_scoped(
     }
     .to_bytes();
 
-    stage_shared_bitmap_membership(txn, &key, node_id, true).await
+    stage_shared_bitmap_membership(txn, &key, node_id, true)
 }
 
 /// Remove a node from an equality index
@@ -467,7 +467,7 @@ pub async fn remove_from_equality_index_scoped(
     }
     .to_bytes();
 
-    stage_shared_bitmap_membership(txn, &key, node_id, false).await
+    stage_shared_bitmap_membership(txn, &key, node_id, false)
 }
 
 /// Look up nodes by equality index
@@ -1397,7 +1397,7 @@ pub async fn add_to_edge_label_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &out_key, to, true).await?;
+    stage_shared_bitmap_membership(txn, &out_key, to, true)?;
 
     // Update incoming index: to + label -> from
     let in_key = DataKey::Data {
@@ -1407,7 +1407,7 @@ pub async fn add_to_edge_label_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &in_key, from, true).await
+    stage_shared_bitmap_membership(txn, &in_key, from, true)
 }
 
 /// Remove an edge from the edge label index
@@ -1437,7 +1437,7 @@ pub async fn remove_from_edge_label_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &out_key, to, false).await?;
+    stage_shared_bitmap_membership(txn, &out_key, to, false)?;
 
     // Update incoming index
     let in_key = DataKey::Data {
@@ -1447,7 +1447,7 @@ pub async fn remove_from_edge_label_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &in_key, from, false).await
+    stage_shared_bitmap_membership(txn, &in_key, from, false)
 }
 
 /// Look up outgoing neighbors by edge label
@@ -1574,7 +1574,7 @@ pub async fn add_to_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &out_key, edge_id, true).await?;
+    stage_shared_bitmap_membership(txn, &out_key, edge_id, true)?;
 
     let in_key = DataKey::Data {
         scope: tenant_scope,
@@ -1588,7 +1588,7 @@ pub async fn add_to_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &in_key, edge_id, true).await?;
+    stage_shared_bitmap_membership(txn, &in_key, edge_id, true)?;
 
     let global_key = DataKey::Data {
         scope: tenant_scope,
@@ -1600,7 +1600,7 @@ pub async fn add_to_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &global_key, edge_id, true).await
+    stage_shared_bitmap_membership(txn, &global_key, edge_id, true)
 }
 
 /// Remove an edge from the equality index (both directions)
@@ -1645,7 +1645,7 @@ pub async fn remove_from_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &out_key, edge_id, false).await?;
+    stage_shared_bitmap_membership(txn, &out_key, edge_id, false)?;
 
     let in_key = DataKey::Data {
         scope: tenant_scope,
@@ -1659,7 +1659,7 @@ pub async fn remove_from_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &in_key, edge_id, false).await?;
+    stage_shared_bitmap_membership(txn, &in_key, edge_id, false)?;
 
     let global_key = DataKey::Data {
         scope: tenant_scope,
@@ -1671,7 +1671,7 @@ pub async fn remove_from_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &global_key, edge_id, false).await
+    stage_shared_bitmap_membership(txn, &global_key, edge_id, false)
 }
 
 /// Look up edges by equality (outgoing from source)
@@ -1790,7 +1790,7 @@ pub async fn add_to_global_edge_label_index_scoped(
         ))),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &key, edge_id, true).await
+    stage_shared_bitmap_membership(txn, &key, edge_id, true)
 }
 
 /// Remove an edge from the global label -> edge IDs index.
@@ -1815,7 +1815,7 @@ pub async fn remove_from_global_edge_label_index_scoped(
         ))),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &key, edge_id, false).await
+    stage_shared_bitmap_membership(txn, &key, edge_id, false)
 }
 
 /// Look up all edge IDs for a label from the global edge-label index.
@@ -1940,7 +1940,7 @@ pub async fn add_to_edge_pair_index_scoped(
         kind: DataKeyKind::EdgePairIndex(crate::encoding::keys::EdgePairIndexKey::new(from, to)),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &key, edge_id, true).await
+    stage_shared_bitmap_membership(txn, &key, edge_id, true)
 }
 
 /// Remove an edge id from the exact `(from, to)` multigraph pair index.
@@ -1965,7 +1965,7 @@ pub async fn remove_from_edge_pair_index_scoped(
         kind: DataKeyKind::EdgePairIndex(crate::encoding::keys::EdgePairIndexKey::new(from, to)),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &key, edge_id, false).await
+    stage_shared_bitmap_membership(txn, &key, edge_id, false)
 }
 
 /// Delete all node `$label` equality-index entries before a full rebuild.
@@ -3390,7 +3390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_bitmap_staging_rejects_corruption() {
+    async fn shared_bitmap_staging_never_reads_a_corrupt_row() {
         for present in [false, true] {
             let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
                 database: format!("search-corrupt-shared-bitmap-{present}"),
@@ -3415,12 +3415,9 @@ mod tests {
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .unwrap();
-            assert!(
-                stage_shared_bitmap_membership(&txn, &key, 7, present)
-                    .await
-                    .is_err(),
-                "present={present}"
-            );
+            stage_shared_bitmap_membership(&txn, &key, 7, present)
+                .unwrap_or_else(|error| panic!("present={present}: {error}"));
+            assert!(txn.get(&key).await.is_err(), "present={present}");
             txn.rollback();
             assert_eq!(db.inner_db().get(&key).await.unwrap(), Some(corrupt));
             db.close().await.unwrap();

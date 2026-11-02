@@ -476,7 +476,7 @@ impl SecondaryMutationRuntime {
                 }
             }
         }
-        stage_bitmap_changes(transaction, &bitmap_changes).await?;
+        stage_bitmap_changes(transaction, &bitmap_changes)?;
         Ok(())
     }
 
@@ -2478,7 +2478,7 @@ async fn apply_active_change(
                 .or_default()
                 .insert(entity_id.get(), true);
         }
-        return stage_bitmap_changes(transaction, &changes).await;
+        return stage_bitmap_changes(transaction, &changes);
     }
 
     'delete_old: {
@@ -3193,7 +3193,7 @@ impl EntityWritePlan {
                 }
             }
         }
-        stage_bitmap_changes(transaction, &bitmap_changes).await?;
+        stage_bitmap_changes(transaction, &bitmap_changes)?;
         Ok(())
     }
 }
@@ -3211,7 +3211,7 @@ enum EntityWrite {
     },
 }
 
-async fn stage_bitmap_changes(
+fn stage_bitmap_changes(
     transaction: &impl crate::transaction::Mutation,
     changes: &BTreeMap<Bytes, BTreeMap<u64, bool>>,
 ) -> Result<()> {
@@ -3227,7 +3227,7 @@ async fn stage_bitmap_changes(
         }
         merges.bitmap(crate::transaction::merges::Key::Encoded(key), &delta)?;
     }
-    merges.stage().await?;
+    merges.stage()?;
     Ok(())
 }
 
@@ -6748,7 +6748,6 @@ mod tests {
             &transaction,
             &BTreeMap::from([(key.clone(), BTreeMap::from([(1, false), (3, true)]))]),
         )
-        .await
         .expect("mixed removal and addition stages");
         transaction
             .commit()
@@ -6776,7 +6775,6 @@ mod tests {
             &transaction,
             &BTreeMap::from([(key.clone(), BTreeMap::from([(2, false), (3, false)]))]),
         )
-        .await
         .expect("complete removal stages");
         transaction
             .commit()
@@ -6791,7 +6789,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_node_and_edge_equality_rows_fail_closed() {
+    async fn corrupt_node_and_edge_equality_rows_fail_closed_without_failing_a_flush() {
         for (kind, definition) in [
             (
                 "node",
@@ -6818,27 +6816,35 @@ mod tests {
             )
             .expect("equality bitmap key validates");
             let corrupt = Bytes::from_static(b"corrupt-equality-bitmap");
+            let validated = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            assert!(
+                crate::transaction::Mutation::put(&validated, &key, &corrupt).is_err(),
+                "{kind} equality corruption"
+            );
+            drop(validated);
+            // Corrupted outside Helix and already flushed: staging never reads
+            // it, the memtable flush still builds, and reads fail closed.
             db.put(&key, corrupt.clone()).await.unwrap();
+            let memtable = slatedb::config::FlushOptions {
+                flush_type: slatedb::config::FlushType::MemTable,
+            };
+            db.flush_with_options(memtable.clone()).await.unwrap();
 
             let transaction = db
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .unwrap();
-            assert!(
-                stage_bitmap_changes(
-                    &transaction,
-                    &BTreeMap::from([(key.clone(), BTreeMap::from([(1, false)]))]),
-                )
-                .await
-                .is_err(),
-                "{kind} equality corruption"
-            );
-            transaction.rollback();
-            assert_eq!(
-                db.get(&key).await.unwrap(),
-                Some(corrupt),
-                "{kind} equality corruption"
-            );
+            stage_bitmap_changes(
+                &transaction,
+                &BTreeMap::from([(key.clone(), BTreeMap::from([(1, false)]))]),
+            )
+            .expect("staging never reads the corrupt row");
+            transaction.commit().await.unwrap();
+            db.flush_with_options(memtable).await.unwrap();
+            assert!(db.get(&key).await.is_err(), "{kind} equality corruption");
             db.close().await.unwrap();
         }
     }
@@ -6883,13 +6889,11 @@ mod tests {
             &left,
             &BTreeMap::from([(key.clone(), BTreeMap::from([(2, true)]))]),
         )
-        .await
         .expect("left addition stages");
         stage_bitmap_changes(
             &right,
             &BTreeMap::from([(key.clone(), BTreeMap::from([(3, true)]))]),
         )
-        .await
         .expect("right addition stages");
 
         left.commit().await.expect("left addition commits");
@@ -6978,7 +6982,6 @@ mod tests {
                                 txn,
                                 &BTreeMap::from([(key.clone(), BTreeMap::from([(id, present)]))]),
                             )
-                            .await
                             .unwrap();
                         }
                         let (first, second, first_change, second_change) = if left_first {
