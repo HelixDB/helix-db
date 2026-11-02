@@ -1934,12 +1934,24 @@ async fn topology_mutations_preserve_transactional_semantics() {
             true,
         ),
     ] {
+        // Helix refuses to store a membership row it could not merge into.
         let seed = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        seed.put(&key, corrupt.clone()).unwrap();
+        assert!(crate::transaction::Mutation::put(&seed, &key, &corrupt).is_err());
+        assert!(
+            crate::transaction::Mutation::put_bytes(&seed, key.clone(), corrupt.clone()).is_err()
+        );
         seed.commit().await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), None);
+        // A row corrupted outside Helix and already flushed is never read by
+        // staging; its delta flushes alone and reads of the row fail closed.
+        db.put(&key, corrupt.clone()).await.unwrap();
+        let memtable = slatedb::config::FlushOptions {
+            flush_type: slatedb::config::FlushType::MemTable,
+        };
+        db.flush_with_options(memtable.clone()).await.unwrap();
         let transaction = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
@@ -1952,9 +1964,11 @@ async fn topology_mutations_preserve_transactional_semantics() {
         } else {
             runtime.remove_node_label(scope, "Corrupt", 1).unwrap();
         }
-        assert!(runtime.flush(&transaction).await.is_err());
-        drop(transaction);
-        assert_eq!(db.get(&key).await.unwrap(), Some(corrupt));
+        runtime.prepare(&transaction).await.unwrap();
+        runtime.consume_prepared().unwrap();
+        transaction.commit().await.unwrap();
+        db.flush_with_options(memtable).await.unwrap();
+        assert!(db.get(&key).await.is_err());
     }
     db.close().await.unwrap();
 
