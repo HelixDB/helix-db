@@ -92,6 +92,30 @@ class CargoTargetReferenceTests(unittest.TestCase):
         self.assertEqual(actual - documented, {("current", "test", "crates/db/tests/current.rs")})
         self.assertEqual(documented - actual, {("stale", "test", "crates/db/tests/stale.rs")})
 
+    def test_feature_gated_tests_must_run_by_name(self):
+        catalog = MODULE.Catalog()
+        catalog.required_features.update({
+            ("db", "test", "default_contracts"): (),
+            ("db", "test", "listed_contracts"): ("production-coverage",),
+            ("db", "test", "unlisted_contracts"): ("index-lifecycle-testing",),
+            ("db", "test", "scale_soak"): ("production-scale",),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "ci.yml").write_text(
+                "steps:\n  - run: >-\n      cargo test -p db\n"
+                "      --features production-coverage --test listed_contracts\n"
+            )
+            self.assertEqual(
+                MODULE.validate_feature_gated_tests_run(root, catalog),
+                [
+                    "db test target 'unlisted_contracts' requires "
+                    "index-lifecycle-testing but no workflow runs it with --test"
+                ],
+            )
+
     def test_yaml_folded_commands_keep_multiline_target_flags(self):
         text = """steps:
   - run: >-

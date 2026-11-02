@@ -339,6 +339,29 @@ def validate_references(
     return errors
 
 
+def validate_feature_gated_tests_run(root: Path, catalog: Catalog) -> list[str]:
+    """Require a workflow to run every test target that `--all-targets` skips.
+
+    Targets gated on `production-scale` are release-scale soaks run on demand.
+    """
+    referenced = {
+        match.group("name")
+        for path in (root / ".github" / "workflows").glob("*.yml")
+        for command in commands(path)
+        for match in REFERENCE.finditer(command)
+        if match.group("flag") == "--test"
+    }
+    return [
+        f"{package} test target {name!r} requires {', '.join(features)} "
+        "but no workflow runs it with --test"
+        for (package, kind, name), features in sorted(catalog.required_features.items())
+        if kind == "test"
+        and features
+        and "production-scale" not in features
+        and name not in referenced
+    ]
+
+
 def validate_fuzz_matrices(root: Path, catalog: Catalog) -> list[str]:
     errors = []
     for path in (root / ".github" / "workflows").glob("*.yml"):
@@ -716,6 +739,7 @@ def main() -> int:
     catalog = load_catalog(root)
     errors = []
     errors.extend(validate_references(root, catalog, automation_files(root)))
+    errors.extend(validate_feature_gated_tests_run(root, catalog))
     errors.extend(validate_fuzz_matrices(root, catalog))
     errors.extend(validate_inventory(root, catalog))
     errors.extend(validate_codec_architecture(root))
