@@ -1,8 +1,7 @@
 //! Exact V1 graph-property representation contracts.
 //!
-//! This harness remains outside the measured production tree while exercising
-//! every production representation branch through the feature-gated crate
-//! boundary. It deliberately constructs only existing V1 values and bytes.
+//! They exercise every representation branch and deliberately construct only
+//! existing V1 values and bytes.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -15,7 +14,8 @@ use crate::index_lifecycle::graph_mutation::{
 };
 
 /// Proves persisted representation identity is recursive and bit exact.
-pub fn graph_mutation_representation_contracts() {
+#[test]
+fn representation_is_recursive_and_bit_exact() {
     let f64_nan = f64::from_bits(0x7ff8_0000_0000_0042);
     let other_f64_nan = f64::from_bits(f64_nan.to_bits().saturating_add(1));
     let f32_nan = f32::from_bits(0x7fc0_0042);

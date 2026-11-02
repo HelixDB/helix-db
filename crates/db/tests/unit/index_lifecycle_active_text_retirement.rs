@@ -1,6 +1,6 @@
 //! Production-codec contracts for state-only Active text retirement.
 //!
-//! This feature-gated child of the production retirement module keeps its
+//! This test child of the production retirement module keeps its
 //! prepared and validated capabilities private. Every fixture uses current V1
 //! keys and values. The scenarios prove family and entity authority, exact
 //! canonical/root/state ownership, resource admission, serialized input
@@ -175,6 +175,7 @@ async fn put_state(db: &Db, fixture: &RetirementFixture, version: u64, live: boo
 }
 
 /// Proves non-text, wrong-kind, and missing-root requests fail before staging.
+#[tokio::test]
 async fn exercise_handle_and_root_presence_rejections() {
     let db = raw_db("production-active-text-retirement-handle").await;
     let scope = DataScope::LegacyUnscoped;
@@ -256,6 +257,7 @@ async fn exercise_handle_and_root_presence_rejections() {
 }
 
 /// Proves mistyped, cross-owned, empty, and exhausted roots fail closed.
+#[tokio::test]
 async fn exercise_root_shape_rejections() {
     let db = raw_db("production-active-text-retirement-roots").await;
     let scope = DataScope::LegacyUnscoped;
@@ -379,6 +381,7 @@ async fn exercise_root_shape_rejections() {
 }
 
 /// Proves state integrity, resource admission, revalidation, and final staging.
+#[tokio::test]
 async fn exercise_state_and_staging_contracts() {
     let db = raw_db("production-active-text-retirement-state").await;
     let scope = DataScope::LegacyUnscoped;
@@ -529,11 +532,4 @@ async fn exercise_state_and_staging_contracts() {
     assert!(!state.live);
     assert_eq!(state.logical_version.get(), 3);
     db.close().await.expect("state-contract database closes");
-}
-
-/// Runs every state-only Active text retirement contract.
-pub(crate) async fn run() {
-    exercise_handle_and_root_presence_rejections().await;
-    exercise_root_shape_rejections().await;
-    exercise_state_and_staging_contracts().await;
 }

@@ -1,6 +1,6 @@
 //! Production-codec contracts for Active text serving reads.
 //!
-//! This feature-gated child of the production serving module exercises its
+//! This test child of the production serving module exercises its
 //! private validated-root capability without widening the default crate API.
 //! All fixtures use current V1 keys and values. The scenarios cover successful
 //! root/page/state projection and every family, partition, presence, value-kind,
@@ -171,6 +171,7 @@ fn wrong_kind_value(authority: &ActiveTextServingAuthority) -> bytes::Bytes {
 }
 
 /// Proves family refinement, getters, and partition-shape validation.
+#[tokio::test]
 async fn exercise_authority_and_partition_rejections() {
     assert!(matches!(
         ActiveTextServingAuthority::try_from_active(&secondary_handle()),
@@ -201,6 +202,7 @@ async fn exercise_authority_and_partition_rejections() {
 }
 
 /// Proves missing and malformed manifest roots fail according to partition mode.
+#[tokio::test]
 async fn exercise_root_rejections() {
     let db = raw_db("production-text-serving-root-errors").await;
     let unpartitioned = text_authority(None);
@@ -248,6 +250,7 @@ async fn exercise_root_rejections() {
 }
 
 /// Proves page bounds, presence, value kind, and ownership checks.
+#[tokio::test]
 async fn exercise_page_rejections() {
     let db = raw_db("production-text-serving-page-errors").await;
     let authority = text_authority(None);
@@ -329,6 +332,7 @@ async fn exercise_page_rejections() {
 
 /// Proves entity-state presence, value-kind, ownership, revision, and live
 /// statistics-marker checks.
+#[tokio::test]
 async fn exercise_entity_state_rejections() {
     let db = raw_db("production-text-serving-state-errors").await;
     let authority = text_authority(None);
@@ -415,12 +419,4 @@ async fn exercise_entity_state_rejections() {
             if message.contains("no statistics marker")
     ));
     db.close().await.expect("state-error database closes");
-}
-
-/// Runs every Active text serving read contract.
-pub(crate) async fn run() {
-    exercise_authority_and_partition_rejections().await;
-    exercise_root_rejections().await;
-    exercise_page_rejections().await;
-    exercise_entity_state_rejections().await;
 }

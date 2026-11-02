@@ -1,6 +1,5 @@
-//! Production-linked contracts for unique equality batches. The reader is an
-//! immutable request view with real encoded rows and explicit storage faults.
-//! Harness code stays outside the measured production source tree.
+//! Contracts for unique equality batches. The reader is an immutable request
+//! view with real encoded rows and explicit storage faults.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -154,8 +153,10 @@ fn seed(
     (key, row)
 }
 
-pub(crate) async fn run() {
-    admission_contracts().await;
+/// Exercises the unique batch reader's input validation, storage faults,
+/// scopes, and owners.
+#[tokio::test]
+async fn unique_batch_validates_inputs_storage_and_owners() {
     let unique = handle(
         config::SecondaryIndexDefinition::node_unique_equality("Fixture", "value").unwrap(),
         DataScope::LegacyUnscoped,
@@ -351,6 +352,7 @@ pub(crate) async fn run() {
 
 /// Every byte limit through the successful high-water mark must either return
 /// the exact owners or fail atomically and release all temporary reservations.
+#[tokio::test]
 async fn admission_contracts() {
     use crate::query_resources as resources;
     let unique = handle(
@@ -466,10 +468,4 @@ async fn admission_contracts() {
         1024 * 1024,
         "cancellation releases pending owners"
     );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn unique_batch_contracts_cover_faults_scope_and_admission() {
-    run().await;
 }

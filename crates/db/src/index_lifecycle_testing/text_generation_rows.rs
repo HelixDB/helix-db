@@ -1,6 +1,6 @@
 //! Row observers and damage for text generations.
 //!
-//! Coverage contracts drive a real text build with explicit scheduling, pause
+//! Lifecycle contracts drive a real text build with explicit scheduling, pause
 //! it at one exact stage or validation lane, and damage one generation-owned
 //! row or split object through the deployed codecs. The next production step
 //! then decides the outcome; nothing here classifies or repairs lifecycle

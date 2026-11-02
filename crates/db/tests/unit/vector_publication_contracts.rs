@@ -1,6 +1,6 @@
 //! Production contracts for queued vector publication's planner boundaries.
 //!
-//! This feature-gated child of the vector lifecycle driver proves that queue
+//! This test child of the vector lifecycle driver proves that queue
 //! publication fails closed on inconsistent state it cannot reach through a
 //! consistent database: a tenant partition whose zero-count metadata still
 //! names a graph, disagrees with its generation, or keeps physical rows; a
@@ -35,13 +35,6 @@ use crate::search::vector::{
 };
 
 type Euclidean = vector::distance::Euclidean;
-
-/// Runs every queued vector publication planner contract.
-pub(crate) async fn run() {
-    empty_tenant_reclamation_fails_closed().await;
-    other_family_targets_fail_closed().await;
-    vector_payload_conversions_are_numeric().await;
-}
 
 /// Returns one Active text record and its handle.
 fn text_generation() -> (IndexRecordV2, ActiveIndexHandle) {
@@ -78,6 +71,7 @@ fn text_generation() -> (IndexRecordV2, ActiveIndexHandle) {
 /// disagrees with the Active generation, a malformed transaction guard, and
 /// any physical row other than the metadata and a well-formed guard each fail
 /// closed before anything is deleted.
+#[tokio::test]
 async fn empty_tenant_reclamation_fails_closed() {
     let db = test_db("vector-publication-reclamation").await;
     let scope = DataScope::LegacyUnscoped;
@@ -217,6 +211,7 @@ async fn empty_tenant_reclamation_fails_closed() {
 /// closed, as do a routed ordinal outside the classified catalog, a
 /// classifier entry whose record or handle is another family's, and a text
 /// build route whose record is not building.
+#[tokio::test]
 async fn other_family_targets_fail_closed() {
     let db = Db::builder("vector-publication-other-family", Arc::new(InMemory::new()))
         .build()
@@ -302,6 +297,7 @@ async fn other_family_targets_fail_closed() {
 
 /// Proves queued vector payloads accept every numeric array representation
 /// and reject non-numeric ones.
+#[tokio::test]
 async fn vector_payload_conversions_are_numeric() {
     let ValidatedDynamicIndexDefinition::Vector(definition) = definition(None) else {
         unreachable!("fixture definition is vector");

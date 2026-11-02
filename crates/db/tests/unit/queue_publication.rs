@@ -1,6 +1,6 @@
 //! Production contracts for bounded queue publication.
 //!
-//! This feature-gated child of the publication module drives the writer's own
+//! This test child of the publication module drives the writer's own
 //! publisher, and publishers over the same storage and planning budget with
 //! narrower limits, against explicitly scheduled writers, so no background
 //! attempt races a contract. An automatically scheduled writer builds each
@@ -55,20 +55,6 @@ use crate::HelixDB;
 const SCOPE: DataScope = DataScope::LegacyUnscoped;
 /// Default transaction byte ceilings of the fixture batch limits.
 const EIGHT_MIB: u64 = 8 * 1024 * 1024;
-
-/// Runs every queue publication contract in isolated databases.
-pub(crate) async fn run() {
-    vector_budgets_trim_then_block().await;
-    selection_and_collapse_boundaries().await;
-    text_budgets_trim_then_block().await;
-    uncertain_acknowledgements_reconcile().await;
-    retired_generations_discard_and_retry().await;
-    refused_corrupt_and_closed_attempts().await;
-    inconsistent_namespace_metadata_fails_closed().await;
-    concurrent_catalog_change_conflicts_publication().await;
-    uncertain_commits_keep_their_charges().await;
-    fenced_commits_end_publication().await;
-}
 
 fn vector_definition() -> ValidatedDynamicIndexDefinition {
     ValidatedDynamicIndexDefinition::try_from(
@@ -312,6 +298,7 @@ async fn drop_index(
 /// a one-byte single-vector ceiling rejects every insertion; either way the
 /// first attempt trims and the second blocks. The configured limits then
 /// publish both entities.
+#[tokio::test]
 async fn vector_budgets_trim_then_block() {
     let db = open_explicit(
         "queue-publication-vector-budgets",
@@ -361,6 +348,7 @@ async fn vector_budgets_trim_then_block() {
 /// Proves batch selection takes whole ordered prefixes within its limits,
 /// skips held-back entities until a newer operation repairs them, and that
 /// effects collapse only operations of their own family.
+#[tokio::test]
 async fn selection_and_collapse_boundaries() {
     let db = open_explicit(
         "queue-publication-selection",
@@ -671,6 +659,7 @@ fn narrow_text_limits() -> ActiveTextMutationLimits {
 
 /// Proves text limits that shrank after admission halve the entity batch
 /// until it fits, and block a lone document that can never fit.
+#[tokio::test]
 async fn text_budgets_trim_then_block() {
     let db = open_explicit(
         "queue-publication-text-budgets",
@@ -726,6 +715,7 @@ async fn text_budgets_trim_then_block() {
 /// Proves uncertain acknowledgements reconcile against a flushed read before
 /// the next attempt publishes: an acknowledgement that committed releases its
 /// charge, and one that did not, even when none did, is published once.
+#[tokio::test]
 async fn uncertain_acknowledgements_reconcile() {
     let db = open_explicit(
         "queue-publication-reconcile",
@@ -808,6 +798,7 @@ async fn uncertain_acknowledgements_reconcile() {
 /// Proves generations no record serves are discarded or empty, and that a
 /// retirement the publication transaction observes after classification
 /// retries.
+#[tokio::test]
 async fn retired_generations_discard_and_retry() {
     let db = open_explicit(
         "queue-publication-retired",
@@ -903,6 +894,7 @@ async fn retired_generations_discard_and_retry() {
 
 /// Proves a concurrent attempt is refused without touching its target, a
 /// queue that no longer decodes retries, and closed storage ends publication.
+#[tokio::test]
 async fn refused_corrupt_and_closed_attempts() {
     let db = open_explicit(
         "queue-publication-refused",
@@ -982,6 +974,7 @@ enum Change {
 /// its definition or is missing, for both removals and upserts: it writes
 /// nothing and holds back only the entity it planned, whose retry publishes
 /// it without another write once the metadata is restored.
+#[tokio::test]
 async fn inconsistent_namespace_metadata_fails_closed() {
     let db = open_explicit(
         "queue-publication-metadata",
@@ -1105,6 +1098,7 @@ async fn inconsistent_namespace_metadata_fails_closed() {
 
 /// Proves an index created in the scope while a publication plans conflicts
 /// its commit, which retries without an error and then publishes.
+#[tokio::test]
 async fn concurrent_catalog_change_conflicts_publication() {
     let db = open_explicit(
         "queue-publication-conflict",
@@ -1234,6 +1228,7 @@ impl ObjectStore for FailingWalStore {
 ///
 /// The failed upload closes the writer, so each case uses its own store and
 /// leaves its writer unclosed.
+#[tokio::test]
 async fn uncertain_commits_keep_their_charges() {
     for (name, family, retired) in [
         ("vector", QueueFamily::Vector, false),
@@ -1277,6 +1272,7 @@ async fn uncertain_commits_keep_their_charges() {
 /// Proves a writer that a newer writer fenced stops publishing: a
 /// publication, text, or discard attempt returns the fatal fencing error
 /// instead of retrying.
+#[tokio::test]
 async fn fenced_commits_end_publication() {
     for (name, family, retired) in [
         ("vector", QueueFamily::Vector, false),
@@ -1623,8 +1619,9 @@ enum WriterLoss {
 /// Proves queue work that only the WAL holds survives a writer that loses
 /// its store mid-publication.
 ///
-/// Runs apart from [`run`]: its overlaid searches over a replayed writer
-/// need a larger stack than a default debug-build test thread.
+/// Its overlaid searches over a replayed writer exceed default debug-build
+/// thread stacks, so it runs on its own larger-stack thread; production
+/// sizing is unchanged.
 ///
 /// For each family, and for a retired generation's discard, a writer
 /// commits an insert, an update, a tenant move, and a delete to
@@ -1635,7 +1632,23 @@ enum WriterLoss {
 /// before publication. Once drained, every queue is gone, eventual search is
 /// exact, each live node's vector rows sit in exactly one partition, and only
 /// live documents keep text statistics markers.
-pub(crate) async fn wal_only_queue_work_survives_fencing_and_failed_commits() {
+#[test]
+fn wal_only_queue_work_survives_fencing_and_failed_commits() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("contract runtime builds")
+                .block_on(wal_only_queue_work_contract());
+        })
+        .expect("contract thread starts")
+        .join()
+        .expect("contract completes");
+}
+
+async fn wal_only_queue_work_contract() {
     for loss in [WriterLoss::Fenced, WriterLoss::FailedWal] {
         for (name, family, retired) in [
             ("vector", QueueFamily::Vector, false),

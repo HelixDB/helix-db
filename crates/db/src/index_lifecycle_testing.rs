@@ -41,6 +41,18 @@ use crate::{
 };
 
 mod contracts;
+mod text_generation_rows;
+
+pub use text_generation_rows::{
+    damage_text_build, damage_text_split_object, restore_text_split_object,
+    text_compaction_pointer_count, text_manifest_row_counts, text_manifest_split_counts,
+    TextBuildDamage, TextSplitObjectDamage,
+};
+
+/// Current managed-index storage version, for contracts that assert what a
+/// build or migration publishes.
+pub const CURRENT_INDEX_STORAGE_VERSION: u16 =
+    crate::index_lifecycle::CURRENT_INDEX_STORAGE_VERSION;
 
 /// Serializes acceptance contracts that share the process-global failpoint slot.
 static LIFECYCLE_CONTRACT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -926,84 +938,6 @@ impl LifecycleTestController {
             batch_start = batch_end;
         }
         Ok(ids)
-    }
-
-    /// Seeds one valid empty legacy vector namespace and enqueues its adoption.
-    ///
-    /// The fixture uses the deployed legacy catalog and metadata codecs, then
-    /// runs the production reservation preflight before accepting the build.
-    /// Legacy vector namespaces are unpartitioned and unscoped by definition,
-    /// so the concrete vector definition is the only caller-supplied identity.
-    #[cfg(any(test, feature = "production-coverage"))]
-    pub async fn seed_empty_legacy_vector_adoption(
-        &self,
-        db: &HelixDB,
-        definition: crate::index_lifecycle::ValidatedVectorIndexDefinition,
-    ) -> Result<IndexDdlReceipt> {
-        if db.inner.lifecycle_test_scheduling != IndexLifecycleScheduling::ExplicitOnly {
-            return Err(HelixDbError::Config(
-                "legacy vector adoption seeding requires explicit lifecycle scheduling".to_string(),
-            ));
-        }
-        if definition.tenant_property().is_some() {
-            return Err(HelixDbError::Config(
-                "legacy vector adoption seeding requires an unpartitioned definition".to_string(),
-            ));
-        }
-        let writer = db.lifecycle_test_writer_db()?;
-        let runtime = definition.to_runtime();
-        let physical_name = crate::search::vector_index_name(
-            runtime.element_type(),
-            runtime.label(),
-            runtime.property(),
-        );
-        let physical_index_id = crate::index_lifecycle::VectorPhysicalIndexId::new(
-            crate::search::vector::index_id_from_name(&physical_name),
-        )?;
-        let dynamic = ValidatedDynamicIndexDefinition::Vector(definition.clone());
-        let (catalog_key, catalog_value) =
-            crate::migrations::migration_parity_legacy_catalog_row(&dynamic, false)?;
-        let metadata = crate::search::vector::VectorIndexMetadata::new(
-            crate::search::vector::VectorIndexConfig::from_v2_definition(
-                &definition,
-                &physical_name,
-            ),
-        );
-        let transaction = writer
-            .begin(slatedb::IsolationLevel::SerializableSnapshot)
-            .await?;
-        crate::migrations::stage_index_v2_migration_reopen_for_fixture(
-            &transaction,
-            DataScope::LegacyUnscoped,
-        )?;
-        transaction.put(catalog_key, catalog_value)?;
-        transaction.put(
-            DataKey::Data {
-                scope: DataScope::LegacyUnscoped,
-                kind: DataKeyKind::Vector(
-                    crate::encoding::v2::keys::indexes::vector::VectorKey::IndexMetadata(
-                        crate::encoding::v2::keys::indexes::vector::VectorIndexMetadataKey::new(
-                            physical_index_id.get(),
-                        ),
-                    ),
-                ),
-            }
-            .to_bytes(),
-            bytes::Bytes::copy_from_slice(
-                &crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract(
-                    &metadata,
-                ),
-            ),
-        )?;
-        transaction.commit().await?;
-        crate::migrations::preflight_legacy_vector_reservations(writer).await?;
-        crate::index_lifecycle::lifecycle::create_legacy_vector_adoption_operation(
-            writer,
-            DataScope::LegacyUnscoped,
-            dynamic,
-            physical_index_id,
-        )
-        .await
     }
 
     /// Seeds authoritative rows plus secondary build deltas in bounded transactions.

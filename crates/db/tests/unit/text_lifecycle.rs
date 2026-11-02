@@ -1,21 +1,21 @@
-//! Production-linked text-index lifecycle state-machine contracts.
+//! Text-index lifecycle state-machine contracts.
 //!
 //! The test uses only public DDL, mutation, status, retry, abort, catalog, and
-//! search boundaries. Feature-gated row observers decode the resulting durable
+//! search boundaries. Internal row observers decode the resulting durable
 //! state without adding a second lifecycle implementation.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
-use db::config::{DbConfig, SearchIndexBackfillLimits, SearchIndexBatchLimits, TextElementType};
-use db::encoding::v2::keys::scope::DataScope;
-use db::execution::interpreter::{
+use crate::config::{DbConfig, SearchIndexBackfillLimits, SearchIndexBatchLimits, TextElementType};
+use crate::encoding::v2::keys::scope::DataScope;
+use crate::execution::interpreter::{
     ElementRef, ExecutionResult, ExecutionRow, ExecutionScalar, ExecutionValue,
 };
-use db::index_lifecycle::{IndexDdlReceipt, IndexOperationId, IndexOperationStatus};
-use db::search::text_index_name;
-use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
+use crate::index_lifecycle::{IndexDdlReceipt, IndexOperationId, IndexOperationStatus};
+use crate::search::text_index_name;
+use crate::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
 use helix_ast::expr::Expr;
 use helix_ast::value::PropertyValue;
 use helix_planner::{catalog, context, cost, exec, ir, properties, trace};
@@ -203,7 +203,7 @@ impl TextMachine {
                 assert!(
                     matches!(
                         &error,
-                        db::error::HelixDbError::InvalidIndexSourceData { reason }
+                        crate::error::HelixDbError::InvalidIndexSourceData { reason }
                             if reason.contains("indexed property has an unsupported value")
                     ),
                     "{error}"
@@ -241,7 +241,7 @@ impl TextMachine {
                 execute_ddl_to_success(&self.db, &text_drop_plan(LABEL, PROPERTY)).await;
                 self.model.active = false;
                 assert!(self.search("textmodelalpha").await.is_err());
-                db::production_coverage::index_lifecycle_text_dropped_row_contracts(&self.db).await;
+                super::lifecycle_rows::verify_dropped(&self.db).await;
             }
             TextAction::Recreate => {
                 assert!(!self.model.active, "model recreate starts from Dropped");
@@ -271,7 +271,7 @@ impl TextMachine {
     }
 
     /// Searches through the public text-index plan without test-only storage access.
-    async fn search(&self, term: &str) -> Result<Vec<u64>, db::error::HelixDbError> {
+    async fn search(&self, term: &str) -> Result<Vec<u64>, crate::error::HelixDbError> {
         self.db
             .execute(
                 &text_search_plan(LABEL, PROPERTY, term),
@@ -301,11 +301,7 @@ impl TextMachine {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        db::production_coverage::index_lifecycle_text_steady_state_contracts(
-            &self.db,
-            self.model.entities.len(),
-        )
-        .await;
+        super::lifecycle_rows::verify_steady_state(&self.db, self.model.entities.len()).await;
     }
 
     /// Proves a typed resource block resumes from its exact checkpoint.
@@ -336,7 +332,7 @@ impl TextMachine {
         assert_eq!(retried.common().progress, blocked_progress);
         wait_for_terminal(&self.db, operation_id, ExpectedTerminal::Succeeded).await;
         execute_ddl_to_success(&self.db, &text_drop_plan(limited_label, PROPERTY)).await;
-        db::production_coverage::index_lifecycle_text_dropped_row_contracts(&self.db).await;
+        super::lifecycle_rows::verify_dropped(&self.db).await;
     }
 
     /// Proves abort reuses one blocked build and removes its complete row graph.
@@ -351,7 +347,7 @@ impl TextMachine {
             .await
             .expect("blocked text build enters abort cleanup");
         wait_for_terminal(&self.db, operation_id, ExpectedTerminal::Aborted).await;
-        db::production_coverage::index_lifecycle_text_dropped_row_contracts(&self.db).await;
+        super::lifecycle_rows::verify_dropped(&self.db).await;
     }
 }
 
@@ -942,7 +938,7 @@ async fn public_managed_text_search_isolates_tenant_partitions() {
     assert!(
         matches!(
             &error,
-            db::error::HelixDbError::InvalidIndexSourceData { reason }
+            crate::error::HelixDbError::InvalidIndexSourceData { reason }
                 if reason.contains("indexed document is missing its tenant property")
         ),
         "{error}"

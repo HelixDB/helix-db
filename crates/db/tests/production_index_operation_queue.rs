@@ -1,12 +1,11 @@
-//! Production contracts for queued asynchronous vector/text index work.
+//! Public contracts for queued asynchronous vector/text index work.
 //!
-//! Requires `production-coverage` and `index-lifecycle-testing`. Public
-//! contracts open writers with explicit lifecycle scheduling, so queued
-//! operations stay pending until a contract publishes them: admission limits,
-//! publication counters, lag, restart discovery, retired-generation discard,
-//! and hidden-build deferral are observed through the public API alone. The
-//! ledger, reconciliation, codec, and fail-closed open contracts run through
-//! `db::production_coverage`.
+//! Requires `index-lifecycle-testing`. Contracts open writers with explicit
+//! lifecycle scheduling, so queued operations stay pending until a contract
+//! publishes them: admission limits, publication counters, lag, restart
+//! discovery, retired-generation discard, and hidden-build deferral are
+//! observed through the public API alone. The ledger, reconciliation, codec,
+//! and fail-closed open contracts are unit tests of `index_lifecycle::queue`.
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -42,47 +41,6 @@ const LABEL: &str = "Doc";
 const BODY: &str = "body";
 const EMBEDDING: &str = "embedding";
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Proves the ledger's admission and outcome lifecycle, including orderings
-/// a writer cannot schedule on demand.
-#[test]
-fn ledger_admits_atomically_and_settles_every_outcome_once() {
-    db::production_coverage::index_operation_queue_ledger_contracts();
-}
-
-/// Proves the writer's publisher settles every uncertain enqueue and
-/// acknowledgement against a flushed read of the queue.
-#[tokio::test]
-async fn publication_reconciles_every_uncertain_commit_outcome() {
-    db::production_coverage::index_operation_queue_reconciliation_contracts().await;
-}
-
-/// Proves stored queue values and merge operands fail closed on every
-/// noncanonical shape and compose exactly through SlateDB.
-#[tokio::test]
-async fn queue_codec_and_merge_algebra_fail_closed() {
-    db::production_coverage::index_operation_queue_codec_contracts().await;
-}
-
-/// Proves tenant scopes with identical definitions queue, publish, recover,
-/// and retire independently.
-#[tokio::test]
-async fn tenant_scopes_queue_publish_and_recover_independently() {
-    Box::pin(db::production_coverage::index_operation_queue_tenant_scope_contracts()).await;
-}
-
-/// Proves a reopened writer discovers queues across the whole tenant
-/// keyspace, from the first tenant ID to the last.
-#[tokio::test]
-async fn writer_open_discovers_queues_across_the_tenant_keyspace() {
-    Box::pin(db::production_coverage::index_operation_queue_scope_walk_contracts()).await;
-}
-
-/// Proves a writer refuses queues its catalog cannot own or read.
-#[tokio::test]
-async fn writer_open_fails_closed_on_unowned_queues() {
-    db::production_coverage::index_operation_queue_recovery_corruption_contracts().await;
-}
 
 /// Tuning validates before open and round-trips through the config; the lag
 /// histogram and process-wide merge counters are readable public values.

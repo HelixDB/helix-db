@@ -1,10 +1,9 @@
-//! Production contracts for the vector lifecycle driver's step boundaries.
+//! Contracts for the vector lifecycle driver's step boundaries.
 //!
 //! This child of the vector lifecycle driver runs its build, cleanup, legacy
 //! adoption, and planning scenarios against raw SlateDB databases through the
 //! production outbox claim and step entry points. The driver's unit tests
-//! share these fixtures and run every scenario, and the production-coverage
-//! build runs the same scenarios through [`run`]. Every fixture row uses the
+//! share these fixtures and run every scenario. Every fixture row uses the
 //! current key and value codecs; no row family or encoding is introduced.
 
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -35,27 +34,6 @@ use crate::migrations::startup::bootstrap_writer;
 use crate::search::vector::{
     SimHasherRegistry, ValidatedVectorGenerationHandle, VectorCacheRegistry,
 };
-
-/// Runs every driver step-boundary scenario in isolated databases.
-#[cfg(not(test))]
-pub(crate) async fn run() {
-    diagnostic_and_error_adapters_preserve_their_error_categories().await;
-    partitioned_drop_resumes_each_mapping_and_removes_every_namespace().await;
-    cleanup_checkpoint_rejections_and_limit_blockers_are_typed().await;
-    source_scan_rejects_every_preplanning_boundary().await;
-    a_scan_step_ends_before_a_blocker_behind_admitted_rows().await;
-    a_scan_step_ends_before_an_entity_its_output_budget_cannot_admit().await;
-    descriptor_validation_cursor_dispatch_is_typed().await;
-    pre_queue_build_deltas_block_catch_up_validation_and_activation().await;
-    typed_row_decoders_and_batch_accounting_fail_closed().await;
-    oversized_partition_build_blocks_before_mapping_or_watermark_writes().await;
-    abort_removes_hidden_physical_rows_and_builder_work().await;
-    adoption_abort_restores_source_reservation_without_deleting_physical_rows().await;
-    a_physical_id_allocated_before_planning_conflicts_and_a_stale_watermark_fails_closed().await;
-    cleanup_batches_resume_and_block_on_oversized_rows().await;
-    descriptor_validation_batches_and_blocks().await;
-    adoption_and_activation_guards_fail_closed().await;
-}
 
 pub(super) const NOW_MILLIS: u64 = 1;
 

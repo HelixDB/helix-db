@@ -84,7 +84,8 @@ fn active_records() -> [IndexRecordV2; 3] {
 }
 
 /// Runs metadata rejection and every loaded-catalog projection contract.
-pub(crate) fn run() {
+#[test]
+fn typed_model_catalog_and_resource_boundaries_fail_closed() {
     assert_eq!(
         IndexStorageVersion::CURRENT.get(),
         crate::index_lifecycle::CURRENT_INDEX_STORAGE_VERSION

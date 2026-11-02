@@ -31,6 +31,9 @@
 
 #![deny(missing_docs)]
 
+#[cfg(test)]
+#[path = "../../tests/unit/index_lifecycle.rs"]
+mod acceptance_tests;
 mod catalog;
 #[cfg(test)]
 mod cursor_contracts;
@@ -48,6 +51,9 @@ pub(crate) mod repository;
 mod scope_gate;
 pub(crate) mod secondary;
 pub(crate) mod text;
+#[cfg(test)]
+#[path = "../../tests/unit/index_lifecycle_typed_boundaries.rs"]
+mod typed_boundary_tests;
 pub(crate) mod vector;
 pub(crate) mod work;
 pub(crate) mod worker;

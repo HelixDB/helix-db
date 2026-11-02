@@ -1,6 +1,6 @@
 //! Production contracts for Active text mutation resource admission.
 //!
-//! The harness is a feature-gated child of the owning module, preserving the
+//! The harness is a test child of the owning module, preserving the
 //! private capability boundary while exercising the exact production limits.
 //! It proves equality-at-limit admission, stable first-failure ordering, and
 //! every typed resource rejection without constructing any persisted row.
@@ -46,7 +46,8 @@ fn limits() -> ActiveTextMutationLimits {
 }
 
 /// Runs exact admission and every ordered resource rejection.
-pub(crate) fn run() {
+#[test]
+fn mutation_measurements_admit_at_and_reject_above_every_ceiling() {
     let admitted =
         ActiveTextMutationMeasurements::try_admit(limits(), INPUT, OPERATIONS, OUTPUT, SPLIT, PAGE)
             .expect("values equal to every ceiling are admitted");

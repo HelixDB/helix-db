@@ -193,7 +193,7 @@ impl ActiveIndexHandle {
     }
 
     /// Returns the public family for production boundary contracts.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     pub(crate) const fn family(&self) -> crate::error::IndexFamily {
         match self {
             Self::Secondary { .. } => crate::error::IndexFamily::Secondary,

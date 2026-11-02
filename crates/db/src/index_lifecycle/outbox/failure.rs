@@ -47,6 +47,6 @@ pub(super) fn is_retryable_object_store(error: &object_store::Error) -> bool {
     })
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/index_lifecycle_driver_failure.rs"]
-pub(crate) mod contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_driver_failure.rs"]
+mod contract_tests;

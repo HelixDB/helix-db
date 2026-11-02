@@ -37,7 +37,7 @@ pub(super) struct PreparedActiveTextRetirement {
     measurements: ActiveTextMutationMeasurements,
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 impl PreparedActiveTextRetirement {
     /// Returns exact work contributed to request-level resource admission.
     pub(super) const fn measurements(&self) -> ActiveTextMutationMeasurements {
@@ -46,7 +46,7 @@ impl PreparedActiveTextRetirement {
 }
 
 /// Fully revalidated retirement rows ready for infallible staging.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ValidatedActiveTextRetirement {
     prepared: PreparedActiveTextRetirement,
@@ -207,7 +207,7 @@ pub(super) async fn prepare_active_text_retirement(
 }
 
 /// Revalidates one retirement without staging either replacement row.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(super) async fn validate_active_text_retirement(
     transaction: &impl crate::transaction::Mutation,
     prepared: &PreparedActiveTextRetirement,
@@ -225,7 +225,7 @@ pub(super) async fn validate_active_text_retirement(
 }
 
 /// Stages one retirement only after every request input has validated.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(super) fn stage_validated_active_text_retirement(
     transaction: &impl crate::transaction::Mutation,
     validated: ValidatedActiveTextRetirement,
@@ -240,9 +240,8 @@ fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/index_lifecycle_active_text_retirement.rs"]
-pub(crate) mod production_contracts;
+#[path = "../../../tests/unit/index_lifecycle_active_text_retirement.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {
@@ -260,10 +259,6 @@ mod tests {
     use crate::encoding::v2::keys::scope::DataScope;
     use crate::encoding::v2::keys::ManagedIndexKey;
 
-    #[tokio::test]
-    async fn production_active_text_retirement_matrix_runs_in_workspace_tests() {
-        production_contracts::run().await;
-    }
     use crate::index_lifecycle::{
         IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, IndexOperationId,
         IndexRecordV2, IndexRevision, IndexStateTransition, PhysicalGeneration, TextLogicalVersion,

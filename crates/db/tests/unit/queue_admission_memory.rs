@@ -2,8 +2,9 @@
 //!
 //! The admission ledger bounds each logical index's backlog in charged bytes:
 //! each operation's encoded size plus a fixed overhead. These samples
-//! measure, through the calling test binary's allocation probe, the heap a
-//! backlog of one operation shape actually holds per operation:
+//! measure, through the test binary's thread-local allocation observer at
+//! glibc's chunk size (the server image's allocator), the heap a backlog of
+//! one operation shape actually holds per operation:
 //!
 //! - `ledger`: the admission ledger after every operation is committed, each
 //!   on its own entity (one member per operation, the worst case);
@@ -22,6 +23,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
+use crate::allocation_testing;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::IndexEntity;
 use crate::encoding::v2::values::indexes::operation_queue as codec;
@@ -34,34 +36,23 @@ use crate::index_lifecycle::{
     IndexElementKind, IndexEntityId, IndexGenerationId, IndexId, TextPartition,
 };
 
-/// Heap accounting of the calling thread, supplied by a test binary's global
-/// allocator.
-pub trait AllocationProbe {
-    /// Heap bytes this thread holds now, as the allocator charges them.
-    fn allocated(&self) -> isize;
-    /// Restarts peak tracking at the current allocation.
-    fn reset_peak(&self);
-    /// Highest [`Self::allocated`] since the last [`Self::reset_peak`].
-    fn peak(&self) -> isize;
-}
-
 /// Worst measured heap bytes per retained operation of one shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueueMemorySample {
+struct QueueMemorySample {
     /// Operation shape.
-    pub shape: &'static str,
+    shape: &'static str,
     /// Encoded record bytes of one operation.
-    pub encoded: u64,
+    encoded: u64,
     /// Bytes one operation counts toward its index's retained-byte limit.
-    pub charged: u64,
+    charged: u64,
     /// Admission ledger bytes per operation.
-    pub ledger: u64,
+    ledger: u64,
     /// Decoded queue bytes per operation.
-    pub decoded: u64,
+    decoded: u64,
     /// Peak resolution bytes per operation against a resolved base.
-    pub resolution_over_base: u64,
+    resolution_over_base: u64,
     /// Peak resolution bytes per operation of single-operation operands.
-    pub resolution_of_operands: u64,
+    resolution_of_operands: u64,
 }
 
 /// Builds one sampled operation's payload.
@@ -72,7 +63,7 @@ type PayloadFn = dyn Fn() -> codec::QueuedPayload;
 const LENGTHS: [usize; 6] = [8_193, 14_337, 16_385, 28_673, 32_769, 57_345];
 
 /// Samples every operation shape a foreground write can queue.
-pub fn index_operation_queue_memory_samples(probe: &dyn AllocationProbe) -> Vec<QueueMemorySample> {
+fn index_operation_queue_memory_samples() -> Vec<QueueMemorySample> {
     let tenant = || TextPartition::TenantValue(Bytes::from_static(b"tenant-a"));
     let vector = |dimensions: usize| -> Arc<[f32]> {
         (0..dimensions)
@@ -139,15 +130,11 @@ pub fn index_operation_queue_memory_samples(probe: &dyn AllocationProbe) -> Vec<
     ];
     shapes
         .iter()
-        .map(|(shape, payload)| sample(probe, shape, payload.as_ref()))
+        .map(|(shape, payload)| sample(shape, payload.as_ref()))
         .collect()
 }
 
-fn sample(
-    probe: &dyn AllocationProbe,
-    shape: &'static str,
-    payload: &PayloadFn,
-) -> QueueMemorySample {
+fn sample(shape: &'static str, payload: &PayloadFn) -> QueueMemorySample {
     let target = QueueTarget::new(
         DataScope::LegacyUnscoped,
         IndexId::new(1).expect("index ID is nonzero"),
@@ -185,35 +172,35 @@ fn sample(
         );
         measured.encoded = encoded;
         measured.charged = charged_bytes(encoded);
-        let per_operation = |bytes: isize| {
+        let per_operation = |bytes: i128| {
             u64::try_from(bytes).expect("a retained structure holds memory") / length as u64
         };
 
-        let before = probe.allocated();
-        let backlog = IndexOperationBacklog::new(
-            BacklogLimits {
-                max_retained_bytes: u64::MAX,
-                max_members: u64::MAX,
-            },
-            crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
-        );
-        for batch in operations.chunks(2_000) {
-            let charges = batch
-                .iter()
-                .map(|operation| OperationCharge {
-                    target,
-                    entity: operation.entity(),
-                    id: operation.id(),
-                    encoded_bytes: operation.retained_bytes(),
-                })
-                .collect::<Vec<_>>();
-            let mut reservation = backlog.reserve(&charges, &[]).expect("unbounded ledger");
-            reservation.begin_commit();
-            reservation.committed();
-        }
-        measured.ledger = measured
-            .ledger
-            .max(per_operation(probe.allocated() - before));
+        let (backlog, ledger) = allocation_testing::observe(|| {
+            let backlog = IndexOperationBacklog::new(
+                BacklogLimits {
+                    max_retained_bytes: u64::MAX,
+                    max_members: u64::MAX,
+                },
+                crate::index_lifecycle::worker::IndexWorkerWakeHandle::default(),
+            );
+            for batch in operations.chunks(2_000) {
+                let charges = batch
+                    .iter()
+                    .map(|operation| OperationCharge {
+                        target,
+                        entity: operation.entity(),
+                        id: operation.id(),
+                        encoded_bytes: operation.retained_bytes(),
+                    })
+                    .collect::<Vec<_>>();
+                let mut reservation = backlog.reserve(&charges, &[]).expect("unbounded ledger");
+                reservation.begin_commit();
+                reservation.committed();
+            }
+            backlog
+        });
+        measured.ledger = measured.ledger.max(per_operation(ledger.chunk_live_bytes));
         drop(backlog);
 
         let operands = operations
@@ -237,34 +224,33 @@ fn sample(
             .into_parts()
             .0;
 
-        probe.reset_peak();
-        let before = probe.allocated();
-        let over_base = codec::merge_with_base(Some(&base), std::slice::from_ref(&newest))
-            .expect("a valid merge");
+        let (over_base, resolution) = allocation_testing::observe(|| {
+            codec::merge_with_base(Some(&base), std::slice::from_ref(&newest))
+                .expect("a valid merge")
+        });
         measured.resolution_over_base = measured
             .resolution_over_base
-            .max(per_operation(probe.peak() - before));
+            .max(per_operation(resolution.chunk_peak_bytes));
         drop(over_base);
 
-        probe.reset_peak();
-        let before = probe.allocated();
-        let of_operands = resolved_merge(&operands);
+        let (of_operands, resolution) = allocation_testing::observe(|| resolved_merge(&operands));
         measured.resolution_of_operands = measured
             .resolution_of_operands
-            .max(per_operation(probe.peak() - before));
+            .max(per_operation(resolution.chunk_peak_bytes));
 
-        let before = probe.allocated();
-        let queue = codec::OperationQueue::decode(&of_operands).expect("a resolved queue");
-        let stored = StoredQueue::new(
-            queue.family(),
-            queue.into_operations(),
-            HashMap::new(),
-            of_operands.len() as u64,
-        )
-        .expect("a non-empty queue");
+        let (stored, decoded) = allocation_testing::observe(|| {
+            let queue = codec::OperationQueue::decode(&of_operands).expect("a resolved queue");
+            StoredQueue::new(
+                queue.family(),
+                queue.into_operations(),
+                HashMap::new(),
+                of_operands.len() as u64,
+            )
+            .expect("a non-empty queue")
+        });
         measured.decoded = measured
             .decoded
-            .max(per_operation(probe.allocated() - before));
+            .max(per_operation(decoded.chunk_live_bytes));
         assert_eq!(
             stored.operations().count(),
             length,
@@ -284,4 +270,65 @@ fn resolved_merge(operands: &[Bytes]) -> Bytes {
 
 fn resolved(operand: Bytes) -> Bytes {
     resolved_merge(std::slice::from_ref(&operand))
+}
+
+/// The heap one retained operation holds in the admission ledger, in one
+/// decoded copy of its queue, and in one resolution of its queue's merge
+/// operands stays within twice what it is charged, for every operation shape;
+/// the fixed overhead never charges more than the smallest operation costs.
+#[test]
+fn retained_operation_memory_stays_within_twice_its_charge() {
+    let overhead = crate::config::IndexOperationQueueTuning::OPERATION_OVERHEAD_BYTES;
+    let samples = index_operation_queue_memory_samples();
+    println!(
+        "{:<24} {:>7} {:>7} {:>7} {:>7} {:>8} {:>7} {:>9} {:>10}",
+        "shape",
+        "encoded",
+        "charged",
+        "ledger",
+        "decoded",
+        "res/base",
+        "res/ops",
+        "heap/chg",
+        "heap/enc"
+    );
+    let heap = |sample: &QueueMemorySample| {
+        sample.ledger
+            + sample.decoded
+            + sample
+                .resolution_over_base
+                .max(sample.resolution_of_operands)
+    };
+    // Every shape is reported before any is checked, so one failure still
+    // shows the whole calibration.
+    for sample in &samples {
+        let QueueMemorySample {
+            shape,
+            encoded,
+            charged,
+            ledger,
+            decoded,
+            resolution_over_base,
+            resolution_of_operands,
+        } = *sample;
+        println!(
+            "{shape:<24} {encoded:>7} {charged:>7} {ledger:>7} {decoded:>7} \
+             {resolution_over_base:>8} {resolution_of_operands:>7} {:>9.2} {:>10.2}",
+            heap(sample) as f64 / charged as f64,
+            heap(sample) as f64 / encoded as f64,
+        );
+    }
+    for sample in &samples {
+        let shape = sample.shape;
+        assert_eq!(sample.charged, sample.encoded + overhead, "{shape}");
+        assert!(
+            heap(sample) <= 2 * sample.charged,
+            "{shape}: {} heap bytes for {sample:?}",
+            heap(sample)
+        );
+        assert!(
+            heap(sample) >= overhead,
+            "{shape}: the overhead exceeds what it covers"
+        );
+    }
 }

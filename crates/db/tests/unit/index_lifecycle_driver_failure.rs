@@ -1,7 +1,8 @@
-//! Typed driver error contracts shared by unit and production coverage tests.
+//! Typed driver error contracts.
 
 use super::*;
 
+#[test]
 fn permanent_store_errors_block_directly_and_through_wrappers() {
     let source = || io::Error::other("fixture").into();
     for error in [
@@ -43,6 +44,7 @@ fn permanent_store_errors_block_directly_and_through_wrappers() {
     }
 }
 
+#[test]
 fn typed_io_causes_preserve_permanent_and_transient_distinctions() {
     for (kind, retryable) in [
         (io::ErrorKind::NotFound, false),
@@ -70,6 +72,7 @@ fn typed_io_causes_preserve_permanent_and_transient_distinctions() {
     }
 }
 
+#[test]
 fn conditional_races_and_opaque_provider_errors_remain_retryable() {
     for error in [
         object_store::Error::AlreadyExists {
@@ -104,6 +107,7 @@ fn conditional_races_and_opaque_provider_errors_remain_retryable() {
     }
 }
 
+#[tokio::test]
 async fn panicked_tasks_block_but_cancelled_tasks_retry() {
     let panicked = tokio::spawn(async { panic!("fixture panic") })
         .await
@@ -117,18 +121,4 @@ async fn panicked_tasks_block_but_cancelled_tasks_retry() {
     assert!(is_retryable_object_store(&object_store::Error::JoinError {
         source: cancelled,
     }));
-}
-
-/// Exercises permanent, temporary, wrapped and task-failure classifications.
-pub(crate) async fn run() {
-    permanent_store_errors_block_directly_and_through_wrappers();
-    typed_io_causes_preserve_permanent_and_transient_distinctions();
-    conditional_races_and_opaque_provider_errors_remain_retryable();
-    panicked_tasks_block_but_cancelled_tasks_retry().await;
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn typed_driver_failure_classification_contract() {
-    run().await;
 }

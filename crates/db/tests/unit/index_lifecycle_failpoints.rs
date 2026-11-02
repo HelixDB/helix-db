@@ -1,22 +1,46 @@
-//! Production contracts for the stable V2 failpoint control boundary.
+//! Contracts for the stable V2 failpoint control boundary.
 //!
-//! This feature-gated child of the production failpoint module covers stable
-//! name parsing, environment-triggered errors, one-shot reset, and poisoned
-//! synchronization. The caller serializes the process-wide environment and
-//! failpoint slot with the lifecycle acceptance lock.
+//! They cover stable name parsing, environment-triggered errors and aborts,
+//! one-shot reset, and poisoned synchronization. The environment and failpoint
+//! slot are process-wide, so each contract runs in its own process.
 
+use std::process::Command;
 use std::thread;
 
 use super::*;
 
-/// Enters the environment-selected abort boundary for a subprocess contract.
-pub(crate) fn abort_probe() -> ! {
-    let _ = trip(IndexOutboxFailpoint::CommitBefore);
-    panic!("abort failpoint unexpectedly returned");
+/// Proves the explicit crash action terminates at its configured boundary.
+#[test]
+fn abort_action_terminates_process() {
+    const CHILD_ENV: &str = "HELIX_INDEX_OUTBOX_ABORT_PROBE_CHILD";
+    let name = concat!(module_path!(), "::abort_action_terminates_process")
+        .strip_prefix("db::")
+        .expect("test paths start at the crate root");
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let _ = trip(IndexOutboxFailpoint::CommitBefore);
+        panic!("abort failpoint unexpectedly returned");
+    }
+
+    let status = Command::new(std::env::current_exe().expect("test executable path resolves"))
+        .args(["--exact", name, "--nocapture"])
+        .env(CHILD_ENV, "1")
+        .env("HELIX_INDEX_OUTBOX_FAILPOINT", "commit_before")
+        .env("HELIX_INDEX_OUTBOX_FAIL_ACTION", "abort")
+        .status()
+        .expect("abort probe child starts");
+    assert!(
+        !status.success(),
+        "abort probe child must not exit normally"
+    );
 }
 
-/// Runs failpoint parsing, environment, reset, and poisoned-lock contracts.
-pub(crate) fn run() {
+/// Proves failpoint parsing, environment, reset, and poisoned-lock contracts.
+#[test]
+fn controls_parse_trip_reset_and_fail_closed_when_poisoned() {
+    crate::test_isolation::in_own_process(failpoint_control_contracts);
+}
+
+fn failpoint_control_contracts() {
     for failpoint in IndexOutboxFailpoint::ALL {
         assert_eq!(
             IndexOutboxFailpoint::parse(failpoint.as_str()),
@@ -30,8 +54,8 @@ pub(crate) fn run() {
     assert!(was_triggered());
     assert!(trip(IndexOutboxFailpoint::ClaimBefore).is_ok());
 
-    // SAFETY: the acceptance runner holds its process-global serialization
-    // lock, and both variables are removed before this function returns.
+    // SAFETY: this contract runs alone in its own process, and both variables
+    // are removed before this function returns.
     unsafe {
         std::env::set_var("HELIX_INDEX_OUTBOX_FAILPOINT", "commit_before");
         std::env::remove_var("HELIX_INDEX_OUTBOX_FAIL_ACTION");
@@ -41,7 +65,7 @@ pub(crate) fn run() {
         Err(HelixDbError::InvariantViolation(reason))
             if reason.contains("commit_before")
     ));
-    // SAFETY: this restores the serialized process environment immediately
+    // SAFETY: this restores the isolated process environment immediately
     // after the single production call that observes it.
     unsafe {
         std::env::remove_var("HELIX_INDEX_OUTBOX_FAILPOINT");

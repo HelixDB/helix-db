@@ -52,11 +52,7 @@ pub enum IndexOutboxFailpoint {
 
 impl IndexOutboxFailpoint {
     /// Complete set used by crash-matrix tests and external harnesses.
-    #[cfg(any(
-        test,
-        feature = "production-coverage",
-        feature = "index-lifecycle-testing"
-    ))]
+    #[cfg(any(test, feature = "index-lifecycle-testing"))]
     pub const ALL: [Self; 16] = [
         Self::DdlEnqueueBefore,
         Self::DdlEnqueueAfterStaging,
@@ -99,11 +95,7 @@ impl IndexOutboxFailpoint {
     }
 
     /// Parses one stable environment value.
-    #[cfg(any(
-        test,
-        feature = "production-coverage",
-        feature = "index-lifecycle-testing"
-    ))]
+    #[cfg(any(test, feature = "index-lifecycle-testing"))]
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -121,11 +113,7 @@ static INJECTED_FAILPOINT: Mutex<Option<InjectedFailpoint>> = Mutex::new(None);
 static FAILPOINT_TRIGGERED: AtomicBool = AtomicBool::new(false);
 
 /// Installs one process-local failure for deterministic recovery tests.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) fn inject_once(failpoint: IndexOutboxFailpoint) -> Result<()> {
     inject(failpoint, None)
 }
@@ -139,11 +127,7 @@ pub(crate) fn inject_for_operation_once(
     inject(failpoint, Some(operation_id))
 }
 
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 fn inject(failpoint: IndexOutboxFailpoint, operation_id: Option<IndexOperationId>) -> Result<()> {
     let mut injected = INJECTED_FAILPOINT.lock().map_err(|_| {
         HelixDbError::InvariantViolation("index outbox failpoint mutex was poisoned".to_string())
@@ -157,11 +141,7 @@ fn inject(failpoint: IndexOutboxFailpoint, operation_id: Option<IndexOperationId
 }
 
 /// Reports whether the current one-shot test failure fired.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) fn was_triggered() -> bool {
     FAILPOINT_TRIGGERED.load(Ordering::SeqCst)
 }
@@ -214,9 +194,9 @@ fn injected_error(failpoint: IndexOutboxFailpoint) -> HelixDbError {
     ))
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../tests/production_support/index_lifecycle_failpoints.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../tests/unit/index_lifecycle_failpoints.rs"]
+mod control_contract_tests;
 
 #[cfg(test)]
 mod tests {

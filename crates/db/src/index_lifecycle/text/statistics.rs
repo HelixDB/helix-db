@@ -33,7 +33,7 @@ pub(crate) struct TextBm25Statistics {
     document_frequencies: BTreeMap<Bytes, u64>,
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 impl TextBm25Statistics {
     /// Constructs exact corpus statistics for fixtures: the production FTS
     /// benchmark and unit tests.

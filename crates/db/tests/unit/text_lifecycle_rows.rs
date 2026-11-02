@@ -1,9 +1,8 @@
-//! Durable-row oracles for production-linked text lifecycle contracts.
+//! Durable-row oracles for text lifecycle contracts.
 //!
-//! The public lifecycle test drives real DDL and graph mutations. This module
-//! remains outside the measured production tree while decoding the rows those
-//! paths create with the deployed V1 key/value codecs. It checks relationships
-//! rather than reproducing lifecycle decisions.
+//! The lifecycle test drives real DDL and graph mutations. This module decodes
+//! the rows those paths create with the deployed key/value codecs. It checks
+//! relationships rather than reproducing lifecycle decisions.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;

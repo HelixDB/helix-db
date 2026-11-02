@@ -1,6 +1,6 @@
 //! Production contracts for the retained vector build planning cache.
 //!
-//! This feature-gated child of the vector lifecycle driver exercises the
+//! This test child of the vector lifecycle driver exercises the
 //! driver-owned [`VectorBuildCache`] against canonical operation and index
 //! records written by the production lifecycle entry points. The sessions it
 //! retains hold only fixture SimHashes that mark reuse, so no vector row
@@ -99,7 +99,8 @@ async fn checked_out_simhashes<D: Distance>(
 /// The committed state crosses the outbox boundary with a diagnostic that
 /// names it without exposing its rows, and source-scan planning and storage
 /// errors return from the step without offering a session.
-pub(crate) async fn run() {
+#[tokio::test]
+async fn reuses_only_the_exact_committed_checkpoint_and_bounds_the_budget() {
     let db = Db::builder(
         "vector-build-cache-production-contracts",
         Arc::new(InMemory::new()),

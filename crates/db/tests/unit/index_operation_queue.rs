@@ -1,6 +1,6 @@
 //! Production contracts for the immutable vector/text index-operation queue.
 //!
-//! These feature-gated contracts run the compiled queue against real storage:
+//! These contracts run the compiled queue against real storage:
 //!
 //! - the admission ledger's closed charge lifecycle, including every
 //!   transition a cancelled or unanswered commit can take;
@@ -66,7 +66,8 @@ const SET: u8 = 0x02;
 /// demand: duplicate identities, a transaction spanning two generations, a
 /// reconciliation that must ignore uncertainty marked after its ticket, and
 /// an acknowledgement that proves an uncertain enqueue durable.
-pub fn index_operation_queue_ledger_contracts() {
+#[test]
+fn ledger_admits_atomically_and_settles_every_outcome_once() {
     let target = |generation| {
         QueueTarget::new(
             DataScope::LegacyUnscoped,
@@ -203,7 +204,8 @@ pub fn index_operation_queue_ledger_contracts() {
 /// races where publication acknowledges before the producer's commit
 /// returns. The final counters must account for every durable operation
 /// exactly once.
-pub async fn index_operation_queue_reconciliation_contracts() {
+#[tokio::test]
+async fn publication_reconciles_every_uncertain_commit_outcome() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let db = open_explicit_vector_fixture("queue-reconciliation", &store).await;
     let target = queue_target(&db, |definition| {
@@ -338,7 +340,8 @@ pub async fn index_operation_queue_reconciliation_contracts() {
 /// Stored values are read through the production queue store, which is the
 /// read publication, recovery, and search overlays share. Merge operands go
 /// through SlateDB and the Helix merge operator.
-pub async fn index_operation_queue_codec_contracts() {
+#[tokio::test]
+async fn queue_codec_and_merge_algebra_fail_closed() {
     let db = HelixDB::open_with_object_store_and_config(
         "queue-codec",
         Arc::new(InMemory::new()),
@@ -648,7 +651,8 @@ pub async fn index_operation_queue_codec_contracts() {
 /// Admission starts from exact durable usage, so a queue the writer cannot
 /// attribute to its canonical definition, or cannot read in its own layout,
 /// fails the open instead of silently dropping or misrouting work.
-pub async fn index_operation_queue_recovery_corruption_contracts() {
+#[tokio::test]
+async fn writer_open_fails_closed_on_unowned_queues() {
     // A secondary index never owns a queue.
     let secondary = ValidatedDynamicIndexDefinition::try_from(
         SecondaryIndexDefinition::node_equality(LABEL, "status")
@@ -791,7 +795,12 @@ pub async fn index_operation_queue_recovery_corruption_contracts() {
 /// after them, are charged exactly once; a tenant holding only graph rows
 /// contributes nothing; and queues no canonical record owns reload to be
 /// discarded.
-pub async fn index_operation_queue_scope_walk_contracts() {
+#[tokio::test]
+async fn writer_open_discovers_queues_across_the_tenant_keyspace() {
+    Box::pin(index_operation_queue_scope_walk_contracts()).await;
+}
+
+async fn index_operation_queue_scope_walk_contracts() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let name = "queue-scope-walk";
     let db = Box::pin(open_explicit(name, &store)).await;
@@ -874,7 +883,12 @@ type ScopeDocuments = BTreeMap<u64, ([f32; 2], String)>;
 /// other's queues pending, a reopened writer rediscovers exactly what is
 /// left, and dropping one scope's vector index discards and releases only
 /// that scope's queued work.
-pub async fn index_operation_queue_tenant_scope_contracts() {
+#[tokio::test]
+async fn tenant_scopes_queue_publish_and_recover_independently() {
+    Box::pin(index_operation_queue_tenant_scope_contracts()).await;
+}
+
+async fn index_operation_queue_tenant_scope_contracts() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let name = "queue-tenant-scopes";
     let db = Box::pin(open_explicit(name, &store)).await;

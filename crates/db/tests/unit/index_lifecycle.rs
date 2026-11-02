@@ -1,8 +1,8 @@
 //! Production-path crash-boundary contracts for the V2 index outbox.
 //!
-//! This harness lives outside the measured production tree but drives the real
-//! canonical records, scoped operation rows, and global queue pointers. It
-//! deliberately uses no alternate lifecycle codec or mock repository.
+//! This harness drives the real canonical records, scoped operation rows, and
+//! global queue pointers. It deliberately uses no alternate lifecycle codec or
+//! mock repository.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -42,9 +42,6 @@ use crate::index_lifecycle::{
     WriterEpoch,
 };
 use crate::search::vector::VectorDistanceMetric;
-
-/// Serializes contracts that share the process-local one-shot failpoint slot.
-static ACCEPTANCE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Closed family cases used by the generic outbox transition contract.
 #[derive(Debug, Clone, Copy)]
@@ -180,9 +177,22 @@ impl IndexOperationDriver for CompleteDriver {
     }
 }
 
-/// Runs the complete operation crash-boundary matrix.
-pub(super) async fn run_outbox_failpoint_contracts() {
-    let _serial = ACCEPTANCE_LOCK.lock().await;
+/// Runs every stable operation/upload crash boundary twice from clean storage
+/// and proves each leaves only a legal recovery state.
+///
+/// Failpoints are process-global, so the matrix runs alone in its own process.
+#[test]
+fn outbox_failpoints_leave_only_legal_recovery_states() {
+    crate::test_isolation::in_own_process(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("contract runtime builds")
+            .block_on(outbox_failpoint_matrix());
+    });
+}
+
+async fn outbox_failpoint_matrix() {
     for family in FamilyCase::ALL {
         for failpoint in [
             IndexOutboxFailpoint::DdlEnqueueBefore,
@@ -220,8 +230,6 @@ pub(super) async fn run_outbox_failpoint_contracts() {
             }
         }
     }
-
-    failpoints::production_contracts::run();
 }
 
 /// Reference lifecycle states used by the deterministic state machine.
@@ -476,8 +484,9 @@ impl SecondaryMachine {
 }
 
 /// Runs a deterministic state machine against the real secondary lifecycle.
-pub(super) async fn run_secondary_state_machine_contracts() {
-    let _serial = ACCEPTANCE_LOCK.lock().await;
+/// Compares lifecycle, mutations, and indexed reads with one reference model.
+#[tokio::test]
+async fn secondary_state_machine_matches_reference_model() {
     let mut machine = SecondaryMachine::open().await;
     for action in [
         SecondaryAction::Create,
@@ -531,8 +540,9 @@ pub(super) async fn run_secondary_state_machine_contracts() {
 }
 
 /// Proves global operation-pointer scans discover 16 isolated scopes.
-pub(super) async fn run_multi_scope_discovery_contracts() {
-    let _serial = ACCEPTANCE_LOCK.lock().await;
+/// Proves the global operation queue retains exact tenant ownership.
+#[tokio::test]
+async fn global_outbox_discovers_sixteen_isolated_scopes() {
     const TENANT_COUNT: u8 = 16;
     let db = Db::open("phase11-multi-scope-discovery", Arc::new(InMemory::new()))
         .await

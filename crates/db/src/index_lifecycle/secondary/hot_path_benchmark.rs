@@ -1,10 +1,14 @@
-//! Fixed-shape secondary-equality read/write benchmark support.
+//! Fixed-shape secondary-equality read/write benchmark support
+//! (`bench-internals`).
 //!
 //! Index creation and physical plan construction finish before the measured
 //! phase. Each measured read still acquires its production request catalog and
 //! stable storage view. The fixture deliberately maps every indexed field to
 //! one shared value so V3 creates one entity-suffixed row per index and entity,
 //! while bitmap formats collapse the same logical state to 50 rows.
+
+// Without `bench-internals`, only the unit tests' share of the fixture is used.
+#![cfg_attr(not(feature = "bench-internals"), allow(dead_code))]
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -58,17 +62,29 @@ pub enum SecondaryEqualityReadMode {
 /// Measured insertion outcome, excluding database and index setup.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SecondaryEqualityInsertSample {
+    /// Insert scheduling mode.
     pub mode: SecondaryEqualityInsertMode,
+    /// Active equality indexes maintained by each insert.
     pub indexes: usize,
+    /// Entities inserted.
     pub entities: usize,
+    /// Concurrent writers.
     pub writers: usize,
+    /// Wall time of the measured inserts.
     pub elapsed_nanos: u128,
+    /// Inserted entities per second.
     pub throughput_per_second: f64,
+    /// Median insert latency.
     pub median_latency_nanos: u64,
+    /// 95th-percentile insert latency.
     pub p95_latency_nanos: u64,
+    /// Transaction conflicts observed.
     pub conflicts: u64,
+    /// Insert retries after conflicts.
     pub retries: u64,
+    /// Allocator calls the harness attached.
     pub allocations: u64,
+    /// Allocated bytes the harness attached.
     pub allocated_bytes: u64,
 }
 
@@ -84,19 +100,33 @@ impl SecondaryEqualityInsertSample {
 /// Repeated full-cardinality equality lookup outcome.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SecondaryEqualityReadSample {
+    /// Lookup scheduling mode.
     pub mode: SecondaryEqualityReadMode,
+    /// Lookups measured.
     pub operations: usize,
+    /// Concurrent readers.
     pub readers: usize,
+    /// Entities each lookup returned.
     pub result_count: usize,
+    /// Wall time of the measured lookups.
     pub elapsed_nanos: u128,
+    /// Lookups per second.
     pub throughput_per_second: f64,
+    /// Median lookup latency.
     pub median_latency_nanos: u64,
+    /// 95th-percentile lookup latency.
     pub p95_latency_nanos: u64,
+    /// Storage point reads issued.
     pub point_reads: u64,
+    /// Storage multi-get calls issued.
     pub multi_get_calls: u64,
+    /// Storage scans issued.
     pub scans: u64,
+    /// Authoritative graph reads issued.
     pub graph_reads: u64,
+    /// Allocator calls the harness attached.
     pub allocations: u64,
+    /// Allocated bytes the harness attached.
     pub allocated_bytes: u64,
 }
 
@@ -112,31 +142,47 @@ impl SecondaryEqualityReadSample {
 /// Post-write structural and read-path observations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SecondaryEqualityInspection {
+    /// Physical secondary rows across every index.
     pub physical_secondary_rows: u64,
+    /// Entity-suffixed V3 nonunique rows.
     pub v3_nonunique_rows: u64,
+    /// V4 bitmap rows.
     pub v4_bitmap_rows: u64,
+    /// Encoded key and value bytes of every secondary row.
     pub logical_secondary_bytes: u64,
+    /// Smallest bitmap cardinality.
     pub minimum_bitmap_cardinality: u64,
+    /// Largest bitmap cardinality.
     pub maximum_bitmap_cardinality: u64,
 }
 
 /// Exact I/O observations from checking every configured equality index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SecondaryEqualityLookupInspection {
+    /// Equality lookups issued, one per index.
     pub lookups: usize,
+    /// Entities each lookup returned.
     pub result_count: usize,
+    /// Storage point reads issued.
     pub point_reads: u64,
+    /// Storage multi-get calls issued.
     pub multi_get_calls: u64,
+    /// Storage scans issued.
     pub scans: u64,
+    /// Authoritative graph reads issued.
     pub graph_reads: u64,
 }
 
 /// Portable bitmap size and codec cost for one million sequential IDs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SecondaryEqualityMillionBitmapSample {
+    /// IDs in the bitmap.
     pub cardinality: u64,
+    /// Portable encoded size.
     pub encoded_bytes: usize,
+    /// Encode time.
     pub encode_nanos: u128,
+    /// Decode time.
     pub decode_nanos: u128,
 }
 
@@ -710,5 +756,118 @@ mod tests {
         let sample = benchmark_million_sequential_id_bitmap();
         assert_eq!(sample.cardinality, MILLION_BITMAP_CARDINALITY);
         assert!(sample.encoded_bytes > 0);
+    }
+
+    /// Proves bounded sequential and concurrent V4 writes produce identical
+    /// bitmaps and that every configured equality lookup is one point read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
+    async fn v4_bitmap_shape_and_read_io_are_exact() {
+        let sequential = SecondaryEqualityHotPathFixture::open_correctness(
+            "secondary-equality-v4-correctness-sequential",
+        )
+        .await
+        .expect("sequential V4 correctness fixture opens");
+        sequential
+            .insert(SecondaryEqualityInsertMode::Sequential)
+            .await
+            .expect("sequential V4 correctness inserts succeed");
+        let sequential_inspection = sequential
+            .inspect()
+            .await
+            .expect("sequential V4 correctness inspection succeeds");
+        assert_eq!(sequential_inspection.physical_secondary_rows, 50);
+        assert_eq!(sequential_inspection.v3_nonunique_rows, 0);
+        assert_eq!(sequential_inspection.v4_bitmap_rows, 50);
+        assert_eq!(sequential_inspection.minimum_bitmap_cardinality, 100);
+        assert_eq!(sequential_inspection.maximum_bitmap_cardinality, 100);
+        let lookup = sequential
+            .inspect_all_lookups()
+            .await
+            .expect("all sequential V4 equality lookups succeed");
+        assert_eq!(lookup.lookups, 50);
+        assert_eq!(lookup.result_count, 100);
+        assert_eq!(lookup.point_reads, 50);
+        assert_eq!(lookup.scans, 0);
+        assert_eq!(lookup.graph_reads, 0);
+        let sequential_rows = sequential
+            .decoded_bitmap_rows()
+            .await
+            .expect("sequential V4 bitmap rows decode");
+
+        let concurrent = SecondaryEqualityHotPathFixture::open_correctness(
+            "secondary-equality-v4-correctness-concurrent",
+        )
+        .await
+        .expect("concurrent V4 correctness fixture opens");
+        concurrent
+            .insert(SecondaryEqualityInsertMode::Concurrent)
+            .await
+            .expect("concurrent V4 correctness inserts succeed");
+        let concurrent_inspection = concurrent
+            .inspect()
+            .await
+            .expect("concurrent V4 correctness inspection succeeds");
+        assert_eq!(concurrent_inspection, sequential_inspection);
+        let concurrent_rows = concurrent
+            .decoded_bitmap_rows()
+            .await
+            .expect("concurrent V4 bitmap rows decode");
+        let assert_one_entity_set_per_index = |rows: &[(Vec<u8>, Vec<u64>)]| {
+            let Some((_, expected_ids)) = rows.first() else {
+                panic!("V4 correctness fixture must contain bitmap rows");
+            };
+            assert_eq!(expected_ids.len(), 100);
+            assert!(rows.iter().all(|(_, ids)| ids == expected_ids));
+        };
+        assert_one_entity_set_per_index(&sequential_rows);
+        assert_one_entity_set_per_index(&concurrent_rows);
+        assert_eq!(
+            concurrent_rows
+                .iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>(),
+            sequential_rows
+                .iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>()
+        );
+
+        let sequential_read = sequential
+            .read_operations(
+                SecondaryEqualityReadMode::Sequential,
+                NonZeroUsize::new(3).unwrap(),
+            )
+            .await
+            .expect("sequential measurement succeeds");
+        assert_eq!(sequential_read.point_reads, 3);
+        // Each measurement starts worker tasks. Overlap two independent observers
+        // so a shared process counter or missing worker propagation fails exactly.
+        let (first, second) = tokio::join!(
+            sequential.read_operations(
+                SecondaryEqualityReadMode::Concurrent,
+                NonZeroUsize::new(13).unwrap(),
+            ),
+            concurrent.read_operations(
+                SecondaryEqualityReadMode::Concurrent,
+                NonZeroUsize::new(17).unwrap(),
+            ),
+        );
+        for (sample, expected) in [(first.unwrap(), 13), (second.unwrap(), 17)] {
+            assert_eq!(sample.point_reads, expected);
+            assert_eq!(sample.result_count, 100);
+            assert_eq!(
+                (sample.multi_get_calls, sample.scans, sample.graph_reads),
+                (0, 0, 0)
+            );
+        }
+
+        sequential
+            .close()
+            .await
+            .expect("sequential V4 correctness fixture closes");
+        concurrent
+            .close()
+            .await
+            .expect("concurrent V4 correctness fixture closes");
     }
 }

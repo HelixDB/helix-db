@@ -1,6 +1,6 @@
 //! Shared typed helpers for text build and manifest metadata.
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use bytes::Bytes;
 
 use crate::encoding::v2::keys as index_keys;
@@ -10,7 +10,7 @@ use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::work;
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(super) fn scoped_key(scope: DataScope, logical_key: index_keys::ScopedKey) -> Bytes {
     ManagedIndexKey::Data {
         scope,
