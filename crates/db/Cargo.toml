@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "4fd156c7f52be9c0b9c10d9a129df654608cc47f" }
-slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "4fd156c7f52be9c0b9c10d9a129df654608cc47f", optional = true }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "d105178194bde272d082e0c8abd1fbec2dcf3385" }
+slatedb-common = { git = "https://github.com/HelixDB/slatedb.git", rev = "d105178194bde272d082e0c8abd1fbec2dcf3385", optional = true }
 http-body = { version = "1", optional = true }
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
@@ -68,7 +68,7 @@ memmap2 = { version = "0.9", optional = true }
 [dev-dependencies]
 # `wal_disable` only adds the opt-in `Settings::wal_enabled` field (default
 # `true`); one legacy-text migration fixture writes without a WAL.
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "4fd156c7f52be9c0b9c10d9a129df654608cc47f", features = ["wal_disable"] }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "d105178194bde272d082e0c8abd1fbec2dcf3385", features = ["wal_disable"] }
 tokio-test = "0.4"
 proptest = "1"
 bincode = "^1.3.3"
