@@ -12,6 +12,7 @@ use crate::encoding::keys::scope::DataScope;
 use crate::encoding::v2::keys::indexes::vector::{
     KEY_KIND_LAYER0_VEC_KS, VECTOR_HOT_KEYSPACE_PREFIX,
 };
+use crate::encoding::v2::keys::indexes::PropertyIndexKey;
 use crate::encoding::v2::keys::{DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{ManagedIndexKey as V2Key, ScopedKey as V2ScopedKey};
 use crate::encoding::v2::values::indexes::operation_queue;
@@ -765,6 +766,44 @@ impl HelixMergeOperator {
         }
     }
 
+    /// Rejects a full value that a merge-maintained bitmap or adjacency row
+    /// could not later resolve as its base.
+    ///
+    /// Membership deltas are staged without reading the stored row, so this is
+    /// what keeps those rows decodable: a memtable holding both an undecodable
+    /// base and a delta for one key would fail to build its L0 table. A value
+    /// passes exactly when [`MergeOperator::merge_batch_with_base`] accepts it
+    /// as a base. Range rows share the property-index prefix but only hold
+    /// empty presence values and never receive merges, so they are not checked.
+    pub(crate) fn validate_put(key: &[u8], value: &[u8]) -> Result<(), slatedb::Error> {
+        let decoded = match Self::key_type(key) {
+            MergeKeyType::Bitmap
+                if !matches!(
+                    DataKeyKind::parse_from_slice(logical_key(key)),
+                    Ok(DataKeyKind::PropertyIndex(
+                        PropertyIndexKey::Range(_)
+                            | PropertyIndexKey::EdgeRange(_)
+                            | PropertyIndexKey::GlobalEdgeRange(_)
+                    ))
+                ) =>
+            {
+                SecondaryEqualityBitmapValue::decode(value).map(drop)
+            }
+            MergeKeyType::Edge => edges::decode_edges(value).map(drop),
+            MergeKeyType::Bitmap
+            | MergeKeyType::Layer0
+            | MergeKeyType::Counter
+            | MergeKeyType::OperationQueue
+            | MergeKeyType::Other => Ok(()),
+        };
+        decoded.map_err(|error| {
+            slatedb::Error::invalid(
+                "full value for a merge-maintained row does not decode".to_owned(),
+            )
+            .with_source(Box::new(error))
+        })
+    }
+
     fn is_hnsw_layer0_key(key: &[u8]) -> bool {
         key.len() == VECTOR_LAYER0_KEY_LEN
             && key[0] == VECTOR_HOT_KEYSPACE_PREFIX
@@ -1190,6 +1229,166 @@ mod tests {
                     .is_ok(),
             );
         }
+    }
+
+    #[test]
+    fn validated_puts_accept_exactly_the_bases_the_operator_resolves() {
+        use crate::encoding::indexes::equality::{
+            EdgeDirection as EqualityDirection, EdgeEqualityIndexKey, EqualityIndexKey,
+            GlobalEdgeEqualityIndexKey,
+        };
+        use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey};
+        use crate::encoding::indexes::range::{
+            EdgeRangeIndexDirection, EdgeRangeIndexKey, GlobalEdgeRangeIndexKey, RangeIndexKey,
+        };
+        use crate::encoding::indexes::{hash_property_name, hash_property_value, EdgeDirection};
+        use std::borrow::Cow;
+
+        let property = hash_property_name("status");
+        let value = hash_property_value("shared");
+        let membership = [
+            PropertyIndexKey::Equality(EqualityIndexKey::new(property, value)),
+            PropertyIndexKey::EdgeEquality(EdgeEqualityIndexKey::new(
+                EqualityDirection::Out,
+                1,
+                property,
+                value,
+            )),
+            PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(value)),
+            PropertyIndexKey::EdgeLabelNeighbor(EdgeLabelNeighborKey::new(
+                EdgeDirection::In,
+                1,
+                value,
+            )),
+            PropertyIndexKey::GlobalEdgeEquality(GlobalEdgeEqualityIndexKey::new(property, value)),
+        ];
+        let presence = [
+            PropertyIndexKey::Range(RangeIndexKey::new(
+                RangeIndexDirection::Asc,
+                property,
+                Cow::Borrowed("shared"),
+                1,
+            )),
+            PropertyIndexKey::EdgeRange(EdgeRangeIndexKey::new(
+                EdgeDirection::Out,
+                EdgeRangeIndexDirection::Desc,
+                1,
+                property,
+                Cow::Borrowed("shared"),
+                2,
+            )),
+            PropertyIndexKey::GlobalEdgeRange(GlobalEdgeRangeIndexKey::new(
+                RangeIndexDirection::Desc,
+                property,
+                Cow::Borrowed("shared"),
+                2,
+            )),
+        ];
+        let mut edges = edges::Edges::new();
+        edges.add_out(1);
+        edges.add_in(2);
+        let mut bitmap_delta = BitmapMembershipDelta::default();
+        bitmap_delta.add(1);
+        bitmap_delta.remove(2);
+        let mut adjacency_delta = edges::AdjacencyMembershipDelta::default();
+        adjacency_delta.add_out(3);
+        let mut trailing = portable_bitmap([1]).to_vec();
+        trailing.push(0xFF);
+        let values = [
+            portable_bitmap([1, 2]),
+            bitmap_delta.encode(),
+            encode_bitmap_add(1),
+            edges::encode_edges(&edges),
+            adjacency_delta.encode(),
+            Bytes::new(),
+            Bytes::from(trailing),
+            Bytes::from_static(b"corrupt"),
+        ];
+        let operator = HelixMergeOperator::new();
+        for scope in [
+            DataScope::LegacyUnscoped,
+            DataScope::Tenant(TenantId::from_u128(7)),
+        ] {
+            let bitmaps = membership
+                .iter()
+                .map(|key| {
+                    DataKey::Data {
+                        scope,
+                        kind: DataKeyKind::PropertyIndex(key.clone()),
+                    }
+                    .to_bytes()
+                })
+                .chain([
+                    DataKey::Data {
+                        scope,
+                        kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 2)),
+                    }
+                    .to_bytes(),
+                    v4_bitmap_key(scope),
+                ])
+                .map(|key| (key, encode_bitmap_add(9)));
+            let adjacency = (
+                DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
+                }
+                .to_bytes(),
+                adjacency_delta.encode(),
+            );
+            let mut rejected = 0;
+            for (key, operand) in bitmaps.chain([adjacency]) {
+                assert!(matches!(
+                    HelixMergeOperator::key_type(&key),
+                    MergeKeyType::Bitmap | MergeKeyType::Edge
+                ));
+                for value in &values {
+                    let accepted = HelixMergeOperator::validate_put(&key, value).is_ok();
+                    rejected += usize::from(!accepted);
+                    assert_eq!(
+                        accepted,
+                        operator
+                            .merge_batch_with_base(
+                                &key,
+                                Some(value.clone()),
+                                std::slice::from_ref(&operand),
+                            )
+                            .is_ok(),
+                        "{key:?} {value:?}"
+                    );
+                }
+            }
+            assert!(rejected > 0);
+            // Presence rows share the bitmap dispatch but are never merged.
+            let unmerged = presence
+                .iter()
+                .map(|key| {
+                    DataKey::Data {
+                        scope,
+                        kind: DataKeyKind::PropertyIndex(key.clone()),
+                    }
+                    .to_bytes()
+                })
+                .chain([DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::NodeProperty(NodePropertyKey::new(1)),
+                }
+                .to_bytes()]);
+            for key in unmerged {
+                for value in &values {
+                    HelixMergeOperator::validate_put(&key, value).unwrap();
+                }
+            }
+        }
+        let error = HelixMergeOperator::validate_put(
+            &DataKey::Data {
+                scope: DataScope::LegacyUnscoped,
+                kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
+            }
+            .to_bytes(),
+            b"corrupt",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), slatedb::ErrorKind::Invalid);
     }
 
     #[test]

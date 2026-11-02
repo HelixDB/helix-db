@@ -118,19 +118,24 @@ impl ReadSource for View<'_> {
 }
 
 /// The native mutation contract preserves backend isolation and write behavior.
-/// Checked disjoint merges deliberately retain their untracked validation reads.
+/// Membership merges never read the stored row; puts keep those rows decodable.
 pub(crate) trait Mutation: DbReadOps + Send + Sync + sealed::Sealed {
     fn mutation_view(&self) -> View<'_>;
 
+    /// Rejects a value a merge-maintained row could not use as its base; see
+    /// [`crate::merge_operator::HelixMergeOperator::validate_put`].
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         &self,
         key: K,
         value: V,
     ) -> std::result::Result<(), slatedb::Error> {
+        crate::merge_operator::HelixMergeOperator::validate_put(key.as_ref(), value.as_ref())?;
         self.mutation_view().raw.put(key, value)
     }
 
+    /// Owned-bytes form of [`Self::put`], with the same validation.
     fn put_bytes(&self, key: Bytes, value: Bytes) -> std::result::Result<(), slatedb::Error> {
+        crate::merge_operator::HelixMergeOperator::validate_put(&key, &value)?;
         self.mutation_view().raw.put_bytes(key, value)
     }
 

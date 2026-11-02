@@ -88,7 +88,13 @@ async fn copy_batch(db: &Db, batch: Vec<TenantKeyMigrationRow>) -> Result<()> {
                 ));
             }
             None => {
-                transaction.put(row.destination_key, row.destination_value)?;
+                // Copied membership rows must stay decodable once deltas merge
+                // into them; the validated put rejects a corrupt legacy row.
+                crate::transaction::Mutation::put(
+                    &transaction,
+                    row.destination_key,
+                    row.destination_value,
+                )?;
                 changed = true;
             }
         }
