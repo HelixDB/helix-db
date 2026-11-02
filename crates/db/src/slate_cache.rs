@@ -92,6 +92,12 @@ impl SlateDbCache {
 /// normalized as SlateDB normalizes it, so every spelling of one database
 /// path shares an id. `0` is never returned: SlateDB decodes keys written
 /// before it scoped them to `0`.
+///
+/// The store is identified by its `Display`, which for S3 names the bucket
+/// but not the endpoint. Two databases with one bucket and path on different
+/// endpoints therefore share an id: a flush or eviction for one also drops
+/// the other's entries. Reads stay correct: WAL reads bypass this cache, and
+/// every SST cached here is keyed by its globally unique ULID.
 pub(crate) fn db_cache_id(path: &str, object_store: &dyn ObjectStore) -> u64 {
     let path = slatedb::object_store::path::Path::from(path);
     let identity = format!("{object_store}\0{path}");
