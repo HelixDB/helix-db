@@ -6509,6 +6509,10 @@ pub(crate) mod production_contracts {
     /// preserve the adopted HNSW source, and cold-recover exact ownership.
     pub(crate) async fn run_vector_adoption_failpoint_recovery_contracts() -> Vec<&'static str> {
         let _failpoint_guard = MIGRATION_FAILPOINT_CONTRACT_LOCK.lock().await;
+        // SlateDB's default 100 ms flush, not `one_row_config`'s 1 ms: a fast
+        // flush lets the recovery open race a resumed index operation into a
+        // transaction conflict (HEL-996).
+        let adoption_config = || one_row_config().with_slate_settings(slatedb::Settings::default());
         const BOUNDARIES: [MigrationFailpoint; 8] = [
             MigrationFailpoint::LegacyVectorValidationCheckpointBefore,
             MigrationFailpoint::LegacyVectorValidationCheckpointAfter,
@@ -6572,7 +6576,7 @@ pub(crate) mod production_contracts {
                 HelixDB::open_with_object_store_for_migration_parity(
                     database.clone(),
                     Arc::clone(&store),
-                    one_row_config(),
+                    adoption_config(),
                 ),
             )
             .await
@@ -6666,7 +6670,7 @@ pub(crate) mod production_contracts {
                 HelixDB::open_with_object_store_for_migration_parity(
                     database,
                     store,
-                    one_row_config(),
+                    adoption_config(),
                 ),
             )
             .await
