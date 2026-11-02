@@ -771,37 +771,41 @@ impl HelixMergeOperator {
     ///
     /// Membership deltas are staged without reading the stored row, so this is
     /// what keeps those rows decodable: a memtable holding both an undecodable
-    /// base and a delta for one key would fail to build its L0 table. A value
-    /// passes exactly when [`MergeOperator::merge_batch_with_base`] accepts it
-    /// as a base. Range rows share the property-index prefix but only hold
-    /// empty presence values and never receive merges, so they are not checked.
+    /// base and a delta for one key would fail to build its L0 table. The value
+    /// goes through the operator's own base validation. Range rows share the
+    /// property-index prefix but only hold empty presence values and never
+    /// receive merges, so they are not checked.
     pub(crate) fn validate_put(key: &[u8], value: &[u8]) -> Result<(), slatedb::Error> {
-        let decoded = match Self::key_type(key) {
-            MergeKeyType::Bitmap
-                if !matches!(
-                    DataKeyKind::parse_from_slice(logical_key(key)),
-                    Ok(DataKeyKind::PropertyIndex(
-                        PropertyIndexKey::Range(_)
-                            | PropertyIndexKey::EdgeRange(_)
-                            | PropertyIndexKey::GlobalEdgeRange(_)
-                    ))
-                ) =>
-            {
-                SecondaryEqualityBitmapValue::decode(value).map(drop)
-            }
-            MergeKeyType::Edge => edges::decode_edges(value).map(drop),
-            MergeKeyType::Bitmap
-            | MergeKeyType::Layer0
+        let membership = match Self::key_type(key) {
+            MergeKeyType::Bitmap => !matches!(
+                DataKeyKind::parse_from_slice(logical_key(key)),
+                Ok(DataKeyKind::PropertyIndex(
+                    PropertyIndexKey::Range(_)
+                        | PropertyIndexKey::EdgeRange(_)
+                        | PropertyIndexKey::GlobalEdgeRange(_)
+                ))
+            ),
+            MergeKeyType::Edge => true,
+            MergeKeyType::Layer0
             | MergeKeyType::Counter
             | MergeKeyType::OperationQueue
-            | MergeKeyType::Other => Ok(()),
+            | MergeKeyType::Other => false,
         };
-        decoded.map_err(|error| {
-            slatedb::Error::invalid(
-                "full value for a merge-maintained row does not decode".to_owned(),
+        if !membership {
+            return Ok(());
+        }
+        Self::new()
+            .validate_merge_with_base(
+                &Bytes::copy_from_slice(key),
+                Some(Bytes::copy_from_slice(value)),
+                &[],
             )
-            .with_source(Box::new(error))
-        })
+            .map_err(|error| {
+                slatedb::Error::invalid(
+                    "full value for a merge-maintained row does not decode".to_owned(),
+                )
+                .with_source(Box::new(error))
+            })
     }
 
     fn is_hnsw_layer0_key(key: &[u8]) -> bool {

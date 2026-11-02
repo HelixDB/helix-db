@@ -25,6 +25,7 @@ use crate::encoding::v2::values::{
 use crate::error::{HelixDbError, Result, SecondaryIndexValueError};
 
 use crate::index_lifecycle::IndexCursor;
+use crate::transaction::Mutation;
 
 const MIGRATION_BATCH_SIZE: usize = 256;
 
@@ -90,11 +91,7 @@ async fn copy_batch(db: &Db, batch: Vec<TenantKeyMigrationRow>) -> Result<()> {
             None => {
                 // Copied membership rows must stay decodable once deltas merge
                 // into them; the validated put rejects a corrupt legacy row.
-                crate::transaction::Mutation::put(
-                    &transaction,
-                    row.destination_key,
-                    row.destination_value,
-                )?;
+                Mutation::put(&transaction, row.destination_key, row.destination_value)?;
                 changed = true;
             }
         }
