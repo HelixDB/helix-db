@@ -77,16 +77,20 @@ jobs:
   db-feature-contracts:
     name: DB feature-gated contracts
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       # `--all-targets` skips targets whose required features are not enabled.
       # List every db test target that requires `production-coverage` or
-      # `index-lifecycle-testing` (but not `production-scale`) here.
+      # `index-lifecycle-testing` (but not `production-scale`) here. Nextest
+      # runs each test in its own process, so suites that serialize on a
+      # process-wide lock still run in parallel.
       - run: >-
-          cargo test -p db --features production-coverage,index-lifecycle-testing
+          cargo nextest run --no-fail-fast -p db
+          --features production-coverage,index-lifecycle-testing
           --test index_lifecycle_contracts
           --test production_index_lifecycle_contracts
           --test production_index_operation_queue
