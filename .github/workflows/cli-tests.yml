@@ -43,8 +43,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Rust CI runs the Linux tests, doctests, Clippy and formatting.
         os:
-          - ubuntu-24.04-arm
           - macos-latest
           - windows-2025
     steps:
@@ -55,23 +55,12 @@ jobs:
           cache: npm
           cache-dependency-path: sdks/typescript/package-lock.json
       - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: clippy, rustfmt
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: sdks/typescript
       - name: Validate locked workspace metadata
         run: cargo metadata --locked --format-version 1 --no-deps
       - name: Unit and binary integration tests
         run: cargo test --locked -p helix-metrics -p helix-cli --all-targets
-      - name: Doc tests
-        if: runner.os == 'Linux'
-        run: cargo test --locked -p helix-metrics -p helix-cli --doc
-      - name: Clippy
-        if: runner.os == 'Linux'
-        run: cargo clippy --locked -p helix-metrics -p helix-cli --all-targets -- -D warnings
-      - name: Formatting
-        if: runner.os == 'Linux'
-        run: cargo fmt -p helix-metrics -p helix-cli -- --check
 
   registry-smoke:
     name: Published TypeScript SDK registry smoke
