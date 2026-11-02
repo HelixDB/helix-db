@@ -19,7 +19,6 @@ use tantivy::tokenizer::{
     Language, LowerCaser, SimpleTokenizer, Stemmer, TextAnalyzer, WhitespaceTokenizer,
 };
 use tantivy::{Index, ReloadPolicy, TantivyDocument, Term};
-use tokio::sync::Notify;
 
 const ORACLE_BODY_FIELD: &str = "body";
 const ORACLE_ENTITY_ID_FIELD: &str = "entity_id";
@@ -165,54 +164,14 @@ fn oracle_analyzer(kind: TextAnalyzerKind) -> TextAnalyzer {
 }
 
 #[derive(Debug, Default)]
-struct BarrierState {
-    path: Option<Path>,
-    entered: bool,
-    released: bool,
-}
-
-#[derive(Debug, Default)]
-pub struct BarrierObjectStore {
+pub struct RecordingObjectStore {
     inner: InMemory,
-    barrier: Mutex<BarrierState>,
-    changed: Notify,
     deleted: Arc<Mutex<Vec<Path>>>,
     fail_text_puts: AtomicUsize,
     text_puts: AtomicUsize,
 }
 
-impl BarrierObjectStore {
-    pub fn arm_read(&self, path: Path) {
-        *self.barrier.lock().expect("barrier mutex is healthy") = BarrierState {
-            path: Some(path),
-            entered: false,
-            released: false,
-        };
-    }
-
-    pub async fn wait_until_read_is_blocked(&self) {
-        loop {
-            let notified = self.changed.notified();
-            if self
-                .barrier
-                .lock()
-                .expect("barrier mutex is healthy")
-                .entered
-            {
-                return;
-            }
-            notified.await;
-        }
-    }
-
-    pub fn release_read(&self) {
-        self.barrier
-            .lock()
-            .expect("barrier mutex is healthy")
-            .released = true;
-        self.changed.notify_waiters();
-    }
-
+impl RecordingObjectStore {
     pub fn deleted_paths(&self) -> Vec<Path> {
         self.deleted
             .lock()
@@ -243,44 +202,16 @@ impl BarrierObjectStore {
         paths.sort();
         paths
     }
-
-    async fn pause_if_armed(&self, location: &Path) {
-        let should_pause = {
-            let mut barrier = self.barrier.lock().expect("barrier mutex is healthy");
-            if barrier.path.as_ref() != Some(location) || barrier.released {
-                false
-            } else {
-                barrier.entered = true;
-                true
-            }
-        };
-        if !should_pause {
-            return;
-        }
-        self.changed.notify_waiters();
-        loop {
-            let notified = self.changed.notified();
-            if self
-                .barrier
-                .lock()
-                .expect("barrier mutex is healthy")
-                .released
-            {
-                return;
-            }
-            notified.await;
-        }
-    }
 }
 
-impl fmt::Display for BarrierObjectStore {
+impl fmt::Display for RecordingObjectStore {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("barrier-memory")
+        formatter.write_str("recording-memory")
     }
 }
 
 #[async_trait::async_trait]
-impl ObjectStore for BarrierObjectStore {
+impl ObjectStore for RecordingObjectStore {
     async fn put_opts(
         &self,
         location: &Path,
@@ -297,7 +228,7 @@ impl ObjectStore for BarrierObjectStore {
                 .is_ok()
             {
                 return Err(slatedb::object_store::Error::Generic {
-                    store: "barrier-memory",
+                    store: "recording-memory",
                     source: Box::new(std::io::Error::other(
                         "injected content-addressed text upload failure",
                     )),
@@ -316,7 +247,6 @@ impl ObjectStore for BarrierObjectStore {
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> ObjectStoreResult<GetResult> {
-        self.pause_if_armed(location).await;
         self.inner.get_opts(location, options).await
     }
 

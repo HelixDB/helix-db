@@ -32,7 +32,9 @@ use helix_ast::value::{PropertyInput, PropertyValue};
 use helix_planner::{catalog, context, cost, exec, ir, properties, trace};
 use slatedb::object_store::path::Path;
 use slatedb::object_store::ObjectStore;
-use text_correctness_support::{search_live_corpus, BarrierObjectStore, OracleDocument, OracleHit};
+use text_correctness_support::{
+    search_live_corpus, OracleDocument, OracleHit, RecordingObjectStore,
+};
 
 const LABEL: &str = "FtsCorrectnessDocument";
 const EDGE_LABEL: &str = "FTS_CORRECTNESS_LINK";
@@ -2950,7 +2952,7 @@ struct DropRaceFixture {
     db: Arc<HelixDB>,
     controller: LifecycleTestController,
     definition: ValidatedDynamicIndexDefinition,
-    store: Arc<BarrierObjectStore>,
+    store: Arc<RecordingObjectStore>,
     later_page_paths: Vec<Path>,
 }
 
@@ -2982,13 +2984,13 @@ async fn activate_drop_race_index(
 }
 
 async fn open_drop_race_fixture(database: &str) -> DropRaceFixture {
-    let store = Arc::new(BarrierObjectStore::default());
+    let store = Arc::new(RecordingObjectStore::default());
     open_drop_race_fixture_on_store(database, store).await
 }
 
 async fn open_drop_race_fixture_on_store(
     database: &str,
-    store: Arc<BarrierObjectStore>,
+    store: Arc<RecordingObjectStore>,
 ) -> DropRaceFixture {
     let object_store: Arc<dyn slatedb::object_store::ObjectStore> = store.clone();
     let db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
@@ -3298,7 +3300,7 @@ async fn active_text_upload_failure_retries_publication_without_losing_the_opera
 #[tokio::test]
 async fn build_restart_after_upload_preserves_the_orphan_and_completes() {
     const DATABASE: &str = "fts-build-upload-restart-regression";
-    let store = Arc::new(BarrierObjectStore::default());
+    let store = Arc::new(RecordingObjectStore::default());
     let object_store: Arc<dyn ObjectStore> = store.clone();
     let writer = HelixDB::open_with_object_store_for_index_lifecycle_testing(
         DATABASE,
