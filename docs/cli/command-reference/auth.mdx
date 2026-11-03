@@ -46,7 +46,9 @@ helix auth logout
 
 - `login` requires an interactive terminal, so it fails with `--json`.
 - Browser methods start WorkOS PKCE in a browser (and print the URL in case the browser does not open), then show a spinner while they wait for the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
-- `password` signs in with an existing account. To create an account or reset a password, use [the sign-in page](https://helix-db.com/login).
+- `password` signs in with an existing account. To create an account or reset a password, use [the sign-in page](https://helix-db.com/login). It only runs when Helix Cloud is reached over HTTPS or on this machine, so a password never travels unencrypted; browser methods are not affected.
+- A login request that gets no answer fails after 60 seconds. During email verification, the CLI asks for the code again instead.
+- `--quiet` still prints what a login needs: the URL, why a code prompt repeats, and the notice before single sign-on opens a second tab.
 - If your company requires single sign-on, any method continues through its identity provider in the browser.
 - If WorkOS requires email verification, the CLI prompts for the code and accepts up to three attempts.
 - It hydrates all current workspace memberships and stores only the rotating WorkOS session in `~/.helix/credentials` (or `$HELIX_HOME/credentials`).
