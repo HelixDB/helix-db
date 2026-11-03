@@ -36,7 +36,7 @@ pub struct SessionCredentials {
 }
 
 impl SessionCredentials {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.access_token.trim().is_empty()
             || self.refresh_token.trim().is_empty()
             || self.expires_at <= 0

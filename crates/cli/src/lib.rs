@@ -48,13 +48,13 @@ pub enum LoginAction {
     /// Single sign-on through your company's identity provider
     Sso {
         /// Work email that selects the identity provider; asks when omitted
-        #[arg(long)]
+        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         email: Option<String>,
     },
     /// Email and password, entered in the terminal
     Password {
         /// Account email; asks when omitted
-        #[arg(long)]
+        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         email: Option<String>,
     },
 }

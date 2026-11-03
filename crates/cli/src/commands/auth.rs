@@ -23,6 +23,9 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const LOGIN_CALLBACK_PORT: u16 = 8765;
 /// WorkOS locks a pending verification after three wrong codes.
 const MAX_VERIFICATION_ATTEMPTS: u32 = 3;
+/// How long one connection to the callback port may stay silent. Browsers open
+/// idle preconnect sockets, which would otherwise hold up the real redirect.
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,8 +34,8 @@ struct StartLoginResponse {
     session_id: String,
 }
 
-/// The reply shared by code exchange, password sign-in and email verification.
-/// Tokens are absent or empty whenever a flag asks for another step.
+/// The reply shared by code exchange, password sign-in and email verification,
+/// as sent: every field is optional on the wire. [`AuthStep`] is what it means.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct AuthResponse {
@@ -43,7 +46,7 @@ struct AuthResponse {
     email: String,
     email_verification_required: bool,
     sso_required: bool,
-    /// Set by password sign-in only; browser logins already hold their session.
+    /// Sent by password sign-in; browser logins fill in the one they started.
     session_id: String,
 }
 
@@ -83,34 +86,52 @@ enum LoginMethod {
     Password { email: String, password: String },
 }
 
-/// Where a sign-in ended up once any email verification is done.
+/// What a login has to do next, parsed from an [`AuthResponse`].
 #[derive(Debug, PartialEq, Eq)]
-enum SignedIn {
+enum AuthStep {
+    /// The login is complete.
     Session(SessionCredentials),
+    /// Submit the code emailed to `email` under `session_id`.
+    VerifyEmail { session_id: String, email: String },
     /// The email's company only allows its own identity provider.
-    SsoRequired {
-        email: String,
-    },
+    SsoRequired { email: String },
 }
 
-impl TryFrom<AuthResponse> for SignedIn {
+impl TryFrom<AuthResponse> for AuthStep {
     type Error = eyre::Report;
 
     fn try_from(response: AuthResponse) -> Result<Self> {
         if response.sso_required {
+            if response.email.trim().is_empty() {
+                return Err(eyre!(
+                    "the login response required single sign-on without naming an email"
+                ));
+            }
             return Ok(Self::SsoRequired {
                 email: response.email,
             });
         }
-        if response.access_token.is_empty() || response.refresh_token.is_empty() {
-            return Err(eyre!("the login response did not include a session"));
+        if response.email_verification_required {
+            if response.session_id.is_empty() {
+                return Err(eyre!(
+                    "the login response required email verification without a session"
+                ));
+            }
+            return Ok(Self::VerifyEmail {
+                session_id: response.session_id,
+                email: response.email,
+            });
         }
-        Ok(Self::Session(SessionCredentials {
+        let session = SessionCredentials {
             access_token: response.access_token,
             refresh_token: response.refresh_token,
             expires_at: response.expires_at,
             email: response.email,
-        }))
+        };
+        session
+            .validate()
+            .wrap_err("the login response did not include a complete session")?;
+        Ok(Self::Session(session))
     }
 }
 
@@ -185,72 +206,69 @@ async fn login(action: Option<LoginAction>) -> Result<()> {
     output::emit(&json!({"email": credentials.email}), |_| Ok(()))
 }
 
-/// Runs `method` to a session. When the server answers that the email must use
-/// single sign-on, continues once through that email's identity provider, the
-/// way the web login does.
+/// Runs `method` to a session, following each step the server asks for. When
+/// the email must use single sign-on, continues once through its identity
+/// provider, the way the web login does.
 ///
 /// A loop rather than recursion because recursive `async fn`s need boxing. It
-/// ends because `SsoRequired` during single sign-on is an error.
+/// ends because verification is bounded and `SsoRequired` during single sign-on
+/// is an error.
 async fn authenticate(
     client: &CloudClient,
     mut method: LoginMethod,
     callback_port: u16,
     host: &mut impl LoginHost,
 ) -> Result<SessionCredentials> {
+    let mut step = sign_in(client, &method, callback_port, host).await?;
     loop {
-        match (
-            sign_in(client, &method, callback_port, host).await?,
-            &method,
-        ) {
-            (SignedIn::Session(session), _) => return Ok(session),
-            (SignedIn::SsoRequired { email }, LoginMethod::Browser(BrowserLogin::Sso { .. })) => {
+        step = match step {
+            AuthStep::Session(session) => return Ok(session),
+            AuthStep::VerifyEmail { session_id, email } => {
+                verify_email(client, &session_id, &email, host).await?
+            }
+            AuthStep::SsoRequired { email }
+                if matches!(method, LoginMethod::Browser(BrowserLogin::Sso { .. })) =>
+            {
                 return Err(CliError::new(format!(
                     "{email} must sign in with single sign-on, which did not complete"
                 ))
                 .with_hint("ask your workspace admin to check the single sign-on connection")
                 .into());
             }
-            (SignedIn::SsoRequired { email }, _) => {
+            AuthStep::SsoRequired { email } => {
                 output::info(&format!(
                     "{email} signs in with single sign-on; continuing through your company's identity provider"
                 ));
                 method = LoginMethod::Browser(BrowserLogin::Sso { email });
+                sign_in(client, &method, callback_port, host).await?
             }
-        }
+        };
     }
 }
 
-/// One sign-in attempt, through email verification when the server asks for it.
+/// One sign-in attempt, up to the first step the server answers with.
 async fn sign_in(
     client: &CloudClient,
     method: &LoginMethod,
     callback_port: u16,
     host: &mut impl LoginHost,
-) -> Result<SignedIn> {
-    let (response, session_id) = match method {
+) -> Result<AuthStep> {
+    let response = match method {
         LoginMethod::Browser(login) => browser_sign_in(client, login, callback_port, host).await?,
         LoginMethod::Password { email, password } => {
-            let response = password_sign_in(client, email, password).await?;
-            let session_id = response.session_id.clone();
-            (response, session_id)
+            password_sign_in(client, email, password).await?
         }
     };
-    if response.email_verification_required && !response.sso_required {
-        return verify_email(client, &session_id, &response.email, host)
-            .await?
-            .try_into();
-    }
     response.try_into()
 }
 
-/// Signs in through the browser and exchanges the returned code. Returns the
-/// exchange reply with the session id any email verification has to reuse.
+/// Signs in through the browser and exchanges the returned code.
 async fn browser_sign_in(
     client: &CloudClient,
     login: &BrowserLogin,
     callback_port: u16,
     host: &mut impl LoginHost,
-) -> Result<(AuthResponse, String)> {
+) -> Result<AuthResponse> {
     let listener = TcpListener::bind(("127.0.0.1", callback_port))
         .await
         .wrap_err_with(|| format!("bind the WorkOS callback listener on port {callback_port}"))?;
@@ -264,15 +282,19 @@ async fn browser_sign_in(
             )
             .await?,
     )?;
+    let state = reqwest::Url::parse(&started.url)?
+        .query_pairs()
+        .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+        .ok_or_else(|| eyre!("the login URL did not include a state"))?;
 
     host.open_browser(&started.url);
     let mut waiting = Step::with_messages("Waiting for the browser", "Signed in with the browser");
     waiting.start();
-    let callback = timeout(LOGIN_TIMEOUT, receive_callback(listener)).await;
-    let (code, state) = match callback {
-        Ok(Ok(callback)) => {
+    let callback = timeout(LOGIN_TIMEOUT, receive_callback(listener, &state)).await;
+    let code = match callback {
+        Ok(Ok(code)) => {
             waiting.done();
-            callback
+            code
         }
         Ok(Err(error)) => {
             waiting.fail();
@@ -285,7 +307,7 @@ async fn browser_sign_in(
                 .into());
         }
     };
-    let response = serde_json::from_value(
+    let response: AuthResponse = serde_json::from_value(
         client
             .public_post(
                 "/v1/auth/exchange",
@@ -294,7 +316,10 @@ async fn browser_sign_in(
             )
             .await?,
     )?;
-    Ok((response, started.session_id))
+    Ok(AuthResponse {
+        session_id: started.session_id,
+        ..response
+    })
 }
 
 async fn password_sign_in(
@@ -310,30 +335,30 @@ async fn password_sign_in(
         )
         .await;
     let value = response.map_err(|error| -> eyre::Report {
-        if error
-            .downcast_ref::<HttpError>()
-            .is_some_and(|http| http.status == StatusCode::UNAUTHORIZED)
-        {
-            return CliError::new("invalid email or password")
-                .with_hint(
-                    "sign up or reset your password at https://helix-db.com/login, \
-                     or run `helix auth login` to pick another method",
-                )
-                .into();
+        match error.downcast_ref::<HttpError>() {
+            Some(http) if http.status == StatusCode::UNAUTHORIZED => {
+                CliError::new(http.message.clone())
+                    .with_hint(
+                        "sign up or reset your password at https://helix-db.com/login, \
+                         or run `helix auth login` to pick another method",
+                    )
+                    .into()
+            }
+            _ => error,
         }
-        error
     })?;
     Ok(serde_json::from_value(value)?)
 }
 
-/// Asks for the emailed code until it is accepted. The server keeps the pending
-/// sign-in through a wrong code (HTTP 400), so only that case asks again.
+/// Asks for the emailed code until the server takes it. Both a wrong code
+/// (HTTP 400) and an outage (HTTP 503) leave the pending sign-in usable, so only
+/// those ask again; anything else means the login has to start over.
 async fn verify_email(
     client: &CloudClient,
     session_id: &str,
     email: &str,
     host: &mut impl LoginHost,
-) -> Result<AuthResponse> {
+) -> Result<AuthStep> {
     let mut attempt = 1;
     loop {
         let code = host.verification_code(email)?;
@@ -344,71 +369,95 @@ async fn verify_email(
                 "verify WorkOS email",
             )
             .await;
-        match response {
-            Ok(value) => return Ok(serde_json::from_value(value)?),
-            Err(error)
-                if attempt < MAX_VERIFICATION_ATTEMPTS
-                    && error
-                        .downcast_ref::<HttpError>()
-                        .is_some_and(|http| http.status == StatusCode::BAD_REQUEST) =>
-            {
-                output::warning("That code is incorrect. Try again.");
-                attempt += 1;
-            }
-            Err(error) => return Err(error),
+        let error = match response {
+            Ok(value) => return serde_json::from_value::<AuthResponse>(value)?.try_into(),
+            Err(error) => error,
+        };
+        let Some(http) = error.downcast_ref::<HttpError>() else {
+            return Err(error);
+        };
+        if attempt >= MAX_VERIFICATION_ATTEMPTS
+            || !matches!(
+                http.status,
+                StatusCode::BAD_REQUEST | StatusCode::SERVICE_UNAVAILABLE
+            )
+        {
+            return Err(
+                CliError::new(format!("email verification failed: {}", http.message))
+                    .with_hint("run `helix auth login` to start over")
+                    .into(),
+            );
         }
+        output::warning(&http.message);
+        attempt += 1;
     }
 }
 
-async fn receive_callback(listener: TcpListener) -> Result<(String, String)> {
-    let (mut stream, _) = listener.accept().await?;
-    let mut request = vec![0_u8; 8192];
-    let read = stream.read(&mut request).await?;
-    let first_line = std::str::from_utf8(&request[..read])?
-        .lines()
-        .next()
-        .ok_or_else(|| eyre!("browser callback was empty"))?;
-    let target = first_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| eyre!("browser callback was malformed"))?;
-    let url = reqwest::Url::parse(&format!("http://127.0.0.1{target}"))?;
-    let param = |name: &str| {
-        url.query_pairs()
-            .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
-            .filter(|value| !value.is_empty())
-    };
-    let result: Result<(String, String)> = match (param("code"), param("state"), param("error")) {
-        (_, _, Some(error)) => Err(CliError::new(format!(
-            "the identity provider refused the login: {}",
-            param("error_description").unwrap_or(error)
-        ))
-        .with_hint("run `helix auth login` to try again or pick another method")
-        .into()),
-        (Some(code), Some(state), None) => Ok((code, state)),
-        _ => Err(eyre!("WorkOS callback did not contain code and state")),
-    };
-    let (status, body) = if result.is_ok() {
-        (
-            "200 OK",
-            "Helix CLI login complete. You can close this window.",
-        )
-    } else {
-        (
-            "400 Bad Request",
-            "Helix CLI login failed. Return to the terminal.",
-        )
-    };
-    stream
-        .write_all(
-            format!(
-                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
+/// Waits for the identity provider's redirect and returns its code.
+///
+/// Only a request to `/callback` carrying the `state` from the authorize URL
+/// counts. Everything else is answered and ignored, so a favicon request, an
+/// idle preconnect or another web page reaching this port cannot end the login.
+async fn receive_callback(listener: TcpListener, state: &str) -> Result<String> {
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = vec![0_u8; 8192];
+        let Ok(Ok(read)) = timeout(CALLBACK_READ_TIMEOUT, stream.read(&mut request)).await else {
+            continue;
+        };
+        let url = std::str::from_utf8(&request[..read])
+            .ok()
+            .and_then(|request| request.lines().next())
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|target| reqwest::Url::parse(&format!("http://127.0.0.1{target}")).ok())
+            .filter(|url| url.path() == "/callback");
+        let param = |name: &str| {
+            url.as_ref()?
+                .query_pairs()
+                .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
+                .filter(|value| !value.is_empty())
+        };
+        let result: Option<Result<String>> =
+            (param("state").as_deref() == Some(state)).then(|| {
+                match (param("code"), param("error")) {
+                    (_, Some(error)) => Err(CliError::new(format!(
+                        "the identity provider refused the login: {}",
+                        param("error_description")
+                            .unwrap_or(error)
+                            .replace(char::is_control, "")
+                    ))
+                    .with_hint("run `helix auth login` to try again or pick another method")
+                    .into()),
+                    (Some(code), None) => Ok(code),
+                    (None, None) => Err(eyre!("WorkOS callback did not contain a code")),
+                }
+            });
+        let (status, body) = match &result {
+            None => ("404 Not Found", "Not a pending Helix CLI login."),
+            Some(Ok(_)) => (
+                "200 OK",
+                "Helix CLI received the sign-in. Return to the terminal.",
+            ),
+            Some(Err(_)) => (
+                "400 Bad Request",
+                "Helix CLI login failed. Return to the terminal.",
+            ),
+        };
+        // The login's outcome does not depend on the browser reading this.
+        let _ = stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
             )
-            .as_bytes(),
-        )
-        .await?;
-    result
+            .await;
+        let Some(result) = result else {
+            continue;
+        };
+        return result;
+    }
 }
 
 /// The logged-in account and its workspaces. Listing the workspaces also
@@ -585,11 +634,16 @@ mod tests {
         /// Mounts the start of a browser login; the session id is `session`.
         async fn expect_start(&self, host: &ScriptedHost, login: BrowserLogin, session: &str) {
             let redirect = format!("http://localhost:{}/callback", host.port);
+            // `session-1` pairs with `state=s1`, the state scripted callbacks send.
+            let state = session.replace("session-", "s");
             self.expect(
                 "/v1/auth/login:start",
                 login.start_body(&redirect),
                 200,
-                json!({"url": format!("https://idp.test/{session}"), "sessionId": session}),
+                json!({
+                    "url": format!("https://idp.test/authorize?state={state}"),
+                    "sessionId": session,
+                }),
             )
             .await;
         }
@@ -676,7 +730,7 @@ mod tests {
             let result = fixture.run(LoginMethod::Browser(login), &mut host).await;
 
             assert_eq!(result.unwrap(), session("person@test.dev"));
-            assert_eq!(host.opened, ["https://idp.test/session-1"]);
+            assert_eq!(host.opened, ["https://idp.test/authorize?state=s1"]);
         }
     }
 
@@ -797,23 +851,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_password_is_a_clear_error_without_the_password() {
-        let fixture = Fixture::new().await;
-        let mut host = ScriptedHost::new(&[], &[]);
-        fixture
-            .expect(
-                "/v1/auth/password:sign-in",
-                password_body(),
-                401,
-                json!({"code": 16, "message": "invalid email or password"}),
-            )
-            .await;
+    async fn a_rejected_password_login_explains_itself_without_the_password() {
+        // Not every 401 means a bad password, so the server's wording is kept.
+        for message in [
+            "invalid email or password",
+            "no workspace assigned for user",
+        ] {
+            let fixture = Fixture::new().await;
+            let mut host = ScriptedHost::new(&[], &[]);
+            fixture
+                .expect(
+                    "/v1/auth/password:sign-in",
+                    password_body(),
+                    401,
+                    json!({"code": 16, "message": message}),
+                )
+                .await;
 
-        let error = fixture.run(password_login(), &mut host).await.unwrap_err();
+            let error = fixture.run(password_login(), &mut host).await.unwrap_err();
 
-        let shown = format!("{error:?}");
-        assert!(shown.contains("invalid email or password"), "{shown}");
-        assert!(!shown.contains("secret"), "{shown}");
+            assert_eq!(error.to_string(), message);
+            let cli_error = error.downcast_ref::<CliError>().unwrap();
+            assert!(cli_error
+                .hint
+                .as_deref()
+                .unwrap()
+                .contains("helix-db.com/login"));
+            assert!(!format!("{error:?}").contains("secret"));
+        }
     }
 
     #[tokio::test]
@@ -937,6 +1002,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verification_retries_through_an_outage() {
+        let fixture = Fixture::new().await;
+        let mut host = ScriptedHost::new(&[], &["123456", "123456"]);
+        pause_on_verification(&fixture).await;
+        let body = json!({"sessionId": "session-1", "code": "123456"});
+        fixture
+            .expect(
+                "/v1/auth/verify-email",
+                body.clone(),
+                503,
+                json!({"code": 14, "message": "email verification is temporarily unavailable"}),
+            )
+            .await;
+        fixture
+            .expect(
+                "/v1/auth/verify-email",
+                body,
+                200,
+                tokens("person@test.dev"),
+            )
+            .await;
+
+        let result = fixture.run(password_login(), &mut host).await;
+
+        assert_eq!(result.unwrap(), session("person@test.dev"));
+    }
+
+    #[tokio::test]
     async fn verification_stops_after_three_wrong_codes() {
         let fixture = Fixture::new().await;
         let mut host = ScriptedHost::new(&[], &["1", "2", "3"]);
@@ -954,7 +1047,10 @@ mod tests {
 
         let error = fixture.run(password_login(), &mut host).await.unwrap_err();
 
-        assert_eq!(error.downcast_ref::<HttpError>().unwrap().status, 400);
+        assert_eq!(
+            error.to_string(),
+            "email verification failed: verification code is incorrect"
+        );
         assert!(host.codes.is_empty());
     }
 
@@ -974,14 +1070,14 @@ mod tests {
 
         let error = fixture.run(password_login(), &mut host).await.unwrap_err();
 
-        assert_eq!(error.downcast_ref::<HttpError>().unwrap().status, 401);
+        assert!(error.to_string().contains("start a new login"), "{error}");
         assert_eq!(host.codes, ["unused"]);
     }
 
     #[tokio::test]
     async fn verification_can_end_in_required_sso() {
         let fixture = Fixture::new().await;
-        let mut host = ScriptedHost::new(&["code=c1&state=s1"], &["123456"]);
+        let mut host = ScriptedHost::new(&["code=c1&state=s2"], &["123456"]);
         pause_on_verification(&fixture).await;
         fixture
             .expect(
@@ -995,7 +1091,7 @@ mod tests {
         fixture
             .expect(
                 "/v1/auth/exchange",
-                json!({"sessionId": "session-2", "code": "c1", "state": "s1"}),
+                json!({"sessionId": "session-2", "code": "c1", "state": "s2"}),
                 200,
                 tokens("person@acme.test"),
             )
@@ -1006,22 +1102,69 @@ mod tests {
         assert_eq!(result.unwrap(), session("person@acme.test"));
     }
 
-    #[tokio::test]
-    async fn a_reply_without_tokens_or_flags_is_an_error() {
+    #[test]
+    fn replies_parse_into_the_step_they_ask_for() {
+        let parse = |reply: Value| -> Result<AuthStep> {
+            serde_json::from_value::<AuthResponse>(reply)?.try_into()
+        };
+
+        assert_eq!(
+            parse(tokens("person@test.dev")).unwrap(),
+            AuthStep::Session(session("person@test.dev"))
+        );
+        assert_eq!(
+            parse(json!({
+                "email": "person@test.dev",
+                "emailVerificationRequired": true,
+                "sessionId": "session-1",
+            }))
+            .unwrap(),
+            AuthStep::VerifyEmail {
+                session_id: "session-1".into(),
+                email: "person@test.dev".into(),
+            }
+        );
+        // Required single sign-on outranks verification, as it does on the server.
+        assert_eq!(
+            parse(json!({
+                "email": "person@acme.test",
+                "ssoRequired": true,
+                "emailVerificationRequired": true,
+                "sessionId": "session-1",
+            }))
+            .unwrap(),
+            AuthStep::SsoRequired {
+                email: "person@acme.test".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn incomplete_replies_are_errors() {
+        let complete = tokens("person@test.dev");
+        let without = |field: &str| {
+            let mut reply = complete.clone();
+            reply.as_object_mut().unwrap().remove(field);
+            reply
+        };
         for reply in [
             json!({}),
-            json!({"email": "person@test.dev", "accessToken": "access"}),
-            json!({"email": "person@test.dev", "refreshToken": "refresh"}),
+            without("accessToken"),
+            without("refreshToken"),
+            without("expiresAt"),
+            without("email"),
+            json!({"accessToken": " ", "refreshToken": " ", "expiresAt": "1", "email": "e"}),
+            json!({"accessToken": "a", "refreshToken": "r", "expiresAt": "0", "email": "e"}),
+            json!({"email": "person@test.dev", "emailVerificationRequired": true}),
+            json!({"ssoRequired": true}),
         ] {
-            let fixture = Fixture::new().await;
-            let mut host = ScriptedHost::new(&[], &[]);
-            fixture
-                .expect("/v1/auth/password:sign-in", password_body(), 200, reply)
-                .await;
-
-            let error = fixture.run(password_login(), &mut host).await.unwrap_err();
-
-            assert!(error.to_string().contains("did not include a session"));
+            let parsed: Result<AuthStep> = serde_json::from_value::<AuthResponse>(reply.clone())
+                .unwrap()
+                .try_into();
+            assert!(
+                parsed.unwrap_err().to_string().contains("login response"),
+                "{reply}"
+            );
         }
     }
 
@@ -1029,7 +1172,7 @@ mod tests {
     async fn a_refused_browser_login_stops_before_the_exchange() {
         let fixture = Fixture::new().await;
         let mut host = ScriptedHost::new(
-            &["error=access_denied&error_description=Domain%20not%20allowed"],
+            &["state=s1&error=access_denied&error_description=Domain%20not%20allowed"],
             &[],
         );
         fixture
@@ -1095,41 +1238,77 @@ mod tests {
         assert!(fixture.server.received_requests().await.unwrap().is_empty());
     }
 
-    /// Serves one raw callback request and returns its parsed result and the
-    /// HTTP status the browser saw.
-    async fn callback_result(query: &str) -> (Result<(String, String)>, String) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let callback = tokio::spawn(receive_callback(listener));
-        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-        stream
-            .write_all(
-                format!("GET /callback?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+    #[tokio::test]
+    async fn a_login_url_without_state_is_refused_before_opening_the_browser() {
+        let fixture = Fixture::new().await;
+        let mut host = ScriptedHost::new(&[], &[]);
+        let redirect = format!("http://localhost:{}/callback", host.port);
+        fixture
+            .expect(
+                "/v1/auth/login:start",
+                BrowserLogin::Github.start_body(&redirect),
+                200,
+                json!({"url": "https://idp.test/authorize", "sessionId": "session-1"}),
             )
+            .await;
+
+        let error = fixture
+            .run(LoginMethod::Browser(BrowserLogin::Github), &mut host)
             .await
-            .unwrap();
+            .unwrap_err();
+
+        assert!(error.to_string().contains("did not include a state"));
+        assert!(host.opened.is_empty());
+    }
+
+    /// Sends `request` to the callback port and returns the reply.
+    async fn send_raw(address: std::net::SocketAddr, request: &[u8]) -> String {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(request).await.unwrap();
         let mut reply = String::new();
         stream.read_to_string(&mut reply).await.unwrap();
+        reply
+    }
+
+    fn callback_request(target: &str) -> Vec<u8> {
+        format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").into_bytes()
+    }
+
+    /// Runs a callback listener expecting `state=xyz`, feeds it `requests`, and
+    /// returns its result with the reply to the last request.
+    async fn callback_result(requests: &[Vec<u8>]) -> (Result<String>, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let callback = tokio::spawn(async move { receive_callback(listener, "xyz").await });
+        let mut reply = String::new();
+        for request in requests {
+            reply = send_raw(address, request).await;
+        }
         (callback.await.unwrap(), reply)
     }
 
     #[tokio::test]
-    async fn callback_requires_code_and_state() {
-        let (result, reply) = callback_result("code=abc&state=xyz").await;
-        assert_eq!(result.unwrap(), ("abc".into(), "xyz".into()));
-        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+    async fn callback_returns_the_code_for_the_pending_state() {
+        let (result, reply) =
+            callback_result(&[callback_request("/callback?code=abc&state=xyz")]).await;
 
-        for query in [
-            "code=abc",
-            "state=xyz",
-            "code=&state=xyz",
-            "code=abc&state=",
-            "",
-        ] {
-            let (result, reply) = callback_result(query).await;
+        assert_eq!(result.unwrap(), "abc");
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        // Single sign-on or verification may still follow.
+        assert!(reply.contains("Return to the terminal"), "{reply}");
+    }
+
+    #[tokio::test]
+    async fn callback_without_a_code_fails_the_login() {
+        for target in ["/callback?state=xyz", "/callback?code=&state=xyz"] {
+            let (result, reply) = callback_result(&[callback_request(target)]).await;
+
             assert!(
-                result.unwrap_err().to_string().contains("code and state"),
-                "{query}"
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("did not contain a code"),
+                "{target}"
             );
             assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
         }
@@ -1137,19 +1316,62 @@ mod tests {
 
     #[tokio::test]
     async fn callback_surfaces_identity_provider_errors() {
-        let (result, reply) = callback_result("error=access_denied").await;
+        let (result, reply) =
+            callback_result(&[callback_request("/callback?state=xyz&error=access_denied")]).await;
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("refused the login: access_denied"));
         assert!(reply.starts_with("HTTP/1.1 400"), "{reply}");
 
-        // An error wins even if a code came along with it.
-        let (result, _) =
-            callback_result("code=abc&state=xyz&error=denied&error_description=No%20access").await;
+        // The description wins, an error wins over a code, and terminal control
+        // characters never reach the screen.
+        let (result, _) = callback_result(&[callback_request(
+            "/callback?code=abc&state=xyz&error=denied&error_description=No%20%1B%5B31maccess",
+        )])
+        .await;
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("refused the login: No access"));
+            .contains("refused the login: No [31maccess"));
+    }
+
+    #[tokio::test]
+    async fn requests_that_are_not_the_redirect_do_not_end_the_login() {
+        for stray in [
+            callback_request("/favicon.ico"),
+            callback_request("/favicon.ico?code=abc&state=xyz"),
+            callback_request("/callback"),
+            callback_request("/callback?code=abc"),
+            callback_request("/callback?code=evil&state=other"),
+            callback_request("/callback?error=denied"),
+            callback_request("/callback?error=denied&error_description=Run%20this&state=other"),
+            b"not http".to_vec(),
+            vec![0xff, 0xfe, 0xfd],
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let callback = tokio::spawn(async move { receive_callback(listener, "xyz").await });
+
+            let reply = send_raw(address, &stray).await;
+            assert!(reply.starts_with("HTTP/1.1 404"), "{stray:?}: {reply}");
+            assert!(!callback.is_finished());
+
+            send_raw(address, &callback_request("/callback?code=abc&state=xyz")).await;
+            assert_eq!(callback.await.unwrap().unwrap(), "abc", "{stray:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_or_closed_connection_does_not_hold_up_the_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let callback = tokio::spawn(async move { receive_callback(listener, "xyz").await });
+
+        drop(tokio::net::TcpStream::connect(address).await.unwrap());
+        let _idle = tokio::net::TcpStream::connect(address).await.unwrap();
+        send_raw(address, &callback_request("/callback?code=abc&state=xyz")).await;
+
+        assert_eq!(callback.await.unwrap().unwrap(), "abc");
     }
 }

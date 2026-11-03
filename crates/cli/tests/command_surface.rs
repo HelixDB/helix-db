@@ -117,6 +117,17 @@ fn login_flags_only_exist_where_they_apply() {
             "{args:?}"
         );
     }
+    // An unset shell variable must not get as far as a request.
+    for method in ["sso", "password"] {
+        assert!(stderr(
+            fixture
+                .command()
+                .args(["auth", "login", method, "--email", ""])
+                .assert()
+                .failure()
+        )
+        .contains("--email"));
+    }
     assert!(stderr(
         fixture
             .command()
