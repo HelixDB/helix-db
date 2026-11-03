@@ -567,10 +567,13 @@ mod tests {
         let client = client(&format!("http://{}", stalled.local_addr().unwrap()))
             .with_public_post_timeout(Duration::from_millis(200));
 
-        let error = client
-            .public_post("/v1/auth/password:sign-in", Value::Null, "sign in")
-            .await
-            .unwrap_err();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.public_post("/v1/auth/password:sign-in", Value::Null, "sign in"),
+        )
+        .await
+        .expect("the request must give up by itself")
+        .unwrap_err();
 
         assert_eq!(
             error.to_string(),

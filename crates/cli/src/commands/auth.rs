@@ -1786,7 +1786,11 @@ mod tests {
         for request in requests {
             reply = send_raw(address, request).await;
         }
-        (callback.await.unwrap(), reply)
+        // Without this bound, a request wrongly taken for a stray would hang the test.
+        let result = timeout(Duration::from_secs(10), callback)
+            .await
+            .expect("the callback must finish");
+        (result.unwrap(), reply)
     }
 
     #[tokio::test]
@@ -1906,8 +1910,36 @@ mod tests {
         assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
     }
 
-    /// The whole request is read, or closing would reset the connection and could
-    /// cost the browser the reply.
+    /// Closing with unread bytes resets the connection, which can cost the browser
+    /// the reply on some systems. Linux delivers it anyway, so this checks the order
+    /// directly: no reply until the request has ended.
+    #[tokio::test]
+    async fn the_reply_waits_for_the_end_of_the_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let callback = tokio::spawn(async move { receive_callback(listener, "xyz", || {}).await });
+
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"GET /callback?code=abc&state=xyz HTTP/1.1\r\nCookie: a=b\r\n")
+            .await
+            .unwrap();
+        let mut early = [0_u8; 1];
+        assert!(
+            timeout(Duration::from_millis(100), stream.read(&mut early))
+                .await
+                .is_err(),
+            "replied before the request ended"
+        );
+
+        stream.write_all(b"\r\n").await.unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert_eq!(callback.await.unwrap().unwrap(), "abc");
+    }
+
+    /// Cookies can make a request far larger than one read.
     #[tokio::test]
     async fn a_large_request_still_gets_its_reply() {
         let cookie = "c".repeat(200 * 1024);
@@ -1936,7 +1968,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(callback.await.unwrap().unwrap(), "abc");
+        let code = timeout(Duration::from_secs(10), callback).await.unwrap();
+        assert_eq!(code.unwrap().unwrap(), "abc");
     }
 
     /// Handled one at a time, these connections would take far longer than the
@@ -1952,9 +1985,13 @@ mod tests {
         for _ in 0..20 {
             idle.push(TcpStream::connect(address).await.unwrap());
         }
-        send_raw(address, &callback_request("/callback?code=abc&state=xyz")).await;
 
-        let code = timeout(CALLBACK_READ_TIMEOUT / 2, callback).await.unwrap();
+        let code = timeout(CALLBACK_READ_TIMEOUT / 2, async {
+            send_raw(address, &callback_request("/callback?code=abc&state=xyz")).await;
+            callback.await
+        })
+        .await
+        .expect("idle connections held up the redirect");
         assert_eq!(code.unwrap().unwrap(), "abc");
     }
 }
