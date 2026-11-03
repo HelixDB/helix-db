@@ -47,19 +47,36 @@ pub(crate) async fn migrate_all_tenant_keys(db: &Db) -> Result<()> {
         return Ok(());
     }
 
-    copy_legacy_tenant_keys(db).await?;
+    let legacy_rows = copy_legacy_tenant_keys(db).await?;
     verify_legacy_tenant_keys(db).await?;
+    // Copied rows are not validated, and membership deltas are staged without
+    // reading their row. Flushing the copies before any writer runs keeps a
+    // legacy row that does not decode out of the memtable a later delta lands
+    // in, so it can never fail a memtable flush; reads of it fail closed. The
+    // flush precedes cleanup: until cleanup commits, a restart finds the
+    // legacy rows again and flushes again. A database without legacy rows
+    // skips it.
+    if legacy_rows {
+        db.flush_with_options(slatedb::config::FlushOptions {
+            flush_type: slatedb::config::FlushType::MemTable,
+        })
+        .await?;
+    }
     cleanup_legacy_tenant_keys(db).await?;
     publish_completion(db).await
 }
 
-async fn copy_legacy_tenant_keys(db: &Db) -> Result<()> {
+/// Copies every legacy row and reports whether any exists, copied by this
+/// run or an interrupted earlier one.
+async fn copy_legacy_tenant_keys(db: &Db) -> Result<bool> {
     let mut rows = db.scan(..).await?;
     let mut batch = Vec::with_capacity(MIGRATION_BATCH_SIZE);
+    let mut found = false;
     while let Some(row) = rows.next().await? {
         let Some(row) = migration_row(row.key, row.value)? else {
             continue;
         };
+        found = true;
         batch.push(row);
         if batch.len() == MIGRATION_BATCH_SIZE {
             copy_batch(db, core::mem::take(&mut batch)).await?;
@@ -68,7 +85,7 @@ async fn copy_legacy_tenant_keys(db: &Db) -> Result<()> {
     if !batch.is_empty() {
         copy_batch(db, batch).await?;
     }
-    Ok(())
+    Ok(found)
 }
 
 async fn copy_batch(db: &Db, batch: Vec<TenantKeyMigrationRow>) -> Result<()> {
@@ -715,8 +732,9 @@ mod tests {
 
     /// Older built-in bitmaps can carry trailing bytes that readers ignore.
     /// The startup copy moves every legacy row verbatim, so such a row, or one
-    /// already corrupt, never fails startup, and deltas keep merging into the
-    /// tolerated rows after the move.
+    /// already corrupt, never fails startup. Deltas keep merging into the
+    /// tolerated rows after the move, and a delta onto the corrupt row still
+    /// lets the next memtable flush build: the copy was flushed first.
     #[tokio::test]
     async fn legacy_membership_rows_migrate_verbatim_and_keep_taking_deltas() {
         use crate::encoding::v2::keys::{AdjacencyKey, EdgePairIndexKey};
@@ -779,6 +797,7 @@ mod tests {
         }
         let bitmap_key = destination(&bitmap);
         let adjacency_key = destination(&adjacency_row);
+        let corrupt_key = destination(&rows[2].0);
         let mut delta = crate::encoding::v2::values::BitmapMembershipDelta::default();
         delta.add(3);
         let mut edge_delta = adjacency::AdjacencyMembershipDelta::default();
@@ -787,10 +806,15 @@ mod tests {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        let mut batch = Mutation::merge_batch(&transaction, 2).unwrap();
+        let mut batch = Mutation::merge_batch(&transaction, 3).unwrap();
         drop(
             batch
                 .bitmap(merges::Key::Encoded(&bitmap_key), &delta)
+                .unwrap(),
+        );
+        drop(
+            batch
+                .bitmap(merges::Key::Encoded(&corrupt_key), &delta)
                 .unwrap(),
         );
         drop(
@@ -815,6 +839,7 @@ mod tests {
             adjacency::decode_edges(&db.get(&adjacency_key).await.unwrap().unwrap()).unwrap();
         assert_eq!(merged.iter_out().collect::<Vec<_>>(), vec![1]);
         assert_eq!(merged.iter_in().collect::<Vec<_>>(), vec![2]);
+        assert!(db.get(&corrupt_key).await.is_err());
         db.close().await.unwrap();
     }
 
@@ -966,7 +991,7 @@ mod tests {
             .to_bytes();
             db.put(&old, Bytes::from_static(b"value")).await.unwrap();
 
-            copy_legacy_tenant_keys(&db).await.unwrap();
+            assert!(copy_legacy_tenant_keys(&db).await.unwrap());
             assert!(db.get(&old).await.unwrap().is_some());
             assert!(db.get(&new).await.unwrap().is_some());
             if cleanup_before_restart {
