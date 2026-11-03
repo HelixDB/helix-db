@@ -155,8 +155,10 @@ helix.ReadQuery("index_operation").
 operation carries a `blocker_code` and does not resume on its own. Fix the cause, then
 run `retry_index_operation` (`retryIndexOperation`) as a write with the same
 `operation_id`, or `abort_index_operation` (`abortIndexOperation`) to discard the build.
-Repeating the CREATE returns `existing_operation` with the same `operation_id` instead
-of starting another build.
+While the build is in flight, repeating the same CREATE returns `existing_operation`
+with the same `operation_id` instead of starting another build. Once the index is
+active, it returns `already_active` without an `operation_id`. After an abort finishes,
+it starts a new build with a new `operation_id`.
 
 ## Query indexed data
 
