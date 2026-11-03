@@ -66,16 +66,17 @@ impl<'db> ExecutionContext<'db> {
             ) {
                 (Some(active), _, _) => active.txn.get(&key).await?,
                 (None, Some(view), _) => view.get(&key).await?,
-                #[cfg(test)]
-                (None, None, HelixStorage::Reader(reader)) => reader.get(&key).await?,
-                #[cfg(test)]
-                (None, None, HelixStorage::Writer(writer)) => writer.get(&key).await?,
-                #[cfg(not(test))]
-                (None, None, _) => {
-                    return Err(HelixDbError::InvariantViolation(
+                (None, None, _) => outside_request_view!(
+                    relaxed: {
+                        match self.db.storage() {
+                            HelixStorage::Reader(reader) => reader.get(&key).await?,
+                            HelixStorage::Writer(writer) => writer.get(&key).await?,
+                        }
+                    },
+                    closed: return Err(HelixDbError::InvariantViolation(
                         "storage read escaped its request read view".to_string(),
-                    ))
-                }
+                    )),
+                ),
             };
             let value = value
                 .map(|bytes| retain_read(bytes, self.row_memory.as_ref()))
@@ -164,17 +165,18 @@ impl<'db> ExecutionContext<'db> {
         ) {
             (Some(active), _, _) => batch_reads.multi_get(&active.txn, keys).await?,
             (None, Some(view), _) => batch_reads.multi_get(view, keys).await?,
-            // Live handles are not one view, so tests read them with one call.
-            #[cfg(test)]
-            (None, None, HelixStorage::Reader(reader)) => reader.multi_get(keys).await?,
-            #[cfg(test)]
-            (None, None, HelixStorage::Writer(writer)) => writer.multi_get(keys).await?,
-            #[cfg(not(test))]
-            (None, None, _) => {
-                return Err(HelixDbError::InvariantViolation(
+            (None, None, _) => outside_request_view!(
+                // Live handles are not one view, so tests read them with one call.
+                relaxed: {
+                    match self.db.storage() {
+                        HelixStorage::Reader(reader) => reader.multi_get(keys).await?,
+                        HelixStorage::Writer(writer) => writer.multi_get(keys).await?,
+                    }
+                },
+                closed: return Err(HelixDbError::InvariantViolation(
                     "storage multi-get escaped its request read view".to_string(),
-                ))
-            }
+                )),
+            ),
         };
         values
             .into_iter()
@@ -234,27 +236,25 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            let mut iter = match self.db.storage() {
-                HelixStorage::Reader(reader) => reader.scan(start..end).await?,
-                HelixStorage::Writer(writer) => writer.scan(start..end).await?,
-            };
-            collect_limited(
-                &mut iter,
-                limit,
-                self.tenant_scope,
-                self.execution_control.clone(),
-                self.row_memory.as_ref(),
-            )
-            .await
-        }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
+        outside_request_view!(
+            relaxed: {
+                let mut iter = match self.db.storage() {
+                    HelixStorage::Reader(reader) => reader.scan(start..end).await?,
+                    HelixStorage::Writer(writer) => writer.scan(start..end).await?,
+                };
+                collect_limited(
+                    &mut iter,
+                    limit,
+                    self.tenant_scope,
+                    self.execution_control.clone(),
+                    self.row_memory.as_ref(),
+                )
+                .await
+            },
+            closed: Err(HelixDbError::InvariantViolation(
                 "storage range scan escaped its request read view".to_string(),
-            ))
-        }
+            )),
+        )
     }
 
     #[cfg(test)]
@@ -303,27 +303,25 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            let mut iter = match self.db.storage() {
-                HelixStorage::Reader(reader) => reader.scan_prefix(prefix, ..).await?,
-                HelixStorage::Writer(writer) => writer.scan_prefix(prefix, ..).await?,
-            };
-            collect_limited(
-                &mut iter,
-                limit,
-                self.tenant_scope,
-                self.execution_control.clone(),
-                self.row_memory.as_ref(),
-            )
-            .await
-        }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
+        outside_request_view!(
+            relaxed: {
+                let mut iter = match self.db.storage() {
+                    HelixStorage::Reader(reader) => reader.scan_prefix(prefix, ..).await?,
+                    HelixStorage::Writer(writer) => writer.scan_prefix(prefix, ..).await?,
+                };
+                collect_limited(
+                    &mut iter,
+                    limit,
+                    self.tenant_scope,
+                    self.execution_control.clone(),
+                    self.row_memory.as_ref(),
+                )
+                .await
+            },
+            closed: Err(HelixDbError::InvariantViolation(
                 "storage prefix scan escaped its request read view".to_string(),
-            ))
-        }
+            )),
+        )
     }
 
     /// Opens a resumable scan in the same request snapshot or write transaction.
@@ -346,19 +344,17 @@ impl<'db> ExecutionContext<'db> {
         if let Some(view) = self.request_read_view() {
             return Ok(view.scan(start..end).await?);
         }
-        #[cfg(test)]
-        {
-            Ok(match self.db.storage() {
-                HelixStorage::Reader(reader) => reader.scan(start..end).await?,
-                HelixStorage::Writer(writer) => writer.scan(start..end).await?,
-            })
-        }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
+        outside_request_view!(
+            relaxed: {
+                Ok(match self.db.storage() {
+                    HelixStorage::Reader(reader) => reader.scan(start..end).await?,
+                    HelixStorage::Writer(writer) => writer.scan(start..end).await?,
+                })
+            },
+            closed: Err(HelixDbError::InvariantViolation(
                 "storage range scan escaped its request read view".to_string(),
-            ))
-        }
+            )),
+        )
     }
 
     /// Opens a resumable scan in the same request snapshot or write transaction.
@@ -380,19 +376,17 @@ impl<'db> ExecutionContext<'db> {
         if let Some(view) = self.request_read_view() {
             return Ok(view.scan_prefix(prefix, ..).await?);
         }
-        #[cfg(test)]
-        {
-            Ok(match self.db.storage() {
-                HelixStorage::Reader(reader) => reader.scan_prefix(prefix, ..).await?,
-                HelixStorage::Writer(writer) => writer.scan_prefix(prefix, ..).await?,
-            })
-        }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
+        outside_request_view!(
+            relaxed: {
+                Ok(match self.db.storage() {
+                    HelixStorage::Reader(reader) => reader.scan_prefix(prefix, ..).await?,
+                    HelixStorage::Writer(writer) => writer.scan_prefix(prefix, ..).await?,
+                })
+            },
+            closed: Err(HelixDbError::InvariantViolation(
                 "storage prefix scan escaped its request read view".to_string(),
-            ))
-        }
+            )),
+        )
     }
 
     pub(in crate::execution::interpreter) fn writer(&self) -> Result<&HelixWriter> {

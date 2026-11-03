@@ -69,7 +69,7 @@ mod hot_directory;
 mod live_state_tests;
 mod overlay_directory;
 pub(crate) mod pending;
-#[cfg(feature = "production-coverage")]
+#[cfg(feature = "bench-internals")]
 mod prefilter_benchmark;
 mod restricted;
 mod split;
@@ -81,7 +81,7 @@ pub(crate) use cache::{FtsCache, FtsCacheConfig, OpenedTextSplit};
 pub use cache::{FtsCacheStateSnapshot, FtsWarmSummary};
 use caching_directory::CachingDirectory;
 use hot_directory::HotDirectory;
-#[cfg(feature = "production-coverage")]
+#[cfg(feature = "bench-internals")]
 pub use prefilter_benchmark::{
     FtsPrefilterBenchmarkCase, FtsPrefilterBenchmarkFixture, FtsPrefilterBenchmarkLayout,
     FtsPrefilterBenchmarkSample, FtsPrefilterBenchmarkStrategy,
@@ -3195,7 +3195,9 @@ mod tests {
     /// Long distinct terms that share a stem in pairs keep the block index
     /// from shortening its keys, random two-byte and case-expanding characters
     /// resist compression and grow when lowercased, and many short or
-    /// repeated terms stress postings, positions, and the fixed layout.
+    /// repeated terms stress postings, positions, and the fixed layout. Each
+    /// regime's ratio of split to charge depends on its term shape, not its
+    /// term count, so a few stems of each shape reach it.
     #[test]
     fn single_document_splits_stay_within_the_analysis_bound() {
         let mut state = 7_u64;
@@ -3224,13 +3226,13 @@ mod tests {
             "a".to_string(),
             " ".to_string(),
             "x".repeat(MAX_TOKEN_LEN + 1),
-            paired(&two_byte, 10, 30_000),
-            paired(&two_byte, 50, 4_000),
-            paired(&expanding, 50, 4_000),
-            paired(&printable, 200, 1_000),
-            paired(&printable, 5_000, 3),
-            "a ".repeat(100_000),
-            (0..100_000)
+            paired(&two_byte, 3, 30_000),
+            paired(&two_byte, 10, 4_000),
+            paired(&expanding, 10, 4_000),
+            paired(&printable, 50, 1_000),
+            paired(&printable, 2_000, 3),
+            "a ".repeat(20_000),
+            (0..20_000)
                 .map(|index| format!("t{} ", (index * 7_919) % 4_000))
                 .collect(),
         ];
@@ -3240,30 +3242,32 @@ mod tests {
             TextAnalyzerKind::StandardStemEn,
             TextAnalyzerKind::WhitespaceLowercase,
         ] {
-            for positions in [false, true] {
-                let definition = TextIndexDefinition::new_node("Doc", "body")
-                    .expect("test text definition is valid")
-                    .with_analyzer(analyzer)
-                    .with_positions_enabled(positions);
-                for text in &documents {
-                    let (_, totals) = analyze_text_within_budget(
-                        analyzer,
-                        text,
-                        &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
-                    )
-                    .expect("an unbounded budget admits every document");
-                    let analyzed = analyze_text_for_indexing(
-                        analyzer,
-                        text.clone(),
-                        &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
-                    )
-                    .expect("an unbounded budget admits every document");
+            for text in &documents {
+                // Analysis does not depend on positions, so each document is
+                // analyzed once per analyzer.
+                let (_, totals) = analyze_text_within_budget(
+                    analyzer,
+                    text,
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .expect("an unbounded budget admits every document");
+                let analyzed = analyze_text_for_indexing(
+                    analyzer,
+                    text.clone(),
+                    &mut TextAnalysisMemoryBudget::new(NonZeroU64::MAX),
+                )
+                .expect("an unbounded budget admits every document");
+                for positions in [false, true] {
+                    let definition = TextIndexDefinition::new_node("Doc", "body")
+                        .expect("test text definition is valid")
+                        .with_analyzer(analyzer)
+                        .with_positions_enabled(positions);
                     let (payload, _, _) = build_analyzed_documents_as_split(
                         &definition,
                         vec![AnalyzedTextDocumentInput {
                             entity_id: u64::MAX,
                             logical_version: u64::MAX,
-                            analyzed,
+                            analyzed: analyzed.clone(),
                         }],
                     )
                     .expect("build one-document split")

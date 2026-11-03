@@ -221,84 +221,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skills_install_args_automatic_global() {
-        let args = skills_install_args(true, true);
-        assert_eq!(args[0], "-y");
-        assert!(args.contains(&"skills"));
-        assert!(args.contains(&"add"));
-        assert!(args.contains(&"HelixDB/skills"));
-        assert!(args.contains(&"--skill"));
-        assert!(args.contains(&"*"));
-        assert_eq!(args.last(), Some(&"-g"));
-    }
-
-    #[test]
-    fn skills_install_args_automatic_project_local() {
-        let args = skills_install_args(true, false);
-        assert!(!args.contains(&"-g"));
-        assert!(args.contains(&"HelixDB/skills"));
-    }
-
-    #[test]
-    fn skills_install_args_manual_global() {
-        let args = skills_install_args(false, true);
-        // Manual mode skips the -y flags so the user sees CLI prompts.
-        assert!(!args.contains(&"-y"));
-        assert!(!args.contains(&"--skill"));
-        assert!(args.contains(&"-g"));
-    }
-
-    #[test]
-    fn skills_install_args_manual_project_local() {
-        let args = skills_install_args(false, false);
-        assert!(!args.contains(&"-g"));
-        assert!(!args.contains(&"-y"));
-    }
-
-    #[test]
-    fn skills_list_args_global() {
-        let args = skills_list_args(true);
-        assert_eq!(args[0], "-y");
-        assert!(args.contains(&"skills"));
-        assert!(args.contains(&"list"));
-        assert_eq!(args.last(), Some(&"-g"));
-    }
-
-    #[test]
-    fn skills_list_args_project() {
-        let args = skills_list_args(false);
-        assert!(args.contains(&"list"));
-        assert!(!args.contains(&"-g"));
-    }
-
-    #[test]
-    fn mcp_install_args_automatic_global() {
-        let args = mcp_install_args(true, true);
-        assert_eq!(args[0], "-y");
-        assert!(args.contains(&"add-mcp"));
-        assert!(args.contains(&HELIX_DOCS_MCP_URL));
-        assert!(args.contains(&"helixdb-docs"));
-        assert!(args.contains(&"-g"));
-    }
-
-    #[test]
-    fn mcp_install_args_automatic_project_local() {
-        let args = mcp_install_args(true, false);
-        assert!(!args.contains(&"-g"));
-        assert!(args.contains(&HELIX_DOCS_MCP_URL));
-    }
-
-    #[test]
-    fn mcp_install_args_manual_global() {
-        let args = mcp_install_args(false, true);
-        assert!(!args.contains(&"-y"));
-        assert!(args.contains(&"-g"));
-    }
-
-    #[test]
-    fn mcp_install_args_manual_project_local() {
-        let args = mcp_install_args(false, false);
-        assert!(!args.contains(&"-g"));
-        assert!(!args.contains(&"-y"));
+    fn npx_args_follow_setup_mode_and_scope() {
+        let automatic_mcp = [
+            "-y",
+            "add-mcp",
+            HELIX_DOCS_MCP_URL,
+            "--name",
+            "helixdb-docs",
+            "-y",
+        ]
+        .into_iter()
+        .chain(
+            MCP_HTTP_COMPATIBLE_AGENTS
+                .iter()
+                .flat_map(|agent| ["-a", *agent]),
+        )
+        .collect::<Vec<_>>();
+        let global_automatic_mcp = automatic_mcp
+            .iter()
+            .copied()
+            .chain(["-g"])
+            .collect::<Vec<_>>();
+        for (args, expected) in [
+            (
+                skills_install_args(true, true),
+                vec![
+                    "-y",
+                    "skills",
+                    "add",
+                    "HelixDB/skills",
+                    "--skill",
+                    "*",
+                    "-y",
+                    "-g",
+                ],
+            ),
+            (
+                skills_install_args(true, false),
+                vec![
+                    "-y",
+                    "skills",
+                    "add",
+                    "HelixDB/skills",
+                    "--skill",
+                    "*",
+                    "-y",
+                ],
+            ),
+            // Manual mode skips the -y flags so the user sees CLI prompts.
+            (
+                skills_install_args(false, true),
+                vec!["skills", "add", "HelixDB/skills", "-g"],
+            ),
+            (
+                skills_install_args(false, false),
+                vec!["skills", "add", "HelixDB/skills"],
+            ),
+            (skills_list_args(true), vec!["-y", "skills", "list", "-g"]),
+            (skills_list_args(false), vec!["-y", "skills", "list"]),
+            (mcp_install_args(true, true), global_automatic_mcp),
+            (mcp_install_args(true, false), automatic_mcp),
+            (
+                mcp_install_args(false, true),
+                vec![
+                    "add-mcp",
+                    HELIX_DOCS_MCP_URL,
+                    "--name",
+                    "helixdb-docs",
+                    "-g",
+                ],
+            ),
+            (
+                mcp_install_args(false, false),
+                vec!["add-mcp", HELIX_DOCS_MCP_URL, "--name", "helixdb-docs"],
+            ),
+        ] {
+            assert_eq!(args, expected);
+        }
     }
 }

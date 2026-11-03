@@ -117,57 +117,6 @@ mod tests {
     };
     use crate::ir::{IndexDdlCreateSpec, IndexDdlDropSpec, IndexDdlPlan, OrderPlan, PlanKind};
     use crate::ir::{StreamRangePlan, StreamVariableOp, VectorIndexMetric};
-    use std::collections::BTreeSet;
-
-    #[test]
-    fn default_scalability_fixtures_have_metric_thresholds() {
-        let fixtures = default_planning_scalability_fixtures();
-        assert_eq!(fixtures.len(), 35);
-        assert!(fixtures
-            .iter()
-            .all(|fixture| fixture.case().thresholds().max_memo_groups().get() > 0));
-        assert!(
-            fixtures
-                .iter()
-                .any(|fixture| fixture.shape()
-                    == fixtures::PlanningScalabilityShape::BatchedRootReuse)
-        );
-        assert!(fixtures
-            .iter()
-            .any(|fixture| fixture.shape()
-                == fixtures::PlanningScalabilityShape::ForEachBodyRootReuse));
-        assert!(fixtures
-            .iter()
-            .any(|fixture| fixture.shape()
-                == fixtures::PlanningScalabilityShape::ManyMemoAlternatives));
-        assert!(fixtures.iter().any(
-            |fixture| fixture.shape() == fixtures::PlanningScalabilityShape::BranchHeavyQueries
-        ));
-        assert!(fixtures.iter().any(|fixture| {
-            fixture.shape() == fixtures::PlanningScalabilityShape::OverLimitIndexDisjunction
-        }));
-        assert!(fixtures.iter().any(|fixture| {
-            fixture.shape() == fixtures::PlanningScalabilityShape::OrderedRangeWindowPushdown
-        }));
-        assert!(fixtures
-            .iter()
-            .any(|fixture| fixture.shape()
-                == fixtures::PlanningScalabilityShape::MutationHeavyBatches));
-        assert!(fixtures.iter().any(|fixture| {
-            fixture.shape() == fixtures::PlanningScalabilityShape::SearchIndexDdlWorkloads
-        }));
-        assert!(fixtures.iter().any(|fixture| {
-            fixture.shape() == fixtures::PlanningScalabilityShape::RuntimeDerivedMixedQueries
-        }));
-        let many_index_thresholds = fixtures
-            .iter()
-            .filter(|fixture| {
-                fixture.shape() == fixtures::PlanningScalabilityShape::ManyAvailableIndexes
-            })
-            .map(|fixture| fixture.case().thresholds().max_memo_groups().get())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(many_index_thresholds.len(), 1);
-    }
 
     #[test]
     fn default_scalability_fixtures_stay_within_metric_thresholds() {

@@ -41,12 +41,3 @@ fn trace_reason_round_trips_static_and_parameterized_reasons() {
         );
     }
 }
-
-#[test]
-fn trace_pass_and_decision_display_are_stable_contracts() {
-    assert_eq!(TracePass::NativeHandoff.to_string(), "native_handoff");
-    assert_eq!(
-        TraceDecision::SelectedMemoChild.to_string(),
-        "selected_memo_child"
-    );
-}

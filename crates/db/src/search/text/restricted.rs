@@ -69,7 +69,7 @@ impl RestrictedTextCandidatesBuilder {
 
 impl RestrictedTextCandidates {
     /// Canonicalizes duplicate traversal rows into one exact bounded bitmap.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn from_ids(ids: impl IntoIterator<Item = u64>) -> Result<Self, HelixDbError> {
         let mut builder = RestrictedTextCandidatesBuilder::new();
         for id in ids {

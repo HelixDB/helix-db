@@ -305,9 +305,9 @@ impl Default for SimHasherRegistry {
     }
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../../tests/production_support/vector/simhash_registry.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/simhash_registry.rs"]
+mod contract_tests;
 
 /// Failure to validate limits, reserve a candidate, or construct projections.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

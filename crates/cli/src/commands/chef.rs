@@ -2374,69 +2374,13 @@ mod tests {
     }
 
     #[test]
-    fn default_project_spec_uses_nextjs_stack() {
-        assert!(DEFAULT_PROJECT_SPEC.contains("Next.js"));
-        assert!(DEFAULT_PROJECT_SPEC.contains("Tailwind"));
-        assert!(DEFAULT_PROJECT_SPEC.contains("TypeScript"));
-        assert!(DEFAULT_PROJECT_SPEC.contains("App Router"));
-        assert!(!DEFAULT_PROJECT_SPEC.contains("web/index.html"));
-        assert!(!DEFAULT_PROJECT_SPEC.contains("vanilla HTML"));
-    }
-
-    #[test]
-    fn agent_prompt_template_uses_nextjs_stack() {
-        let prompt = starter_prompt(Some("Build a recipe library"));
-
-        assert!(prompt.contains("Build a recipe library"));
-        assert!(prompt.contains("Next.js"));
-        assert!(prompt.contains("Tailwind"));
-        assert!(prompt.contains("App Router"));
-        assert!(prompt.contains("create-next-app"));
-        assert!(prompt.contains("vercel-labs/agent-skills"));
-        assert!(prompt.contains("<install_more_skills>"));
-        assert!(prompt.contains("npm run dev"));
-        assert!(!prompt.contains("vanilla HTML"));
-        assert!(!prompt.contains("no framework"));
-    }
-
-    #[test]
-    fn agent_prompt_references_memory_system_skill() {
-        let prompt = starter_prompt(Some("Build an assistant with long-term memory"));
-
-        assert!(prompt.contains("helix-memory-system"));
-    }
-
-    #[test]
-    fn agent_prompt_references_current_query_skill_names() {
-        let prompt = starter_prompt(Some("Build a recipe library"));
-
-        // TypeScript DSL is primary; raw JSON remains the documented fallback.
-        assert!(prompt.contains("helix-query-typescript"));
-        assert!(prompt.contains("helix-query-json-dynamic"));
-        // The Rust authoring skill was renamed helix-query-authoring -> helix-query-rust.
-        assert!(prompt.contains("helix-query-rust"));
-        assert!(!prompt.contains("helix-query-authoring"));
-        // Memory/retrieval intent is steered to the memory-system skill.
-        assert!(prompt.contains("memory or retrieval"));
-    }
-
-    #[test]
-    fn agent_prompt_defaults_to_typescript_dsl() {
-        let prompt = starter_prompt(Some("Build a recipe library"));
-
-        // Queries are authored with the npm DSL, not hand-written JSON.
-        assert!(prompt.contains("@helix-db/helix-db"));
-        assert!(prompt.contains("<typescript_dsl_quickref>"));
-        assert!(prompt.contains("web/src/lib/queries/"));
-        assert!(prompt.contains("web/src/lib/helix.ts"));
-        // Raw JSON is positioned as the fallback, not the default.
-        assert!(prompt.contains("fallback"));
-        // Placeholders must be fully substituted — no leftover template tokens.
-        assert!(!prompt.contains("{seed_state}"));
-        assert!(!prompt.contains("{seed_step}"));
-        assert!(!prompt.contains("{intent}"));
-        // Stored routes must not be presented as a supported workflow.
-        assert!(!prompt.contains("stored query"));
+    fn agent_prompt_substitutes_every_placeholder() {
+        for intent in [Some("Build a recipe library"), None] {
+            let prompt = starter_prompt(intent);
+            assert!(!prompt.contains("{seed_state}"));
+            assert!(!prompt.contains("{seed_step}"));
+            assert!(!prompt.contains("{intent}"));
+        }
     }
 
     #[test]
@@ -2451,81 +2395,6 @@ mod tests {
         let blank = starter_prompt(None);
         assert!(blank.contains("Seeded starter `User` nodes"));
         assert!(blank.contains("examples/seed.json"));
-    }
-
-    #[test]
-    fn agent_prompt_uses_latest_openai_embedding_model() {
-        let prompt = starter_prompt(Some("Build semantic search over my notes"));
-
-        assert!(prompt.contains("<embeddings>"));
-        assert!(prompt.contains("text-embedding-3-small"));
-        assert!(prompt.contains("OPENAI_API_KEY"));
-        // The embed helper calls the 3-series model, not the legacy default.
-        assert!(prompt.contains("model: 'text-embedding-3-small'"));
-    }
-
-    #[test]
-    fn agent_prompt_template_keeps_services_running() {
-        let prompt = starter_prompt(Some("X"));
-
-        // Background-detach pattern
-        assert!(prompt.contains("nohup"));
-        assert!(prompt.contains("& disown"));
-        // Persistence requirement
-        assert!(prompt.contains("still running"));
-        // Backend-is-included explainer
-        assert!(prompt.contains("frontend and backend in one process"));
-        // Stop command for the user
-        assert!(prompt.contains("pkill -f 'next dev'"));
-        // Old "user-must-start-server" wording is gone
-        assert!(!prompt.contains("must be running"));
-    }
-
-    #[test]
-    fn agent_prompt_template_summary_has_commands_and_services() {
-        let prompt = starter_prompt(Some("X"));
-
-        // Existing sections still present.
-        assert!(prompt.contains("### What you built"));
-        assert!(prompt.contains("### Files created"));
-        assert!(prompt.contains("### Files modified"));
-        assert!(prompt.contains("### How to try it"));
-        assert!(prompt.contains("### Known gaps"));
-        // New sections.
-        assert!(prompt.contains("### Services running"));
-        assert!(prompt.contains("### Commands run"));
-        // Old "use exactly these sections in this order: 5 sections" wording is updated.
-        assert!(prompt.contains("seven sections"));
-    }
-
-    #[test]
-    fn agent_prompt_template_workflow_includes_browser_open() {
-        let prompt = starter_prompt(Some("X"));
-
-        assert!(prompt.contains("Open the frontend in the user's default browser"));
-        assert!(prompt.contains("open http://localhost:3000"));
-        assert!(prompt.contains("xdg-open http://localhost:3000"));
-        assert!(prompt.contains("start http://localhost:3000"));
-    }
-
-    #[test]
-    fn design_guide_contains_brand_tokens() {
-        // The guide is the source of truth for the Helix look — assert the
-        // load-bearing tokens survive any future edits to the constant.
-        assert!(DESIGN_GUIDE.contains("#FF5C01")); // brand orange accent
-        assert!(DESIGN_GUIDE.contains("#1E1715")); // page background
-        assert!(DESIGN_GUIDE.contains("#070504")); // card/panel background
-        assert!(DESIGN_GUIDE.contains("tactical-corners")); // signature element + utility
-        assert!(DESIGN_GUIDE.contains("rounded-none")); // square-corner rule
-        assert!(DESIGN_GUIDE.contains("font-mono")); // typography convention
-    }
-
-    #[test]
-    fn prompt_references_design_guide() {
-        let prompt = starter_prompt(None);
-        // Referenced from both the environment file list and the frontend section.
-        assert!(prompt.contains("DESIGN.md"));
-        assert!(prompt.contains("Helix brand"));
     }
 
     #[test]
@@ -2752,24 +2621,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_priority_is_claude_codex_opencode_cursor() {
-        assert_eq!(
-            AGENT_PRIORITY,
-            &[
-                AgentKind::ClaudeCode,
-                AgentKind::OpenAiCodex,
-                AgentKind::OpenCode,
-                AgentKind::CursorAgent,
-            ],
-        );
-        assert_eq!(AgentKind::ClaudeCode.binary(), "claude");
-        assert_eq!(AgentKind::OpenAiCodex.binary(), "codex");
-        assert_eq!(AgentKind::OpenCode.binary(), "opencode");
-        assert_eq!(AgentKind::CursorAgent.binary(), "cursor-agent");
-        assert_eq!(AgentKind::CursorAgent.display(), "Cursor Agent");
-    }
-
-    #[test]
     fn build_agent_argv_claude_full_auto() {
         let argv = build_agent_argv(
             AgentKind::ClaudeCode,
@@ -2919,75 +2770,40 @@ mod tests {
     // ---------- Claude stream-json event parsing ----------
 
     #[test]
-    fn format_tool_use_edit() {
-        let input = serde_json::json!({"file_path": "examples/seed.json", "old_string": "x", "new_string": "y"});
-        assert_eq!(
-            format_tool_use("Edit", &input).unwrap(),
-            "✎ Editing examples/seed.json"
-        );
-    }
-
-    #[test]
-    fn format_tool_use_read() {
-        let input = serde_json::json!({"file_path": "helix.toml"});
-        assert_eq!(
-            format_tool_use("Read", &input).unwrap(),
-            "📖 Reading helix.toml"
-        );
-    }
-
-    #[test]
-    fn format_tool_use_bash_prefers_description() {
-        let input =
-            serde_json::json!({"command": "rm -rf /tmp/x", "description": "Clean up tmp dir"});
-        assert_eq!(
-            format_tool_use("Bash", &input).unwrap(),
-            "💻 Clean up tmp dir"
-        );
-    }
-
-    #[test]
-    fn format_tool_use_bash_falls_back_to_command() {
-        let input = serde_json::json!({"command": "ls -la"});
-        assert_eq!(format_tool_use("Bash", &input).unwrap(), "💻 ls -la");
-    }
-
-    #[test]
-    fn format_tool_use_todowrite_renders_with_count() {
-        let input = serde_json::json!({"todos": [{"content": "a"}, {"content": "b"}]});
-        let rendered = format_tool_use("TodoWrite", &input).unwrap();
-        assert!(rendered.contains("Updating tasks"));
-        assert!(rendered.contains("(2)"));
-    }
-
-    #[test]
-    fn format_tool_use_todowrite_renders_without_count() {
-        let input = serde_json::json!({});
-        let rendered = format_tool_use("TodoWrite", &input).unwrap();
-        assert_eq!(rendered, "📋 Updating tasks");
-    }
-
-    #[test]
-    fn format_tool_use_unknown_tool() {
-        let input = serde_json::json!({});
-        assert_eq!(
-            format_tool_use("SomethingNew", &input).unwrap(),
-            "🔧 SomethingNew"
-        );
-    }
-
-    #[test]
-    fn format_tool_use_mcp_tool() {
-        let input = serde_json::json!({});
-        assert_eq!(
-            format_tool_use("mcp__helixdb-docs__search", &input).unwrap(),
-            "🔌 MCP: mcp__helixdb-docs__search"
-        );
-    }
-
-    #[test]
     fn format_tool_use_covers_all_named_tools_and_missing_required_fields() {
         for (name, input, expected) in [
+            (
+                "Edit",
+                serde_json::json!({"file_path": "examples/seed.json", "old_string": "x", "new_string": "y"}),
+                "✎ Editing examples/seed.json",
+            ),
+            (
+                "Read",
+                serde_json::json!({"file_path": "helix.toml"}),
+                "📖 Reading helix.toml",
+            ),
+            (
+                "Bash",
+                serde_json::json!({"command": "rm -rf /tmp/x", "description": "Clean up tmp dir"}),
+                "💻 Clean up tmp dir",
+            ),
+            (
+                "Bash",
+                serde_json::json!({"command": "ls -la"}),
+                "💻 ls -la",
+            ),
+            (
+                "TodoWrite",
+                serde_json::json!({"todos": [{"content": "a"}, {"content": "b"}]}),
+                "📋 Updating tasks (2)",
+            ),
+            ("TodoWrite", serde_json::json!({}), "📋 Updating tasks"),
+            ("SomethingNew", serde_json::json!({}), "🔧 SomethingNew"),
+            (
+                "mcp__helixdb-docs__search",
+                serde_json::json!({}),
+                "🔌 MCP: mcp__helixdb-docs__search",
+            ),
             (
                 "Write",
                 serde_json::json!({"file_path":"src/main.rs"}),

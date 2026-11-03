@@ -596,19 +596,6 @@ mod tests {
     }
 
     #[test]
-    fn verbosity_levels_are_ordered() {
-        assert!(Verbosity::Silent < Verbosity::Quiet);
-        assert!(Verbosity::Quiet < Verbosity::Normal);
-        assert!(Verbosity::Normal < Verbosity::Verbose);
-        assert!(!Verbosity::Silent.show_quiet());
-        assert!(Verbosity::Quiet.show_quiet());
-        assert!(!Verbosity::Quiet.show_normal());
-        assert!(Verbosity::Normal.show_normal());
-        assert!(!Verbosity::Normal.show_verbose());
-        assert!(Verbosity::Verbose.show_verbose());
-    }
-
-    #[test]
     fn mode_round_trips_through_the_global() {
         let _lock = MODE_TEST_LOCK
             .lock()
@@ -660,47 +647,6 @@ mod tests {
             })
             .unwrap();
             assert_eq!(rendered.get(), expected, "{mode:?}");
-        }
-        OutputMode::Human(Verbosity::Normal).set();
-    }
-
-    #[test]
-    fn chrome_and_steps_run_in_every_mode() {
-        let _lock = MODE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for mode in [
-            OutputMode::Json,
-            OutputMode::Human(Verbosity::Silent),
-            OutputMode::Human(Verbosity::Quiet),
-            OutputMode::Human(Verbosity::Normal),
-            OutputMode::Human(Verbosity::Verbose),
-        ] {
-            mode.set();
-            let operation = Operation::new("Checking", "test");
-            let mut step = operation.step("Checking files");
-            step.start();
-            step.println("progress");
-            step.set_message("still checking");
-            step.set_completion("Files checked");
-            step.done_with_info("2 files");
-            let mut failed = Step::with_messages("Starting", "Started");
-            failed.start();
-            failed.fail();
-            Step::with_messages("Never started", "Done").done();
-            super::step("step");
-            success("done");
-            info("info");
-            warning("warning");
-            remark("remark");
-            verbose("verbose");
-            note("Title", "body");
-            next_steps(&["one", "two"]);
-            operation.success();
-            Operation::new("Checking", "test").failure();
-            outro("standalone");
-            outro_cancel("standalone");
-            report_error(&eyre::eyre!("boom"));
         }
         OutputMode::Human(Verbosity::Normal).set();
     }

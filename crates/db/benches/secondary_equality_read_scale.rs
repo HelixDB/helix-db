@@ -2,7 +2,7 @@
 
 use std::num::NonZeroUsize;
 
-use db::production_coverage::{
+use db::bench_internals::{
     SecondaryEqualityHotPathFixture, SecondaryEqualityInsertMode, SecondaryEqualityReadMode,
 };
 use serde::Serialize;
@@ -16,10 +16,10 @@ const READ_OPERATIONS: NonZeroUsize = NonZeroUsize::new(100).expect("read count 
 
 #[derive(Serialize)]
 struct BenchmarkReport {
-    population: db::production_coverage::SecondaryEqualityInsertSample,
-    inspection: db::production_coverage::SecondaryEqualityInspection,
-    read_sequential: db::production_coverage::SecondaryEqualityReadSample,
-    read_concurrent: db::production_coverage::SecondaryEqualityReadSample,
+    population: db::bench_internals::SecondaryEqualityInsertSample,
+    inspection: db::bench_internals::SecondaryEqualityInspection,
+    read_sequential: db::bench_internals::SecondaryEqualityReadSample,
+    read_concurrent: db::bench_internals::SecondaryEqualityReadSample,
 }
 
 fn main() {

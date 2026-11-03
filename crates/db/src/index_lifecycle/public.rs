@@ -63,7 +63,7 @@ pub enum IndexDdlReceipt {
 }
 
 impl IndexDdlReceipt {
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) const fn operation_id(&self) -> Option<IndexOperationId> {
         match self {
             Self::Accepted { operation_id, .. } | Self::ExistingOperation { operation_id } => {

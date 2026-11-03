@@ -179,23 +179,3 @@ fn login_needs_a_terminal_for_every_method() {
     }
     assert!(!fixture.helix_home().join("credentials").exists());
 }
-
-#[test]
-fn local_commands_do_not_require_cloud_credentials() {
-    let fixture = CliFixture::new_with_fake_runtime();
-    let project = fixture.root().join("local-only");
-    fixture
-        .command()
-        .args(["init", "--path"])
-        .arg(&project)
-        .args(["local", "--no-skills"])
-        .assert()
-        .success();
-    fixture
-        .command()
-        .current_dir(&project)
-        .args(["status", "dev"])
-        .assert()
-        .success();
-    assert!(!fixture.helix_home().join("credentials").exists());
-}

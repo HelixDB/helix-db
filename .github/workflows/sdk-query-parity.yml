@@ -57,6 +57,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            bindings/uniffi-bindgen -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
         working-directory: sdks/typescript
       - run: python -m pip install -e './sdks/python[dev]'
@@ -111,6 +117,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            bindings/uniffi-bindgen -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Add Linux compiler swap
         if: runner.os == 'Linux'
         run: |
@@ -170,6 +182,12 @@ jobs:
           go-version: "1.24.x"
           cache: false
       - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            bindings/uniffi-bindgen -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/download-artifact@v5
         with:
           name: embedded-go-generator-linux-arm
@@ -215,6 +233,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy, rustfmt, llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            bindings/uniffi-bindgen -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
         working-directory: sdks/typescript
       - run: npm run test:coverage

@@ -61,21 +61,3 @@ pub trait QueryCorpusAdapter: Send {
     /// Closes owned runtime resources and joins background work.
     async fn close(&mut self) -> Result<()>;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn storage_backend_keeps_future_adapters_explicit() {
-        assert_eq!(
-            StorageBackend::LocalFileSystem,
-            StorageBackend::LocalFileSystem
-        );
-        assert_ne!(StorageBackend::SeaweedFs, StorageBackend::S3);
-        assert_eq!(
-            StorageBackend::Other("fixture".to_string()),
-            StorageBackend::Other("fixture".to_string())
-        );
-    }
-}

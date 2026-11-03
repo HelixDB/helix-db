@@ -136,35 +136,8 @@ fn init_and_add_generate_expected_project_files() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn documented_quickstart_runs_against_an_isolated_fixture() {
-    const QUICKSTART: &str =
-        include_str!("../../../docs/database/helix-db/start-here/quickstart.mdx");
-    let documented_commands: Vec<&str> = QUICKSTART
-        .lines()
-        .filter(|line| line.starts_with("helix "))
-        .collect();
-    assert_eq!(
-        documented_commands,
-        [
-            "helix init local",
-            "helix start dev",
-            "helix query dev --file examples/request.json",
-            "helix stop dev",
-        ]
-    );
-    assert!(QUICKSTART.contains("- A terminal on macOS or Linux, or PowerShell on Windows"));
-    assert!(QUICKSTART.contains(
-        "irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex"
-    ));
-    assert!(QUICKSTART.contains("container_runtime = \"podman\""));
-    for obsolete_claim in [
-        "--lang",
-        "helix start local",
-        "queries.rs",
-        "helix dashboard",
-    ] {
-        assert!(!QUICKSTART.contains(obsolete_claim), "{obsolete_claim}");
-    }
-
+    // `docs/scripts/check-docs.mjs` pins the quickstart's commands to the
+    // ones this test runs.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/healthz"))
@@ -393,6 +366,10 @@ fn local_runtime_commands_have_cross_platform_no_daemon_smoke_coverage() {
         .unwrap_or_default();
     assert!(dev.contains("local"), "{status}");
     assert!(status.contains("not created"));
+    assert!(
+        !fixture.helix_home().join("credentials").exists(),
+        "local commands never create Cloud credentials"
+    );
 
     let logs = stdout(
         fixture

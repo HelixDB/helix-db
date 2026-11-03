@@ -223,7 +223,6 @@ mod tests {
             .get_file_handle(Path::new("segment.term"))
             .expect("file handle");
         assert_eq!(file_handle.len(), 16);
-        assert!(format!("{file_handle:?}").contains("StorageDirectoryFileHandle"));
         assert_eq!(
             file_handle
                 .read_bytes_async(2..6)
@@ -245,7 +244,6 @@ mod tests {
             .expect("missing exists succeeds"));
         assert!(directory.exists(Path::new("broken.term")).is_err());
         assert!(directory.atomic_read(Path::new("segment.term")).is_err());
-        assert!(format!("{directory:?}").contains("StorageDirectory"));
         let _watch = directory
             .watch(WatchCallback::new(|| {}))
             .expect("watch handle");

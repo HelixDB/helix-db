@@ -46,7 +46,7 @@ use crate::error::HelixDbError;
 use crate::index_lifecycle::{ValidatedVectorIndexDefinition, VectorPhysicalIndexId};
 
 // Legacy item validation delegates metric semantics to the central decoder.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 use super::index_id_from_name;
 use super::{
     decode_item_borrowed, decode_metadata, encode_metadata, Distance, MeasuredVectorTransaction,
@@ -172,7 +172,7 @@ impl VectorRowKeyspace {
     /// Derivation inside this constructor, together with private fields,
     /// prevents a full name and its persisted `u64` namespace from disagreeing
     /// at any storage call site.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn new(physical_name: String, scope: DataScope) -> Self {
         let index_id = index_id_from_name(&physical_name);
         Self {
@@ -1857,7 +1857,7 @@ where
     ///
     /// Absence still charges the complete typed lookup key. The operation is
     /// read-only and does not decode or rewrite the stored value.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn metadata_input_bytes(&self) -> Result<u64, HelixDbError> {
         let key = self
             .keyspace
@@ -2013,7 +2013,7 @@ where
     ///
     /// The opaque payload is returned only to the item-decoding/cache boundary;
     /// callers cannot construct or submit its physical key.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn upper_vector_row(
         &self,
         node_id: NodeId,
@@ -2092,7 +2092,7 @@ where
     /// iterator can cover a contiguous SimHash block without fetching vectors.
     /// Every returned marker and key is validated because a directory-capable
     /// generation promises that this row family is complete and well formed.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn simhash_directory_window(
         &self,
         min_order_code: u64,
@@ -2712,7 +2712,7 @@ impl<'a, 'txn> VectorWriteRows<'a, 'txn> {
     /// The exhaustive lane list covers core, hot, and layer-0 keyspaces even
     /// when metadata is absent. Adding a new `VectorStorageLane` therefore
     /// requires updating its closed `ALL` set before cleanup can pass review.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn delete_all(&self) -> Result<(), HelixDbError> {
         for lane in VectorStorageLane::ALL {
             let prefix = self.keyspace.key(lane.prefix_key(self.keyspace.index_id()));
@@ -2725,9 +2725,9 @@ impl<'a, 'txn> VectorWriteRows<'a, 'txn> {
     }
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../../tests/production_support/vector/storage.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/storage.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3819,10 +3819,5 @@ mod tests {
             }
         ));
         db.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn production_storage_contract_matrix_runs_in_workspace_tests() {
-        production_contracts::run().await;
     }
 }

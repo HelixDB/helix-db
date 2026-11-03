@@ -1,4 +1,4 @@
-//! Feature-gated vector benchmark support.
+//! Vector benchmark support compiled only with `bench-internals`.
 
 mod batch;
 mod telemetry;

@@ -117,7 +117,7 @@ impl SimHashCache {
     }
 
     /// Creates a scoped cache after reserving its descriptor-bound projection table.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn new_scoped(index_id: u64, dimension: usize, tenant_scope: DataScope) -> Self {
         Self::try_new_scoped(index_id, dimension, tenant_scope)
             .expect("SimHash cache dimension must fit the configured registry")
@@ -290,9 +290,9 @@ impl SimHashCache {
     }
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../../tests/production_support/vector/simhash.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/simhash.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {

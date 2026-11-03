@@ -216,7 +216,7 @@ impl<'db> ExecutionContext<'db> {
 
     /// Preserves the production-linked conservative barrier oracle.
     #[allow(dead_code)]
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::execution::interpreter) async fn flush_active_index_mutations(
         &mut self,
     ) -> Result<()> {

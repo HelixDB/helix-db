@@ -1,0 +1,68 @@
+name: Vector kernels
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - ".github/workflows/vector-kernels.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/db/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vector-kernels-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  architecture-kernels:
+    name: ${{ matrix.kernel }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: x86_64 scalar reference
+            runner: ubuntu-24.04
+            rustflags: -C target-cpu=x86-64
+            feature-args: --features force-vector-scalar-kernel
+          - kernel: x86_64 SSE4.1
+            runner: ubuntu-24.04
+            rustflags: -C target-cpu=x86-64 -C target-feature=+sse4.1,-avx,-avx2,-fma
+            feature-args: ""
+          - kernel: x86_64 AVX FMA
+            runner: ubuntu-24.04
+            rustflags: -C target-cpu=x86-64 -C target-feature=+sse4.1,+avx,+avx2,+fma
+            feature-args: ""
+          - kernel: aarch64 scalar reference
+            runner: ubuntu-24.04-arm
+            rustflags: ""
+            feature-args: --features force-vector-scalar-kernel
+          - kernel: aarch64 NEON
+            runner: ubuntu-24.04-arm
+            rustflags: -C target-feature=+neon
+            feature-args: ""
+    runs-on: ${{ matrix.runner }}
+    # Builds the library's unit-test binary before the one kernel test runs.
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Exercise scalar and native kernels directly
+        # `--exact` selects the one kernel contract; fail if it was renamed
+        # away rather than pass after running nothing.
+        run: |
+          cargo test -p db --lib ${{ matrix.feature-args }} -- --exact \
+            search::vector::distance_neighbor_tests::distance_neighbors_exercise_metric_and_graph_invariants \
+            | tee kernel-test.log
+          grep -q "test result: ok. 1 passed" kernel-test.log

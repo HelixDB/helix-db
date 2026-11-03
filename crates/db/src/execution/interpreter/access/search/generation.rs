@@ -170,35 +170,35 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    resolve_vector_generation_in_view::<D>(
-                        self,
-                        reader.as_ref(),
-                        self.tenant_scope,
-                        &requested,
-                        partition,
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        resolve_vector_generation_in_view::<D>(
+                            self,
+                            reader.as_ref(),
+                            self.tenant_scope,
+                            &requested,
+                            partition,
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        resolve_vector_generation_in_view::<D>(
+                            self,
+                            writer.db(),
+                            self.tenant_scope,
+                            &requested,
+                            partition,
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    resolve_vector_generation_in_view::<D>(
-                        self,
-                        writer.db(),
-                        self.tenant_scope,
-                        &requested,
-                        partition,
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "vector generation resolution escaped its request read view".to_string(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "vector generation resolution escaped its request read view".to_string(),
+            )),
+        )
     }
 
     /// Resolves one text generation from active canonical state.
@@ -257,35 +257,35 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    resolve_text_generation_in_view(
-                        self,
-                        reader.as_ref(),
-                        self.tenant_scope,
-                        requested,
-                        partition,
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        resolve_text_generation_in_view(
+                            self,
+                            reader.as_ref(),
+                            self.tenant_scope,
+                            requested,
+                            partition,
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        resolve_text_generation_in_view(
+                            self,
+                            writer.db(),
+                            self.tenant_scope,
+                            requested,
+                            partition,
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    resolve_text_generation_in_view(
-                        self,
-                        writer.db(),
-                        self.tenant_scope,
-                        requested,
-                        partition,
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "text generation resolution escaped its request read view".to_string(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "text generation resolution escaped its request read view".to_string(),
+            )),
+        )
     }
 }
 

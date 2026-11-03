@@ -68,23 +68,10 @@ fn scoped_property_direction_key(
     .ok_or_else(|| ConfigError::new("secondary index label and property are required"))
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 fn scoped_property_key_from_storage(property: &str) -> Option<catalog::ScopedPropertyKey> {
     let (label, property) = split_scoped_secondary_index_property(property)?;
     catalog::ScopedPropertyKey::try_new(label, property)
-}
-
-#[cfg(test)]
-fn scoped_property_direction_key_from_storage(
-    property: &str,
-    direction: RangeIndexDirection,
-) -> Option<catalog::ScopedPropertyDirectionKey> {
-    let (label, property) = split_scoped_secondary_index_property(property)?;
-    catalog::ScopedPropertyDirectionKey::try_new(
-        label,
-        property,
-        planner_range_direction(direction),
-    )
 }
 
 #[inline]
@@ -987,69 +974,6 @@ impl RuntimeIndexCatalog {
         snapshot
     }
 
-    /// Iterate label-scoped node equality index keys.
-    #[cfg(test)]
-    pub fn node_equality_indexes(&self) -> impl Iterator<Item = String> + '_ {
-        self.node_equality
-            .keys()
-            .map(|key| scoped_secondary_index_property(key.label.as_ref(), key.property.as_ref()))
-    }
-
-    /// Iterate label-scoped unique node equality index keys.
-    #[cfg(test)]
-    pub fn node_unique_equality_indexes(&self) -> impl Iterator<Item = String> + '_ {
-        self.node_equality
-            .iter()
-            .filter(|(_key, uniqueness)| **uniqueness == catalog::IndexUniqueness::Unique)
-            .map(|(key, _uniqueness)| {
-                scoped_secondary_index_property(key.label.as_ref(), key.property.as_ref())
-            })
-    }
-
-    /// Iterate label-scoped node ascending range index keys.
-    #[cfg(test)]
-    pub fn node_range_indexes(&self) -> impl Iterator<Item = String> + '_ {
-        self.node_range
-            .iter()
-            .filter(|key| key.direction == PlannerRangeIndexDirection::Asc)
-            .map(|key| scoped_secondary_index_property(key.label.as_ref(), key.property.as_ref()))
-    }
-
-    /// Iterate label-scoped node descending range index keys.
-    #[cfg(test)]
-    pub fn node_range_desc_indexes(&self) -> impl Iterator<Item = String> + '_ {
-        self.node_range
-            .iter()
-            .filter(|key| key.direction == PlannerRangeIndexDirection::Desc)
-            .map(|key| scoped_secondary_index_property(key.label.as_ref(), key.property.as_ref()))
-    }
-
-    /// Iterate label-scoped edge equality index keys.
-    #[cfg(test)]
-    pub fn edge_equality_indexes(&self) -> impl Iterator<Item = String> + '_ {
-        self.edge_equality
-            .iter()
-            .map(|key| scoped_secondary_index_property(key.label.as_ref(), key.property.as_ref()))
-    }
-
-    /// Iterate label-scoped edge ascending range index keys.
-    #[cfg(test)]
-    pub fn edge_range_indexes(&self) -> impl Iterator<Item = String> + '_ {
-        self.edge_range
-            .iter()
-            .filter(|key| key.direction == PlannerRangeIndexDirection::Asc)
-            .map(|key| scoped_secondary_index_property(key.label.as_ref(), key.property.as_ref()))
-    }
-
-    /// Iterate label-scoped edge descending range index keys.
-    #[cfg(test)]
-    pub fn edge_range_desc_indexes(&self) -> impl Iterator<Item = String> + '_ {
-        self.edge_range
-            .iter()
-            .filter(|key| key.direction == PlannerRangeIndexDirection::Desc)
-            .map(|key| scoped_secondary_index_property(key.label.as_ref(), key.property.as_ref()))
-    }
-
     /// Iterate runtime vector index definitions.
     pub fn vector_indexes(&self) -> impl Iterator<Item = &VectorIndexDefinition> {
         self.vector_indexes.iter()
@@ -1061,76 +985,12 @@ impl RuntimeIndexCatalog {
     }
 
     /// Check an already-scoped node equality key.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub fn contains_node_equality_scoped(&self, scoped: &str) -> bool {
         let Some(key) = scoped_property_key_from_storage(scoped) else {
             return false;
         };
         self.node_equality.contains_key(&key)
-    }
-
-    /// Check an already-scoped unique node equality key.
-    #[cfg(test)]
-    pub fn contains_node_unique_equality_scoped(&self, scoped: &str) -> bool {
-        let Some(key) = scoped_property_key_from_storage(scoped) else {
-            return false;
-        };
-        self.node_equality
-            .get(&key)
-            .is_some_and(|uniqueness| *uniqueness == catalog::IndexUniqueness::Unique)
-    }
-
-    /// Check an already-scoped node ascending range key.
-    #[cfg(test)]
-    pub fn contains_node_range_scoped(&self, scoped: &str) -> bool {
-        let Some(key) =
-            scoped_property_direction_key_from_storage(scoped, RangeIndexDirection::Asc)
-        else {
-            return false;
-        };
-        self.node_range.contains(&key)
-    }
-
-    /// Check an already-scoped node descending range key.
-    #[cfg(test)]
-    pub fn contains_node_range_desc_scoped(&self, scoped: &str) -> bool {
-        let Some(key) =
-            scoped_property_direction_key_from_storage(scoped, RangeIndexDirection::Desc)
-        else {
-            return false;
-        };
-        self.node_range.contains(&key)
-    }
-
-    /// Check an already-scoped edge equality key.
-    #[cfg(test)]
-    pub fn contains_edge_equality_scoped(&self, scoped: &str) -> bool {
-        let Some(key) = scoped_property_key_from_storage(scoped) else {
-            return false;
-        };
-        self.edge_equality.contains(&key)
-    }
-
-    /// Check an already-scoped edge ascending range key.
-    #[cfg(test)]
-    pub fn contains_edge_range_scoped(&self, scoped: &str) -> bool {
-        let Some(key) =
-            scoped_property_direction_key_from_storage(scoped, RangeIndexDirection::Asc)
-        else {
-            return false;
-        };
-        self.edge_range.contains(&key)
-    }
-
-    /// Check an already-scoped edge descending range key.
-    #[cfg(test)]
-    pub fn contains_edge_range_desc_scoped(&self, scoped: &str) -> bool {
-        let Some(key) =
-            scoped_property_direction_key_from_storage(scoped, RangeIndexDirection::Desc)
-        else {
-            return false;
-        };
-        self.edge_range.contains(&key)
     }
 
     /// Check if a label-scoped node property has an equality index.

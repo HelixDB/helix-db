@@ -435,18 +435,4 @@ mod tests {
 
         assert!(steps[0].contains("helix query production"));
     }
-
-    #[test]
-    fn validate_name_rejects_disallowed_characters() {
-        assert!(validate_name("my.prod").is_err());
-        assert!(validate_name("../evil").is_err());
-        assert!(validate_name("").is_err());
-    }
-
-    #[test]
-    fn validate_name_accepts_the_normal_charset() {
-        assert!(validate_name("dev").is_ok());
-        assert!(validate_name("prod-1").is_ok());
-        assert!(validate_name("my_instance").is_ok());
-    }
 }

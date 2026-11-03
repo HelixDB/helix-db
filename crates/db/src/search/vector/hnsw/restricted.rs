@@ -8,16 +8,16 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-scale"))]
 use std::future::Future;
 #[cfg(feature = "production-scale")]
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-scale"))]
 use std::sync::Arc;
 use std::sync::OnceLock;
 
 use futures::future::try_join_all;
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-scale"))]
 use parking_lot::Mutex;
 use roaring::RoaringTreemap;
 use slatedb::DbReadOps;
@@ -192,13 +192,13 @@ pub(crate) struct RestrictedSearchStats {
     pub(crate) distance_computations: usize,
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-scale"))]
 tokio::task_local! {
     static RESTRICTED_SEARCH_OBSERVER: Arc<Mutex<Option<RestrictedSearchStats>>>;
 }
 
 /// Runs one future with task-local capture of its restricted-search counters.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-scale"))]
 pub(crate) async fn observe_restricted_search<F>(
     future: F,
 ) -> (F::Output, Option<RestrictedSearchStats>)
@@ -213,7 +213,7 @@ where
     (output, stats)
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-scale"))]
 fn record_restricted_search(stats: &RestrictedSearchStats) {
     let _ = RESTRICTED_SEARCH_OBSERVER.try_with(|observation| {
         *observation.lock() = Some(stats.clone());
@@ -625,7 +625,7 @@ impl RestrictedVectorCandidates {
         }
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn iter(&self) -> impl Iterator<Item = NodeId> + '_ {
         match self {
             Self::Empty => None.into_iter().flatten(),
@@ -634,7 +634,7 @@ impl RestrictedVectorCandidates {
     }
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 fn restricted_execution_plan<'a>(
     candidates: &'a NonEmptyCandidateSet,
     dimension: usize,
@@ -651,7 +651,7 @@ fn restricted_execution_plan<'a>(
     )
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 fn restricted_execution_plan_with_beam_multiplier<'a>(
     candidates: &'a NonEmptyCandidateSet,
     dimension: usize,
@@ -738,12 +738,12 @@ impl<D: Distance> VectorIndex<D> {
             vector_bytes = stats.vector_bytes,
             "restricted vector search"
         );
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(any(test, feature = "production-scale"))]
         record_restricted_search(&stats);
         Ok(results)
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn search_restricted_with_stats(
         &self,
         read: &(impl DbReadOps + Send + Sync),
@@ -1463,12 +1463,9 @@ impl<D: Distance> VectorIndex<D> {
     }
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../../tests/production_support/vector/restricted.rs"]
-mod contracts;
-
-#[cfg(feature = "production-coverage")]
-pub(crate) use contracts::run as run_production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/restricted.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {

@@ -180,13 +180,11 @@ mod tests {
         ram.atomic_write(path, b"abcdefghijkl")?;
         let proxy = DebugProxyDirectory::wrap(ram);
 
-        assert_eq!(format!("{proxy:?}"), "DebugProxyDirectory");
         assert!(proxy.exists(path)?);
         assert_eq!(proxy.atomic_read(path)?, b"abcdefghijkl");
 
         let handle = proxy.get_file_handle(path)?;
         assert_eq!(handle.len(), 12);
-        assert!(format!("{handle:?}").contains("DebugProxyFileHandle"));
         assert_eq!(handle.read_bytes(2..5)?.as_slice(), b"cde");
 
         let slice = proxy.open_read(path)?;

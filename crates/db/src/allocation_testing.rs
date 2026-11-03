@@ -11,6 +11,19 @@ pub(crate) struct Count {
     /// should use the cumulative request counters above.
     pub peak_bytes: usize,
     live_bytes: i128,
+    /// Net live bytes at glibc's chunk size (the server image's allocator):
+    /// each request plus an 8-byte header, rounded up to 16, at least 32. A
+    /// reallocation moves it by the chunk difference in one step, so its peak
+    /// excludes old/new overlap.
+    pub chunk_live_bytes: i128,
+    /// Peak of [`Self::chunk_live_bytes`] within the observation.
+    pub chunk_peak_bytes: i128,
+}
+
+/// glibc's chunk for a request on 64-bit targets.
+const fn chunk(size: usize) -> i128 {
+    let chunk = (size + 8 + 15) & !15;
+    (if chunk < 32 { 32 } else { chunk }) as i128
 }
 
 thread_local! {
@@ -20,27 +33,22 @@ struct ObservedAllocator;
 #[global_allocator]
 static ALLOCATOR: ObservedAllocator = ObservedAllocator;
 
-fn allocated(bytes: usize) {
+fn record(update: impl FnOnce(&mut Count)) {
     let _ = COUNT.try_with(|cell| {
         let Some(mut count) = cell.get() else {
             return;
         };
-        count.allocations = count.allocations.saturating_add(1);
-        count.bytes = count.bytes.saturating_add(bytes);
-        count.live_bytes += bytes as i128;
-        count.peak_bytes = count.peak_bytes.max(count.live_bytes.max(0) as usize);
+        update(&mut count);
+        count.chunk_peak_bytes = count.chunk_peak_bytes.max(count.chunk_live_bytes);
         cell.set(Some(count));
     });
 }
 
-fn released(bytes: usize) {
-    let _ = COUNT.try_with(|cell| {
-        let Some(mut count) = cell.get() else {
-            return;
-        };
-        count.live_bytes -= bytes as i128;
-        cell.set(Some(count));
-    });
+fn allocated(count: &mut Count, bytes: usize) {
+    count.allocations = count.allocations.saturating_add(1);
+    count.bytes = count.bytes.saturating_add(bytes);
+    count.live_bytes += bytes as i128;
+    count.peak_bytes = count.peak_bytes.max(count.live_bytes.max(0) as usize);
 }
 
 // SAFETY: All allocation operations delegate unchanged valid pointers/layouts
@@ -50,7 +58,10 @@ unsafe impl alloc::GlobalAlloc for ObservedAllocator {
         // SAFETY: The allocator caller supplies a valid layout.
         let pointer = unsafe { alloc::System.alloc(layout) };
         if !pointer.is_null() {
-            allocated(layout.size());
+            record(|count| {
+                allocated(count, layout.size());
+                count.chunk_live_bytes += chunk(layout.size());
+            });
         }
         pointer
     }
@@ -58,7 +69,10 @@ unsafe impl alloc::GlobalAlloc for ObservedAllocator {
         // SAFETY: The allocator caller supplies a valid layout.
         let pointer = unsafe { alloc::System.alloc_zeroed(layout) };
         if !pointer.is_null() {
-            allocated(layout.size());
+            record(|count| {
+                allocated(count, layout.size());
+                count.chunk_live_bytes += chunk(layout.size());
+            });
         }
         pointer
     }
@@ -66,13 +80,19 @@ unsafe impl alloc::GlobalAlloc for ObservedAllocator {
         // SAFETY: Forward the original allocation and valid requested size.
         let next = unsafe { alloc::System.realloc(pointer, layout, size) };
         if !next.is_null() {
-            allocated(size);
-            released(layout.size());
+            record(|count| {
+                allocated(count, size);
+                count.live_bytes -= layout.size() as i128;
+                count.chunk_live_bytes += chunk(size) - chunk(layout.size());
+            });
         }
         next
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: alloc::Layout) {
-        released(layout.size());
+        record(|count| {
+            count.live_bytes -= layout.size() as i128;
+            count.chunk_live_bytes -= chunk(layout.size());
+        });
         // SAFETY: Pointer and layout remain those of their original allocation.
         unsafe { alloc::System.dealloc(pointer, layout) };
     }
@@ -111,4 +131,8 @@ fn owned_allocation_peaks_include_reallocation_overlap_and_release() {
     assert_eq!(count.bytes, 64 + 128 + 32);
     assert_eq!(count.peak_bytes, 64 + 128);
     assert_eq!(count.live_bytes, 0);
+    // 64 B and 32 B requests take 80 B and 48 B chunks; growing to 128 B
+    // moves straight to a 144 B chunk without counting both buffers.
+    assert_eq!(count.chunk_peak_bytes, 144);
+    assert_eq!(count.chunk_live_bytes, 0);
 }
