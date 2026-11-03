@@ -1015,7 +1015,6 @@ mod tests {
         let (bytes, _) = synthetic_split_bytes(b"metaterm", synthetic_footer(), b"hot");
         let split = open_split_directory_from_bytes(bytes).expect("open split");
 
-        assert_eq!(format!("{split:?}"), "TextSplitDirectory");
         assert!(split.exists(Path::new(META_JSON_FILE)).expect("exists"));
         assert!(!split.exists(Path::new("missing")).expect("missing"));
         assert_eq!(

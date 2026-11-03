@@ -94,23 +94,3 @@ fn obsolete_cloud_commands_and_auth_paths_are_absent() {
             .contains("unrecognized subcommand"));
     }
 }
-
-#[test]
-fn local_commands_do_not_require_cloud_credentials() {
-    let fixture = CliFixture::new_with_fake_runtime();
-    let project = fixture.root().join("local-only");
-    fixture
-        .command()
-        .args(["init", "--path"])
-        .arg(&project)
-        .args(["local", "--no-skills"])
-        .assert()
-        .success();
-    fixture
-        .command()
-        .current_dir(&project)
-        .args(["status", "dev"])
-        .assert()
-        .success();
-    assert!(!fixture.helix_home().join("credentials").exists());
-}

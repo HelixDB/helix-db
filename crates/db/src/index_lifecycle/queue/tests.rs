@@ -756,10 +756,19 @@ async fn oversized_operands_fail_before_commit_without_leaking_capacity() {
     let error = add_text(&db, &"x".repeat(128))
         .await
         .expect_err("operand too large");
-    assert!(matches!(
-        error,
-        HelixDbError::IndexOperationBatchTooLarge { limit: 64, .. }
-    ));
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexOperationBatchTooLarge {
+                resource: IndexOperationBatchResource::OperandBytes,
+                observed,
+                limit: 64,
+                ..
+            } if observed > 64
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("operand_bytes"), "{error}");
     assert_eq!(
         error.error_code().failure_class(),
         helix_ast::error_code::QueryFailureClass::InvalidRequest

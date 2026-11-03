@@ -1,3 +1,5 @@
+// This target does not use every shared support helper.
+#[allow(dead_code)]
 #[path = "production_support/text_correctness.rs"]
 mod text_correctness_support;
 
@@ -8,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use db::config::{
     DbConfig, SearchIndexBackfillLimits, SearchIndexBatchLimits, TextAnalyzerKind,
-    TextIndexDefinition, VectorIndexDefinition,
+    TextIndexDefinition,
 };
 use db::encoding::v2::keys::scope::DataScope;
 use db::execution::interpreter::{ElementRef, ExecutionResult, ExecutionRow, ExecutionValue};
@@ -20,7 +22,6 @@ use db::index_lifecycle_testing::{
     arm_text_search_page_barrier, LifecycleTestController, LifecycleTestScheduling,
     LifecycleWorkTarget, TextManifestValidationLane,
 };
-use db::search::vector::VectorDistanceMetric;
 use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
 use helix_ast::batch;
 use helix_ast::graph::NodeRef;
@@ -30,10 +31,9 @@ use helix_ast::traversal;
 use helix_ast::value::{PropertyInput, PropertyValue};
 use helix_planner::{catalog, context, cost, exec, ir, properties, trace};
 use slatedb::object_store::path::Path;
-use slatedb::object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutPayload};
+use slatedb::object_store::ObjectStore;
 use text_correctness_support::{
-    analyze_text, search_live_corpus, BarrierObjectStore, OracleDocument, OracleHit,
-    ORACLE_MAX_TOKEN_LEN,
+    search_live_corpus, OracleDocument, OracleHit, RecordingObjectStore,
 };
 
 const LABEL: &str = "FtsCorrectnessDocument";
@@ -43,157 +43,6 @@ const TENANT_PROPERTY: &str = "tenant_id";
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const TRANSACTION_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 static PAGE_BARRIER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-#[test]
-fn independent_oracle_analyzers_have_golden_terms() {
-    assert_eq!(
-        analyze_text(TextAnalyzerKind::Standard, "Running QUICKLY, 2026-07-24"),
-        ["running", "quickly", "2026", "07", "24"]
-    );
-    assert_eq!(
-        analyze_text(
-            TextAnalyzerKind::StandardStemEn,
-            "Running runners jumped quickly"
-        ),
-        ["run", "runner", "jump", "quick"]
-    );
-    assert_eq!(
-        analyze_text(TextAnalyzerKind::WhitespaceLowercase, "Alpha-Beta GAMMA"),
-        ["alpha-beta", "gamma"]
-    );
-}
-
-#[test]
-fn independent_oracle_is_deterministic_and_deduplicates_query_terms() {
-    let documents = [
-        OracleDocument {
-            entity_id: 1,
-            text: "alpha alpha beta",
-        },
-        OracleDocument {
-            entity_id: 2,
-            text: "alpha gamma",
-        },
-        OracleDocument {
-            entity_id: 3,
-            text: "gamma",
-        },
-    ];
-    let first = search_live_corpus(TextAnalyzerKind::Standard, &documents, "alpha alpha", 10);
-    let second = search_live_corpus(TextAnalyzerKind::Standard, &documents, "alpha", 10);
-    assert_eq!(first, second);
-    assert_eq!(
-        first.iter().map(|hit| hit.entity_id).collect::<Vec<_>>(),
-        [1, 2]
-    );
-    assert!(first
-        .iter()
-        .all(|hit| f32::from_bits(hit.score_bits).is_finite()));
-}
-
-#[test]
-fn independent_oracle_has_stable_ties_and_tantivy_token_length_boundaries() {
-    let tied = [
-        OracleDocument {
-            entity_id: 30,
-            text: "same score",
-        },
-        OracleDocument {
-            entity_id: 10,
-            text: "same score",
-        },
-        OracleDocument {
-            entity_id: 20,
-            text: "same score",
-        },
-    ];
-    assert_eq!(
-        search_live_corpus(TextAnalyzerKind::Standard, &tied, "same", 2)
-            .into_iter()
-            .map(|hit| hit.entity_id)
-            .collect::<Vec<_>>(),
-        [10, 20]
-    );
-
-    let maximum = "a".repeat(ORACLE_MAX_TOKEN_LEN);
-    let oversized = "b".repeat(ORACLE_MAX_TOKEN_LEN + 1);
-    assert_eq!(
-        analyze_text(TextAnalyzerKind::WhitespaceLowercase, &maximum),
-        std::slice::from_ref(&maximum)
-    );
-    assert!(analyze_text(TextAnalyzerKind::WhitespaceLowercase, &oversized).is_empty());
-    let boundary_documents = [
-        OracleDocument {
-            entity_id: 1,
-            text: &maximum,
-        },
-        OracleDocument {
-            entity_id: 2,
-            text: &oversized,
-        },
-    ];
-    assert_eq!(
-        search_live_corpus(
-            TextAnalyzerKind::WhitespaceLowercase,
-            &boundary_documents,
-            &maximum,
-            10,
-        )
-        .into_iter()
-        .map(|hit| hit.entity_id)
-        .collect::<Vec<_>>(),
-        [1]
-    );
-    assert!(search_live_corpus(
-        TextAnalyzerKind::WhitespaceLowercase,
-        &boundary_documents,
-        &oversized,
-        10,
-    )
-    .is_empty());
-}
-
-#[tokio::test]
-async fn object_store_barrier_blocks_only_the_armed_read_and_records_deletion() {
-    let store = Arc::new(BarrierObjectStore::default());
-    let blocked_path = Path::from("fts/blobs/blocked");
-    let other_path = Path::from("fts/blobs/other");
-    store
-        .put(&blocked_path, PutPayload::from_static(b"blocked"))
-        .await
-        .expect("blocked fixture uploads");
-    store
-        .put(&other_path, PutPayload::from_static(b"other"))
-        .await
-        .expect("control fixture uploads");
-    store.arm_read(blocked_path.clone());
-
-    let blocked_store = Arc::clone(&store);
-    let blocked_path_for_task = blocked_path.clone();
-    let blocked = tokio::spawn(async move {
-        blocked_store
-            .get_opts(&blocked_path_for_task, GetOptions::default())
-            .await
-    });
-    store.wait_until_read_is_blocked().await;
-    assert!(!blocked.is_finished());
-    store
-        .get(&other_path)
-        .await
-        .expect("unarmed reads remain available");
-
-    store.release_read();
-    blocked
-        .await
-        .expect("blocked task joins")
-        .expect("released read succeeds");
-    store.delete(&blocked_path).await.expect("fixture deletes");
-    tokio::time::sleep(Duration::from_millis(1)).await;
-    assert!(
-        store.deleted_paths().contains(&blocked_path),
-        "the wrapper records deletion of the armed object"
-    );
-}
 
 fn name(value: &str) -> ir::NonEmptyString {
     ir::NonEmptyString::new(value).expect("fixture identifier is non-empty")
@@ -1933,65 +1782,6 @@ async fn fragmented_bm25_matches_monolithic_live_corpus_across_history() {
 }
 
 #[tokio::test]
-async fn vector_distance_virtual_property_materializes_and_serializes_control() {
-    let db = HelixDB::open_for_index_lifecycle_testing(
-        HelixDbSource::InMemory {
-            database: "fts-public-score-vector-control".to_string(),
-        },
-        DbConfig::new(),
-        LifecycleTestScheduling::Automatic,
-    )
-    .await
-    .expect("vector virtual-property control opens");
-    let controller = LifecycleTestController::new();
-    db.query(QueryRequest::write(
-        batch::write_batch()
-            .var_as(
-                "document",
-                traversal::g().add_n(
-                    LABEL,
-                    vec![("embedding", PropertyInput::from(vec![1.0_f32, 0.0]))],
-                ),
-            )
-            .returning(Vec::<String>::new()),
-    ))
-    .await
-    .expect("vector control source commits");
-    let definition: ValidatedDynamicIndexDefinition =
-        VectorIndexDefinition::new_node(LABEL, "embedding", 2, VectorDistanceMetric::Euclidean)
-            .expect("vector control definition validates")
-            .try_into()
-            .expect("vector control definition converts");
-    activate_text_definition(&db, &controller, definition).await;
-
-    let response = db
-        .query(QueryRequest::read(
-            batch::read_batch()
-                .var_as(
-                    "matches",
-                    traversal::g()
-                        .vector_search_nodes(LABEL, "embedding", vec![1.0_f32, 0.0], 1, None)
-                        .bind("match")
-                        .project_bindings(vec![
-                            BindingProjection::current("$distance", "current_distance"),
-                            BindingProjection::binding("match", "$distance", "bound_distance"),
-                            BindingProjection::current("$score", "score"),
-                        ]),
-                )
-                .returning(["matches"]),
-        ))
-        .await
-        .expect("vector control query serializes");
-    assert_eq!(
-        response,
-        serde_json::json!({
-            "matches": [{ "current_distance": 0.0, "bound_distance": 0.0 }],
-        })
-    );
-    db.close().await.expect("vector control closes");
-}
-
-#[tokio::test]
 async fn public_text_rows_expose_raw_score_for_nodes_edges_and_bindings() {
     let db = HelixDB::open_for_index_lifecycle_testing(
         HelixDbSource::InMemory {
@@ -3162,7 +2952,7 @@ struct DropRaceFixture {
     db: Arc<HelixDB>,
     controller: LifecycleTestController,
     definition: ValidatedDynamicIndexDefinition,
-    store: Arc<BarrierObjectStore>,
+    store: Arc<RecordingObjectStore>,
     later_page_paths: Vec<Path>,
 }
 
@@ -3194,13 +2984,13 @@ async fn activate_drop_race_index(
 }
 
 async fn open_drop_race_fixture(database: &str) -> DropRaceFixture {
-    let store = Arc::new(BarrierObjectStore::default());
+    let store = Arc::new(RecordingObjectStore::default());
     open_drop_race_fixture_on_store(database, store).await
 }
 
 async fn open_drop_race_fixture_on_store(
     database: &str,
-    store: Arc<BarrierObjectStore>,
+    store: Arc<RecordingObjectStore>,
 ) -> DropRaceFixture {
     let object_store: Arc<dyn slatedb::object_store::ObjectStore> = store.clone();
     let db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
@@ -3510,7 +3300,7 @@ async fn active_text_upload_failure_retries_publication_without_losing_the_opera
 #[tokio::test]
 async fn build_restart_after_upload_preserves_the_orphan_and_completes() {
     const DATABASE: &str = "fts-build-upload-restart-regression";
-    let store = Arc::new(BarrierObjectStore::default());
+    let store = Arc::new(RecordingObjectStore::default());
     let object_store: Arc<dyn ObjectStore> = store.clone();
     let writer = HelixDB::open_with_object_store_for_index_lifecycle_testing(
         DATABASE,

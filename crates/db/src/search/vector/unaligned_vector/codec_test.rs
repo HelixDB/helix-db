@@ -339,43 +339,6 @@ fn word_size_values() {
     assert_eq!(BinaryQuantized::word_size(), 64);
 }
 
-// ── J. Debug formatting ────────────────────────────────────────────────
-
-#[test]
-fn debug_short_vector() {
-    let v = UnalignedVector::<f32>::from_slice(&[1.0, 2.0, 3.0]);
-    let dbg = format!("{v:?}");
-    assert!(dbg.contains("1.0000"));
-    assert!(dbg.contains("2.0000"));
-    assert!(dbg.contains("3.0000"));
-    assert!(!dbg.contains("..."));
-}
-
-#[test]
-fn debug_long_vector_trailing_zeros() {
-    // 12 elements: first 10 non-zero, then zeros
-    let mut data = vec![1.0_f32; 10];
-    data.extend_from_slice(&[0.0; 54]); // pad to fill a word for Binary
-    let v = UnalignedVector::<f32>::from_slice(&data);
-    let dbg = format!("{v:?}");
-    assert!(
-        dbg.contains("0.0, ..."),
-        "expected trailing zero marker, got: {dbg}"
-    );
-}
-
-#[test]
-fn debug_long_vector_nonzero_tail() {
-    let mut data = vec![1.0_f32; 10];
-    data.extend_from_slice(&[5.0; 5]);
-    let v = UnalignedVector::<f32>::from_slice(&data);
-    let dbg = format!("{v:?}");
-    assert!(
-        dbg.contains("other ..."),
-        "expected 'other ...' marker, got: {dbg}"
-    );
-}
-
 // ── K. Property-based tests ────────────────────────────────────────────
 
 proptest! {

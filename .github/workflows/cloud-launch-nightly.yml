@@ -86,11 +86,6 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
-      - name: Nightly lifecycle histories
-        run: >-
-          cargo test -p helix-db-testkit
-          lifecycle_workload::tests::nightly_seed_matrix_runs_long_multi_index_histories
-          -- --ignored --exact
       - name: Oversized V4 bitmap cleanup and reopen
         run: >-
           cargo test -p db

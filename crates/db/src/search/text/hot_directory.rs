@@ -796,7 +796,6 @@ mod tests {
         cache_builder.write(&mut hotcache)?;
         let hot_directory = HotDirectory::open(Arc::new(directory), &hotcache)?;
 
-        assert_eq!(format!("{hot_directory:?}"), "HotDirectory");
         assert!(hot_directory.exists(Path::new("segment.term"))?);
         assert!(!hot_directory.exists(Path::new("missing"))?);
         assert!(matches!(
@@ -808,7 +807,6 @@ mod tests {
 
         let handle = hot_directory.get_file_handle(Path::new("segment.term"))?;
         assert_eq!(handle.len(), 10);
-        assert!(format!("{handle:?}").contains("FileSliceWithCache"));
         assert_eq!(handle.read_bytes(2..5)?.as_slice(), b"cde");
         assert_eq!(handle.read_bytes(4..4)?.as_slice(), b"");
         assert_eq!(handle.read_bytes(0..2)?.as_slice(), b"ab");

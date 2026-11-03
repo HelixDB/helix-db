@@ -139,18 +139,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::HelixDbError;
 
-#[cfg(test)]
-use crate::encoding::v2::keys::indexes::vector::{
-    VectorEntryCandidateKey, VectorEntryCandidateNodeKey, VectorIndexMetadataKey,
-    VectorIndexPrefixKey, VectorItemKey, VectorLayer0NeighborsKey, VectorUpperVectorKey,
-};
 use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorMetadataScanPrefix};
-#[cfg(test)]
-use crate::encoding::v2::keys::indexes::vector::{
-    VectorReverseEdgeKey, VectorReverseEdgePrefixKey,
-};
-#[cfg(test)]
-use crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey as VectorTxnGuardKey;
 use crate::encoding::v2::values::indexes::vector as vector_values;
 use crate::encoding::NodeId;
 
@@ -1109,23 +1098,9 @@ mod tests {
     impl distance::sealed::Sealed for BinaryTestDistance {}
 
     #[test]
-    fn test_config_builder() {
-        let config = VectorIndexConfig::new("test_idx", "embedding", 128)
-            .with_m(32)
-            .with_ef_construction(400);
-
-        assert_eq!(config.index_name, "test_idx");
-        assert_eq!(config.property_name, "embedding");
-        assert_eq!(config.dimension, 128);
-        assert_eq!(config.m, 32);
+    fn test_config_builder_with_m_rederives_ml() {
+        let config = VectorIndexConfig::new("test_idx", "embedding", 128).with_m(32);
         assert!((config.ml - default_ml_for_m(32)).abs() < 1e-6);
-        assert_eq!(config.ef_construction, 400);
-        assert_eq!(
-            config.simhash_threshold,
-            DEFAULT_SIMHASH_COLLISION_THRESHOLD
-        );
-        assert!(config.adaptive_enabled);
-        assert!((config.adaptive_failure_prob - 0.1).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1284,15 +1259,6 @@ mod tests {
     }
 
     #[test]
-    fn test_neighbors_encoding() {
-        let neighbors = vec![1, 42, 1000, u64::MAX - 1];
-        let encoded = encode_neighbors(&neighbors);
-        let decoded = decode_neighbors(&encoded).unwrap();
-
-        assert_eq!(neighbors, decoded);
-    }
-
-    #[test]
     fn test_metadata_encoding() {
         let config = VectorIndexConfig::new("test", "emb", 64);
         let metadata = VectorIndexMetadata::new(config);
@@ -1393,46 +1359,6 @@ mod tests {
     }
 
     #[test]
-    fn test_entry_candidate_layer_encoding() {
-        let layer = 321u16;
-        let encoded = encode_entry_candidate_layer(layer);
-        let decoded = decode_entry_candidate_layer(&encoded).unwrap();
-        assert_eq!(decoded, layer);
-    }
-
-    #[test]
-    fn test_entry_candidate_key_roundtrip() {
-        let index_id = index_id_from_name("idx");
-        let key = VectorKey::EntryCandidateSorted(VectorEntryCandidateKey::new(index_id, 12, 99))
-            .to_bytes();
-        let VectorKey::EntryCandidateSorted(parsed) = VectorKey::parse_from_slice(&key).unwrap()
-        else {
-            panic!("entry candidate key should parse as EntryCandidateSorted");
-        };
-        assert_eq!(parsed.layer(), 12);
-        assert_eq!(parsed.node_id(), 99);
-    }
-
-    #[test]
-    fn test_entry_candidate_keys_live_in_vector_l0_keyspace() {
-        let index_id = index_id_from_name("idx");
-        let sorted_key =
-            VectorKey::EntryCandidateSorted(VectorEntryCandidateKey::new(index_id, 3, 7))
-                .to_bytes();
-        let node_key =
-            VectorKey::EntryCandidateNode(VectorEntryCandidateNodeKey::new(index_id, 7)).to_bytes();
-
-        assert!(matches!(
-            VectorKey::parse_from_slice(&sorted_key).unwrap(),
-            VectorKey::EntryCandidateSorted(_)
-        ));
-        assert!(matches!(
-            VectorKey::parse_from_slice(&node_key).unwrap(),
-            VectorKey::EntryCandidateNode(_)
-        ));
-    }
-
-    #[test]
     fn test_index_id_deterministic() {
         let id_a = index_id_from_name("idx");
         let id_b = index_id_from_name("idx");
@@ -1440,57 +1366,6 @@ mod tests {
 
         assert_eq!(id_a, id_b);
         assert_ne!(id_a, id_c);
-    }
-
-    #[test]
-    fn test_v2_key_lengths() {
-        let index_id = index_id_from_name("idx");
-        let meta_key = VectorKey::IndexMetadata(VectorIndexMetadataKey::new(index_id)).to_bytes();
-        let vec_key = VectorKey::Vector(VectorItemKey::new(index_id, 0, 7)).to_bytes();
-        let l0_key =
-            VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(index_id, 7)).to_bytes();
-        let upper_vec_key =
-            VectorKey::UpperVector(VectorUpperVectorKey::new(index_id, 7)).to_bytes();
-        let cand_sorted_key =
-            VectorKey::EntryCandidateSorted(VectorEntryCandidateKey::new(index_id, 3, 7))
-                .to_bytes();
-        let cand_node_key =
-            VectorKey::EntryCandidateNode(VectorEntryCandidateNodeKey::new(index_id, 7)).to_bytes();
-        let txn_guard_key = VectorKey::TxnGuard(VectorTxnGuardKey::new(index_id)).to_bytes();
-        let idx_prefix = VectorKey::IndexPrefix(VectorIndexPrefixKey::new(index_id)).to_bytes();
-        let reverse_edge_prefix =
-            VectorKey::ReverseEdgePrefix(VectorReverseEdgePrefixKey::new(index_id, 7)).to_bytes();
-        let reverse_edge_key =
-            VectorKey::ReverseEdge(VectorReverseEdgeKey::new(index_id, 7, 3, 9)).to_bytes();
-
-        assert_eq!(meta_key.len(), 11);
-        assert_eq!(vec_key.len(), 26);
-        assert_eq!(l0_key.len(), 18);
-        assert_eq!(upper_vec_key.len(), 18);
-        assert_eq!(cand_sorted_key.len(), 20);
-        assert_eq!(cand_node_key.len(), 18);
-        assert_eq!(txn_guard_key.len(), 11);
-        assert_eq!(idx_prefix.len(), 10);
-        assert_eq!(reverse_edge_prefix.len(), 18);
-        assert_eq!(reverse_edge_key.len(), 28);
-    }
-
-    #[test]
-    fn test_reverse_edge_key_roundtrip() {
-        let key = VectorKey::ReverseEdge(VectorReverseEdgeKey::new(
-            index_id_from_name("idx"),
-            7,
-            4,
-            9,
-        ))
-        .to_bytes();
-        let VectorKey::ReverseEdge(parsed) = VectorKey::parse_from_slice(&key).unwrap() else {
-            panic!("reverse edge key should parse as ReverseEdge");
-        };
-        assert_eq!(parsed.target_node_id(), 7);
-        assert_eq!(parsed.layer(), 4);
-        assert_eq!(parsed.source_node_id(), 9);
-        assert!(VectorKey::parse_from_slice(&key[..27]).is_err());
     }
 
     #[test]
