@@ -215,9 +215,9 @@ fn status_view(email: &str, workspaces: &[Workspace]) -> String {
         0 => "none".to_owned(),
         count => count.to_string(),
     };
-    let account = table::key_values(&[("Email", email.to_owned()), ("Workspaces", count)]);
+    let details = table::key_values(&[("Email", email.to_owned()), ("Workspaces", count)]);
     if workspaces.is_empty() {
-        return account;
+        return details;
     }
     let mut sorted: Vec<&Workspace> = workspaces.iter().collect();
     sorted.sort_by_key(|workspace| workspace.label().to_lowercase());
@@ -225,7 +225,7 @@ fn status_view(email: &str, workspaces: &[Workspace]) -> String {
     for workspace in sorted {
         rows.row([workspace.label(), workspace.id.as_str()]);
     }
-    format!("{account}\n{}", rows.render())
+    format!("{details}\n{}", rows.render())
 }
 
 async fn logout() -> Result<()> {
