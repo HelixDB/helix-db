@@ -24,7 +24,7 @@ use crate::{
         keys::DataKey,
         values::{adjacency, indexes::equality},
     },
-    merge_operator::HelixMergeOperator,
+    merge_operator::{HelixMergeOperator, MembershipRow},
     query_resources::{Budget, Reservation},
     HelixDbError, Result,
 };
@@ -168,8 +168,9 @@ impl Tracker {
 }
 
 /// Membership row family of one operand. It selects the allocation-free
-/// preflight that bounds the operand's validation decode before it runs.
-#[derive(Clone, Copy)]
+/// preflight that bounds the operand's validation decode before it runs, and
+/// must match the row the operand merges into.
+#[derive(Clone, Copy, Debug)]
 enum Family {
     Bitmap,
     Adjacency,
@@ -311,10 +312,19 @@ impl<'a> Batch<'a> {
 
     /// Validates every entry, then stages each in push order.
     ///
-    /// A batch with a repeated key or an operand the merge operator cannot
-    /// decode stages nothing. Validation never reads the stored row. The
-    /// construction reservation, grown by the largest validation decode, lives
-    /// until the last operand is staged.
+    /// A batch with a repeated key, an operand whose family does not match its
+    /// row, or an operand the merge operator cannot decode stages nothing and
+    /// fails with one `Storage` invalid-argument error. Validation never reads
+    /// the stored row. The construction reservation, grown by the largest
+    /// validation decode before it runs, lives until the last operand is staged.
+    ///
+    /// The backend takes its write-batch lock once per operand; it has no
+    /// read-free call that stages several under one lock. No other reader can
+    /// observe a partly staged batch: this is synchronous, so nothing on the
+    /// transaction's task interleaves, and Helix never shares a transaction
+    /// across threads. Staging cannot fail midway either: the backend's only
+    /// error is a database-wide missing merge operator, raised on the first
+    /// operand before anything is staged.
     pub(crate) fn stage(self) -> Result<()> {
         let Self {
             view,
@@ -323,16 +333,32 @@ impl<'a> Batch<'a> {
             totals,
             mut memory,
         } = self;
+        let invalid = |message: String| HelixDbError::Storage(slatedb::Error::invalid(message));
         let mut keys = HashSet::with_capacity(entries.len());
         entries.iter().try_for_each(|entry| {
-            keys.insert(&entry.key).then_some(()).ok_or_else(|| {
-                HelixDbError::Storage(slatedb::Error::invalid(format!(
+            if !keys.insert(&entry.key) {
+                return Err(invalid(format!(
                     "disjoint merge batch contains duplicate key {:?}",
                     entry.key
-                )))
-            })
+                )));
+            }
+            let row = MembershipRow::of(&entry.key);
+            match (entry.family, row) {
+                (Family::Bitmap, Some(MembershipRow::Bitmap(_)))
+                | (Family::Adjacency, Some(MembershipRow::Adjacency)) => Ok(()),
+                (Family::Bitmap | Family::Adjacency, _) => Err(invalid(format!(
+                    "{:?} membership delta cannot merge into {row:?} row {:?}",
+                    entry.family, entry.key
+                ))),
+            }
         })?;
         drop(keys);
+        let undecodable = |error: Box<dyn std::error::Error + Send + Sync>| {
+            HelixDbError::Storage(
+                slatedb::Error::invalid("membership delta does not decode".to_owned())
+                    .with_source(error),
+            )
+        };
         memory
             .as_mut()
             .map(|memory| {
@@ -340,13 +366,13 @@ impl<'a> Batch<'a> {
                 let decode = entries.iter().try_fold(0, |largest, entry| {
                     let bound = match entry.family {
                         Family::Bitmap => {
-                            equality::SecondaryEqualityBitmapValue::prepare(&entry.operand)?
-                                .allocation_bound()
+                            equality::SecondaryEqualityBitmapValue::prepare(&entry.operand)
+                                .map(|prepared| prepared.allocation_bound())
                         }
-                        Family::Adjacency => {
-                            adjacency::prepare_edges(&entry.operand)?.allocation_bound()
-                        }
-                    };
+                        Family::Adjacency => adjacency::prepare_edges(&entry.operand)
+                            .map(|prepared| prepared.allocation_bound()),
+                    }
+                    .map_err(|error| undecodable(Box::new(error)))?;
                     Ok::<_, HelixDbError>(largest.max(bound))
                 })?;
                 memory.resize(Self::construction_bytes(capacity, totals).saturating_add(decode))
@@ -356,12 +382,7 @@ impl<'a> Batch<'a> {
         entries.iter().try_for_each(|entry| {
             operator
                 .validate_merge_with_base(&entry.key, None, std::slice::from_ref(&entry.operand))
-                .map_err(|error| {
-                    HelixDbError::Storage(
-                        slatedb::Error::invalid("merge operator error".to_owned())
-                            .with_source(Box::new(error)),
-                    )
-                })
+                .map_err(|error| undecodable(Box::new(error)))
         })?;
         view.merges
             .map(|tracker| tracker.retain(totals))
