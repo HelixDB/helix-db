@@ -1496,7 +1496,6 @@ async fn per_document_operation_allowances_block_builds_and_queued_writes_contra
 // Damaged builds.
 // ---------------------------------------------------------------------------
 
-/// One split per page and one row per step, so every lane walks several rows.
 /// SlateDB settings that flush every millisecond, so builds that commit
 /// many small steps do not each wait out the 100 ms default.
 fn one_ms_flush() -> slatedb::Settings {
@@ -1506,6 +1505,7 @@ fn one_ms_flush() -> slatedb::Settings {
     }
 }
 
+/// One split per page and one row per step, so every lane walks several rows.
 fn paged_config() -> DbConfig {
     DbConfig::new()
         .with_slate_settings(one_ms_flush())

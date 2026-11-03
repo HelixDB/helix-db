@@ -18,8 +18,8 @@
 //! pair of seeds flips the order, so every four consecutive seeds run each
 //! metric under an odd and an even seed. `GRAPH_SEEDS` (default 2, the fewest
 //! that cover both metrics, every write kind, eviction, and discard) and
-//! `GRAPH_SEED` (first seed) scale the run; the nightly workflow runs 4 in
-//! release.
+//! `GRAPH_SEED` (first seed) scale the run; the nightly workflow runs 8 in
+//! release, 4 per metric.
 //!
 //! The direct runs apply the same invariants to every way a vector write is
 //! planned below the publisher: the retained build session under budgets
