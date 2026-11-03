@@ -5,7 +5,7 @@ The v3 CLI manages local Helix instances and WorkOS-session-authenticated Helix 
 - Local: `init`, `add`, `start`, `stop`, `restart`, `status`, `logs`, `query`, `shell`, `explorer`, `prune`.
 - Cloud discovery/resources: `workspace`, `project`, `cluster`, `database`, `service-credential`, `api`.
 - Cloud queries: `query` and `shell` execute through the backend query broker.
-- Authentication: `auth login|status|logout` stores only a rotating WorkOS session.
+- Authentication: `auth login [github|google|microsoft|sso|password]`, `auth status` and `auth logout`. Login stores only a rotating WorkOS session.
 - Output: results go to stdout and progress to stderr; the global `--json` flag prints the result as JSON and never prompts.
 - Cloud arguments accept an ID, slug, or name and default to the project and databases linked in `helix.toml`.
 

@@ -62,7 +62,7 @@ Instance args default to `dev`, else the only instance, else a prompt (TTY), els
 - `query [instance|cluster:<id>|tenant:<id>] (--file <req.json> | --body '<json>' | -e/--ts '<ts>' | --ts-file <query.ts>) [--warm] [--host <h>] [--port <p>]` — local targets send to `POST /v2/query` with auth disabled. Cloud targets use the active WorkOS session and WFE's separate read/write broker endpoints; a typed target needs no helix.toml. They never load an application key. The four input flags are mutually exclusive and exactly one is required. TypeScript input is evaluated through the cached `@helix-db/helix-db` SDK. Results print as highlighted JSON with a `status · latency · target` footer on stderr, or compact JSON under `--json`.
 
 **Cloud**
-- `auth (login|status|logout)` — WorkOS PKCE login and rotating session credentials. Refresh is serialized and persisted atomically. There is no API-key or service-credential login.
+- `auth (login [github|google|microsoft|sso [--email]|password [--email]]|status|logout)` — WorkOS login and rotating session credentials; login asks for a method when none is named. Browser methods use PKCE through the loopback callback; `password` reads the password from a hidden prompt only. `sso_required` replies continue through single sign-on, and email verification allows three codes. Refresh is serialized and persisted atomically. There is no API-key or service-credential login.
 - `workspace (list|get)` — discover workspaces without global selection state.
 - `project (list|get|create <name>|delete|link)` — discover/manage projects; `link` (picker when no argument) writes only this `helix.toml` and keeps the local project name.
 - `cluster (list|get|indexes)` — discover and inspect existing clusters.

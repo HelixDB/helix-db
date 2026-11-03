@@ -9985,8 +9985,8 @@ scripts, add `--json` for machine-readable output; commands then never prompt. S
 
 ## How Cloud queries are authorized
 
-- `helix auth login` creates a WorkOS session that identifies you. The CLI never uses
-  database API keys.
+- `helix auth login` creates a WorkOS session that identifies you, using GitHub, Google,
+  Microsoft, single sign-on, or an email and password. The CLI never uses database API keys.
 - Cloud queries go through the Helix Cloud backend (the broker), not directly to the
   database gateway. The broker forwards each authorized request with its own gateway
   credentials, which the CLI never receives.
@@ -10305,7 +10305,7 @@ never need it.
 ## Usage
 
 ```bash
-helix auth login
+helix auth login [github | google | microsoft | sso | password]
 helix auth status
 helix auth logout
 ```
@@ -10314,9 +10314,17 @@ helix auth logout
 
 | Subcommand | Description |
 | --- | --- |
-| `login` | Sign in through WorkOS in your browser and store the session. |
+| `login` | Sign in with any supported method and store the session. Asks which method when you do not name one. |
 | `status` | Verify the session and show the signed-in email and your workspaces by name. |
 | `logout` | Revoke the session when possible and delete the local credential file. |
+
+## Login methods
+
+| Method | How it signs in |
+| --- | --- |
+| `github`, `google`, `microsoft` | Continue with that provider in your browser. |
+| `sso [--email <email>]` | Single sign-on through the identity provider of your company's verified email domain, in your browser. Asks for the work email when omitted. |
+| `password [--email <email>]` | Email and password, in the terminal. Asks for the email when omitted, and always reads the password from a hidden prompt. |
 
 ## Options
 
@@ -10329,8 +10337,10 @@ helix auth logout
 ### Login
 
 - `login` requires an interactive terminal, so it fails with `--json`.
-- It starts WorkOS PKCE in a browser (and prints the URL in case the browser does not open), then shows a spinner while it waits for the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
-- If WorkOS requires email verification, the CLI prompts for the code.
+- Browser methods start WorkOS PKCE in a browser (and print the URL in case the browser does not open), then show a spinner while they wait for the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
+- `password` signs in with an existing account. To create an account or reset a password, use [the sign-in page](https://helix-db.com/login).
+- If your company requires single sign-on, any method continues through its identity provider in the browser.
+- If WorkOS requires email verification, the CLI prompts for the code and accepts up to three attempts.
 - It hydrates all current workspace memberships and stores only the rotating WorkOS session in `~/.helix/credentials` (or `$HELIX_HOME/credentials`).
 
 ### Session handling
@@ -10347,8 +10357,13 @@ helix auth logout
 ## Examples
 
 ```bash
-# Sign in (opens a browser)
+# Choose how to sign in
 helix auth login
+
+# Sign in with a specific method
+helix auth login google
+helix auth login sso --email you@company.com
+helix auth login password --email you@company.com
 
 # Check who is signed in
 helix auth status
