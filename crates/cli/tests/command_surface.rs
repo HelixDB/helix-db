@@ -117,16 +117,22 @@ fn login_flags_only_exist_where_they_apply() {
             "{args:?}"
         );
     }
-    // An unset shell variable must not get as far as a request.
+    // A typo or an unset shell variable must not get as far as a prompt or a
+    // request.
     for method in ["sso", "password"] {
-        assert!(stderr(
-            fixture
-                .command()
-                .args(["auth", "login", method, "--email", ""])
-                .assert()
-                .failure()
-        )
-        .contains("--email"));
+        for email in ["", " ", "person@", "not-an-email"] {
+            assert!(
+                stderr(
+                    fixture
+                        .command()
+                        .args(["auth", "login", method, "--email", email])
+                        .assert()
+                        .failure()
+                )
+                .contains("valid email address"),
+                "{method} {email:?}"
+            );
+        }
     }
     assert!(stderr(
         fixture

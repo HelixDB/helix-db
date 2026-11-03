@@ -1,8 +1,10 @@
 use crate::config::DEFAULT_LOCAL_PORT;
 use crate::{AddTarget, InitTarget, LoginAction};
 use eyre::{eyre, Result};
+use regex::Regex;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InstanceKind {
@@ -138,6 +140,30 @@ pub fn input_required(label: &str) -> Result<String> {
         })
         .interact()?;
     Ok(value)
+}
+
+static EMAIL_SHAPE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$").unwrap());
+
+/// Whether `email` has the shape of an address. Deliberately loose, so that an
+/// internationalized address is left for the server to judge.
+pub fn is_valid_email(email: &str) -> bool {
+    EMAIL_SHAPE.is_match(email)
+}
+
+/// Asks for an email address until the answer has the shape of one.
+pub fn email(label: &str) -> Result<String> {
+    let value: String = cliclack::input(label)
+        .placeholder("you@example.com")
+        .validate(|input: &String| {
+            if is_valid_email(input.trim()) {
+                Ok(())
+            } else {
+                Err("enter a valid email address")
+            }
+        })
+        .interact()?;
+    Ok(value.trim().to_owned())
 }
 
 /// Reads a secret without echoing it. The value is returned exactly as typed.
@@ -284,6 +310,30 @@ pub fn select_prune(local_instances: &[(String, String)]) -> Result<PruneSelecti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_email_addresses() {
+        for valid in [
+            "user@example.com",
+            "first.last+tag@sub.example.co",
+            "josé@münchen.de",
+        ] {
+            assert!(is_valid_email(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            " ",
+            "not-an-email",
+            "@example.com",
+            "person@",
+            "person@localhost",
+            "person@example.c",
+            "two@at@example.com",
+            "a b@example.com",
+        ] {
+            assert!(!is_valid_email(invalid), "{invalid}");
+        }
+    }
 
     #[test]
     fn prompts_need_both_terminals_and_never_run_in_json_mode() {

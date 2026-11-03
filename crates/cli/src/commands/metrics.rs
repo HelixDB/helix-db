@@ -1,7 +1,4 @@
-use std::{
-    io::{self, IsTerminal as _},
-    sync::LazyLock,
-};
+use std::io::{self, IsTerminal as _};
 
 use crate::errors::CliError;
 use crate::output::{self, table};
@@ -10,7 +7,6 @@ use crate::{
     prompts, MetricsAction,
 };
 use eyre::{eyre, Result};
-use regex::Regex;
 use serde_json::json;
 
 pub async fn run(action: MetricsAction) -> Result<()> {
@@ -88,13 +84,6 @@ fn format_age(seconds: u64) -> String {
     }
 }
 
-static EMAIL_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap());
-
-fn is_valid_email(email: &str) -> bool {
-    EMAIL_REGEX.is_match(email)
-}
-
 /// Prompt for an email on a terminal; read one line from piped stdin otherwise.
 fn ask_for_email() -> Result<String> {
     if !prompts::is_interactive() {
@@ -109,17 +98,7 @@ fn ask_for_email() -> Result<String> {
         }
         return read_email_from(&mut io::stdin().lock());
     }
-    let email: String = cliclack::input("Email address")
-        .placeholder("you@example.com")
-        .validate(|input: &String| {
-            if is_valid_email(input.trim()) {
-                Ok(())
-            } else {
-                Err("enter a valid email address")
-            }
-        })
-        .interact()?;
-    Ok(email.trim().to_owned())
+    prompts::email("Email address")
 }
 
 fn read_email_from<R: io::BufRead>(reader: &mut R) -> Result<String> {
@@ -132,7 +111,7 @@ fn read_email_from<R: io::BufRead>(reader: &mut R) -> Result<String> {
             ));
         }
         let email = email.trim();
-        if email.is_empty() || !is_valid_email(email) {
+        if !prompts::is_valid_email(email) {
             output::warning("Invalid email address; enter another");
             continue;
         }
@@ -144,7 +123,7 @@ fn read_email_from<R: io::BufRead>(reader: &mut R) -> Result<String> {
 mod tests {
     use std::io::Cursor;
 
-    use super::{format_age, is_valid_email, read_email_from};
+    use super::{format_age, read_email_from};
 
     #[test]
     fn formats_age_for_status_output() {
@@ -153,14 +132,6 @@ mod tests {
         assert_eq!(format_age(60), "1m ago");
         assert_eq!(format_age(3_600), "1h ago");
         assert_eq!(format_age(172_800), "2d ago");
-    }
-
-    #[test]
-    fn validates_email_addresses() {
-        assert!(is_valid_email("user@example.com"));
-        assert!(!is_valid_email(""));
-        assert!(!is_valid_email("not-an-email"));
-        assert!(!is_valid_email("@example.com"));
     }
 
     #[test]

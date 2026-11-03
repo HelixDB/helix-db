@@ -48,15 +48,26 @@ pub enum LoginAction {
     /// Single sign-on through your company's identity provider
     Sso {
         /// Work email that selects the identity provider; asks when omitted
-        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        #[arg(long, value_parser = parse_email)]
         email: Option<String>,
     },
     /// Email and password, entered in the terminal
     Password {
         /// Account email; asks when omitted
-        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        #[arg(long, value_parser = parse_email)]
         email: Option<String>,
     },
+}
+
+/// Refuses an `--email` that cannot name an account, so a typo or an unset shell
+/// variable fails here rather than after a password prompt.
+fn parse_email(value: &str) -> Result<String, String> {
+    let email = value.trim();
+    if prompts::is_valid_email(email) {
+        Ok(email.to_owned())
+    } else {
+        Err("enter a valid email address".to_owned())
+    }
 }
 
 #[derive(Subcommand)]
