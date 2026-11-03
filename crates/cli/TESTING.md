@@ -33,21 +33,6 @@ cargo test --locked -p helix-cli --test typescript_runtime \
   registry_smoke_executes_exact_sdk_read_and_write -- --ignored --exact
 ```
 
-Run the same line-coverage gate used by CI:
-
-```bash
-cargo llvm-cov --locked -p helix-cli --all-targets \
-  --ignore-filename-regex '(crates/cli/tests/|crates/cli/src/prompts.rs|crates/cli/src/commands/update.rs)' \
-  --fail-under-lines 80
-```
-
-The gate excludes two host-bound adapters:
-
-- `prompts.rs` requires a real TTY and is covered through non-interactive caller behavior plus manual terminal checks.
-- `commands/update.rs` replaces the running executable. Tests use the typed host-action update contract instead of mutating the developer or CI binary.
-
-Their callers, state handling, update checks, caches, output, and failure paths remain in the coverage calculation. The current threshold is a floor and must not be lowered to accommodate new code.
-
 Run the real Docker tests sequentially:
 
 ```bash

@@ -12,7 +12,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Instant;
 
-use db::production_coverage::{
+use db::bench_internals::{
     FtsPrefilterBenchmarkCase, FtsPrefilterBenchmarkFixture, FtsPrefilterBenchmarkLayout,
     FtsPrefilterBenchmarkSample, FtsPrefilterBenchmarkStrategy,
 };

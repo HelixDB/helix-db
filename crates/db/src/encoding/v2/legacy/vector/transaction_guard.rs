@@ -1,7 +1,7 @@
 //! Retired vector transaction-guard key and value.
 
 use bytes::BufMut;
-#[cfg(any(test, feature = "fuzzing", feature = "production-coverage"))]
+#[cfg(any(test, feature = "fuzzing"))]
 use bytes::Bytes;
 
 use crate::encoding::error::EncodingError;
@@ -80,7 +80,7 @@ impl LegacyVectorTxnGuardKey {
 
 /// Encodes the retired deployed transaction-guard value `[1]` for fixtures.
 #[must_use]
-#[cfg(any(test, feature = "fuzzing", feature = "production-coverage"))]
+#[cfg(any(test, feature = "fuzzing"))]
 #[allow(dead_code)]
 pub(crate) fn encode_active_txn_guard() -> Bytes {
     Bytes::copy_from_slice(&[ACTIVE_TXN_GUARD])

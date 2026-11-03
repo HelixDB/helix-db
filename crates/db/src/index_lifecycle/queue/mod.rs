@@ -269,6 +269,9 @@ impl QueueTarget {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/unit/queue_admission_memory.rs"]
+mod admission_memory_tests;
+#[cfg(test)]
 mod codec_storage_tests;
 #[cfg(test)]
 mod drain_tests;
@@ -278,6 +281,9 @@ mod grouping_tests;
 mod isolation_tests;
 #[cfg(test)]
 mod layout_tests;
+#[cfg(all(test, feature = "index-lifecycle-testing"))]
+#[path = "../../../tests/unit/index_operation_queue.rs"]
+mod lifecycle_testing_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]

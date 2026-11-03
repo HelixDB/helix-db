@@ -7,6 +7,8 @@ extern crate self as db;
 
 #[cfg(test)]
 mod allocation_testing;
+#[cfg(test)]
+mod test_isolation;
 
 mod batch_reads;
 #[cfg(feature = "async-index-benchmark")]
@@ -27,7 +29,7 @@ pub mod index_lifecycle;
 #[cfg(feature = "index-lifecycle-testing")]
 pub mod index_lifecycle_testing;
 mod merge_operator;
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub mod migration_parity;
 pub mod migrations;
 mod query_resources;
@@ -39,31 +41,41 @@ mod transaction;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
 
-#[cfg(all(feature = "production-coverage", not(test)))]
-#[path = "../tests/production_support/mod.rs"]
-pub mod production_coverage;
-#[cfg(test)]
-#[path = "../tests/production_support/index_lifecycle_text_rows.rs"]
-mod production_text_lifecycle_rows;
-#[cfg(test)]
-pub mod production_coverage {
-    /// Verifies the complete durable row graph for one settled text generation.
-    pub async fn index_lifecycle_text_steady_state_contracts(
-        db: &crate::HelixDB,
-        expected_live_entities: usize,
-    ) {
-        crate::production_text_lifecycle_rows::verify_steady_state(db, expected_live_entities)
-            .await;
-    }
-
-    /// Verifies that terminal cleanup removed every generation-owned text row.
-    pub async fn index_lifecycle_text_dropped_row_contracts(db: &crate::HelixDB) {
-        crate::production_text_lifecycle_rows::verify_dropped(db).await;
-    }
+/// Internal fixtures driven by the `db` benchmarks.
+///
+/// Benchmarks are separate crates and cannot reach `cfg(test)` code, so the
+/// `bench-internals` feature exposes exactly the fixtures they measure. It is
+/// not part of the supported API and no production build enables it.
+#[cfg(feature = "bench-internals")]
+#[doc(hidden)]
+pub mod bench_internals {
+    #[cfg(feature = "index-lifecycle-testing")]
+    pub use crate::execution::interpreter::text_transaction_benchmark::{
+        run_text_transaction_batch_benchmark_sample, TextTransactionBatchBenchmarkCase,
+        TextTransactionBatchBenchmarkSample,
+    };
+    pub use crate::index_lifecycle::secondary::hot_path_benchmark::{
+        benchmark_million_sequential_id_bitmap, SecondaryEqualityHotPathFixture,
+        SecondaryEqualityInsertMode, SecondaryEqualityInsertSample, SecondaryEqualityInspection,
+        SecondaryEqualityLookupInspection, SecondaryEqualityMillionBitmapSample,
+        SecondaryEqualityReadMode, SecondaryEqualityReadSample,
+    };
+    pub use crate::search::text::{
+        FtsPrefilterBenchmarkCase, FtsPrefilterBenchmarkFixture, FtsPrefilterBenchmarkLayout,
+        FtsPrefilterBenchmarkSample, FtsPrefilterBenchmarkStrategy,
+    };
+    pub use crate::search::vector::{
+        VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
+        VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
+        VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape, VectorMemoryBenchmarkStore,
+    };
 }
-#[cfg(test)]
-#[path = "../tests/production_text_lifecycle.rs"]
-mod production_text_lifecycle_workspace_tests;
+
+/// Release-scale soak entry points, compiled only with `production-scale`.
+#[cfg(feature = "production-scale")]
+#[doc(hidden)]
+#[path = "../tests/scale_support/mod.rs"]
+pub mod production_scale;
 
 use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -76,7 +88,7 @@ pub use index_lifecycle::queue::lag::PublicationLagHistogram;
 pub use index_lifecycle::queue::{BlockedIndexEntity, IndexOperationQueueStats};
 pub use merge_operator::{operation_queue_merge_stats, OperationQueueMergeStats, QueueMergeCost};
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 use config::ValidatedDynamicIndexDefinition;
 use config::{db::EmbeddedStorageProfile, runtime_catalog, CacheMode, RuntimeIndexCatalog};
 use error::{HelixDbError, Result};
@@ -899,7 +911,7 @@ impl PreparedPlannerContext {
 
     /// The catalog proof alone, for test plans built without the request's
     /// parameters; request execution takes [`Self::into_execution_inputs`].
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn into_catalog_proof(self) -> CatalogRefreshProof {
         self.proof
     }
@@ -994,7 +1006,7 @@ impl HelixDB {
     }
 
     /// Opens one parity-harness process over a caller-provided store.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(any(test, feature = "index-lifecycle-testing"))]
     pub async fn open_with_object_store_for_migration_parity(
         database: impl Into<String>,
         object_store: Arc<dyn ObjectStore>,
@@ -1105,7 +1117,7 @@ impl HelixDB {
         .await
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     async fn open_with_object_store_for_tests_inner(
         database: impl Into<String>,
         object_store: Arc<dyn ObjectStore>,
@@ -2182,7 +2194,7 @@ impl HelixDB {
         self.inner.storage.object_store()
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn inner_db(&self) -> Arc<Db> {
         match self.inner.storage.handle() {
             HelixStorage::Writer(writer) => Arc::clone(&writer.db),
@@ -3436,7 +3448,7 @@ impl HelixDB {
     ///
     /// Only for explicit scheduling: no automatic worker may publish at the
     /// same time, since two attempts for one generation must never overlap.
-    #[cfg(any(feature = "index-lifecycle-testing", feature = "production-coverage"))]
+    #[cfg(feature = "index-lifecycle-testing")]
     #[doc(hidden)]
     pub async fn publish_index_queues_for_lifecycle_testing(&self) -> Result<u64> {
         use index_lifecycle::queue::publication::PublicationOutcome;
@@ -3585,7 +3597,7 @@ impl HelixDB {
             .ok_or(HelixDbError::DatabaseClosed)
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     /// Advances at most one immediately eligible background migration step.
     ///
     /// This writer-only surface is available only when the migration worker is
@@ -3607,7 +3619,7 @@ impl HelixDB {
         .await
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) async fn install_index_for_tests(
         &self,
         definition: ValidatedDynamicIndexDefinition,
@@ -5040,9 +5052,20 @@ mod tests {
         writer.close().await.expect("winning writer closes");
     }
 
-    #[cfg(feature = "production-coverage")]
-    #[tokio::test]
-    async fn old_storage_reader_stays_available_until_managed_writer_migrates() {
+    /// The managed writer runs the equality-bitmap migration, whose failpoints
+    /// other tests arm process-wide, so this contract runs in its own process.
+    #[test]
+    fn old_storage_reader_stays_available_until_managed_writer_migrates() {
+        crate::test_isolation::in_own_process(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("contract runtime builds")
+                .block_on(old_storage_reader_contract());
+        });
+    }
+
+    async fn old_storage_reader_contract() {
         let token =
             ProcessLocalDatabaseToken::new("facade-reader-before-writer-migration").unwrap();
         let source = || HelixDbSource::InMemoryToken {

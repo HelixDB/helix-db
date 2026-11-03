@@ -116,12 +116,13 @@ Call `helix_execute_read_query` with the selected database reference:
 ```json
 {
   "database": "tenant:<id>",
-  "query_json": "{\"request_type\":\"read\",\"query\":{\"read\":{\"entries\":[],\"returns\":[]}}}"
+  "query_json": "{\"request_type\":\"read\",\"query\":{\"read\":{\"entries\":[{\"query\":{\"name\":\"nodes\",\"root\":{\"count\":{\"input\":{\"nodes_where\":{\"predicate\":{\"eq\":{\"left\":{\"property\":\"$label\"},\"right\":{\"constant\":{\"string\":\"Example\"}}}}}}}}}}],\"returns\":[\"nodes\"]}}}"
 }
 ```
 
-This empty read checks the request path without returning user records. For useful reads and writes,
-construct the inner request with the [query guides](/database/helix-db/query-guides/reading-data).
+This read counts `Example` nodes, which checks the request path without returning user records.
+For useful reads and writes, construct the inner request with the
+[query guides](/database/helix-db/query-guides/reading-data).
 The result contains `status_code` and `response`; receiving an MCP response alone does not prove
 that the database operation succeeded.
 

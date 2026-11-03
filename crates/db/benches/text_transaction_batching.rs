@@ -7,7 +7,7 @@
 
 use std::process::Command;
 
-use db::production_coverage::{
+use db::bench_internals::{
     run_text_transaction_batch_benchmark_sample, TextTransactionBatchBenchmarkCase,
     TextTransactionBatchBenchmarkSample,
 };

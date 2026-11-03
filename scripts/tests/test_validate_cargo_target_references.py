@@ -92,6 +92,191 @@ class CargoTargetReferenceTests(unittest.TestCase):
         self.assertEqual(actual - documented, {("current", "test", "crates/db/tests/current.rs")})
         self.assertEqual(documented - actual, {("stale", "test", "crates/db/tests/stale.rs")})
 
+    def test_feature_gated_tests_must_run_by_name(self):
+        catalog = MODULE.Catalog()
+        catalog.required_features.update({
+            ("db", "test", "default_contracts"): (),
+            ("db", "test", "listed_contracts"): ("bench-internals",),
+            ("db", "test", "unlisted_contracts"): ("index-lifecycle-testing",),
+            ("db", "test", "filtered_contracts"): ("index-lifecycle-testing",),
+            ("db", "test", "scale_soak"): ("production-scale",),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "ci.yml").write_text(
+                "steps:\n  - run: >-\n      cargo test -p db\n"
+                "      --features bench-internals --test listed_contracts\n"
+                "  - run: cargo test -p db --test filtered_contracts one_test -- --exact\n"
+                "  - run: cargo clippy -p db --test unlisted_contracts\n"
+            )
+            self.assertEqual(
+                MODULE.validate_feature_gated_tests_run(root, catalog),
+                [
+                    "db test target 'filtered_contracts' requires "
+                    "index-lifecycle-testing but no workflow runs the whole target with --test",
+                    "db test target 'unlisted_contracts' requires "
+                    "index-lifecycle-testing but no workflow runs the whole target with --test",
+                ],
+            )
+
+    def test_whole_target_runs_exclude_filters_and_non_test_commands(self):
+        runs = MODULE.runs_whole_test_targets
+        self.assertTrue(runs("cargo test -p db --features a,b --test t"))
+        self.assertTrue(runs("cargo test --release -p db --test t -- --nocapture --test-threads=1"))
+        self.assertTrue(
+            runs("cargo nextest run --profile ci -p db --test t -E 'kind(test) or test(/x/)'")
+        )
+        self.assertTrue(runs("cargo test -p db --features ${{ matrix.features }} --test t"))
+        self.assertFalse(runs("cargo test -p db --test t some_test"))
+        self.assertFalse(runs("cargo test -p db --test t -- --exact some_test"))
+        self.assertFalse(runs("cargo test -p db --test t -- --skip slow"))
+        self.assertFalse(runs("cargo nextest run -p db --test t -E 'test(/x/)'"))
+        self.assertFalse(runs("cargo test -p db --no-run --test t"))
+        self.assertFalse(runs("cargo clippy -p db --test t -- -D warnings"))
+
+    def test_every_bench_must_be_named(self):
+        catalog = MODULE.Catalog()
+        catalog.required_features.update({
+            ("db", "bench", "named_default"): (),
+            ("db", "bench", "unnamed_default"): (),
+            ("db", "bench", "unnamed_gated"): ("index-lifecycle-testing",),
+            ("db", "bench", "scale_bench"): ("production-scale",),
+            ("db", "test", "unnamed_test"): (),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "ci.yml").write_text(
+                "steps:\n  - run: cargo test -p db --bench named_default\n"
+            )
+            self.assertEqual(
+                MODULE.validate_benches_run(root, catalog),
+                [
+                    "db bench target 'unnamed_default' is named by no workflow --bench",
+                    "db bench target 'unnamed_gated' is named by no workflow --bench",
+                ],
+            )
+
+    def test_rust_ci_paths_cover_embedded_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "rust-ci.yml").write_text(
+                "on:\n  pull_request:\n    paths:\n"
+                '      - "crates/**"\n'
+                "      # Embedded fixtures.\n"
+                '      - "fixtures/*.json"\n'
+                "  push:\n"
+            )
+            source = root / "crates" / "a" / "src"
+            source.mkdir(parents=True)
+            (source / "lib.rs").write_text(
+                'const A: &str = include_str!("../../../fixtures/a.json");\n'
+                'const B: &[u8] = include_bytes!("../../../fixtures/nested/b.json");\n'
+                'const C: &str = include_str!("../../../docs/c.md");\n'
+                'const D: &str = include_str!("data.txt");\n'
+            )
+            self.assertEqual(
+                MODULE.validate_rust_ci_paths(root),
+                [
+                    "crates/a/src/lib.rs embeds fixtures/nested/b.json, which no "
+                    "Rust CI pull_request path matches",
+                    "crates/a/src/lib.rs embeds docs/c.md, which no "
+                    "Rust CI pull_request path matches",
+                ],
+            )
+
+    def test_lifecycle_testing_unit_tests_live_in_selected_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "crates" / "db" / "src"
+            source.mkdir(parents=True)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (source / "queue.rs").write_text(
+                '#[cfg(all(test, feature = "index-lifecycle-testing"))]\n'
+                '#[path = "../tests/unit/queue.rs"]\n'
+                "mod lifecycle_testing_tests;\n"
+                '#[cfg(all(test, feature = "index-lifecycle-testing"))]\n'
+                "mod stray_tests {}\n"
+            )
+            self.assertEqual(
+                MODULE.validate_lifecycle_testing_unit_tests(root),
+                [
+                    "crates/db/src/queue.rs: index-lifecycle-testing unit tests must "
+                    "live in a `lifecycle_testing_tests` module, not 'stray_tests'",
+                    "no workflow runs the library's lifecycle_testing_tests modules",
+                ],
+            )
+            (workflows / "ci.yml").write_text(
+                "steps:\n  - run: >-\n      cargo nextest run -p db --lib\n"
+                "      -E 'test(/::lifecycle_testing_tests::/)'\n"
+            )
+            self.assertEqual(
+                MODULE.validate_lifecycle_testing_unit_tests(root),
+                [
+                    "crates/db/src/queue.rs: index-lifecycle-testing unit tests must "
+                    "live in a `lifecycle_testing_tests` module, not 'stray_tests'",
+                ],
+            )
+
+    def test_test_modules_in_feature_gated_files_must_be_selected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "crates" / "db" / "src"
+            (source / "interpreter").mkdir(parents=True)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "ci.yml").write_text(
+                "steps:\n  - run: >-\n      cargo nextest run -p db --lib\n"
+                "      -E 'test(/::lifecycle_testing_tests::/)'\n"
+            )
+            (source / "interpreter" / "mod.rs").write_text(
+                "#[cfg(all(\n"
+                '    feature = "index-lifecycle-testing",\n'
+                '    any(test, feature = "bench-internals")\n'
+                "))]\n"
+                "pub(crate) mod benchmark;\n"
+                '#[cfg(feature = "index-lifecycle-testing")]\n'
+                '#[path = "../../tests/fixtures.rs"]\n'
+                "mod fixtures;\n"
+                '#[cfg(any(test, feature = "index-lifecycle-testing"))]\n'
+                "mod parity;\n"
+            )
+            (source / "interpreter" / "parity.rs").write_text("#[cfg(test)]\nmod tests {}\n")
+            (source / "interpreter" / "benchmark.rs").write_text(
+                "#[cfg(test)]\nmod lifecycle_testing_tests {}\n"
+                "#[cfg(test)]\nmod tests {}\n"
+            )
+            (root / "crates" / "db" / "tests").mkdir()
+            (root / "crates" / "db" / "tests" / "fixtures.rs").write_text(
+                "#[cfg(test)]\nmod fixture_tests;\n"
+            )
+            self.assertEqual(
+                MODULE.validate_lifecycle_testing_unit_tests(root),
+                [
+                    "crates/db/src/interpreter/benchmark.rs: index-lifecycle-testing unit "
+                    "tests must live in a `lifecycle_testing_tests` module, not 'tests'",
+                    "crates/db/src/interpreter/../../tests/fixtures.rs: "
+                    "index-lifecycle-testing unit tests must live in a "
+                    "`lifecycle_testing_tests` module, not 'fixture_tests'",
+                ],
+            )
+
+    def test_cfg_expressions_evaluate(self):
+        holds = MODULE.cfg_holds
+        self.assertTrue(holds('any(test, feature = "a")', test=True, features=set()))
+        self.assertFalse(holds('all(test, feature = "a")', test=True, features=set()))
+        self.assertTrue(holds('all(test, feature = "a")', test=True, features={"a"}))
+        self.assertFalse(
+            holds('all(feature = "a", any(test, feature = "b"))', test=True, features=set())
+        )
+        self.assertTrue(holds('all(not(test), feature = "a")', test=False, features={"a"}))
+
     def test_yaml_folded_commands_keep_multiline_target_flags(self):
         text = """steps:
   - run: >-

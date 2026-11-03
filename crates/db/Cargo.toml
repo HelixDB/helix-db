@@ -66,6 +66,9 @@ arrayvec = "0.7.7"
 memmap2 = { version = "0.9", optional = true }
 
 [dev-dependencies]
+# `wal_disable` only adds the opt-in `Settings::wal_enabled` field (default
+# `true`); one legacy-text migration fixture writes without a WAL.
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "2fb25fdaa61d42cc3756f979a8a7b37dbfc483fd", features = ["wal_disable"] }
 tokio-test = "0.4"
 proptest = "1"
 bincode = "^1.3.3"
@@ -79,8 +82,11 @@ default = []
 index-lifecycle-testing = []
 test-util = ["tokio/test-util"]
 future-vector-codecs = []
-production-coverage = ["slatedb/wal_disable"]
-production-scale = ["production-coverage", "dep:memmap2"]
+# Benchmarks only: exposes `db::bench_internals`, the internal fixtures the
+# `db` benches drive. No production build enables it.
+bench-internals = []
+# Release-scale soaks only: exposes `db::production_scale`.
+production-scale = ["dep:memmap2"]
 fuzzing = []
 # Benchmark images only: object-store connector counters and SlateDB metrics.
 async-index-benchmark = ["dep:http-body", "dep:slatedb-common"]
@@ -108,90 +114,51 @@ harness = false
 [[bench]]
 name = "secondary_equality_hot_path"
 harness = false
-required-features = ["production-coverage"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "secondary_equality_read_scale"
 harness = false
-required-features = ["production-coverage"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "vector_batch_insert"
 harness = false
-required-features = ["production-coverage"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "vector_memory_store"
 harness = false
-required-features = ["production-coverage"]
+required-features = ["bench-internals"]
 
 [[bench]]
 name = "text_transaction_batching"
 harness = false
 required-features = [
-    "production-coverage",
+    "bench-internals",
     "index-lifecycle-testing",
 ]
 
 [[bench]]
 name = "fts_prefilter"
 harness = false
-required-features = ["production-coverage"]
+required-features = ["bench-internals"]
 
 [[test]]
-name = "production_internal_contracts"
-required-features = ["production-coverage"]
-
-[[test]]
-name = "production_index_lifecycle_contracts"
-required-features = ["production-coverage"]
-
-[[test]]
-name = "production_secondary_equality_hot_path_contracts"
-required-features = ["production-coverage"]
-
-[[test]]
-name = "production_migration_contracts"
-required-features = [
-    "production-coverage",
-    "index-lifecycle-testing",
-]
-
-[[test]]
-name = "production_queue_publication"
-required-features = [
-    "production-coverage",
-    "index-lifecycle-testing",
-]
-
-[[test]]
-name = "production_text_lifecycle"
-required-features = ["production-coverage"]
+name = "bench_internals_contracts"
+required-features = ["bench-internals"]
 
 [[test]]
 name = "production_index_operation_queue"
-required-features = [
-    "production-coverage",
-    "index-lifecycle-testing",
-]
-
-[[test]]
-name = "production_queue_admission_memory"
-required-features = ["production-coverage"]
+required-features = ["index-lifecycle-testing"]
 
 [[test]]
 name = "production_text_correctness_regressions"
-required-features = [
-    "production-coverage",
-    "index-lifecycle-testing",
-]
+required-features = ["index-lifecycle-testing"]
 
 [[test]]
 name = "production_text_queue_contracts"
-required-features = [
-    "production-coverage",
-    "index-lifecycle-testing",
-]
+required-features = ["index-lifecycle-testing"]
 
 [[test]]
 name = "production_index_lifecycle_scale"

@@ -140,10 +140,9 @@ async fn initial_graph_sources_reject_every_admission_cleanly() {
         "MATCH (a:A), (b:B) WHERE a.key = b.key RETURN count(*)".to_owned(),
         "MATCH (a:A)-[:R]->(b:B), (n:N) RETURN count(*)".to_owned(),
         "MATCH p=(h:H)-[:R]->(t:T) RETURN length(p)".to_owned(),
-        // Relationship scans as the initial source, in both orientations, and
-        // as a later frame replaying its bitmaps for a batch of parents.
+        // Relationship scans as the initial source, and as a later frame
+        // replaying its bitmaps for a batch of parents.
         "MATCH ()-[r:R]->() RETURN count(r)".to_owned(),
-        "MATCH (a)-[r:R]-(b) RETURN a, b".to_owned(),
         "MATCH ()-[r:R]->(), ()-[s:R]->() RETURN count(*)".to_owned(),
         "OPTIONAL MATCH ()-[r:Absent]->() RETURN r".to_owned(),
         // A null row this wide outgrows the exhausted source's transients.
@@ -153,6 +152,16 @@ async fn initial_graph_sources_reject_every_admission_cleanly() {
             sweep(&db, &text, r::RowExecution::Batched, batch_rows).await;
         }
     }
+    // The undirected scan retains two rows per relationship. In one-row
+    // batches each is a new peak, about 10,000 executions and most of this
+    // test's run time, for admission sites the sweeps above already reach.
+    sweep(
+        &db,
+        "MATCH (a)-[r:R]-(b) RETURN a, b",
+        r::RowExecution::Batched,
+        512,
+    )
+    .await;
     db.close().await.unwrap();
 }
 

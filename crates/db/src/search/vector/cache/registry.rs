@@ -74,19 +74,19 @@ impl VectorCacheIdentity {
     }
 
     /// Returns the non-zero lifecycle generation in this complete identity.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) const fn generation(&self) -> crate::index_lifecycle::IndexGenerationId {
         self.generation
     }
 
     /// Returns the stable logical index owning this cache entry.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) const fn index_id(&self) -> crate::index_lifecycle::IndexId {
         self.index_id
     }
 
     /// Returns the exact canonical revision that authorized admission.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) const fn record_revision(&self) -> crate::index_lifecycle::IndexRevision {
         self.record_revision
     }
@@ -242,7 +242,7 @@ impl VectorMemoryCacheEntry {
     }
 
     /// Returns the complete identity that every read guard retains.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) const fn identity(&self) -> &VectorCacheIdentity {
         &self.identity
     }
@@ -263,7 +263,7 @@ impl VectorMemoryCacheEntry {
     }
 
     /// Publishes a manually constructed fixture without a storage scan.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn finish_hydration(&self, store: Arc<VectorMemoryStore>) -> bool {
         self.publish_initial(
             store,
@@ -446,7 +446,7 @@ impl VectorMemoryCacheEntry {
     }
 
     /// Acquires the published store without a currency proof, for inspection only.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn acquire_resident_guard(
         self: &Arc<Self>,
     ) -> Result<VectorCacheReadGuard, VectorCacheReadGuardError> {
@@ -736,7 +736,7 @@ pub(crate) struct VectorCacheReadGuard {
 
 impl VectorCacheReadGuard {
     /// Returns the exact identity whose active-reader count this guard owns.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     pub(crate) fn identity(&self) -> &VectorCacheIdentity {
         self.entry.identity()
     }
@@ -1026,7 +1026,7 @@ impl VectorCacheRegistry {
     }
 
     /// Acquires the published store without a currency proof, for inspection only.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn resident_guard_for(
         &self,
         handle: &ValidatedVectorGenerationHandle,
@@ -1262,9 +1262,9 @@ impl VectorCacheRegistry {
     }
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../../tests/production_support/vector/memory_registry.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/memory_registry.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {

@@ -177,7 +177,6 @@ The [scalar memory allowance](../crates/planner/src/relational/evaluation/memory
 tracks nested temporary bounds and borrows the request's peak counter. It carries
 no storage handle. Evaluation and row aggregation share the same accumulator
 admission boundary, including the overlap between an input and retained state.
-Private allowance tests live separately from production coverage.
 
 Materialisation depends on the selected pipeline:
 
@@ -260,10 +259,9 @@ submitted commit. Tests must distinguish pre-commit rollback from that boundary.
 | [Complete plan regressions](planner-regressions.md) | Frozen inputs, complete plan signatures and explicit full-plan diffs across storage-latency profiles. Runtime reads and memory remain separate review gates. |
 | [Planner tests](../crates/planner/tests) and [planner corpus script](../scripts/planner-normalized-corpus.sh) | Validation, rewrite legality, deterministic fallback, costs, operator contracts and plan-quality regressions. |
 | [Row executor tests](../crates/db/src/execution/interpreter/rows/tests) | Batches versus materialised/reference execution, independent expected rows, errors, scopes, admission and rollback. |
-| [Production contracts](../crates/db/tests/production_internal_contracts.rs) with `production-coverage` | Production-linked storage/interpreter behaviour beyond `cfg(test)` paths. |
+| `cargo test -p db --features index-lifecycle-testing --test <target>` and `cargo nextest run -p db --features index-lifecycle-testing --lib -E 'test(/::lifecycle_testing_tests::/)'` | Explicitly scheduled lifecycle, queue, and text contracts that `--all-targets` skips. CI lists every such target, and the library's `lifecycle_testing_tests` modules, in the `Rust CI` workflow. Contracts over private internals are ordinary unit tests whose bodies live in [`crates/db/tests/unit`](../crates/db/tests/unit). |
 | `cargo run --locked -p helix-opencypher-tck -- --gate --output target/cypher-tck.json` | Whole pinned corpus accounting, required scenarios, individual previous-pass regressions, errors, graph effects and harness health. The capability manifest must equal the current `--profile-draft` classification, and each exclusion must stop at its declared capability. |
 | `npm --prefix sdks/typescript run test:parity` | Cross-language request fixtures and embedded/server execution, including disk restart behaviour. Requires local test servers. |
-| [Cypher coverage](../scripts/cypher-coverage.sh), [workspace coverage](../scripts/workspace-coverage.sh), specialised coverage scripts | Explicit denominators and minimum coverage. Passing functional tests alone does not establish a coverage threshold. |
 | [Cypher scaling](../crates/db/examples/cypher_scaling.rs), [DB benches](../crates/db/benches), [planner benches](../crates/planner/benches) | Independent expected results, bounded planner work, actual read counts and admitted-memory guards; latency measured separately. |
 | `cargo fmt --all -- --check` and `cargo clippy --workspace -- -D warnings` | Formatting and code-quality gates with the pinned stable toolchain. |
 

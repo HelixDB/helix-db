@@ -14,9 +14,12 @@
 //! entities, which the next attempt plans again through the retained
 //! session. Both happen over a run, though not in every seed.
 //!
-//! `GRAPH_SEEDS` (default 2 per metric, the fewest that cover every write
-//! kind, eviction, and discard) and `GRAPH_SEED` (first seed) scale the run;
-//! the nightly workflow runs 4 per metric in release.
+//! Each seed runs one metric: consecutive seeds alternate metrics, and each
+//! pair of seeds flips the order, so every four consecutive seeds run each
+//! metric under an odd and an even seed. `GRAPH_SEEDS` (default 2, the fewest
+//! that cover both metrics, every write kind, eviction, and discard) and
+//! `GRAPH_SEED` (first seed) scale the run; the nightly workflow runs 8 in
+//! release, 4 per metric.
 //!
 //! The direct runs apply the same invariants to every way a vector write is
 //! planned below the publisher: the retained build session under budgets
@@ -425,16 +428,15 @@ async fn random_queued_vector_writes_keep_every_graph_valid() {
     // not those of builds, which run in their own.
     let discards = vector::DISCARDED_ENTITIES
         .scope(Cell::new(0), async {
-            for metric in [
-                VectorDistanceMetric::Euclidean,
-                VectorDistanceMetric::Cosine,
-            ] {
-                for seed in first..first + seeds {
-                    let (run_commits, run_evictions) = run(metric, seed, &mut applied).await;
-                    commits += run_commits;
-                    if !seed.is_multiple_of(2) {
-                        evictions += run_evictions;
-                    }
+            for (index, seed) in (first..first + seeds).enumerate() {
+                let metric = [
+                    VectorDistanceMetric::Euclidean,
+                    VectorDistanceMetric::Cosine,
+                ][(index + index / 2) % 2];
+                let (run_commits, run_evictions) = run(metric, seed, &mut applied).await;
+                commits += run_commits;
+                if !seed.is_multiple_of(2) {
+                    evictions += run_evictions;
                 }
             }
             vector::DISCARDED_ENTITIES.with(Cell::get)
@@ -446,7 +448,7 @@ async fn random_queued_vector_writes_keep_every_graph_valid() {
         "every write kind ran: {applied:?}"
     );
     assert!(
-        commits > 2 * seeds * ROUNDS as u64,
+        commits > seeds * ROUNDS as u64,
         "rounds took several attempts: {commits} commits"
     );
     assert!(

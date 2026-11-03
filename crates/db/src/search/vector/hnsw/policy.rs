@@ -319,7 +319,7 @@ pub(crate) struct AdaptiveBypassObservation {
 
 impl AdaptiveBypassObservation {
     /// Returns an idle observation for fixed policy tests and cold-start search.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) const fn idle() -> Self {
         Self {
             state: AdaptiveBypassState::Ready,
@@ -596,9 +596,9 @@ fn adaptive_threshold(
         .expect("adaptive threshold is clamped to the SimHash bit width")
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../../tests/production_support/vector/policy.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/policy.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {

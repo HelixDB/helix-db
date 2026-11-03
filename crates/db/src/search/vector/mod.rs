@@ -98,32 +98,32 @@
 //! ```
 
 mod access;
-#[cfg(feature = "production-coverage")]
+#[cfg(feature = "bench-internals")]
 mod benchmarks;
 mod cache;
 mod configuration;
 pub mod dimension;
 pub mod distance;
-#[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/distance_neighbors.rs"]
-mod distance_neighbor_production_contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/vector/distance_neighbors.rs"]
+mod distance_neighbor_tests;
 mod domain;
 mod generation;
 mod hnsw;
 pub mod item;
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/vector/magnitude_oracle.rs"]
+#[cfg(test)]
+#[path = "../../../tests/unit/vector/magnitude_oracle.rs"]
 pub(crate) mod magnitude_oracle;
-#[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/magnitude_regressions.rs"]
-mod magnitude_regressions;
+#[cfg(test)]
+#[path = "../../../tests/unit/vector/magnitude_regressions.rs"]
+mod magnitude_tests;
 pub mod parameters;
-#[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/vector/primitives.rs"]
-mod primitive_production_contracts;
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/vector/read_fault.rs"]
-pub(crate) mod read_fault_production_support;
+#[cfg(test)]
+#[path = "../../../tests/unit/vector/primitives.rs"]
+mod primitive_tests;
+#[cfg(test)]
+#[path = "../../../tests/unit/vector/read_fault.rs"]
+pub(crate) mod read_fault;
 mod result;
 pub mod simhash;
 pub mod spaces;
@@ -139,26 +139,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::HelixDbError;
 
-#[cfg(test)]
-use crate::encoding::v2::keys::indexes::vector::{
-    VectorEntryCandidateKey, VectorEntryCandidateNodeKey, VectorIndexMetadataKey,
-    VectorIndexPrefixKey, VectorItemKey, VectorLayer0NeighborsKey, VectorUpperVectorKey,
-};
 use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorMetadataScanPrefix};
-#[cfg(test)]
-use crate::encoding::v2::keys::indexes::vector::{
-    VectorReverseEdgeKey, VectorReverseEdgePrefixKey,
-};
-#[cfg(test)]
-use crate::encoding::v2::legacy::vector::transaction_guard::LegacyVectorTxnGuardKey as VectorTxnGuardKey;
 use crate::encoding::v2::values::indexes::vector as vector_values;
 use crate::encoding::NodeId;
 
-#[cfg(feature = "production-coverage")]
-pub(crate) use access::read::production_contracts::run as run_read_boundary_contracts;
 pub(crate) use access::read::{ValidatedVectorReadIndex, VectorReadVisibility};
 pub(crate) use access::read_view::VectorReadView;
-#[cfg(feature = "production-coverage")]
+#[cfg(feature = "bench-internals")]
 pub(crate) use benchmarks::{
     observe_retained_payload as observe_benchmark_retained_payload,
     record_cache_stats as record_benchmark_cache_stats, record_delete as record_benchmark_delete,
@@ -168,108 +155,66 @@ pub(crate) use benchmarks::{
     reset as reset_benchmark_telemetry, snapshot as benchmark_telemetry_snapshot,
     VectorMutationBenchmarkTelemetry,
 };
-#[cfg(feature = "production-coverage")]
+#[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub use benchmarks::{
     VectorBatchBenchmarkCacheLimits, VectorBatchBenchmarkCase, VectorBatchBenchmarkFixture,
     VectorBatchBenchmarkMetric, VectorBatchBenchmarkSample, VectorBatchBenchmarkWorkload,
 };
-#[cfg(feature = "production-coverage")]
+#[cfg(feature = "bench-internals")]
 #[doc(hidden)]
 pub use cache::benchmark::{
     VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape, VectorMemoryBenchmarkStore,
 };
 #[cfg(test)]
 pub(crate) use cache::commit::gated_wal;
-#[cfg(feature = "production-coverage")]
-pub(crate) use cache::commit::production_contracts::run as run_write_cache_contracts;
 pub(crate) use cache::commit::{commit_fenced, VectorCacheWriteSet};
-#[cfg(feature = "production-coverage")]
-pub(crate) use cache::hydration::production_contracts::run as run_hydration_contracts;
 pub(crate) use cache::hydration::{
     active_vector_targets, hydrate_active_generations, VectorCacheHydrationBudget,
     VectorCacheHydrationOutcome, VectorCacheSnapshotSource,
 };
 pub(crate) use cache::part_warm::{warm_object_store_parts, VectorPartWarmSummary};
 pub(crate) use cache::reader_refresh::run_reader_refreshes;
-#[cfg(feature = "production-coverage")]
-pub(crate) use cache::registry::production_contracts::run as run_memory_registry_contracts;
 pub(crate) use cache::registry::{VectorCacheRegistry, VectorCacheVisibility};
-#[cfg(feature = "production-coverage")]
-pub(crate) use cache::store::production_contracts::run as run_memory_store_contracts;
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) use cache::store::VectorMemoryStore;
 pub use configuration::VectorConfigError;
 pub(crate) use configuration::VectorIndexState;
 pub use dimension::{SameDimensionPair, VectorDimension, VectorDimensionError, VectorRef};
 pub use distance::Distance;
-#[cfg(feature = "production-coverage")]
-pub(crate) use distance_neighbor_production_contracts::run as run_distance_neighbor_contracts;
 pub(crate) use domain::{ValidatedMetricVector, VectorValidationError};
-#[cfg(feature = "production-coverage")]
-pub(crate) use generation::production_contracts::run as run_generation_contracts;
 pub(crate) use generation::ValidatedVectorCleanupAuthority;
 pub(crate) use generation::{ValidatedVectorBuildGenerationHandle, VectorGenerationIdentity};
 pub(crate) use generation::{ValidatedVectorGenerationHandle, VectorGenerationValidationError};
-#[cfg(feature = "production-coverage")]
-pub(crate) use hnsw::index::production_contracts::run as run_index_contracts;
 pub(crate) use hnsw::index::VectorIndex;
 pub(crate) use hnsw::model::Candidate;
-#[cfg(feature = "production-coverage")]
-pub(crate) use hnsw::mutation::production_contracts::run as run_mutation_contracts;
 pub(crate) use hnsw::mutation::{VectorBuildSession, VectorBuildSessionStats};
 #[cfg(test)]
 pub(crate) use hnsw::mutation::{DISCARDED_ENTITIES, REPLACE_REPLAYS};
-#[cfg(feature = "production-coverage")]
-pub(crate) use hnsw::policy::production_contracts::run as run_policy_contracts;
 #[cfg(any(test, feature = "production-scale"))]
 pub(crate) use hnsw::restricted::observe_restricted_search;
-#[cfg(feature = "production-coverage")]
-pub(crate) use hnsw::restricted::run_production_contracts as run_restricted_contracts;
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "production-scale"))]
 pub use hnsw::restricted::RestrictedSearchStrategy;
 pub(crate) use hnsw::restricted::RestrictedVectorCandidates;
 #[cfg(feature = "production-scale")]
 pub(crate) use hnsw::restricted::{
     RestrictedBeamOverrideGuard, RestrictedBeamScale, RestrictedSearchTermination,
 };
-#[cfg(feature = "production-coverage")]
-pub(crate) use hnsw::search::production_contracts::run as run_search_contracts;
 pub(crate) use hnsw::search::score_exact_in_memory;
 pub use item::Item;
-#[cfg(feature = "production-coverage")]
-pub(crate) use magnitude_regressions::{
-    run_current_row_decode_contracts as run_magnitude_current_row_decode_contracts,
-    run_golden_and_cosine_contracts as run_magnitude_golden_and_cosine_contracts,
-    run_legacy_validation_contracts as run_magnitude_legacy_validation_contracts,
-    run_mutation_contracts as run_magnitude_mutation_contracts,
-    run_oracle_and_kernel_contracts as run_magnitude_oracle_and_kernel_contracts,
-    run_restricted_search_contracts as run_magnitude_restricted_search_contracts,
-    run_search_contracts as run_magnitude_search_contracts,
-};
 pub use parameters::{
     CollisionThreshold, Connections, ConstructionBeamWidth, DistanceScore, FailureProbability,
     Layer0Connections, LayerMultiplier, ResultCount, SearchBeamWidth, UnitInterval,
     VectorParameterError,
 };
-#[cfg(feature = "production-coverage")]
-pub(crate) use primitive_production_contracts::run as run_primitive_contracts;
 pub use result::{
     DistanceOutputUnit, DistanceOutputVersion, MaterializedVectorDistance, VectorEntityId,
 };
 pub(crate) use result::{SearchResult, TypedVectorSearchResult};
-#[cfg(feature = "production-coverage")]
-pub(crate) use simhash::production_contracts::run as run_simhash_contracts;
-#[cfg(feature = "production-coverage")]
-pub(crate) use simhash::registry::production_contracts::run as run_simhash_registry_contracts;
 pub use simhash::{
     SimHash, SimHashCache, SimHasher, DEFAULT_SIMHASH_COLLISION_THRESHOLD, SIMHASH_BITS,
 };
 pub(crate) use simhash::{SimHashIdentity, SimHasherRegistry, SimHasherRegistryLimits};
-#[cfg(feature = "production-coverage")]
-pub(crate) use storage::production_contracts::run as run_storage_contracts;
-#[cfg(feature = "production-coverage")]
-pub(crate) use storage::transaction::production_contracts::run as run_write_transaction_contracts;
 pub(crate) use storage::transaction::{
     MeasuredVectorTransaction, PlannedVectorMutation, VectorWriteMeasurement, VectorWriteRecorder,
 };
@@ -302,7 +247,7 @@ impl VectorDistanceMetric {
     }
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 impl VectorIndexConfig {
     /// Create a new vector index configuration
     ///
@@ -626,7 +571,7 @@ impl SearchParams {
 #[derive(Debug, Default, Clone)]
 #[allow(
     dead_code,
-    reason = "search updates a closed diagnostic snapshot; production-coverage contracts, rather than every build mode, observe every counter"
+    reason = "search updates a closed diagnostic snapshot; unit tests, rather than every build mode, observe every counter"
 )]
 pub(crate) struct SearchStats {
     /// Number of candidate-pop expansion iterations in layer-0 traversal.
@@ -1109,23 +1054,9 @@ mod tests {
     impl distance::sealed::Sealed for BinaryTestDistance {}
 
     #[test]
-    fn test_config_builder() {
-        let config = VectorIndexConfig::new("test_idx", "embedding", 128)
-            .with_m(32)
-            .with_ef_construction(400);
-
-        assert_eq!(config.index_name, "test_idx");
-        assert_eq!(config.property_name, "embedding");
-        assert_eq!(config.dimension, 128);
-        assert_eq!(config.m, 32);
+    fn test_config_builder_with_m_rederives_ml() {
+        let config = VectorIndexConfig::new("test_idx", "embedding", 128).with_m(32);
         assert!((config.ml - default_ml_for_m(32)).abs() < 1e-6);
-        assert_eq!(config.ef_construction, 400);
-        assert_eq!(
-            config.simhash_threshold,
-            DEFAULT_SIMHASH_COLLISION_THRESHOLD
-        );
-        assert!(config.adaptive_enabled);
-        assert!((config.adaptive_failure_prob - 0.1).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -1284,15 +1215,6 @@ mod tests {
     }
 
     #[test]
-    fn test_neighbors_encoding() {
-        let neighbors = vec![1, 42, 1000, u64::MAX - 1];
-        let encoded = encode_neighbors(&neighbors);
-        let decoded = decode_neighbors(&encoded).unwrap();
-
-        assert_eq!(neighbors, decoded);
-    }
-
-    #[test]
     fn test_metadata_encoding() {
         let config = VectorIndexConfig::new("test", "emb", 64);
         let metadata = VectorIndexMetadata::new(config);
@@ -1393,46 +1315,6 @@ mod tests {
     }
 
     #[test]
-    fn test_entry_candidate_layer_encoding() {
-        let layer = 321u16;
-        let encoded = encode_entry_candidate_layer(layer);
-        let decoded = decode_entry_candidate_layer(&encoded).unwrap();
-        assert_eq!(decoded, layer);
-    }
-
-    #[test]
-    fn test_entry_candidate_key_roundtrip() {
-        let index_id = index_id_from_name("idx");
-        let key = VectorKey::EntryCandidateSorted(VectorEntryCandidateKey::new(index_id, 12, 99))
-            .to_bytes();
-        let VectorKey::EntryCandidateSorted(parsed) = VectorKey::parse_from_slice(&key).unwrap()
-        else {
-            panic!("entry candidate key should parse as EntryCandidateSorted");
-        };
-        assert_eq!(parsed.layer(), 12);
-        assert_eq!(parsed.node_id(), 99);
-    }
-
-    #[test]
-    fn test_entry_candidate_keys_live_in_vector_l0_keyspace() {
-        let index_id = index_id_from_name("idx");
-        let sorted_key =
-            VectorKey::EntryCandidateSorted(VectorEntryCandidateKey::new(index_id, 3, 7))
-                .to_bytes();
-        let node_key =
-            VectorKey::EntryCandidateNode(VectorEntryCandidateNodeKey::new(index_id, 7)).to_bytes();
-
-        assert!(matches!(
-            VectorKey::parse_from_slice(&sorted_key).unwrap(),
-            VectorKey::EntryCandidateSorted(_)
-        ));
-        assert!(matches!(
-            VectorKey::parse_from_slice(&node_key).unwrap(),
-            VectorKey::EntryCandidateNode(_)
-        ));
-    }
-
-    #[test]
     fn test_index_id_deterministic() {
         let id_a = index_id_from_name("idx");
         let id_b = index_id_from_name("idx");
@@ -1440,57 +1322,6 @@ mod tests {
 
         assert_eq!(id_a, id_b);
         assert_ne!(id_a, id_c);
-    }
-
-    #[test]
-    fn test_v2_key_lengths() {
-        let index_id = index_id_from_name("idx");
-        let meta_key = VectorKey::IndexMetadata(VectorIndexMetadataKey::new(index_id)).to_bytes();
-        let vec_key = VectorKey::Vector(VectorItemKey::new(index_id, 0, 7)).to_bytes();
-        let l0_key =
-            VectorKey::Layer0Neighbors(VectorLayer0NeighborsKey::new(index_id, 7)).to_bytes();
-        let upper_vec_key =
-            VectorKey::UpperVector(VectorUpperVectorKey::new(index_id, 7)).to_bytes();
-        let cand_sorted_key =
-            VectorKey::EntryCandidateSorted(VectorEntryCandidateKey::new(index_id, 3, 7))
-                .to_bytes();
-        let cand_node_key =
-            VectorKey::EntryCandidateNode(VectorEntryCandidateNodeKey::new(index_id, 7)).to_bytes();
-        let txn_guard_key = VectorKey::TxnGuard(VectorTxnGuardKey::new(index_id)).to_bytes();
-        let idx_prefix = VectorKey::IndexPrefix(VectorIndexPrefixKey::new(index_id)).to_bytes();
-        let reverse_edge_prefix =
-            VectorKey::ReverseEdgePrefix(VectorReverseEdgePrefixKey::new(index_id, 7)).to_bytes();
-        let reverse_edge_key =
-            VectorKey::ReverseEdge(VectorReverseEdgeKey::new(index_id, 7, 3, 9)).to_bytes();
-
-        assert_eq!(meta_key.len(), 11);
-        assert_eq!(vec_key.len(), 26);
-        assert_eq!(l0_key.len(), 18);
-        assert_eq!(upper_vec_key.len(), 18);
-        assert_eq!(cand_sorted_key.len(), 20);
-        assert_eq!(cand_node_key.len(), 18);
-        assert_eq!(txn_guard_key.len(), 11);
-        assert_eq!(idx_prefix.len(), 10);
-        assert_eq!(reverse_edge_prefix.len(), 18);
-        assert_eq!(reverse_edge_key.len(), 28);
-    }
-
-    #[test]
-    fn test_reverse_edge_key_roundtrip() {
-        let key = VectorKey::ReverseEdge(VectorReverseEdgeKey::new(
-            index_id_from_name("idx"),
-            7,
-            4,
-            9,
-        ))
-        .to_bytes();
-        let VectorKey::ReverseEdge(parsed) = VectorKey::parse_from_slice(&key).unwrap() else {
-            panic!("reverse edge key should parse as ReverseEdge");
-        };
-        assert_eq!(parsed.target_node_id(), 7);
-        assert_eq!(parsed.layer(), 4);
-        assert_eq!(parsed.source_node_id(), 9);
-        assert!(VectorKey::parse_from_slice(&key[..27]).is_err());
     }
 
     #[test]

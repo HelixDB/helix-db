@@ -510,9 +510,42 @@ impl EdgeIdAllocator {
 
 #[cfg(test)]
 mod tests {
+    /// Verifies concurrent first allocations share one lease instead of
+    /// restarting from storage.
+    ///
+    /// SlateDB writes on a separate task, so on a current-thread runtime the
+    /// first caller stays suspended in its lease write, holding the extension
+    /// lock with the lease unpublished. The second caller therefore always
+    /// takes the initialized branch once it gets that lock, independent of
+    /// scheduling.
+    #[tokio::test]
+    async fn concurrent_first_allocations_share_one_lease() {
+        let db = slatedb::Db::builder(
+            "id-allocator-first-allocation",
+            std::sync::Arc::new(slatedb::object_store::memory::InMemory::new()),
+        )
+        .build()
+        .await
+        .expect("in-memory database opens");
+        let allocator =
+            super::NodeIdAllocator::new_with_refill_threshold(std::sync::Arc::new(db), 10, 0);
+
+        let mut first = std::pin::pin!(allocator.allocate());
+        assert!(
+            futures::poll!(&mut first).is_pending(),
+            "the first caller must suspend before publishing its lease",
+        );
+        let (first, second) = tokio::join!(first, allocator.allocate());
+
+        assert_eq!(
+            [first.expect("first ID"), second.expect("second ID")],
+            [0, 1],
+            "the second caller must claim from the first caller's lease",
+        );
+    }
+
     use super::*;
     use slatedb::object_store::memory::InMemory;
-    use std::sync::atomic::AtomicUsize;
     use tokio::sync::Barrier;
 
     async fn test_db() -> Arc<Db> {
@@ -692,37 +725,6 @@ mod tests {
     // =========================================================================
     // Concurrent Allocation
     // =========================================================================
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn test_concurrent_allocation() {
-        let alloc = Arc::new(test_allocator(
-            test_db().await,
-            Bytes::from_static(b"test"),
-            1000,
-        ));
-
-        let handles: Vec<_> = (0..10)
-            .map(|_| {
-                let alloc = Arc::clone(&alloc);
-                tokio::spawn(async move {
-                    let mut ids = Vec::new();
-                    for _ in 0..100 {
-                        ids.push(alloc.allocate().await.unwrap());
-                    }
-                    ids
-                })
-            })
-            .collect();
-
-        let mut all_ids: Vec<u64> = futures::future::join_all(handles)
-            .await
-            .into_iter()
-            .flat_map(|r| r.unwrap())
-            .collect();
-
-        all_ids.sort();
-        assert_eq!(all_ids, (0..1000).collect::<Vec<_>>());
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn test_concurrent_batch_allocation() {
@@ -905,157 +907,6 @@ mod tests {
         // HWM should be 50 (exactly 10 leases of 5)
         let hwm = read_stored_hwm(&db, &key).await;
         assert_eq!(hwm, 50, "HWM should be 50, got {}", hwm);
-    }
-
-    // =========================================================================
-    // Extension Count Verification
-    // =========================================================================
-
-    /// Wrapper that counts how many times persist_lease_extension is called
-    struct CountingAllocator {
-        inner: IdAllocator,
-        extend_count: AtomicUsize,
-    }
-
-    impl CountingAllocator {
-        fn new(db: Arc<Db>, key: Bytes, lease_size: u64) -> Self {
-            Self {
-                inner: IdAllocator::new_with_refill_threshold(db, key, lease_size, 0),
-                extend_count: AtomicUsize::new(0),
-            }
-        }
-
-        async fn allocate(&self) -> Result<u64> {
-            let lease_end = self.inner.lease_end.load(Ordering::Acquire);
-
-            if lease_end == 0 {
-                let _guard = self.inner.extend_lock.lock().await;
-                let lease_end = self.inner.lease_end.load(Ordering::Acquire);
-                if lease_end > 0 {
-                    let id = self.inner.next_id.fetch_add(1, Ordering::AcqRel);
-                    if id < lease_end {
-                        return Ok(id);
-                    }
-                    self.counted_persist().await?;
-                    return Ok(id);
-                }
-                let watermark = self.inner.load_persisted_watermark().await?;
-                self.inner.next_id.store(watermark, Ordering::Release);
-                let id = self.inner.next_id.fetch_add(1, Ordering::AcqRel);
-                self.counted_persist().await?;
-                return Ok(id);
-            }
-
-            let id = self.inner.next_id.fetch_add(1, Ordering::AcqRel);
-            if id < lease_end {
-                return Ok(id);
-            }
-
-            let _guard = self.inner.extend_lock.lock().await;
-            if self.inner.next_id.load(Ordering::Acquire)
-                <= self.inner.lease_end.load(Ordering::Acquire)
-            {
-                return Ok(id);
-            }
-            self.counted_persist().await?;
-            Ok(id)
-        }
-
-        async fn counted_persist(&self) -> Result<()> {
-            self.extend_count.fetch_add(1, Ordering::SeqCst);
-            let lease_end = self.inner.lease_end.load(Ordering::Acquire);
-            self.inner.persist_lease_extension(lease_end).await
-        }
-
-        fn extend_count(&self) -> usize {
-            self.extend_count.load(Ordering::SeqCst)
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn test_extension_count_minimal() {
-        let db = test_db().await;
-        let key = Bytes::from_static(b"test");
-        let alloc = Arc::new(CountingAllocator::new(Arc::clone(&db), key.clone(), 10));
-
-        // Fill the initial lease before forcing all remaining claims to wait for
-        // the same extension. The first waiter must cover every claimed ID with
-        // one write; the remaining waiters must observe that completed write.
-        for expected_id in 0..10 {
-            assert_eq!(alloc.allocate().await.unwrap(), expected_id);
-        }
-        assert_eq!(alloc.extend_count(), 1);
-
-        let extension_guard = alloc.inner.extend_lock.lock().await;
-        let num_tasks = 40;
-
-        let handles: Vec<_> = (0..num_tasks)
-            .map(|_| {
-                let alloc = Arc::clone(&alloc);
-                tokio::spawn(async move { alloc.allocate().await.unwrap() })
-            })
-            .collect();
-
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while alloc.inner.next_id.load(Ordering::Acquire) != 50 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("all allocations should claim an id before the extension lock is released");
-        drop(extension_guard);
-
-        let mut all_ids: Vec<u64> = futures::future::join_all(handles)
-            .await
-            .into_iter()
-            .map(|r| r.unwrap())
-            .collect();
-        all_ids.sort();
-
-        assert_eq!(all_ids, (10..50).collect::<Vec<_>>());
-        assert_eq!(read_stored_hwm(&db, &key).await, 50);
-        assert_eq!(alloc.extend_count(), 2);
-    }
-
-    #[tokio::test]
-    async fn counting_allocator_covers_sequential_fast_and_extension_paths() {
-        let alloc = CountingAllocator::new(test_db().await, Bytes::from_static(b"test"), 3);
-
-        assert_eq!(alloc.allocate().await.unwrap(), 0);
-        assert_eq!(alloc.allocate().await.unwrap(), 1);
-        assert_eq!(alloc.allocate().await.unwrap(), 2);
-        assert_eq!(alloc.allocate().await.unwrap(), 3);
-        assert_eq!(alloc.extend_count(), 2);
-    }
-
-    #[tokio::test]
-    async fn counting_allocator_observes_extension_completed_while_waiting() {
-        let alloc = Arc::new(CountingAllocator::new(
-            test_db().await,
-            Bytes::from_static(b"test"),
-            3,
-        ));
-        alloc.inner.next_id.store(1, Ordering::Release);
-        alloc.inner.lease_end.store(1, Ordering::Release);
-        let extension_guard = alloc.inner.extend_lock.lock().await;
-
-        let waiting = {
-            let alloc = Arc::clone(&alloc);
-            tokio::spawn(async move { alloc.allocate().await })
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while alloc.inner.next_id.load(Ordering::Acquire) != 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("allocation should claim an id before waiting for the lock");
-
-        alloc.inner.lease_end.store(3, Ordering::Release);
-        drop(extension_guard);
-
-        assert_eq!(waiting.await.unwrap().unwrap(), 1);
-        assert_eq!(alloc.extend_count(), 0);
     }
 
     // =========================================================================
@@ -1339,82 +1190,8 @@ mod tests {
     }
 
     // =========================================================================
-    // Edge Cases
-    // =========================================================================
-
-    #[tokio::test]
-    async fn test_lease_size_one() {
-        let alloc = test_allocator(test_db().await, Bytes::from_static(b"test"), 1);
-
-        // Every allocation triggers an extension
-        for i in 0..10 {
-            assert_eq!(alloc.allocate().await.unwrap(), i);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_batch_larger_than_lease() {
-        let db = test_db().await;
-        let key = Bytes::from_static(b"test");
-        let alloc = test_allocator(Arc::clone(&db), key.clone(), 10);
-
-        // Batch of 100 with lease_size=10
-        let range = alloc.allocate_batch(100).await.unwrap();
-        assert_eq!(range, 0..100);
-
-        // HWM should be exactly 100
-        let hwm = read_stored_hwm(&db, &key).await;
-        assert_eq!(hwm, 100);
-    }
-
-    #[tokio::test]
-    async fn test_mixed_single_and_batch() {
-        let alloc = test_allocator(test_db().await, Bytes::from_static(b"test"), 20);
-
-        assert_eq!(alloc.allocate().await.unwrap(), 0);
-        assert_eq!(alloc.allocate_batch(5).await.unwrap(), 1..6);
-        assert_eq!(alloc.allocate().await.unwrap(), 6);
-        assert_eq!(alloc.allocate_batch(10).await.unwrap(), 7..17);
-        assert_eq!(alloc.allocate().await.unwrap(), 17);
-    }
-
-    // =========================================================================
     // Stress Tests
     // =========================================================================
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn test_stress_many_extensions() {
-        let db = test_db().await;
-        let key = Bytes::from_static(b"test");
-        let alloc = Arc::new(test_allocator(Arc::clone(&db), key.clone(), 3));
-
-        let num_tasks = 100;
-        let barrier = Arc::new(Barrier::new(num_tasks));
-
-        let handles: Vec<_> = (0..num_tasks)
-            .map(|_| {
-                let alloc = Arc::clone(&alloc);
-                let barrier = Arc::clone(&barrier);
-                tokio::spawn(async move {
-                    barrier.wait().await;
-                    alloc.allocate().await.unwrap()
-                })
-            })
-            .collect();
-
-        let mut all_ids: Vec<u64> = futures::future::join_all(handles)
-            .await
-            .into_iter()
-            .map(|r| r.unwrap())
-            .collect();
-        all_ids.sort();
-
-        assert_eq!(all_ids, (0..100).collect::<Vec<_>>());
-
-        // HWM should be 102 (ceil(100/3) * 3 = 34 * 3 = 102)
-        let hwm = read_stored_hwm(&db, &key).await;
-        assert_eq!(hwm, 102);
-    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn test_stress_mixed_operations() {

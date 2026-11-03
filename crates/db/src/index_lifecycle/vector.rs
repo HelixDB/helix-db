@@ -29,18 +29,8 @@ use super::{
 };
 
 mod driver;
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) use driver::build_cache_production_contracts::run as run_build_cache_contracts;
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) use driver::driver_contracts::run as run_driver_contracts;
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) use driver::publication_production_contracts::run as run_publication_contracts;
-#[cfg(all(
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing",
-    not(test)
-))]
-pub(crate) use driver::publication_production_contracts::{
+#[cfg(all(test, feature = "index-lifecycle-testing"))]
+pub(crate) use driver::publication_contract_tests::{
     hold_planning_sessions, planning_session_lock_holders,
 };
 pub(crate) mod publication;
@@ -1094,46 +1084,6 @@ mod tests {
         .await
         .unwrap()
         .is_none());
-        db.close().await.unwrap();
-    }
-
-    /// Short-circuits an unchanged semantic document before any physical access.
-    #[tokio::test]
-    async fn unchanged_active_document_stages_no_vector_work() {
-        let db = test_db("vector-active-unchanged-document").await;
-        let (target, _) = active_target(
-            validated_definition(None, VectorDistanceMetric::Euclidean),
-            VectorPhysicalLayout::Unpartitioned {
-                physical_index_id: VectorPhysicalIndexId::new(51).unwrap(),
-            },
-        );
-        let mutations = VectorMutationSet {
-            targets: vec![target],
-        };
-        let properties = vec![
-            property("$label", PropertyValue::String("Document".to_string())),
-            property("embedding", PropertyValue::F32Array(vec![1.0, 2.0, 3.0])),
-        ];
-        let transaction = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-
-        maintain_entities(
-            &db,
-            &transaction,
-            &mutations,
-            &VectorCacheWriteSet::default(),
-            &[VectorEntityMutation::new(
-                IndexElementKind::Node,
-                9,
-                &properties,
-                &properties,
-            )],
-        )
-        .await
-        .unwrap();
-        transaction.commit().await.unwrap();
         db.close().await.unwrap();
     }
 

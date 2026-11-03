@@ -34,9 +34,6 @@ mod failure;
 #[cfg(test)]
 pub(crate) mod step_pause;
 
-#[cfg(feature = "production-coverage")]
-pub(crate) use failure::contracts::run as driver_failure_classification_contract;
-
 use super::failpoints::{self, IndexOutboxFailpoint};
 use super::{
     BuildOperationOutcome, ClaimSequence, IndexOperationBlocker, IndexOperationExecutionState,
@@ -579,7 +576,7 @@ struct StagedOperationStep {
 ///
 /// Starting a later operation deletes the exact prior terminal operation in
 /// the same transaction, retaining at most one operation per logical index.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn enqueue_operation(
     db: &Db,
     scope: DataScope,
@@ -884,7 +881,7 @@ pub(crate) async fn observe_operation_pointer(
         return Ok(OperationPointerObservation::StalePointerRemoved);
     };
     let operation = decode_operation_record(&operation_value)?;
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     crate::migrations::observe_legacy_text_migration_operation(&operation)?;
     let index_key = scoped_index_key_for_identity(pointer.scope, operation.identity());
     let Some(index_value) = transaction.get(index_key).await? else {
@@ -1531,7 +1528,7 @@ pub(crate) async fn read_operation(
 
 /// Convergently ensures a retained operation is runnable and returns its
 /// resulting public status source record.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn retry_operation(
     db: &Db,
     scope: DataScope,
@@ -1577,7 +1574,7 @@ pub(crate) async fn retry_operation_with_control(
 
 /// Converts a constructing BUILD into abort cleanup, or converges on an
 /// already-aborting/aborted BUILD with the same operation ID.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn abort_operation(
     db: &Db,
     scope: DataScope,

@@ -193,7 +193,7 @@ async fn run_case(
     let mut db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
         &database,
         Arc::clone(&object_store),
-        crate::DbConfig::new(),
+        super::contract_config(),
         crate::index_lifecycle_testing::LifecycleTestScheduling::Explicit,
     )
     .await
@@ -376,7 +376,7 @@ async fn run_case(
     db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
         &database,
         Arc::clone(&object_store),
-        crate::DbConfig::new(),
+        super::contract_config(),
         crate::index_lifecycle_testing::LifecycleTestScheduling::Explicit,
     )
     .await

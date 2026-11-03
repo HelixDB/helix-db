@@ -1,19 +1,19 @@
 //! Public boundary for ordered writer-startup migrations.
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use slatedb::Db;
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use crate::encoding::v2::keys::scope::DataScope;
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use crate::{DbConfig, HelixWriter};
 use crate::{HelixDB, Result};
 
 /// Runs every migration that must finish before the runtime is constructed.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn prepare_writer(db: Arc<Db>, config: &DbConfig) -> Result<HelixWriter> {
     super::bootstrap_writer(&db).await?;
     super::super::preflight_legacy_vector_reservations(&db).await?;

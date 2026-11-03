@@ -89,7 +89,7 @@ impl InitialBuildProgress {
 }
 
 /// Creates or converges on one canonical BUILD operation.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn create_index_operation(
     db: &Db,
     scope: DataScope,
@@ -180,7 +180,7 @@ pub(crate) async fn create_legacy_vector_adoption_operation(
 }
 
 /// Runs canonical duplicate classification inside an already selected source cut.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 async fn create_index_operation_in_transaction(
     transaction: DbTransaction,
     scope: DataScope,

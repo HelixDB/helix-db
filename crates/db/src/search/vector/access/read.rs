@@ -118,9 +118,9 @@ impl<D: Distance> ValidatedVectorReadIndex<D> {
     }
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../../tests/production_support/vector/read_index.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/read_index.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {

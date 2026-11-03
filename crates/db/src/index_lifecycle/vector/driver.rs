@@ -56,7 +56,7 @@ use crate::search::vector::{
     VectorWriteRecorder,
 };
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use super::vector_document;
 use super::{stored_vector_document, VectorIndexedDocument};
 use crate::index_lifecycle::outbox::{
@@ -226,7 +226,7 @@ impl OfferedVectorBuild {
     }
 
     /// Offers `session` at `checkpoint` under a new lease of `cache`'s budget.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn for_tests(
         cache: &VectorBuildCache,
         checkpoint: VectorPlanningCheckpoint,
@@ -247,7 +247,7 @@ impl OfferedVectorBuild {
 
 impl RetainedVectorBuild {
     /// Returns the build checkpoint this session mirrors, if a build retained it.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn build_checkpoint(&self) -> Option<&VectorBuildCheckpoint> {
         match &self.checkpoint {
             VectorPlanningCheckpoint::Build(checkpoint) => Some(checkpoint),
@@ -372,7 +372,7 @@ impl RetainedSessions {
     }
 
     /// Returns every retained session.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn iter(&self) -> impl DoubleEndedIterator<Item = &RetainedVectorBuild> {
         self.builds.iter().chain(&self.pending).chain(&self.drained)
     }
@@ -662,7 +662,7 @@ impl VectorBuildCache {
 
     /// Checks out a fresh session of unbounded demand, as a build step
     /// would, without taking any retained one.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn checkout_fresh<D: Distance>(&self) -> CheckedOutSession<D> {
         let (lease, _) = self
             .lease(None, |_| false, |_| LeaseDemand::Unbounded)
@@ -2233,7 +2233,7 @@ async fn step_build<D: Distance>(
                 )
                 .map_err(|error| corruption(error.to_string()))?;
                 let legacy = VectorIndex::<D>::for_legacy_migration(source.physical_name(), scope);
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorMetadataPublicationBefore,
                 )?;
@@ -2249,11 +2249,11 @@ async fn step_build<D: Distance>(
                         "legacy vector activation did not transcode exactly one metadata row",
                     ));
                 }
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorMetadataPublicationAfter,
                 )?;
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorReservationTransitionBefore,
                 )?;
@@ -2266,16 +2266,16 @@ async fn step_build<D: Distance>(
                         active_reservation,
                     )),
                 )?;
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorReservationTransitionAfter,
                 )?;
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyDefinitionRetirementBefore,
                 )?;
                 transaction.delete(source.storage_key())?;
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyDefinitionRetirementAfter,
                 )?;
@@ -2412,7 +2412,7 @@ async fn adopt_legacy<D: Distance>(
     };
     let started = std::time::Instant::now();
     let legacy = VectorIndex::<D>::for_legacy_migration(legacy_name, scope);
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     crate::migrations::trip_migration_failpoint(
         crate::migrations::MigrationFailpoint::LegacyVectorValidationCheckpointBefore,
     )?;
@@ -2476,7 +2476,7 @@ async fn adopt_legacy<D: Distance>(
             vector::LegacyVectorValidationOutcome::Valid { .. } => unreachable!(),
         }
     };
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     crate::migrations::trip_migration_failpoint(
         crate::migrations::MigrationFailpoint::LegacyVectorValidationCheckpointAfter,
     )?;
@@ -4407,17 +4407,17 @@ fn operation_error(error: crate::index_lifecycle::IndexOperationModelError) -> H
     HelixDbError::InvariantViolation(error.to_string())
 }
 
-#[cfg(all(feature = "production-coverage", not(test)))]
-#[path = "../../../tests/production_support/vector_build_cache.rs"]
-pub(super) mod build_cache_production_contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/vector_build_cache.rs"]
+mod build_cache_contract_tests;
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/vector_driver_contracts.rs"]
+#[cfg(test)]
+#[path = "../../../tests/unit/vector_driver_contracts.rs"]
 pub(super) mod driver_contracts;
 
-#[cfg(all(feature = "production-coverage", not(test)))]
-#[path = "../../../tests/production_support/vector_publication_contracts.rs"]
-pub(super) mod publication_production_contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/vector_publication_contracts.rs"]
+pub(super) mod publication_contract_tests;
 
 #[cfg(test)]
 mod tests {

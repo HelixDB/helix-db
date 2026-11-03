@@ -59,31 +59,29 @@ impl<'db> ExecutionContext<'db> {
         if let Some(view) = self.request_read_view() {
             return lookup_equality_in_view(self, view, identity.as_ref(), property, value).await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    lookup_equality_in_view(
-                        self,
-                        reader.as_ref(),
-                        identity.as_ref(),
-                        property,
-                        value,
-                    )
-                    .await
-                }
-                HelixStorage::Writer(writer) => {
-                    lookup_equality_in_view(self, writer.db(), identity.as_ref(), property, value)
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        lookup_equality_in_view(
+                            self,
+                            reader.as_ref(),
+                            identity.as_ref(),
+                            property,
+                            value,
+                        )
                         .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        lookup_equality_in_view(self, writer.db(), identity.as_ref(), property, value)
+                            .await
+                    }
                 }
-            }
-        }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
+            },
+            closed: Err(HelixDbError::InvariantViolation(
                 "secondary equality lookup escaped its request read view".to_string(),
-            ))
-        }
+            )),
+        )
     }
 
     /// Rows of `key` whose property equals any of `values`.
@@ -146,25 +144,23 @@ impl<'db> ExecutionContext<'db> {
             if let Some(view) = self.request_read_view() {
                 return lookup_managed_equalities_in_view(self, view, &identity, values).await;
             }
-            #[cfg(test)]
-            {
-                match self.db.storage() {
-                    HelixStorage::Reader(reader) => {
-                        lookup_managed_equalities_in_view(self, reader.as_ref(), &identity, values)
-                            .await
+            outside_request_view!(
+                relaxed: {
+                    match self.db.storage() {
+                        HelixStorage::Reader(reader) => {
+                            lookup_managed_equalities_in_view(self, reader.as_ref(), &identity, values)
+                                .await
+                        }
+                        HelixStorage::Writer(writer) => {
+                            lookup_managed_equalities_in_view(self, writer.db(), &identity, values)
+                                .await
+                        }
                     }
-                    HelixStorage::Writer(writer) => {
-                        lookup_managed_equalities_in_view(self, writer.db(), &identity, values)
-                            .await
-                    }
-                }
-            }
-            #[cfg(not(test))]
-            {
-                Err(HelixDbError::InvariantViolation(
+                },
+                closed: Err(HelixDbError::InvariantViolation(
                     "secondary equality batch escaped its request read view".to_string(),
-                ))
-            }
+                )),
+            )
         }
         .await?;
         match unindexed_ids {
@@ -223,39 +219,37 @@ impl<'db> ExecutionContext<'db> {
             return unindexed_label_rows_in_view(self, view, &identity, label, accept, within)
                 .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    unindexed_label_rows_in_view(
-                        self,
-                        reader.as_ref(),
-                        &identity,
-                        label,
-                        accept,
-                        within,
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        unindexed_label_rows_in_view(
+                            self,
+                            reader.as_ref(),
+                            &identity,
+                            label,
+                            accept,
+                            within,
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        unindexed_label_rows_in_view(
+                            self,
+                            writer.db(),
+                            &identity,
+                            label,
+                            accept,
+                            within,
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    unindexed_label_rows_in_view(
-                        self,
-                        writer.db(),
-                        &identity,
-                        label,
-                        accept,
-                        within,
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
+            },
+            closed: Err(HelixDbError::InvariantViolation(
                 "unindexed label rows escaped their request read view".to_string(),
-            ))
-        }
+            )),
+        )
     }
 
     /// Rows of `key.label` whose `key.property` is missing or null, narrowed
@@ -461,36 +455,36 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    crate::search::lookup_global_edge_label_index_admitted(
-                        reader.as_ref(),
-                        label,
-                        self.tenant_scope,
-                        self.row_memory.as_ref(),
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        crate::search::lookup_global_edge_label_index_admitted(
+                            reader.as_ref(),
+                            label,
+                            self.tenant_scope,
+                            self.row_memory.as_ref(),
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        crate::search::lookup_global_edge_label_index_admitted(
+                            writer.db(),
+                            label,
+                            self.tenant_scope,
+                            self.row_memory.as_ref(),
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    crate::search::lookup_global_edge_label_index_admitted(
-                        writer.db(),
-                        label,
-                        self.tenant_scope,
-                        self.row_memory.as_ref(),
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "global edge label lookup escaped its request read view".to_string(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "global edge label lookup escaped its request read view".to_string(),
+            )),
+        )
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(super) async fn lookup_global_edge_equality_index(
         &self,
         property: &str,
@@ -513,31 +507,29 @@ impl<'db> ExecutionContext<'db> {
         if let Some(view) = self.request_read_view() {
             return lookup_equality_in_view(self, view, identity.as_ref(), property, value).await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    lookup_equality_in_view(
-                        self,
-                        reader.as_ref(),
-                        identity.as_ref(),
-                        property,
-                        value,
-                    )
-                    .await
-                }
-                HelixStorage::Writer(writer) => {
-                    lookup_equality_in_view(self, writer.db(), identity.as_ref(), property, value)
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        lookup_equality_in_view(
+                            self,
+                            reader.as_ref(),
+                            identity.as_ref(),
+                            property,
+                            value,
+                        )
                         .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        lookup_equality_in_view(self, writer.db(), identity.as_ref(), property, value)
+                            .await
+                    }
                 }
-            }
-        }
-        #[cfg(not(test))]
-        {
-            Err(HelixDbError::InvariantViolation(
+            },
+            closed: Err(HelixDbError::InvariantViolation(
                 "edge secondary equality lookup escaped its request read view".to_string(),
-            ))
-        }
+            )),
+        )
     }
 
     pub(in crate::execution::interpreter) async fn lookup_out_neighbors_by_label(
@@ -565,35 +557,35 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    crate::search::lookup_out_neighbors_by_label_admitted(
-                        reader.as_ref(),
-                        node_id,
-                        label,
-                        self.tenant_scope,
-                        self.row_memory.as_ref(),
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        crate::search::lookup_out_neighbors_by_label_admitted(
+                            reader.as_ref(),
+                            node_id,
+                            label,
+                            self.tenant_scope,
+                            self.row_memory.as_ref(),
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        crate::search::lookup_out_neighbors_by_label_admitted(
+                            writer.db(),
+                            node_id,
+                            label,
+                            self.tenant_scope,
+                            self.row_memory.as_ref(),
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    crate::search::lookup_out_neighbors_by_label_admitted(
-                        writer.db(),
-                        node_id,
-                        label,
-                        self.tenant_scope,
-                        self.row_memory.as_ref(),
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "out-neighbor label lookup escaped its request read view".to_string(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "out-neighbor label lookup escaped its request read view".to_string(),
+            )),
+        )
     }
 
     pub(in crate::execution::interpreter) async fn lookup_in_neighbors_by_label(
@@ -621,35 +613,35 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    crate::search::lookup_in_neighbors_by_label_admitted(
-                        reader.as_ref(),
-                        node_id,
-                        label,
-                        self.tenant_scope,
-                        self.row_memory.as_ref(),
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        crate::search::lookup_in_neighbors_by_label_admitted(
+                            reader.as_ref(),
+                            node_id,
+                            label,
+                            self.tenant_scope,
+                            self.row_memory.as_ref(),
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        crate::search::lookup_in_neighbors_by_label_admitted(
+                            writer.db(),
+                            node_id,
+                            label,
+                            self.tenant_scope,
+                            self.row_memory.as_ref(),
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    crate::search::lookup_in_neighbors_by_label_admitted(
-                        writer.db(),
-                        node_id,
-                        label,
-                        self.tenant_scope,
-                        self.row_memory.as_ref(),
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "in-neighbor label lookup escaped its request read view".to_string(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "in-neighbor label lookup escaped its request read view".to_string(),
+            )),
+        )
     }
 
     pub(super) async fn lookup_edge_pair_index(
@@ -681,35 +673,35 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    crate::search::lookup_edge_pair_index_admitted(
-                        reader.as_ref(),
-                        from,
-                        to,
-                        self.tenant_scope,
-                        self.row_memory.as_ref(),
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        crate::search::lookup_edge_pair_index_admitted(
+                            reader.as_ref(),
+                            from,
+                            to,
+                            self.tenant_scope,
+                            self.row_memory.as_ref(),
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        crate::search::lookup_edge_pair_index_admitted(
+                            writer.db(),
+                            from,
+                            to,
+                            self.tenant_scope,
+                            self.row_memory.as_ref(),
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    crate::search::lookup_edge_pair_index_admitted(
-                        writer.db(),
-                        from,
-                        to,
-                        self.tenant_scope,
-                        self.row_memory.as_ref(),
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "edge pair lookup escaped its request read view".to_string(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "edge pair lookup escaped its request read view".to_string(),
+            )),
+        )
     }
 
     pub(in crate::execution::interpreter) async fn get_edge_endpoints(
@@ -730,31 +722,31 @@ impl<'db> ExecutionContext<'db> {
             return crate::search::get_edge_endpoints_scoped(view, edge_id, self.tenant_scope)
                 .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    crate::search::get_edge_endpoints_scoped(
-                        reader.as_ref(),
-                        edge_id,
-                        self.tenant_scope,
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        crate::search::get_edge_endpoints_scoped(
+                            reader.as_ref(),
+                            edge_id,
+                            self.tenant_scope,
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        crate::search::get_edge_endpoints_scoped(
+                            writer.db(),
+                            edge_id,
+                            self.tenant_scope,
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    crate::search::get_edge_endpoints_scoped(
-                        writer.db(),
-                        edge_id,
-                        self.tenant_scope,
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "edge endpoint lookup escaped its request read view".to_string(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "edge endpoint lookup escaped its request read view".to_string(),
+            )),
+        )
     }
 }
 
@@ -1048,13 +1040,12 @@ fn secondary_catalog_unavailable() -> HelixDbError {
     }
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(super) fn scoped_property_key(key: &catalog::ScopedPropertyKey) -> String {
     crate::config::scoped_secondary_index_property(key.label.as_ref(), key.property.as_ref())
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[cfg_attr(all(feature = "production-coverage", not(test)), allow(dead_code))]
+#[cfg(test)]
 pub(super) mod tests {
     use super::super::super::test_support;
     use super::*;
@@ -1871,15 +1862,5 @@ pub(super) mod tests {
         context
             .close_request_read_view()
             .expect("request snapshot closes");
-    }
-
-    #[cfg(all(feature = "production-coverage", not(test)))]
-    pub(in crate::execution::interpreter::access) async fn run_production_contracts() {
-        index_value_converts_literals_and_runtime_parameters().await;
-        index_value_rejects_missing_parameters().await;
-        scoped_property_key_uses_internal_secondary_index_scope();
-        exact_equality_dispatch_rejects_every_wrong_catalog_lane().await;
-        active_transaction_dispatches_index_lookup_contracts().await;
-        request_snapshot_excludes_concurrent_edge_index_and_endpoint_phantoms().await;
     }
 }

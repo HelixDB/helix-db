@@ -384,52 +384,6 @@ pub(crate) fn hash_property_value_component(value: &PropertyValue) -> u64 {
     hasher.finish()
 }
 
-#[cfg(test)]
-pub(crate) fn property_value_is_secondary_indexable(value: &PropertyValue) -> bool {
-    !matches!(value, PropertyValue::Array(_) | PropertyValue::Object(_))
-}
-
-/// Convert a PropertyValue to a string for indexing
-#[cfg(test)]
-pub fn property_value_to_index_string(value: &PropertyValue) -> String {
-    match value {
-        PropertyValue::Null => "null".to_string(),
-        PropertyValue::Bool(b) => b.to_string(),
-        PropertyValue::I64(n) => format!("{:020}", n),
-        PropertyValue::DateTime(n) => PropertyValue::DateTime(*n).to_index_string(),
-        PropertyValue::F64(n) => format!("{:+024.15e}", n),
-        PropertyValue::F32(n) => format!("{:+024.15e}", n),
-        PropertyValue::String(s) => s.clone(),
-        PropertyValue::Bytes(b) => format!("<bytes:{:?}>", b),
-        PropertyValue::I64Array(a) => format!("<i64[{}]>", a.len()),
-        PropertyValue::F64Array(a) => format!("<f64[{}]>", a.len()),
-        PropertyValue::StringArray(a) => format!("<str[{}]>", a.len()),
-        PropertyValue::F32Array(items) => format!("<f32[{}]>", items.len()),
-        PropertyValue::Array(items) => format!("<array[{}]>", items.len()),
-        PropertyValue::Object(items) => format!("<object[{}]>", items.len()),
-    }
-}
-
-#[cfg(test)]
-fn property_value_type_name(value: &PropertyValue) -> &'static str {
-    match value {
-        PropertyValue::Null => "Null",
-        PropertyValue::Bool(_) => "Bool",
-        PropertyValue::I64(_) => "I64",
-        PropertyValue::DateTime(_) => "DateTime",
-        PropertyValue::F64(_) => "F64",
-        PropertyValue::F32(_) => "F32",
-        PropertyValue::String(_) => "String",
-        PropertyValue::Bytes(_) => "Bytes",
-        PropertyValue::I64Array(_) => "I64Array",
-        PropertyValue::F64Array(_) => "F64Array",
-        PropertyValue::F32Array(_) => "F32Array",
-        PropertyValue::StringArray(_) => "StringArray",
-        PropertyValue::Array(_) => "Array",
-        PropertyValue::Object(_) => "Object",
-    }
-}
-
 /// Encode a RoaringTreemap to bytes
 pub fn encode_roaring_treemap(bitmap: &RoaringTreemap) -> Bytes {
     SecondaryEqualityValue::encode_ids(bitmap)
@@ -2987,24 +2941,6 @@ mod tests {
     use proptest::prelude::*;
     use slatedb::IsolationLevel;
 
-    #[test]
-    fn test_property_value_to_index_string() {
-        assert_eq!(property_value_to_index_string(&PropertyValue::Null), "null");
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Bool(true)),
-            "true"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::String("hello".to_string())),
-            "hello"
-        );
-
-        // I64 should be zero-padded for lexicographic ordering
-        let i64_str = property_value_to_index_string(&PropertyValue::I64(42));
-        assert!(i64_str.starts_with('0'));
-        assert!(i64_str.contains("42"));
-    }
-
     fn current_range_bytes(direction: RangeIndexDirection, value: &PropertyValue) -> Vec<u8> {
         let crate::encoding::v2::values::property::range_index_value::RangeValueProjection::Indexed(
             value,
@@ -3302,101 +3238,7 @@ mod tests {
     }
 
     #[test]
-    fn property_value_index_strings_cover_all_variants() {
-        let mut object = std::collections::BTreeMap::new();
-        object.insert("nested".to_string(), PropertyValue::Bool(true));
-
-        assert_eq!(property_value_to_index_string(&PropertyValue::Null), "null");
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Bool(false)),
-            "false"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::I64(42)),
-            "00000000000000000042"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::DateTime(42)),
-            PropertyValue::DateTime(42).to_index_string()
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::F64(1.5)),
-            "+00001.500000000000000e0"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::F32(1.5)),
-            "+00001.500000000000000e0"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::String("hello".to_string())),
-            "hello"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Bytes(vec![1, 2])),
-            "<bytes:[1, 2]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::I64Array(vec![1, 2])),
-            "<i64[2]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::F64Array(vec![1.0])),
-            "<f64[1]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::F32Array(vec![1.0, 2.0])),
-            "<f32[2]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::StringArray(vec!["a".to_string()])),
-            "<str[1]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Array(vec![PropertyValue::Null])),
-            "<array[1]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Object(object)),
-            "<object[1]>"
-        );
-    }
-
-    #[test]
-    fn property_value_hashes_and_type_names_cover_all_variants() {
-        let mut object = std::collections::BTreeMap::new();
-        object.insert("nested".to_string(), PropertyValue::I64(7));
-
-        let values = [
-            (PropertyValue::Null, "Null"),
-            (PropertyValue::Bool(true), "Bool"),
-            (PropertyValue::I64(42), "I64"),
-            (PropertyValue::DateTime(42), "DateTime"),
-            (PropertyValue::F64(1.5), "F64"),
-            (PropertyValue::F32(1.5), "F32"),
-            (PropertyValue::String("hello".to_string()), "String"),
-            (PropertyValue::Bytes(vec![1, 2]), "Bytes"),
-            (PropertyValue::I64Array(vec![1, 2]), "I64Array"),
-            (PropertyValue::F64Array(vec![1.0, 2.0]), "F64Array"),
-            (PropertyValue::F32Array(vec![1.0, 2.0]), "F32Array"),
-            (
-                PropertyValue::StringArray(vec!["a".to_string(), "b".to_string()]),
-                "StringArray",
-            ),
-            (
-                PropertyValue::Array(vec![PropertyValue::Bool(false)]),
-                "Array",
-            ),
-            (PropertyValue::Object(object), "Object"),
-        ];
-
-        for (value, type_name) in values {
-            assert_eq!(property_value_type_name(&value), type_name);
-            assert_eq!(
-                hash_property_value_component(&value),
-                hash_property_value_component(&value)
-            );
-        }
-
+    fn property_value_hash_distinguishes_variant_types() {
         assert_ne!(
             hash_property_value_component(&PropertyValue::Bool(true)),
             hash_property_value_component(&PropertyValue::I64(1))
@@ -3405,20 +3247,6 @@ mod tests {
             hash_property_value_component(&PropertyValue::F64(1.0)),
             hash_property_value_component(&PropertyValue::F32(1.0))
         );
-    }
-
-    #[test]
-    fn secondary_indexable_values_reject_only_nested_array_and_object() {
-        assert!(property_value_is_secondary_indexable(&PropertyValue::Null));
-        assert!(property_value_is_secondary_indexable(
-            &PropertyValue::StringArray(vec!["a".to_string()])
-        ));
-        assert!(!property_value_is_secondary_indexable(
-            &PropertyValue::Array(vec![PropertyValue::Bool(true)])
-        ));
-        assert!(!property_value_is_secondary_indexable(
-            &PropertyValue::Object(std::collections::BTreeMap::new())
-        ));
     }
 
     #[tokio::test]

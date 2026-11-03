@@ -40,8 +40,8 @@ Use the pinned Rust toolchain with `CARGO_INCREMENTAL=0`,
 - `cargo clippy --locked --workspace --all-targets -- -D warnings`
 - `cargo fmt --all -- --check`
 - `python3 scripts/validate-cargo-target-references.py`
-- `cargo test --locked -p db --features production-coverage,index-lifecycle-testing --test production_internal_contracts index_driver_failure_classification_preserves_retry_boundaries -- --exact`
-- `cargo test --locked -p db --features production-coverage,index-lifecycle-testing --test production_migration_contracts -- --test-threads=1`
+- `cargo test --locked -p db --lib index_lifecycle::outbox::failure::contract_tests::`
+- `cargo test --locked -p db --lib migrations::acceptance_tests::`
 - `cargo llvm-cov --locked -p db --lib --json --output-path coverage.json -- index_lifecycle::`
 - `docker build --platform linux/arm64 -t helixdb:index-failure-fixes-local .`
 - `docker-image/test.sh --platform linux/arm64 --image helixdb:index-failure-fixes-local`
@@ -54,14 +54,12 @@ All 27 production migration contracts pass, including the 64-case vector
 materialization and retirement recovery matrix.
 
 Focused LLVM coverage passes 275 lifecycle tests. The new production classifier
-covers all 24 executable lines and all 28 regions. The same classifier contract
-also passes through the external production-coverage test entry point.
+covers all 24 executable lines and all 28 regions.
 
 The ARM64 release image suite passes packaging, memory mode, disk persistence and reopen,
 query contracts, graceful shutdown, and MinIO-backed persistence and idle refresh.
 The all-target Clippy check also required replacing an existing test-only `vec!`
 with an array in the pull-value identity test.
 
-Hosted checks and the Linux production-coverage fingerprint must be refreshed
-after an authorized push. The focused local coverage report does not replace
-that gate. No coverage threshold or baseline was changed.
+Hosted checks must be refreshed after an authorized push. No coverage
+threshold or baseline was changed.

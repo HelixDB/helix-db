@@ -10,7 +10,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-#[cfg(not(any(test, feature = "production-coverage")))]
+#[cfg(not(test))]
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::time::Instant;
@@ -1286,9 +1286,9 @@ where
 
 /// Optional diagnostics destination for one vector-search invocation.
 pub(crate) struct SearchObserver<'a> {
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     destination: Option<&'a mut SearchStats>,
-    #[cfg(not(any(test, feature = "production-coverage")))]
+    #[cfg(not(test))]
     _destination: PhantomData<&'a mut SearchStats>,
 }
 
@@ -1296,20 +1296,20 @@ impl SearchObserver<'_> {
     /// Creates an observer that discards the completed diagnostic snapshot.
     pub(crate) const fn disabled() -> Self {
         Self {
-            #[cfg(any(test, feature = "production-coverage"))]
+            #[cfg(test)]
             destination: None,
-            #[cfg(not(any(test, feature = "production-coverage")))]
+            #[cfg(not(test))]
             _destination: PhantomData,
         }
     }
 
     /// Reports whether this invocation requested the diagnostic snapshot.
     const fn is_collecting(&self) -> bool {
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(test)]
         {
             self.destination.is_some()
         }
-        #[cfg(not(any(test, feature = "production-coverage")))]
+        #[cfg(not(test))]
         {
             false
         }
@@ -1318,7 +1318,7 @@ impl SearchObserver<'_> {
 
 impl<'a> SearchObserver<'a> {
     /// Borrows the caller-owned destination used by `search_with_stats`.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn collecting(destination: &'a mut SearchStats) -> Self {
         Self {
             destination: Some(destination),
@@ -1331,23 +1331,23 @@ impl<'a> SearchObserver<'a> {
     /// the caller's default snapshot unchanged exactly as the public contract
     /// requires.
     pub(crate) fn publish(&mut self, completed: SearchStats) {
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(test)]
         {
             let Some(destination) = &mut self.destination else {
                 return;
             };
             **destination = completed;
         }
-        #[cfg(not(any(test, feature = "production-coverage")))]
+        #[cfg(not(test))]
         {
             let _ = completed;
         }
     }
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../../tests/production_support/vector/search.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/search.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1366,10 +1366,5 @@ mod tests {
 
         SearchObserver::collecting(&mut destination).publish(completed);
         assert_eq!(destination.expansion_steps, 7);
-    }
-
-    #[tokio::test]
-    async fn production_search_contract_matrix_runs_in_workspace_tests() {
-        production_contracts::run().await;
     }
 }

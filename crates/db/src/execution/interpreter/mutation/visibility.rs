@@ -48,7 +48,7 @@ impl RequiredMutationVisibility {
     }
 
     /// Returns the conservative requirement used by explicit test barriers.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(super) const fn all() -> Self {
         Self::ALL
     }

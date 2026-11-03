@@ -63,11 +63,7 @@ use crate::index_lifecycle::work::{
     AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaState,
     CoalescedBuildDeltaValue, SecondaryEntryValue,
 };
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 use crate::index_lifecycle::IndexStateV2;
 use crate::index_lifecycle::{
     ActiveIndexHandle, BuildOperationOutcome, IndexCursor, IndexElementKind, IndexEntityId,
@@ -82,8 +78,6 @@ use super::IndexScopeGates;
 
 mod exact;
 pub(crate) use exact::lookup_active_unique_equality_batch_admitted;
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) use exact::run_production_contracts as run_exact_production_contracts;
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) use exact::scan_active_range_generation_with_membership;
 pub(crate) use exact::{
@@ -97,20 +91,23 @@ pub(crate) use exact::{
     lookup_active_equality_literal_batch, lookup_active_equality_point_literal,
 };
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) mod hot_path_benchmark;
+#[cfg(any(test, feature = "bench-internals"))]
 mod metrics;
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
+pub(crate) use metrics::SecondaryEqualityReadMetrics;
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use metrics::{
     equality_read_metrics, reset_equality_read_metrics, EqualityReadObserver,
-    SecondaryEqualityReadMetrics,
 };
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 use metrics::{record, ReadKind};
 
 /// Records one logical point read issued by the complete equality-serving path.
 #[inline]
 pub(crate) fn record_equality_point_read() {
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     record(ReadKind::Point);
 }
 
@@ -560,11 +557,7 @@ impl SecondaryMutationSet {
 /// The scan belongs to the caller's serializable graph transaction. Canonical
 /// rows read here therefore conflict with a concurrent activate/drop revision,
 /// and `Aborting`/`Dropping` generations cannot accidentally receive new work.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn load_mutation_set(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
@@ -624,11 +617,7 @@ pub(crate) async fn load_mutation_set(
 /// `before` and `after` are complete authoritative property sets. Passing both
 /// makes label moves, property deletion, and entity deletion the same closed
 /// operation instead of separate optional flags.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn maintain_entity(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
@@ -2438,11 +2427,7 @@ enum CleanupBatch {
     Blocked(IndexOperationBlocker),
 }
 
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 async fn apply_active_change(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
@@ -3431,11 +3416,7 @@ fn mutation_value_error(
 /// with `handle`. Unique entries and V4 non-unique bitmaps each use one point
 /// read. Null and values no lane can encode are answered by the verified
 /// label rows outside the lane (see [`unindexed_label_rows`]).
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn lookup_active_equality_generation(
     reader: &(impl DbReadOps + Send + Sync),
     handle: &ActiveIndexHandle,
@@ -3455,7 +3436,7 @@ pub(crate) async fn lookup_active_equality_generation(
 
 /// Owners of `values` in one Active unique node equality generation, read
 /// unbudgeted (see [`exact::lookup_active_unique_equality_batch_admitted`]).
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn lookup_active_unique_equality_batch(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
@@ -3584,7 +3565,7 @@ async fn equality_lane_rows(
     let scope = handle.scope();
     let mut held = roaring::RoaringTreemap::new();
     if definition_uses_equality_bitmap(definition) {
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(any(test, feature = "bench-internals"))]
         record(ReadKind::Scan);
         let prefix = IndexKey::data_prefix(
             scope,
@@ -3622,7 +3603,7 @@ async fn equality_lane_rows(
     }
     // Unique owners, and the deployed V3 per-entity entries a legacy reader
     // still unions, are one entry per entity in the definition's lane.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     record(ReadKind::Scan);
     let lane = definition_lane(definition);
     let prefix = IndexKey::data_prefix(
@@ -3684,7 +3665,7 @@ pub(crate) async fn verified_unindexed_rows(
         if batch.is_empty() {
             return Ok(verified.finish());
         }
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(any(test, feature = "bench-internals"))]
         batch.iter().for_each(|_| record(ReadKind::Graph));
         let keys = batch
             .iter()
@@ -3841,7 +3822,7 @@ pub(crate) enum SecondaryRangeQuery {
 ///
 /// Storage bounds use typed, self-delimiting payloads. Every candidate is then
 /// checked against authoritative graph state before it can consume `limit`.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn scan_active_range_generation(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
@@ -10455,8 +10436,6 @@ mod ordered_tests;
 #[cfg(test)]
 mod test_read_counters;
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../tests/production_support/secondary_unique_batch.rs"]
+#[cfg(test)]
+#[path = "../../tests/unit/secondary_unique_batch.rs"]
 mod unique_batch_contracts;
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) use unique_batch_contracts::run as run_unique_batch_production_contracts;
