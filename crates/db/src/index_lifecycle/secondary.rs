@@ -8995,36 +8995,6 @@ mod tests {
             .expect("update records one build delta");
         }
 
-        for (limits, waits) in [
-            (SearchIndexBackfillLimits::default().batch(), true),
-            (one_entity_limits(), false),
-        ] {
-            let mutation = gates.mutation_permit(scope).await;
-            let prepared = driver.prepare_step(&db, scope, &operation, limits);
-            tokio::pin!(prepared);
-            if waits {
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(50), &mut prepared)
-                        .await
-                        .is_err(),
-                    "a backlog within the gated reach must wait for exclusive scope authority"
-                );
-                drop(mutation);
-                let prepared = tokio::time::timeout(Duration::from_secs(2), prepared)
-                    .await
-                    .expect("the barrier acquires after the mutation finishes")
-                    .expect("the barrier prepares");
-                assert_eq!(prepared.family(), IndexOperationFamily::Secondary);
-            } else {
-                let prepared = tokio::time::timeout(Duration::from_secs(2), prepared)
-                    .await
-                    .expect("exact-key preparation does not wait for the shared scope permit")
-                    .expect("exact-key catch-up prepares");
-                assert_eq!(prepared.family(), IndexOperationFamily::Secondary);
-                drop(prepared);
-                drop(mutation);
-            }
-        }
         // The ten deltas are equally sized. An input budget whose reach
         // covers their bytes admits them; one whose reach falls a byte short
         // does not, and its first batch then holds one delta. A budget
@@ -9060,6 +9030,44 @@ mod tests {
                 "{limits:?}: the first batch holds one delta"
             );
         }
+        // Exact-key preparation commits nothing, so the gated case runs last:
+        // its drain empties the prefix.
+        for (limits, waits) in [
+            (one_entity_limits(), false),
+            (SearchIndexBackfillLimits::default().batch(), true),
+        ] {
+            let mutation = gates.mutation_permit(scope).await;
+            let prepared = driver.prepare_step(&db, scope, &operation, limits);
+            tokio::pin!(prepared);
+            if waits {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), &mut prepared)
+                        .await
+                        .is_err(),
+                    "a backlog within the gated reach must wait for exclusive scope authority"
+                );
+                drop(mutation);
+                let prepared = tokio::time::timeout(Duration::from_secs(2), prepared)
+                    .await
+                    .expect("the barrier acquires after the mutation finishes")
+                    .expect("the barrier prepares");
+                assert_eq!(prepared.family(), IndexOperationFamily::Secondary);
+            } else {
+                let prepared = tokio::time::timeout(Duration::from_secs(2), prepared)
+                    .await
+                    .expect("exact-key preparation does not wait for the shared scope permit")
+                    .expect("exact-key catch-up prepares");
+                assert_eq!(prepared.family(), IndexOperationFamily::Secondary);
+                drop(prepared);
+                drop(mutation);
+            }
+        }
+        assert!(
+            generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
+                .await
+                .is_empty(),
+            "the gated step drains the prefix before its own transaction opens"
+        );
         db.close().await.expect("secondary test database closes");
     }
 
