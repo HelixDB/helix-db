@@ -1,8 +1,9 @@
 //! One request per variant of every request enum, so a parser comparison
 //! exercises every visitor the AST has.
 //!
-//! The `*_variant` functions match exhaustively without a wildcard, so adding a
-//! variant fails to compile until it is named there.
+//! The `*_variant` functions match exhaustively without a wildcard: adding a
+//! variant fails to compile until it is named there, and the tests in this
+//! module then fail until a sample uses it.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -643,163 +644,170 @@ pub fn index_specs() -> Vec<IndexSpec> {
     ]
 }
 
-fn ast_variant(node: &AstNode) -> &'static str {
-    match node {
-        AstNode::Context => "context",
-        AstNode::Nodes { .. } => "nodes",
-        AstNode::NodesWhere { .. } => "nodes_where",
-        AstNode::Edges { .. } => "edges",
-        AstNode::EdgesWhere { .. } => "edges_where",
-        AstNode::VectorSearchNodes { .. } => "vector_search_nodes",
-        AstNode::TextSearchNodes { .. } => "text_search_nodes",
-        AstNode::VectorSearchEdges { .. } => "vector_search_edges",
-        AstNode::TextSearchEdges { .. } => "text_search_edges",
-        AstNode::TextSearchNodesWithin { .. } => "text_search_nodes_within",
-        AstNode::TextSearchEdgesWithin { .. } => "text_search_edges_within",
-        AstNode::VectorSearchNodesWithin { .. } => "vector_search_nodes_within",
-        AstNode::VectorSearchEdgesWithin { .. } => "vector_search_edges_within",
-        AstNode::Out { .. } => "out",
-        AstNode::In { .. } => "in",
-        AstNode::Both { .. } => "both",
-        AstNode::OutE { .. } => "out_e",
-        AstNode::InE { .. } => "in_e",
-        AstNode::BothE { .. } => "both_e",
-        AstNode::OutN { .. } => "out_n",
-        AstNode::InN { .. } => "in_n",
-        AstNode::OtherN { .. } => "other_n",
-        AstNode::Has { .. } => "has",
-        AstNode::HasLabel { .. } => "has_label",
-        AstNode::HasKey { .. } => "has_key",
-        AstNode::Where { .. } => "where",
-        AstNode::Dedup { .. } => "dedup",
-        AstNode::Within { .. } => "within",
-        AstNode::Without { .. } => "without",
-        AstNode::EdgeHas { .. } => "edge_has",
-        AstNode::EdgeHasLabel { .. } => "edge_has_label",
-        AstNode::Limit { .. } => "limit",
-        AstNode::Skip { .. } => "skip",
-        AstNode::Range { .. } => "range",
-        AstNode::As { .. } => "as",
-        AstNode::Store { .. } => "store",
-        AstNode::Select { .. } => "select",
-        AstNode::Bind { .. } => "bind",
-        AstNode::Inject { .. } => "inject",
-        AstNode::Count { .. } => "count",
-        AstNode::Exists { .. } => "exists",
-        AstNode::Id { .. } => "id",
-        AstNode::Label { .. } => "label",
-        AstNode::Values { .. } => "values",
-        AstNode::ValueMap { .. } => "value_map",
-        AstNode::Project { .. } => "project",
-        AstNode::ProjectBindings { .. } => "project_bindings",
-        AstNode::EdgeProperties { .. } => "edge_properties",
-        AstNode::CreateIndex { .. } => "create_index",
-        AstNode::DropIndex { .. } => "drop_index",
-        AstNode::GetIndexOperation { .. } => "get_index_operation",
-        AstNode::RetryIndexOperation { .. } => "retry_index_operation",
-        AstNode::AbortIndexOperation { .. } => "abort_index_operation",
-        AstNode::AddN { .. } => "add_n",
-        AstNode::AddE { .. } => "add_e",
-        AstNode::SetProperty { .. } => "set_property",
-        AstNode::RemoveProperty { .. } => "remove_property",
-        AstNode::Drop { .. } => "drop",
-        AstNode::DropEdge { .. } => "drop_edge",
-        AstNode::DropEdgeLabeled { .. } => "drop_edge_labeled",
-        AstNode::DropEdgeById { .. } => "drop_edge_by_id",
-        AstNode::OrderBy { .. } => "order_by",
-        AstNode::OrderByMultiple { .. } => "order_by_multiple",
-        AstNode::Repeat { .. } => "repeat",
-        AstNode::Union { .. } => "union",
-        AstNode::Choose { .. } => "choose",
-        AstNode::Coalesce { .. } => "coalesce",
-        AstNode::Optional { .. } => "optional",
-        AstNode::Group { .. } => "group",
-        AstNode::GroupCount { .. } => "group_count",
-        AstNode::AggregateBy { .. } => "aggregate_by",
-        AstNode::Fold { .. } => "fold",
-        AstNode::Unfold { .. } => "unfold",
-        AstNode::Path { .. } => "path",
-        AstNode::SimplePath { .. } => "simple_path",
-        AstNode::WithSack { .. } => "with_sack",
-        AstNode::SackSet { .. } => "sack_set",
-        AstNode::SackAdd { .. } => "sack_add",
-        AstNode::SackGet { .. } => "sack_get",
-        AstNode::ShortestPath { .. } => "shortest_path",
-    }
+/// Defines `$guard`, an exhaustive match without a wildcard from a variant to
+/// its sample name, and `$names`, every name it returns. A variant added to the
+/// enum fails to compile until it is named here, and
+/// `samples_cover_every_variant` then fails until a sample uses it.
+macro_rules! variant_guard {
+    ($guard:ident, $names:ident, $ty:ty, { $($pattern:pat => $name:literal,)+ }) => {
+        fn $guard(value: &$ty) -> &'static str {
+            match value {
+                $($pattern => $name,)+
+            }
+        }
+
+        #[cfg(test)]
+        const $names: &[&str] = &[$($name),+];
+    };
 }
 
-fn predicate_variant(predicate: &Predicate) -> &'static str {
-    match predicate {
-        Predicate::Eq { .. } => "eq",
-        Predicate::Neq { .. } => "neq",
-        Predicate::Gt { .. } => "gt",
-        Predicate::Gte { .. } => "gte",
-        Predicate::Lt { .. } => "lt",
-        Predicate::Lte { .. } => "lte",
-        Predicate::Between { .. } => "between",
-        Predicate::HasKey { .. } => "has_key",
-        Predicate::IsNull { .. } => "is_null",
-        Predicate::IsNotNull { .. } => "is_not_null",
-        Predicate::StartsWith { .. } => "starts_with",
-        Predicate::EndsWith { .. } => "ends_with",
-        Predicate::Contains { .. } => "contains",
-        Predicate::IsIn { .. } => "is_in",
-        Predicate::And { .. } => "and",
-        Predicate::Or { .. } => "or",
-        Predicate::Not { .. } => "not",
-        Predicate::Compare { .. } => "compare",
-    }
-}
+variant_guard!(ast_variant, AST_VARIANTS, AstNode, {
+    AstNode::Context => "context",
+    AstNode::Nodes { .. } => "nodes",
+    AstNode::NodesWhere { .. } => "nodes_where",
+    AstNode::Edges { .. } => "edges",
+    AstNode::EdgesWhere { .. } => "edges_where",
+    AstNode::VectorSearchNodes { .. } => "vector_search_nodes",
+    AstNode::TextSearchNodes { .. } => "text_search_nodes",
+    AstNode::VectorSearchEdges { .. } => "vector_search_edges",
+    AstNode::TextSearchEdges { .. } => "text_search_edges",
+    AstNode::TextSearchNodesWithin { .. } => "text_search_nodes_within",
+    AstNode::TextSearchEdgesWithin { .. } => "text_search_edges_within",
+    AstNode::VectorSearchNodesWithin { .. } => "vector_search_nodes_within",
+    AstNode::VectorSearchEdgesWithin { .. } => "vector_search_edges_within",
+    AstNode::Out { .. } => "out",
+    AstNode::In { .. } => "in",
+    AstNode::Both { .. } => "both",
+    AstNode::OutE { .. } => "out_e",
+    AstNode::InE { .. } => "in_e",
+    AstNode::BothE { .. } => "both_e",
+    AstNode::OutN { .. } => "out_n",
+    AstNode::InN { .. } => "in_n",
+    AstNode::OtherN { .. } => "other_n",
+    AstNode::Has { .. } => "has",
+    AstNode::HasLabel { .. } => "has_label",
+    AstNode::HasKey { .. } => "has_key",
+    AstNode::Where { .. } => "where",
+    AstNode::Dedup { .. } => "dedup",
+    AstNode::Within { .. } => "within",
+    AstNode::Without { .. } => "without",
+    AstNode::EdgeHas { .. } => "edge_has",
+    AstNode::EdgeHasLabel { .. } => "edge_has_label",
+    AstNode::Limit { .. } => "limit",
+    AstNode::Skip { .. } => "skip",
+    AstNode::Range { .. } => "range",
+    AstNode::As { .. } => "as",
+    AstNode::Store { .. } => "store",
+    AstNode::Select { .. } => "select",
+    AstNode::Bind { .. } => "bind",
+    AstNode::Inject { .. } => "inject",
+    AstNode::Count { .. } => "count",
+    AstNode::Exists { .. } => "exists",
+    AstNode::Id { .. } => "id",
+    AstNode::Label { .. } => "label",
+    AstNode::Values { .. } => "values",
+    AstNode::ValueMap { .. } => "value_map",
+    AstNode::Project { .. } => "project",
+    AstNode::ProjectBindings { .. } => "project_bindings",
+    AstNode::EdgeProperties { .. } => "edge_properties",
+    AstNode::CreateIndex { .. } => "create_index",
+    AstNode::DropIndex { .. } => "drop_index",
+    AstNode::GetIndexOperation { .. } => "get_index_operation",
+    AstNode::RetryIndexOperation { .. } => "retry_index_operation",
+    AstNode::AbortIndexOperation { .. } => "abort_index_operation",
+    AstNode::AddN { .. } => "add_n",
+    AstNode::AddE { .. } => "add_e",
+    AstNode::SetProperty { .. } => "set_property",
+    AstNode::RemoveProperty { .. } => "remove_property",
+    AstNode::Drop { .. } => "drop",
+    AstNode::DropEdge { .. } => "drop_edge",
+    AstNode::DropEdgeLabeled { .. } => "drop_edge_labeled",
+    AstNode::DropEdgeById { .. } => "drop_edge_by_id",
+    AstNode::OrderBy { .. } => "order_by",
+    AstNode::OrderByMultiple { .. } => "order_by_multiple",
+    AstNode::Repeat { .. } => "repeat",
+    AstNode::Union { .. } => "union",
+    AstNode::Choose { .. } => "choose",
+    AstNode::Coalesce { .. } => "coalesce",
+    AstNode::Optional { .. } => "optional",
+    AstNode::Group { .. } => "group",
+    AstNode::GroupCount { .. } => "group_count",
+    AstNode::AggregateBy { .. } => "aggregate_by",
+    AstNode::Fold { .. } => "fold",
+    AstNode::Unfold { .. } => "unfold",
+    AstNode::Path { .. } => "path",
+    AstNode::SimplePath { .. } => "simple_path",
+    AstNode::WithSack { .. } => "with_sack",
+    AstNode::SackSet { .. } => "sack_set",
+    AstNode::SackAdd { .. } => "sack_add",
+    AstNode::SackGet { .. } => "sack_get",
+    AstNode::ShortestPath { .. } => "shortest_path",
+});
 
-fn expr_variant(expr: &Expr) -> &'static str {
-    match expr {
-        Expr::Property(_) => "property",
-        Expr::Id => "id",
-        Expr::Timestamp => "timestamp",
-        Expr::DateTimeNow => "date_time_now",
-        Expr::Constant(_) => "constant",
-        Expr::Param(_) => "param",
-        Expr::Add { .. } => "add",
-        Expr::Sub { .. } => "sub",
-        Expr::Mul { .. } => "mul",
-        Expr::Div { .. } => "div",
-        Expr::Mod { .. } => "mod",
-        Expr::Neg { .. } => "neg",
-        Expr::Case { .. } => "case",
-    }
-}
+variant_guard!(predicate_variant, PREDICATE_VARIANTS, Predicate, {
+    Predicate::Eq { .. } => "eq",
+    Predicate::Neq { .. } => "neq",
+    Predicate::Gt { .. } => "gt",
+    Predicate::Gte { .. } => "gte",
+    Predicate::Lt { .. } => "lt",
+    Predicate::Lte { .. } => "lte",
+    Predicate::Between { .. } => "between",
+    Predicate::HasKey { .. } => "has_key",
+    Predicate::IsNull { .. } => "is_null",
+    Predicate::IsNotNull { .. } => "is_not_null",
+    Predicate::StartsWith { .. } => "starts_with",
+    Predicate::EndsWith { .. } => "ends_with",
+    Predicate::Contains { .. } => "contains",
+    Predicate::IsIn { .. } => "is_in",
+    Predicate::And { .. } => "and",
+    Predicate::Or { .. } => "or",
+    Predicate::Not { .. } => "not",
+    Predicate::Compare { .. } => "compare",
+});
 
-fn property_value_variant(value: &PropertyValue) -> &'static str {
-    match value {
-        PropertyValue::Null => "null",
-        PropertyValue::Bool(_) => "bool",
-        PropertyValue::I64(_) => "i64",
-        PropertyValue::DateTime(_) => "date_time",
-        PropertyValue::F64(_) => "f64",
-        PropertyValue::F32(_) => "f32",
-        PropertyValue::String(_) => "string",
-        PropertyValue::Bytes(_) => "bytes",
-        PropertyValue::I64Array(_) => "i64_array",
-        PropertyValue::F64Array(_) => "f64_array",
-        PropertyValue::F32Array(_) => "f32_array",
-        PropertyValue::StringArray(_) => "string_array",
-        PropertyValue::Array(_) => "array",
-        PropertyValue::Object(_) => "object",
-    }
-}
+variant_guard!(expr_variant, EXPR_VARIANTS, Expr, {
+    Expr::Property(_) => "property",
+    Expr::Id => "id",
+    Expr::Timestamp => "timestamp",
+    Expr::DateTimeNow => "date_time_now",
+    Expr::Constant(_) => "constant",
+    Expr::Param(_) => "param",
+    Expr::Add { .. } => "add",
+    Expr::Sub { .. } => "sub",
+    Expr::Mul { .. } => "mul",
+    Expr::Div { .. } => "div",
+    Expr::Mod { .. } => "mod",
+    Expr::Neg { .. } => "neg",
+    Expr::Case { .. } => "case",
+});
 
-fn index_spec_variant(spec: &IndexSpec) -> &'static str {
-    match spec {
-        IndexSpec::NodeEquality { .. } => "node_equality",
-        IndexSpec::NodeRange { .. } => "node_range",
-        IndexSpec::EdgeEquality { .. } => "edge_equality",
-        IndexSpec::EdgeRange { .. } => "edge_range",
-        IndexSpec::NodeVector { .. } => "node_vector",
-        IndexSpec::NodeText { .. } => "node_text",
-        IndexSpec::EdgeVector { .. } => "edge_vector",
-        IndexSpec::EdgeText { .. } => "edge_text",
-    }
-}
+variant_guard!(property_value_variant, PROPERTY_VALUE_VARIANTS, PropertyValue, {
+    PropertyValue::Null => "null",
+    PropertyValue::Bool(_) => "bool",
+    PropertyValue::I64(_) => "i64",
+    PropertyValue::DateTime(_) => "date_time",
+    PropertyValue::F64(_) => "f64",
+    PropertyValue::F32(_) => "f32",
+    PropertyValue::String(_) => "string",
+    PropertyValue::Bytes(_) => "bytes",
+    PropertyValue::I64Array(_) => "i64_array",
+    PropertyValue::F64Array(_) => "f64_array",
+    PropertyValue::F32Array(_) => "f32_array",
+    PropertyValue::StringArray(_) => "string_array",
+    PropertyValue::Array(_) => "array",
+    PropertyValue::Object(_) => "object",
+});
+
+variant_guard!(index_spec_variant, INDEX_SPEC_VARIANTS, IndexSpec, {
+    IndexSpec::NodeEquality { .. } => "node_equality",
+    IndexSpec::NodeRange { .. } => "node_range",
+    IndexSpec::EdgeEquality { .. } => "edge_equality",
+    IndexSpec::EdgeRange { .. } => "edge_range",
+    IndexSpec::NodeVector { .. } => "node_vector",
+    IndexSpec::NodeText { .. } => "node_text",
+    IndexSpec::EdgeVector { .. } => "edge_vector",
+    IndexSpec::EdgeText { .. } => "edge_text",
+});
 
 fn entry(name: Option<&str>, root: AstNode, condition: Option<BatchCondition>) -> BatchEntry {
     BatchEntry::Query(Box::new(NamedQuery {
@@ -977,6 +985,42 @@ pub fn every_variant() -> Vec<Shape> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn samples_cover_every_variant() {
+        let sampled = |names: Vec<&'static str>| names.into_iter().collect::<BTreeSet<_>>();
+        for (sampled, every) in [
+            (
+                sampled(ast_nodes().iter().map(ast_variant).collect()),
+                AST_VARIANTS,
+            ),
+            (
+                sampled(predicates().iter().map(predicate_variant).collect()),
+                PREDICATE_VARIANTS,
+            ),
+            (
+                sampled(exprs().iter().map(expr_variant).collect()),
+                EXPR_VARIANTS,
+            ),
+            (
+                sampled(
+                    property_values()
+                        .iter()
+                        .map(property_value_variant)
+                        .collect(),
+                ),
+                PROPERTY_VALUE_VARIANTS,
+            ),
+            (
+                sampled(index_specs().iter().map(index_spec_variant).collect()),
+                INDEX_SPEC_VARIANTS,
+            ),
+        ] {
+            let every_name = every.iter().copied().collect::<BTreeSet<_>>();
+            assert_eq!(every_name.len(), every.len(), "variant names are unique");
+            assert_eq!(sampled, every_name);
+        }
+    }
 
     #[test]
     fn every_variant_request_is_valid_and_named_once() {
