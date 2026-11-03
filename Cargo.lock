@@ -4704,6 +4704,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "reqwest 0.13.4",
  "rustix",
  "serde",
  "serde_json",

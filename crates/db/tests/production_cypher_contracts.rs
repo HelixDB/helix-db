@@ -75,6 +75,9 @@ mod ordered_ranges;
 #[path = "cypher/relationship_types.rs"]
 mod relationship_types;
 
+#[path = "cypher/relationship_scans.rs"]
+mod relationship_scans;
+
 #[path = "cypher/boolean_chains.rs"]
 mod boolean_chains;
 

@@ -194,8 +194,9 @@ Materialisation depends on the selected pipeline:
 | Response | Returned values and encoded buffer | Yes; public responses are buffered, not client streams. |
 
 Disk spilling is not implemented. Resource exhaustion must fail the query, never
-silently truncate its successful result. The complete public behaviour is in the
-[Cypher reference](cypher.md).
+silently truncate its successful result. The public behaviour is in the
+[Cypher guide](database/helix-db/query-guides/cypher.mdx), and implementation
+detail is in the [Cypher implementation notes](cypher.md).
 
 ## Storage, transactions and indexes
 

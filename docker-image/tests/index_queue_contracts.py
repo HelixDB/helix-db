@@ -220,7 +220,9 @@ def write(port, batch, retries=100):
         try:
             return post(port, dsl.QueryRequest.write(batch), write=True)
         except Rejected as error:
-            if error.status == 409:
+            # Only a transaction conflict is safe to resend; other 409s, such
+            # as a duplicate unique value, fail again.
+            if error.status == 409 and isinstance(error.body, dict) and error.body.get("error") == "transaction_conflict":
                 continue
             raise
     raise AssertionError("write kept conflicting")

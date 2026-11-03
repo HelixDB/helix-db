@@ -1039,6 +1039,7 @@ fn unique_correlated_lookups_beat_static_sources_and_other_keys() {
                 r::MatchStep::IndexLookup(lookup) => Some(lookup.key.property.as_ref().to_owned()),
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1082,6 +1083,7 @@ fn correlated_lookups_probe_properties_of_bound_values() {
                 r::MatchStep::IndexLookup(lookup) => Some(lookup.probe_property.clone()),
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1420,6 +1422,7 @@ fn membership_lookups_probe_list_variables() {
                 }
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1475,6 +1478,7 @@ fn incoming_lookups_survive_cheaper_lookups_on_the_same_pattern() {
                 r::MatchStep::IndexLookup(lookup) => Some(lookup.key.property.as_ref().to_owned()),
                 r::MatchStep::Scan(_)
                 | r::MatchStep::Expand { .. }
+                | r::MatchStep::ScanRelationship { .. }
                 | r::MatchStep::HashJoin { .. } => None,
             })
             .collect::<Vec<_>>()
@@ -1487,5 +1491,79 @@ fn incoming_lookups_survive_cheaper_lookups_on_the_same_pattern() {
     ] {
         let found = lookups(text);
         assert!(found == ["key"] || found == ["email"], "{text}: {found:?}");
+    }
+}
+
+#[test]
+fn typed_relationships_between_full_scans_start_from_their_edges() {
+    let mut indexes = catalog::IndexCatalogSnapshot::default();
+    indexes.node_eq.insert(
+        catalog::ScopedPropertyKey::try_new("N", "uid").unwrap(),
+        catalog::NodeEqualityIndexMeta::try_new("node_eq:N:uid")
+            .unwrap()
+            .with_uniqueness(catalog::IndexUniqueness::Unique),
+    );
+    let unknown = context::PlannerContext {
+        indexes,
+        ..context::PlannerContext::default()
+    };
+    let mut known = unknown.clone();
+    known.stats = known
+        .stats
+        .with_edge_label_cardinality(ir::NonEmptyString::new("R").unwrap(), 7)
+        .with_edge_label_cardinality(ir::NonEmptyString::new("S").unwrap(), 5);
+    let planned = |text: &str, context: &context::PlannerContext| {
+        r::plan(helix_cypher::compile(text).unwrap(), context)
+            .unwrap()
+            .matches()[&0]
+            .clone()
+    };
+    let plan = |text: &str| planned(text, &known);
+    let scan = |relationship| r::MatchStep::ScanRelationship { relationship };
+    // The scan binds one row per edge and orientation of the distinct types.
+    for (text, rows) in [
+        ("MATCH ()-[r:R]->() RETURN count(r)", 7),
+        ("MATCH ()<-[r:R|R]-() RETURN count(r)", 7),
+        ("MATCH ()-[r:R|S]-() RETURN count(r)", 24),
+    ] {
+        let plan = plan(text);
+        assert_eq!(plan.steps, [scan(0)], "{text}");
+        assert_eq!(plan.estimated_rows, rows, "{text}");
+    }
+    // Later relationships expand from the endpoints the scan bound.
+    let chain = plan("MATCH (a)-[r:R]->(b)-[s:S]->(c) RETURN count(*)");
+    assert!(
+        matches!(
+            chain.steps.as_slice(),
+            [
+                r::MatchStep::ScanRelationship { .. },
+                r::MatchStep::Expand { .. }
+            ]
+        ),
+        "{:?}",
+        chain.steps
+    );
+    // Another component is a cartesian product whichever side starts.
+    let product = plan("MATCH (x:N), ()-[r:R]->() RETURN count(*)");
+    assert_eq!(product.steps.len(), 2);
+    assert!(product.steps.contains(&scan(0)));
+    assert_eq!(product.cartesian_products, 1);
+    // A selective anchor or label anywhere in the connected pattern, or an
+    // untyped relationship, keeps the node start.
+    for text in [
+        "MATCH (a:N {uid: 1})-[r:R]->(b)-[s:R]->(c) RETURN count(*)",
+        "MATCH (a)-[r:R]->(b)-[s:S]->(c:N) RETURN count(*)",
+        "MATCH (a:N)-[r:R]->(b) RETURN count(*)",
+        "MATCH (a)-[r]->(b) RETURN count(*)",
+    ] {
+        let plan = planned(text, &unknown);
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, r::MatchStep::ScanRelationship { .. })),
+            "{text}: {:?}",
+            plan.steps
+        );
     }
 }

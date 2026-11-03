@@ -1,0 +1,449 @@
+---
+title: "Query HelixDB with Cypher"
+description: "Run Cypher statements beside native queries, and see which parts of openCypher HelixDB supports"
+sidebarTitle: "Cypher"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+HelixDB accepts Cypher statements alongside its native operation-tree queries.
+Both languages run against the same graph, transactions, and indexes, so data
+written with one is visible to the other, and existing databases need no
+migration.
+
+Cypher support is a profile of openCypher, not full compatibility. The clauses,
+expressions, and functions listed under [What is supported](#what-is-supported) run.
+Everything in [What is not supported](#what-is-not-supported) is rejected with a
+specific error before the statement reads or writes anything.
+
+Cypher as described here is served by local servers running the
+`ghcr.io/helixdb/helixdb:v0.0.13` image or later, and by Helix Cloud gateways.
+
+<Note>
+The SDK examples below require SDKs built from the
+[repository checkout](https://github.com/HelixDB/helix-db). TypeScript 3.2.0,
+Python 0.3.4, Rust 3.0.0, and Go v0.3.1 do not include the Cypher methods.
+With those releases, use the [HTTP API](#over-http) to run and explain statements.
+</Note>
+
+## Run a statement
+
+Send one statement, with optional parameters and a query name, to
+`POST /v2/cypher`. The server works out whether the statement reads or writes.
+
+<CodeGroup>
+
+```rust Rust
+use std::collections::BTreeMap;
+
+let result = client
+    .cypher(
+        "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+        BTreeMap::from([("age".to_string(), serde_json::json!(30))]),
+        Some("adults"),
+    )
+    .await?;
+// result.columns == ["name"]; result.rows == [["Ada"], ...]
+```
+
+```ts TypeScript
+const result = await client.cypher(
+  "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+  { age: 30 },
+  "adults",
+);
+// { columns: ["name"], rows: [["Ada"], ...] }
+```
+
+```go Go
+result, err := client.Cypher(ctx, helix.CypherRequest{
+	Query:      "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+	Parameters: map[string]any{"age": 30},
+	QueryName:  "adults",
+})
+// result.Columns == ["name"]; result.Rows == [["Ada"], ...]
+```
+
+```python Python
+result = client.cypher(
+    "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+    {"age": 30},
+    query_name="adults",
+)
+# {"columns": ["name"], "rows": [["Ada"], ...]}
+```
+
+```json JSON
+{
+  "query": "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+  "parameters": { "age": 30 },
+  "query_name": "adults"
+}
+```
+
+</CodeGroup>
+
+A successful response has ordered `columns` and rectangular `rows`, with one
+value per column in column order:
+
+```json
+{ "columns": ["name"], "rows": [["Ada"], ["Grace"]] }
+```
+
+`query` is required; `parameters` and `query_name` are optional. Duplicate rows
+are kept unless the statement uses `DISTINCT`, and row order is only defined by
+`ORDER BY`. A write without `RETURN` succeeds with empty `columns` and `rows`.
+
+Parameters hold values. Labels, relationship types, and variable names are part
+of the statement, so keep values in parameters instead of building them into the
+query text.
+
+### Over HTTP
+
+A local server has no authentication:
+
+```sh
+curl http://localhost:6969/v2/cypher \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"RETURN $name AS name","parameters":{"name":"Ada"}}'
+```
+
+A Helix Cloud gateway takes the same body. Authenticate as for `POST /v2/query`,
+with the cluster API key and, on a GA shared gateway, the database ID:
+
+```sh
+curl "$HELIX_ENDPOINT/v2/cypher" \
+  -H "Authorization: Bearer $HELIX_API_KEY" \
+  -H "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"MATCH (n) RETURN count(n) AS nodes"}'
+```
+
+The gateway routes each statement by what it does: reads go to readers, and
+writes go to the elected writer. A read-only API key can read and explain, but
+receives `403` for a statement that writes. The
+[HTTP API reference](/database/helix-db/query-guides/http-api#cypher) describes
+the headers, status codes, and lossless value encoding in full.
+
+### From the CLI
+
+From a linked local project, `helix cypher` runs a statement against the local
+instance:
+
+```sh
+helix cypher -e 'MATCH (p:Person) RETURN p.name AS name'
+helix cypher -e 'RETURN $name AS name' --parameters '{"name":"Ada"}'
+helix cypher --file query.cypher --parameters '{"minimumAge":30}'
+helix cypher --explain -e 'MATCH (p:Person {name: "Ada"}) RETURN p'
+```
+
+### Request options
+
+The native request options apply to Cypher too:
+
+| Option | Rust | TypeScript | Go | Python | HTTP header |
+| --- | --- | --- | --- | --- | --- |
+| Run on the writer | `.writer_only()` | `.writerOnly()` | `helix.WriterOnly()` | `writer_only=True` | `X-Helix-Require-Writer: true` |
+| Warm caches only (reads) | `.warm_only()` | `.warmOnly()` | `helix.WarmOnly()` | `warm_only=True` | `X-Helix-Warm: true` |
+| Wait for durability (writes) | `.should_await_durability(true)` | `.shouldAwaitDurability(true)` | `helix.AwaitDurability(true)` | `await_durability=True` | `X-Helix-Await-Durable: true` |
+
+Rust and TypeScript set options on `request_builder()` / `requestBuilder()` before
+`.cypher(...)`; Go and Python pass them to `Cypher` and `cypher`. A warm-only read
+that Helix Cloud answers with `204 No Content` returns no rows. Embedded clients
+reject request options.
+
+## Explain a statement
+
+`POST /v2/cypher/explain` takes the same body and plans the statement without
+running it, so explaining a write changes nothing. The plan reports the
+statement's `effect` (`Read` or `Write`), its bindings, the selected access paths
+such as index lookups, estimated cardinalities, blocking work, Cartesian
+products, and optimizer warnings. Planning checks parameters, so supply every
+parameter the statement uses.
+
+<CodeGroup>
+
+```rust Rust
+let plan = client
+    .explain_cypher(
+        "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+        BTreeMap::from([("email".to_string(), serde_json::json!("ada@example.com"))]),
+        None,
+    )
+    .await?;
+// plan["effect"] == "Read"
+```
+
+```ts TypeScript
+const plan = await client.explainCypher(
+  "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+  { email: "ada@example.com" },
+);
+// plan.effect === "Read"
+```
+
+```go Go
+plan, err := client.ExplainCypher(ctx, helix.CypherRequest{
+	Query:      "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+	Parameters: map[string]any{"email": "ada@example.com"},
+})
+// plan["effect"] == "Read"
+```
+
+```python Python
+plan = client.explain_cypher(
+    "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+    {"email": "ada@example.com"},
+)
+# plan["effect"] == "Read"
+```
+
+```json JSON
+{
+  "query": "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+  "parameters": { "email": "ada@example.com" }
+}
+```
+
+</CodeGroup>
+
+## What is supported
+
+| Area | Supported |
+| --- | --- |
+| Reading patterns | `MATCH` and `OPTIONAL MATCH`; fixed-length directed and undirected relationships; several patterns in one clause; repeated variables; named paths such as `p = (a)-[:KNOWS]->(b)` |
+| Row clauses | `WHERE`, `WITH`, `RETURN`, aliases, `DISTINCT`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT` |
+| Writing | `CREATE`; property and map `SET` (`=` and `+=`); property `REMOVE`; `DELETE`; `DETACH DELETE` |
+| Expressions | Parameters; scalar, list, and map literals; property and index access; arithmetic; comparisons and comparison chains; `AND`, `OR`, `XOR`, `NOT`; `IS NULL` and `IS NOT NULL`; `IN`; `STARTS WITH`, `ENDS WITH`, `CONTAINS`; label tests such as `n:User`; simple and searched `CASE` |
+| Graph and list functions | `id`, `type`, `labels`, `properties`, `keys`, `exists` (for properties), `size`, `length`, `nodes`, `relationships`, `head`, `last`, `range`, `reverse` |
+| Scalar functions | `coalesce`, `abs`, `toString`, `toInteger` (and `toInt`), `toFloat`, `toBoolean`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
+| Aggregation | `count` (including `count(*)`), `sum`, `avg`, `min`, `max`, `collect`, each with `DISTINCT` arguments |
+| Values | Nulls, booleans, integers, floats, strings, lists, maps, nodes, relationships, and paths, with [lossless JSON encoding](#values-and-parameters) for large integers and non-finite floats |
+
+Create and read a small graph:
+
+```cypher
+CREATE (a:Person {name: 'Ada', age: 30})-[:KNOWS {since: 2020}]->(b:Person {name: 'Bob', age: 40})
+RETURN a.name AS person, b.name AS friend
+```
+
+```cypher
+MATCH (a:Person)-[:KNOWS]->(b:Person)
+WHERE a.age >= $minimumAge
+RETURN a.name AS person, collect(b.name) AS friends
+ORDER BY person
+```
+
+The `WHERE` of a `WITH` filters the rows that clause returns, after its
+`DISTINCT`, `ORDER BY`, `SKIP`, and `LIMIT`: `WITH x ORDER BY x LIMIT 3 WHERE x > 2`
+keeps at most the third row. After `SKIP` or `LIMIT`, only the variables the
+`WITH` projects remain in scope.
+
+## What is not supported
+
+These constructs are valid openCypher but outside the profile. Each is rejected
+before anything runs, with the error category `unsupported_feature` and the
+`details.detail` code shown, unless the table says otherwise.
+
+| Construct | Example | `details.detail` |
+| --- | --- | --- |
+| `MERGE` | `MERGE (p:Person {name: 'Ada'})` | `merge` |
+| Variable-length relationships | `MATCH (a)-[:KNOWS*1..3]->(b)` | `variable_length_pattern` |
+| Shortest paths | `shortestPath(...)`, `allShortestPaths(...)` | `shortest_path` |
+| `UNION` and `UNION ALL` | `RETURN 1 AS x UNION RETURN 2 AS x` | `union` |
+| Procedures and `CALL` subqueries | `CALL db.labels()`, `CALL { ... }` | `procedures_and_subqueries` |
+| `EXISTS`, `COUNT`, and `COLLECT` subqueries; map projections | `WHERE EXISTS { (n)-->() }`, `RETURN n {.name}` | `map_projection_or_subquery` |
+| List comprehensions | `[x IN list \| x * 2]` | `list_comprehension` |
+| Pattern comprehensions | `[(a)-->(b) \| b.name]` | `pattern_comprehension` |
+| Patterns used as predicates | `WHERE (a)-[:KNOWS]->(b)` | `pattern_expression` |
+| Quantified list predicates | `any(...)`, `all(...)`, `none(...)`, `single(...)` | `quantified_list_expression` |
+| `FOREACH` | `FOREACH (x IN list \| CREATE (:N {v: x}))` | `foreach` |
+| `LOAD CSV` | `LOAD CSV FROM 'file:///data.csv' AS row` | `load_csv` |
+| Schema commands | `DROP INDEX person_name` | `schema_ddl` |
+| Namespaced functions | `apoc.text.join(...)`, `db.labels()` | `namespaced_function` |
+| Other built-in functions, including temporal, spatial, and most math and string functions | `sqrt(x)`, `round(x)`, `date()`, `point(...)`, `split(s, ',')`, `replace(s, 'a', 'b')` | `function` (the message names the function) |
+| More than one label on a node | `CREATE (n:Admin:User)` | `multiple_node_labels` |
+| Adding or removing labels | `SET n:Admin`, `REMOVE n:Admin` | `label_mutation` |
+| Creating a node without exactly one label | `CREATE (n)` | `node_label_required` |
+| A parameter map in a `CREATE` pattern | `CREATE (n:User $props)` | `pattern_parameter_map` |
+| Property names beginning with `$` | ``CREATE (n:User {`$secret`: 1})`` | `reserved_property_name` |
+| Several statements in one request | `RETURN 1; RETURN 2` | `multiple_statements` |
+
+Some of these fail as ordinary compile errors instead:
+
+- `CREATE INDEX ...` is a `syntax_error` (`unexpected_syntax`). Create indexes with
+  the native [secondary](/database/helix-db/query-guides/secondary-indexes),
+  [vector](/database/helix-db/query-guides/vector-indexes), and
+  [text](/database/helix-db/query-guides/text-indexes) index APIs; Cypher planning
+  then uses compatible indexes automatically.
+- A relationship in `CREATE` needs exactly one type and a direction, otherwise
+  the statement is a `syntax_error` (`no_single_relationship_type`).
+- A parameter map in a `MATCH` pattern, such as `MATCH (n:User $props)`, is a
+  `syntax_error` (`invalid_parameter_use`). Write the properties as a map literal,
+  such as `{email: $email}`.
+- An unrecognized function name is a `syntax_error` (`unknown_function`).
+- A statement that is also invalid openCypher reports the standard error, such as
+  `variable_already_bound` for a `CREATE` that redeclares a variable.
+
+Vector search, full-text search, and index management have no Cypher syntax;
+use native queries for them. Cypher is served over HTTP, gRPC, the SDKs, and the
+CLI. The Bolt protocol and Bolt drivers are not supported.
+
+## Values and parameters
+
+Nulls, booleans, strings, lists, maps, and finite floats use ordinary JSON values,
+in parameters and in results. Integers inside JavaScript's safe range use JSON
+numbers. Larger integers and non-finite floats use tagged values:
+
+| Value | Encoding |
+| --- | --- |
+| Integer outside the JavaScript safe range | `{"$type":"integer","value":"9223372036854775807"}` |
+| Non-finite float | `{"$type":"float","value":"NaN"}`, `"Infinity"`, or `"-Infinity"` |
+| A literal map with a `$type` key | `{"$type":"map","value":{"$type":"user value"}}` |
+| Node | `{"$type":"node","id":"7","labels":["Person"],"properties":{"name":"Ada"}}` |
+| Relationship | `{"$type":"relationship","id":"9","start":"7","end":"8","type":"KNOWS","properties":{}}` |
+| Path | `{"$type":"path","nodes":[...],"relationships":[...]}` |
+
+Node and relationship IDs are unsigned decimal strings in separate namespaces;
+keep them as strings. `id()` reports an overflow when an ID does not fit a signed
+64-bit integer. Relationship endpoints keep their stored direction even when a
+path traverses them in reverse. Internal metadata is left out of property maps.
+Scalars, lists, and maps, including their tagged forms, can be passed as
+parameters; nodes, relationships, and paths cannot.
+
+The SDKs keep tagged values in results. TypeScript also accepts `bigint`
+parameters and sends them tagged.
+
+## Writes and transactions
+
+Each statement that writes runs in one transaction, including its index changes.
+If any clause fails, nothing the statement wrote is kept.
+
+- A created node needs exactly one non-empty label, and a created relationship
+  exactly one non-empty type. `MATCH` without a label scans all nodes.
+- Stored properties are scalars or lists of one scalar type. Maps and nested
+  lists can be used in expressions but not stored, so storing one fails the
+  statement.
+- `SET n += {...}` updates the given keys and keeps the rest. `SET n = {...}`
+  replaces every user property. Setting a property to `null` removes it. `SET`
+  items run in order, so later items see earlier changes.
+- A plain `DELETE` of a node that still has relationships fails the statement.
+  `DETACH DELETE` removes the relationships and the node.
+- Index rules still apply: a value an index cannot store fails the statement,
+  including a string too large for an index key (about 64 KiB).
+- Do not retry a write automatically when its commit outcome is uncertain; see
+  [error handling](/database/helix-db/query-guides/error-handling#stability-and-retry-rules).
+
+```cypher
+MATCH (p:Person {name: 'Ada'})
+SET p += {age: 31, nickname: null}
+RETURN properties(p) AS person
+```
+
+## Functions, aggregation, and grouping
+
+- `toInteger()` and `toInt()` convert decimal strings exactly, including
+  scientific notation, and truncate fractions toward zero:
+  `toInteger('9007199254740993.0')` returns `9007199254740993`. Invalid text and
+  values outside the signed 64-bit range return null.
+- `avg()` ignores nulls, returns null for an empty group, and returns a float. A
+  large total does not overflow while the inputs are finite. `sum()` reports
+  integer overflow.
+- Expressions in `RETURN` or `WITH` without aggregates define the groups. In an
+  expression that mixes aggregation with other operations, everything outside the
+  aggregate's arguments must be a constant, a parameter, a grouped variable, or a
+  projected property, following the
+  [openCypher grouping rules](https://github.com/opencypher/openCypher/blob/007895aff5f33097d67b2e48a0a2babd6bd18590/cip/1.accepted/CIP2021-07-07-Grouping-keys-and-aggregation-expressions.adoc).
+  An ambiguous aggregation is rejected before anything runs.
+- `ORDER BY` can use an aggregate without returning it, as in
+  `RETURN 1 + sum(amount) AS total ORDER BY 2 - sum(amount)`.
+- A simple `CASE value WHEN ...` evaluates `value` once, and `null` never matches
+  `null`; test for a missing value with `CASE WHEN value IS NULL THEN ...`.
+  Only the selected branch is evaluated, but aggregate arguments inside `CASE` are
+  always evaluated.
+
+```cypher
+MATCH (p:Person)-[:LIVES_IN]->(c:City)
+RETURN c.name AS city, count(*) AS people, avg(p.age) AS averageAge
+ORDER BY people DESC
+LIMIT 10
+```
+
+## Indexes and performance
+
+Cypher plans use existing native indexes automatically. You do not name an index
+in the statement; explain shows which one was chosen.
+
+- An equality on a labeled node, such as `MATCH (u:User {email: $email})` or
+  `WHERE u.email = $email`, can read an equality index. So can `IN` lists of up to
+  64 values and `OR`ed equalities on one property.
+- A range such as `WHERE u.age >= 21 AND u.age < $max` can read a range index, and
+  stops reading as soon as a `LIMIT` is satisfied.
+- `ORDER BY` on a range-indexed property in the index's direction, with a range
+  bound and a `LIMIT`, reads the index in order instead of sorting.
+- `id(n) = $id` and `id(n) IN $ids` read those nodes directly.
+- An equality against an earlier variable, as in
+  `UNWIND $ids AS k MATCH (u:User {uid: k})`, looks up the index once per row.
+- An expansion only reads the relationship types it names, so
+  `-[:WROTE|LIVES_IN]->` skips a node's other relationships.
+- `LIMIT` stops scans and expansions early when the clauses before it cannot fail.
+  Reading a stored property in `RETURN` can fail, so return whole nodes, or apply
+  `WITH ... LIMIT` first and read properties afterwards:
+  `MATCH (u:User) WITH u LIMIT 10 RETURN u.name`.
+
+An index is only used when every other condition on that node cannot fail.
+Comparisons, string predicates, label and null tests, and their `AND`, `OR`,
+`XOR`, and `NOT` combinations over literals, parameters, variables, and properties
+qualify. Arithmetic and function calls keep the label scan.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Request body | 16 MiB on a local server; 2 MiB on Helix Cloud (`413 payload_too_large`) |
+| Response body | 16 MiB |
+| Query time | 30 seconds by default on a local server; the database's query time limit on Helix Cloud |
+| Expression nesting | 48 levels (`expression_depth`); a chain of one operator, such as `a OR b OR c`, counts as one level |
+| Memory, result size, and list sizes | Per-query budgets (`memory_limit`, `result_limit`, `collection_limit`) |
+
+A statement that exceeds a budget fails with `resource_limit` (HTTP `429`)
+instead of returning a truncated result, and a write that fails this way commits
+nothing. `UNWIND range(...)` streams its values, while `range()` in an
+expression builds the whole list first.
+
+## Errors
+
+A failed statement returns the Cypher error body:
+
+```json
+{
+  "error": "unsupported_feature",
+  "msg": "the Cypher MVP profile does not support MERGE",
+  "details": { "detail": "merge", "phase": "compile", "span": { "start": 0, "end": 5 } }
+}
+```
+
+`error` is the category and `details.detail` the specific condition, both in
+lower snake case. `phase` is `compile` (nothing ran) or `runtime`, and `span`
+gives the byte range of the statement text that failed, when known. Request,
+authentication, storage, and transaction failures use the native error envelope.
+The [error reference](/database/helix-db/query-guides/error-handling#cypher-errors)
+lists every category with its HTTP status and retry guidance.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="HTTP API" icon="code" href="/database/helix-db/query-guides/http-api#cypher">
+    Request headers, status codes, and the OpenAPI contract for the Cypher routes.
+  </Card>
+  <Card title="Error handling" icon="triangle-exclamation" href="/database/helix-db/query-guides/error-handling#cypher-errors">
+    Cypher error categories, HTTP statuses, and when to retry.
+  </Card>
+  <Card title="Reading data" icon="magnifying-glass" href="/database/helix-db/query-guides/reading-data">
+    The native read API, with Cypher equivalents.
+  </Card>
+  <Card title="Secondary indexes" icon="bolt" href="/database/helix-db/query-guides/secondary-indexes">
+    Create the indexes that Cypher plans read.
+  </Card>
+</CardGroup>

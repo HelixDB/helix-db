@@ -1535,8 +1535,11 @@ shows what an operation contributes, what it becomes on the wire, and what the s
 sends back. To run it, start a local instance as described in
 [Get started](/database/helix-db/start-here/quickstart).
 
-  Every tab builds the same request. The JSON tab is the body sent to `POST /v2/query`,
-  and the v3 SDKs are typed builders for exactly that body.
+  The Rust, TypeScript, Go, Python, and JSON tabs build the same request. The JSON tab is
+  the body sent to `POST /v2/query`, and the v3 SDKs are typed builders for exactly that
+  body. The Cypher tab is the equivalent statement for
+  [`POST /v2/cypher`](/database/helix-db/query-guides/cypher), and the steps below show
+  the clauses of that statement that do the same work.
 
 ## The whole query
 
@@ -1723,6 +1726,16 @@ query = (
 }
 ```
 
+```cypher Cypher
+CREATE (alice:User {name: 'Alice'})
+CREATE (bob:User {name: 'Bob'})
+CREATE (alice)-[:FOLLOWS {since: '2026-07-24'}]->(bob)
+WITH alice, bob
+MATCH (alice)-[:FOLLOWS]->(friend)
+WITH alice, bob, collect({id: id(friend), name: friend.name}) AS friends
+RETURN id(alice) AS alice, id(bob) AS bob, friends
+```
+
 Four named entries run in order, and later entries reuse earlier results by name:
 
 ```mermaid
@@ -1766,7 +1779,9 @@ batch at compile time, and Go and Python reject it while the request is being bu
 a stray write in a read path never reaches the server.
 
 All entries in one batch commit or roll back together, which is what lets entry 4 read
-the edge that entry 3 has only just created.
+the edge that entry 3 has only just created. Cypher has no batch type: the server works
+out whether a statement reads or writes, and runs a statement that writes in one
+transaction.
 
 ## 2. Create the two nodes
 
@@ -1800,6 +1815,10 @@ VarAs("alice", helix.G().AddN("User", helix.Props{helix.Prop("name", "Alice")}))
     }
   }
 }
+```
+
+```cypher Cypher
+CREATE (alice:User {name: 'Alice'})
 ```
 
 `varAs` adds one entry and gives it a name. `g()` starts an empty traversal, so `addN`
@@ -1874,6 +1893,10 @@ VarAs(
 }
 ```
 
+```cypher Cypher
+CREATE (alice)-[:FOLLOWS {since: '2026-07-24'}]->(bob)
+```
+
 Unlike `addN`, `addE` needs an input stream: the nodes in that stream become the edge
 sources, and `to` is the target. `n(NodeRef.var("alice"))` turns entry 1's result back
 into a stream, which is why `add_e` carries an `input` of
@@ -1941,6 +1964,12 @@ VarAs(
 }
 ```
 
+```cypher Cypher
+WITH alice, bob
+MATCH (alice)-[:FOLLOWS]->(friend)
+WITH alice, bob, collect({id: id(friend), name: friend.name}) AS friends
+```
+
 This entry is a read inside a write batch. It starts at Alice again, walks out along
 `FOLLOWS`, and projects two fields from whatever it lands on. The edge from entry 3 is
 uncommitted at this point but still visible, because the batch is one transaction.
@@ -1995,6 +2024,10 @@ Returning("alice", "bob", "friends")
 
 ```json JSON
 { "returns": ["alice", "bob", "friends"] }
+```
+
+```cypher Cypher
+RETURN id(alice) AS alice, id(bob) AS bob, friends
 ```
 
 `returning` picks which named entries appear in the response body. Names it omits still
@@ -2100,19 +2133,15 @@ produces the shape you need — each of these replaces `valueMap` on the `friend
 | `exists()` | `true` |
 | `project(…)` | One object per row with named fields |
 
-Populated values keep these existing shapes. Only a declared return with no
-value uses an inferred empty shape:
+A declared return with no value, because it matched nothing or its entry was
+skipped, keeps the JSON type it has when populated:
 
-| Semantic return | Populated | Empty or skipped |
+| Return | Populated | Empty or skipped |
 | --- | --- | --- |
-| At most one row, such as `limit(1)` | Existing one-element array | `null` |
-| Collection, many, or unknown cardinality | Existing array | `[]` |
-| `fold` or mutation | Existing array | `[]` |
-| Scalar terminal, such as `count()` or `exists()` | Existing scalar | No synthetic empty value |
+| Row stream, including `n(<one id>)`, `limit(1)`, `fold` and mutations | Array | `[]` |
+| Scalar terminal, such as `count()` or `exists()` | Scalar | No synthetic empty value |
 
-The planner infers this from the semantic output type and guaranteed
-multiplicity. It does not use the observed row count or optimizer estimates. An
-empty `returns` declaration returns `{}` because it declares no response keys.
+An empty `returns` declaration returns `{}` because it declares no response keys.
 
 ## 9. Read it back in a later request
 
@@ -2261,6 +2290,13 @@ helix.ReadQuery("alice_friends").
 }
 ```
 
+```cypher Cypher
+MATCH (alice:User {name: 'Alice'})
+WITH alice LIMIT 1
+MATCH (alice)-[:FOLLOWS]->(friend)
+RETURN DISTINCT id(friend) AS id, friend.name AS name
+```
+
 It returns the same rows the write batch already reported:
 
 ```json
@@ -2274,8 +2310,9 @@ the multigraph case, where several `FOLLOWS` edges between the same pair would o
 yield the same node more than once.
 
 A label scan reads every `User`. Add a
-[secondary index](/database/helix-db/query-guides/secondary-indexes) on `name` and use
-`nWhere` instead, so the lookup is pushed down to the index.
+[secondary index](/database/helix-db/query-guides/secondary-indexes) on `User.name` and
+the same `nWithLabel("User")` source with a `name` filter, or `nWithLabelWhere`, reads the
+index instead.
 
 ## Next steps
 
@@ -2425,6 +2462,13 @@ helix.WriteQuery("connect_users").
 }
 ```
 
+```cypher Cypher
+CREATE (alice:User {name: 'Alice'})
+CREATE (bob:User {name: 'Bob'})
+CREATE (alice)-[follows:FOLLOWS {since: '2026-07-24'}]->(bob)
+RETURN id(alice) AS alice, id(bob) AS bob, count(follows) AS linked
+```
+
 ## Other mutations
 
 | Intent | Operation |
@@ -2441,6 +2485,10 @@ helix.WriteQuery("connect_users").
 All entries in the write batch commit or roll back together. Reads inside the batch can
 refer to earlier mutations through named variables. Do not retry a write automatically
 unless the full request is safe to replay.
+
+Cypher has no batch type: the server detects that a statement writes and runs it in one
+transaction, so the Cypher tab's three `CREATE` clauses also commit or roll back
+together.
 
 ## Next steps
 
@@ -2466,8 +2514,11 @@ data you already know.
 | Edges with a label | `eWithLabel` / `e_with_label` |
 | Earlier named entry | `NodeRef.var(...)` / `NodeVar(...)` |
 
-Source predicates are eligible for index push-down. General `.where(...)` filters the
-current stream after its source.
+Source predicates are eligible for index push-down. Secondary indexes are defined per
+label, so a source must be scoped to a label to read one: `nWithLabelWhere` /
+`n_with_label_where`, or a `.where(...)` directly after `nWithLabel`. A source predicate
+without a label scans every node. A `.where(...)` later in a traversal filters the
+current stream.
 
 ## Read active users
 
@@ -2572,24 +2623,31 @@ helix.ReadQuery("active_users").
 }
 ```
 
+```cypher Cypher
+MATCH (u:User)
+WHERE u.status = 'active'
+WITH u LIMIT 25
+RETURN id(u) AS id, u.name AS name
+```
+
 ## Read by indexed property
 
-Use a source predicate when the property has a compatible index:
+Scope the source predicate to the indexed label, so the property read uses its index:
 
 ```rust Rust
-g().n_where(SourcePredicate::eq("email", "alice@example.com"))
+g().n_with_label_where("User", SourcePredicate::eq("email", "alice@example.com"))
 ```
 
 ```ts TypeScript
-g().nWhere(SourcePredicate.eq("email", "alice@example.com"))
+g().nWithLabelWhere("User", SourcePredicate.eq("email", "alice@example.com"))
 ```
 
 ```go Go
-helix.G().NWhere(helix.SourceEq("email", "alice@example.com"))
+helix.G().NWithLabelWhere("User", helix.SourceEq("email", "alice@example.com"))
 ```
 
 ```python Python
-g().n_where(SourcePredicate.eq("email", "alice@example.com"))
+g().n_with_label_where("User", SourcePredicate.eq("email", "alice@example.com"))
 ```
 
 ```json JSON
@@ -2604,11 +2662,23 @@ g().n_where(SourcePredicate.eq("email", "alice@example.com"))
           "root": {
             "nodes_where": {
               "predicate": {
-                "eq": {
-                  "left": { "property": "email" },
-                  "right": {
-                    "constant": { "string": "alice@example.com" }
-                  }
+                "and": {
+                  "predicates": [
+                    {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "User" } }
+                      }
+                    },
+                    {
+                      "eq": {
+                        "left": { "property": "email" },
+                        "right": {
+                          "constant": { "string": "alice@example.com" }
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -2619,6 +2689,11 @@ g().n_where(SourcePredicate.eq("email", "alice@example.com"))
     }
   }
 }
+```
+
+```cypher Cypher
+MATCH (user:User {email: 'alice@example.com'})
+RETURN id(user) AS user
 ```
 
 ## Read an earlier result
@@ -2773,6 +2848,12 @@ helix.ReadQuery("friends").
 }
 ```
 
+```cypher Cypher
+MATCH (user {username: 'alice'})-[:FOLLOWS]->(friend)
+WITH DISTINCT friend LIMIT 25
+RETURN id(friend) AS id, friend.username AS username
+```
+
 ## Preserve correlated values
 
 A traversal normally forgets where it has been: after `out(...)`, each row holds only
@@ -2906,8 +2987,15 @@ helix.ReadQuery("service_routes").
 }
 ```
 
+```cypher Cypher
+MATCH (s:Service)-[:ROUTES_TO]->(w)
+RETURN s.name AS service, w.name AS workload
+```
+
 Bindings are row-local, so each row pairs a workload with the service that reached it
-rather than joining unrelated paths. Branches can bind optional values and coalesce
+rather than joining unrelated paths. Cypher pattern variables, such as `s` in the
+Cypher tab, stay bound for the whole row in the same way, so the statement needs no
+`bind` step. Branches can bind optional values and coalesce
 them during projection; see [Project correlated bindings](/database/helix-db/query-guides/projections#project-correlated-bindings).
 
 ## Avoid accidental path growth
@@ -3028,6 +3116,12 @@ helix.G().
 }
 ```
 
+```cypher Cypher
+MATCH (u:User)
+WHERE u.score >= 100
+RETURN id(u) AS id, u.name AS name, u.score AS score
+```
+
 ## Filter search candidates
 
 To restrict vector or full-text search to a candidate set, build the traversal that
@@ -3144,6 +3238,11 @@ g().n_with_label("User").project([
     }
   }
 }
+```
+
+```cypher Cypher
+MATCH (u:User)
+RETURN id(u) AS user_id, u.name AS name
 ```
 
 ## Project correlated bindings
@@ -3414,6 +3513,23 @@ helix.ReadQuery("service_workloads").
 }
 ```
 
+```cypher Cypher
+MATCH (service:Service)-[:ROUTES_TO]->(pod)
+OPTIONAL MATCH (deployment)-[:CREATES]->(pod)
+WITH service, deployment, coalesce(deployment, pod) AS current
+UNWIND ['MANAGES', 'ROUTES_TO'] AS branch
+OPTIONAL MATCH (owner)-[:MANAGES]->(current) WHERE branch = 'MANAGES'
+OPTIONAL MATCH (current)-[:ROUTES_TO]->(workload) WHERE branch = 'ROUTES_TO'
+WITH service, deployment, owner, workload
+WHERE owner IS NOT NULL OR workload IS NOT NULL
+RETURN DISTINCT id(service) AS service_id, id(coalesce(deployment, owner, workload)) AS workload_id
+```
+
+Cypher has no `UNION` (see the
+[Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported)), so the
+Cypher tab gives each `union` branch its own row through `UNWIND`, runs that branch as
+an `OPTIONAL MATCH`, and drops rows where the branch found nothing.
+
 ## Aggregate
 
 Append `count()` to a filtered traversal and return that named entry; aggregation runs
@@ -3584,6 +3700,18 @@ request = query.to_query_request(
   }
 }
 ```
+
+```cypher Cypher
+// parameters: {"tenant_id": "acme", "limit": 25}
+MATCH (u:User)
+WHERE u.tenantId = $tenant_id
+WITH u LIMIT $limit
+RETURN id(u) AS id, u.name AS name, u.tenantId AS tenantId
+```
+
+The Cypher statement reads the same values as `$tenant_id` and `$limit`. A Cypher
+request has no `parameter_types`; each value's type comes from its
+[JSON encoding](/database/helix-db/query-guides/cypher#values-and-parameters).
 
 ## Supported parameter families
 
@@ -3759,10 +3887,21 @@ helix.ReadQuery("user_posts").
 }
 ```
 
+```cypher Cypher
+MATCH (user:User)
+WHERE user.username = 'alice'
+MATCH (user)-[:AUTHORED]->(post)
+RETURN id(post) AS id, post.title AS title
+```
+
 The condition serializes inside the named entry, not as a separate step. Other
 conditions test for an empty result (`varEmpty`), a minimum size (`varMinSize`), or
 the previous entry (`prevNotEmpty`). The first entry in a batch cannot depend on a
 previous result.
+
+Cypher has no batch conditions. In the Cypher tab, the second `MATCH` runs once for
+each user the first one finds, so the statement returns no rows when the user does
+not exist.
 
 ## Bound recursive work
 
@@ -3775,6 +3914,434 @@ all work performed before that operation.
     Emit stable rows from correlated paths.
 
     Bind values and bounds at request time.
+
+# Query HelixDB with Cypher
+
+Page type: Guide
+
+HelixDB accepts Cypher statements alongside its native operation-tree queries.
+Both languages run against the same graph, transactions, and indexes, so data
+written with one is visible to the other, and existing databases need no
+migration.
+
+Cypher support is a profile of openCypher, not full compatibility. The clauses,
+expressions, and functions listed under [What is supported](#what-is-supported) run.
+Everything in [What is not supported](#what-is-not-supported) is rejected with a
+specific error before the statement reads or writes anything.
+
+Cypher as described here is served by local servers running the
+`ghcr.io/helixdb/helixdb:v0.0.13` image or later, and by Helix Cloud gateways.
+
+The SDK examples below require SDKs built from the
+[repository checkout](https://github.com/HelixDB/helix-db). TypeScript 3.2.0,
+Python 0.3.4, Rust 3.0.0, and Go v0.3.1 do not include the Cypher methods.
+With those releases, use the [HTTP API](#over-http) to run and explain statements.
+
+## Run a statement
+
+Send one statement, with optional parameters and a query name, to
+`POST /v2/cypher`. The server works out whether the statement reads or writes.
+
+```rust Rust
+use std::collections::BTreeMap;
+
+let result = client
+    .cypher(
+        "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+        BTreeMap::from([("age".to_string(), serde_json::json!(30))]),
+        Some("adults"),
+    )
+    .await?;
+// result.columns == ["name"]; result.rows == [["Ada"], ...]
+```
+
+```ts TypeScript
+const result = await client.cypher(
+  "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+  { age: 30 },
+  "adults",
+);
+// { columns: ["name"], rows: [["Ada"], ...] }
+```
+
+```go Go
+result, err := client.Cypher(ctx, helix.CypherRequest{
+	Query:      "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+	Parameters: map[string]any{"age": 30},
+	QueryName:  "adults",
+})
+// result.Columns == ["name"]; result.Rows == [["Ada"], ...]
+```
+
+```python Python
+result = client.cypher(
+    "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+    {"age": 30},
+    query_name="adults",
+)
+# {"columns": ["name"], "rows": [["Ada"], ...]}
+```
+
+```json JSON
+{
+  "query": "MATCH (p:Person) WHERE p.age >= $age RETURN p.name AS name ORDER BY name",
+  "parameters": { "age": 30 },
+  "query_name": "adults"
+}
+```
+
+A successful response has ordered `columns` and rectangular `rows`, with one
+value per column in column order:
+
+```json
+{ "columns": ["name"], "rows": [["Ada"], ["Grace"]] }
+```
+
+`query` is required; `parameters` and `query_name` are optional. Duplicate rows
+are kept unless the statement uses `DISTINCT`, and row order is only defined by
+`ORDER BY`. A write without `RETURN` succeeds with empty `columns` and `rows`.
+
+Parameters hold values. Labels, relationship types, and variable names are part
+of the statement, so keep values in parameters instead of building them into the
+query text.
+
+### Over HTTP
+
+A local server has no authentication:
+
+```sh
+curl http://localhost:6969/v2/cypher \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"RETURN $name AS name","parameters":{"name":"Ada"}}'
+```
+
+A Helix Cloud gateway takes the same body. Authenticate as for `POST /v2/query`,
+with the cluster API key and, on a GA shared gateway, the database ID:
+
+```sh
+curl "$HELIX_ENDPOINT/v2/cypher" \
+  -H "Authorization: Bearer $HELIX_API_KEY" \
+  -H "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"MATCH (n) RETURN count(n) AS nodes"}'
+```
+
+The gateway routes each statement by what it does: reads go to readers, and
+writes go to the elected writer. A read-only API key can read and explain, but
+receives `403` for a statement that writes. The
+[HTTP API reference](/database/helix-db/query-guides/http-api#cypher) describes
+the headers, status codes, and lossless value encoding in full.
+
+### From the CLI
+
+From a linked local project, `helix cypher` runs a statement against the local
+instance:
+
+```sh
+helix cypher -e 'MATCH (p:Person) RETURN p.name AS name'
+helix cypher -e 'RETURN $name AS name' --parameters '{"name":"Ada"}'
+helix cypher --file query.cypher --parameters '{"minimumAge":30}'
+helix cypher --explain -e 'MATCH (p:Person {name: "Ada"}) RETURN p'
+```
+
+### Request options
+
+The native request options apply to Cypher too:
+
+| Option | Rust | TypeScript | Go | Python | HTTP header |
+| --- | --- | --- | --- | --- | --- |
+| Run on the writer | `.writer_only()` | `.writerOnly()` | `helix.WriterOnly()` | `writer_only=True` | `X-Helix-Require-Writer: true` |
+| Warm caches only (reads) | `.warm_only()` | `.warmOnly()` | `helix.WarmOnly()` | `warm_only=True` | `X-Helix-Warm: true` |
+| Wait for durability (writes) | `.should_await_durability(true)` | `.shouldAwaitDurability(true)` | `helix.AwaitDurability(true)` | `await_durability=True` | `X-Helix-Await-Durable: true` |
+
+Rust and TypeScript set options on `request_builder()` / `requestBuilder()` before
+`.cypher(...)`; Go and Python pass them to `Cypher` and `cypher`. A warm-only read
+that Helix Cloud answers with `204 No Content` returns no rows. Embedded clients
+reject request options.
+
+## Explain a statement
+
+`POST /v2/cypher/explain` takes the same body and plans the statement without
+running it, so explaining a write changes nothing. The plan reports the
+statement's `effect` (`Read` or `Write`), its bindings, the selected access paths
+such as index lookups, estimated cardinalities, blocking work, Cartesian
+products, and optimizer warnings. Planning checks parameters, so supply every
+parameter the statement uses.
+
+```rust Rust
+let plan = client
+    .explain_cypher(
+        "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+        BTreeMap::from([("email".to_string(), serde_json::json!("ada@example.com"))]),
+        None,
+    )
+    .await?;
+// plan["effect"] == "Read"
+```
+
+```ts TypeScript
+const plan = await client.explainCypher(
+  "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+  { email: "ada@example.com" },
+);
+// plan.effect === "Read"
+```
+
+```go Go
+plan, err := client.ExplainCypher(ctx, helix.CypherRequest{
+	Query:      "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+	Parameters: map[string]any{"email": "ada@example.com"},
+})
+// plan["effect"] == "Read"
+```
+
+```python Python
+plan = client.explain_cypher(
+    "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+    {"email": "ada@example.com"},
+)
+# plan["effect"] == "Read"
+```
+
+```json JSON
+{
+  "query": "MATCH (p:Person {email: $email}) RETURN p.name AS name",
+  "parameters": { "email": "ada@example.com" }
+}
+```
+
+## What is supported
+
+| Area | Supported |
+| --- | --- |
+| Reading patterns | `MATCH` and `OPTIONAL MATCH`; fixed-length directed and undirected relationships; several patterns in one clause; repeated variables; named paths such as `p = (a)-[:KNOWS]->(b)` |
+| Row clauses | `WHERE`, `WITH`, `RETURN`, aliases, `DISTINCT`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT` |
+| Writing | `CREATE`; property and map `SET` (`=` and `+=`); property `REMOVE`; `DELETE`; `DETACH DELETE` |
+| Expressions | Parameters; scalar, list, and map literals; property and index access; arithmetic; comparisons and comparison chains; `AND`, `OR`, `XOR`, `NOT`; `IS NULL` and `IS NOT NULL`; `IN`; `STARTS WITH`, `ENDS WITH`, `CONTAINS`; label tests such as `n:User`; simple and searched `CASE` |
+| Graph and list functions | `id`, `type`, `labels`, `properties`, `keys`, `exists` (for properties), `size`, `length`, `nodes`, `relationships`, `head`, `last`, `range`, `reverse` |
+| Scalar functions | `coalesce`, `abs`, `toString`, `toInteger` (and `toInt`), `toFloat`, `toBoolean`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
+| Aggregation | `count` (including `count(*)`), `sum`, `avg`, `min`, `max`, `collect`, each with `DISTINCT` arguments |
+| Values | Nulls, booleans, integers, floats, strings, lists, maps, nodes, relationships, and paths, with [lossless JSON encoding](#values-and-parameters) for large integers and non-finite floats |
+
+Create and read a small graph:
+
+```cypher
+CREATE (a:Person {name: 'Ada', age: 30})-[:KNOWS {since: 2020}]->(b:Person {name: 'Bob', age: 40})
+RETURN a.name AS person, b.name AS friend
+```
+
+```cypher
+MATCH (a:Person)-[:KNOWS]->(b:Person)
+WHERE a.age >= $minimumAge
+RETURN a.name AS person, collect(b.name) AS friends
+ORDER BY person
+```
+
+The `WHERE` of a `WITH` filters the rows that clause returns, after its
+`DISTINCT`, `ORDER BY`, `SKIP`, and `LIMIT`: `WITH x ORDER BY x LIMIT 3 WHERE x > 2`
+keeps at most the third row. After `SKIP` or `LIMIT`, only the variables the
+`WITH` projects remain in scope.
+
+## What is not supported
+
+These constructs are valid openCypher but outside the profile. Each is rejected
+before anything runs, with the error category `unsupported_feature` and the
+`details.detail` code shown, unless the table says otherwise.
+
+| Construct | Example | `details.detail` |
+| --- | --- | --- |
+| `MERGE` | `MERGE (p:Person {name: 'Ada'})` | `merge` |
+| Variable-length relationships | `MATCH (a)-[:KNOWS*1..3]->(b)` | `variable_length_pattern` |
+| Shortest paths | `shortestPath(...)`, `allShortestPaths(...)` | `shortest_path` |
+| `UNION` and `UNION ALL` | `RETURN 1 AS x UNION RETURN 2 AS x` | `union` |
+| Procedures and `CALL` subqueries | `CALL db.labels()`, `CALL { ... }` | `procedures_and_subqueries` |
+| `EXISTS`, `COUNT`, and `COLLECT` subqueries; map projections | `WHERE EXISTS { (n)-->() }`, `RETURN n {.name}` | `map_projection_or_subquery` |
+| List comprehensions | `[x IN list \| x * 2]` | `list_comprehension` |
+| Pattern comprehensions | `[(a)-->(b) \| b.name]` | `pattern_comprehension` |
+| Patterns used as predicates | `WHERE (a)-[:KNOWS]->(b)` | `pattern_expression` |
+| Quantified list predicates | `any(...)`, `all(...)`, `none(...)`, `single(...)` | `quantified_list_expression` |
+| `FOREACH` | `FOREACH (x IN list \| CREATE (:N {v: x}))` | `foreach` |
+| `LOAD CSV` | `LOAD CSV FROM 'file:///data.csv' AS row` | `load_csv` |
+| Schema commands | `DROP INDEX person_name` | `schema_ddl` |
+| Namespaced functions | `apoc.text.join(...)`, `db.labels()` | `namespaced_function` |
+| Other built-in functions, including temporal, spatial, and most math and string functions | `sqrt(x)`, `round(x)`, `date()`, `point(...)`, `split(s, ',')`, `replace(s, 'a', 'b')` | `function` (the message names the function) |
+| More than one label on a node | `CREATE (n:Admin:User)` | `multiple_node_labels` |
+| Adding or removing labels | `SET n:Admin`, `REMOVE n:Admin` | `label_mutation` |
+| Creating a node without exactly one label | `CREATE (n)` | `node_label_required` |
+| A parameter map in a `CREATE` pattern | `CREATE (n:User $props)` | `pattern_parameter_map` |
+| Property names beginning with `$` | ``CREATE (n:User {`$secret`: 1})`` | `reserved_property_name` |
+| Several statements in one request | `RETURN 1; RETURN 2` | `multiple_statements` |
+
+Some of these fail as ordinary compile errors instead:
+
+- `CREATE INDEX ...` is a `syntax_error` (`unexpected_syntax`). Create indexes with
+  the native [secondary](/database/helix-db/query-guides/secondary-indexes),
+  [vector](/database/helix-db/query-guides/vector-indexes), and
+  [text](/database/helix-db/query-guides/text-indexes) index APIs; Cypher planning
+  then uses compatible indexes automatically.
+- A relationship in `CREATE` needs exactly one type and a direction, otherwise
+  the statement is a `syntax_error` (`no_single_relationship_type`).
+- A parameter map in a `MATCH` pattern, such as `MATCH (n:User $props)`, is a
+  `syntax_error` (`invalid_parameter_use`). Write the properties as a map literal,
+  such as `{email: $email}`.
+- An unrecognized function name is a `syntax_error` (`unknown_function`).
+- A statement that is also invalid openCypher reports the standard error, such as
+  `variable_already_bound` for a `CREATE` that redeclares a variable.
+
+Vector search, full-text search, and index management have no Cypher syntax;
+use native queries for them. Cypher is served over HTTP, gRPC, the SDKs, and the
+CLI. The Bolt protocol and Bolt drivers are not supported.
+
+## Values and parameters
+
+Nulls, booleans, strings, lists, maps, and finite floats use ordinary JSON values,
+in parameters and in results. Integers inside JavaScript's safe range use JSON
+numbers. Larger integers and non-finite floats use tagged values:
+
+| Value | Encoding |
+| --- | --- |
+| Integer outside the JavaScript safe range | `{"$type":"integer","value":"9223372036854775807"}` |
+| Non-finite float | `{"$type":"float","value":"NaN"}`, `"Infinity"`, or `"-Infinity"` |
+| A literal map with a `$type` key | `{"$type":"map","value":{"$type":"user value"}}` |
+| Node | `{"$type":"node","id":"7","labels":["Person"],"properties":{"name":"Ada"}}` |
+| Relationship | `{"$type":"relationship","id":"9","start":"7","end":"8","type":"KNOWS","properties":{}}` |
+| Path | `{"$type":"path","nodes":[...],"relationships":[...]}` |
+
+Node and relationship IDs are unsigned decimal strings in separate namespaces;
+keep them as strings. `id()` reports an overflow when an ID does not fit a signed
+64-bit integer. Relationship endpoints keep their stored direction even when a
+path traverses them in reverse. Internal metadata is left out of property maps.
+Scalars, lists, and maps, including their tagged forms, can be passed as
+parameters; nodes, relationships, and paths cannot.
+
+The SDKs keep tagged values in results. TypeScript also accepts `bigint`
+parameters and sends them tagged.
+
+## Writes and transactions
+
+Each statement that writes runs in one transaction, including its index changes.
+If any clause fails, nothing the statement wrote is kept.
+
+- A created node needs exactly one non-empty label, and a created relationship
+  exactly one non-empty type. `MATCH` without a label scans all nodes.
+- Stored properties are scalars or lists of one scalar type. Maps and nested
+  lists can be used in expressions but not stored, so storing one fails the
+  statement.
+- `SET n += {...}` updates the given keys and keeps the rest. `SET n = {...}`
+  replaces every user property. Setting a property to `null` removes it. `SET`
+  items run in order, so later items see earlier changes.
+- A plain `DELETE` of a node that still has relationships fails the statement.
+  `DETACH DELETE` removes the relationships and the node.
+- Index rules still apply: a value an index cannot store fails the statement,
+  including a string too large for an index key (about 64 KiB).
+- Do not retry a write automatically when its commit outcome is uncertain; see
+  [error handling](/database/helix-db/query-guides/error-handling#stability-and-retry-rules).
+
+```cypher
+MATCH (p:Person {name: 'Ada'})
+SET p += {age: 31, nickname: null}
+RETURN properties(p) AS person
+```
+
+## Functions, aggregation, and grouping
+
+- `toInteger()` and `toInt()` convert decimal strings exactly, including
+  scientific notation, and truncate fractions toward zero:
+  `toInteger('9007199254740993.0')` returns `9007199254740993`. Invalid text and
+  values outside the signed 64-bit range return null.
+- `avg()` ignores nulls, returns null for an empty group, and returns a float. A
+  large total does not overflow while the inputs are finite. `sum()` reports
+  integer overflow.
+- Expressions in `RETURN` or `WITH` without aggregates define the groups. In an
+  expression that mixes aggregation with other operations, everything outside the
+  aggregate's arguments must be a constant, a parameter, a grouped variable, or a
+  projected property, following the
+  [openCypher grouping rules](https://github.com/opencypher/openCypher/blob/007895aff5f33097d67b2e48a0a2babd6bd18590/cip/1.accepted/CIP2021-07-07-Grouping-keys-and-aggregation-expressions.adoc).
+  An ambiguous aggregation is rejected before anything runs.
+- `ORDER BY` can use an aggregate without returning it, as in
+  `RETURN 1 + sum(amount) AS total ORDER BY 2 - sum(amount)`.
+- A simple `CASE value WHEN ...` evaluates `value` once, and `null` never matches
+  `null`; test for a missing value with `CASE WHEN value IS NULL THEN ...`.
+  Only the selected branch is evaluated, but aggregate arguments inside `CASE` are
+  always evaluated.
+
+```cypher
+MATCH (p:Person)-[:LIVES_IN]->(c:City)
+RETURN c.name AS city, count(*) AS people, avg(p.age) AS averageAge
+ORDER BY people DESC
+LIMIT 10
+```
+
+## Indexes and performance
+
+Cypher plans use existing native indexes automatically. You do not name an index
+in the statement; explain shows which one was chosen.
+
+- An equality on a labeled node, such as `MATCH (u:User {email: $email})` or
+  `WHERE u.email = $email`, can read an equality index. So can `IN` lists of up to
+  64 values and `OR`ed equalities on one property.
+- A range such as `WHERE u.age >= 21 AND u.age < $max` can read a range index, and
+  stops reading as soon as a `LIMIT` is satisfied.
+- `ORDER BY` on a range-indexed property in the index's direction, with a range
+  bound and a `LIMIT`, reads the index in order instead of sorting.
+- `id(n) = $id` and `id(n) IN $ids` read those nodes directly.
+- An equality against an earlier variable, as in
+  `UNWIND $ids AS k MATCH (u:User {uid: k})`, looks up the index once per row.
+- An expansion only reads the relationship types it names, so
+  `-[:WROTE|LIVES_IN]->` skips a node's other relationships.
+- `LIMIT` stops scans and expansions early when the clauses before it cannot fail.
+  Reading a stored property in `RETURN` can fail, so return whole nodes, or apply
+  `WITH ... LIMIT` first and read properties afterwards:
+  `MATCH (u:User) WITH u LIMIT 10 RETURN u.name`.
+
+An index is only used when every other condition on that node cannot fail.
+Comparisons, string predicates, label and null tests, and their `AND`, `OR`,
+`XOR`, and `NOT` combinations over literals, parameters, variables, and properties
+qualify. Arithmetic and function calls keep the label scan.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Request body | 16 MiB on a local server; 2 MiB on Helix Cloud (`413 payload_too_large`) |
+| Response body | 16 MiB |
+| Query time | 30 seconds by default on a local server; the database's query time limit on Helix Cloud |
+| Expression nesting | 48 levels (`expression_depth`); a chain of one operator, such as `a OR b OR c`, counts as one level |
+| Memory, result size, and list sizes | Per-query budgets (`memory_limit`, `result_limit`, `collection_limit`) |
+
+A statement that exceeds a budget fails with `resource_limit` (HTTP `429`)
+instead of returning a truncated result, and a write that fails this way commits
+nothing. `UNWIND range(...)` streams its values, while `range()` in an
+expression builds the whole list first.
+
+## Errors
+
+A failed statement returns the Cypher error body:
+
+```json
+{
+  "error": "unsupported_feature",
+  "msg": "the Cypher MVP profile does not support MERGE",
+  "details": { "detail": "merge", "phase": "compile", "span": { "start": 0, "end": 5 } }
+}
+```
+
+`error` is the category and `details.detail` the specific condition, both in
+lower snake case. `phase` is `compile` (nothing ran) or `runtime`, and `span`
+gives the byte range of the statement text that failed, when known. Request,
+authentication, storage, and transaction failures use the native error envelope.
+The [error reference](/database/helix-db/query-guides/error-handling#cypher-errors)
+lists every category with its HTTP status and retry guidance.
+
+## Next steps
+
+    Request headers, status codes, and the OpenAPI contract for the Cypher routes.
+
+    Cypher error categories, HTTP statuses, and when to retry.
+
+    The native read API, with Cypher equivalents.
+
+    Create the indexes that Cypher plans read.
 
 # Secondary indexes
 
@@ -3873,10 +4440,25 @@ active before depending on indexed performance.
 
 ## Query indexed data
 
-Use `nWhere(SourcePredicate.eq("status", "active"))` (or the language-equivalent
-snake_case builder) for index push-down, then project the required fields. A general
-`.where(...)` remains useful after traversal but may filter a larger intermediate
-stream.
+Use `nWithLabelWhere("User", SourcePredicate.eq("status", "active"))` (or the
+language-equivalent snake_case builder) for index push-down, then project the required
+fields. The read must be scoped to the index's label: a source predicate without a label
+scans every node. A `.where(...)` directly after `nWithLabel("User")` is pushed down to
+the index too; later in a traversal it filters a possibly larger intermediate stream.
+
+Cypher statements use these indexes automatically, without naming them. An
+equality or `IN` match on a labeled node reads an equality index, and range
+comparisons and ordered `LIMIT` reads use a range index:
+
+```cypher
+// parameters: {"status": "active"}
+MATCH (u:User {status: $status})
+RETURN u.name AS name
+```
+
+Explain the statement to see which index the plan reads. See
+[Cypher indexes and performance](/database/helix-db/query-guides/cypher#indexes-and-performance)
+for the conditions that keep an index in use.
 
 ## Unique indexes
 
@@ -3903,6 +4485,10 @@ the declared dimension.
 
 For background, see [What is vector search?](/learn/vector-search/what-is-vector-search)
 and [vector distance metrics](/learn/vector-search/vector-distance-metrics).
+
+Vector search and vector index management are native-only: Cypher has no syntax for
+them. The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported)
+lists what Cypher covers.
 
 ## Create a vector index
 
@@ -4140,6 +4726,10 @@ keyword relevance.
 For background, see [What is full-text search?](/learn/full-text-search/what-is-full-text-search)
 and [What is BM25?](/learn/full-text-search/what-is-bm25).
 
+Full-text search and text index management are native-only: Cypher has no syntax for
+them. The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported)
+lists what Cypher covers.
+
 ## Create a text index
 
 ```rust Rust
@@ -4342,6 +4932,10 @@ vector and full-text search.
 
 For why filtering before ranking matters, see
 [Filtered vector search](/learn/vector-search/filtered-vector-search).
+
+Prefiltered search is native-only: Cypher has no vector or full-text search syntax.
+The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists
+what Cypher covers.
 
 ## How it works
 
@@ -4833,6 +5427,11 @@ label, or lost the indexed property, until the index worker publishes that chang
 `strong` search never returns one. Search `strong` when every result must match the
 search's current tenant, label, and property.
 
+Vector and text search are native-only: Cypher has no search syntax, so search
+consistency applies only to native queries. The
+[Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists what
+Cypher covers.
+
 ## Request eventual search
 
 The SDK options on this page ship in the SDK releases after Rust `helix-db` 3.0.0,
@@ -5117,10 +5716,15 @@ Cloud, use the gateway URL and database ID shown in the dashboard. The
 `cluster.helix-db.com` hostname in the OpenAPI document is a placeholder, not a
 shared query endpoint.
 
-The root OpenAPI server and the `/healthz` and `/readyz` operations describe a
-local HelixDB server. The Helix Cloud gateway is advertised only for
-`POST /v2/query`; its separate `/health` and `/readyz` contracts are not part of
-this specification.
+The root OpenAPI server and the `/healthz`, `/readyz` and `/v2/diagnostics`
+operations describe a local HelixDB server. The Helix Cloud gateway is advertised
+only for `POST /v2/query`; its separate `/health` and `/readyz` contracts are not
+part of this specification.
+
+`GET /v2/diagnostics` returns read-only checks of the server's setup: storage,
+the S3 bucket's region, the disk cache's device and room, memory, index
+publication, and recent queries' index use.
+[`helix doctor`](/cli/command-reference/doctor) renders it.
 
 Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
 gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
@@ -5226,9 +5830,15 @@ durability waits on reads are rejected with `400 Bad Request`.
 - `402` reports that Helix Cloud query processing is disabled because credit is
   exhausted.
 - `403` reports that the Helix Cloud API key lacks permission for the query.
-- `408` reports that a Helix Cloud query exceeded its wall-clock limit.
-- `409` reports a transaction conflict. Retry the whole transaction only when
-  it is idempotent or protected by an application idempotency key.
+- `404` reports that the query named a node, edge, index or index operation
+  that does not exist.
+- `408` reports that a query exceeded its deadline. A write may have committed.
+- `409` reports a conflict; branch on `retryable`. A retryable conflict, such
+  as `transaction_conflict`, carries `retryable: true`: retry the whole
+  transaction only when it is idempotent or protected by an application
+  idempotency key. A conflict with the database's state, such as
+  `unique_constraint_violation`, carries `retryable: false` and committed
+  nothing; resending it unchanged fails again.
 - `413` reports that a Helix Cloud request body exceeded 2 MiB. The gateway
   rejects it before query parsing.
 - `429` reports a Helix Cloud rate limit (`rate_limited`), which can include
@@ -5239,7 +5849,8 @@ durability waits on reads are rejected with `400 Bad Request`.
   `retryable: true` and no `Retry-After`; nothing from the request took effect.
   See [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
 - `500` reports an internal query or storage failure.
-- `503` reports that a required writer or ready database is unavailable.
+- `503` reports that a required writer or ready database is unavailable, or,
+  with `retryable: false`, that a write's outcome is unknown.
 
 Local servers and Helix Cloud gateways return
 `{ "error": "<code>", "msg": "<message>" }`. Clients should branch on
@@ -5283,17 +5894,9 @@ apply. A read-only Helix Cloud API key can read and explain, but receives `403`
 for a modifying statement. Cloud database-selection headers do not select a
 database on a standalone server.
 
-The profile includes fixed-length `MATCH` and `OPTIONAL MATCH`, `WHERE`, `WITH`,
-`RETURN`, `UNWIND`, aggregation, ordering and windows, and `CREATE`, property
-`SET`/`REMOVE`, `DELETE`, and `DETACH DELETE`. It requires exactly one nonempty
-label on created nodes and one nonempty type on created relationships. Unlabeled
-matching is supported. Multiple labels, label changes, and property names
-beginning with `$` are rejected. Assigning null removes a property. Plain node
-deletion fails if relationships remain; `DETACH DELETE` removes those relationships.
-
-`MERGE`, variable-length or shortest paths, `UNION`, subqueries, comprehensions,
-procedures, schema DDL, temporal/spatial functions, and Bolt are deferred. They
-produce specific unsupported-feature errors.
+The [Cypher guide](/database/helix-db/query-guides/cypher) lists which clauses,
+expressions, and functions are supported, and which constructs are rejected with
+an `unsupported_feature` error, such as `MERGE`, variable-length paths, and `UNION`.
 
 ### Lossless JSON values
 
@@ -5323,8 +5926,9 @@ Cypher errors include `error`, `msg`, and `details` with a specific `detail`,
 the [query error reference](/database/helix-db/query-guides/error-handling#cypher-errors)
 lists the categories. Malformed
 requests and storage errors retain the native envelope. Resource limits return
-`429`; request/semantic errors return `400`; conflicts return `409`; internal
-failures return `500`; writer requirements or uncertain commits return `503`.
+`429`; request/semantic errors return `400`; conflicts return `409` (a duplicate
+unique value is `unique_constraint_violation`); internal failures return `500`;
+writer requirements or uncertain commits return `503`.
 An uncertain commit includes `retryable:false` and must not be retried automatically.
 
 The local request and response limits are 16 MiB, with a default 30-second query
@@ -5390,10 +5994,42 @@ code and `msg` for the readable message:
 }
 ```
 
-The response never adds a separate `code` field. HTTP status classifications
-are unchanged, so use both the status and static code when deciding whether to
-retry. A non-JSON response from an older proxy or intermediary is still exposed
-by each SDK as readable details with no code.
+The response never adds a separate `code` field. A non-JSON response from an
+older proxy or intermediary is still exposed by each SDK as readable details
+with no code.
+
+## Failure classes
+
+Every code belongs to exactly one class, and the class alone sets the HTTP
+status, the gRPC status, the `retryable` field and whether a failed write is
+proven to have committed nothing. The [reference](#error-code-reference) lists
+each code's status.
+
+| Class | HTTP | gRPC | `retryable` | A failed write |
+| --- | --- | --- | --- | --- |
+| Invalid request | 400 | `INVALID_ARGUMENT` | absent | Committed nothing |
+| Planning | 400 | `INVALID_ARGUMENT` | absent | Committed nothing |
+| Not found | 404 | `NOT_FOUND` | absent | Committed nothing |
+| Request timeout | 408 | `DEADLINE_EXCEEDED` | absent | May have committed |
+| Retryable conflict | 409 | `ABORTED` | `true` | Committed nothing |
+| Conflict with database state | 409 | `FAILED_PRECONDITION` | `false` | Committed nothing |
+| Index backpressure | 429 | `RESOURCE_EXHAUSTED` | `true` | Committed nothing |
+| Resource limit | 429 | `RESOURCE_EXHAUSTED` | absent | Committed nothing |
+| Internal failure | 500 | `INTERNAL` | absent | May have committed |
+| Unavailable | 503 | `FAILED_PRECONDITION` | absent | Committed nothing |
+| Commit outcome unknown | 503 | `UNAVAILABLE` | `false` | May have committed |
+
+HTTP 409 has two classes, so branch on `retryable` rather than the status. A
+retryable conflict (`transaction_conflict`, `request_read_view_changed` or
+`stale_index_generation`, with `retryable: true`) can succeed when resent
+unchanged. A conflict with the database's state, such as
+`unique_constraint_violation` (`retryable: false`), fails again until that
+state changes: choose another value or reconcile first.
+
+An index-management request with several create, drop, retry or abort
+operations commits each operation as it runs. If a later operation fails, the
+earlier ones stay committed, so read the index state before resending such a
+batch.
 
 ## Cypher errors
 
@@ -5431,6 +6067,9 @@ envelope and the codes below.
 | `resource_limit` | A per-query budget was exceeded, for example `memory_limit`, `result_limit`, `collection_limit`, or `expression_depth`. | 429 | Not unchanged; reduce the work. Distinct from the gateway's `rate_limited` |
 | `access_mode_error` | A modifying statement reached a reader or a warm-only request (`writer_required`). | 503 | On the writer |
 | `internal_planner_error` | The planner broke one of its own invariants. | 500 | No automatic retry |
+
+The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists
+the `details.detail` code for each construct outside the supported profile.
 
 ## Access the code in an SDK
 
@@ -5492,9 +6131,9 @@ being collapsed or rejected.
 ## Other query boundaries
 
 For gRPC, the status message remains human-readable and the same static code is
-attached as ASCII metadata under `helix-error-code`. Active-text mutation admission
-failures use `InvalidArgument`, matching their HTTP 400 classification, and
-`index_backpressure` uses `ResourceExhausted`, matching HTTP 429.
+attached as ASCII metadata under `helix-error-code`. The gRPC status is the
+code's [class](#failure-classes) status, so `unique_constraint_violation` is
+`FAILED_PRECONDITION` and `index_backpressure` is `RESOURCE_EXHAUSTED`.
 
 Embedded Rust errors expose `error_code()`. UniFFI errors carry two explicit
 fields named `error` and `msg`; generated Python, Node, and Go bindings pass
@@ -5508,8 +6147,11 @@ code from exception text.
 - A code describes the failure, not whether replaying a particular mutation is
   safe. Retry only idempotent work or work protected by an application-level
   idempotency key.
-- `transaction_conflict` is the only HTTP conflict classification and is
-  normally retryable with bounded backoff.
+- HTTP 409 with `retryable: true` (`transaction_conflict`,
+  `request_read_view_changed`, `stale_index_generation`) is normally retryable
+  with bounded backoff. A 409 with `retryable: false` conflicts with the
+  database's state and fails again when resent; branch on `retryable` or the
+  code, not the status alone.
 - `index_backpressure` (HTTP 429) rejects the whole request before it takes
   effect and carries `retryable: true`. Retry it unchanged with bounded backoff;
   see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
@@ -5522,8 +6164,7 @@ code from exception text.
 ## Error-code reference
 
 “Correctable” means whether a caller can change its request or deployment state
-to address the failure. Statuses list the current HTTP behavior; `400/503` and
-`400/500` indicate that the same code can arise at more than one boundary.
+to address the failure. Each code has one HTTP status at every boundary.
 
 ### Request validation
 
@@ -5532,8 +6173,9 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 | `invalid_request` | The request is incompatible with the selected query mode. | 400 | After fixing the request | Yes |
 | `invalid_query_json` | The query body cannot be decoded as query JSON. | 400 | After fixing the body | Yes |
 | `invalid_request_body` | The transport cannot read the body or it exceeds the body limit. | 400 | After fixing the body | Yes |
-| `invalid_request_option` | A header or transport option is invalid; writer routing can also be unavailable. | 400/503 | After fixing the option or routing | Yes |
+| `invalid_request_option` | A header or transport option is invalid; writer routing can also be unavailable. | 400 | After fixing the option or routing | Yes |
 | `invalid_query` | An embedded or encoded query payload is invalid. | 500 | After fixing the query | Yes |
+| `unbound_parameter` | The query reads a parameter the request did not bind. | 400 | After binding the parameter | Yes |
 
 ### Planning
 
@@ -5577,14 +6219,14 @@ to address the failure. Statuses list the current HTTP behavior; `400/503` and
 
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
-| `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 500 | With a larger deadline or less work | Sometimes |
-| `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `resource_limit` / `memory_limit` with HTTP 429. | 500 (native), 429 (Cypher) | After reducing retained data or increasing the embedded query budget | Sometimes |
-| `invalid_node_id` | A supplied node ID is invalid. | 500 | After fixing the ID | Yes |
-| `node_not_found` | A requested node does not exist. | 500 | After fixing state or ID | Yes |
-| `edge_not_found` | A requested edge does not exist. | 500 | After fixing state or endpoints | Yes |
-| `invalid_vector_configuration` | Vector index configuration is invalid. | 500 | After fixing configuration | Yes |
-| `unique_constraint_violation` | A unique index already owns the requested value. | 500 | After choosing a unique value | Yes |
-| `unsupported_unique_index_value_type` | A unique index does not support the value type. | 500 | After changing the value | Yes |
+| `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 408 | With a larger deadline or less work | Sometimes |
+| `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `resource_limit` / `memory_limit` with HTTP 429. | 429 | After reducing retained data or increasing the embedded query budget | Sometimes |
+| `invalid_node_id` | A supplied node ID is invalid. | 400 | After fixing the ID | Yes |
+| `node_not_found` | A requested node does not exist. | 404 | After fixing state or ID | Yes |
+| `edge_not_found` | A requested edge does not exist. | 404 | After fixing state or endpoints | Yes |
+| `invalid_vector_configuration` | Vector index configuration is invalid. | 400 | After fixing configuration | Yes |
+| `unique_constraint_violation` | A unique index already owns the requested value. | 409 | After choosing a unique value | Yes |
+| `unsupported_unique_index_value_type` | A unique index does not support the value type. | 400 | After changing the value | Yes |
 | `invalid_vector_dimension` | A vector has the wrong dimension. | 400 | After fixing the vector | Yes |
 | `invalid_vector_component` | A vector contains a non-finite component. | 400 | After fixing the vector | Yes |
 | `vector_component_magnitude_exceeded` | A component exceeds the score-safe magnitude. | 400 | After normalizing the vector | Yes |
@@ -5617,26 +6259,26 @@ embedded configurations may override it.
 
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
-| `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 500 | After authority recovery | Operational |
-| `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
+| `index_lifecycle_unavailable` | The required lifecycle authority is unavailable. | 503 | After authority recovery | Operational |
+| `secondary_lifecycle_stepping_requires_disabled_mode` | Explicit secondary stepping requires disabled worker mode. | 400 | After changing worker mode | Operational |
 | `active_text_mutation_limit_exceeded` | One indexed text document exceeded a hard per-document admission limit. | 400 | Shorten the text before retrying | Yes |
 | `index_operation_batch_too_large` | One write staged more queued vector/text index work than a single transaction can carry, or a text search in it would analyze more of its own text than a `strong` text search may (512 MiB of analysis by default). | 400 | Split the write before retrying | Yes |
-| `index_build_blocked` | A write would exceed a vector or text index's unpublished-work limit while the index's build is blocked; nothing publishes that work until the build is retried or aborted. | 500 | After retrying or aborting the blocked build | Yes |
-| `invalid_index_source_data` | Existing graph data violates an index source contract. | 500 | After correcting source data | Yes |
+| `index_build_blocked` | A write would exceed a vector or text index's unpublished-work limit while the index's build is blocked; nothing publishes that work until the build is retried or aborted. | 409 | After retrying or aborting the blocked build | Yes |
+| `invalid_index_source_data` | Existing graph data violates an index source contract. | 400 | After correcting source data | Yes |
 | `invalid_index_model` | A value violates the current index model. | 500 | After fixing model or value | Yes |
-| `invalid_secondary_index_value` | A value violates a secondary-index contract. | 500 | After fixing the value | Yes |
+| `invalid_secondary_index_value` | A value violates a secondary-index contract. | 400 | After fixing the value | Yes |
 | `identifier_exhausted` | A bounded non-index-specific identifier namespace is exhausted. | 500 | No immediate retry | Operational |
 | `index_id_exhausted` | The logical index ID namespace is exhausted. | 500 | No immediate retry | Operational |
 | `vector_physical_id_exhausted` | The vector physical index ID namespace is exhausted. | 500 | No immediate retry | Operational |
 | `index_generation_exhausted` | The index generation namespace is exhausted. | 500 | No immediate retry | Operational |
 | `index_revision_exhausted` | The index revision namespace is exhausted. | 500 | No immediate retry | Operational |
 | `index_operation_revision_exhausted` | The index-operation revision namespace is exhausted. | 500 | No immediate retry | Operational |
-| `index_already_exists` | An index with the requested identity already exists. | 500 | After using idempotent creation or a new name | Yes |
-| `index_definition_conflict` | An existing index has a conflicting definition. | 500 | After reconciling definitions | Yes |
-| `index_busy` | The index is already changing lifecycle state. | 500 | After the active operation completes | Yes |
-| `index_operation_not_found` | The requested index operation does not exist. | 500 | After fixing the operation ID | Yes |
-| `index_operation_not_abortable` | The requested operation can no longer be aborted. | 500 | No | No |
-| `index_not_found` | The required logical or physical index does not exist. | 400/500 | After creating or selecting the index | Yes |
+| `index_already_exists` | An index with the requested identity already exists. | 409 | After using idempotent creation or a new name | Yes |
+| `index_definition_conflict` | An existing index has a conflicting definition. | 409 | After reconciling definitions | Yes |
+| `index_busy` | The index is already changing lifecycle state. | 409 | After the active operation completes | Yes |
+| `index_operation_not_found` | The requested index operation does not exist. | 404 | After fixing the operation ID | Yes |
+| `index_operation_not_abortable` | The requested operation can no longer be aborted. | 409 | No | No |
+| `index_not_found` | The required logical or physical index does not exist. | 404 | After creating or selecting the index | Yes |
 
 ### Retryable conflicts
 
@@ -5644,23 +6286,23 @@ embedded configurations may override it.
 | --- | --- | --- | --- | --- |
 | `transaction_conflict` | A concurrent transaction prevented commit. | 409 | Yes, bounded backoff | No request change required |
 | `index_backpressure` | A vector or text index already retains its maximum unpublished work, so the whole write was rejected before commit, or a whole-index `strong` search's answer lies behind more than 800 committed but unpublished changes, or a `strong` text search would analyze more unpublished text in its partition than its bound allows (512 MiB of analysis by default), or a `strong` vector search would score more unpublished vector work than its bound allows (by default the index's retained-byte limit, which writes reach first). | 429 | Yes, bounded backoff | No request change required |
-| `request_read_view_changed` | A standalone reader changed views during the request. | 500 | Yes, bounded retry | No request change required |
-| `stale_index_generation` | A retained handle refers to a stale index generation. | 500 | Yes, reacquire state | No request change required |
-| `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 500 | Only with idempotency protection | No |
+| `request_read_view_changed` | A standalone reader changed views during the request. | 409 | Yes, bounded retry | No request change required |
+| `stale_index_generation` | A retained handle refers to a stale index generation. | 409 | Yes, reacquire state | No request change required |
 
 ### Availability and migration
 
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
-| `database_closed` | The database handle is closed. | 500 | After reopening | Operational |
+| `database_closed` | The database handle is closed. | 503 | After reopening | Operational |
 | `invalid_configuration` | Database configuration is invalid. | 500 | After fixing configuration | Operational |
-| `migration_stepping_requires_disabled_mode` | Explicit migration stepping requires disabled worker mode. | 500 | After changing worker mode | Operational |
-| `migration_required` | Existing storage requires an explicit migration. | 500 | After migration | Operational |
-| `writer_migration_required` | A writer must open and migrate existing storage. | 500 | After writer migration | Operational |
+| `migration_stepping_requires_disabled_mode` | Explicit migration stepping requires disabled worker mode. | 400 | After changing worker mode | Operational |
+| `migration_required` | Existing storage requires an explicit migration. | 503 | After migration | Operational |
+| `writer_migration_required` | A writer must open and migrate existing storage. | 503 | After writer migration | Operational |
 | `unsupported_index_storage_version` | Stored index data is newer than this binary supports. | 500 | After upgrading the binary | Operational |
 | `writer_mode_required` | The operation requires a writer handle. | 503 | On a writer | Operational |
-| `reader_mode_required` | The operation requires a standalone reader handle. | 500 | On a reader | Operational |
-| `query_cancelled_by_reader_retirement` | Reader retirement cancelled the query before the reader closed. | 500 | After routing to another reader | Operational |
+| `reader_mode_required` | The operation requires a standalone reader handle. | 503 | On a reader | Operational |
+| `query_cancelled_by_reader_retirement` | Reader retirement cancelled the query before the reader closed. | 503 | After routing to another reader | Operational |
+| `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 503 | Only with idempotency protection | No |
 
 ### Internal failures
 
@@ -5769,9 +6411,15 @@ options are also rejected in embedded mode because no routing gateway is present
 
 ## Request returns HTTP 409
 
-A conflict means the request could not commit against current transactional state.
-Retry the entire idempotent transaction with bounded backoff. Do not retry only part of
-a multi-mutation request.
+Branch on `retryable`. A 409 with `retryable: true` (`transaction_conflict`,
+`request_read_view_changed` or `stale_index_generation`) means the request could
+not commit against current state. Retry the entire idempotent transaction with
+bounded backoff. Do not retry only part of a multi-mutation request.
+
+A 409 with `retryable: false` conflicts with the database's state and committed
+nothing, for example `unique_constraint_violation` when another node already
+owns a unique value. Resending it unchanged fails again: choose another value
+or update the existing node.
 
 For non-idempotent business actions, attach an application-level idempotency key or
 read the latest state before deciding whether to resubmit.
@@ -5900,6 +6548,18 @@ curl --fail-with-body \
   }'
 ```
 
+To test the Cypher route, send the equivalent statement to `/v2/cypher` with the
+same headers; an empty database returns `{"columns":["node_count"],"rows":[[0]]}`.
+
+```bash
+curl --fail-with-body \
+  "$HELIX_ENDPOINT/v2/cypher" \
+  --header "Authorization: Bearer $HELIX_API_KEY" \
+  --header "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  --header "Content-Type: application/json" \
+  --data '{"query":"MATCH (n) RETURN count(n) AS node_count"}'
+```
+
 Keep API keys in a secrets manager or environment variable. Do not commit them
 to source control.
 
@@ -6003,7 +6663,13 @@ Each client sends the same operation-tree request body:
 ```
 
 Keep API keys in secrets management, not source control. The JSON example is the request
-body sent to `POST /v2/query`.
+body sent to `POST /v2/query`. The same lookup as a Cypher statement goes in the `query`
+field of a `POST /v2/cypher` body:
+
+```cypher
+MATCH (user {username: 'Alice'})
+RETURN id(user) AS `$id`
+```
 
 `query_name` is optional diagnostic metadata. The query itself remains entirely inside
 the request; there is no route deployment step.
@@ -6385,7 +7051,9 @@ if your deployment depends on one of them.
 
 Page type: Guide
 
-Multi-tenant architectures generally fall into one of three isolation levels.
+Multi-tenant architectures generally fall into one of three isolation levels. Helix Cloud
+isolates each database at the storage level, and lets you add row-level isolation for application
+tenants inside a database.
 
 ## Isolation levels
 
@@ -6395,11 +7063,34 @@ Multi-tenant architectures generally fall into one of three isolation levels.
 | **Namespace-level**      | Shared infrastructure, separate logical partitions (databases, schemas, or namespaces) per tenant.                          | Strong. Logical separation with shared compute.                  | Moderate. Shared compute, but metadata and indexes scale per tenant. |
 | **Row-level**            | Shared infrastructure, shared data structures. Tenants distinguished by a property on every record, enforced at query time. | Application-enforced. Relies on consistent query-time filtering. | Highest. All tenants share indexes, caches, and storage.             |
 
+## Storage-level isolation: tenant databases
+
+Every tenant database, whether on a GA shared plan or created inside a dedicated enterprise
+cluster, has its own database ID. Helix uses that ID as a storage tenant ID to give the database
+a namespace-level partition of the cluster's storage:
+
+- **Tenant-prefixed keys.** Every stored key (nodes, edges, properties, and index entries) is
+  prefixed with the tenant ID. Reads only scan their own prefix, so one database can never observe
+  another database's records.
+- **Per-database index catalogs.** Equality, range, vector, and text indexes are defined and built
+  per database. Index definitions and builds in one database do not affect another.
+- **Selected by the request, not the query.** The gateway reads the database from the
+  `X-Helix-Database-Id` header and rejects API keys scoped to a different database. Query bodies
+  cannot name or change it, so no query predicate is needed for this isolation. See
+  [HTTP API authentication](/database/helix-db/query-guides/http-api#authentication).
+
+Databases that share a cluster still share its compute, caches, and object storage. A
+database-specific cluster-mode endpoint serves the cluster's own unscoped database and rejects
+the database header.
+
+Create a tenant database with [`helix database create`](/cli/command-reference/database), using
+`--plan` for a shared plan or `--cluster` for a dedicated cluster.
+
 ## Row-level isolation in Helix Cloud
 
-Helix Cloud focuses on row-level isolation, which lets you implement any tenancy model at the
-application layer without structural constraints on the database. Adding a tenant is a write, not a
-provisioning event.
+Within a single database, use row-level isolation for your own application tenants. It lets you
+implement any tenancy model at the application layer without structural constraints on the
+database. Adding a tenant is a write, not a provisioning event.
 
 Assign a tenant identifier as a property on every node and edge, index it with an equality index,
 and filter every query on it so each request only sees its own tenant's data. This is the same
@@ -6512,10 +7203,20 @@ helix.ReadQuery("tenant_docs").
 }
 ```
 
+```cypher Cypher
+// parameters: {"tenant_id": "acme"}
+MATCH (doc:Doc {tenant_id: $tenant_id})
+RETURN id(doc) AS `$id`, doc.title AS title
+```
+
 When the tenant predicate sits mid-traversal — for example after walking edges from a known
 starting node — use `.where_(Predicate::eq("tenant_id", "acme"))`. The same scope rule applies
 at every hop: edges that fan out across the graph remain tenant-scoped as long as every step
 filters on the tenant property.
+
+Cypher statements follow the same rule, since request headers select only the database: match
+`tenant_id` on every node and relationship in the pattern, as in
+`MATCH (a:Doc {tenant_id: $tenant_id})-[:CITES {tenant_id: $tenant_id}]->(b:Doc {tenant_id: $tenant_id})`.
 
 ## What this provides
 
@@ -6574,9 +7275,11 @@ the request's tenant value to the text-search builder. See
 
 ## Stricter isolation requirements
 
-For workloads that require namespace-level or infrastructure-level tenant isolation (regulatory
-compliance, data residency, or dedicated-resource SLAs), contact us at
-[founders@helix-db.com](mailto:founders@helix-db.com) to discuss options.
+When application tenants need storage-level isolation, give each one its own
+[tenant database](#storage-level-isolation-tenant-databases) instead of a `tenant_id` property.
+For workloads that require infrastructure-level isolation (regulatory compliance, data residency,
+or dedicated-resource SLAs), contact us at [founders@helix-db.com](mailto:founders@helix-db.com)
+about dedicated clusters.
 
 # Guarantees
 
@@ -6935,7 +7638,7 @@ database engine behind it use the same envelope; see the
 |  402 | `tenant_disabled`        | `tenant query processing is disabled because credit is exhausted`           | Query processing is disabled because the tenant has exhausted its credit. | Resolve the account state before retrying.                               |
 |  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation.                       | Use a key with the required permission.                                  |
 |  408 | `query_timeout`          | `query exceeded its wall-clock limit`                                       | The query exceeded its wall-clock limit.                                  | Reconcile timed-out writes before considering a retry.                   |
-|  409 | `transaction_conflict`   | `request conflicted with a concurrent write; please retry`                  | A concurrent write prevented the transaction from committing.             | Retry the whole idempotent transaction with bounded backoff.             |
+|  409 | `transaction_conflict`   | The database's conflict diagnostic                                          | A concurrent write prevented the transaction from committing. The body includes `"retryable": true`. | Retry the whole idempotent transaction with bounded backoff.             |
 |  413 | `payload_too_large`      | `request body exceeds the maximum allowed size`                             | The query request exceeds the gateway body-size limit.                    | Reduce the request size.                                                 |
 |  429 | `rate_limited`           | `rate limit exceeded`                                                       | The database's request bucket has no token available.                     | Honor `Retry-After`; see [Limits](/database/helix-cloud/operate/limits). |
 |  500 | `internal_error`         | An internal or backend diagnostic                                           | An unexpected gateway or backend error occurred.                          | Retry only if the operation is safe; contact support if persistent.      |
@@ -6946,6 +7649,12 @@ database engine behind it use the same envelope; see the
 
 The text in `msg` can include request-specific details. The `error` values and
 HTTP statuses above are the compatibility surface.
+
+Database engine failures pass through with the engine's code and its
+[class status](/database/helix-db/query-guides/error-handling#failure-classes),
+for example HTTP 409 `unique_constraint_violation` with `"retryable": false` when
+another node already owns a unique value. The gateway reports a failed write as
+`write_outcome_unknown` only when the engine cannot prove it committed nothing.
 
 ## Cypher errors
 
@@ -7062,6 +7771,1915 @@ Current SDKs read both shapes. Keep a readable diagnostic fallback for
 intermediaries and older self-hosted endpoints that do not return the Cloud
 envelope.
 
+# What is Helix Foundry?
+
+Page type: Concept
+
+Helix Foundry turns the tools your company runs on into one connected graph. Connect
+sources such as Stripe or your PostgreSQL database, send it your app's or agent's own
+data, upload the documents your tables don't cover, let Foundry's agent draft an
+ontology across them, then load it into a Helix database, ask it questions, and
+explore it as a graph or as records. Connectors keep syncing on a schedule, and
+ontologies refresh when their data changes.
+
+Foundry runs at [foundry.helix-db.com](https://foundry.helix-db.com), and your agents
+reach it through the [Helix MCP](/foundry/agents/helix-mcp). Sign in with the account
+you use for Helix Cloud; your workspaces come with it.
+
+  <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
+
+## How it fits together
+
+| Concept | What it is |
+| --- | --- |
+| **Workspace** | Your team's space, shared with Helix Cloud. It holds connections, documents, ontologies, members and the Foundry plan. |
+| **Connection** | A source Foundry reads, with its credential. Each **sync** copies its tables into a snapshot Foundry keeps, on the plan's schedule or when you ask. |
+| **API source** | A source your apps and agents send pieces of data to, over HTTP or the Helix MCP. |
+| **Document** | A file of the workspace, such as a contract, kept in Connectors. A load reads text and PDFs for the names and facts they hold, and table files such as CSV as tables. |
+| **Document set** | A folder of documents. A version reads the sets its generation picked. |
+| **Ontology** | The types, links and rules that describe your data, bound to one Helix database. |
+| **Generation** | A request to Foundry's agent to draft a new version of the ontology from the tables, API sources and document sets you pick. |
+| **Version** | One draft of the ontology. Versions never change; you choose which one is current. |
+| **Load** | One write of the current version into the ontology's database: your tables, then the documents of its sets. A **refresh** is a load Foundry starts itself when the data changed. |
+| **Ask** | Questions about a load in plain language, answered with the sources they came from. Foundry opens on it. |
+| **Explorer** | The graph and records view of a load, read from the database with your session. |
+
+The work flows in one direction:
+
+```mermaid
+flowchart LR
+  A[Connect data and upload documents] --> B[Generate a draft]
+  B --> C[Review and make it current]
+  C --> D[Load into the database]
+  D --> E[Ask and explore]
+  A -. syncs .-> D
+```
+
+You can do each step on the website, or have your agent do it through the
+[Helix MCP](/foundry/agents/helix-mcp), with your confirmation for every change.
+
+## What Foundry does not do
+
+- It never writes to your sources. Connections only read, and database users need
+  `SELECT` only.
+- It never deletes a Helix database. Deleting an ontology removes what its loads wrote
+  and leaves the database's other data in place.
+- It does not manage roles, member removal or single sign-on. Those stay in the
+  [Helix dashboard](https://helix-db.com/login).
+
+## How Foundry uses AI models
+
+A generation sends your synced tables, and up to five of the newest documents of each
+set it picks, to Foundry's agent, which drafts the version. A load sends your
+documents' text to AI models, which find the names and facts they hold and check them.
+Reading tables into a load uses no models. Ask sends your question, and what each step
+reads from the load, to AI models.
+
+By default these run on hosted providers through Helix, today Anthropic's Claude models.
+On Pro or Max, an owner can run them on the workspace's own Anthropic key instead; see
+[AI models](/foundry/workspace/ai-models). What they cost counts against the
+workspace's [monthly caps](/foundry/workspace/usage).
+
+## Next steps
+
+    Go from sign-in to an explored graph in about ten minutes.
+
+    Add a source, test it and sync its tables.
+
+    Draft types, links and mappings from your tables.
+
+    Ask your data questions in plain language.
+
+    Connect Claude Code, Codex or another agent through the Helix MCP.
+
+    Push pieces of data to an API source.
+
+# Helix Foundry quickstart
+
+Page type: Tutorial
+
+This tutorial takes a new workspace from sign-in to a first answer and an explored
+graph. You need a Helix account and some data: a source to read, such as a Stripe
+account, or documents such as contracts. Owners and admins of a workspace can do every
+step. Members can follow along read-only once an ontology exists; asking about a load
+and exploring it also need **Query read** on its database's Helix project.
+
+    A workspace without an ontology opens on **Create your first ontology**, which
+    takes you through the steps below. To hand them to your agent instead, select
+    **Copy prompt** under **Set up with your agent**, and paste it into Claude Code,
+    Codex or another agent with the [Helix MCP](/foundry/agents/helix-mcp).
+
+    Select **Upload documents** for files such as contracts, notes, CSV exports or PDFs.
+    They go into the **General** document set, which is then chosen. Any of tables, API
+    sources and documents will do; you need at least one.
+
+    See [Connect data](/foundry/data/connect-data) for every source, and
+    [Documents](/foundry/data/documents) for what Foundry reads in each format.
+
+    See [Create an ontology](/foundry/ontologies/create-an-ontology) for each step. Until
+    the ontology is set up, its overview lists the steps left, so you can carry on from
+    there at any time.
+
+## Next steps
+
+    Keep contracts and notes in sets for your ontologies to read.
+
+    Invite members and admins to the workspace.
+
+    Connect Claude Code or Codex through the Helix MCP.
+
+    What each error and waiting state means.
+
+# Workspaces and navigation
+
+Page type: Guide
+
+Use this page to sign in, move between workspaces and get around Foundry quickly.
+Foundry's workspaces are your Helix Cloud workspaces: the same names, members and
+roles.
+
+To switch later, use the workspace menu at the top of the sidebar. Foundry remembers
+the workspace you chose in this browser.
+
+A workspace without an ontology opens on **Create your first ontology**, which connects
+data and uploads documents in place. Until its first ontology exists, the sidebar holds
+only the workspace menu and your account, and Settings is open for the plan.
+
+## The main page: Ask
+
+Foundry opens on [Ask](/foundry/ask/ask-questions), on the ontology you last opened,
+or the newest. Ask your data a question there, or pick a suggestion; the **Ontology**
+picker at the top opens another ontology. Select **helixfoundry** at the top of the
+sidebar to come back to it from anywhere.
+
+## The sidebar
+
+The sidebar is on every page. From the top:
+
+- **helixfoundry**, which opens Ask, and the search button.
+- The workspace menu, to switch workspaces.
+- The sections, by name: **Ask**, **Ontologies**, **Explorer** and **Connectors**.
+- What the open section adds below them. For Ask, **New thread** and the ontology's
+  threads, with what the workspace has spent on questions this month at the foot.
+- Your account menu, and **Settings**.
+
+Three sections have a second panel, beside the sidebar:
+
+| Section | Its panel |
+| --- | --- |
+| **Ontologies** | The workspace's ontologies, with the pages of the one open |
+| **Explorer** | The labels of the graph, or the types in Records. Press <kbd>[</kbd> to hide it and show it again. |
+| **Connectors** | The Connectors explorer: connections and documents as a tree |
+
+On a phone, select the menu button at the top of the page. The drawer it opens holds the
+sidebar, or, in a section with a panel, a column of section icons and the panel side by
+side.
+
+## Search with the command palette
+
+Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and Linux), or
+select the search icon, to search pages, connections, synced tables, documents and
+ontologies, switch workspace or theme, and reopen what you opened recently. Owners and
+admins also get **Add data**, **New API source** and **Create an ontology** there.
+
+## Account menu and theme
+
+Select your name at the foot of the sidebar for Settings, Members, Plan & billing with
+the workspace's plan, this month's [usage](/foundry/workspace/usage), the theme and
+**Sign out**. Choose **System**, **Light** or **Dark**; Foundry keeps the choice in this
+browser.
+
+## Workspace settings
+
+**Settings** → **General** shows the workspace's name, address, region and your role.
+Rename or delete a workspace in the Helix dashboard; Foundry shares it with Helix Cloud.
+Settings also holds [AI models](/foundry/workspace/ai-models),
+[Members](/foundry/workspace/members-and-roles) and
+[Plan & billing](/foundry/workspace/plans-and-billing).
+
+## Next steps
+
+    Invite people and see what each role can do.
+
+    Compare Free, Pro and Max.
+
+# Connect and sync data
+
+Page type: Guide
+
+A connection is a source Foundry reads, such as a Stripe account or a PostgreSQL
+database. Each sync copies its tables into a snapshot that generations and loads read,
+and Foundry syncs every connection on a schedule. Owners and admins add, sync, edit and
+delete connections; members see them.
+
+## The Connectors explorer
+
+The explorer's tree has, at its root:
+
+- a folder per kind of connection the workspace has, such as **Stripe** or
+  **PostgreSQL**, holding those connections;
+- folders of your own, each holding the connections moved into it;
+- **Documents**, with a folder per document set holding its documents.
+
+Select a connection to open its page, or a document to open its page. A connection's dot
+shows its last sync's status, and its arrow opens its synced tables. **Filter** narrows
+the tree to what matches, tables included. The row of the page you have open is
+highlighted, and the folders holding it open.
+
+The tree works from the keyboard: the arrow keys move between rows and open and close
+folders, <kbd>Home</kbd> and <kbd>End</kbd> go to the first and last rows,
+<kbd>Enter</kbd> opens a row, and <kbd>F2</kbd> renames it.
+
+Rows can't be moved while a filter is on. Sync, and a document set's upload, describe and
+delete buttons, show on a row while you point at it or it has the focus.
+
+## Add a connection
+
+    Under **Connection options** you can name the connection; databases also choose
+    their encryption there.
+
+A table that finished keeps its new snapshot even if a later table fails. A connection
+runs one sync at a time. While one runs, its settings can't change and it can't be
+deleted.
+
+## Syncs on a schedule
+
+Foundry syncs every connection on its own, as often as the workspace's
+[plan](/foundry/workspace/plans-and-billing) says:
+
+| Plan | Syncs | Each sync reads |
+| --- | --- | --- |
+| Free | Once a day | Every table in full |
+| Pro | Every hour | Only what changed since the last sync, and every table in full once a day |
+| Max | Every 15 minutes | Only what changed since the last sync, and every table in full once a day |
+
+Reading only what changed uses what each source can tell: Stripe's and WorkOS's events,
+records updated since the last sync, or new files in S3. A daily full read catches what
+those can't see, such as deleted records. PostgreSQL and MySQL tables, and any table
+without a primary key, are read in full each time and compared with the last snapshot.
+A Stripe key needs **Read** on Events for this; without it, every sync reads every table
+in full, and the test says so.
+
+You can also sync at any time: select **Sync now** on a connection's page, or **Sync**
+on its row in the explorer. A connection also syncs after you change its settings. An
+[API source](/foundry/data/api-sources) syncs about a minute after pieces arrive, on
+every plan.
+
+When a sync changes tables an ontology's current load reads, the ontology
+[refreshes](/foundry/ontologies/load-data#automatic-refreshes) by itself.
+
+## Read a synced table
+
+Select a table to see its columns, its primary key, the columns that point at other
+tables, the columns in other tables that point at it, and when its snapshot was taken.
+An app's columns are the fields found in its rows, without types.
+
+## Edit or delete a connection
+
+Open the **⋯** menu on a connection's page:
+
+- **Edit connection** changes its settings or credential. Foundry tests the new
+  settings before it saves them, and syncs again when they changed. Leave the
+  credential blank to keep the stored one. To change which database tables sync, enter
+  the password and test the connection again.
+- **Delete connection** stops syncing it and removes its tables from the workspace's
+  data. The source itself is not changed.
+
+Foundry never shows a stored credential again. An API key is named by its prefix and
+last four characters, such as `rk_live…Qx7m`; a database shows that a password is set.
+
+## Next steps
+
+    What each source needs, and what it syncs.
+
+    Upload contracts and notes into document sets.
+
+    Draft an ontology from your synced tables and documents.
+
+    The sidebar, the panels and search.
+
+# Upload and organise documents
+
+Page type: Guide
+
+Documents carry what your tables don't: who signed a contract, what was agreed, who
+referred whom. They belong to the workspace and live in **Connectors**, in document
+sets: folders of documents an ontology reads together. A load reads the documents of
+the sets its version reads: text and PDFs for the names and facts they hold, linked to
+the records your tables hold, and table files, such as CSV exports, as tables of their
+own.
+
+## Document sets
+
+In the Connectors explorer, the **Documents** folder holds a folder per set, and each
+set holds its documents. A workspace gets a set named **General** with its first upload.
+
+Some connections write documents of their own, in sets of their own: Granola keeps each
+meeting note's summary in **Notes**, and its transcripts in **Transcripts** when you turn
+them on; an [API source](/foundry/data/api-sources) read by entity extraction keeps its
+newest 500 pieces in its set. Each sync updates them, so they can't be uploaded to,
+moved, renamed or deleted, and they don't count toward the workspace's uploads. A
+connection keeps the newest 1,000 documents of each of its sets.
+
+Owners and admins manage the sets from their rows in the explorer:
+
+- **New set**, on the Documents row, names a set and gives it an optional description.
+  The agent that drafts the next version reads the description.
+- **Describe** changes a set's name and description.
+- The pencil beside a set's name, or <kbd>F2</kbd> on its row, renames it in place.
+- **Delete** removes a set that holds no documents. Move or delete its documents first.
+
+A workspace holds up to 20 sets. Set names are unique in the workspace, ignoring case
+and accents.
+
+## Upload
+
+Upload in any of these ways; Foundry checks each file before it uploads it, then sends
+it straight to storage and shows its progress.
+
+- **Upload documents**, in the explorer's head or on the Connectors overview, uploads
+  into General, or the oldest set when there is no General.
+- **Upload into**, on a set's row, uploads into that set.
+- Drop files onto a set in the explorer. Files dropped anywhere else on the explorer or
+  the Connectors overview go where **Upload documents** puts them.
+- On New ontology and in Generate, **Upload documents** uploads in place.
+
+| Format | Extensions | Size | Ontologies read it |
+| --- | --- | --- | --- |
+| Markdown, MDX and text | `.md`, `.markdown`, `.mdx`, `.txt` | Up to 1 MiB | As text, for its names and facts |
+| PDF | `.pdf` | Up to 3 MiB and 150 pages | As the text Foundry reads from it |
+| CSV, TSV, JSON, JSONL and Parquet | `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.parquet` | Up to 3 MiB | As a table of its own |
+
+A workspace holds up to 200 uploaded documents. A name is at most 255 characters, with
+no slash, backslash or control character. Compressed files aren't taken.
+
+Each upload says which set it went into and which ontologies read that set.
+
+A workspace keeps one copy of each file. Uploading a file it already holds, under any
+name, doesn't add another: the upload says **Already uploaded** and names the set the
+file is in.
+
+## A document's page
+
+Select a document in the explorer to open its page: what it holds, its set, its size and
+when it was uploaded. Foundry shows each document by its type:
+
+| Type | Shown as |
+| --- | --- |
+| Markdown and MDX | Rendered, with headings, lists, tables and links; images show as their alt text and are never loaded. MDX is never run: its components and expressions show as written |
+| Text | As it is |
+| JSON | A tree you open node by node |
+| CSV, TSV, JSONL and Parquet | A table of the first 5,000 rows, with the rows it couldn't read |
+| PDF | **Text**: the text Foundry read from it, page by page; **Pages**: its pages as they look |
+
+Markdown, JSON, CSV, TSV and JSONL also have **Source**, to read the file's own text.
+
+A table file's page also says how Foundry read it: its columns, as **Rows**. Until
+Foundry has read it, which takes a moment after the upload, a generation leaves it out.
+
+A PDF's text is read once, after its upload. Until then, it says **Reading its text**,
+and a generation leaves it out. A scanned PDF has no text to read, so ontologies can't
+read it; it stays in its set to view. The same goes for a PDF that is encrypted,
+damaged, or longer than 150 pages.
+
+**Details** lists its media type, size, SHA-256 and ID. **Ontologies** lists each
+ontology that reads the document's set, or whose current load holds the document, with
+what its current load made of it and **Open in** to read it there.
+
+Each ontology's status says where the document stands in its current load: **Not read
+yet**, **Read**, **Needs review**, **Duplicate**, **Couldn't be read** or **Not read
+by its version**.
+
+On a document's page, owners and admins can:
+
+- **Move** it to another set (or use **Move to another set…** on its grip in the
+  explorer). Loads that read it keep what they read until their next load, and every
+  ontology that reads the new set reads it there.
+- **Delete** it. It's removed from Foundry at once; what loads read from it stays in
+  their ontologies' databases.
+- Rename it in place in the explorer, with the pencil beside its name. A rename may
+  change its extension.
+
+## How ontologies read documents
+
+An ontology doesn't read every document in the workspace. Each version reads the sets
+its generation picked:
+
+- **Generate** picks whole sets. The agent reads up to five of the newest documents in
+  each and drafts routes for them, which say what each set's documents may fill, such
+  as a contract's signing date and the customer it was signed with. See
+  [Generate and version](/foundry/ontologies/generate-and-version#generate-a-draft).
+- **Loads** read every text document and PDF in the version's sets: its sections, the
+  names it mentions, and the facts it states, each with the quote it came from. A
+  document in a set no route reads is stored, not read, and shows **Not read by its
+  version**. What a load can't settle, such as a name the database doesn't hold, an
+  ambiguous name, a quote it couldn't verify or a fact that conflicts with your tables,
+  goes to **Needs review** instead of becoming a record.
+- **Table files** are tables of their own, which a version's mappings load as they load
+  a synced table. Text in their cells isn't read for names and facts. A generation that
+  picks a set drafts mappings for the table files in it.
+- A document uploaded or moved into a set the current load reads is read into that load
+  as it arrives.
+
+An existing ontology reads a new set only after a new generation picks it, or a
+[version edit](/foundry/ontologies/generate-and-version#edit-a-version) routes it, and
+that version is loaded.
+
+Reading documents uses AI models: a load sends each document's text to the
+workspace's [AI models](/foundry/workspace/ai-models) to find its names and facts and
+to check them. What it costs counts toward the month's
+[loads cap](/foundry/workspace/usage).
+
+## In an ontology
+
+An ontology's **Documents** lists what it reads of the workspace's documents: those in
+the sets its version reads, and those its current load holds. Open it from the
+ontology's pages in the Ontologies panel, from the document count in the ontology's
+header, or from a load's **Documents read** and **Review documents**. It is read-only:
+**Open in Connectors** goes back to the documents in Connectors.
+
+There, the Ontologies panel becomes the ontology's documents explorer: a row back to
+the ontology, a filter, and its sets as folders of their documents. Each document's dot
+says what the current load made of it: orange needs review, red couldn't be read,
+green read, grey waiting or not read. A set counts its documents that need review.
+
+Open a document there to see its text as the load read it, shown as the document is
+(Markdown rendered, text as it is), with names underlined, quoted facts tinted and
+anything that needs review marked. Beside it, **Facts**, **Entities** and **Needs
+review** list what the load found, each linked to its record, and **Details** describe
+the document. Select a mark to follow it: a name opens its entity's page, a quote the
+page of the entity its fact is about, and a review mark its card in **Needs review**.
+Until a load holds it, the document shows as uploaded. Use the **Load** picker to read
+the document as another load saw it.
+
+## Who can do what
+
+Owners and admins upload, move, rename and delete documents, and create, describe and
+delete sets. Members read them.
+
+## Next steps
+
+    Pick the document sets a version reads.
+
+    Write tables and documents into the database.
+
+    The Connectors explorer, and how to arrange it.
+
+    See every place a record comes from.
+
+# Connectors
+
+Page type: Reference
+
+Foundry reads ten kinds of source, and takes data your apps and agents send to an
+[API source](/foundry/data/api-sources). Apps sync every table their credential can
+read; databases and Amazon S3 sync the tables you choose. Every credential only needs
+read access, and every plan offers every kind: plans differ in
+[how often they sync](/foundry/data/connect-data#syncs-on-a-schedule).
+
+| Source | Credential | Syncs |
+| --- | --- | --- |
+| [Stripe](#stripe) | Restricted (`rk_`) or secret (`sk_`) API key | Customers, subscriptions, invoices, payments and more |
+| [WorkOS](#workos) | Secret API key (`sk_`) | Organizations, users, SSO and directories |
+| [PostHog](#posthog) | Personal API key (`phx_`) | Persons, groups and events |
+| [GitHub](#github) | Fine-grained (`github_pat_`) or classic (`ghp_`) token | Issues, pull requests, comments and reviews |
+| [Linear](#linear) | Personal API key (`lin_api_`) | Teams, projects, cycles, issues and comments |
+| [Cal.com](#cal-com) | API key (`cal_live_`) | Bookings, attendees, event types and schedules |
+| [Granola](#granola) | API key (`grn_`) | Meeting notes and attendees, kept as documents too |
+| [PostgreSQL](#postgresql) | Database user and password | The tables you choose |
+| [MySQL](#mysql) | Database user and password | The tables you choose |
+| [Amazon S3](#amazon-s3) | IAM role, or an access key | Parquet, JSON and CSV files as tables |
+| [API source](/foundry/data/api-sources) | None: senders use send tokens | The pieces your apps and agents send |
+
+## Stripe
+
+In Stripe, open **API keys** and select **Create restricted key**. Name it "Helix
+Foundry", set **Read** on the objects you want and leave everything else as **None**.
+Foundry reads test or live data, as the key says. Use a sandbox or test mode key first
+to try Foundry without live data.
+
+Syncs `customers`, `products`, `prices`, `coupons`, `promotion_codes`, `subscriptions`,
+`subscription_items`, `invoices`, `invoice_line_items`, `charges`, `payment_intents`,
+`refunds`, `disputes`, `payouts` and `balance_transactions`. A table the key can't read
+is skipped and named after the test; the test fails only when the key can read none.
+
+Also give the key **Read** on **Events**. On Pro and Max, syncs then read only the
+objects that changed; without it, every sync reads every object in full, and the test
+warns you.
+
+## WorkOS
+
+In WorkOS, open **API Keys** in the environment you want to import (Staging or
+Production) and copy the secret key. Production keys are shown only when created, so
+create a new one if you no longer have it. WorkOS keys can make changes, but Foundry
+only reads.
+
+Syncs `organizations`, `users`, `organization_memberships`, `invitations`,
+`sso_connections`, `directories`, `directory_users`, `directory_groups` and
+`directory_group_members`.
+
+## PostHog
+
+In PostHog, open **Settings** → **Personal API keys** and select **Create personal API
+key**. Give it the **Query** and **Project** read scopes only, limited to the project you
+want to import.
+
+| Field | Notes |
+| --- | --- |
+| Region | US Cloud, EU Cloud or Self-hosted (an HTTPS host). |
+| Project ID | Optional when the key sees one project; Foundry fills it in after the test. |
+| Event history (days) | 1 to 365, 30 by default. |
+
+Syncs `persons`, `person_distinct_ids` and `groups` in full, and `events` and
+`daily_event_counts` for the event history you chose.
+
+## GitHub
+
+In GitHub, open **Settings** → **Developer settings** → **Fine-grained tokens** and
+create a token named "Helix Foundry". For an organization's repositories, choose the
+organization as the resource owner; it may need to approve the token. Choose the
+repositories to import, and set **Issues** and **Pull requests** to **Read-only**. A
+classic token (`ghp_…`) with the `repo` scope works too.
+
+| Field | Notes |
+| --- | --- |
+| Repositories | Optional: one `owner/name` per line. Blank syncs every repository the token can read, up to 100. |
+| Review history (days) | 1 to 365: how far back pull request reviews are read. |
+
+Syncs `repositories`, `users`, `labels`, `milestones`, `issues`, `pull_requests`,
+`issue_comments` and `pull_request_reviews`. Foundry never reads code.
+
+## Linear
+
+In Linear, open **Settings** → **Security & access** and create a personal API key named
+"Helix Foundry" with **Read** access. It reads every team you can see in Linear.
+
+Syncs `teams`, `users`, `projects`, `cycles`, `workflow_states`, `issue_labels`,
+`issues` and `comments`.
+
+## Cal.com
+
+In Cal.com, open **Settings** → **Developer** → **API keys** and create a key named
+"Helix Foundry". Turn on **Never expires**, or choose a long expiry: syncs stop when the
+key expires. Cal.com shows the key once. Cal.com keys can make changes, but Foundry only
+reads. Only Cal.com's cloud is supported.
+
+Syncs `users`, `teams`, `team_memberships`, `event_types`, `schedules`, `bookings`,
+`booking_attendees` and `booking_hosts`. Teams come with a Teams plan, and only a team
+admin's key reads the team's other members.
+
+## Granola
+
+API keys come with Granola Business and Enterprise. In the Granola desktop app, open
+**Settings** → **Connectors** → **API keys** and select **Create new key**. Choose the
+**Personal notes** scope, and **Public notes** too for notes shared with your team.
+
+Syncs `notes`, with each note's summary, `note_attendees`, `note_folders`, `folders`
+and `spaces`. Foundry also keeps each note's summary as a Markdown document, in a
+**Notes** document set of the connection's own, which ontologies read like any other
+[documents](/foundry/data/documents).
+
+**Transcripts**, under the key, is off by default. Turn it on to keep each note's
+transcript as a document too, in a **Transcripts** set beside Notes. Transcripts are
+long: reading one into an ontology costs several times what a note does.
+
+## PostgreSQL
+
+Create a read-only user as an administrator, replacing the database name and password:
+
+```sql
+CREATE ROLE foundry_readonly LOGIN PASSWORD 'choose-a-password';
+GRANT CONNECT ON DATABASE app TO foundry_readonly;
+GRANT USAGE ON SCHEMA public TO foundry_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO foundry_readonly;
+```
+
+| Field | Default |
+| --- | --- |
+| Host, Database, Username, Password | Required. |
+| Port | `5432` |
+| Schema | `public` |
+| Encryption (under **Connection options**) | Require TLS with certificate verification. Add a CA certificate for a private CA, or choose **No TLS**. |
+
+After the test, choose the tables to sync. Every table in the schema starts selected,
+and keeping them all also syncs tables added later; views are not synced. If a selected
+table is dropped or renamed, syncs fail until you edit the connection and test it
+again.
+
+## MySQL
+
+The same fields as PostgreSQL, with port `3306` and no schema: Foundry reads the
+database you name. Give the user `SELECT` on it only.
+
+## Amazon S3
+
+Foundry reads Parquet, JSON, JSON Lines and CSV files (plain, gzip, zstd or bzip2) from
+one folder of a bucket. Files with the same shape become one table, named after their
+folder or file name, and every sync reads them all again.
+
+| Field | Notes |
+| --- | --- |
+| Bucket | Required. Pasting an `s3://bucket/folder/` address fills both fields. |
+| Folder | Optional; the whole bucket without one. |
+| Access | **IAM role** (recommended) or **Access key**. |
+| Region (under **Advanced**) | Detected by the test. |
+| Endpoint (under **Advanced**, access key only) | For S3-compatible storage such as Cloudflare R2, MinIO, Backblaze B2 or Wasabi. |
+
+With an **IAM role**, Foundry assumes a role in your AWS account with the workspace's
+external ID, which the form shows with a **Copy** button. In AWS IAM, create a role
+with **Custom trust policy** and paste the trust policy the form shows, which requires
+that ID. Then give the role the inline permissions policy the form shows, which lists
+the folder and reads its files only, and paste the role's ARN. Foundry won't use a role
+whose trust policy doesn't require the external ID, and checks this on every test and
+sync with an ID that must fail, which your CloudTrail shows as a denied `AssumeRole`.
+
+With an **access key**, create an IAM user with the same permissions policy and an
+access key for it. Leave the secret blank when you edit the connection to keep the
+stored one.
+
+If the bucket uses a customer-managed KMS key, also allow `kms:Decrypt` on that key.
+AWS bills your account for the requests and for data transferred out of the bucket's
+region.
+
+The test lists each table with its format, files, size, columns and key, a preview of
+its rows, and any file Foundry can't read. Choose the tables to sync; the form adds up
+their size, and a connection syncs at most 20 GB.
+
+## Network access for databases
+
+Foundry connects to a database over the internet from Helix's network, so the
+database must accept connections from outside your network. If it only accepts known
+addresses, allow the outbound addresses the form lists, and select **Copy** to copy
+them.
+
+Foundry refuses private, loopback and shared address ranges, and follows no
+redirects.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Rows per table | 2,000,000, and 2 GiB. A larger table fails the sync: for a database, leave it out; for PostHog, shorten the event history. |
+| Size of an S3 connection's tables, per sync | 20 GB. Choose fewer tables, or a narrower folder. |
+| Documents a connection keeps, per set | The newest 1,000 |
+| Scheduled syncs | Free daily, Pro hourly, Max every 15 minutes |
+| One sync attempt | 2 hours |
+| Attempts per sync | 3 |
+| Syncs running per connection | 1 |
+
+## Next steps
+
+    Add a connection and follow its syncs.
+
+    Send data no connector reads.
+
+# API sources
+
+Page type: Guide
+
+An API source takes data that no connector reads: your app's records, or what an agent
+produces. Your apps and agents send it pieces of data, JSON objects each with an id,
+over HTTP or the [Helix MCP](/foundry/agents/helix-mcp). Foundry keeps every piece,
+merges them by id into one table, `events`, and learns its fields from what arrives.
+Ontologies read that table through mappings, or read each piece's text by entity
+extraction. API sources are on every plan.
+
+## Create an API source
+
+An agent can create one too, with the MCP's `create_event_source` action, after your
+confirmation.
+
+## Send tokens
+
+A send token, `hx_ev_…`, lets whoever holds it add pieces to one source and replace any
+piece in it by its id; it reads nothing. Foundry shows it once and keeps only its hash.
+The source's **Send tokens** list names each by its prefix, with when it was made and
+last used. **Revoke** turns a token off for good: senders using it are refused from then
+on, so make a new one for them. A source holds up to 10 live tokens. Give each app or
+agent that sends on its own a source of its own.
+
+Owners and admins make and revoke tokens. They can also send as themselves through the
+signed-in Helix MCP, without a token.
+
+## Send pieces
+
+The source's **Send pieces** panel has what a sender needs. **Copy prompt** copies
+instructions for Claude Code, Codex or another agent: how to connect, how to send and
+what each answer means.
+
+    `POST https://ingest.helix-db.com/v1/sources/{id}/pieces`, with the send token as
+    its bearer, from a server: never from a browser or an app on someone else's device,
+    which would hand them the token. The panel's curl reads the token from
+    `HELIX_EVENT_TOKEN` and sends `pieces.json`:
+
+    ```bash
+    printf 'Authorization: Bearer %s\n' "$HELIX_EVENT_TOKEN" | curl -sS -X POST \
+      "https://ingest.helix-db.com/v1/sources/<source id>/pieces" \
+      -H @- -H "Content-Type: application/json" --data-binary @pieces.json
+    ```
+
+    ```json pieces.json
+    {
+      "client_token": "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+      "pieces": [
+        {
+          "id": "ord-1042-1",
+          "occurred_at": "2026-10-23T09:30:00Z",
+          "data": { "order_id": "ord-1042", "customer": "Globex Corporation", "quantity": 250 }
+        }
+      ]
+    }
+    ```
+
+    The body is JSON in UTF-8, uncompressed, and `client_token` is required.
+
+    `helix_foundry_send_pieces` takes the same pieces, with each piece's data as JSON
+    text in `data_json`. An agent that sends on its own uses the send token as its
+    bearer and sees only that tool. For Claude Code, in the project's `.mcp.json`:
+
+    ```json .mcp.json
+    {
+      "mcpServers": {
+        "helix-events": {
+          "type": "http",
+          "url": "https://mcp.helix-db.com/mcp",
+          "headers": { "Authorization": "Bearer ${HELIX_EVENT_TOKEN}" }
+        }
+      }
+    }
+    ```
+
+    For Codex, in `~/.codex/config.toml`:
+
+    ```toml
+    [mcp_servers.helix-events]
+    url = "https://mcp.helix-db.com/mcp"
+    bearer_token_env_var = "HELIX_EVENT_TOKEN"
+    ```
+
+    An agent you work with can instead send as you, through its
+    [signed-in Helix MCP](/foundry/agents/helix-mcp#connect-your-agent), if you're an
+    owner or admin.
+
+### What a piece is
+
+| Field | Rule |
+| --- | --- |
+| `id` | 1 to 128 printable ASCII characters, no spaces, unique within the send. A piece with an id the source holds replaces it. |
+| `occurred_at` | Optional: when it happened, as an RFC 3339 time. |
+| `data` | One JSON object, at most 256 KiB and 64 levels deep. Its top-level keys are the source's fields: at most 200 in a source, 1 to 64 bytes each. `id`, `received_at` and `occurred_at` can't be data keys. |
+
+A field keeps the JSON type it first had: string, number, boolean, object or array, and
+`null` is always allowed. A send that changes a field's type is refused and names both
+types.
+
+`client_token` is a new random value, such as a UUID, for each send: 16 to 64 printable
+ASCII characters. To retry a send, send it again with the same token and the same
+pieces; Foundry stores nothing new and answers `replayed: true`.
+
+### Answers
+
+A send that is stored answers 200, with the source's `capacity`, any `warning` and when
+its next sync is due (`next`). One bad piece refuses the whole send, and none of it is
+stored.
+
+| Status | Meaning |
+| --- | --- |
+| 400 | A piece or the send breaks a rule; the message says which, and `piece` is its place in `pieces`, from 1. |
+| 401 | The send token is missing, wrong or revoked. |
+| 404 | The source isn't the send token's own. |
+| 408 | The body took over 15 seconds to arrive. Send it again with the same `client_token`. |
+| 409 | The source is full or paused, or has all the fields it may have, as `reason` says. |
+| 413 | The body is over 2 MiB. Send fewer pieces at a time. |
+| 415 | Send JSON in UTF-8, uncompressed, with `Content-Type: application/json`. |
+| 429 | Too many sends: wait as long as `Retry-After` says, then retry with the same `client_token`. |
+| 500 to 504 | Wait a second, or as `Retry-After` says, then retry with the same `client_token`. |
+
+## Read an API source
+
+Pieces reach the source's table at its next sync, about a minute after they arrive, on
+every plan. The source's page lists its recent sends, its fields with the type each
+first had, its table and its documents, and how full it is.
+
+A source holds at most 2,000,000 rows or 2 GiB. Its page and each answer warn from 80%;
+once it is full, sends are refused, so send new pieces to a new source before then.
+Foundry keeps every piece until you delete the source.
+
+## How ontologies read it
+
+On [New ontology](/foundry/ontologies/create-an-ontology) and in
+[Generate](/foundry/ontologies/generate-and-version#generate-a-draft), **API sources**
+lists the sources that have synced pieces. Choose one, and how it is read:
+
+- **Structured mappings** suit strictly structured JSON: ids, amounts, statuses, times.
+  Its fields map to types and properties, as a synced table's columns do, and every
+  piece is kept.
+- **Entity extraction** suits pieces whose body is text, such as an agent's reply or a
+  note: Foundry's agent reads the text and finds the entities and facts it describes.
+  Choose the source's **text field**, the top-level field holding each piece's text,
+  which must stay a string in every piece. Its newest 500 pieces become Markdown
+  documents in a set of the source's own, which loads read like any
+  [document](/foundry/data/documents).
+
+Extraction suits a few hundred pieces a month, not a steady stream. It costs about 1
+cent a piece for each ontology that reads it. Extraction no person started, as pieces
+arrive and at refreshes, spends at most $5 a month per source and $20 a month across
+the workspace's sources; past that, new pieces wait for next month. A load you start
+spends the [loads' budget](/foundry/workspace/usage) instead.
+
+When new pieces sync, ontologies that read the source
+[refresh by themselves](/foundry/ontologies/load-data#automatic-refreshes).
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| API sources per workspace | 20 |
+| Live send tokens per source | 10 |
+| Pieces per send | 500, with at most 1 MiB of data together, in a body of at most 2 MiB |
+| Piece | 256 KiB of data |
+| Fields per source | 200 |
+| Sends | 5 a second per source (bursts of 20), 20 a second per workspace (bursts of 50) |
+| Per workspace, per UTC day | 200,000 pieces and 1 GiB of data |
+| Rows per source | 2,000,000, and 2 GiB |
+| Pieces read by extraction | The newest 500 |
+| Extraction no person started | $5 a month per source, $20 a month per workspace |
+
+## Next steps
+
+    Connect your agent to Foundry.
+
+    Draft an ontology from your API sources.
+
+# Create an ontology
+
+Page type: Guide
+
+An ontology holds the types, links and rules that describe your data, with its
+versions and loads. Each one is bound to one Helix database, which its loads write
+into. A workspace can have several ontologies, one per database, and each reads the
+workspace's [data](/foundry/data/connect-data) and
+[documents](/foundry/data/documents) its versions pick.
+
+**Ontologies** in the sidebar opens the ontology you last opened in this browser, or
+the first one.
+
+## Create one
+
+Select **New ontology**. A workspace without an ontology opens on the same page, as
+**Create your first ontology**, with **Set up with your agent** above it to hand the
+steps to your agent through the [Helix MCP](/foundry/agents/helix-mcp#set-up-a-workspace-with-your-agent).
+
+The page walks through five steps, one at a time: each step you finish shrinks to a
+line saying what you chose, with **Edit** to change it. Select **Continue** to go on, or
+**Skip** on an optional step you leave empty. Your choices are kept in the browser tab
+until you create the ontology or select **Cancel**, and the step is in the page's
+address, so going back or reloading keeps your place.
+
+    **Create a new one** makes a database in a project you choose, or a new project, on
+    Helix's shared cluster, under the workspace's Helix plan. Its address is the name you
+    give it, with a short suffix when another database already has it.
+
+You review the draft before it is used: make it current to load it. If you leave
+before then, the ontology's [overview](#the-overview) picks up where you stopped. If
+the ontology was created but its generation couldn't start, the ontology opens saying
+why, with **Try again**, which opens Generate with your choices.
+
+Members see the same steps, without the pickers or anything that changes the
+ontology.
+
+Once the ontology has been loaded and explored or asked about, the overview is its
+current version as a schema: each type as a card with its key and the table that fills
+it, joined by its links. Select a card to open that type; point at a link to read what
+it means. Above it, the overview follows a generation or load that is running, and
+says when a newer version is ready to review or the current one isn't loaded yet.
+
+Its header names the database and its Helix project, the status of the last load and
+when the ontology was created. It links to the documents the ontology reads, and offers
+**Generate** once the ontology has a draft and, once the current version can be loaded,
+**Load data**. Below the schema,
+[Schema versions](/foundry/ontologies/generate-and-version#schema-versions) lists every
+version and [Data loads](/foundry/ontologies/load-data#manage-loads) the loads kept.
+
+The [Explorer](/foundry/explore/explorer) and [Ask](/foundry/ask/ask-questions) are
+sections of their own, which open the ontology you last opened.
+
+## Delete an ontology
+
+Select the bin on the overview. Foundry deletes the ontology, its versions and loads,
+and, in the background, everything its loads wrote into the database, including links
+your own data added to those records. The database and its other data stay, and so do
+the workspace's documents. The database can take a new ontology once that removal
+finishes.
+
+## Who can do what
+
+Owners and admins create and delete ontologies, and need write access to the
+database's Helix project to do so. Members see every ontology. A member who can't read
+the database's project sees the ontology without its database's details or contents.
+
+## Next steps
+
+    Review the draft, make it current, and draft new versions.
+
+    Add the files a load reads for names, facts and tables.
+
+# Generate and version an ontology
+
+Page type: Guide
+
+A generation asks Foundry's agent to draft a new version of an ontology: its types,
+links, mappings from your tables, routes for your documents, rules and the questions it
+should answer. Each draft is stored as a new version beside the others. Nothing changes
+until you make a version current.
+
+[Creating an ontology](/foundry/ontologies/create-an-ontology) drafts its first
+version, and until the ontology is set up its
+[overview](/foundry/ontologies/create-an-ontology#the-overview) carries on from there:
+generate, review, make current, load. **Generate** drafts the next versions.
+
+A generation's page shows its goal, its tables and its steps. Open it from its
+version's page, where the version is named for it, or from a failed generation's row in
+**Schema versions**. A failed generation offers **Try again**, which opens the form
+with the same goal, connectors and document sets.
+
+## Schema versions
+
+**Schema versions**, on the ontology's overview below its schema, lists every version,
+newest first, named by the generation that
+drafted it, with the generations that failed among them. Each row shows the version's
+status, title, format and when it was made. Select a row to open the version, or a
+failed generation's row to see why it failed.
+
+## Review a version
+
+Select **Review version** on a generation or in **Schema versions**. A version's header
+says whether it is current, its format, the document sets its loads read (**Reads …**)
+and the generation it was drafted for. An agent draft opens on its summary and its
+graph, with a tab for each part:
+
+| Tab | Shows |
+| --- | --- |
+| **Graph** | The agent's summary, and the types and links as a schema; select a type to open it |
+| **Types** | Each type with its properties, keys and identifiers |
+| **Links** | How types connect, and what each link means |
+| **Mappings** | Which table and columns fill each type and link |
+| **Sources** | For each type and link, which tables and document routes fill it |
+| **Rules** | Rules, constraints and relations the data should pass |
+| **Questions** | The questions the version is meant to answer |
+| **TOML** | The draft's `ontology.toml` and `mappings.toml` |
+| **Edit** | Changes to routes, identifiers, rules and constraints, as a new version |
+
+## Edit a version
+
+Versions never change. To change a finished agent draft without generating again, use
+its **Edit** tab, which makes a new version from your edits:
+
+1. Choose an item to edit, or **Add document route**, **Add rule** or **Add
+   constraint**, write it as TOML, and select **Stage item**. Stage as many as you need.
+2. Select **Preview edits**. Foundry checks the edits and says what they would change,
+   without storing a version.
+3. Select **Create version**, then **View new version**. Make it current and load it
+   to apply your edits.
+
+Edits cover document routes, the identifiers of a type, rules and constraints. A route
+that names a document set adds that set to the new version's reads, so an existing
+ontology can read a new set without a new generation. To change which tables fill a
+type, or the types and links themselves, generate again with a sharper goal or
+different tables.
+
+## Make a version current
+
+Select **Make current** on a version's page, or on the overview, which offers it for a
+version ready to review, and confirm. The current version is the one the overview shows and the one a load writes.
+
+To roll back, make an older version current. If someone else makes another version
+current at the same time, Foundry refuses yours, says why, and shows the version that
+is current now.
+
+  Only an **Agent draft** the agent finished can be [loaded](/foundry/ontologies/load-data).
+  A draft it stopped early, or a version in the older **Definition v1** format, can be
+  reviewed and made current, but not loaded.
+
+## Who can do what
+
+Owners and admins generate, edit versions and make them current. Members see every
+generation and version.
+
+## Next steps
+
+    Write the current version into the ontology's database.
+
+    Put documents into sets for a version to read.
+
+# Load data into a Helix database
+
+Page type: Guide
+
+A load writes the ontology's current version into its Helix database: your synced
+tables as its mappings shape them, then the documents of the sets the version reads.
+Each load is a complete copy, written beside the earlier ones, so you can compare them
+and switch back. Reads go to the current load.
+
+The version's page shows the same sets in its header, as **Reads …**. To read another
+set, generate a version that picks it, or
+[edit the version](/foundry/ontologies/generate-and-version#edit-a-version) to route it,
+then load that version.
+
+## Follow a load
+
+The load's page follows each step: preparing, writing the tables, reading the
+documents, finishing. A load is **Writing**, then **Ready**. It ends **Partial** when
+it reached the spending cap with its tables written but some documents unread, or
+**Failed**.
+
+When the load leaves items to review, **Review documents** opens the ontology's
+documents that need review. **Rule breaks** lists the records that break the version's
+constraints.
+
+The newest load that finishes **Ready** becomes current. A **Partial** load becomes
+current only when the ontology has no current load.
+
+- If a source synced again while the load ran, the load says so and offers a new one;
+  with automatic refreshes on, Foundry starts it itself.
+- If the database is new and still starting, the load waits and tries again by itself.
+- An ontology runs one load at a time.
+
+Loading, setting a load current and deleting one need owner or admin rights and write
+access to the database's Helix project.
+
+## Automatic refreshes
+
+Connections [sync on a schedule](/foundry/data/connect-data#syncs-on-a-schedule). When a
+sync changes a table the current load reads, or a connection's document it read is
+replaced or removed, the ontology owes a refresh: a load of its current version that
+Foundry starts itself. It runs at most once per the plan's interval (daily on Free,
+hourly on Pro, every 15 minutes on Max), and waits while another load or generation
+runs. A large API source adds 30 minutes per million rows to the wait. A refresh becomes
+current when it finishes, like any load.
+
+A refresh reads again only what changed: documents it read before, with the same text
+and models, cost nothing. When the month's
+[loads budget](/foundry/workspace/usage) is spent, a refresh still writes your tables
+and reuses what earlier loads read from documents, at no cost.
+
+## Manage loads
+
+**Data loads**, on the ontology's overview below its schema, lists the loads
+kept: the current one and the newest others, five in all. Older loads are deleted from
+the database in the background. Each row shows the load's version, status, node and
+fact counts, and its jobs. Select a row to open the load's page, with its steps and
+spend.
+
+**Open** reads the load in the Explorer. The **⋯** menu beside it holds the rest:
+
+| Action | Does |
+| --- | --- |
+| **Compare with current** | The Explorer with the load and the current one side by side |
+| **Set current** | Makes a Ready or Partial load the one every page reads |
+| **Delete** | Removes what the load wrote, including links your own data added to its nodes. Never the current load or one still writing. |
+| **Retry delete** | Tries a delete that failed again |
+
+## Spending and limits
+
+Reading documents uses models, so it costs money; tables don't. Reading the same text
+with the same models again costs nothing. [Usage](/foundry/workspace/usage), in the
+account menu, shows what the month's loads have spent.
+
+| Limit | Value |
+| --- | --- |
+| Per load | $10 |
+| Per workspace, per month | $50, of which work no person started, such as refreshes, may spend $40 |
+| Uploaded documents | 200 in the workspace: 1 MiB each for text, 3 MiB for PDFs and table files |
+| Loads kept per ontology | 5 |
+
+A load that reaches its cap stops **Partial**. The documents it didn't reach are read
+into it once it's current and the month has budget left; a new load reads every
+document again. Once the workspace has spent $50 in a month, Foundry refuses new loads
+until the next month, and new uploads aren't read.
+
+## Next steps
+
+    See what the load wrote.
+
+    Read each type as a table.
+
+# Explore the graph
+
+Page type: Guide
+
+The Explorer draws what a load wrote into the ontology's database: its records and how
+they connect. It reads the database with your session and never writes to it. Switch
+to **Records** in the bar at the top to read the same data as tables.
+
+| To | Do |
+| --- | --- |
+| Jump to a record by name, id or text | Press <kbd>/</kbd> and type, then <kbd>Enter</kbd> |
+| Load a record's neighbors | Double-click it, or use **Expand** in the inspector |
+| Draw more of a type | Select **+** beside it in Labels, 50 records at a time |
+| See every action on a record | Right-click it |
+| Hide or show the inspector | Press <kbd>]</kbd>, or use its toggle in the bar |
+| Hide or show Labels | Press <kbd>[</kbd> |
+| See every shortcut | Press <kbd>?</kbd> |
+
+The inspector is the sidebar on the right. With nothing selected, it gives an overview
+of the database. Select a record to open it there: its type, its properties, the load
+that wrote it, and its relationships with their counts. Foundry remembers whether the
+inspector is shown, per database.
+
+On an entity's page, in a compare and while the graph loads, the panel shows the
+ontology, its database, the load you're reading and links to the Graph and Records. On
+a phone, Labels is in the navigation drawer, and the inspector opens as a sheet.
+
+Records are named the way the version says: by a name property, else by their keys.
+A record drawn with a dashed outline was reached outside the load you're reading; the
+inspector names its load.
+
+## Choose a load
+
+The **Load** picker reads another load of the ontology. Links between the Explorer,
+Records, a record's page and a document keep the load you chose. The **Ontology**
+picker beside it opens another ontology's Explorer; **Explorer** in the sidebar opens the
+ontology you last opened.
+
+**Other data** shows what no load wrote: data the database held already, or that your
+own applications write. It is hidden while you read a load, and listed below the labels.
+
+## Show Foundry's own records
+
+Loads also write Foundry's bookkeeping beside your data: documents, their sections,
+mentions and evidence, and reviews. The Explorer hides these until you select **Show
+Foundry internals** under Labels. They are then listed apart and drawn grey. The choice
+is kept in this browser.
+
+## Compare two loads
+
+Choose a second load under **Compare with**, or select **Compare with current** in a
+load's menu in [Data loads](/foundry/ontologies/load-data#manage-loads). The two loads
+are drawn side by side, each with its own bar, labels and inspector, over **What
+changed**: the count of each type and link in each load. Open a type to see the
+records added, removed and renamed between them, by key, and select one to find it on
+its side.
+
+## When there's nothing to read
+
+| The Explorer says | What to do |
+| --- | --- |
+| **No ontologies yet** | The workspace has no ontology. Owners and admins select **Create an ontology**. |
+| **Nothing loaded yet** | The ontology has no load. Owners and admins select **Load data**, which opens the Load dialog, or, while no version is current, **Finish setting up**, which opens the ontology's overview. Records and an entity's page say the same. |
+| The database is starting | A database created in the last few minutes may not answer yet. The Explorer opens by itself once it answers. |
+| **Queries are paused** | The workspace's Helix plan doesn't allow queries now. **Choose a plan**, or **Open Helix billing**, opens billing in the Helix dashboard. |
+
+Members see the same messages, without the buttons.
+
+## Next steps
+
+    Read each type as a table, and a record's page.
+
+    Ask the graph questions in plain language.
+
+# Records and entities
+
+Page type: Guide
+
+**Records** is the Explorer's table view: one type at a time, searchable and sortable,
+with every record's links and where it came from. An entity's page gathers everything
+the load knows about one record.
+
+## Read a type as a table
+
+In the Explorer, select **Records** in the bar. Choose a type in the panel beside the
+sidebar, or above the table while the panel is hidden; the count beside it is how many
+records the load holds.
+
+- **Search** finds records by name or key.
+- **Filter by field** keeps the records whose field matches a value.
+- Select a column's header to sort by it, and **Columns** to choose which show.
+- Pages hold 50 records. Searches and filters count up to 1,000 matches, and paging
+  reaches the first 10,000 records of a type.
+
+## Open a record
+
+Select a row to open the record beside the table: its properties, its links to other
+records, and **Where it comes from**. A link or record that came from a table names the
+source and row; one that came from a document shows the quote, with a link to it in the
+document.
+
+Select **Open in graph** to find it in the Explorer, or **Open its page** for the
+entity's page.
+
+## An entity's page
+
+An entity's page names the record's type, key and sources, with tabs for its
+**Overview** (properties, each with the row or quote that states it), **Facts** (its
+links, with their evidence), **Derived** (what the version's rules derive about it, and
+why), **Mentions** (where documents name it) and **Needs review** (reviews, and rule
+breaks).
+
+Every page here reads one load. Use the **Load** picker to read another; links between
+pages keep it. **Ask about this** asks a question about the record in a drawer; see
+[Ask](/foundry/ask/ask-questions#ask-about-a-record).
+
+**Derived** shows only for a version with rules. Its facts are worked out when the page
+reads them and are never stored; one too costly to work out says so.
+
+## Settle a review
+
+Owners and admins settle a review in **Needs review** on an entity's page or a
+document's, while it reads the current load: link a name to the record it means or mark
+it **Not in data**, keep one of the values documents disagree on, or replace a table's
+value with one a document states. A decision applies from the next load, so load again
+to see it; a value chosen over a table's holds in every later load, even after the
+table changes. **Saved decisions** lists the decisions, and removing one also applies
+from the next load.
+
+## Next steps
+
+    Search, expand and compare loads.
+
+    Add the documents facts and mentions come from.
+
+# Ask questions of your data
+
+Page type: Guide
+
+Ask answers questions about an ontology's load in plain language, and is Foundry's main
+page: Foundry opens on it. Foundry's agent reads the load from the ontology's database
+step by step, and its answer cites each record, table row, quote and rule it used, so
+you can open every one.
+
+Write the question, or select a suggestion, then select the arrow or press
+<kbd>⌘</kbd> <kbd>Enter</kbd> (<kbd>Ctrl</kbd> <kbd>Enter</kbd> on Windows and Linux).
+A question is at most 4,000 characters.
+
+Ask reads one load: the current one, unless you choose another in the **Load** picker
+in the top bar. A load can be asked about once it is **Ready** or **Partial**. While
+the ontology has no load, a new thread says **Nothing loaded yet** in place of the
+composer, with **Load data** or, while no version is current, **Finish setting up**.
+With no ontology in the workspace, Ask says **No ontologies yet**, with **Create an
+ontology**.
+
+## Read an answer
+
+A thread is one column: each question, then its steps as they run, then the answer,
+with the composer pinned at the bottom.
+
+- **Steps** say what the agent read. Its first step reads what the load holds: its
+  types and links and how many of each. Then it finds entities, reads them and their
+  evidence, runs queries written as a path through the ontology's types and links, and,
+  for what those can't say, queries the graph directly with a Helix read. Each step's
+  JSON is behind a disclosure. A step that failed says why, and the agent carries on.
+- **The answer** is plain text with numbered citations, then **Sources**: each record,
+  fact, derived fact, table row, document quote, rule break or step it cites. Select one
+  to open it: an entity's page, the row's table, the quote in its document, or the step.
+- Below the answer, what the question cost and the tokens it used.
+
+While a question runs, **Cancel** stops it.
+
+Follow up in the same thread: the composer at the bottom asks with the thread's earlier
+answers. A thread takes one question at a time, so a follow-up waits until the answer
+before it is ready.
+
+## Threads
+
+While Ask is open, the sidebar lists the ontology's threads under the sections, by
+their first question, grouped **Today**, **Previous 7 days** and **Older**. A thread
+being answered says so. **New thread** starts another. The foot of the list shows what
+the workspace has spent on questions this month, out of its monthly budget; select it
+for the limits.
+
+On a phone, Ask shows the threads first; choose one, or **New thread**, to open it.
+
+## Ask about a record
+
+On an entity's page, select **Ask about this** to ask about that record in a drawer.
+The question is about the entity and the load the page reads; **Open in Ask** opens its
+thread.
+
+## When Ask can't answer
+
+| What the thread says | What it means |
+| --- | --- |
+| **This ontology can't answer that** | What the load holds doesn't say. Ask says why, and what the ontology lacks. **Draft a new version with this** opens [Generate](/foundry/ontologies/generate-and-version) with a goal written from the question. |
+| **Stopped at this question's limit** | The question used its budget, steps or time before it could answer. Ask something narrower. |
+| **It couldn't answer** | It stopped with an error, which it names. |
+| **An attempt failed. Helix will try again** | A passing failure; the question runs again by itself. |
+| **Waiting for this month's questions budget** | The month's budget can't hold what a question may spend. It runs once it can, or you can cancel it. |
+
+## Limits and spending
+
+Ask uses AI models: it sends your question, and what each step reads from the load, to
+the workspace's [AI models](/foundry/workspace/ai-models). Questions have their own
+monthly budget, apart from loads'; [Usage](/foundry/workspace/usage) shows both. Your
+agent can ask too, through the [Helix MCP](/foundry/agents/helix-mcp#ask-questions),
+within the same limits.
+
+| Limit | Value |
+| --- | --- |
+| Per question | $0.50, 20 steps and 4 minutes |
+| Questions running per workspace | 2; others wait, queued |
+| Questions per workspace, per hour | 30 |
+| Per workspace, per month | $15, shown at the foot of the threads |
+| Question | 4,000 characters |
+
+## Who can ask
+
+Anyone in the workspace who can read the ontology's database: members need **Query
+read** on the database's Helix project. Ask only reads the load; it never writes to
+the database.
+
+## Next steps
+
+    Search and expand what a load wrote.
+
+    Ask reads a load, so keep the current one up to date.
+
+# Use Foundry from your agent
+
+Page type: Guide
+
+Foundry's tools are on the Helix MCP, at `https://mcp.helix-db.com/mcp`. Connect your
+agent to it, sign in once, and the agent works in Foundry as you: it reads your
+ontologies, their versions, loads and graph, asks them questions, and makes the changes
+you ask for, each after a confirmation. It can't add a connector's credentials, delete
+anything or change billing; those stay on the website.
+
+## Connect your agent
+
+The MCP signs you in with OAuth in your browser, with the account you use for Foundry.
+
+```bash
+    claude mcp add --transport http helix https://mcp.helix-db.com/mcp
+    ```
+
+    Then run `/mcp` in Claude Code and sign in.
+
+```bash
+    codex mcp add helix --url https://mcp.helix-db.com/mcp && codex mcp login helix
+    ```
+
+    Add `https://mcp.helix-db.com/mcp` as a remote (streamable HTTP) MCP server, and
+    complete the browser sign-in when the client asks. Clients that discover OAuth
+    find it at `https://mcp.helix-db.com/.well-known/oauth-protected-resource/mcp`.
+
+Your agent acts with your role in each workspace and your rights on its Helix projects,
+so it can do only what you could do on the website. The same endpoint serves Helix
+Cloud's tools; see [Helix Cloud MCP](/database/helix-cloud/connect/mcp).
+
+For agents that should know Foundry's tools well, add Helix's agent skills:
+
+```bash
+npx skills add HelixDB/skills
+```
+
+`helix-foundry-mcp` covers reading and asking, and `helix-foundry-actions-mcp` the
+changes and their confirmations.
+
+### Set up a workspace with your agent
+
+A new workspace opens on its first ontology's steps. **Set up with your agent**, at the
+top of that page and on an unfinished ontology's overview, copies a prompt for Claude
+Code, Codex or another agent with the Helix MCP. It says how to connect the MCP, where
+the workspace's setup stands, and the steps left, and the agent asks you before each
+change it makes.
+
+## What your agent can read
+
+| Tools | What they read |
+| --- | --- |
+| `helix_list_workspaces`, `helix_foundry_list_ontologies`, `helix_foundry_get_ontology` | Your workspaces, their ontologies, and an ontology's database, current version, current load and setup |
+| `helix_foundry_get_version`, `helix_foundry_get_generation` | A version's definition, and a generation's goal, sources and outcome |
+| `helix_foundry_get_load`, `helix_foundry_read_graph` | A load, and what it wrote: up to 20 graph reads per call |
+| `helix_foundry_list_documents`, `helix_foundry_list_review_decisions` | The documents an ontology reads, and the review decisions settled on them |
+| `helix_foundry_list_connectors`, `helix_foundry_list_connector_kinds`, `helix_foundry_list_syncs`, `helix_foundry_get_sync` | The workspace's connections and their syncs, and the kinds of source it can add |
+| `helix_foundry_read_guide` | Foundry's own guide to these tools |
+
+Reading a load, through the graph or through Ask, needs **Query read** on the
+database's Helix project, as on the website.
+
+## Ask questions
+
+`helix_foundry_ask` asks an ontology's load a question in plain language, as
+[Ask](/foundry/ask/ask-questions) does, and waits up to 25 seconds for the answer. A
+longer question carries on: the agent follows it with `helix_foundry_get_question`, reads
+its steps with `helix_foundry_list_question_events`, and stops it with
+`helix_foundry_cancel_question`. `helix_foundry_list_questions` lists the ontology's
+questions. Questions asked through the MCP count against the same hourly limit and
+monthly budget as Ask's.
+
+## Changes, with a confirmation
+
+Every change takes two calls. `helix_prepare_foundry_operation` checks the change and
+returns a confirmation for it: one-time, valid for five minutes, and bound to that
+operation, its target and its exact payload. `helix_execute_foundry_operation` uses the
+confirmation and makes the change once. Agents with Helix's skills show you what they
+are about to do and ask before they execute it.
+
+| Operation | Does |
+| --- | --- |
+| `create_ontology` | Creates an ontology on a Helix database, with its first draft |
+| `generate_ontology` | Asks Foundry's agent for a new draft, from the tables, API sources and document sets you choose |
+| `revise_version` | Applies edits to a version as a new version, or previews them with `dry_run` |
+| `set_current_version` | Makes a version current |
+| `create_load`, `set_current_load` | Loads the current version, or makes another load current |
+| `sync_connector` | Syncs a connection now |
+| `create_event_source` | Creates an [API source](/foundry/data/api-sources) |
+| `upload_document` | Starts a document upload; the agent sends the file, then completes it with `helix_foundry_complete_document_upload` |
+| `create_document_set`, `update_document_set`, `move_document` | Makes, renames or describes a document set, or moves a document to another set |
+| `settle_review` | Settles a load's review, as on an entity's page |
+
+A change is refused for the same reasons as on the website: your role, the database's
+project rights, a sync or generation already running, the
+[workspace's hourly generations](/foundry/reference/limits#generations), or the month's
+spending caps. Making a version current is refused if someone moved the current
+version since the agent read it.
+
+## Connectors stay on the website
+
+An agent never handles a connector's credentials. When you ask it to connect a source,
+`helix_foundry_connector_link` gives it a link to Foundry's **Add data** form for that
+kind, in your workspace, such as
+`https://foundry.helix-db.com/data?add=stripe&workspace=<id>`. Open the link, follow the
+form's steps, and the agent carries on once the connection has synced.
+
+[API sources](/foundry/data/api-sources) hold no credentials, so an agent can create one
+and send it pieces with `helix_foundry_send_pieces`.
+
+## Service credentials
+
+For an agent that runs without a person, such as in CI, use a Helix
+[service credential](/cli/command-reference/service-credential) (`hlxs_…`) as the MCP's
+bearer token instead of signing in: `--header "Authorization: Bearer hlxs_…"` for Claude
+Code, or `bearer_token_env_var` in Codex's MCP config. Keep it in a secret store, never
+in a prompt or a repository.
+
+A service credential reaches only the ontologies whose database is in a project it is
+granted, and only an ontology a person has set up.
+
+| A service credential with | Can |
+| --- | --- |
+| **query-read** | Read those ontologies, their versions, loads, documents and graph, and ask them questions |
+| **query-write** as well | Also make a version or load current, load, revise a version, and upload, move and organise documents |
+
+It can't list or sync connections, generate drafts, create ontologies or API sources,
+or settle reviews: those need a person.
+
+An [API source's send token](/foundry/data/api-sources#send-tokens) (`hx_ev_…`) works as a
+bearer token too, and sees only `helix_foundry_send_pieces`, for its own source.
+
+## Report a problem
+
+`helix_feedback` sends Helix a bug, a missing capability or a confusing result, one
+call per problem, without your data. Helix's skills have agents use it when something
+goes wrong. Each caller can send 20 an hour, of up to 4,096 bytes each.
+
+## Next steps
+
+    Send your app's or agent's data to Foundry.
+
+    What Ask reads, and its limits.
+
+# Members and roles
+
+Page type: Guide
+
+Everyone in a workspace shares its data, documents, ontologies and plan. Foundry uses the
+workspace's Helix Cloud members and roles, so someone you add in either place has access
+in both.
+
+## See the members
+
+**Settings** → **Members** lists everyone in the workspace with their role and when they
+joined.
+
+## Invite people
+
+Owners and admins select **Invite people**, enter an email address and choose a role:
+
+- **Member** sees everything in the workspace.
+- **Admin** also connects data, invites people and manages billing.
+
+The invitation arrives by email and is accepted through Helix. To make someone an owner,
+change a role, remove someone or manage pending invitations, use the
+[Helix dashboard](https://helix-db.com/login).
+
+## What each role can do
+
+| Action | Owner | Admin | Member |
+| --- | :---: | :---: | :---: |
+| See connections, documents, ontologies, versions, loads, the plan and usage | ✓ | ✓ | ✓ |
+| Ask questions, explore and read records | ✓ | ✓ | With **Query read** on the database's project |
+| Add, sync, edit and delete connections | ✓ | ✓ | |
+| Create API sources, and make and revoke their send tokens | ✓ | ✓ | |
+| Upload, move, rename and delete documents and sets | ✓ | ✓ | |
+| Arrange the Connectors explorer for the workspace | ✓ | ✓ | |
+| Create and delete ontologies | ✓ | ✓ | |
+| Generate, edit versions, make them current, load and settle reviews | ✓ | ✓ | |
+| Invite people | ✓ | ✓ | |
+| Upgrade, switch, cancel and manage billing | ✓ | ✓ | |
+| Choose where the workspace's AI runs, and bring its own key | ✓ | | |
+
+Reading what a load wrote, in the Explorer, Records, Ask and a document's text in an
+ontology, needs **Query read** on the database's Helix project; grant it in the Helix
+dashboard. Creating or deleting an ontology and loading also need write access to that
+project.
+
+An agent you connect through the [Helix MCP](/foundry/agents/helix-mcp) acts with your
+role and rights: it can do only what the table allows you, and it never adds connections,
+deletes anything, invites people or changes billing.
+
+## Next steps
+
+    Compare Free, Pro and Max.
+
+    Switch workspaces and find your way around.
+
+# Plans and billing
+
+Page type: Guide
+
+Each workspace has one Foundry plan, billed monthly and separately from Helix Cloud.
+Owners and admins change it in **Settings** → **Plan & billing**; members see which plan
+the workspace holds.
+
+| | Free | Pro | Max |
+| --- | --- | --- | --- |
+| Price | $0 | $100 a month | $500 a month |
+| Every connector: apps, PostgreSQL, MySQL, Amazon S3 and API sources | ✓ | ✓ | ✓ |
+| Ontology generation, versions, loads and Ask | ✓ | ✓ | ✓ |
+| [Scheduled syncs](/foundry/data/connect-data#syncs-on-a-schedule) | Daily | Hourly, reading only what changed | Every 15 minutes, reading only what changed |
+| [Automatic refreshes](/foundry/ontologies/load-data#automatic-refreshes) | Daily at most | Hourly at most | Every 15 minutes at most |
+| Your own [Anthropic key](/foundry/workspace/ai-models) | | ✓ | ✓ |
+
+Max includes everything in Pro, and will add more. The monthly
+[spending caps](/foundry/workspace/usage) on loads and questions are the same on every
+plan.
+
+## Upgrade
+
+## Cancel or resume
+
+Select **Cancel Pro** (or **Cancel Max**) and confirm. The plan stays on until the end
+of the period, then the workspace moves to Free: its connections sync once a day, and
+if it runs on its own model key, its AI work pauses until an owner chooses **Default**
+or the workspace is on Pro again (see [AI models](/foundry/workspace/ai-models#if-the-workspace-leaves-pro)).
+Until then, **Resume Pro** (or **Resume Max**) undoes the cancellation.
+
+## Manage payment and invoices
+
+Select **Manage billing** to open the Stripe billing portal for the workspace: payment
+methods, invoices and billing details. When an invoice isn't paid, the page says so and
+offers **Update payment method**; cancelling and switching wait until it's paid.
+
+## Next steps
+
+    This month's AI spend, against its caps.
+
+    Who can change the plan.
+
+# AI models
+
+Page type: Guide
+
+Foundry uses AI models to draft ontologies, read documents into loads, check the facts
+it finds, and answer questions. **Settings** → **AI models** says where they run. Owners
+choose; everyone else in the workspace sees the choice.
+
+## Default
+
+**Default** runs on hosted providers through Helix, and you pay for what you use. Every
+workspace starts on it, and it is there on every plan. Today it runs on Anthropic's
+Claude models.
+
+## Your own Anthropic key
+
+On Foundry Pro or Max, an owner can run the workspace's AI on the workspace's own
+Anthropic API key instead, under the terms of its Anthropic account.
+
+    Select **Test and save** and confirm. Foundry tests the key and models before it uses
+    them: the page follows the test and says when it passed, or why it failed. Until it
+    passes, the setting before stays in force.
+
+From then on, new drafts, document reads and questions run on your key. Documents are
+read again on their next load, at your key's cost. To go back, choose **Default** and
+select **Use the default**; it takes effect at once.
+
+Foundry keeps the key encrypted and never shows it again. Spend on your own key counts
+toward the workspace's [monthly caps](/foundry/workspace/usage) all the same. On Free,
+choosing Claude says that bringing your own model key needs Foundry Pro, with a link to
+upgrade.
+
+### If the workspace leaves Pro
+
+A workspace that moves to Free while it runs on its own key is paused: its drafts,
+document reads and questions are refused until it is on Pro or Max again, or an owner
+chooses **Default**. The page says so.
+
+## Who can change it
+
+Only owners. Admins and members see where the workspace's AI runs.
+
+## Next steps
+
+    This month's AI spend, against its caps.
+
+    Upgrade to Pro or Max.
+
+# Usage and spending caps
+
+Page type: Guide
+
+Reading documents into loads and answering questions use AI models, so they cost money;
+reading tables doesn't. Each has a monthly cap per workspace, the same on every plan.
+Select your name at the foot of the sidebar: **Usage**, in the account menu, shows what
+the workspace has spent this month.
+
+| Row | What it counts | Cap each month |
+| --- | --- | --- |
+| **This month** | Everything below, once | |
+| **Loads** | Reading documents, and API sources' pieces, into your ontologies' loads | $50 |
+| **API sources** | Part of Loads: extracting API sources' pieces that no one started a load for | $20 |
+| **Questions** | Answering questions in Ask and through the Helix MCP | $15 |
+
+Each row's bar fills as the month's spend nears its cap. Point at a row for what it
+counts; point at the total for the day the caps start again, the first of each month
+(UTC). Everyone in the workspace sees it. Spend on the workspace's
+[own model key](/foundry/workspace/ai-models) counts toward the caps too.
+
+## When a cap is reached
+
+| Cap | What happens |
+| --- | --- |
+| A load: $10 | The load stops **Partial**, with its tables written. The documents it didn't reach are read into it once it's current and the month has budget. |
+| Loads: $50 a month | New loads are refused, and new documents aren't read, until next month. Work no person started, such as [refreshes](/foundry/ontologies/load-data#automatic-refreshes) and reading documents as they arrive, stops at $40, which leaves the last $10 for loads you start. |
+| API sources: $5 per source, $20 a month | Extraction no person started stops for the month: new pieces wait for next month, and ontologies keep the pieces they have. |
+| A question: $0.50 | The question stops at its limit. Ask something narrower. |
+| Questions: $15 a month | A question waits until the month's budget can hold it, or you cancel it. |
+
+A refresh that runs with the month spent still writes your tables, and reuses what
+earlier loads read from documents at no cost.
+
+Drafting an ontology isn't in Usage: each generation attempt stops at $5.
+
+## Next steps
+
+    Every limit in one place.
+
+    Where the workspace's AI runs.
+
+# Helix Foundry limits
+
+Page type: Reference
+
+The limits Foundry applies, by area. Each guide explains what happens when you reach one.
+
+## Connections
+
+| Limit | Value |
+| --- | --- |
+| Scheduled syncs | Free once a day, Pro every hour, Max every 15 minutes |
+| Rows per table | 2,000,000, and 2 GiB |
+| One sync attempt | 2 hours |
+| Attempts per sync | 3 |
+| Syncs running per connection | 1 |
+| Size of an S3 connection's tables, per sync | 20 GB |
+| PostHog event history | 1 to 365 days, 30 by default |
+| GitHub repositories | Up to 100 when none are named |
+| Documents a connection keeps, per set | The newest 1,000 |
+| Your folders in the Connectors explorer | 50, at the root, holding connections only |
+| Folder name | 120 characters |
+
+## API sources
+
+| Limit | Value |
+| --- | --- |
+| API sources per workspace | 20 |
+| Live send tokens per source | 10 |
+| Pieces per send | 500, with at most 1 MiB of data together |
+| Request body over HTTP | 2 MiB, arriving within 15 seconds |
+| Piece | 256 KiB of data, 64 levels deep; an id of 1 to 128 characters |
+| Fields per source | 200 |
+| Sends per source | 5 a second, in bursts of up to 20 |
+| Sends per workspace | 20 a second, in bursts of up to 50 |
+| Per workspace, per UTC day | 200,000 pieces and 1 GiB of data |
+| Rows per source | 2,000,000, and 2 GiB |
+| Sync after a send | About a minute |
+| Pieces read by entity extraction | The newest 500 |
+| Extraction no person started | $5 a month per source, $20 a month per workspace |
+
+## Documents
+
+| Limit | Value |
+| --- | --- |
+| File types | `.md`, `.markdown`, `.mdx`, `.txt`, `.pdf`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.ndjson`, `.parquet` |
+| Formats ontologies read | All of them: text and PDFs for names and facts, table files as tables |
+| Markdown, MDX and text | 1 byte to 1 MiB |
+| PDF | 3 MiB and 150 pages; its text at most 1 MiB. Scanned PDFs have no text to read. |
+| CSV, TSV, JSON, JSONL and Parquet | 3 MiB; up to 1,000 columns and 1 MiB per row or line |
+| Uploaded documents per workspace | 200; connections' documents don't count |
+| Name | 255 characters, no slash, backslash or control character |
+| Document sets per workspace | 20 |
+| Set name | 120 characters, unique in the workspace ignoring case and accents |
+| Set description | 1,000 characters |
+
+## Generations
+
+| Limit | Value |
+| --- | --- |
+| Goal | 2,000 characters |
+| Tables per generation | 50, synced tables and table files together |
+| Document sets per generation | 20 |
+| Documents the agent reads | Up to 5 of the newest in each set |
+| Attempts per generation | 3 |
+| Spend per attempt | $5 |
+| Generations running per ontology | 1 |
+| Generations and version edits per workspace | 10 an hour |
+
+## Loads
+
+| Limit | Value |
+| --- | --- |
+| Document reading spend, per load | $10 |
+| Document reading spend, per workspace each month | $50, of which work no person started may spend $40 |
+| Automatic refreshes | At most once per the plan's sync interval |
+| Loads kept per ontology | 5: the current one and the four newest others |
+| Loads or extracts running per ontology | 1 |
+
+## Ask
+
+| Limit | Value |
+| --- | --- |
+| Per question | $0.50, 20 steps and 4 minutes |
+| Question | 4,000 characters |
+| Questions running per workspace | 2 |
+| Questions per workspace, per hour | 30 |
+| Spend per workspace, per month | $15, apart from loads' |
+
+## Helix MCP
+
+| Limit | Value |
+| --- | --- |
+| A confirmation for a change | One use, within 5 minutes |
+| Graph reads per call | 1 to 20 |
+| `helix_foundry_ask` waits for an answer | 25 seconds; longer questions carry on |
+| Feedback | 20 an hour per caller, 4,096 bytes each |
+
+## Explorer and Records
+
+| Limit | Value |
+| --- | --- |
+| First view of a load | A connected sample of about 320 records |
+| Records per page | 50 |
+| Records reachable by paging, per type | 10,000 |
+| Matches counted by a search or filter | 1,000 |
+| Records compared per type, per side | 5,000 |
+
+## Ontologies
+
+| Limit | Value |
+| --- | --- |
+| Ontologies per database | 1 |
+| Databases per ontology | 1 |
+
+## Next steps
+
+    What to do when you reach a limit.
+
+    This month's spend against each cap.
+
+# Troubleshooting Helix Foundry
+
+Page type: Troubleshooting
+
+Find the message Foundry shows, then its cause and fix.
+
+## Sign-in
+
+| Message | Cause and fix |
+| --- | --- |
+| Your company signs in with single sign-on. | Foundry doesn't offer single sign-on yet. Sign in to the [Helix dashboard](https://helix-db.com/login) instead. |
+| Your email isn't verified yet. | Verify the email with your provider, or continue with another provider. |
+| This account can't sign in here. | The environment doesn't accept this account. Sign in with your work account, or ask Helix for access. |
+| Sign-in couldn't start. | Choose a provider to try again. |
+| Sign-in is unavailable right now. | Helix couldn't start sign-in. Try again in a moment. |
+| Sign-in didn't finish. | The sign-in link expired or was already used. Try again. |
+| Couldn't load your workspaces. | Foundry couldn't reach Helix. Select **Retry**; **Sign out** is offered on the same page. |
+
+## Connections and syncs
+
+| Message or state | Cause and fix |
+| --- | --- |
+| The test fails | The credential is wrong, revoked or lacks read access. Create it again with the permissions in [Connectors](/foundry/data/connectors). |
+| This key cannot read: … | The key can't read those objects, so they're skipped. Add **Read** for them and test again, or carry on without them. |
+| The database can't be reached | The database must accept connections from Helix's network. Allow the outbound addresses the form lists, and check the host and port. Private addresses are refused. |
+| A TLS error | Foundry verifies the server's certificate. Add the CA certificate under **Connection options**, or choose **No TLS** if the database doesn't offer it. |
+| this key can't read events, so on Pro and Max every sync reads every object in full | Stripe: give the key **Read** on Events, so syncs read only what changed. It syncs either way. |
+| table … has more than 2000000 rows; choose fewer tables | A table is over the [row limit](/foundry/reference/limits#connections). For a database, edit the connection and leave the table out; for PostHog, shorten the event history. |
+| Syncs fail after a table changed | A selected database table was dropped or renamed. Edit the connection and test it again. |
+| A sync of this connector is already queued or running | Wait for it to finish before syncing, editing or deleting. |
+| **Connect** is off for S3 | The chosen tables are over the [20 GB a connection syncs](/foundry/reference/limits#connections). Choose fewer tables, or a narrower folder. |
+| The tree shows its usual order and can't be rearranged | A newer version of Foundry arranged it. Reload the page. |
+
+## API sources
+
+| Message or state | Cause and fix |
+| --- | --- |
+| Waiting for its first pieces | Nothing has been sent to the source yet. Make a send token, or copy the prompt for your agent, from its **Send pieces** panel. |
+| 401 over HTTP, or the MCP refuses the send token | The token is missing, wrong or revoked. Make a new one on the source's page; Foundry never shows a token twice. |
+| 409, the source is full | It holds 2,000,000 rows or 2 GiB. Send new pieces to a new API source. |
+| A send is refused for a field's type | A field keeps the JSON type it first had. Send the field with that type, or `null`. |
+| 409, the source has all the fields it may have | A source holds at most 200 fields. Send the pieces to a new source. |
+| 429 | Too many sends at once, or the workspace's pieces for the day. Wait as `Retry-After` says, then retry with the same `client_token`. |
+| The client_token was already used | A retry must send the same pieces. Send new pieces with a new `client_token`. |
+| An API source can't be chosen in Generate | Its first pieces haven't synced yet. Wait about a minute after the first send. |
+| Extraction is paused | The source's $5, or the workspace's $20, for extraction no person started is spent this month. New pieces wait for next month; a load you start reads them. |
+
+## Documents
+
+| Message or state | Cause and fix |
+| --- | --- |
+| Already uploaded: it's in … | The workspace has this file already, in the set named. Foundry keeps one copy. |
+| Only Markdown, MDX, text, JSON, CSV, TSV, JSONL, Parquet, or PDF files can be uploaded. | Save the file in one of these formats, with its extension, uncompressed. |
+| The file is larger than 1.0 MiB, or 3.0 MiB | Text is up to 1 MiB, and PDFs and table files up to 3 MiB. Split it into smaller documents. |
+| Reading its text, or Reading its rows | Foundry reads a PDF's text, or a table file's rows, once after the upload. Wait a moment; a generation started meanwhile leaves the file out. |
+| Scanned PDF: no text to read | The PDF has no text layer, so ontologies can't read it. Upload a PDF with its text, such as one exported from the original, or the text itself. |
+| Ontologies can't read it, for a PDF | The PDF is encrypted, damaged or longer than 150 pages. Upload an unlocked copy, or split it. |
+| A workspace holds up to 200 documents | Delete uploaded documents you no longer need in Connectors. Connections' documents don't count. |
+| A workspace holds up to 20 document sets | Delete an empty set, or move documents into the sets you have. |
+| There is a set named … already | Set names are unique in the workspace, ignoring case and accents. Choose another. |
+| A set's **Delete** is off | The set still holds documents. Move or delete them first. |
+| Not read by its version | The document's set is in the version's reads, but no route reads it, so loads store it without reading it. [Edit the version](/foundry/ontologies/generate-and-version#edit-a-version) to route it, or generate again. |
+| An ontology doesn't read a new set | A version reads the sets its generation picked. Generate a version that picks the set, or edit the version to route it, then load it. |
+| … doesn't read it yet: you can't write to its database | You can't write to that ontology's database project, so the upload didn't start its reading. Its next load reads it. |
+| Its current load holds it, but its version doesn't read … | The document is in a set the current version doesn't read: it moved, or another version became current. The next load drops it. |
+
+## Ontologies and generations
+
+| Message or state | Cause and fix |
+| --- | --- |
+| Retrying | An attempt failed for a passing reason and Foundry will try again; the page says why and when. Nothing to do. |
+| Failed | The generation failed for good. Open it from **Schema versions** and select **Try again** to reopen the form with the same goal, connectors and document sets; choosing fewer tables or a clearer goal helps. |
+| A generation reads at most 20 document sets | Untick a set to choose another. |
+| One generation covers at most 50 tables | Choose fewer connectors or sets: table files count as tables. |
+| A workspace may start 10 ontology generations an hour | Generations and version edits are capped per workspace. Try again later. |
+| Syncing… you can continue once it's synced. | The connection you added on New ontology is on its first sync. Wait for it, or choose a connection that has synced. |
+| … is used by …. Choose another. | A database holds one ontology. Choose another database, or create a new one. |
+| Making a version current is refused | Someone else made another version current at the same time. The page now shows it; make yours current again if you still want it. |
+| A new database needs a Helix plan | The workspace has no Helix subscription. Select **Open Helix billing** to add one, or **Use an existing one** for a database you already have. |
+| The database is starting | A new database takes a few minutes to start. Pages read it again by themselves; a load waits for it. |
+| The ontology shows no database contents | You can't read the database's Helix project. Ask an owner for access to it. |
+
+## Loads
+
+| Message or state | Cause and fix |
+| --- | --- |
+| **Load data** isn't offered | Only a current agent draft the agent finished can be loaded. [Generate](/foundry/ontologies/generate-and-version) one and make it current. |
+| Partial, or Stopped at the cap | Reading documents reached the [spending cap](/foundry/ontologies/load-data#spending-and-limits). The documents it didn't reach are read into it once it's current and the month has budget. |
+| The workspace has spent this month's $50.00 of loads | New loads are refused until next month. [Usage](/foundry/workspace/usage) shows the month's spend. |
+| The tables synced again during the load | A source changed under the load. Start a new load to write the new snapshot. |
+| A document needs review | The load couldn't settle something in it, such as an unknown or ambiguous name, a quote it couldn't verify, or a fact that conflicts with your tables. Open the document to see why, and [settle it](/foundry/explore/records-and-entities#settle-a-review). |
+| The load reads no documents | Its version reads no document sets. Generate a version that picks some. |
+| Delete failed | Select **Retry delete** in the load's menu in **Data loads**. |
+
+## Explorer and Ask
+
+| Message or state | Cause and fix |
+| --- | --- |
+| Nothing loaded yet | The ontology has no load. Select **Load data** to [load](/foundry/ontologies/load-data) its current version, or **Finish setting up** when no version is current. The Explorer, Records and entity pages say the same. |
+| No ontologies yet | The workspace has no ontology. Select **Create an ontology**, or ask an owner or admin. |
+| Queries are paused: this workspace has no active Helix plan | The Explorer, Records and entity pages can't read the database. Select **Choose a plan** for the Helix dashboard's billing. **Queries are paused for billing** means the plan's billing stopped them: **Open Helix billing**. |
+| … can't be asked about until it's written | The load is still writing. Wait for it to finish. |
+| You can't read this ontology's database | Ask reads the database a load wrote. Ask an owner for **Query read** on its Helix project. |
+| This ontology can't answer that | What the load holds doesn't say. Select **Draft a new version with this** to generate a version that can. |
+| Stopped at this question's limit | It used a question's $0.50, 20 steps or 4 minutes. Ask something narrower. |
+| Waiting for this month's questions budget | The workspace's questions budget is spent. The question runs once the month allows it, or cancel it. |
+| The workspace has asked 30 questions in the last hour | Try again later. |
+
+## AI models
+
+| Message or state | Cause and fix |
+| --- | --- |
+| Bringing your own model key needs Foundry Pro | Your own key needs [Pro or Max](/foundry/workspace/plans-and-billing). **Default** works on every plan. |
+| Paused: this workspace is off Foundry Pro | It left Pro while on its own key, so drafts, document reads and questions are refused. Upgrade again, or an owner chooses **Default** in [AI models](/foundry/workspace/ai-models). |
+| Claude refused the API key. | The key is wrong or revoked. Paste a working key and select **Test and save** again; the setting before stays meanwhile. |
+| The API key may not use … | The key's Anthropic account can't use that model. Choose another, or keep the recommended ones. |
+| The Claude account is out of credit or quota. | Add credit in Anthropic's console, then test again. |
+
+## Helix MCP
+
+| Message or state | Cause and fix |
+| --- | --- |
+| The agent can't connect a source | Agents never handle credentials. Open the link the agent gives you, `…/data?add=<kind>`, and connect it there. |
+| A confirmation is refused | It was used already, is over five minutes old, or doesn't match the change. Have the agent prepare the change again. |
+| `resource_exhausted` | A limit was reached, such as the hourly questions or generations, or a send rate. Wait as the message says. |
+| A service credential sees no ontology | It reaches only ontologies whose database is in a project it's granted, and that a person has set up. Grant **query-read** on the project. |
+
+## Next steps
+
+    Every limit in one place.
+
+    What each source needs.
+
 # Getting started with HelixDB CLI
 
 Page type: Tutorial
@@ -7173,6 +9791,12 @@ Use the manual flow below when you want to scaffold and run each step yourself.
     `--warm` to populate the standalone process caches while returning the normal
     response.
 
+    The same count in Cypher:
+
+    ```bash
+    helix cypher dev -e 'MATCH (u:User) RETURN count(u) AS users'
+    ```
+
 Default local storage is in-memory. `helix stop` or `helix restart` wipes in-memory data — keep your seed data in JSON request files so you can replay it, or use `--disk` for persistent local storage.
 
 ## Persistent local storage
@@ -7239,6 +9863,9 @@ $EDITOR examples/request.json
 
 # Send the request
 helix query dev --file examples/request.json
+
+# Or run a Cypher statement from a file you write
+helix cypher dev --file examples/users.cypher
 
 # Tail container logs in another shell
 helix logs dev --follow
@@ -7493,8 +10120,10 @@ They never accept or store application database keys or service credentials.
 | [`helix stop`](/cli/command-reference/stop) | Local | Stop a local instance and remove its containers |
 | [`helix restart`](/cli/command-reference/restart) | Local | Restart a local instance |
 | [`helix status`](/cli/command-reference/status) | Local, Cloud | Inspect runtime or database status |
+| [`helix doctor`](/cli/command-reference/doctor) | Local, Cloud | Check an instance's setup and recent queries' index use |
 | [`helix logs`](/cli/command-reference/logs) | Local, Cloud | Follow local logs or list Cloud query errors |
 | [`helix query`](/cli/command-reference/query) | Local, Cloud | Execute one v3 JSON/SDK query |
+| [`helix cypher`](/cli/command-reference/cypher) | Local | Execute or explain one Cypher statement |
 | [`helix shell`](/cli/command-reference/shell) | Local, Cloud | Execute line-oriented v3 JSON queries |
 | [`helix explorer`](/cli/command-reference/explorer) | Local | Browse a running local instance in the graph Explorer |
 | [`helix prune`](/cli/command-reference/prune) | Local | Remove Helix-owned local containers, volumes, and state |
@@ -7926,6 +10555,109 @@ helix cluster indexes
 - [`helix project`](/cli/command-reference/project) — find and link the owning project.
 - [Helix Cloud workflow](/cli/workflows/helix_cloud) — end-to-end Cloud usage.
 
+# helix cypher
+
+Page type: Reference
+
+Send one Cypher statement to a local instance and print the JSON response, or plan it
+without running it. Local only.
+
+## Usage
+
+```bash
+helix cypher [INSTANCE] -e '<statement>' [--parameters '<json-object>']
+helix cypher [INSTANCE] --file <statement.cypher> [--parameters '<json-object>']
+helix cypher [INSTANCE] -e '<statement>' --explain
+```
+
+Exactly one of `-e` and `--file` is required. See the [Cypher guide](/database/helix-db/query-guides/cypher)
+for the supported language profile.
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Local instance name from `helix.toml`. See [Target resolution](#target-resolution) for the default. |
+
+## Options
+
+### Input (pick one)
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-e`, `--query <QUERY>` | The Cypher statement. | — |
+| `-f`, `--file <FILE>` | Read one Cypher statement from a UTF-8 file. | — |
+
+### Statement
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--parameters <JSON>` | A JSON object of parameter values, such as `'{"name":"Ada"}'`. Lossless tagged values such as `{"$type":"integer","value":"9223372036854775807"}` pass through unchanged. | `{}` |
+| `--explain` | Plan the statement with `POST /v2/cypher/explain` instead of running it. Explaining a write changes nothing. | Off |
+
+### Connection
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--host <HOST>` | Override the host. | `localhost` |
+| `--port <PORT>` | Override the port. | The instance's port in `helix.toml` |
+
+### Output
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--json` | Print the response as compact JSON. | Off (highlighted, pretty-printed) |
+
+## Behavior
+
+### Target resolution
+
+- With no `INSTANCE`, the CLI uses the `dev` instance, then the only instance, then a picker in
+  a terminal.
+- The instance must be local. A Cloud instance fails with
+  `Cypher CLI requests currently require a local instance`; send Cypher to Helix Cloud through an
+  SDK or `POST /v2/cypher`.
+
+### Requests
+
+- The statement posts to the local, auth-disabled `/v2/cypher`, or `/v2/cypher/explain` with
+  `--explain`.
+- `--parameters` must be a JSON object; any other JSON value fails before the request is sent.
+- A `404` means the server predates Cypher, and the error asks you to upgrade it. Cypher needs
+  the `ghcr.io/helixdb/helixdb:v0.0.13` image or later.
+
+### Output
+
+- A successful response goes to stdout as syntax-highlighted, pretty-printed JSON with
+  `columns` and `rows`, or the plan under `--explain`. `--json` prints compact JSON instead.
+- A non-2xx response fails with the HTTP status and the error body, including the Cypher error
+  `error`, `msg`, and `details`.
+
+## Examples
+
+```bash
+# Run a statement against the default local instance
+helix cypher -e 'MATCH (u:User) RETURN u.name AS name ORDER BY name LIMIT 10'
+
+# Pass parameters
+helix cypher -e 'MATCH (u:User {email: $email}) RETURN u.name AS name' --parameters '{"email":"ada@example.com"}'
+
+# Run a statement from a file against a named instance
+helix cypher dev --file queries/active-users.cypher --parameters '{"status":"active"}'
+
+# Show the selected plan without running the statement
+helix cypher --explain -e 'MATCH (u:User {email: $email}) RETURN u' --parameters '{"email":"ada@example.com"}'
+
+# Print one line of JSON for scripts
+helix cypher -e 'MATCH (n) RETURN count(n) AS nodes' --json
+```
+
+## Related
+
+- [Cypher guide](/database/helix-db/query-guides/cypher): supported clauses, functions, and limits.
+- [`helix query`](/cli/command-reference/query): send a native v3 JSON or TypeScript DSL query.
+- [`helix start`](/cli/command-reference/start): start the local instance you query.
+
 # helix database
 
 Page type: Reference
@@ -8071,6 +10803,101 @@ helix delete staging --yes
 - [`helix prune`](/cli/command-reference/prune) — clean up local state but keep the instance in `helix.toml`.
 - [`helix add`](/cli/command-reference/add) — add a replacement instance.
 - [CLI configuration](/cli/configuration) — the `helix.toml` format.
+
+# helix doctor
+
+Page type: Reference
+
+Check how an instance is set up and what to change. Doctor checks what the CLI can see itself,
+then asks the server for its own checks: whether data is durable, whether the S3 bucket is in the
+server's region, whether the disk cache is on local NVMe rather than network block storage like
+EBS, whether caches fit in memory, and whether recent queries used indexes. Local, self-hosted,
+and Cloud.
+
+Doctor is read-only. It never changes the instance, its data, its caches, or `helix.toml`, and it
+never starts a container.
+
+## Usage
+
+```bash
+helix doctor [INSTANCE]
+helix doctor --url <URL>
+```
+
+## Arguments
+
+| Argument | Description |
+| --- | --- |
+| `INSTANCE` | Instance or typed database (`cluster:<id>`, `tenant:<id>`). Defaults to `dev`, else the only instance, else a prompt. |
+
+## Options
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--url <URL>` | Diagnose the server at this base URL instead, e.g. a self-hosted server. No `helix.toml` is needed. Cannot be combined with `INSTANCE`. | — |
+| `--json` | Print the report as JSON on stdout. | Off |
+| `-v`, `--verbose` | Also print the details of passing checks. | Off |
+| `--quiet` | Print only warnings, failures, and the summary. | Off |
+
+## Checks
+
+Each check passes, warns, fails, or is skipped with its reason. A warning means the setup works
+but costs performance or money; a failure means it risks losing data or cannot work. Warnings and
+failures print a fix.
+
+| Check | What it looks at |
+| --- | --- |
+| `cli.version` | Whether a newer CLI is released. |
+| `runtime.daemon`, `runtime.container`, `runtime.image` | Local instances: Docker or Podman answers, the container is running, and its image is not older than the one this CLI ships with. |
+| `server.reachable` | The server answers `GET /healthz`. |
+| `storage.durability` | Data is in S3 or on disk, not in memory only. |
+| `storage.data_device` | `HELIX_DATA_DIR` is on persistent storage: not tmpfs, the container's writable layer, or ephemeral instance storage. |
+| `storage.s3_region` | The S3 bucket is in the server's AWS region. The server's region comes from EC2 or ECS metadata; in a container on EC2 that needs an IMDSv2 hop limit of 2. |
+| `storage.s3_latency` | The median of five S3 round trips from the server is under 50 ms. |
+| `cache.device` | The disk cache is on a local SSD or NVMe instance storage, not network block storage (EBS, Persistent Disk), a network filesystem, tmpfs, or the container's writable layer. |
+| `cache.space` | `HELIX_DISK_CACHE_BYTES` fits the cache's filesystem. |
+| `cache.warm` | S3 storage warms the disk cache after a restart. |
+| `resources.memory` | Cache budgets take at most 70% of the memory the server may use. |
+| `indexes.publication` | Vector and text index publication is caught up and holds back no entries. |
+| `queries.missing_indexes` | Recent queries filtered without the secondary index the planner recommends. The fix is the `helix query` command that creates each index. |
+| `queries.unbounded_scans` | Recent queries read every element of a label that no index would bound. |
+
+The query checks cover queries from the last 24 hours since the server started. A missing index
+stops being reported once the index is active. Queries that only count matches are not analyzed
+yet. Server checks need a server image with
+`GET /v2/diagnostics`; an older server reports `server.diagnostics` as skipped. Helix Cloud manages
+storage, caching, and regions, so a Cloud database reports `cloud.managed` as skipped.
+
+## Behavior
+
+- Prints `Helix doctor`, the target, and the server's uptime, then the checks grouped by area, and a
+  summary such as `Setup works, with room to improve · 2 warnings · 9 passed`.
+- Passing checks print one line; others also print their detail and fix.
+- Exits `1` when any check fails, after printing the report. Warnings alone exit `0`.
+- A local instance whose container is not running reports that, and skips the server checks.
+- `--json` prints an object with `target`, `uptime_secs` (when the server reported its checks),
+  `checks`, and `summary`. Each check has `id`, `category`, `status` (`pass`, `warn`, `fail`, or
+  `skip`), `summary`, and, when present, `detail` and `fix`. The server's own report is
+  [`GET /v2/diagnostics`](/database/helix-db/query-guides/http-api).
+
+## Examples
+
+```bash
+# Check the default instance
+helix doctor
+
+# Check a self-hosted server
+helix doctor --url http://10.0.1.5:8080
+
+# Machine-readable report for an agent or CI
+helix doctor --json
+```
+
+## Related
+
+- [`helix status`](/cli/command-reference/status) — show instance state.
+- [`helix logs`](/cli/command-reference/logs) — view server logs.
+- [Secondary indexes](/database/helix-db/query-guides/secondary-indexes) — create the indexes doctor recommends.
 
 # helix explorer
 

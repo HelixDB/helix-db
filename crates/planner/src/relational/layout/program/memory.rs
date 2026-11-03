@@ -66,7 +66,9 @@ impl RowProgram {
                     ));
                 plan.steps.iter().fold(bytes, |bytes, step| {
                     bytes.saturating_add(match step {
-                        r::MatchStep::Scan(_) | r::MatchStep::Expand { .. } => 0,
+                        r::MatchStep::Scan(_)
+                        | r::MatchStep::Expand { .. }
+                        | r::MatchStep::ScanRelationship { .. } => 0,
                         r::MatchStep::HashJoin {
                             property,
                             probe_property,

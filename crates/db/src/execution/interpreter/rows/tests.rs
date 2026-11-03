@@ -25,6 +25,7 @@ mod projection_ownership;
 mod projection_windows;
 mod property_admission;
 mod reference;
+mod relationship_scan;
 mod requirements;
 mod response_admission;
 mod row_layout;

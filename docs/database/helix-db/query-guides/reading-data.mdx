@@ -20,8 +20,11 @@ data you already know.
 | Edges with a label | `eWithLabel` / `e_with_label` |
 | Earlier named entry | `NodeRef.var(...)` / `NodeVar(...)` |
 
-Source predicates are eligible for index push-down. General `.where(...)` filters the
-current stream after its source.
+Source predicates are eligible for index push-down. Secondary indexes are defined per
+label, so a source must be scoped to a label to read one: `nWithLabelWhere` /
+`n_with_label_where`, or a `.where(...)` directly after `nWithLabel`. A source predicate
+without a label scans every node. A `.where(...)` later in a traversal filters the
+current stream.
 
 ## Read active users
 
@@ -128,28 +131,35 @@ helix.ReadQuery("active_users").
 }
 ```
 
+```cypher Cypher
+MATCH (u:User)
+WHERE u.status = 'active'
+WITH u LIMIT 25
+RETURN id(u) AS id, u.name AS name
+```
+
 </CodeGroup>
 
 ## Read by indexed property
 
-Use a source predicate when the property has a compatible index:
+Scope the source predicate to the indexed label, so the property read uses its index:
 
 <CodeGroup>
 
 ```rust Rust
-g().n_where(SourcePredicate::eq("email", "alice@example.com"))
+g().n_with_label_where("User", SourcePredicate::eq("email", "alice@example.com"))
 ```
 
 ```ts TypeScript
-g().nWhere(SourcePredicate.eq("email", "alice@example.com"))
+g().nWithLabelWhere("User", SourcePredicate.eq("email", "alice@example.com"))
 ```
 
 ```go Go
-helix.G().NWhere(helix.SourceEq("email", "alice@example.com"))
+helix.G().NWithLabelWhere("User", helix.SourceEq("email", "alice@example.com"))
 ```
 
 ```python Python
-g().n_where(SourcePredicate.eq("email", "alice@example.com"))
+g().n_with_label_where("User", SourcePredicate.eq("email", "alice@example.com"))
 ```
 
 ```json JSON
@@ -164,11 +174,23 @@ g().n_where(SourcePredicate.eq("email", "alice@example.com"))
           "root": {
             "nodes_where": {
               "predicate": {
-                "eq": {
-                  "left": { "property": "email" },
-                  "right": {
-                    "constant": { "string": "alice@example.com" }
-                  }
+                "and": {
+                  "predicates": [
+                    {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "User" } }
+                      }
+                    },
+                    {
+                      "eq": {
+                        "left": { "property": "email" },
+                        "right": {
+                          "constant": { "string": "alice@example.com" }
+                        }
+                      }
+                    }
+                  ]
                 }
               }
             }
@@ -179,6 +201,11 @@ g().n_where(SourcePredicate.eq("email", "alice@example.com"))
     }
   }
 }
+```
+
+```cypher Cypher
+MATCH (user:User {email: 'alice@example.com'})
+RETURN id(user) AS user
 ```
 
 </CodeGroup>

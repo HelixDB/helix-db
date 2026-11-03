@@ -571,7 +571,11 @@ async fn a_write_over_the_member_limit_on_its_own_fails_without_retry() {
         }
     ));
     assert!(!error.is_index_backpressure(), "{error}");
-    assert!(error.is_invalid_input(), "{error}");
+    assert_eq!(
+        error.error_code().failure_class(),
+        helix_ast::error_code::QueryFailureClass::InvalidRequest,
+        "{error}"
+    );
     assert_eq!(node_count(&db).await, 0, "the graph write rolled back");
     // Nothing stayed charged: writes within the limit are admitted.
     add_text(&db, "one").await.unwrap();
@@ -756,7 +760,10 @@ async fn oversized_operands_fail_before_commit_without_leaking_capacity() {
         error,
         HelixDbError::IndexOperationBatchTooLarge { limit: 64, .. }
     ));
-    assert!(error.is_invalid_input());
+    assert_eq!(
+        error.error_code().failure_class(),
+        helix_ast::error_code::QueryFailureClass::InvalidRequest
+    );
     assert_eq!(node_count(&db).await, 0);
     let text_target = target(&db, QueueFamily::Text).await;
     assert_eq!(

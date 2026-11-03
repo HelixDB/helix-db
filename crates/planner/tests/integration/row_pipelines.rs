@@ -200,14 +200,17 @@ proptest::proptest! {
     fn randomized_graph_plans_keep_every_edge_and_bound_memo_work(
         endpoints in proptest::collection::vec((0_usize..8,0_usize..8),0..16),
         incoming in proptest::collection::btree_set(0_u32..8,0..8),
+        scannable in proptest::collection::vec(proptest::bool::ANY,16),
         budget in 1_usize..16,
     ) {
         use helix_planner::{cost,optimizer,physical,rules};
+        let incoming=incoming.into_iter().map(r::Slot).collect::<std::collections::BTreeSet<_>>();
         let pattern=r::GraphPatternOrder::new(
             (0..8).map(|slot|r::PatternSource { slot:r::Slot(slot),rows:1_u64<<slot,access_cost:cost::CostVector::ZERO }).collect(),
             endpoints.iter().enumerate().map(|(i,(from,to))|r::PatternExpansion {
                 from:r::Slot(*from as u32),to:r::Slot(*to as u32),relationship:r::Slot(8+i as u32),forward_rows:2,reverse_rows:3,
-            }).collect(),incoming.into_iter().map(r::Slot).collect(),
+                scan:(scannable[i] && !incoming.contains(&r::Slot(*from as u32)) && !incoming.contains(&r::Slot(*to as u32))).then_some(r::RelationshipScan { edges:4, undirected:i%2==0 }),
+            }).collect(),incoming.clone(),
         ).unwrap();
         let mut ctx=context::PlannerContext::default();
         ctx.optimizer_limits.rule_fires=properties::PositiveUsize::at_least_one(budget);
@@ -219,9 +222,31 @@ proptest::proptest! {
             Err(_)=>{proptest::prop_assert!(result.metrics().guardrail_hit);&pattern}
         };
         let schedule=order.schedule(&ctx.storage);
-        let edges=schedule.steps.iter().filter_map(|step|match step {r::MatchStep::Expand{relationship,..}=>Some(*relationship), _=>None}).collect::<std::collections::BTreeSet<_>>();
+        let edges=schedule.steps.iter().filter_map(|step|match step {r::MatchStep::Expand{relationship,..}|r::MatchStep::ScanRelationship{relationship}=>Some(*relationship), _=>None}).collect::<std::collections::BTreeSet<_>>();
         proptest::prop_assert_eq!(edges.len(),endpoints.len());
         proptest::prop_assert!(schedule.steps.len()<=8+endpoints.len());
+        // Expansions start from a bound endpoint; scans bind three unbound slots.
+        let mut known=incoming;
+        for step in &schedule.steps {
+            match step {
+                r::MatchStep::Expand{from,to,relationship,..}=>{
+                    proptest::prop_assert!(known.contains(from));
+                    known.extend([*to,r::Slot(8+*relationship as u32)]);
+                }
+                r::MatchStep::ScanRelationship{relationship}=>{
+                    proptest::prop_assert!(scannable[*relationship]);
+                    let (from,to)=endpoints[*relationship];
+                    let slots=[r::Slot(from as u32),r::Slot(to as u32),r::Slot(8+*relationship as u32)];
+                    proptest::prop_assert!(slots.iter().all(|slot|!known.contains(slot)));
+                    known.extend(slots);
+                }
+                r::MatchStep::Scan(slot)=>{
+                    proptest::prop_assert!(!known.contains(slot));
+                    known.insert(*slot);
+                }
+                r::MatchStep::IndexLookup(_)|r::MatchStep::HashJoin{..}=>unreachable!("no lookups or joins"),
+            }
+        }
     }
 }
 

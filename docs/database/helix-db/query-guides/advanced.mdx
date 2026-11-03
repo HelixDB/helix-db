@@ -147,12 +147,23 @@ helix.ReadQuery("user_posts").
 }
 ```
 
+```cypher Cypher
+MATCH (user:User)
+WHERE user.username = 'alice'
+MATCH (user)-[:AUTHORED]->(post)
+RETURN id(post) AS id, post.title AS title
+```
+
 </CodeGroup>
 
 The condition serializes inside the named entry, not as a separate step. Other
 conditions test for an empty result (`varEmpty`), a minimum size (`varMinSize`), or
 the previous entry (`prevNotEmpty`). The first entry in a batch cannot depend on a
 previous result.
+
+Cypher has no batch conditions. In the Cypher tab, the second `MATCH` runs once for
+each user the first one finds, so the statement returns no rows when the user does
+not exist.
 
 ## Bound recursive work
 

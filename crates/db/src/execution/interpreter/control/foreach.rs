@@ -70,9 +70,10 @@ impl<'db> ExecutionContext<'db> {
             return query_parameter_frames(param, value);
         }
 
-        Err(HelixDbError::Query(format!(
-            "foreach parameter `{param}` is not bound"
-        )))
+        Err(HelixDbError::UnboundParameter {
+            used_as: crate::error::ParameterUse::ForEach,
+            name: param.to_string(),
+        })
     }
 }
 

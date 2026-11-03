@@ -34,11 +34,12 @@ use db::production_coverage::{
     text_compaction_pointer_count, text_manifest_row_counts, text_manifest_split_counts,
     TextBuildDamage, TextSplitObjectDamage,
 };
-use db::query_service::{HelixQueryService, QueryFailureClass};
+use db::query_service::HelixQueryService;
 use db::search::vector::VectorDistanceMetric;
 use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
 use helix_ast::batch;
 use helix_ast::error_code::QueryErrorCode;
+use helix_ast::error_code::QueryFailureClass;
 use helix_ast::expr::Predicate;
 use helix_ast::graph::NodeRef;
 use helix_ast::query::{QueryRequest, QueryValue, SearchConsistency};

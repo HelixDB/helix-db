@@ -1438,9 +1438,6 @@ async fn search_ids(
     )
     .await
     .expect("search runs");
-    if result["hits"].is_null() {
-        return Vec::new();
-    }
     result["hits"]
         .as_array()
         .unwrap_or_else(|| panic!("search returned {result}"))

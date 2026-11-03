@@ -209,6 +209,11 @@ impl RowLayout {
                         to: self.slot(*to),
                         reverse: *reverse,
                     },
+                    r::MatchStep::ScanRelationship { relationship } => {
+                        r::MatchStep::ScanRelationship {
+                            relationship: *relationship,
+                        }
+                    }
                     r::MatchStep::HashJoin {
                         slot,
                         property,

@@ -9504,6 +9504,294 @@
       },
       "sha256": "be49a4090cd857f3a22007dc756f026ae615cef5422a128c6f5b3975305e33f9"
     },
+    "cypher/relationship_count/rows=100/indexed=false/storage=cold_200ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000,
+          "cpu_units": 4400,
+          "latency": 1064450,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "5e1bb6e117efc5dfe27a33eaf389add47eb553d5c8da286d33a3f28eb566018f"
+    },
+    "cypher/relationship_count/rows=100/indexed=false/storage=cold_50ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000,
+          "cpu_units": 4400,
+          "latency": 314450,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "d5590732338b24d27c4cc3fed9432f681764dbe16be37b88b671112c7651dba0"
+    },
+    "cypher/relationship_count/rows=100/indexed=false/storage=default": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000,
+          "cpu_units": 4400,
+          "latency": 72450,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "970b8e111679c9320c248e1f8d7f06a54f64abc79edbc0e0e0e0c5228340af54"
+    },
+    "cypher/relationship_count/rows=100/indexed=true/storage=cold_200ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000,
+          "cpu_units": 4400,
+          "latency": 1064450,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "a11baa5e8f49981748345335d33357f6943c9951875f8283ed11f2378c8a374b"
+    },
+    "cypher/relationship_count/rows=100/indexed=true/storage=cold_50ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000,
+          "cpu_units": 4400,
+          "latency": 314450,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "45df327d8f370fa98d0450f2e57f9beafc5d5d2149c8d62d0333b88b9bbb6f73"
+    },
+    "cypher/relationship_count/rows=100/indexed=true/storage=default": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000,
+          "cpu_units": 4400,
+          "latency": 72450,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "d8bcd8963290e5a43db2179c7ed55aa5b38a6d2b9efacb4e4f09ca64ad6399a0"
+    },
+    "cypher/relationship_count/rows=100000/indexed=false/storage=cold_200ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000000,
+          "cpu_units": 2402000,
+          "latency": 687602050,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "1d92df33416f7b9d3afa4a3bf26626f6e4005c92e4ab3583c2ceef3f23f649cc"
+    },
+    "cypher/relationship_count/rows=100000/indexed=false/storage=cold_50ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000000,
+          "cpu_units": 2402000,
+          "latency": 218702050,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "516a6d4af3233f6242920e842cc6217658ca4e3162ff226b53e0be55d3967567"
+    },
+    "cypher/relationship_count/rows=100000/indexed=false/storage=default": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000000,
+          "cpu_units": 2402000,
+          "latency": 64750800,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "1d9156d8e1fe177c562a9527e8e9615c71bb438b72df8eac3421ac99349e34db"
+    },
+    "cypher/relationship_count/rows=100000/indexed=true/storage=cold_200ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000000,
+          "cpu_units": 2402000,
+          "latency": 687602050,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "a3347afaceb77607e853b9dabda94e08b0666fda2192b624d393359d07a19505"
+    },
+    "cypher/relationship_count/rows=100000/indexed=true/storage=cold_50ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000000,
+          "cpu_units": 2402000,
+          "latency": 218702050,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "21141c2e03d2091d20dfb7dcc870c8f97559313e9a20026da25bba2d4a723635"
+    },
+    "cypher/relationship_count/rows=100000/indexed=true/storage=default": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 5,
+        "guardrail_hit": false,
+        "memo_exprs": 4,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 6,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 416000000,
+          "cpu_units": 2402000,
+          "latency": 64750800,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 0,
+          "range_seeks": 0
+        }
+      },
+      "sha256": "0e17f9b2865a9632001bbb1ac478ae46707d1f0cd4f28e5b29a7f47e07c9d94a"
+    },
     "cypher/relationship_properties/rows=100/indexed=false/storage=cold_200ms": {
       "error": null,
       "metrics": {
@@ -13247,6 +13535,294 @@
         }
       },
       "sha256": "46ab2823443b68ea51b643d1497aa09cd3fe7cd4602fb6a3ea9c0073c25bb310"
+    },
+    "cypher/unlabeled_chain/rows=100/indexed=false/storage=cold_200ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 825600,
+          "cpu_units": 6000,
+          "latency": 161082050,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 1600,
+          "range_seeks": 800
+        }
+      },
+      "sha256": "4149900034657002c8121ca48c30b66539a1ce387e97f29b294fcf55af353c8d"
+    },
+    "cypher/unlabeled_chain/rows=100/indexed=false/storage=cold_50ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 825600,
+          "cpu_units": 6000,
+          "latency": 40332050,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 1600,
+          "range_seeks": 800
+        }
+      },
+      "sha256": "1958bdb454db3f254564bae07f4b673986f74a701731dd93e4eb19fb3f605bb0"
+    },
+    "cypher/unlabeled_chain/rows=100/indexed=false/storage=default": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 825600,
+          "cpu_units": 6000,
+          "latency": 1690050,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 1600,
+          "range_seeks": 800
+        }
+      },
+      "sha256": "5eaff5489823168dcfe182b16339243c0e62b59cedde1188eec5c63f57c9c6c7"
+    },
+    "cypher/unlabeled_chain/rows=100/indexed=true/storage=cold_200ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 825600,
+          "cpu_units": 6000,
+          "latency": 161082050,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 1600,
+          "range_seeks": 800
+        }
+      },
+      "sha256": "46f877fd8e8ac9587e44c90f6c0002ac6ad88a4c7447404bf4df99b24be114bc"
+    },
+    "cypher/unlabeled_chain/rows=100/indexed=true/storage=cold_50ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 825600,
+          "cpu_units": 6000,
+          "latency": 40332050,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 1600,
+          "range_seeks": 800
+        }
+      },
+      "sha256": "c98b5414be62f22f82974ffc91df6a5105648484c654a2a544022ed50d5473d7"
+    },
+    "cypher/unlabeled_chain/rows=100/indexed=true/storage=default": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 825600,
+          "cpu_units": 6000,
+          "latency": 1690050,
+          "multi_get_calls": 4,
+          "object_reads": 801,
+          "parallel_width": 1,
+          "peak_memory": 204800,
+          "range_nexts": 1600,
+          "range_seeks": 800
+        }
+      },
+      "sha256": "bd84e5205e42f78548f2fb9a2c120ec35b543ee758d93afe9a6c4c692720ad86"
+    },
+    "cypher/unlabeled_chain/rows=100000/indexed=false/storage=cold_200ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 328096000000,
+          "cpu_units": 1282402000,
+          "latency": 174767602050,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 1280000000,
+          "range_seeks": 800000
+        }
+      },
+      "sha256": "6f084df2e86e15cad35bd4b279c50bd1a30257a6105d58658f5eafeb1650012d"
+    },
+    "cypher/unlabeled_chain/rows=100000/indexed=false/storage=cold_50ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 328096000000,
+          "cpu_units": 1282402000,
+          "latency": 54298702050,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 1280000000,
+          "range_seeks": 800000
+        }
+      },
+      "sha256": "f04bf2e48ba11e7efb0331a275f5e52268d83597dc0822a0fd2099226feb938f"
+    },
+    "cypher/unlabeled_chain/rows=100000/indexed=false/storage=default": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 328096000000,
+          "cpu_units": 1282402000,
+          "latency": 15744750800,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 1280000000,
+          "range_seeks": 800000
+        }
+      },
+      "sha256": "7e85c3ec8d54046e67f6780fe85b578ff8eeae1ceea592d16b8304ba51978645"
+    },
+    "cypher/unlabeled_chain/rows=100000/indexed=true/storage=cold_200ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 328096000000,
+          "cpu_units": 1282402000,
+          "latency": 174767602050,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 1280000000,
+          "range_seeks": 800000
+        }
+      },
+      "sha256": "cf7523bbc79c725f4050de3a31049c42002f5ac65997a4a03d4bbaf78a569329"
+    },
+    "cypher/unlabeled_chain/rows=100000/indexed=true/storage=cold_50ms": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 328096000000,
+          "cpu_units": 1282402000,
+          "latency": 54298702050,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 1280000000,
+          "range_seeks": 800000
+        }
+      },
+      "sha256": "57b232e711e2de30c0adcb9df681a1442b3e07a2f97cc7d13129847549ad47a0"
+    },
+    "cypher/unlabeled_chain/rows=100000/indexed=true/storage=default": {
+      "error": null,
+      "metrics": {
+        "alternatives_considered": 9,
+        "guardrail_hit": false,
+        "memo_exprs": 8,
+        "memo_groups": 3,
+        "rejected_alternatives": 0,
+        "rule_fires": 14,
+        "selected_cost": {
+          "authoritative_graph_reads": 0,
+          "bytes": 328096000000,
+          "cpu_units": 1282402000,
+          "latency": 15744750800,
+          "multi_get_calls": 3125,
+          "object_reads": 800001,
+          "parallel_width": 1,
+          "peak_memory": 204800000,
+          "range_nexts": 1280000000,
+          "range_seeks": 800000
+        }
+      },
+      "sha256": "8c5ffd50481a45d61423db1d6359b54a0f05acc5774dd3f058c9234557e79aac"
     },
     "cypher/unlabeled_scan/rows=100/indexed=false/storage=cold_200ms": {
       "error": null,

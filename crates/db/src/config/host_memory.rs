@@ -15,7 +15,15 @@ use std::sync::OnceLock;
 ///
 /// Returns `None` only when neither a cgroup limit nor the physical memory
 /// size is readable, for example on a platform without `sysconf`.
-pub(crate) fn memory_ceiling_bytes() -> Option<u64> {
+///
+/// # Examples
+///
+/// ```
+/// let ceiling = db::config::memory_ceiling_bytes();
+/// assert!(ceiling.is_some_and(|bytes| bytes > 0));
+/// assert_eq!(ceiling, db::config::memory_ceiling_bytes(), "read once per process");
+/// ```
+pub fn memory_ceiling_bytes() -> Option<u64> {
     static CEILING: OnceLock<Option<u64>> = OnceLock::new();
     *CEILING.get_or_init(|| {
         let mounts = CgroupMounts::parse(

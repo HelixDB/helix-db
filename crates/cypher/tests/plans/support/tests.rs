@@ -56,7 +56,7 @@ fn captures_replay_exact_inputs_and_sign_every_plan_field() {
 #[test]
 fn matrix_preserves_all_families_and_reports_exhausted_search() {
     let capture = Capture::plan(inputs());
-    assert_eq!(capture.cases.len(), 810);
+    assert_eq!(capture.cases.len(), 834);
     let mut exhausted = 0;
     for (name, case) in &capture.cases {
         assert!(

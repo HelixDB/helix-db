@@ -526,9 +526,10 @@ impl<'db> ExecutionContext<'db> {
             });
         }
         let Some(value) = self.params.query_values.get(name) else {
-            return Err(HelixDbError::Query(format!(
-                "count window parameter `{name}` is not bound"
-            )));
+            return Err(HelixDbError::UnboundParameter {
+                used_as: crate::error::ParameterUse::CountWindow,
+                name: name.to_string(),
+            });
         };
         let QueryValue::I64(value) = value else {
             return Err(HelixDbError::Query(format!(

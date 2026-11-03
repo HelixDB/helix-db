@@ -31,13 +31,11 @@ impl<'db> ExecutionContext<'db> {
                     let value = match self.variables.get(planned.name()).cloned() {
                         Some(value) if value.is_empty() => match shape {
                             exec::ReturnShape::List => ReturnedValue::EmptyList,
-                            exec::ReturnShape::Object => ReturnedValue::EmptyObject,
                             exec::ReturnShape::Scalar => ReturnedValue::Present(value),
                         },
                         Some(value) => ReturnedValue::Present(value),
                         None => match planned.shape() {
                             exec::ReturnShape::List => ReturnedValue::EmptyList,
-                            exec::ReturnShape::Object => ReturnedValue::EmptyObject,
                             exec::ReturnShape::Scalar => {
                                 return Err(missing_variable("return variable", planned.name()));
                             }
@@ -258,19 +256,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_normalizes_only_empty_list_and_object_returns() {
+    async fn finish_normalizes_only_empty_list_returns() {
         let db = test_support::open_db("state-finish-empty-shapes").await;
         let root = step_id(1);
-        let list = name("list");
-        let object = name("object");
+        let rows = name("rows");
+        let scalars = name("scalars");
         let scalar = name("scalar");
         let missing_list = name("missing_list");
-        let missing_object = name("missing_object");
         let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
         ctx.variables
-            .insert(list.clone(), ExecutionValue::Stream(Vec::new()));
+            .insert(rows.clone(), ExecutionValue::Stream(Vec::new()));
         ctx.variables
-            .insert(object.clone(), ExecutionValue::Scalars(Vec::new()));
+            .insert(scalars.clone(), ExecutionValue::Scalars(Vec::new()));
         ctx.variables
             .insert(scalar.clone(), ExecutionValue::Count(0));
 
@@ -278,19 +275,18 @@ mod tests {
             .finish(
                 root,
                 &return_variables(vec![
-                    ("list", exec::ReturnShape::List),
-                    ("object", exec::ReturnShape::Object),
+                    ("rows", exec::ReturnShape::List),
+                    ("scalars", exec::ReturnShape::List),
                     ("scalar", exec::ReturnShape::Scalar),
                     ("missing_list", exec::ReturnShape::List),
-                    ("missing_object", exec::ReturnShape::Object),
                 ]),
             )
             .unwrap();
 
-        assert_eq!(result.returns.get(&list), Some(&ReturnedValue::EmptyList));
+        assert_eq!(result.returns.get(&rows), Some(&ReturnedValue::EmptyList));
         assert_eq!(
-            result.returns.get(&object),
-            Some(&ReturnedValue::EmptyObject)
+            result.returns.get(&scalars),
+            Some(&ReturnedValue::EmptyList)
         );
         assert_eq!(
             result.returns.get(&scalar),
@@ -300,10 +296,6 @@ mod tests {
             result.returns.get(&missing_list),
             Some(&ReturnedValue::EmptyList)
         );
-        assert_eq!(
-            result.returns.get(&missing_object),
-            Some(&ReturnedValue::EmptyObject)
-        );
     }
 
     #[tokio::test]
@@ -311,8 +303,7 @@ mod tests {
         let db = test_support::open_db("state-finish-executed-shapes").await;
         let empty_scalar = name("empty_scalar");
         let present_scalar = name("present_scalar");
-        let empty_object = name("empty_object");
-        let present_object = name("present_object");
+        let empty_point = name("empty_point");
         let empty_list = name("empty_list");
         let present_list = name("present_list");
         let mut empty_scalar_step = test_support::step(
@@ -326,38 +317,35 @@ mod tests {
         let mut present_scalar_step = empty_scalar_step.clone();
         present_scalar_step.id = step_id(2);
         present_scalar_step.output = ir::BatchOutputPlan::Bind(present_scalar.clone());
-        let mut empty_object_step = test_support::step(3, Vec::new(), exec::ExecOp::Noop);
-        empty_object_step.delivered.cardinality = properties::CardinalityBounds::zero_to(Some(1));
-        empty_object_step.output = ir::BatchOutputPlan::Bind(empty_object.clone());
-        let mut present_object_step = empty_object_step.clone();
-        present_object_step.id = step_id(4);
-        present_object_step.output = ir::BatchOutputPlan::Bind(present_object.clone());
-        let mut empty_list_step = test_support::step(5, Vec::new(), exec::ExecOp::Noop);
+        // At most one row is still a row stream.
+        let mut empty_point_step = test_support::step(3, Vec::new(), exec::ExecOp::Noop);
+        empty_point_step.delivered.cardinality = properties::CardinalityBounds::zero_to(Some(1));
+        empty_point_step.output = ir::BatchOutputPlan::Bind(empty_point.clone());
+        let mut empty_list_step = test_support::step(4, Vec::new(), exec::ExecOp::Noop);
         empty_list_step.output = ir::BatchOutputPlan::Bind(empty_list.clone());
         let mut present_list_step = empty_list_step.clone();
-        present_list_step.id = step_id(6);
+        present_list_step.id = step_id(5);
         present_list_step.output = ir::BatchOutputPlan::Bind(present_list.clone());
         let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
         ctx.record_step_value(&empty_scalar_step, ExecutionValue::Count(0));
         ctx.record_step_value(&present_scalar_step, ExecutionValue::Count(7));
-        ctx.record_step_value(&empty_object_step, ExecutionValue::Stream(Vec::new()));
-        ctx.record_step_value(&present_object_step, ExecutionValue::Stream(vec![row(1)]));
+        ctx.record_step_value(&empty_point_step, ExecutionValue::Stream(Vec::new()));
         ctx.record_step_value(&empty_list_step, ExecutionValue::Stream(Vec::new()));
         ctx.record_step_value(
             &present_list_step,
             ExecutionValue::Stream(vec![row(2), row(3)]),
         );
 
+        // Each planned shape is the opposite of the executed one.
         let execution = ctx
             .finish(
                 present_list_step.id,
                 &return_variables(vec![
-                    ("empty_scalar", exec::ReturnShape::Object),
-                    ("present_scalar", exec::ReturnShape::Object),
-                    ("empty_object", exec::ReturnShape::List),
-                    ("present_object", exec::ReturnShape::List),
-                    ("empty_list", exec::ReturnShape::Object),
-                    ("present_list", exec::ReturnShape::Object),
+                    ("empty_scalar", exec::ReturnShape::List),
+                    ("present_scalar", exec::ReturnShape::List),
+                    ("empty_point", exec::ReturnShape::Scalar),
+                    ("empty_list", exec::ReturnShape::Scalar),
+                    ("present_list", exec::ReturnShape::Scalar),
                 ]),
             )
             .unwrap();
@@ -371,14 +359,8 @@ mod tests {
             Some(&ReturnedValue::Present(ExecutionValue::Count(7)))
         );
         assert_eq!(
-            execution.returns.get(&empty_object),
-            Some(&ReturnedValue::EmptyObject)
-        );
-        assert_eq!(
-            execution.returns.get(&present_object),
-            Some(&ReturnedValue::Present(ExecutionValue::Stream(vec![row(
-                1
-            )])))
+            execution.returns.get(&empty_point),
+            Some(&ReturnedValue::EmptyList)
         );
         assert_eq!(
             execution.returns.get(&empty_list),

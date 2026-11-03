@@ -100,6 +100,11 @@ g().n_with_label("User").project([
 }
 ```
 
+```cypher Cypher
+MATCH (u:User)
+RETURN id(u) AS user_id, u.name AS name
+```
+
 </CodeGroup>
 
 ## Project correlated bindings
@@ -372,7 +377,24 @@ helix.ReadQuery("service_workloads").
 }
 ```
 
+```cypher Cypher
+MATCH (service:Service)-[:ROUTES_TO]->(pod)
+OPTIONAL MATCH (deployment)-[:CREATES]->(pod)
+WITH service, deployment, coalesce(deployment, pod) AS current
+UNWIND ['MANAGES', 'ROUTES_TO'] AS branch
+OPTIONAL MATCH (owner)-[:MANAGES]->(current) WHERE branch = 'MANAGES'
+OPTIONAL MATCH (current)-[:ROUTES_TO]->(workload) WHERE branch = 'ROUTES_TO'
+WITH service, deployment, owner, workload
+WHERE owner IS NOT NULL OR workload IS NOT NULL
+RETURN DISTINCT id(service) AS service_id, id(coalesce(deployment, owner, workload)) AS workload_id
+```
+
 </CodeGroup>
+
+Cypher has no `UNION` (see the
+[Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported)), so the
+Cypher tab gives each `union` branch its own row through `UNWIND`, runs that branch as
+an `OPTIONAL MATCH`, and drops rows where the branch found nothing.
 
 ## Aggregate
 

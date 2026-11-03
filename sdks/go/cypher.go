@@ -117,7 +117,7 @@ func (c *Client) postCypher(ctx context.Context, route cypherRoute, query Cypher
 		}
 		if response.StatusCode != http.StatusOK {
 			remoteErr := decodeRemoteError(data, response.Status, response.StatusCode)
-			if response.StatusCode == http.StatusConflict {
+			if remoteErr.Code == QueryErrorCodeTransactionConflict {
 				remoteErr.Err = ErrConflict
 			}
 			return remoteErr

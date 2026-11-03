@@ -223,4 +223,15 @@ fn stream_bound_eval_rejects_invalid_expression_results() {
         error_message(bound_eval::eval_stream_bound(&unsupported, &params))
             .contains("unsupported stream bound expression")
     );
+    // A bound read from a parameter the request never bound is the caller's
+    // mistake, typed as such for every transport.
+    let missing = ir::StreamBoundPlan::new(StreamBound::expr(Expr::param("missing")))
+        .expect("parameter bound expression is syntactically valid");
+    assert!(matches!(
+        bound_eval::eval_stream_bound(&missing, &params),
+        Err(HelixDbError::UnboundParameter {
+            used_as: crate::error::ParameterUse::Value,
+            ref name,
+        }) if name == "missing"
+    ));
 }

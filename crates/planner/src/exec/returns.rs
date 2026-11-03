@@ -6,8 +6,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use helix_ast::expr::StreamBound;
-use helix_ast::graph::{EdgeRef, NodeRef};
 use helix_ast::traversal::AstNode;
 use serde::{Deserialize, Serialize};
 
@@ -19,10 +17,8 @@ use super::{ExecOp, ExecPlanError, ExecStep};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReturnShape {
-    /// A collection return serializes an empty value as `[]`.
+    /// A row return serializes an empty value as `[]`.
     List,
-    /// An at-most-one return serializes an empty value as `null`.
-    Object,
     /// A scalar return has no synthetic empty representation.
     Scalar,
 }
@@ -39,29 +35,15 @@ impl ExecStep {
                 projection: ir::ProjectionPlan::Exists,
             }
             | ExecOp::IndexDdl { .. } => ReturnShape::Scalar,
-            ExecOp::Reserved {
-                op: ir::ReservedOp::Fold,
-            }
-            | ExecOp::Mutation { .. } => ReturnShape::List,
-            _ => match self.delivered.cardinality.upper() {
-                Some(0 | 1) => ReturnShape::Object,
-                Some(_) | None => ReturnShape::List,
-            },
+            _ => ReturnShape::List,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SemanticMultiplicity {
-    AtMostOne,
-    Collection,
-}
-
 /// Infer return shape from the query contract before optimizer rewrites.
 ///
-/// Predicate truth is deliberately ignored: proving a collection empty must
-/// not turn its public response from `[]` into `null`. Explicit multiplicity
-/// operators such as `limit(1)` still produce an at-most-one contract.
+/// Every row stream returns an array, so an empty one is `[]` whatever its
+/// multiplicity; only scalar terminals have a scalar shape.
 pub(crate) fn return_shape_from_ast(root: &AstNode) -> ReturnShape {
     match root {
         AstNode::Count { .. }
@@ -71,163 +53,7 @@ pub(crate) fn return_shape_from_ast(root: &AstNode) -> ReturnShape {
         | AstNode::GetIndexOperation { .. }
         | AstNode::RetryIndexOperation { .. }
         | AstNode::AbortIndexOperation { .. } => ReturnShape::Scalar,
-        AstNode::AddN { .. }
-        | AstNode::AddE { .. }
-        | AstNode::SetProperty { .. }
-        | AstNode::RemoveProperty { .. }
-        | AstNode::Drop { .. }
-        | AstNode::DropEdge { .. }
-        | AstNode::DropEdgeLabeled { .. }
-        | AstNode::DropEdgeById { .. }
-        | AstNode::Group { .. }
-        | AstNode::GroupCount { .. }
-        | AstNode::AggregateBy { .. }
-        | AstNode::Fold { .. }
-        | AstNode::ShortestPath { .. } => ReturnShape::List,
-        _ => match semantic_multiplicity(root, SemanticMultiplicity::Collection) {
-            SemanticMultiplicity::AtMostOne => ReturnShape::Object,
-            SemanticMultiplicity::Collection => ReturnShape::List,
-        },
-    }
-}
-
-fn semantic_multiplicity(root: &AstNode, context: SemanticMultiplicity) -> SemanticMultiplicity {
-    match root {
-        AstNode::Context => context,
-        AstNode::Nodes { reference } => node_reference_multiplicity(reference),
-        AstNode::Edges { reference } => edge_reference_multiplicity(reference),
-        AstNode::NodesWhere { .. } | AstNode::EdgesWhere { .. } => SemanticMultiplicity::Collection,
-        AstNode::VectorSearchNodes { k, .. }
-        | AstNode::TextSearchNodes { k, .. }
-        | AstNode::VectorSearchEdges { k, .. }
-        | AstNode::TextSearchEdges { k, .. } => bound_multiplicity(k),
-        AstNode::TextSearchNodesWithin { input, k, .. }
-        | AstNode::TextSearchEdgesWithin { input, k, .. }
-        | AstNode::VectorSearchNodesWithin { input, k, .. }
-        | AstNode::VectorSearchEdgesWithin { input, k, .. } => {
-            let input = semantic_multiplicity(input, context);
-            if input == SemanticMultiplicity::AtMostOne
-                || bound_multiplicity(k) == SemanticMultiplicity::AtMostOne
-            {
-                SemanticMultiplicity::AtMostOne
-            } else {
-                SemanticMultiplicity::Collection
-            }
-        }
-        AstNode::Out { .. }
-        | AstNode::In { .. }
-        | AstNode::Both { .. }
-        | AstNode::OutE { .. }
-        | AstNode::InE { .. }
-        | AstNode::BothE { .. }
-        | AstNode::OutN { .. }
-        | AstNode::InN { .. }
-        | AstNode::OtherN { .. }
-        | AstNode::Inject { .. }
-        | AstNode::Select { .. }
-        | AstNode::Repeat { .. }
-        | AstNode::Unfold { .. }
-        | AstNode::ShortestPath { .. }
-        | AstNode::Union { .. }
-        | AstNode::Choose { .. }
-        | AstNode::Coalesce { .. }
-        | AstNode::Optional { .. } => SemanticMultiplicity::Collection,
-        AstNode::Has { input, .. }
-        | AstNode::HasLabel { input, .. }
-        | AstNode::HasKey { input, .. }
-        | AstNode::Where { input, .. }
-        | AstNode::Dedup { input }
-        | AstNode::Within { input, .. }
-        | AstNode::Without { input, .. }
-        | AstNode::EdgeHas { input, .. }
-        | AstNode::EdgeHasLabel { input, .. }
-        | AstNode::Skip { input, .. }
-        | AstNode::As { input, .. }
-        | AstNode::Store { input, .. }
-        | AstNode::Bind { input, .. }
-        | AstNode::Id { input }
-        | AstNode::Label { input }
-        | AstNode::Values { input, .. }
-        | AstNode::ValueMap { input, .. }
-        | AstNode::Project { input, .. }
-        | AstNode::ProjectBindings { input, .. }
-        | AstNode::EdgeProperties { input }
-        | AstNode::OrderBy { input, .. }
-        | AstNode::OrderByMultiple { input, .. }
-        | AstNode::Path { input }
-        | AstNode::SimplePath { input }
-        | AstNode::WithSack { input, .. }
-        | AstNode::SackSet { input, .. }
-        | AstNode::SackAdd { input, .. }
-        | AstNode::SackGet { input } => semantic_multiplicity(input, context),
-        AstNode::Limit { input, count } => {
-            let input = semantic_multiplicity(input, context);
-            if input == SemanticMultiplicity::AtMostOne
-                || bound_multiplicity(count) == SemanticMultiplicity::AtMostOne
-            {
-                SemanticMultiplicity::AtMostOne
-            } else {
-                SemanticMultiplicity::Collection
-            }
-        }
-        AstNode::Range { input, start, end } => {
-            let input = semantic_multiplicity(input, context);
-            let bounded = match (start, end) {
-                (StreamBound::Literal(start), StreamBound::Literal(end)) => {
-                    end.saturating_sub(*start) <= 1
-                }
-                (StreamBound::Literal(_) | StreamBound::Expr(_), _) => false,
-            };
-            if input == SemanticMultiplicity::AtMostOne || bounded {
-                SemanticMultiplicity::AtMostOne
-            } else {
-                SemanticMultiplicity::Collection
-            }
-        }
-        AstNode::Count { .. }
-        | AstNode::Exists { .. }
-        | AstNode::CreateIndex { .. }
-        | AstNode::DropIndex { .. }
-        | AstNode::GetIndexOperation { .. }
-        | AstNode::RetryIndexOperation { .. }
-        | AstNode::AbortIndexOperation { .. } => SemanticMultiplicity::AtMostOne,
-        AstNode::AddN { .. }
-        | AstNode::AddE { .. }
-        | AstNode::SetProperty { .. }
-        | AstNode::RemoveProperty { .. }
-        | AstNode::Drop { .. }
-        | AstNode::DropEdge { .. }
-        | AstNode::DropEdgeLabeled { .. }
-        | AstNode::DropEdgeById { .. }
-        | AstNode::Group { .. }
-        | AstNode::GroupCount { .. }
-        | AstNode::AggregateBy { .. }
-        | AstNode::Fold { .. } => SemanticMultiplicity::Collection,
-    }
-}
-
-fn node_reference_multiplicity(reference: &NodeRef) -> SemanticMultiplicity {
-    match reference {
-        NodeRef::Ids(ids) if ids.len() <= 1 => SemanticMultiplicity::AtMostOne,
-        NodeRef::All | NodeRef::Ids(_) | NodeRef::Var(_) | NodeRef::Param(_) => {
-            SemanticMultiplicity::Collection
-        }
-    }
-}
-
-fn edge_reference_multiplicity(reference: &EdgeRef) -> SemanticMultiplicity {
-    match reference {
-        EdgeRef::Ids(ids) if ids.len() <= 1 => SemanticMultiplicity::AtMostOne,
-        EdgeRef::All | EdgeRef::Ids(_) | EdgeRef::Var(_) | EdgeRef::Param(_) => {
-            SemanticMultiplicity::Collection
-        }
-    }
-}
-
-fn bound_multiplicity(bound: &StreamBound) -> SemanticMultiplicity {
-    match bound {
-        StreamBound::Literal(bound) if *bound <= 1 => SemanticMultiplicity::AtMostOne,
-        StreamBound::Literal(_) | StreamBound::Expr(_) => SemanticMultiplicity::Collection,
+        _ => ReturnShape::List,
     }
 }
 
@@ -246,10 +72,10 @@ impl ExecutableReturn {
     ///
     /// let returned = exec::ExecutableReturn::new(
     ///     ir::NonEmptyString::from_static("user"),
-    ///     exec::ReturnShape::Object,
+    ///     exec::ReturnShape::List,
     /// );
     /// assert_eq!(returned.name().as_ref(), "user");
-    /// assert_eq!(returned.shape(), exec::ReturnShape::Object);
+    /// assert_eq!(returned.shape(), exec::ReturnShape::List);
     /// ```
     pub fn new(name: ir::NonEmptyString, shape: ReturnShape) -> Self {
         Self { name, shape }
@@ -381,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_shape_is_stable_when_a_collection_predicate_is_proven_empty() {
+    fn every_row_stream_returns_a_list_whatever_its_multiplicity() {
         let empty_membership = g()
             .n_with_label("Person")
             .where_(Predicate::is_in(
@@ -389,35 +215,36 @@ mod tests {
                 PropertyValue::StringArray(Vec::new()),
             ))
             .into_ast();
-        let empty_point = g()
-            .n(NodeRef::id(7))
-            .where_(Predicate::is_in(
-                "orbit_id",
-                PropertyValue::StringArray(Vec::new()),
-            ))
-            .into_ast();
+        let point = g().n(NodeRef::id(7)).id().into_ast();
         let bounded = g().n_with_label("Person").limit(1usize).into_ast();
-        let scalar = g().n_with_label("Person").count().into_ast();
+        let empty_window = g().n_with_label("Person").limit(0usize).into_ast();
+        let edge_point = g().e(EdgeRef::id(7)).into_ast();
         let grouped = g().n_with_label("Person").group("team").into_ast();
-        let selected = g().n(NodeRef::id(7)).select("cached").into_ast();
         let control = g()
             .n(NodeRef::id(7))
             .optional(sub().out(Some("KNOWS")))
             .into_ast();
-        let edge_endpoint = g().e(EdgeRef::id(7)).out_n().into_ast();
-
-        assert_eq!(return_shape_from_ast(&empty_membership), ReturnShape::List);
-        assert_eq!(return_shape_from_ast(&empty_point), ReturnShape::Object);
-        assert_eq!(return_shape_from_ast(&bounded), ReturnShape::Object);
-        assert_eq!(return_shape_from_ast(&scalar), ReturnShape::Scalar);
-        assert_eq!(return_shape_from_ast(&grouped), ReturnShape::List);
-        assert_eq!(return_shape_from_ast(&selected), ReturnShape::List);
-        assert_eq!(return_shape_from_ast(&control), ReturnShape::List);
-        assert_eq!(return_shape_from_ast(&edge_endpoint), ReturnShape::List);
+        for row_stream in [
+            empty_membership,
+            point,
+            bounded,
+            empty_window,
+            edge_point,
+            grouped,
+            control,
+        ] {
+            assert_eq!(return_shape_from_ast(&row_stream), ReturnShape::List);
+        }
+        for scalar in [
+            g().n(NodeRef::id(7)).count().into_ast(),
+            g().n_with_label("Person").limit(1usize).exists().into_ast(),
+        ] {
+            assert_eq!(return_shape_from_ast(&scalar), ReturnShape::Scalar);
+        }
     }
 
     #[test]
-    fn shape_depends_on_semantics_not_selected_operator_or_cost() {
+    fn row_shape_ignores_cardinality_operator_and_cost() {
         let point = step(
             ExecOp::Noop,
             properties::CardinalityBounds::zero_to(Some(1)),
@@ -426,29 +253,18 @@ mod tests {
             ExecOp::Barrier {
                 name: name("physical-alternative"),
             },
-            properties::CardinalityBounds::zero_to(Some(1)),
+            properties::CardinalityBounds::zero_to(Some(0)),
         );
         alternative.cost = cost::CostVector {
             object_reads: u64::MAX,
             cpu_units: u64::MAX,
             ..cost::CostVector::ZERO
         };
-        let bounded_collection = step(
-            ExecOp::Noop,
-            properties::CardinalityBounds::zero_to(Some(2)),
-        );
         let unknown_collection = step(ExecOp::Noop, properties::CardinalityBounds::unknown());
 
-        assert_eq!(point.inferred_return_shape(), ReturnShape::Object);
-        assert_eq!(alternative.inferred_return_shape(), ReturnShape::Object);
-        assert_eq!(
-            bounded_collection.inferred_return_shape(),
-            ReturnShape::List
-        );
-        assert_eq!(
-            unknown_collection.inferred_return_shape(),
-            ReturnShape::List
-        );
+        for row_step in [point, alternative, unknown_collection] {
+            assert_eq!(row_step.inferred_return_shape(), ReturnShape::List);
+        }
     }
 
     #[test]
@@ -511,7 +327,7 @@ mod tests {
         assert_eq!(single.as_ref(), std::slice::from_ref(&returned));
         let duplicate = ir::AtLeast::from_one_and_rest(
             returned,
-            vec![ExecutableReturn::new(name("result"), ReturnShape::Object)],
+            vec![ExecutableReturn::new(name("result"), ReturnShape::Scalar)],
         );
 
         assert!(matches!(
@@ -548,8 +364,10 @@ mod tests {
     #[test]
     fn return_resolution_finds_bindings_inside_foreach_bodies() {
         let body_step = step(
-            ExecOp::Noop,
-            properties::CardinalityBounds::zero_to(Some(1)),
+            ExecOp::Count {
+                plan: Box::new(super::super::ExecCountPlan::Constant(0)),
+            },
+            properties::CardinalityBounds::exact(1),
         );
         let body = super::super::ExecutableSubplan::new(
             ir::AtLeast::from_one(body_step),
@@ -571,7 +389,7 @@ mod tests {
         let expected = ExecutableReturns::Variables(
             ExecutableReturnVariables::new(ir::AtLeast::from_one(ExecutableReturn::new(
                 name("result"),
-                ReturnShape::Object,
+                ReturnShape::Scalar,
             )))
             .unwrap(),
         );
@@ -598,10 +416,12 @@ mod tests {
 
     #[test]
     fn indexed_bindings_resolve_as_the_reverse_scan_did() {
-        let object = || {
+        let scalar = || {
             step(
-                ExecOp::Noop,
-                properties::CardinalityBounds::zero_to(Some(1)),
+                ExecOp::Count {
+                    plan: Box::new(super::super::ExecCountPlan::Constant(0)),
+                },
+                properties::CardinalityBounds::exact(1),
             )
         };
         let list = || step(ExecOp::Noop, properties::CardinalityBounds::unknown());
@@ -625,17 +445,17 @@ mod tests {
         let bound = ir::BatchOutputPlan::Bind(name("result"));
         let cases = [
             // The last binding wins.
-            vec![object(), list()],
-            vec![list(), object()],
+            vec![scalar(), list()],
+            vec![list(), scalar()],
             // A body's binding sits at its loop's position.
-            vec![foreach(object(), ir::BatchOutputPlan::Discard), list()],
-            vec![list(), foreach(object(), ir::BatchOutputPlan::Discard)],
+            vec![foreach(scalar(), ir::BatchOutputPlan::Discard), list()],
+            vec![list(), foreach(scalar(), ir::BatchOutputPlan::Discard)],
             // A loop's own binding wins over its body's.
-            vec![foreach(object(), bound.clone())],
+            vec![foreach(scalar(), bound.clone())],
             vec![
-                object(),
+                scalar(),
                 foreach(list(), ir::BatchOutputPlan::Discard),
-                object(),
+                scalar(),
             ],
         ];
         let requested = ir::ReturnPlan::Variables(
@@ -655,6 +475,6 @@ mod tests {
             .iter()
             .filter_map(|steps| reverse_scan_shape(steps, &name("result")))
             .collect::<Vec<_>>();
-        assert!(shapes.contains(&ReturnShape::Object) && shapes.contains(&ReturnShape::List));
+        assert!(shapes.contains(&ReturnShape::Scalar) && shapes.contains(&ReturnShape::List));
     }
 }

@@ -157,7 +157,19 @@ request = query.to_query_request(
 }
 ```
 
+```cypher Cypher
+// parameters: {"tenant_id": "acme", "limit": 25}
+MATCH (u:User)
+WHERE u.tenantId = $tenant_id
+WITH u LIMIT $limit
+RETURN id(u) AS id, u.name AS name, u.tenantId AS tenantId
+```
+
 </CodeGroup>
+
+The Cypher statement reads the same values as `$tenant_id` and `$limit`. A Cypher
+request has no `parameter_types`; each value's type comes from its
+[JSON encoding](/database/helix-db/query-guides/cypher#values-and-parameters).
 
 ## Supported parameter families
 

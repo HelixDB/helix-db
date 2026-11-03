@@ -409,7 +409,7 @@ fn write_wrapper(runtime_dir: &Path, snippet: &str) -> Result<PathBuf> {
     // embedded inside parentheses, where that terminator is invalid syntax.
     let snippet = snippet.trim_end().trim_end_matches(';').trim_end();
     let wrapper = format!(
-        r#"import {{ g, readBatch, writeBatch, defineParams, param }} from "{SDK_PACKAGE}";
+        r#"import {{ g, readBatch, writeBatch, defineParams, param, IndexSpec }} from "{SDK_PACKAGE}";
 
 const __query = (
 {snippet}
@@ -494,6 +494,10 @@ mod tests {
 
         assert!(contents.contains(&format!("from \"{SDK_PACKAGE}\"")));
         assert!(contents.contains("readBatch, writeBatch"));
+        assert!(
+            contents.contains("param, IndexSpec }"),
+            "index DDL suggested by `helix doctor` evaluates with IndexSpec in scope"
+        );
         assert!(contents.contains(snippet));
         assert!(contents.contains("toQueryJson()"));
         std::fs::remove_dir_all(&dir).unwrap();

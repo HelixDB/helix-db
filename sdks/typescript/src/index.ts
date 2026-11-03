@@ -172,8 +172,16 @@ export class HelixError extends Error {
     return new HelixError("Embedded", `embedded HelixDB error: ${message}`, message, code);
   }
 
+  /**
+   * Returns whether a transaction conflict aborted the request, so resending
+   * it unchanged may succeed.
+   *
+   * This reads the `transaction_conflict` code, not the status: HTTP 409 also
+   * reports conflicts with the database's state, such as
+   * `unique_constraint_violation`, which fail again when resent.
+   */
   isConflict(): boolean {
-    return this.kind === "Remote" && this.statusCode === 409;
+    return this.kind === "Remote" && this.code === "transaction_conflict";
   }
 
   isRateLimited(): boolean {

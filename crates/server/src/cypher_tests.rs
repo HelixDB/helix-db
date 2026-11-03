@@ -18,7 +18,7 @@ async fn cypher_http_and_grpc_preserve_values_errors_and_atomic_writes() {
         .await
         .unwrap(),
     );
-    let state = state::ServerState::new(Arc::clone(&db), None);
+    let state = state::ServerState::new(Arc::clone(&db), None, crate::StorageConfig::Memory);
     let router = http::router(state.clone());
     let grpc = grpc::GrpcService::new(state);
     let response = router.clone().oneshot(Request::post("/v2/cypher").header("content-type","application/json")
@@ -104,7 +104,11 @@ async fn cypher_explain_has_a_separate_read_only_http_contract() {
         .embedded_default_config()
         .with_query_telemetry(db::config::QueryTelemetry::Disabled);
     let db = Arc::new(db::HelixDB::open_with_config(source, config).await.unwrap());
-    let router = http::router(state::ServerState::new(Arc::clone(&db), None));
+    let router = http::router(state::ServerState::new(
+        Arc::clone(&db),
+        None,
+        crate::StorageConfig::Memory,
+    ));
     let create = json!({"query":"CREATE (:N {key:7})"}).to_string();
     for (body, durable, status) in [
         (create.clone(), false, StatusCode::OK),
@@ -161,7 +165,7 @@ async fn cypher_routing_checks_effects_before_parameter_validation() {
         .embedded_default_config()
         .with_query_telemetry(db::config::QueryTelemetry::Disabled);
     let db = Arc::new(db::HelixDB::open_with_config(source, config).await.unwrap());
-    let state = state::ServerState::new(Arc::clone(&db), None);
+    let state = state::ServerState::new(Arc::clone(&db), None, crate::StorageConfig::Memory);
     let router = http::router(state.clone());
     let grpc = grpc::GrpcService::new(state);
     for (text, warm, durable, detail) in [
@@ -238,7 +242,7 @@ async fn native_and_cypher_share_one_state() {
         .await
         .unwrap(),
     );
-    let state = state::ServerState::new(Arc::clone(&db), None);
+    let state = state::ServerState::new(Arc::clone(&db), None, crate::StorageConfig::Memory);
     let router = http::router(state.clone());
     let grpc = grpc::GrpcService::new(state);
     let post = |path: &'static str, body: Vec<u8>| {
@@ -361,7 +365,11 @@ async fn grpc_cypher_rejections_use_native_codes_and_read_explain_options() {
         .await
         .unwrap(),
     );
-    let grpc = grpc::GrpcService::new(state::ServerState::new(Arc::clone(&writer), None));
+    let grpc = grpc::GrpcService::new(state::ServerState::new(
+        Arc::clone(&writer),
+        None,
+        crate::StorageConfig::Memory,
+    ));
     let request = |body: Vec<u8>, require_writer: bool, await_durable: bool| {
         tonic::Request::new(grpc::pb::QueryJsonRequest {
             body: body.into(),
@@ -390,7 +398,7 @@ async fn grpc_cypher_rejections_use_native_codes_and_read_explain_options() {
         ),
         (
             vec![b' '; crate::MAX_QUERY_BODY_BYTES + 1],
-            tonic::Code::ResourceExhausted,
+            tonic::Code::InvalidArgument,
             "invalid_request_body",
         ),
     ] {
@@ -430,13 +438,17 @@ async fn grpc_cypher_rejections_use_native_codes_and_read_explain_options() {
             .await
             .unwrap(),
     );
-    let read_grpc = grpc::GrpcService::new(state::ServerState::new(Arc::clone(&reader), None));
+    let read_grpc = grpc::GrpcService::new(state::ServerState::new(
+        Arc::clone(&reader),
+        None,
+        crate::StorageConfig::Memory,
+    ));
     let require_writer = read_grpc
         .explain_cypher(request(create.clone(), true, false))
         .await
         .unwrap_err();
-    assert_eq!(require_writer.code(), tonic::Code::Unavailable);
-    assert_eq!(error_code(&require_writer), "invalid_request_option");
+    assert_eq!(require_writer.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(error_code(&require_writer), "writer_mode_required");
     // A reader still plans a modifying statement, and refuses to run it.
     read_grpc
         .explain_cypher(request(create.clone(), false, false))
@@ -465,7 +477,7 @@ async fn cypher_rejects_malformed_bodies_and_options_before_executing() {
         .await
         .unwrap(),
     );
-    let state = state::ServerState::new(Arc::clone(&db), None);
+    let state = state::ServerState::new(Arc::clone(&db), None, crate::StorageConfig::Memory);
     let router = http::router(state.clone());
     let malformed = router
         .clone()
@@ -529,7 +541,11 @@ async fn cypher_executions_emit_anonymous_query_telemetry() {
         "http://127.0.0.1:9",
     )
     .unwrap();
-    let state = state::ServerState::new(Arc::clone(&db), Some(started.recorder.clone()));
+    let state = state::ServerState::new(
+        Arc::clone(&db),
+        Some(started.recorder.clone()),
+        crate::StorageConfig::Memory,
+    );
     let router = http::router(state.clone());
     let grpc = grpc::GrpcService::new(state);
 

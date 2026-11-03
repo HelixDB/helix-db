@@ -117,7 +117,7 @@ fn save_update_check(latest_version: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn is_newer_version(current: &str, latest: &str) -> bool {
+pub(crate) fn is_newer_version(current: &str, latest: &str) -> bool {
     // Simple version comparison - assumes semantic versioning but is robust against missing zeros
     let current_parts = current
         .split('.')
@@ -190,6 +190,32 @@ pub async fn check_for_updates() -> Result<Option<String>> {
 /// Get the current version of the CLI.
 pub const fn current_version() -> &'static str {
     CURRENT_VERSION
+}
+
+/// What a fresh release check found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LatestRelease {
+    /// `HELIX_NO_UPDATE_CHECK` or `HELIX_DISABLE_UPDATE_CHECK` is set.
+    Disabled,
+    /// This CLI is the newest release.
+    Current,
+    /// A newer release exists.
+    Newer(String),
+    /// The release feed could not be read.
+    Unknown(String),
+}
+
+/// Asks the release feed for the newest CLI, bypassing the 24-hour cache so
+/// a diagnosis reflects the feed now. Honors the update-check opt-out.
+pub(crate) async fn latest_release() -> LatestRelease {
+    if update_check_disabled() {
+        return LatestRelease::Disabled;
+    }
+    match fetch_latest_version().await {
+        Ok(latest) if is_newer_version(CURRENT_VERSION, &latest) => LatestRelease::Newer(latest),
+        Ok(_) => LatestRelease::Current,
+        Err(error) => LatestRelease::Unknown(error.to_string()),
+    }
 }
 
 // --- Skills update check -----------------------------------------------------

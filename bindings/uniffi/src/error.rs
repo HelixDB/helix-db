@@ -73,20 +73,15 @@ impl From<HelixDbError> for HelixError {
     /// Classifies a detailed database error without exposing Rust-only payload types.
     ///
     /// The original display message is retained for diagnostics. The category
-    /// distinguishes caller-correctable vector configuration/input and active-text
-    /// admission failures from invalid stored vector rows, which indicate an internal invariant
-    /// violation rather than malformed foreign-language API usage. Retryable
+    /// distinguishes caller-correctable failures (invalid input, missing
+    /// elements, a duplicate unique value, active-text admission) from invalid
+    /// stored vector rows, which indicate an internal invariant violation
+    /// rather than malformed foreign-language API usage. Retryable
     /// request-view changes remain transaction failures so foreign callers can
     /// apply the same retry policy as a storage transaction conflict.
     fn from(error: HelixDbError) -> Self {
         let error_code = error.error_code().to_string();
         let msg = error.to_string();
-        if error.is_invalid_input() {
-            return Self::InvalidRequest {
-                error: error_code,
-                msg,
-            };
-        }
         match error {
             HelixDbError::Config(_)
             | HelixDbError::InvalidVectorConfig(_)
@@ -99,6 +94,7 @@ impl From<HelixDbError> for HelixError {
                 msg,
             },
             HelixDbError::Query(_)
+            | HelixDbError::UnboundParameter { .. }
             | HelixDbError::InvalidQueryJson(_)
             | HelixDbError::Encoding(EncodingError::InvalidTenantId(_))
             | HelixDbError::IndexBusy { .. }
@@ -111,7 +107,18 @@ impl From<HelixDbError> for HelixError {
             | HelixDbError::SecondaryIndexValue(_)
             | HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode
             | HelixDbError::MigrationSteppingRequiresDisabledMode
-            | HelixDbError::IndexOperationBatchTooLarge { .. } => Self::InvalidRequest {
+            | HelixDbError::IndexOperationBatchTooLarge { .. }
+            | HelixDbError::InvalidNodeId(_)
+            | HelixDbError::NodeNotFound(_)
+            | HelixDbError::EdgeNotFound { .. }
+            | HelixDbError::IndexAlreadyExists(_)
+            | HelixDbError::IndexNotFound(_)
+            | HelixDbError::UniqueConstraintViolation { .. }
+            | HelixDbError::UnsupportedUniqueIndexValueType { .. }
+            | HelixDbError::InvalidDimension { .. }
+            | HelixDbError::InvalidVectorComponent { .. }
+            | HelixDbError::VectorComponentMagnitudeExceeded { .. }
+            | HelixDbError::ZeroNormCosineVector => Self::InvalidRequest {
                 error: error_code,
                 msg,
             },
@@ -135,17 +142,6 @@ impl From<HelixDbError> for HelixError {
                 msg,
             },
             HelixDbError::Encoding(_)
-            | HelixDbError::InvalidNodeId(_)
-            | HelixDbError::NodeNotFound(_)
-            | HelixDbError::EdgeNotFound { .. }
-            | HelixDbError::IndexAlreadyExists(_)
-            | HelixDbError::IndexNotFound(_)
-            | HelixDbError::UniqueConstraintViolation { .. }
-            | HelixDbError::UnsupportedUniqueIndexValueType { .. }
-            | HelixDbError::InvalidDimension { .. }
-            | HelixDbError::InvalidVectorComponent { .. }
-            | HelixDbError::VectorComponentMagnitudeExceeded { .. }
-            | HelixDbError::ZeroNormCosineVector
             | HelixDbError::InvalidVectorItem(_)
             | HelixDbError::IndexLifecycleUnavailable { .. }
             | HelixDbError::InvalidIndexV2Model(_)
@@ -223,6 +219,39 @@ mod tests {
             )),
             HelixError::Internal { .. }
         ));
+    }
+
+    #[test]
+    fn caller_correctable_conflicts_and_missing_elements_are_invalid_requests() {
+        for (error, code) in [
+            (
+                HelixDbError::UniqueConstraintViolation {
+                    label: "User".to_string(),
+                    property: "email".to_string(),
+                    value: "<hashed secondary value>".to_string(),
+                    existing_node_id: 1,
+                    attempted_node_id: 2,
+                },
+                "unique_constraint_violation",
+            ),
+            (HelixDbError::NodeNotFound(7), "node_not_found"),
+            (
+                HelixDbError::IndexNotFound("documents".to_string()),
+                "index_not_found",
+            ),
+            (
+                HelixDbError::UnboundParameter {
+                    used_as: db::error::ParameterUse::Value,
+                    name: "ids".to_string(),
+                },
+                "unbound_parameter",
+            ),
+        ] {
+            assert!(matches!(
+                HelixError::from(error),
+                HelixError::InvalidRequest { error, .. } if error == code
+            ));
+        }
     }
 
     #[test]

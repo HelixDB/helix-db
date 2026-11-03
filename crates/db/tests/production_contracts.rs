@@ -260,17 +260,15 @@ async fn server_open_prunes_foyer_partitions_a_smaller_hybrid_cache_no_longer_ow
             .collect::<Vec<_>>()
     };
 
-    // 16 MiB in 64 KiB blocks is 256 partitions.
-    HelixDB::open_for_server(source(), hybrid(&foyer_root, 16 * 1024 * 1024))
-        .await
-        .expect("server writer opens a fresh hybrid cache")
-        .close()
-        .await
-        .expect("server writer closes");
-    assert_eq!(entries(), partitions(256));
-
+    // An earlier process with a 16 MiB budget left 256 partitions of 64 KiB.
     // Halving the budget keeps the block size, so partitions 0..128 are
     // reused and 128..256 go. Names Foyer never numbers are left alone.
+    std::fs::create_dir_all(&foyer_root).expect("Foyer cache directory");
+    for name in partitions(256) {
+        std::fs::File::create(foyer_root.join(name))
+            .and_then(|file| file.set_len(64 * 1024))
+            .expect("earlier partition");
+    }
     for name in ["foyer-storage-direct-fs-not-a-number", "unrelated"] {
         std::fs::write(foyer_root.join(name), b"").expect("foreign cache entry");
     }
@@ -280,38 +278,57 @@ async fn server_open_prunes_foyer_partitions_a_smaller_hybrid_cache_no_longer_ow
         .close()
         .await
         .expect("server writer closes");
-    assert_eq!(
-        entries(),
-        [
-            partitions(128),
-            vec![
-                "foyer-storage-direct-fs-not-a-number".to_owned(),
-                "unrelated".to_owned(),
-            ],
-        ]
-        .concat()
+    let pruned = [
+        partitions(128),
+        vec![
+            "foyer-storage-direct-fs-not-a-number".to_owned(),
+            "unrelated".to_owned(),
+        ],
+    ]
+    .concat();
+    assert_eq!(entries(), pruned);
+
+    // The process keeps the root's cache after the close: a reopen with the
+    // same budget reads through it, and another budget takes a restart.
+    HelixDB::open_for_server(source(), hybrid(&foyer_root, 8 * 1024 * 1024))
+        .await
+        .expect("server writer reopens the hybrid cache")
+        .close()
+        .await
+        .expect("server writer closes");
+    assert_eq!(entries(), pruned);
+    let error = HelixDB::open_for_server(source(), hybrid(&foyer_root, 16 * 1024 * 1024))
+        .await
+        .err()
+        .expect("a resized reopen fails");
+    assert!(
+        error.to_string().contains("already open in this process"),
+        "{error}"
     );
+    assert_eq!(entries(), pruned);
 
     // A stale partition that cannot be removed, and a cache root that is
     // not a directory, fail the open instead of leaving stale blocks.
-    std::fs::create_dir(foyer_root.join("foyer-storage-direct-fs-00000999"))
+    let blocked_root = root.path().join("blocked-foyer");
+    std::fs::create_dir_all(blocked_root.join("foyer-storage-direct-fs-00000999"))
         .expect("irremovable stale partition");
     let not_a_directory = root.path().join("not-a-directory");
     std::fs::write(&not_a_directory, b"").expect("regular file");
     for (foyer_root, reason) in [
-        (foyer_root.as_path(), "stale partition directory"),
-        (not_a_directory.as_path(), "regular file"),
+        (
+            blocked_root.as_path(),
+            "failed to remove stale Slate hybrid cache partitions",
+        ),
+        (
+            not_a_directory.as_path(),
+            "failed to resolve Slate hybrid cache root",
+        ),
     ] {
         let error = HelixDB::open_for_server(source(), hybrid(foyer_root, 8 * 1024 * 1024))
             .await
             .err()
             .expect("the open fails");
-        assert!(
-            error
-                .to_string()
-                .contains("failed to remove stale Slate hybrid cache partitions"),
-            "{reason}: {error}"
-        );
+        assert!(error.to_string().contains(reason), "{reason}: {error}");
     }
 }
 
@@ -3547,7 +3564,7 @@ async fn public_query_boundary_restricts_node_and_edge_text_search_to_the_curren
         serde_json::Value::Array(expected_nodes)
     );
     assert_eq!(response["single_node"], serde_json::json!([2]));
-    assert_eq!(response["empty_nodes"], serde_json::Value::Null);
+    assert_eq!(response["empty_nodes"], serde_json::json!([]));
     assert!(response["node_sacks"]
         .as_array()
         .unwrap()
@@ -5099,13 +5116,7 @@ async fn public_query_boundary_distinct_binding_projection_uses_storage_value_id
                 .iter()
                 .take(take)
                 .collect::<Vec<_>>());
-            // Known-empty scalar plans serialize as null; drained ones use [].
-            let actual = if take == 0 && actual["result"].is_null() {
-                serde_json::json!([])
-            } else {
-                actual["result"].clone()
-            };
-            assert_eq!(actual, expected);
+            assert_eq!(actual["result"], expected);
         }
     }
 
@@ -12301,4 +12312,95 @@ mod vector_object_store_warm {
             "warmed {warmed_gets} SST reads, unwarmed {unwarmed_gets}"
         );
     }
+}
+
+/// Every row return is an array: an entry that can match at most one row
+/// returns `[]` when it matches nothing, exactly as a collection does, and
+/// `[x]` when it matches. Scalar terminals keep their scalar empty values.
+#[tokio::test]
+async fn empty_at_most_one_row_returns_are_empty_arrays() {
+    let db = HelixDB::open(HelixDbSource::InMemory {
+        database: "production-empty-at-most-one".to_owned(),
+    })
+    .await
+    .unwrap();
+    let created = db
+        .query(QueryRequest::write(
+            batch::write_batch()
+                .var_as(
+                    "user",
+                    traversal::g().add_n("User", vec![("name", PropertyInput::from("Ada"))]),
+                )
+                .returning(["user"]),
+        ))
+        .await
+        .unwrap();
+    let id = created["user"][0]["$id"].as_u64().unwrap();
+    let missing = id + 1_000;
+
+    let response = db
+        .query(QueryRequest::read(
+            batch::read_batch()
+                .var_as("found", traversal::g().n(NodeRef::id(id)).id())
+                .var_as("missing", traversal::g().n(NodeRef::id(missing)).id())
+                .var_as(
+                    "missing_projection",
+                    traversal::g()
+                        .n(NodeRef::id(missing))
+                        .value_map(Some(vec!["$id", "name"])),
+                )
+                .var_as(
+                    "filtered_out",
+                    traversal::g()
+                        .n(NodeRef::id(id))
+                        .where_(Predicate::eq("name", "Grace"))
+                        .id(),
+                )
+                .var_as("missing_edge", traversal::g().e(EdgeRef::id(missing)).id())
+                .var_as(
+                    "first",
+                    traversal::g().n_with_label("User").limit(1usize).id(),
+                )
+                .var_as(
+                    "first_of_none",
+                    traversal::g().n_with_label("Missing").limit(1usize).id(),
+                )
+                .var_as(
+                    "empty_window",
+                    traversal::g().n_with_label("User").limit(0usize).id(),
+                )
+                .var_as("count", traversal::g().n(NodeRef::id(missing)).count())
+                .var_as("exists", traversal::g().n(NodeRef::id(missing)).exists())
+                .returning([
+                    "found",
+                    "missing",
+                    "missing_projection",
+                    "filtered_out",
+                    "missing_edge",
+                    "first",
+                    "first_of_none",
+                    "empty_window",
+                    "count",
+                    "exists",
+                ]),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response,
+        serde_json::json!({
+            "found": [id],
+            "missing": [],
+            "missing_projection": [],
+            "filtered_out": [],
+            "missing_edge": [],
+            "first": [id],
+            "first_of_none": [],
+            "empty_window": [],
+            "count": 0,
+            "exists": false,
+        })
+    );
+    db.close().await.unwrap();
 }

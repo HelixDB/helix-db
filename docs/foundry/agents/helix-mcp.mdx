@@ -1,0 +1,164 @@
+---
+title: "Use Foundry from your agent"
+description: "Connect Claude Code, Codex or another MCP client to the Helix MCP to read and ask Helix Foundry ontologies, and to set them up with a confirmation for every change"
+sidebarTitle: "Helix MCP"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Foundry's tools are on the Helix MCP, at `https://mcp.helix-db.com/mcp`. Connect your
+agent to it, sign in once, and the agent works in Foundry as you: it reads your
+ontologies, their versions, loads and graph, asks them questions, and makes the changes
+you ask for, each after a confirmation. It can't add a connector's credentials, delete
+anything or change billing; those stay on the website.
+
+## Connect your agent
+
+The MCP signs you in with OAuth in your browser, with the account you use for Foundry.
+
+<Tabs>
+  <Tab title="Claude Code">
+    ```bash
+    claude mcp add --transport http helix https://mcp.helix-db.com/mcp
+    ```
+
+    Then run `/mcp` in Claude Code and sign in.
+  </Tab>
+  <Tab title="Codex">
+    ```bash
+    codex mcp add helix --url https://mcp.helix-db.com/mcp && codex mcp login helix
+    ```
+  </Tab>
+  <Tab title="Other clients">
+    Add `https://mcp.helix-db.com/mcp` as a remote (streamable HTTP) MCP server, and
+    complete the browser sign-in when the client asks. Clients that discover OAuth
+    find it at `https://mcp.helix-db.com/.well-known/oauth-protected-resource/mcp`.
+  </Tab>
+</Tabs>
+
+Your agent acts with your role in each workspace and your rights on its Helix projects,
+so it can do only what you could do on the website. The same endpoint serves Helix
+Cloud's tools; see [Helix Cloud MCP](/database/helix-cloud/connect/mcp).
+
+For agents that should know Foundry's tools well, add Helix's agent skills:
+
+```bash
+npx skills add HelixDB/skills
+```
+
+`helix-foundry-mcp` covers reading and asking, and `helix-foundry-actions-mcp` the
+changes and their confirmations.
+
+### Set up a workspace with your agent
+
+A new workspace opens on its first ontology's steps. **Set up with your agent**, at the
+top of that page and on an unfinished ontology's overview, copies a prompt for Claude
+Code, Codex or another agent with the Helix MCP. It says how to connect the MCP, where
+the workspace's setup stands, and the steps left, and the agent asks you before each
+change it makes.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/onboarding.png" alt="A new workspace's Create your first ontology page, with Set up with your agent and its Copy prompt above the steps" />
+</Frame>
+
+## What your agent can read
+
+| Tools | What they read |
+| --- | --- |
+| `helix_list_workspaces`, `helix_foundry_list_ontologies`, `helix_foundry_get_ontology` | Your workspaces, their ontologies, and an ontology's database, current version, current load and setup |
+| `helix_foundry_get_version`, `helix_foundry_get_generation` | A version's definition, and a generation's goal, sources and outcome |
+| `helix_foundry_get_load`, `helix_foundry_read_graph` | A load, and what it wrote: up to 20 graph reads per call |
+| `helix_foundry_list_documents`, `helix_foundry_list_review_decisions` | The documents an ontology reads, and the review decisions settled on them |
+| `helix_foundry_list_connectors`, `helix_foundry_list_connector_kinds`, `helix_foundry_list_syncs`, `helix_foundry_get_sync` | The workspace's connections and their syncs, and the kinds of source it can add |
+| `helix_foundry_read_guide` | Foundry's own guide to these tools |
+
+Reading a load, through the graph or through Ask, needs **Query read** on the
+database's Helix project, as on the website.
+
+## Ask questions
+
+`helix_foundry_ask` asks an ontology's load a question in plain language, as
+[Ask](/foundry/ask/ask-questions) does, and waits up to 25 seconds for the answer. A
+longer question carries on: the agent follows it with `helix_foundry_get_question`, reads
+its steps with `helix_foundry_list_question_events`, and stops it with
+`helix_foundry_cancel_question`. `helix_foundry_list_questions` lists the ontology's
+questions. Questions asked through the MCP count against the same hourly limit and
+monthly budget as Ask's.
+
+## Changes, with a confirmation
+
+Every change takes two calls. `helix_prepare_foundry_operation` checks the change and
+returns a confirmation for it: one-time, valid for five minutes, and bound to that
+operation, its target and its exact payload. `helix_execute_foundry_operation` uses the
+confirmation and makes the change once. Agents with Helix's skills show you what they
+are about to do and ask before they execute it.
+
+| Operation | Does |
+| --- | --- |
+| `create_ontology` | Creates an ontology on a Helix database, with its first draft |
+| `generate_ontology` | Asks Foundry's agent for a new draft, from the tables, API sources and document sets you choose |
+| `revise_version` | Applies edits to a version as a new version, or previews them with `dry_run` |
+| `set_current_version` | Makes a version current |
+| `create_load`, `set_current_load` | Loads the current version, or makes another load current |
+| `sync_connector` | Syncs a connection now |
+| `create_event_source` | Creates an [API source](/foundry/data/api-sources) |
+| `upload_document` | Starts a document upload; the agent sends the file, then completes it with `helix_foundry_complete_document_upload` |
+| `create_document_set`, `update_document_set`, `move_document` | Makes, renames or describes a document set, or moves a document to another set |
+| `settle_review` | Settles a load's review, as on an entity's page |
+
+A change is refused for the same reasons as on the website: your role, the database's
+project rights, a sync or generation already running, the
+[workspace's hourly generations](/foundry/reference/limits#generations), or the month's
+spending caps. Making a version current is refused if someone moved the current
+version since the agent read it.
+
+## Connectors stay on the website
+
+An agent never handles a connector's credentials. When you ask it to connect a source,
+`helix_foundry_connector_link` gives it a link to Foundry's **Add data** form for that
+kind, in your workspace, such as
+`https://foundry.helix-db.com/data?add=stripe&workspace=<id>`. Open the link, follow the
+form's steps, and the agent carries on once the connection has synced.
+
+[API sources](/foundry/data/api-sources) hold no credentials, so an agent can create one
+and send it pieces with `helix_foundry_send_pieces`.
+
+## Service credentials
+
+For an agent that runs without a person, such as in CI, use a Helix
+[service credential](/cli/command-reference/service-credential) (`hlxs_…`) as the MCP's
+bearer token instead of signing in: `--header "Authorization: Bearer hlxs_…"` for Claude
+Code, or `bearer_token_env_var` in Codex's MCP config. Keep it in a secret store, never
+in a prompt or a repository.
+
+A service credential reaches only the ontologies whose database is in a project it is
+granted, and only an ontology a person has set up.
+
+| A service credential with | Can |
+| --- | --- |
+| **query-read** | Read those ontologies, their versions, loads, documents and graph, and ask them questions |
+| **query-write** as well | Also make a version or load current, load, revise a version, and upload, move and organise documents |
+
+It can't list or sync connections, generate drafts, create ontologies or API sources,
+or settle reviews: those need a person.
+
+An [API source's send token](/foundry/data/api-sources#send-tokens) (`hx_ev_…`) works as a
+bearer token too, and sees only `helix_foundry_send_pieces`, for its own source.
+
+## Report a problem
+
+`helix_feedback` sends Helix a bug, a missing capability or a confusing result, one
+call per problem, without your data. Helix's skills have agents use it when something
+goes wrong. Each caller can send 20 an hour, of up to 4,096 bytes each.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="API sources" icon="code" href="/foundry/data/api-sources">
+    Send your app's or agent's data to Foundry.
+  </Card>
+  <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
+    What Ask reads, and its limits.
+  </Card>
+</CardGroup>

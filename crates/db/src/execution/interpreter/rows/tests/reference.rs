@@ -14,7 +14,7 @@ struct Case {
 /// positions. It uses neither storage traversal nor planner/evaluator helpers.
 #[tokio::test]
 async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_model() {
-    let mut observed_accesses = [(false, false, false); 2];
+    let mut observed_accesses = [(false, false, false, false); 2];
     for seed in 0..4 {
         let db = test_support::open_db_with_config(
             test_support::in_memory_config("cypher-reference-multigraph")
@@ -120,6 +120,48 @@ async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_
             .take(2)
             .map(|b| vec![Some(b)])
             .collect();
+        // Unlabeled endpoints admit every node, so these patterns start from
+        // the edges of their types; the reference still expands from nodes.
+        let typed = |kinds: &[&str]| {
+            edges
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, _, kind))| kinds.contains(kind))
+                .map(|(edge, (a, b, _))| (edge, *a as i64, *b as i64))
+                .collect::<Vec<_>>()
+        };
+        let any_r = typed(&["R"]);
+        let pairs = |edges: &[(usize, i64, i64)]| {
+            edges
+                .iter()
+                .map(|(_, a, b)| vec![Some(*a), Some(*b)])
+                .collect::<Vec<_>>()
+        };
+        let loops = any_r
+            .iter()
+            .filter(|(_, a, b)| a == b)
+            .map(|(_, a, _)| vec![Some(*a)])
+            .collect::<Vec<_>>();
+        let any_chains = any_r
+            .iter()
+            .flat_map(|(first, a, b)| {
+                any_r
+                    .iter()
+                    .filter(move |(second, c, _)| first != second && b == c)
+                    .map(move |(_, _, d)| vec![Some(*a), Some(*b), Some(*d)])
+            })
+            .collect::<Vec<_>>();
+        let grouped = |groups: &[i64]| {
+            groups
+                .iter()
+                .flat_map(|x| {
+                    any_r
+                        .iter()
+                        .map(move |(_, a, b)| vec![Some(*x), Some(*a), Some(*b)])
+                })
+                .collect::<Vec<_>>()
+        };
+        let edge_count = any_r.len() as i64;
         let mut cases = vec![
             Case { query: "MATCH (a:N) RETURN CASE a.group WHEN 0 THEN 10 WHEN 1 THEN 20 ELSE 30 END AS chosen ORDER BY chosen",
                 columns: &["chosen"], rows: (0..5).map(|key| vec![Some(if key==4 {30} else if key%2==0 {10} else {20})]).collect() },
@@ -165,6 +207,39 @@ async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_
                 columns: &["b"], rows: distinct },
             Case { query: "UNWIND [2,2,99,null] AS key OPTIONAL MATCH (n:N {key:key}) RETURN key,n.key AS found ORDER BY key,found",
                 columns: &["key", "found"], rows: vec![vec![Some(2),Some(2)],vec![Some(2),Some(2)],vec![Some(99),None],vec![None,None]] },
+            Case { query: "MATCH ()-[r:R]->() RETURN count(r) AS c",
+                columns: &["c"], rows: vec![vec![Some(edge_count)]] },
+            Case { query: "MATCH (a)-[r:R]->(b) RETURN a.key AS a,b.key AS b ORDER BY a,b",
+                columns: &["a", "b"], rows: pairs(&any_r) },
+            Case { query: "MATCH (a)<-[r:R]-(b) RETURN a.key AS a,b.key AS b ORDER BY a,b",
+                columns: &["a", "b"], rows: any_r.iter().map(|(_, a, b)| vec![Some(*b), Some(*a)]).collect() },
+            Case { query: "MATCH (a)-[r:R]-(b) RETURN a.key AS a,b.key AS b ORDER BY a,b",
+                columns: &["a", "b"], rows: any_r.iter().flat_map(|(_, a, b)| {
+                    std::iter::once(vec![Some(*a), Some(*b)]).chain((a != b).then(|| vec![Some(*b), Some(*a)]))
+                }).collect() },
+            Case { query: "MATCH (a)-[r:R|S|R]->(b) RETURN a.key AS a,b.key AS b ORDER BY a,b",
+                columns: &["a", "b"], rows: pairs(&typed(&["R", "S"])) },
+            Case { query: "MATCH (a)-[r:R]->(a) RETURN a.key AS a ORDER BY a",
+                columns: &["a"], rows: loops.clone() },
+            Case { query: "MATCH (a)-[r:R]-(a) RETURN a.key AS a ORDER BY a",
+                columns: &["a"], rows: loops },
+            Case { query: "MATCH (a)-[r:R]->(b)-[s:R]->(c) RETURN a.key AS a,b.key AS b,c.key AS c ORDER BY a,b,c",
+                columns: &["a", "b", "c"], rows: any_chains },
+            Case { query: "MATCH (a {group:1})-[r:R]->(b) RETURN a.key AS a,b.key AS b ORDER BY a,b",
+                columns: &["a", "b"], rows: pairs(&any_r.iter().copied().filter(|(_, a, _)| *a < 4 && a % 2 == 1).collect::<Vec<_>>()) },
+            Case { query: "MATCH ()-[r:R]->(), ()-[s:R]->() RETURN count(*) AS c",
+                columns: &["c"], rows: vec![vec![Some(edge_count * (edge_count - 1).max(0))]] },
+            Case { query: "MATCH (x:N {group:0}), (a)-[r:R]->(b) RETURN x.key AS x,a.key AS a,b.key AS b ORDER BY x,a,b",
+                columns: &["x", "a", "b"], rows: grouped(&[0, 2]) },
+            Case { query: "MATCH (x:N {group:1}) MATCH (a)-[r:R]->(b) RETURN x.key AS x,a.key AS a,b.key AS b ORDER BY x,a,b",
+                columns: &["x", "a", "b"], rows: grouped(&[1, 3]) },
+            Case { query: "MATCH (x:N {key:4}) OPTIONAL MATCH (a)-[r:S]->(b) RETURN x.key AS x,a.key AS a,b.key AS b ORDER BY x,a,b",
+                columns: &["x", "a", "b"], rows: match typed(&["S"]).as_slice() {
+                    [] => vec![vec![Some(4), None, None]],
+                    edges => edges.iter().map(|(_, a, b)| vec![Some(4), Some(*a), Some(*b)]).collect(),
+                } },
+            Case { query: "MATCH ()-[r:R]->() WITH r LIMIT 3 RETURN count(*) AS c",
+                columns: &["c"], rows: vec![vec![Some(edge_count.min(3))]] },
         ];
         for case in &mut cases {
             // Cypher ASC puts null last. Sorting the independent expected tuples
@@ -183,9 +258,13 @@ async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_
                 if !prefix.is_empty() {
                     assert!(selected.program().query().width() < selected.query().bindings().len());
                 }
-                let (indexed, hash_joined, correlated) =
+                let (indexed, hash_joined, correlated, relationship_scanned) =
                     &mut observed_accesses[usize::from(!prefix.is_empty())];
                 for plan in selected.program().matches().values() {
+                    *relationship_scanned |= plan
+                        .steps
+                        .iter()
+                        .any(|step| matches!(step, r::MatchStep::ScanRelationship { .. }));
                     *hash_joined |= plan
                         .steps
                         .iter()
@@ -291,9 +370,13 @@ async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_
         db.close().await.unwrap();
     }
     assert!(
-        observed_accesses
-            .into_iter()
-            .all(|(indexed, hash_joined, correlated)| indexed && hash_joined && correlated),
-        "both ordinary and reused-cell queries must exercise indexed, hash and correlated access"
+        observed_accesses.into_iter().all(
+            |(indexed, hash_joined, correlated, relationship_scanned)| indexed
+                && hash_joined
+                && correlated
+                && relationship_scanned
+        ),
+        "both ordinary and reused-cell queries must exercise indexed, hash, correlated \
+         and relationship-scan access"
     );
 }
