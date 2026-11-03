@@ -141,6 +141,56 @@ class DslAstTests(unittest.TestCase):
                 "typed", QueryParamType.bool(), True
             ).with_untyped_parameter("raw", True)
 
+    def test_typed_datetime_parameter_accepts_same_values_as_schema(self) -> None:
+        millis = 1_776_000_000_000
+        expected = DateTime.from_millis(millis).to_rfc3339()
+        dt_val = datetime.fromtimestamp(millis / 1000.0, tz=timezone.utc)
+
+        typed = (
+            QueryRequest.read(read_batch())
+            .with_typed_parameter("t_millis", QueryParamType.date_time(), millis)
+            .with_typed_parameter("t_rfc3339", QueryParamType.date_time(), expected)
+            .with_typed_parameter("t_datetime", QueryParamType.date_time(), dt_val)
+            .with_typed_parameter(
+                "t_custom", QueryParamType.date_time(), DateTime.from_millis(millis)
+            )
+        )
+        body = parsed(typed)
+        for name in ["t_millis", "t_rfc3339", "t_datetime", "t_custom"]:
+            self.assertEqual(body["parameters"][name], expected)
+
+        typed_array = QueryRequest.read(read_batch()).with_typed_parameter(
+            "dates",
+            QueryParamType.array(QueryParamType.date_time()),
+            [millis, expected, dt_val, DateTime.from_millis(millis)],
+        )
+        body_array = parsed(typed_array)
+        self.assertEqual(
+            body_array["parameters"]["dates"],
+            [expected, expected, expected, expected],
+        )
+
+        with self.assertRaises(TypeError):
+            QueryRequest.read(read_batch()).with_typed_parameter(
+                "bad", QueryParamType.date_time(), True
+            )
+        with self.assertRaises(TypeError):
+            QueryRequest.read(read_batch()).with_typed_parameter(
+                "bad", QueryParamType.date_time(), 1.5
+            )
+        with self.assertRaises(TypeError):
+            QueryRequest.read(read_batch()).with_typed_parameter(
+                "bad", QueryParamType.date_time(), "not-a-date"
+            )
+
+        with self.assertRaises(QueryError) as raised:
+            QueryRequest.read(read_batch()).with_typed_parameter(
+                "bad_millis", QueryParamType.date_time(), 253_402_300_800_000
+            )
+        self.assertEqual(raised.exception.kind, "InvalidDateTimeParameter")
+        self.assertEqual(raised.exception.millis, 253_402_300_800_000)
+        self.assertIn("bad_millis", raised.exception.path)
+
     def test_index_lifecycle_response_decoders_are_strict_and_additive(self) -> None:
         operation_id = "018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"
         receipt = parse_index_ddl_receipt(
