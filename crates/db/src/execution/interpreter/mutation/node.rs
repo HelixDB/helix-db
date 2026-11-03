@@ -527,25 +527,62 @@ mod tests {
         rows
     }
 
+    /// One membership row a cascade delete changes.
+    #[derive(Debug, Clone, Copy)]
+    enum CorruptRow {
+        NodeLabel,
+        EdgePair,
+        EdgeLabelOut,
+        EdgeLabelIn,
+        GlobalEdgeLabel,
+        Adjacency,
+        NodeEquality,
+        EdgeEquality,
+    }
+
+    /// What a cascade delete does when one of its rows was corrupted outside
+    /// Helix.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CascadeOutcome {
+        /// The delete only stages a removal delta for the row, which never
+        /// reads it: every record goes and the delta commits.
+        Deletes,
+        /// The delete reads the row to find incident edges, so it fails
+        /// closed and writes nothing.
+        RejectsOnRead,
+    }
+
     /// A membership row corrupted outside Helix never fails a memtable flush.
     ///
     /// Staging a removal never reads the row it changes, so a cascade delete
-    /// either commits or, when it must read the corrupt row, rejects without
-    /// writing anything. Either way the next memtable flush builds.
+    /// commits unless it reads the corrupt row itself, in which case it
+    /// rejects without writing anything. Either way the next flush builds.
     #[tokio::test]
     async fn cascade_delete_over_a_corrupt_row_is_atomic_and_never_fails_a_flush() {
-        for corrupted in std::iter::once(None).chain((0..8).map(Some)) {
-            cascade_delete_over_a_corrupt_row(corrupted).await;
+        for (corrupt, expected) in [
+            (None, CascadeOutcome::Deletes),
+            (Some(CorruptRow::NodeLabel), CascadeOutcome::Deletes),
+            (Some(CorruptRow::EdgePair), CascadeOutcome::RejectsOnRead),
+            (Some(CorruptRow::EdgeLabelOut), CascadeOutcome::Deletes),
+            (Some(CorruptRow::EdgeLabelIn), CascadeOutcome::Deletes),
+            (Some(CorruptRow::GlobalEdgeLabel), CascadeOutcome::Deletes),
+            (Some(CorruptRow::Adjacency), CascadeOutcome::RejectsOnRead),
+            (Some(CorruptRow::NodeEquality), CascadeOutcome::Deletes),
+            (Some(CorruptRow::EdgeEquality), CascadeOutcome::Deletes),
+        ] {
+            cascade_delete_over_a_corrupt_row(corrupt, expected).await;
         }
     }
 
-    async fn cascade_delete_over_a_corrupt_row(corrupted: Option<usize>) {
+    async fn cascade_delete_over_a_corrupt_row(
+        corrupt: Option<CorruptRow>,
+        expected: CascadeOutcome,
+    ) {
         let scope = keys::scope::DataScope::LegacyUnscoped;
-        let config = test_support::in_memory_config(&format!(
-            "mutation-corrupt-cascade-delete-{corrupted:?}"
-        ))
-        .with_equality_index("User", "status")
-        .with_edge_equality_index("FOLLOWS", "status");
+        let config =
+            test_support::in_memory_config(&format!("mutation-corrupt-cascade-delete-{corrupt:?}"))
+                .with_equality_index("User", "status")
+                .with_edge_equality_index("FOLLOWS", "status");
         let db = test_support::open_db_with_config(config).await;
         let target = test_support::add_node_with_properties(
             &db,
@@ -593,60 +630,42 @@ mod tests {
                 })
             })
             .expect("the edge equality generation is active");
-        let cases = [
-            (
-                "node-label",
-                super::super::topology::node_label_key(scope, "User"),
+        let corrupt_key = corrupt.map(|row| match row {
+            CorruptRow::NodeLabel => super::super::topology::node_label_key(scope, "User"),
+            CorruptRow::EdgePair => super::super::topology::edge_pair_key(scope, target, neighbor),
+            CorruptRow::EdgeLabelOut => super::super::topology::edge_label_neighbor_key(
+                scope,
+                crate::encoding::indexes::EdgeDirection::Out,
+                target,
+                "FOLLOWS",
             ),
-            (
-                "edge-pair",
-                super::super::topology::edge_pair_key(scope, target, neighbor),
+            CorruptRow::EdgeLabelIn => super::super::topology::edge_label_neighbor_key(
+                scope,
+                crate::encoding::indexes::EdgeDirection::In,
+                target,
+                "FOLLOWS",
             ),
-            (
-                "edge-label-out",
-                super::super::topology::edge_label_neighbor_key(
-                    scope,
-                    crate::encoding::indexes::EdgeDirection::Out,
-                    target,
-                    "FOLLOWS",
-                ),
-            ),
-            (
-                "edge-label-in",
-                super::super::topology::edge_label_neighbor_key(
-                    scope,
-                    crate::encoding::indexes::EdgeDirection::In,
-                    target,
-                    "FOLLOWS",
-                ),
-            ),
-            (
-                "global-edge-label",
-                super::super::topology::global_edge_label_key(scope, "FOLLOWS"),
-            ),
-            (
-                "adjacency",
-                keys::DataKey::Data {
-                    scope,
-                    kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(target)),
-                }
-                .to_bytes(),
-            ),
-            (
-                "node-equality",
+            CorruptRow::GlobalEdgeLabel => {
+                super::super::topology::global_edge_label_key(scope, "FOLLOWS")
+            }
+            CorruptRow::Adjacency => keys::DataKey::Data {
+                scope,
+                kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(target)),
+            }
+            .to_bytes(),
+            CorruptRow::NodeEquality => {
                 crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
                     node_equality,
                     "shared",
-                ),
-            ),
-            (
-                "edge-equality",
+                )
+            }
+            CorruptRow::EdgeEquality => {
                 crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
                     edge_equality,
                     "shared",
-                ),
-            ),
-        ];
+                )
+            }
+        });
         let node_key = keys::DataKey::Data {
             scope,
             kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(target)),
@@ -692,11 +711,14 @@ mod tests {
         let memtable = slatedb::config::FlushOptions {
             flush_type: slatedb::config::FlushType::MemTable,
         };
-        let corrupt = corrupted.map(|case| cases[case].clone());
-        if let Some((name, key)) = &corrupt {
+        // Corrupt the row outside Helix and flush it below the next memtable.
+        async {
+            let Some(key) = &corrupt_key else {
+                return;
+            };
             assert!(
                 db.inner_db().get(key).await.unwrap().is_some(),
-                "{name} fixture row exists"
+                "{corrupt:?} fixture row exists"
             );
             db.inner_db()
                 .put(key, Bytes::from_static(b"corrupt-membership-row"))
@@ -707,6 +729,7 @@ mod tests {
                 .await
                 .unwrap();
         }
+        .await;
         let before = all_rows(&db).await;
         let outcome = db
             .execute(
@@ -714,19 +737,19 @@ mod tests {
                 context::ParamBindings::default()
                     .with_value(node_param, AstPropertyValue::I64(target as i64)),
             )
-            .await;
-        let deleted = match outcome {
-            Ok(_) => true,
-            Err(error) => {
-                assert!(corrupt.is_some(), "an intact fixture deletes: {error}");
+            .await
+            .map(drop);
+        match (expected, outcome) {
+            (CascadeOutcome::Deletes, Ok(_)) => {}
+            (CascadeOutcome::RejectsOnRead, Err(_)) => {
                 assert_eq!(all_rows(&db).await, before, "{corrupt:?}");
-                false
             }
-        };
+            (expected, outcome) => panic!("{corrupt:?}: expected {expected:?}, got {outcome:?}"),
+        }
         for record_key in [&node_key, &outgoing_key, &incoming_key] {
             assert_eq!(
                 db.inner_db().get(record_key).await.unwrap().is_none(),
-                deleted,
+                expected == CascadeOutcome::Deletes,
                 "{corrupt:?}"
             );
         }
