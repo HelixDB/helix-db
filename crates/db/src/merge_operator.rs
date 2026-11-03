@@ -35,6 +35,18 @@ const VECTOR_LAYER0_KEY_LEN: usize = core::mem::size_of::<u8>()
     + VECTOR_INDEX_ID_LEN
     + core::mem::size_of::<u8>()
     + size_of::<NodeId>();
+// Only a tenant envelope is ever stripped before dispatch: no unscoped key
+// can start with its prefix.
+const _: () = {
+    let tenant = crate::encoding::v2::keys::scope::TENANT_KEY_PREFIX;
+    assert!(
+        tenant != ADJACENCY_PREFIX
+            && tenant != PROPERTY_INDEX_PREFIX
+            && tenant != EDGE_PAIR_INDEX_PREFIX
+            && tenant != METADATA_PREFIX
+            && tenant != VECTOR_HOT_KEYSPACE_PREFIX
+    );
+};
 const BITMAP_DELTA_MAGIC: &[u8; 8] = b"HLXRBM1\0";
 const BITMAP_DELTA_OP_LEN: usize = core::mem::size_of::<u8>();
 const BITMAP_DELTA_ID_LEN: usize = core::mem::size_of::<u64>();
@@ -1053,41 +1065,30 @@ enum MergeKeyType {
     Other,
 }
 
+/// The dispatchable logical key: the key without its tenant envelope when the
+/// enveloped key carries a merge-maintained prefix, otherwise the key itself.
+///
+/// Only an enveloped key (`TENANT_KEY_PREFIX`, which no logical prefix shares)
+/// can be stripped, so no unscoped key needs parsing here; classification in
+/// [`HelixMergeOperator::key_type`] parses a key at most once.
 fn logical_key(key: &[u8]) -> &[u8] {
-    if matches!(
-        key.first().copied(),
-        Some(METADATA_PREFIX | VECTOR_HOT_KEYSPACE_PREFIX)
-    ) || key.len() == core::mem::size_of::<u8>() + core::mem::size_of::<NodeId>()
-        && key.first().copied() == Some(ADJACENCY_PREFIX)
-        || key.len()
-            == core::mem::size_of::<u8>()
-                + core::mem::size_of::<NodeId>()
-                + core::mem::size_of::<NodeId>()
-            && key.first().copied() == Some(EDGE_PAIR_INDEX_PREFIX)
-        || key.first().copied() == Some(PROPERTY_INDEX_PREFIX)
-            && matches!(
-                DataKeyKind::parse_from_slice(key),
-                Ok(DataKeyKind::PropertyIndex(_))
-            )
-    {
-        return key;
+    match DataScope::strip_tenant_envelope(key) {
+        Some((_, logical))
+            if matches!(
+                logical.first().copied(),
+                Some(
+                    ADJACENCY_PREFIX
+                        | METADATA_PREFIX
+                        | VECTOR_HOT_KEYSPACE_PREFIX
+                        | PROPERTY_INDEX_PREFIX
+                        | EDGE_PAIR_INDEX_PREFIX
+                )
+            ) =>
+        {
+            logical
+        }
+        Some(_) | None => key,
     }
-
-    if let Some((_, tenant_logical)) = DataScope::strip_tenant_envelope(key)
-        && matches!(
-            tenant_logical.first().copied(),
-            Some(
-                ADJACENCY_PREFIX
-                    | METADATA_PREFIX
-                    | VECTOR_HOT_KEYSPACE_PREFIX
-                    | PROPERTY_INDEX_PREFIX
-                    | EDGE_PAIR_INDEX_PREFIX
-            )
-        )
-    {
-        return tenant_logical;
-    }
-    key
 }
 
 fn merge_decode_error(error: impl std::fmt::Display) -> MergeOperatorError {
