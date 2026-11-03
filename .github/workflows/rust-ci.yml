@@ -8,8 +8,16 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "bindings/uniffi/**"
+      - "clippy.toml"
       - "crates/**"
+      # Fixtures and docs that Rust tests embed with include_str!/include_bytes!;
+      # the target-reference validator fails when one is missing here.
+      - "docker-image/tests/fixtures/**"
+      - "docs/database/helix-db/query-guides/error-handling.mdx"
+      - "docs/database/helix-db/start-here/quickstart.mdx"
+      - "docs/openapi.json"
       - "rust-toolchain.toml"
+      - "rustfmt.toml"
       - "scripts/**"
       - "sdks/rust/**"
       - "sdks/typescript/**"
@@ -22,8 +30,16 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "bindings/uniffi/**"
+      - "clippy.toml"
       - "crates/**"
+      # Fixtures and docs that Rust tests embed with include_str!/include_bytes!;
+      # the target-reference validator fails when one is missing here.
+      - "docker-image/tests/fixtures/**"
+      - "docs/database/helix-db/query-guides/error-handling.mdx"
+      - "docs/database/helix-db/start-here/quickstart.mdx"
+      - "docs/openapi.json"
       - "rust-toolchain.toml"
+      - "rustfmt.toml"
       - "scripts/**"
       - "sdks/rust/**"
       - "sdks/typescript/**"
@@ -62,6 +78,10 @@ jobs:
       # cargo-target-references.yml only when a referenced target can change.
       - run: python3 scripts/validate-cargo-target-references.py --skip-test-filters
       - run: cargo clippy --locked --workspace -- -D warnings
+      # The CLI and metrics crates also lint their tests.
+      - run: >-
+          cargo clippy --locked -p helix-cli -p helix-metrics --all-targets
+          -- -D warnings
       # The test profile also lints the cfg(test) unit tests of both crates.
       - name: Clippy async index benchmark feature
         run: >-
@@ -189,6 +209,17 @@ jobs:
           --bench graph_algorithms
           --bench ast_memory --bench ast_parse --bench ast_rss
           --bench ast_throughput --bench planner_alloc --bench planner_arena
+      # Feature-gated benches run full workloads from custom mains, so lint
+      # them without running. The target-reference validator fails when a
+      # bench is named in no workflow.
+      - name: Lint feature-gated benches
+        run: >-
+          cargo clippy --locked -p db
+          --features production-coverage,index-lifecycle-testing
+          --bench secondary_equality_hot_path --bench secondary_equality_read_scale
+          --bench vector_batch_insert --bench vector_memory_store
+          --bench text_transaction_batching --bench fts_prefilter
+          -- -D warnings
 
   benchmark-feature:
     name: Async index benchmark feature
