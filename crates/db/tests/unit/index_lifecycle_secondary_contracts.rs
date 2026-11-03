@@ -162,7 +162,8 @@ async fn legacy_secondary_marker_without_applied_state_fails_closed() {
             entity_state_key(&definition, entity.id),
             &definition,
             &CoalescedBuildDeltaState::Marker,
-            Some(equality("current@example.com")),
+            Some(&equality("current@example.com")),
+            AppliedStateDisposition::Retain,
         )
         .await,
         Err(HelixDbError::IndexCatalogCorruption(_))
@@ -188,13 +189,14 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     };
     let value = equality("first@example.com");
 
-    let ReconciliationPlan::Writes(add) = reconciliation_plan(
+    let EntityReconciliation::Writes { plan: add, .. } = reconciliation_plan(
         &transaction,
         scope,
         entity_state_key(&definition, entity.id),
         &definition,
         &CoalescedBuildDeltaState::SecondaryBefore(None),
-        Some(value.clone()),
+        Some(&value),
+        AppliedStateDisposition::Retain,
     )
     .await
     .unwrap() else {
@@ -208,28 +210,47 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
     assert!(matches!(add.writes[1], EntityWrite::Put { .. }));
     add.stage(&transaction).await.unwrap();
 
-    let ReconciliationPlan::Writes(noop) = reconciliation_plan(
+    // The applied row proves the generation already holds the value.
+    let EntityReconciliation::Writes { plan: noop, .. } = reconciliation_plan(
         &transaction,
         scope,
         entity_state_key(&definition, entity.id),
         &definition,
         &CoalescedBuildDeltaState::Marker,
-        Some(value),
+        Some(&value),
+        AppliedStateDisposition::Retain,
     )
     .await
     .unwrap() else {
-        panic!("unchanged bitmap value still refreshes applied authority");
+        panic!("an unchanged bitmap value reconciles");
     };
-    assert_eq!(noop.writes.len(), 1);
-    assert!(matches!(noop.writes[0], EntityWrite::Put { .. }));
+    assert!(noop.writes.is_empty());
 
-    let ReconciliationPlan::Writes(remove) = reconciliation_plan(
+    // A gated drain releases the applied row instead of keeping it.
+    let EntityReconciliation::Writes { plan: release, .. } = reconciliation_plan(
+        &transaction,
+        scope,
+        entity_state_key(&definition, entity.id),
+        &definition,
+        &CoalescedBuildDeltaState::Marker,
+        Some(&value),
+        AppliedStateDisposition::Release,
+    )
+    .await
+    .unwrap() else {
+        panic!("a released unchanged bitmap value produces writes");
+    };
+    assert_eq!(release.writes.len(), 1);
+    assert!(matches!(release.writes[0], EntityWrite::Delete(_)));
+
+    let EntityReconciliation::Writes { plan: remove, .. } = reconciliation_plan(
         &transaction,
         scope,
         entity_state_key(&definition, entity.id),
         &definition,
         &CoalescedBuildDeltaState::Marker,
         None,
+        AppliedStateDisposition::Retain,
     )
     .await
     .unwrap() else {
@@ -291,7 +312,7 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
     transaction
         .put(previous_key.clone(), encoded_owner(&definition, foreign_id))
         .unwrap();
-    let ReconciliationPlan::Blocked(IndexOperationBlocker::UniquenessViolation {
+    let EntityReconciliation::Blocked(IndexOperationBlocker::UniquenessViolation {
         first_entity_id,
         second_entity_id,
     }) = reconciliation_plan(
@@ -300,7 +321,8 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
         entity_state_key(&definition, entity.id),
         &definition,
         &CoalescedBuildDeltaState::Marker,
-        Some(next.clone()),
+        Some(&next),
+        AppliedStateDisposition::Retain,
     )
     .await
     .unwrap()
@@ -313,25 +335,92 @@ async fn reconciliation_unique_observations_block_foreign_release_and_claim() {
         .put(previous_key, encoded_owner(&definition, entity_id))
         .unwrap();
     transaction
-        .put(next_key, encoded_owner(&definition, foreign_id))
+        .put(next_key.clone(), encoded_owner(&definition, foreign_id))
         .unwrap();
-    let ReconciliationPlan::Blocked(IndexOperationBlocker::UniquenessViolation {
+    let foreign = IndexEntity {
+        kind: definition.element_kind(),
+        id: foreign_id,
+    };
+    let foreign_source = authoritative_property_key(scope, foreign);
+    let foreign_delta = scoped_index_key(
+        scope,
+        ScopedKey::BuildDelta(entity_state_key(&definition, foreign_id)),
+    );
+    let reconcile = || {
+        reconciliation_plan(
+            &transaction,
+            scope,
+            entity_state_key(&definition, entity.id),
+            &definition,
+            &CoalescedBuildDeltaState::Marker,
+            Some(&next),
+            AppliedStateDisposition::Retain,
+        )
+    };
+
+    // An owner whose row still holds the value is a duplicate.
+    transaction
+        .put(
+            &foreign_source,
+            crate::encoding::property::encode_properties(&[
+                Property::string("$label", "User"),
+                Property::string("email", "next@example.com"),
+            ]),
+        )
+        .unwrap();
+    let EntityReconciliation::Blocked(IndexOperationBlocker::UniquenessViolation {
         first_entity_id,
         second_entity_id,
-    }) = reconciliation_plan(
-        &transaction,
-        scope,
-        entity_state_key(&definition, entity.id),
-        &definition,
-        &CoalescedBuildDeltaState::Marker,
-        Some(next),
-    )
-    .await
-    .unwrap()
+    }) = reconcile().await.unwrap()
     else {
-        panic!("foreign next owner blocks reconciliation");
+        panic!("a foreign owner that still holds the value blocks reconciliation");
     };
     assert_eq!((first_entity_id, second_entity_id), (foreign_id, entity_id));
+
+    // An owner that moved off the value holds a stale claim its pending
+    // delta will release, so the claim and its applied row move over.
+    transaction
+        .put(
+            &foreign_source,
+            crate::encoding::property::encode_properties(&[
+                Property::string("$label", "User"),
+                Property::string("email", "moved@example.com"),
+            ]),
+        )
+        .unwrap();
+    assert!(matches!(
+        reconcile().await,
+        Err(HelixDbError::IndexCatalogCorruption(_))
+    ));
+    transaction
+        .put(
+            &foreign_delta,
+            encode_build_delta(&CoalescedBuildDeltaValue {
+                index_id: IndexId::initial(),
+                generation: IndexGenerationId::initial(),
+                entity_kind: foreign.kind,
+                entity_id: foreign_id,
+                state: CoalescedBuildDeltaState::SecondaryBefore(Some(next.clone())),
+            }),
+        )
+        .unwrap();
+    let EntityReconciliation::Writes {
+        plan,
+        released_owner,
+    } = reconcile().await.unwrap()
+    else {
+        panic!("a stale foreign claim is taken over");
+    };
+    assert_eq!(released_owner, Some(foreign_id));
+    let foreign_applied = applied_key(scope, &definition, foreign_id);
+    assert!(plan.writes.iter().any(|write| matches!(
+        write,
+        EntityWrite::Put { key, .. } if *key == next_key
+    )));
+    assert!(plan.writes.iter().any(|write| matches!(
+        write,
+        EntityWrite::Delete(key) if *key == foreign_applied
+    )));
     transaction.rollback();
     db.close().await.unwrap();
 }
