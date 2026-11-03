@@ -501,13 +501,13 @@ impl<'db> ExecutionContext<'db> {
         edge_id: u64,
         index_context: &mut MutationIndexContext,
     ) -> Result<()> {
-        index_context.flush_topology(txn).await?;
+        index_context.flush_topology(txn)?;
         let mut observed = self
             .observe_edge_deletions(txn, std::iter::once(edge_id), index_context)
             .await?;
         self.delete_edge_observed(txn, edge_id, observed.take(edge_id)?, index_context)
             .await?;
-        index_context.flush_topology(txn).await
+        index_context.flush_topology(txn)
     }
 
     pub(super) async fn delete_edge_observed(

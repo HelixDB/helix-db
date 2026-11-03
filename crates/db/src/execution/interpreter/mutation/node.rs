@@ -112,7 +112,7 @@ impl<'db> ExecutionContext<'db> {
         let _ = self
             .set_node_property_observed(txn, node_id, property, observed, index_context)
             .await?;
-        index_context.flush_topology(txn).await?;
+        index_context.flush_topology(txn)?;
         Ok(())
     }
 
@@ -396,7 +396,7 @@ impl<'db> ExecutionContext<'db> {
             .before()
             .expect("a delete transition has a before row")
             .properties();
-        index_context.flush_topology(txn).await?;
+        index_context.flush_topology(txn)?;
         let incident_edges = self.incident_edge_ids(txn, node_id, index_context).await?;
         let mut observed_edges = self
             .observe_edge_deletions(txn, incident_edges.iter().copied(), index_context)
@@ -406,7 +406,7 @@ impl<'db> ExecutionContext<'db> {
             self.delete_edge_observed(txn, edge_id, observed_edges.take(edge_id)?, index_context)
                 .await?;
         }
-        index_context.flush_topology(txn).await?;
+        index_context.flush_topology(txn)?;
         if let Some(label) = label_of(properties) {
             index_context.topology_mutations().remove_node_label(
                 self.tenant_scope,

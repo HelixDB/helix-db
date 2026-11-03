@@ -463,7 +463,7 @@ impl TopologyMutationRuntime {
     }
 
     /// Flushes one coalesced epoch and returns to the collecting state.
-    pub(in crate::execution::interpreter) async fn flush(
+    pub(in crate::execution::interpreter) fn flush(
         &mut self,
         transaction: &impl crate::transaction::Mutation,
     ) -> Result<()> {
@@ -555,11 +555,11 @@ impl TopologyMutationRuntime {
     }
 
     /// Flushes the final epoch and seals the runtime for commit.
-    pub(in crate::execution::interpreter) async fn prepare(
+    pub(in crate::execution::interpreter) fn prepare(
         &mut self,
         transaction: &impl crate::transaction::Mutation,
     ) -> Result<()> {
-        self.flush(transaction).await?;
+        self.flush(transaction)?;
         self.state = TopologyMutationRuntimeState::Prepared;
         Ok(())
     }
@@ -863,7 +863,7 @@ mod tests {
                     .unwrap(),
                 _ => unreachable!("the fixture lists every topology row"),
             }
-            runtime.prepare(&transaction).await.unwrap();
+            runtime.prepare(&transaction).unwrap();
             runtime.consume_prepared().unwrap();
             assert!(transaction.get(&key).await.is_err(), "{row}");
             transaction.commit().await.unwrap();
@@ -877,7 +877,7 @@ mod tests {
                 .unwrap();
             let mut runtime = TopologyMutationRuntime::default();
             runtime.add_node_label(scope, "Healthy", 2).unwrap();
-            runtime.prepare(&transaction).await.unwrap();
+            runtime.prepare(&transaction).unwrap();
             runtime.consume_prepared().unwrap();
             transaction.commit().await.unwrap();
             db.flush_with_options(memtable).await.unwrap();
@@ -933,8 +933,8 @@ mod tests {
             .add_adjacency(scope, 50, 61, helix_planner::ir::ExpandDirection::Both)
             .unwrap();
 
-        left_runtime.prepare(&left).await.unwrap();
-        right_runtime.prepare(&right).await.unwrap();
+        left_runtime.prepare(&left).unwrap();
+        right_runtime.prepare(&right).unwrap();
         left_runtime.consume_prepared().unwrap();
         right_runtime.consume_prepared().unwrap();
         left.commit().await.unwrap();
@@ -1023,7 +1023,7 @@ mod tests {
                                 row.stage(&mut runtime, scope, id, MembershipMutation::Present);
                             }
                         }
-                        runtime.prepare(&seed).await.unwrap();
+                        runtime.prepare(&seed).unwrap();
                         runtime.consume_prepared().unwrap();
                         seed.commit().await.unwrap();
 
@@ -1051,7 +1051,7 @@ mod tests {
                                     MembershipMutation::Absent
                                 },
                             );
-                            runtime.prepare(txn).await.unwrap();
+                            runtime.prepare(txn).unwrap();
                             runtime.consume_prepared().unwrap();
                         }
                         let (first, second) = if left_first {
@@ -1104,7 +1104,7 @@ mod tests {
             for (txn, id) in [(&observed, 1), (&concurrent, 2)] {
                 let mut runtime = TopologyMutationRuntime::default();
                 runtime.add_node_label(scope, "Event", id).unwrap();
-                runtime.prepare(txn).await.unwrap();
+                runtime.prepare(txn).unwrap();
                 runtime.consume_prepared().unwrap();
             }
             concurrent.commit().await.unwrap();
@@ -1135,7 +1135,7 @@ mod tests {
                 .unwrap();
             let mut seed_runtime = TopologyMutationRuntime::default();
             row.stage(&mut seed_runtime, scope, 1, MembershipMutation::Present);
-            seed_runtime.prepare(&seed).await.unwrap();
+            seed_runtime.prepare(&seed).unwrap();
             seed_runtime.consume_prepared().unwrap();
             seed.commit().await.unwrap();
 
@@ -1149,11 +1149,11 @@ mod tests {
                 .unwrap();
             let mut insert_runtime = TopologyMutationRuntime::default();
             row.stage(&mut insert_runtime, scope, 2, MembershipMutation::Present);
-            insert_runtime.prepare(&insert).await.unwrap();
+            insert_runtime.prepare(&insert).unwrap();
             insert_runtime.consume_prepared().unwrap();
             let mut remove_runtime = TopologyMutationRuntime::default();
             row.stage(&mut remove_runtime, scope, 1, MembershipMutation::Absent);
-            remove_runtime.prepare(&remove).await.unwrap();
+            remove_runtime.prepare(&remove).unwrap();
             remove_runtime.consume_prepared().unwrap();
 
             if insert_commits_first {
@@ -1193,7 +1193,7 @@ mod tests {
                     helix_planner::ir::ExpandDirection::In,
                 )
                 .unwrap();
-            seed_runtime.prepare(&seed).await.unwrap();
+            seed_runtime.prepare(&seed).unwrap();
             seed_runtime.consume_prepared().unwrap();
             seed.commit().await.unwrap();
 
@@ -1214,7 +1214,7 @@ mod tests {
                     helix_planner::ir::ExpandDirection::Out,
                 )
                 .unwrap();
-            outgoing_runtime.prepare(&outgoing).await.unwrap();
+            outgoing_runtime.prepare(&outgoing).unwrap();
             outgoing_runtime.consume_prepared().unwrap();
             let mut incoming_runtime = TopologyMutationRuntime::default();
             incoming_runtime
@@ -1225,7 +1225,7 @@ mod tests {
                     helix_planner::ir::ExpandDirection::In,
                 )
                 .unwrap();
-            incoming_runtime.prepare(&incoming).await.unwrap();
+            incoming_runtime.prepare(&incoming).unwrap();
             incoming_runtime.consume_prepared().unwrap();
 
             if outgoing_commits_first {
@@ -1273,7 +1273,7 @@ mod tests {
                 .unwrap();
             let mut seed_runtime = TopologyMutationRuntime::default();
             row.stage(&mut seed_runtime, scope, 1, MembershipMutation::Present);
-            seed_runtime.prepare(&seed).await.unwrap();
+            seed_runtime.prepare(&seed).unwrap();
             seed_runtime.consume_prepared().unwrap();
             seed.commit().await.unwrap();
 
@@ -1287,11 +1287,11 @@ mod tests {
                 .unwrap();
             let mut insert_runtime = TopologyMutationRuntime::default();
             row.stage(&mut insert_runtime, scope, 1, MembershipMutation::Present);
-            insert_runtime.prepare(&insert).await.unwrap();
+            insert_runtime.prepare(&insert).unwrap();
             insert_runtime.consume_prepared().unwrap();
             let mut remove_runtime = TopologyMutationRuntime::default();
             row.stage(&mut remove_runtime, scope, 1, MembershipMutation::Absent);
-            remove_runtime.prepare(&remove).await.unwrap();
+            remove_runtime.prepare(&remove).unwrap();
             remove_runtime.consume_prepared().unwrap();
 
             if insert_commits_first {
@@ -1338,7 +1338,7 @@ mod tests {
                 (&node_label, &edge_label),
                 MembershipMutation::Present,
             );
-            seed_runtime.prepare(&seed).await.unwrap();
+            seed_runtime.prepare(&seed).unwrap();
             seed_runtime.consume_prepared().unwrap();
             seed.commit().await.unwrap();
 
@@ -1360,7 +1360,7 @@ mod tests {
                 (&node_label, &edge_label),
                 MembershipMutation::Present,
             );
-            insert_runtime.prepare(&insert).await.unwrap();
+            insert_runtime.prepare(&insert).unwrap();
             insert_runtime.consume_prepared().unwrap();
             let mut remove_runtime = TopologyMutationRuntime::default();
             stage_linked_event(
@@ -1372,7 +1372,7 @@ mod tests {
                 (&node_label, &edge_label),
                 MembershipMutation::Absent,
             );
-            remove_runtime.prepare(&remove).await.unwrap();
+            remove_runtime.prepare(&remove).unwrap();
             remove_runtime.consume_prepared().unwrap();
 
             if insert_commits_first {
@@ -1476,7 +1476,7 @@ mod tests {
             .add_adjacency(scope, 1, 3, helix_planner::ir::ExpandDirection::Out)
             .unwrap();
         runtime.add_edge_label(scope, 1, 2, "FOLLOWS", 10).unwrap();
-        runtime.flush(&transaction).await.unwrap();
+        runtime.flush(&transaction).unwrap();
 
         runtime.remove_node_label(scope, "User", 1).unwrap();
         runtime.remove_edge_pair(scope, 1, 2, 10).unwrap();
@@ -1486,7 +1486,7 @@ mod tests {
         runtime
             .remove_global_edge_label(scope, "FOLLOWS", 10)
             .unwrap();
-        runtime.flush(&transaction).await.unwrap();
+        runtime.flush(&transaction).unwrap();
 
         let labels = secondary::SecondaryEqualityValue::decode(
             &transaction
@@ -1524,7 +1524,7 @@ mod tests {
         .unwrap();
         assert_eq!(adjacency.iter_out().collect::<Vec<_>>(), vec![3]);
 
-        runtime.prepare(&transaction).await.unwrap();
+        runtime.prepare(&transaction).unwrap();
         runtime.consume_prepared().unwrap();
     }
 
@@ -1554,7 +1554,7 @@ mod tests {
         runtime
             .add_adjacency(scope, 9, 2, helix_planner::ir::ExpandDirection::Out)
             .unwrap();
-        runtime.prepare(&transaction).await.unwrap();
+        runtime.prepare(&transaction).unwrap();
         runtime.consume_prepared().unwrap();
         transaction.commit().await.unwrap();
 
@@ -1594,14 +1594,14 @@ mod tests {
     async fn prepared_runtime_rejects_further_collection() {
         let transaction = transaction("prepared-rejects-collection").await;
         let mut runtime = TopologyMutationRuntime::default();
-        runtime.prepare(&transaction).await.unwrap();
+        runtime.prepare(&transaction).unwrap();
 
         assert!(matches!(
             runtime.add_node_label(DataScope::LegacyUnscoped, "User", 1),
             Err(HelixDbError::InvariantViolation(_))
         ));
         assert!(matches!(
-            runtime.flush(&transaction).await,
+            runtime.flush(&transaction),
             Err(HelixDbError::InvariantViolation(_))
         ));
         // A rejected extra flush must retain the prepared state for commit.
@@ -1746,7 +1746,7 @@ mod tests {
                             .unwrap();
                     }
                 }
-                runtime.prepare(&transaction).await.unwrap();
+                runtime.prepare(&transaction).unwrap();
                 runtime.consume_prepared().unwrap();
             }
         }

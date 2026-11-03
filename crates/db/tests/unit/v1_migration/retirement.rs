@@ -126,7 +126,6 @@ async fn seed(
         EDGE,
         DataScope::LegacyUnscoped,
     )
-    .await
     .expect("retirement edge-label row stages");
 
     let scoped_property = crate::config::scoped_secondary_index_property(LABEL, PROPERTY);
@@ -141,7 +140,6 @@ async fn seed(
                 LEGACY_VALUE,
                 DataScope::LegacyUnscoped,
             )
-            .await
             .expect("retirement equality rows stage");
         }
         Family::Range => {

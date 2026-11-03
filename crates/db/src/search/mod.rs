@@ -412,16 +412,16 @@ fn stage_shared_bitmap_membership(
 }
 
 /// Add a node to an equality index
-pub async fn add_to_equality_index(
+pub fn add_to_equality_index(
     txn: &DbTransaction,
     property: &str,
     value: &str,
     node_id: NodeId,
 ) -> Result<(), HelixDbError> {
-    add_to_equality_index_scoped(txn, property, value, node_id, DataScope::LegacyUnscoped).await
+    add_to_equality_index_scoped(txn, property, value, node_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn add_to_equality_index_scoped(
+pub fn add_to_equality_index_scoped(
     txn: &DbTransaction,
     property: &str,
     value: &str,
@@ -441,17 +441,16 @@ pub async fn add_to_equality_index_scoped(
 }
 
 /// Remove a node from an equality index
-pub async fn remove_from_equality_index(
+pub fn remove_from_equality_index(
     txn: &DbTransaction,
     property: &str,
     value: &str,
     node_id: NodeId,
 ) -> Result<(), HelixDbError> {
     remove_from_equality_index_scoped(txn, property, value, node_id, DataScope::LegacyUnscoped)
-        .await
 }
 
-pub async fn remove_from_equality_index_scoped(
+pub fn remove_from_equality_index_scoped(
     txn: &DbTransaction,
     property: &str,
     value: &str,
@@ -1371,16 +1370,16 @@ pub(crate) async fn delete_global_edge_range_index_entries_for_property_with_dir
 ///
 /// Updates both the outgoing index (source -> targets with label)
 /// and the incoming index (target -> sources with label).
-pub async fn add_to_edge_label_index(
+pub fn add_to_edge_label_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
     label: &str,
 ) -> Result<(), HelixDbError> {
-    add_to_edge_label_index_scoped(txn, from, to, label, DataScope::LegacyUnscoped).await
+    add_to_edge_label_index_scoped(txn, from, to, label, DataScope::LegacyUnscoped)
 }
 
-pub async fn add_to_edge_label_index_scoped(
+pub fn add_to_edge_label_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1411,16 +1410,16 @@ pub async fn add_to_edge_label_index_scoped(
 }
 
 /// Remove an edge from the edge label index
-pub async fn remove_from_edge_label_index(
+pub fn remove_from_edge_label_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
     label: &str,
 ) -> Result<(), HelixDbError> {
-    remove_from_edge_label_index_scoped(txn, from, to, label, DataScope::LegacyUnscoped).await
+    remove_from_edge_label_index_scoped(txn, from, to, label, DataScope::LegacyUnscoped)
 }
 
-pub async fn remove_from_edge_label_index_scoped(
+pub fn remove_from_edge_label_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1533,7 +1532,7 @@ pub(crate) async fn lookup_in_neighbors_by_label_admitted(
 // =============================================================================
 
 /// Add an edge to the equality index (both directions)
-pub async fn add_to_edge_equality_index(
+pub fn add_to_edge_equality_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1550,10 +1549,9 @@ pub async fn add_to_edge_equality_index(
         value,
         DataScope::LegacyUnscoped,
     )
-    .await
 }
 
-pub async fn add_to_edge_equality_index_scoped(
+pub fn add_to_edge_equality_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1604,7 +1602,7 @@ pub async fn add_to_edge_equality_index_scoped(
 }
 
 /// Remove an edge from the equality index (both directions)
-pub async fn remove_from_edge_equality_index(
+pub fn remove_from_edge_equality_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1621,10 +1619,9 @@ pub async fn remove_from_edge_equality_index(
         value,
         DataScope::LegacyUnscoped,
     )
-    .await
 }
 
-pub async fn remove_from_edge_equality_index_scoped(
+pub fn remove_from_edge_equality_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1769,15 +1766,15 @@ pub async fn scan_edges_out_by_equality_property_prefix(
 }
 
 /// Add an edge to the global label -> edge IDs index.
-pub async fn add_to_global_edge_label_index(
+pub fn add_to_global_edge_label_index(
     txn: &DbTransaction,
     label: &str,
     edge_id: EdgeId,
 ) -> Result<(), HelixDbError> {
-    add_to_global_edge_label_index_scoped(txn, label, edge_id, DataScope::LegacyUnscoped).await
+    add_to_global_edge_label_index_scoped(txn, label, edge_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn add_to_global_edge_label_index_scoped(
+pub fn add_to_global_edge_label_index_scoped(
     txn: &DbTransaction,
     label: &str,
     edge_id: EdgeId,
@@ -1794,15 +1791,15 @@ pub async fn add_to_global_edge_label_index_scoped(
 }
 
 /// Remove an edge from the global label -> edge IDs index.
-pub async fn remove_from_global_edge_label_index(
+pub fn remove_from_global_edge_label_index(
     txn: &DbTransaction,
     label: &str,
     edge_id: EdgeId,
 ) -> Result<(), HelixDbError> {
-    remove_from_global_edge_label_index_scoped(txn, label, edge_id, DataScope::LegacyUnscoped).await
+    remove_from_global_edge_label_index_scoped(txn, label, edge_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn remove_from_global_edge_label_index_scoped(
+pub fn remove_from_global_edge_label_index_scoped(
     txn: &DbTransaction,
     label: &str,
     edge_id: EdgeId,
@@ -1919,16 +1916,16 @@ pub(crate) async fn lookup_edge_pair_index_admitted(
 }
 
 /// Add an edge id to the exact `(from, to)` multigraph pair index.
-pub async fn add_to_edge_pair_index(
+pub fn add_to_edge_pair_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
     edge_id: EdgeId,
 ) -> Result<(), HelixDbError> {
-    add_to_edge_pair_index_scoped(txn, from, to, edge_id, DataScope::LegacyUnscoped).await
+    add_to_edge_pair_index_scoped(txn, from, to, edge_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn add_to_edge_pair_index_scoped(
+pub fn add_to_edge_pair_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1944,16 +1941,16 @@ pub async fn add_to_edge_pair_index_scoped(
 }
 
 /// Remove an edge id from the exact `(from, to)` multigraph pair index.
-pub async fn remove_from_edge_pair_index(
+pub fn remove_from_edge_pair_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
     edge_id: EdgeId,
 ) -> Result<(), HelixDbError> {
-    remove_from_edge_pair_index_scoped(txn, from, to, edge_id, DataScope::LegacyUnscoped).await
+    remove_from_edge_pair_index_scoped(txn, from, to, edge_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn remove_from_edge_pair_index_scoped(
+pub fn remove_from_edge_pair_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -3263,15 +3260,9 @@ mod tests {
             .expect("transaction starts");
         let property = scoped_secondary_index_property("User", "status");
 
-        add_to_equality_index(&txn, &property, "active", 2)
-            .await
-            .expect("add active node 2");
-        add_to_equality_index(&txn, &property, "active", 1)
-            .await
-            .expect("add active node 1");
-        add_to_equality_index(&txn, &property, "inactive", 3)
-            .await
-            .expect("add inactive node");
+        add_to_equality_index(&txn, &property, "active", 2).expect("add active node 2");
+        add_to_equality_index(&txn, &property, "active", 1).expect("add active node 1");
+        add_to_equality_index(&txn, &property, "inactive", 3).expect("add inactive node");
 
         assert_eq!(
             lookup_equality_index(&txn, &property, "active")
@@ -3308,18 +3299,14 @@ mod tests {
         assert!(filtered.contains(3));
         assert_eq!(filtered.len(), 2);
 
-        remove_from_equality_index(&txn, &property, "active", 2)
-            .await
-            .expect("remove active node 2");
+        remove_from_equality_index(&txn, &property, "active", 2).expect("remove active node 2");
         assert_eq!(
             lookup_equality_index(&txn, &property, "active")
                 .await
                 .expect("active lookup after first remove succeeds"),
             vec![1]
         );
-        remove_from_equality_index(&txn, &property, "active", 1)
-            .await
-            .expect("remove active node 1");
+        remove_from_equality_index(&txn, &property, "active", 1).expect("remove active node 1");
         assert!(lookup_equality_index(&txn, &property, "active")
             .await
             .expect("active lookup after all removes succeeds")
@@ -3348,10 +3335,8 @@ mod tests {
         let scope_b = DataScope::Tenant(tenant_b);
 
         add_to_equality_index_scoped(&txn, "status", "active", 10, scope_a)
-            .await
             .expect("tenant a equality write succeeds");
         add_to_equality_index_scoped(&txn, "status", "active", 20, scope_b)
-            .await
             .expect("tenant b equality write succeeds");
 
         assert_eq!(
@@ -3456,25 +3441,18 @@ mod tests {
                     .expect("transaction starts");
 
                 add_to_equality_index_scoped(&txn, "$label", "User", node_id, scope)
-                    .await
                     .expect("node label insert succeeds");
                 add_to_equality_index_scoped(&txn, &normal_property, "active", node_id, scope)
-                    .await
                     .expect("node equality insert succeeds");
                 add_to_edge_label_index_scoped(&txn, 31, node_id + 30_000, "FOLLOWS", scope)
-                    .await
                     .expect("outgoing edge-label insert succeeds");
                 add_to_edge_label_index_scoped(&txn, node_id + 40_000, 32, "FOLLOWS", scope)
-                    .await
                     .expect("incoming edge-label insert succeeds");
                 add_to_edge_equality_index_scoped(&txn, 41, 42, edge_id, "status", "active", scope)
-                    .await
                     .expect("edge equality insert succeeds");
                 add_to_global_edge_label_index_scoped(&txn, "FOLLOWS", edge_id, scope)
-                    .await
                     .expect("global edge-label insert succeeds");
                 add_to_edge_pair_index_scoped(&txn, 51, 52, edge_id, scope)
-                    .await
                     .expect("edge-pair insert succeeds");
                 transactions.push(txn);
             }
@@ -3596,9 +3574,7 @@ mod tests {
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .expect("seed transaction starts");
-            add_to_equality_index(&seed, "race", value, 1)
-                .await
-                .expect("seed insert succeeds");
+            add_to_equality_index(&seed, "race", value, 1).expect("seed insert succeeds");
             seed.commit().await.expect("seed transaction commits");
 
             let insert = db
@@ -3611,12 +3587,8 @@ mod tests {
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .expect("remove transaction starts");
-            add_to_equality_index(&insert, "race", value, 2)
-                .await
-                .expect("racing insert buffers");
-            remove_from_equality_index(&remove, "race", value, 1)
-                .await
-                .expect("racing removal buffers");
+            add_to_equality_index(&insert, "race", value, 2).expect("racing insert buffers");
+            remove_from_equality_index(&remove, "race", value, 1).expect("racing removal buffers");
 
             if insert_commits_first {
                 insert.commit().await.expect("insert commits first");
@@ -4023,13 +3995,10 @@ mod tests {
         let property = scoped_secondary_index_property("FOLLOWS", "status");
 
         add_to_edge_equality_index(&txn, 1, 2, 100, &property, "active")
-            .await
             .expect("add edge 100 equality");
         add_to_edge_equality_index(&txn, 1, 3, 101, &property, "active")
-            .await
             .expect("add edge 101 equality");
         add_to_edge_equality_index(&txn, 1, 4, 102, &property, "inactive")
-            .await
             .expect("add edge 102 equality");
 
         let active_out = lookup_edges_out_by_equality(&txn, 1, &property, "active")
@@ -4058,7 +4027,6 @@ mod tests {
         assert_eq!(any_status.len(), 3);
 
         remove_from_edge_equality_index(&txn, 1, 2, 100, &property, "active")
-            .await
             .expect("remove edge 100 equality");
         assert!(!lookup_edges_out_by_equality(&txn, 1, &property, "active")
             .await
@@ -4071,21 +4039,15 @@ mod tests {
                 .contains(100)
         );
 
-        add_to_edge_pair_index(&txn, 1, 2, 100)
-            .await
-            .expect("add edge pair 100");
-        add_to_edge_pair_index(&txn, 1, 2, 103)
-            .await
-            .expect("add edge pair 103");
+        add_to_edge_pair_index(&txn, 1, 2, 100).expect("add edge pair 100");
+        add_to_edge_pair_index(&txn, 1, 2, 103).expect("add edge pair 103");
         let pair = lookup_edge_pair_index(&txn, 1, 2)
             .await
             .expect("edge pair lookup succeeds");
         assert!(pair.contains(100));
         assert!(pair.contains(103));
         assert_eq!(pair.len(), 2);
-        remove_from_edge_pair_index(&txn, 1, 2, 100)
-            .await
-            .expect("remove edge pair 100");
+        remove_from_edge_pair_index(&txn, 1, 2, 100).expect("remove edge pair 100");
         assert!(!lookup_edge_pair_index(&txn, 1, 2)
             .await
             .expect("edge pair after remove succeeds")
@@ -4096,7 +4058,6 @@ mod tests {
                 .expect("valid tenant");
         let scope = DataScope::Tenant(tenant);
         add_to_edge_equality_index_scoped(&txn, 1, 2, 200, "status", "active", scope)
-            .await
             .expect("tenant edge equality write succeeds");
         assert!(
             lookup_edges_out_by_equality_scoped(&txn, 1, "status", "active", scope)
@@ -4392,7 +4353,6 @@ mod tests {
             ("a\0", FF_PREFIX_ID),
         ] {
             add_to_edge_equality_index(&txn, 1, 2, edge_id, "target", value)
-                .await
                 .expect("target edge equality row stages");
             add_to_edge_range_index_with_direction(
                 &txn,
@@ -4407,7 +4367,6 @@ mod tests {
             .expect("target ascending edge range row stages");
         }
         add_to_edge_equality_index(&txn, 1, 2, 7, "other", "a\0")
-            .await
             .expect("unrelated edge equality row stages");
         add_to_edge_range_index_with_direction(
             &txn,
@@ -4533,12 +4492,8 @@ mod tests {
             .await
             .expect("transaction starts");
 
-        add_to_equality_index(&txn, "status", "active", 1)
-            .await
-            .unwrap();
-        add_to_equality_index(&txn, "other", "active", 2)
-            .await
-            .unwrap();
+        add_to_equality_index(&txn, "status", "active", 1).unwrap();
+        add_to_equality_index(&txn, "other", "active", 2).unwrap();
         delete_equality_index_entries_for_property(&txn, "status")
             .await
             .unwrap();
@@ -4582,12 +4537,8 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        add_to_edge_equality_index(&txn, 1, 2, 10, "status", "active")
-            .await
-            .unwrap();
-        add_to_edge_equality_index(&txn, 1, 3, 11, "other", "active")
-            .await
-            .unwrap();
+        add_to_edge_equality_index(&txn, 1, 2, 10, "status", "active").unwrap();
+        add_to_edge_equality_index(&txn, 1, 3, 11, "other", "active").unwrap();
         delete_edge_equality_index_entries_for_property(&txn, "status")
             .await
             .unwrap();
@@ -4604,12 +4555,8 @@ mod tests {
             .unwrap()
             .contains(11));
 
-        add_to_edge_label_index(&txn, 1, 2, "FOLLOWS")
-            .await
-            .unwrap();
-        remove_from_edge_label_index(&txn, 1, 2, "FOLLOWS")
-            .await
-            .unwrap();
+        add_to_edge_label_index(&txn, 1, 2, "FOLLOWS").unwrap();
+        remove_from_edge_label_index(&txn, 1, 2, "FOLLOWS").unwrap();
         assert!(lookup_out_neighbors_by_label(&txn, 1, "FOLLOWS")
             .await
             .unwrap()
@@ -4619,18 +4566,10 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        add_to_global_edge_label_index(&txn, "FOLLOWS", 20)
-            .await
-            .unwrap();
-        add_to_global_edge_label_index(&txn, "FOLLOWS", 21)
-            .await
-            .unwrap();
-        remove_from_global_edge_label_index(&txn, "FOLLOWS", 20)
-            .await
-            .unwrap();
-        remove_from_global_edge_label_index(&txn, "FOLLOWS", 99)
-            .await
-            .unwrap();
+        add_to_global_edge_label_index(&txn, "FOLLOWS", 20).unwrap();
+        add_to_global_edge_label_index(&txn, "FOLLOWS", 21).unwrap();
+        remove_from_global_edge_label_index(&txn, "FOLLOWS", 20).unwrap();
+        remove_from_global_edge_label_index(&txn, "FOLLOWS", 99).unwrap();
         assert_eq!(
             lookup_global_edge_label_index(&txn, "FOLLOWS")
                 .await
@@ -4640,9 +4579,7 @@ mod tests {
             vec![21]
         );
 
-        add_to_equality_index(&txn, "$label", "User", 1)
-            .await
-            .unwrap();
+        add_to_equality_index(&txn, "$label", "User", 1).unwrap();
         clear_node_label_indexes(&txn).await.unwrap();
         assert!(lookup_equality_index(&txn, "$label", "User")
             .await
@@ -4655,9 +4592,7 @@ mod tests {
             vec![2]
         );
 
-        add_to_global_edge_label_index(&txn, "LIKES", 22)
-            .await
-            .unwrap();
+        add_to_global_edge_label_index(&txn, "LIKES", 22).unwrap();
         clear_global_edge_label_indexes(&txn).await.unwrap();
         assert!(lookup_global_edge_label_index(&txn, "FOLLOWS")
             .await
@@ -4683,11 +4618,8 @@ mod tests {
             .expect("transaction starts");
         let label_hash = hash_property_value("FOLLOWS");
 
-        add_to_edge_label_index(&txn, 1, 2, "FOLLOWS")
-            .await
-            .expect("neighbor index write succeeds");
+        add_to_edge_label_index(&txn, 1, 2, "FOLLOWS").expect("neighbor index write succeeds");
         add_to_global_edge_label_index(&txn, "FOLLOWS", 99)
-            .await
             .expect("global label index write succeeds");
 
         let out_key = DataKey::Data {
@@ -4767,10 +4699,8 @@ mod tests {
         let scope_b = DataScope::Tenant(tenant_b);
 
         add_to_edge_label_index_scoped(&txn, 1, 2, "FOLLOWS", scope_a)
-            .await
             .expect("tenant neighbor index write succeeds");
         add_to_global_edge_label_index_scoped(&txn, "FOLLOWS", 99, scope_a)
-            .await
             .expect("tenant global label index write succeeds");
 
         assert!(

@@ -1464,7 +1464,7 @@ async fn scan_source(
                     exhausted = false;
                     break;
                 }
-                plan.stage(transaction).await?;
+                plan.stage(transaction)?;
                 for write in &plan.writes {
                     match write {
                         EntityWrite::Put { key, value } if unique_entries.contains_key(key) => {
@@ -1702,7 +1702,7 @@ async fn drain_build_deltas(
             }
             return Ok(DeltaDrain::BudgetExhausted);
         }
-        plan.stage(transaction).await?;
+        plan.stage(transaction)?;
         accounting.admit_scan(input_bytes, Some(&plan))?;
     }
 }
@@ -1955,7 +1955,7 @@ async fn catch_up_exact(
             }
             break;
         }
-        plan.stage(transaction).await?;
+        plan.stage(transaction)?;
         for write in &plan.writes {
             match write {
                 EntityWrite::Put { key, value } if unique_entries.contains_key(key) => {
@@ -2103,7 +2103,7 @@ async fn validate_and_release_applied(
             exhausted = false;
             break;
         }
-        plan.stage(transaction).await?;
+        plan.stage(transaction)?;
         accounting.admit_scan(input_bytes, Some(&plan))?;
         cursor = Some(IndexCursor::try_new(row.key).map_err(operation_error)?);
     }
@@ -2336,7 +2336,7 @@ async fn delete_generation_rows(
                 exhausted = false;
                 break;
             }
-            plan.stage(transaction).await?;
+            plan.stage(transaction)?;
             accounting.admit_scan(input_bytes, Some(&plan))?;
             cursor = Some(IndexCursor::try_new(row.key).map_err(operation_error)?);
         }
@@ -2411,7 +2411,7 @@ async fn delete_delta_and_applied_rows(
                 exhausted = false;
                 break;
             }
-            plan.stage(transaction).await?;
+            plan.stage(transaction)?;
             accounting.admit_scan(input_bytes, Some(&plan))?;
         }
         if !accounting.can_read_another() {
@@ -3173,7 +3173,7 @@ impl EntityWritePlan {
         });
     }
 
-    async fn stage(&self, transaction: &impl crate::transaction::Mutation) -> Result<()> {
+    fn stage(&self, transaction: &impl crate::transaction::Mutation) -> Result<()> {
         let mut bitmap_changes = BTreeMap::<Bytes, BTreeMap<u64, bool>>::new();
         for write in &self.writes {
             match write {
@@ -6636,7 +6636,6 @@ mod tests {
             .await
             .expect("bitmap reconciliation transaction begins");
         plan.stage(&transaction)
-            .await
             .expect("bitmap reconciliation stages");
         transaction
             .commit()

@@ -986,7 +986,6 @@ mod tests {
             entity_id,
             scope,
         )
-        .await
         .unwrap();
         transaction.commit().await.unwrap();
     }
@@ -1021,7 +1020,6 @@ mod tests {
             entity_id,
             scope,
         )
-        .await
         .unwrap();
         transaction.commit().await.unwrap();
     }

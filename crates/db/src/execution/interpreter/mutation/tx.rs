@@ -205,7 +205,7 @@ impl<'db> ExecutionContext<'db> {
                 return Ok(());
             };
             if required.contains(super::visibility::DeferredMutationFamily::Topology) {
-                active.index_context.flush_topology(&active.txn).await?;
+                active.index_context.flush_topology(&active.txn)?;
             }
             if required.contains(super::visibility::DeferredMutationFamily::Secondary) {
                 active.index_context.flush_secondary(&active.txn).await?;
@@ -231,7 +231,7 @@ impl<'db> ExecutionContext<'db> {
     /// finalized only from the commit outcome; the index worker is woken after
     /// a durable enqueue.
     pub(super) async fn commit_write_tx(&self, mut active: ActiveWriteTx) -> Result<()> {
-        active.index_context.prepare_topology(&active.txn).await?;
+        active.index_context.prepare_topology(&active.txn)?;
         active.index_context.prepare_secondary(&active.txn).await?;
         let staged_queue = active.index_context.finalize_queued(
             self.db.index_operand_limit(),

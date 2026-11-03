@@ -2417,7 +2417,6 @@ async fn regression_node_dynamic_equality_never_falls_back_to_colliding_legacy_p
         entity_id,
         DataScope::LegacyUnscoped,
     )
-    .await
     .unwrap();
     transaction.commit().await.unwrap();
 
@@ -2479,7 +2478,6 @@ async fn regression_edge_dynamic_equality_never_falls_back_to_colliding_legacy_p
         "collision",
         DataScope::LegacyUnscoped,
     )
-    .await
     .unwrap();
     transaction.commit().await.unwrap();
 

@@ -356,7 +356,6 @@ async fn seed_semantic_rows(
             node_id,
             DataScope::LegacyUnscoped,
         )
-        .await
         .expect("semantic V1 node label row stages");
         transaction
             .put(
@@ -384,7 +383,6 @@ async fn seed_semantic_rows(
             edge_id,
             DataScope::LegacyUnscoped,
         )
-        .await
         .expect("semantic V1 global edge label row stages");
         crate::search::add_to_edge_label_index_scoped(
             &transaction,
@@ -393,7 +391,6 @@ async fn seed_semantic_rows(
             seed.edge_label,
             DataScope::LegacyUnscoped,
         )
-        .await
         .expect("semantic V1 edge-neighbor label rows stage");
         rows.push(V1SemanticRow {
             element_kind: V1ElementKind::Node,

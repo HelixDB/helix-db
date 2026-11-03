@@ -3884,14 +3884,14 @@ async fn maintain_current_edge_rows(
         search::store_edge_endpoints_scoped(txn, edge_id, from, to, scope).await?;
         search::store_edge_properties_by_id_scoped(txn, edge_id, properties, scope).await?;
     }
-    search::add_to_edge_pair_index_scoped(txn, from, to, edge_id, scope).await?;
+    search::add_to_edge_pair_index_scoped(txn, from, to, edge_id, scope)?;
     add_adjacency(txn, scope, from, to, EdgeAdjacencyDirection::Out)?;
     add_adjacency(txn, scope, to, from, EdgeAdjacencyDirection::In)?;
 
     let properties = properties.unwrap_or(&[]);
     if let Some(label) = label_of(properties) {
-        search::add_to_edge_label_index_scoped(txn, from, to, label, scope).await?;
-        search::add_to_global_edge_label_index_scoped(txn, label, edge_id, scope).await?;
+        search::add_to_edge_label_index_scoped(txn, from, to, label, scope)?;
+        search::add_to_global_edge_label_index_scoped(txn, label, edge_id, scope)?;
     }
     Ok(())
 }
