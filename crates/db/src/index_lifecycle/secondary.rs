@@ -779,10 +779,10 @@ impl IndexOperationDriver for SecondaryIndexDriver {
                 ));
             }
             SecondaryBuildStage::CatchUp(progress) => {
-                if let Some(keys) = observe_backlog(db, scope, operation, limits).await? {
-                    return Ok(exact_catch_up(keys));
+                match observe_backlog(db, scope, operation, limits).await? {
+                    Some(keys) => return Ok(exact_catch_up(keys)),
+                    None => (progress.counters, AppliedStateDisposition::Retain),
                 }
-                (progress.counters, AppliedStateDisposition::Retain)
             }
             SecondaryBuildStage::Validate(progress) => {
                 (progress.counters, AppliedStateDisposition::Release)
@@ -795,20 +795,31 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         // Writes that committed while the permit was awaited may have taken
         // the backlog past the gated reach. Validation and activation drain
         // it regardless: returning to catch-up would restart validation.
-        if matches!(stage, SecondaryBuildStage::CatchUp(_))
-            && let Some(keys) = observe_backlog(db, scope, operation, limits).await?
-        {
-            drop(permit);
-            return Ok(exact_catch_up(keys));
-        }
-        let counters =
-            drain_backlog_under_gate(db, scope, operation, counters, limits, disposition).await?;
-        Ok(PreparedIndexOperationStep::secondary(
-            Box::new(permit),
-            PreparedSecondaryOperationStep {
-                step: PreparedSecondaryStep::Gated { counters },
-            },
-        ))
+        let regrown = match stage {
+            SecondaryBuildStage::CatchUp(_) => {
+                observe_backlog(db, scope, operation, limits).await?
+            }
+            SecondaryBuildStage::Scan(_)
+            | SecondaryBuildStage::Validate(_)
+            | SecondaryBuildStage::Activate(_) => None,
+        };
+        Ok(match regrown {
+            Some(keys) => {
+                drop(permit);
+                exact_catch_up(keys)
+            }
+            None => {
+                let counters =
+                    drain_backlog_under_gate(db, scope, operation, counters, limits, disposition)
+                        .await?;
+                PreparedIndexOperationStep::secondary(
+                    Box::new(permit),
+                    PreparedSecondaryOperationStep {
+                        step: PreparedSecondaryStep::Gated { counters },
+                    },
+                )
+            }
+        })
     }
 
     async fn step(
@@ -1384,7 +1395,7 @@ async fn scan_source(
     };
     let mut unique_entries = unique_keys
         .into_iter()
-        .zip(unique_values)
+        .zip(unique_values.into_iter().map(UniqueEntry::Observed))
         .collect::<BTreeMap<_, _>>();
     let mut accounting = BatchAccounting::new(progress.counters, limits);
     let mut cursor = progress.cursor.clone();
@@ -1457,10 +1468,11 @@ async fn scan_source(
                 for write in &plan.writes {
                     match write {
                         EntityWrite::Put { key, value } if unique_entries.contains_key(key) => {
-                            unique_entries.insert(key.clone(), Some(value.clone()));
+                            unique_entries
+                                .insert(key.clone(), UniqueEntry::Staged(Some(value.clone())));
                         }
                         EntityWrite::Delete(key) if unique_entries.contains_key(key) => {
-                            unique_entries.insert(key.clone(), None);
+                            unique_entries.insert(key.clone(), UniqueEntry::Staged(None));
                         }
                         EntityWrite::Put { .. }
                         | EntityWrite::Delete(_)
@@ -1875,7 +1887,7 @@ async fn catch_up_exact(
     let unique_values = transaction.multi_get(&unique_keys).await?;
     let mut unique_entries = unique_keys
         .into_iter()
-        .zip(unique_values)
+        .zip(unique_values.into_iter().map(UniqueEntry::Observed))
         .collect::<BTreeMap<_, _>>();
     let mut accounting = BatchAccounting::new(progress.counters, limits);
     // Owners whose stale unique claim an earlier entity of this batch took.
@@ -1888,7 +1900,7 @@ async fn catch_up_exact(
                 key.len().saturating_add(
                     unique_entries
                         .get(key)
-                        .and_then(Option::as_ref)
+                        .and_then(UniqueEntry::value)
                         .map_or(0, Bytes::len),
                 )
             })
@@ -1947,10 +1959,10 @@ async fn catch_up_exact(
         for write in &plan.writes {
             match write {
                 EntityWrite::Put { key, value } if unique_entries.contains_key(key) => {
-                    unique_entries.insert(key.clone(), Some(value.clone()));
+                    unique_entries.insert(key.clone(), UniqueEntry::Staged(Some(value.clone())));
                 }
                 EntityWrite::Delete(key) if unique_entries.contains_key(key) => {
-                    unique_entries.insert(key.clone(), None);
+                    unique_entries.insert(key.clone(), UniqueEntry::Staged(None));
                 }
                 EntityWrite::Put { .. } | EntityWrite::Delete(_) | EntityWrite::Bitmap { .. } => {}
             }
@@ -2669,7 +2681,7 @@ async fn reconciliation_plan(
             next_value,
         )? {
             let observed = transaction.get(&key).await?;
-            unique_entries.insert(key, observed);
+            unique_entries.insert(key, UniqueEntry::Observed(observed));
         }
     }
     decide_reconciliation(
@@ -2782,6 +2794,29 @@ fn unique_observation_keys<'a>(
     Ok(keys)
 }
 
+/// A unique entry as one batch's reconciliations see it.
+///
+/// A scan reads its source from a snapshot opened after the step's
+/// transaction, so a claim an earlier entity of the batch staged can name a
+/// value that entity's row holds only in that later snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UniqueEntry {
+    /// Read through the step's transaction.
+    Observed(Option<Bytes>),
+    /// Staged by an earlier reconciliation of the same batch, from the
+    /// source values the batch read.
+    Staged(Option<Bytes>),
+}
+
+impl UniqueEntry {
+    /// The entry's encoded value, if one is present.
+    fn value(&self) -> Option<&Bytes> {
+        match self {
+            Self::Observed(value) | Self::Staged(value) => value.as_ref(),
+        }
+    }
+}
+
 /// One entity's reconciliation with every unique claim decided.
 enum EntityReconciliation {
     /// The writes that reconcile the entity, and the owner whose stale
@@ -2805,7 +2840,11 @@ enum EntityReconciliation {
 /// then holds nothing until its pending delta reconciles it (see
 /// [`HeldValue`]). An owner whose row still holds the value is a real
 /// duplicate. Its row is read through the transaction, so a write that
-/// changes it before commit makes the step retry.
+/// changes it before commit makes the step retry. An owner whose claim an
+/// earlier reconciliation of the same batch staged is a duplicate in the
+/// source the batch read; the caller keeps both rows in the transaction's
+/// read set, so a write that moves either before commit makes the step
+/// retry.
 #[allow(
     clippy::too_many_arguments,
     reason = "a decided reconciliation needs the transaction, exact entity, definition, held and next values, observed unique rows, and applied-state disposition"
@@ -2817,7 +2856,7 @@ async fn decide_reconciliation(
     definition: &ValidatedSecondaryIndexDefinition,
     held: &HeldValue,
     next_value: Option<&CanonicalSecondaryValue>,
-    unique_entries: &mut BTreeMap<Bytes, Option<Bytes>>,
+    unique_entries: &mut BTreeMap<Bytes, UniqueEntry>,
     disposition: AppliedStateDisposition,
 ) -> Result<EntityReconciliation> {
     let IndexEntityStateKey {
@@ -2874,6 +2913,17 @@ async fn decide_reconciliation(
                 "secondary reconciliation contended a released unique claim",
             ));
         }
+        // The batch read both values from one source view, which may be
+        // newer than the transaction's snapshot, so the owner's row must not
+        // be read through the transaction here.
+        if matches!(unique_entries.get(&key), Some(UniqueEntry::Staged(_))) {
+            return Ok(EntityReconciliation::Blocked(
+                IndexOperationBlocker::UniquenessViolation {
+                    first_entity_id: owner,
+                    second_entity_id: entity.id,
+                },
+            ));
+        }
         let owner_state = IndexEntityStateKey {
             index_id,
             generation,
@@ -2915,7 +2965,7 @@ async fn decide_reconciliation(
                 "a unique secondary owner left its value without a pending delta",
             ));
         }
-        unique_entries.insert(key, None);
+        unique_entries.insert(key, UniqueEntry::Staged(None));
         released_owner = Some(owner);
     }
 }
@@ -2941,7 +2991,7 @@ fn reconciliation_plan_from_observations(
     applied_key: Bytes,
     held: &HeldValue,
     next_value: Option<&CanonicalSecondaryValue>,
-    unique_entries: &BTreeMap<Bytes, Option<Bytes>>,
+    unique_entries: &BTreeMap<Bytes, UniqueEntry>,
     disposition: AppliedStateDisposition,
 ) -> Result<ReconciliationPlan> {
     let entity_id = entity.id;
@@ -2952,7 +3002,7 @@ fn reconciliation_plan_from_observations(
             .ok_or_else(|| {
                 corruption("unique secondary entry was not observed before reconciliation")
             })?
-            .as_deref()
+            .value()
             .map(|value| decode_secondary_entry_value(index_id, generation, lane, value))
             .transpose()
     };
@@ -8399,6 +8449,97 @@ mod tests {
             }
             db.close().await.expect("secondary test database closes");
         }
+    }
+
+    /// A scan reads its source from a snapshot opened after the step's
+    /// transaction. A write between the two that gives an earlier entity of
+    /// the batch a later entity's unique value is a duplicate in the batch's
+    /// view, not a stale claim: the step reports it instead of corruption,
+    /// its commit conflicts with the write, and the retry blocks on the same
+    /// duplicate durably.
+    #[tokio::test]
+    async fn a_unique_scan_reports_a_duplicate_written_after_its_transaction_began() {
+        let db = test_db("secondary-unique-scan-snapshot-skew").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("node unique equality definition"),
+        );
+        let original = user_properties("original-0@example.com");
+        let shared = user_properties("shared@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &original).await;
+        put_source(&db, scope, IndexElementKind::Node, 1, &shared).await;
+        let (operation_id, _, _) = create_build(&db, scope, &definition, 1).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("secondary operation is readable")
+            .expect("secondary operation exists");
+        assert!(matches!(
+            operation.progress(),
+            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                SecondaryBuildStage::Scan(_)
+            ))
+        ));
+
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("scan transaction begins");
+        mutate_source(&db, scope, IndexElementKind::Node, 0, &original, &shared)
+            .await
+            .expect("a Building unique index admits the duplicate as a delta");
+        let execution = driver
+            .step(
+                &db,
+                &transaction,
+                scope,
+                &operation,
+                SearchIndexBackfillLimits::default().batch(),
+            )
+            .await
+            .expect("the scan stages without reporting corruption");
+        let is_duplicate = |blocker: &IndexOperationBlocker| {
+            matches!(
+                blocker,
+                IndexOperationBlocker::UniquenessViolation {
+                    first_entity_id,
+                    second_entity_id,
+                } if first_entity_id.get() == 0 && second_entity_id.get() == 1
+            )
+        };
+        assert!(
+            matches!(execution.result(), IndexOperationStepResult::Blocked(blocker) if is_duplicate(blocker)),
+            "{:?}",
+            execution.result()
+        );
+        assert_eq!(
+            transaction
+                .commit()
+                .await
+                .expect_err("the write after the transaction began conflicts")
+                .kind(),
+            slatedb::ErrorKind::Transaction
+        );
+
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Blocked
+        );
+        let blocked = read_operation(&db, scope, operation_id)
+            .await
+            .expect("blocked operation is readable")
+            .expect("blocked operation exists");
+        assert!(
+            matches!(
+                blocked.execution_state(),
+                IndexOperationExecutionState::Blocked(blocker) if is_duplicate(blocker)
+            ),
+            "{:?}",
+            blocked.execution_state()
+        );
+        db.close().await.expect("secondary test database closes");
     }
 
     /// A duplicate found by the validation drain blocks the build after the
