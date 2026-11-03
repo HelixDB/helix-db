@@ -6,7 +6,7 @@
 //! sharing RNG state, and gives tests deterministic replay without global
 //! mutable state. The module contains no persistence or graph-mutation logic.
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rand::{RngExt, SeedableRng};
@@ -22,7 +22,7 @@ use crate::search::vector::{select_layer, SimHash};
 pub(crate) enum LayerSelector {
     /// Draw every insertion layer from the process RNG.
     Random,
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     /// Cycle through an explicitly non-empty test sequence.
     Scripted {
         first: u16,
@@ -44,7 +44,7 @@ impl LayerSelector {
                 let mut rng = rand::rng();
                 select_layer(ml, &mut rng)
             }
-            #[cfg(any(test, feature = "production-coverage"))]
+            #[cfg(any(test, feature = "bench-internals"))]
             Self::Scripted { first, rest, next } => {
                 let layer_count = 1 + rest.len();
                 let index = next.fetch_add(1, Ordering::Relaxed) % layer_count;
@@ -61,7 +61,7 @@ impl LayerSelector {
     ///
     /// Empty scripts are rejected so selection cannot enter an unrepresentable
     /// state with no next layer.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn scripted(layers: Vec<u16>) -> Result<Self, ScriptedLayerSelectorError> {
         let Some((&first, rest)) = layers.split_first() else {
             return Err(ScriptedLayerSelectorError::Empty);
@@ -75,7 +75,7 @@ impl LayerSelector {
 }
 
 /// Why a deterministic test layer policy could not be constructed.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScriptedLayerSelectorError {
     /// A repeating layer policy requires at least one layer.

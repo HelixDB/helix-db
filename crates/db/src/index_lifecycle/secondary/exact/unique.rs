@@ -89,7 +89,7 @@ pub(crate) async fn lookup_active_unique_equality_batch_admitted(
     keys.iter().for_each(|_| record_equality_point_read());
     let mut owners = bitmap::Builder::new(budget)?;
     for (keys, values) in keys.chunks(BATCH).zip(values.chunks(BATCH)) {
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(any(test, feature = "bench-internals"))]
         record(ReadKind::MultiGet);
         if let Some(budget) = budget {
             budget.record_reads(query_resources::StorageReadUsage {
@@ -154,7 +154,7 @@ pub(crate) async fn lookup_active_unique_equality_batch_admitted(
                 )
             })
             .collect::<Vec<_>>();
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(any(test, feature = "bench-internals"))]
         record(ReadKind::MultiGet);
         if let Some(budget) = budget {
             budget.record_reads(query_resources::StorageReadUsage {

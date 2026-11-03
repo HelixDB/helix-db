@@ -51,7 +51,7 @@ use tokio::sync::{watch, Mutex, MutexGuard};
 
 use slatedb::DbReadOps;
 
-#[cfg(feature = "production-coverage")]
+#[cfg(test)]
 use crate::encoding::error::EncodingError;
 use crate::encoding::keys::{scope::DataScope, DataKey, DataKeyKind};
 use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorMemoryPrefixKey};
@@ -59,7 +59,7 @@ use crate::encoding::v2::keys::indexes::vector::{VectorKey, VectorMemoryPrefixKe
 use crate::encoding::v2::keys::indexes::vector::{
     VectorSimHashKey, VectorUpperNeighborsKey, VectorUpperVectorKey,
 };
-#[cfg(feature = "production-coverage")]
+#[cfg(test)]
 use crate::encoding::v2::values::indexes::vector::neighbors::encode_upper_neighbors;
 use crate::encoding::v2::values::indexes::vector::simhash::decode_simhash;
 #[cfg(test)]
@@ -677,7 +677,7 @@ impl VectorMemoryStore {
     }
 
     /// SimHash upsert for fixtures; production rows enter through hydration.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub fn insert_simhash(&self, node_id: NodeId, hash: SimHash) {
         self.simhashes.insert(node_id, hash);
     }
@@ -695,7 +695,7 @@ impl VectorMemoryStore {
 
     /// Upper-neighbor raw-bytes upsert for fixtures, copying `bytes` into
     /// the slab without charging it; production rows enter through hydration.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub fn insert_upper_neighbors_bytes(&self, layer: u16, node_id: NodeId, bytes: Bytes) {
         self.insert_upper_row(node_id, UpperRowKind::Neighbors(layer), &bytes);
     }
@@ -704,8 +704,8 @@ impl VectorMemoryStore {
     ///
     /// Production hydration retains the raw-byte insertion boundary because it
     /// validates row framing before admission. This decoded boundary exists only
-    /// for feature-gated production contract coverage.
-    #[cfg(feature = "production-coverage")]
+    /// for unit tests.
+    #[cfg(test)]
     pub fn insert_upper_neighbors(
         &self,
         layer: u16,
@@ -729,13 +729,13 @@ impl VectorMemoryStore {
 
     /// Upper-vector raw-bytes upsert for fixtures, copying `bytes` into the
     /// slab without charging it; production rows enter through hydration.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub fn insert_upper_vector(&self, node_id: NodeId, bytes: Bytes) {
         self.insert_upper_row(node_id, UpperRowKind::Vector, &bytes);
     }
 
     /// Remove upper-vector row.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub fn remove_upper_vector(&self, node_id: NodeId) {
         self.update_upper_node(node_id, |rows| rows.vector = None);
     }
@@ -766,7 +766,7 @@ impl VectorMemoryStore {
     }
 
     /// Copies one uncharged row into the slab and indexes it.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn insert_upper_row(&self, node_id: NodeId, kind: UpperRowKind, bytes: &[u8]) {
         let appended = self
             .slab
@@ -1015,7 +1015,7 @@ const fn hash_index_entry_bytes<K, V>() -> u64 {
 
 /// Charge for one upper row of `value_len` bytes admitted into an empty
 /// store: its index entry, its bytes, and the handle of the chunk it opens.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) const fn isolated_upper_row_admission_bytes(value_len: u64) -> u64 {
     UPPER_NODE_INDEX_ENTRY_BYTES + SLAB_CHUNK_HANDLE_BYTES + value_len
 }
@@ -1373,9 +1373,9 @@ impl VectorMemorySlab {
     }
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../../tests/production_support/vector/memory_store.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/memory_store.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 #[path = "store_tests.rs"]

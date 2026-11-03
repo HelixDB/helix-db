@@ -2391,12 +2391,7 @@ fn validate_index_id(
     Ok(())
 }
 
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(super) async fn run_production_contracts() {
-    tests::run_production_contracts().await;
-}
-
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 mod tests {
     #[cfg(test)]
     mod dynamic_membership;
@@ -5777,30 +5772,6 @@ mod tests {
             );
         }
         execution.close_request_read_view().unwrap();
-    }
-
-    #[cfg(all(feature = "production-coverage", not(test)))]
-    pub(super) async fn run_production_contracts() {
-        test_support::run_production_contracts().await;
-        evaluated_windows_and_index_identity_validation_cover_boundaries();
-        direct_non_search_count_families_match_materialized_sources_contract().await;
-        dynamic_equality_runtime_classification_covers_every_named_case().await;
-        every_direct_storage_count_propagates_its_own_read_failure().await;
-        direct_and_cursor_authoritative_counts_propagate_each_predicate_failure().await;
-        count_window_parameters_shapes_and_runtime_variables_fail_closed().await;
-        recursive_count_cursor_matrix_preserves_identity_and_child_order().await;
-        every_recursive_cursor_wrapper_propagates_child_failure_in_encoded_order().await;
-        every_recursive_cursor_operation_propagates_its_primitive_failure().await;
-        direct_and_restricted_search_count_families_use_selected_search_primitives().await;
-        every_direct_and_cursor_search_propagates_its_selected_read_failure().await;
-        input_shapes_and_parameterized_windows_are_literal_contracts().await;
-        count_window_runtime_dynamic_range_and_deadline_errors_are_exhaustive().await;
-        point_and_batch_bitmap_counts_issue_only_the_encoded_primitive().await;
-        bitmap_child_order_is_observed_and_never_reordered().await;
-        bitmap_validation_and_recursive_error_paths_cover_every_exact_variant().await;
-        unique_count_performs_one_owner_read_and_one_authoritative_verification().await;
-        authoritative_null_count_applies_its_normalized_window_after_matches().await;
-        terminal_cursor_counts_avoid_row_output_and_stop_at_the_encoded_threshold().await;
     }
 
     /// Direct and single-cursor stream authoritative counts select exactly

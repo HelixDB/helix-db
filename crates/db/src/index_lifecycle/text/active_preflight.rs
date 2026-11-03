@@ -39,7 +39,7 @@ pub(super) struct ActiveTextMutationUsage {
 
 impl ActiveTextMutationMeasurements {
     /// Admits all exact counts or returns the first stable exceeded resource.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(super) fn try_admit(
         limits: ActiveTextMutationLimits,
         input_bytes: u64,
@@ -63,7 +63,7 @@ impl ActiveTextMutationMeasurements {
     }
 
     /// Returns the number of distinct graph entities in the admitted epoch.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(super) const fn entities(self) -> u64 {
         self.entities
     }
@@ -171,9 +171,9 @@ impl ActiveTextMutationMeasurements {
     }
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/index_lifecycle_active_text_preflight.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_active_text_preflight.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {
@@ -184,11 +184,6 @@ mod tests {
         SearchIndexBackfillLimits, SearchIndexBatchLimits, TextBackfillCompactionLimits,
         TextBuildArtifactLimits,
     };
-
-    #[test]
-    fn production_active_text_preflight_matrix_runs_in_workspace_tests() {
-        production_contracts::run();
-    }
 
     /// Distinct ceilings, each above the smallest document's per-document share.
     const INPUT: u64 = 40_000;

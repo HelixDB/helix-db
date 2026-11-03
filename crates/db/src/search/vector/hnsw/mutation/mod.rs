@@ -35,7 +35,7 @@ use super::neighbor_set::{
 use crate::search::vector::distance::{ActiveVectorSemantics, Distance};
 use crate::search::vector::item::Item;
 use crate::search::vector::result::VectorEntityId;
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use crate::search::vector::storage::ReverseSourcesForTarget;
 use crate::search::vector::storage::{
     EntryCandidateLayerRow, VectorRowKeyspace, VectorRows, VectorWriteRows,
@@ -215,7 +215,7 @@ impl FreshVectorBuildProof {
         Self { _private: () }
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::search::vector) const fn for_test() -> Self {
         Self { _private: () }
     }
@@ -406,7 +406,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// The caller owns the measured transaction. Corrupt, mismatched, or
     /// payload-less candidates are pruned before a replacement is returned.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::search::vector) async fn find_best_entry_candidate(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -642,7 +642,7 @@ impl<D: Distance> VectorIndex<D> {
                 true,
             )
             .await;
-        #[cfg(feature = "production-coverage")]
+        #[cfg(feature = "bench-internals")]
         crate::search::vector::record_benchmark_cache_stats(mutation_cache.stats);
         result
     }
@@ -1231,7 +1231,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Stages one canonical upper-neighbor row through typed storage.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     pub(in crate::search::vector) fn store_upper_neighbors(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1302,7 +1302,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Loads every reverse source grouped by layer for deletion repair.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::search::vector) async fn load_reverse_sources_for_target(
         &self,
         read: &(impl DbReadOps + Send + Sync),
@@ -1570,7 +1570,7 @@ impl<D: Distance> VectorIndex<D> {
         } else {
             mutation_cache.mark_neighbor_flushed(row);
         }
-        #[cfg(feature = "production-coverage")]
+        #[cfg(feature = "bench-internals")]
         crate::search::vector::record_benchmark_dirty_neighbor_flush();
         Ok(())
     }
@@ -1720,7 +1720,7 @@ impl<D: Distance> VectorIndex<D> {
             Ok(_) => self.flush_mutation_cache(txn, &mut mutation_cache).await,
             Err(error) => Err(error),
         };
-        #[cfg(feature = "production-coverage")]
+        #[cfg(feature = "bench-internals")]
         crate::search::vector::record_benchmark_cache_stats(mutation_cache.stats);
         result
     }
@@ -1892,8 +1892,8 @@ impl<D: Distance> VectorIndex<D> {
         Ok(item_existed)
     }
 
-    /// Finds the highest layer containing a node for production coverage contracts.
-    #[cfg(feature = "production-coverage")]
+    /// Finds the highest layer containing a node for unit tests.
+    #[cfg(test)]
     pub(in crate::search::vector) async fn get_node_max_layer(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -2308,13 +2308,13 @@ impl<D: Distance> ItemBatch<D> {
     }
 
     /// Returns whether an item was found for `node_id`.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::search::vector) fn contains(&self, node_id: NodeId) -> bool {
         self.found.contains_key(&node_id)
     }
 
     /// Returns how many requested nodes have an item.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     pub(in crate::search::vector) fn len(&self) -> usize {
         self.found.len()
     }
@@ -2474,13 +2474,13 @@ impl NeighborRowId {
     }
 
     /// Returns the row's physical layer.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::search::vector) const fn layer(self) -> HnswLayer {
         self.layer
     }
 
     /// Returns the row's descriptor-proven entity identity.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::search::vector) const fn entity(self) -> VectorEntityId {
         self.entity
     }
@@ -3018,7 +3018,7 @@ impl<D: Distance> MutationOpCache<D> {
             .stats
             .max_retained_payload_bytes
             .max(u64::try_from(retained_payload_bytes).unwrap_or(u64::MAX));
-        #[cfg(feature = "production-coverage")]
+        #[cfg(feature = "bench-internals")]
         crate::search::vector::observe_benchmark_retained_payload(
             u64::try_from(retained_payload_bytes).unwrap_or(u64::MAX),
         );
@@ -3365,7 +3365,7 @@ impl<D: Distance> MutationOpCache<D> {
     }
 
     /// Reports a retained negative lookup without changing its recency.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::search::vector) fn item_is_known_absent(
         &self,
         layer: u16,
@@ -3672,7 +3672,7 @@ impl<D: Distance> VectorBuildSession<D> {
     }
 
     /// Creates a small-limit session for deterministic cache contract tests.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn with_test_limits(
         max_input_bytes: NonZeroU64,
         max_items: usize,
@@ -3693,7 +3693,7 @@ impl<D: Distance> VectorBuildSession<D> {
     ///
     /// Lifecycle driver contracts use it to retain sessions of an exact
     /// charged size: one namespace plus one SimHash charge per entry.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn with_test_simhashes(max_retained_bytes: NonZeroU64, simhashes: u64) -> Self {
         let identity = VectorGenerationIdentity::try_new(
             crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
@@ -4114,19 +4114,19 @@ impl<D: Distance> VectorBuildSession<D> {
     }
 
     /// Returns retained decoded-item and negative-lookup entries.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn item_count(&self) -> usize {
         self.footprint.items
     }
 
     /// Returns retained upper/layer-zero neighbor rows.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn neighbor_count(&self) -> usize {
         self.footprint.neighbors
     }
 
     /// Returns retained SimHash and negative-lookup entries.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn simhash_count(&self) -> usize {
         self.footprint.simhashes
     }
@@ -4173,7 +4173,7 @@ impl<D: Distance> VectorBuildSession<D> {
         })
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) const fn max_payload_bytes(&self) -> usize {
         self.max_payload_bytes
     }
@@ -4314,9 +4314,9 @@ const fn simhash_payload_bytes(value: Option<crate::search::vector::SimHash>) ->
     }
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../../../tests/production_support/vector/mutation.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../../tests/unit/vector/mutation.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod golden_tests;

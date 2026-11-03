@@ -30,7 +30,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use db::production_coverage::{self, RestrictedSearchStrategy};
+use db::production_scale::{self, RestrictedSearchStrategy};
 use db::{DbConfig, HelixDB};
 use helix_ast::prelude::*;
 use slatedb::object_store::memory::InMemory;
@@ -102,7 +102,7 @@ async fn scoped_search_keeps_recall_and_exact_filter_semantics() {
             let candidate_ids = &candidate_ids;
             async move {
                 let (response, strategy) =
-                    production_coverage::observe_restricted_vector_strategy(backend.query(request))
+                    production_scale::observe_restricted_vector_strategy(backend.query(request))
                         .await;
                 let returned = response.unwrap()["r"]
                     .as_array()

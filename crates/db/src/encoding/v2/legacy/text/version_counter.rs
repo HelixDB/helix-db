@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU64;
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use bytes::Bytes;
 
 #[allow(dead_code)]
@@ -14,7 +14,7 @@ pub(crate) enum LegacyTextVersionCounterError {
     Zero,
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) fn encode_for_contract(
     version: NonZeroU64,
 ) -> Result<Bytes, LegacyTextVersionCounterError> {

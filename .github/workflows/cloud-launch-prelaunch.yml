@@ -66,15 +66,22 @@ jobs:
   release-contracts:
     name: Stable failpoint and coordinator contracts
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+    # Builds the library's release test binary before any contract runs.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - name: Complete stable failpoint and coordinator contracts
         run: >-
-          cargo test --release -p db --features production-coverage
-          --test production_index_lifecycle_contracts -- --nocapture --test-threads=1
+          cargo test --release -p db --lib -- --nocapture --test-threads=1
+          index_lifecycle::acceptance_tests::
+          index_lifecycle::failpoints::
+          index_lifecycle::typed_boundary_tests::
+          index_lifecycle::text::active_preflight::contract_tests::
+          index_lifecycle::text::active_retirement::contract_tests::
+          index_lifecycle::text::serving::contract_tests::
+          migrations::lifecycle_contracts::writer_migration_requirements_are_typed
 
   vector-diagnostic:
     name: Vector recall and throughput diagnostic

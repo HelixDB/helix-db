@@ -68,7 +68,7 @@ fn scoped_property_direction_key(
     .ok_or_else(|| ConfigError::new("secondary index label and property are required"))
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 fn scoped_property_key_from_storage(property: &str) -> Option<catalog::ScopedPropertyKey> {
     let (label, property) = split_scoped_secondary_index_property(property)?;
     catalog::ScopedPropertyKey::try_new(label, property)
@@ -985,7 +985,7 @@ impl RuntimeIndexCatalog {
     }
 
     /// Check an already-scoped node equality key.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub fn contains_node_equality_scoped(&self, scoped: &str) -> bool {
         let Some(key) = scoped_property_key_from_storage(scoped) else {
             return false;

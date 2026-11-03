@@ -1,9 +1,9 @@
-//! Production-linked contracts for queued text publication, text build
-//! limits, Active text compaction, and searches over unpublished index work.
+//! Contracts for queued text publication, text build limits, Active text
+//! compaction, and searches over unpublished index work.
 //!
 //! Every contract drives public DDL, graph writes, searches, and explicit
 //! lifecycle steps through the compiled library. Build contracts pause a real
-//! text build at an exact stage or validation lane; the feature-gated damage
+//! text build at an exact stage or validation lane; the lifecycle-testing damage
 //! helpers then alter one durable row or split object, and the production step
 //! that follows decides the outcome. Overlay contracts hold publication with
 //! explicit scheduling so committed work stays pending while searches run.
@@ -25,13 +25,10 @@ use db::index_lifecycle::{
     IndexOperationStatus, ValidatedDynamicIndexDefinition,
 };
 use db::index_lifecycle_testing::{
-    LifecycleTestController, LifecycleTestScheduling, LifecycleWorkTarget,
-    TextManifestValidationLane,
-};
-use db::production_coverage::{
     damage_text_build, damage_text_split_object, restore_text_split_object,
     text_compaction_pointer_count, text_manifest_row_counts, text_manifest_split_counts,
-    TextBuildDamage, TextSplitObjectDamage,
+    LifecycleTestController, LifecycleTestScheduling, LifecycleWorkTarget, TextBuildDamage,
+    TextManifestValidationLane, TextSplitObjectDamage,
 };
 use db::search::vector::VectorDistanceMetric;
 use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};

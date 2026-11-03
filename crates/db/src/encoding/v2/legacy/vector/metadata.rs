@@ -100,7 +100,7 @@ pub(crate) fn decode_legacy_metadata(data: &[u8]) -> Result<VectorIndexMetadata,
 }
 
 /// Encodes the frozen pre-V2 metadata shape for migration fixtures.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "production-scale"))]
 pub(crate) fn encode_legacy_metadata_for_contract(
     metadata: &VectorIndexMetadata,
 ) -> AlignedVec<16> {

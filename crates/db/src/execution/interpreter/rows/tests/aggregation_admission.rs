@@ -3,7 +3,7 @@ use crate::allocation_testing;
 use helix_planner::relational as r;
 use std::collections::BTreeMap;
 
-#[path = "../../../../../tests/production_support/mixed_aggregation.rs"]
+#[path = "../../../../../tests/unit/mixed_aggregation.rs"]
 mod mixed_aggregation;
 
 #[tokio::test]

@@ -69,7 +69,7 @@ mod hot_directory;
 mod live_state_tests;
 mod overlay_directory;
 pub(crate) mod pending;
-#[cfg(feature = "production-coverage")]
+#[cfg(feature = "bench-internals")]
 mod prefilter_benchmark;
 mod restricted;
 mod split;
@@ -81,7 +81,7 @@ pub(crate) use cache::{FtsCache, FtsCacheConfig, OpenedTextSplit};
 pub use cache::{FtsCacheStateSnapshot, FtsWarmSummary};
 use caching_directory::CachingDirectory;
 use hot_directory::HotDirectory;
-#[cfg(feature = "production-coverage")]
+#[cfg(feature = "bench-internals")]
 pub use prefilter_benchmark::{
     FtsPrefilterBenchmarkCase, FtsPrefilterBenchmarkFixture, FtsPrefilterBenchmarkLayout,
     FtsPrefilterBenchmarkSample, FtsPrefilterBenchmarkStrategy,

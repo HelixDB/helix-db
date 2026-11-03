@@ -218,8 +218,8 @@ impl VectorCacheWriteSet {
     }
 }
 
-#[cfg(feature = "production-coverage")]
-pub(crate) mod production_contracts {
+#[cfg(test)]
+mod contract_tests {
     use std::num::NonZeroU64;
     use std::panic::AssertUnwindSafe;
 
@@ -229,7 +229,8 @@ pub(crate) mod production_contracts {
     use crate::search::vector::{VectorDimension, VectorGenerationIdentity};
 
     /// Proves retirement closes the transaction-local physical-write state.
-    pub(crate) fn run() {
+    #[test]
+    fn retired_generations_reject_later_writes() {
         let handle = ValidatedVectorGenerationHandle::create_current::<Cosine>(
             VectorGenerationIdentity::try_new(
                 DataScope::LegacyUnscoped,

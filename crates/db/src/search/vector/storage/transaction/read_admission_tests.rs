@@ -218,7 +218,7 @@ async fn native_read_entries_preserve_values_and_invoke_one_hook_each() {
 }
 
 /// Process-global benchmark counters require this contract to run alone.
-#[cfg(feature = "production-coverage")]
+#[cfg(feature = "bench-internals")]
 #[tokio::test]
 #[ignore = "run alone: native_read_telemetry_counts_each_entry_once --ignored"]
 async fn native_read_telemetry_counts_each_entry_once() {
