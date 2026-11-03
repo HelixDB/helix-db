@@ -9,6 +9,7 @@ pub mod api;
 mod bind;
 mod lexer;
 mod parser;
+mod print;
 pub mod request;
 pub mod syntax;
 
