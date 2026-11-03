@@ -22,12 +22,41 @@ pub mod utils;
 
 #[derive(Subcommand)]
 pub enum AuthAction {
-    /// Login to Helix Cloud
-    Login,
+    /// Login to Helix Cloud; asks how when no method is given
+    #[command(subcommand_value_name = "METHOD", subcommand_help_heading = "Methods")]
+    Login {
+        #[command(subcommand)]
+        method: Option<LoginAction>,
+    },
     /// Show the active WorkOS session
     Status,
     /// Logout from Helix Cloud
     Logout,
+}
+
+/// How `helix auth login` signs in. Only the methods that use an email take
+/// one, and a password is only ever read from a hidden prompt, so it can never
+/// reach shell history or a process listing.
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum LoginAction {
+    /// Continue with GitHub in the browser
+    Github,
+    /// Continue with Google in the browser
+    Google,
+    /// Continue with Microsoft in the browser
+    Microsoft,
+    /// Single sign-on through your company's identity provider
+    Sso {
+        /// Work email that selects the identity provider; asks when omitted
+        #[arg(long)]
+        email: Option<String>,
+    },
+    /// Email and password, entered in the terminal
+    Password {
+        /// Account email; asks when omitted
+        #[arg(long)]
+        email: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

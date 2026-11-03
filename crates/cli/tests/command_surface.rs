@@ -28,6 +28,11 @@ fn every_retained_command_renders_help() {
         &["shell", "--help"],
         &["explorer", "--help"],
         &["auth", "login", "--help"],
+        &["auth", "login", "github", "--help"],
+        &["auth", "login", "google", "--help"],
+        &["auth", "login", "microsoft", "--help"],
+        &["auth", "login", "sso", "--help"],
+        &["auth", "login", "password", "--help"],
         &["auth", "status", "--help"],
         &["auth", "logout", "--help"],
         &["workspace", "list", "--help"],
@@ -93,6 +98,69 @@ fn obsolete_cloud_commands_and_auth_paths_are_absent() {
         assert!(stderr(fixture.command().args(args).assert().failure())
             .contains("unrecognized subcommand"));
     }
+}
+
+#[test]
+fn login_flags_only_exist_where_they_apply() {
+    let fixture = CliFixture::new();
+    for args in [
+        &["auth", "login", "--email", "person@test.dev"][..],
+        &["auth", "login", "github", "--email", "person@test.dev"][..],
+        &["auth", "login", "google", "--email", "person@test.dev"][..],
+        &["auth", "login", "microsoft", "--email", "person@test.dev"][..],
+        // Passwords only come from the hidden prompt, never from argv.
+        &["auth", "login", "password", "--password", "secret"][..],
+        &["auth", "login", "--password", "secret"][..],
+    ] {
+        assert!(
+            stderr(fixture.command().args(args).assert().failure()).contains("unexpected argument"),
+            "{args:?}"
+        );
+    }
+    assert!(stderr(
+        fixture
+            .command()
+            .args(["auth", "login", "carrier-pigeon"])
+            .assert()
+            .failure()
+    )
+    .contains("unrecognized subcommand"));
+}
+
+#[test]
+fn login_needs_a_terminal_for_every_method() {
+    let fixture = CliFixture::new();
+    for args in [
+        &["auth", "login", "--json"][..],
+        &["auth", "login", "github", "--json"][..],
+        &["auth", "login", "google", "--json"][..],
+        &["auth", "login", "microsoft", "--json"][..],
+        &[
+            "auth",
+            "login",
+            "sso",
+            "--email",
+            "person@test.dev",
+            "--json",
+        ][..],
+        &[
+            "auth",
+            "login",
+            "password",
+            "--email",
+            "person@test.dev",
+            "--json",
+        ][..],
+    ] {
+        let error: serde_json::Value =
+            serde_json::from_str(stderr(fixture.command().args(args).assert().failure()).trim())
+                .unwrap();
+        assert_eq!(
+            error["error"]["message"], "logging in needs an interactive terminal",
+            "{args:?}"
+        );
+    }
+    assert!(!fixture.helix_home().join("credentials").exists());
 }
 
 #[test]

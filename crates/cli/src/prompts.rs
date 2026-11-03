@@ -1,5 +1,5 @@
 use crate::config::DEFAULT_LOCAL_PORT;
-use crate::{AddTarget, InitTarget};
+use crate::{AddTarget, InitTarget, LoginAction};
 use eyre::{eyre, Result};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -138,6 +138,34 @@ pub fn input_required(label: &str) -> Result<String> {
         })
         .interact()?;
     Ok(value)
+}
+
+/// Reads a secret without echoing it. The value is returned exactly as typed.
+pub fn password(label: &str) -> Result<String> {
+    Ok(cliclack::password(label).interact()?)
+}
+
+/// Asks how to log in. Emails are asked for later, by the methods that use one.
+pub fn select_login_action() -> Result<LoginAction> {
+    Ok(cliclack::select("How do you want to log in?")
+        .item(LoginAction::Github, "GitHub", "Continue in the browser")
+        .item(LoginAction::Google, "Google", "Continue in the browser")
+        .item(
+            LoginAction::Microsoft,
+            "Microsoft",
+            "Continue in the browser",
+        )
+        .item(
+            LoginAction::Sso { email: None },
+            "Single sign-on",
+            "Continue through your company's identity provider",
+        )
+        .item(
+            LoginAction::Password { email: None },
+            "Email and password",
+            "Sign in from the terminal",
+        )
+        .interact()?)
 }
 
 pub fn input_optional(label: &str) -> Result<Option<String>> {
