@@ -61,7 +61,7 @@ Cargo discovers these targets:
 
 `cargo test -p db --all-targets` skips targets that require
 `production-coverage` or `index-lifecycle-testing`. The `DB feature-gated
-contracts` job in `.github/workflows/cloud-launch-pr.yml` runs each of them by
+contracts` job in `.github/workflows/rust-ci.yml` runs each of them by
 name, so a new feature-gated target must be added there.
 
 The `queue_acceptance_verify` example is an existing-database acceptance

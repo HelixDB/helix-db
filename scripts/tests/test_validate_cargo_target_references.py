@@ -136,6 +136,60 @@ class CargoTargetReferenceTests(unittest.TestCase):
         self.assertFalse(runs("cargo test -p db --no-run --test t"))
         self.assertFalse(runs("cargo clippy -p db --test t -- -D warnings"))
 
+    def test_every_bench_must_be_named(self):
+        catalog = MODULE.Catalog()
+        catalog.required_features.update({
+            ("db", "bench", "named_default"): (),
+            ("db", "bench", "unnamed_default"): (),
+            ("db", "bench", "unnamed_gated"): ("index-lifecycle-testing",),
+            ("db", "bench", "scale_bench"): ("production-scale",),
+            ("db", "test", "unnamed_test"): (),
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "ci.yml").write_text(
+                "steps:\n  - run: cargo test -p db --bench named_default\n"
+            )
+            self.assertEqual(
+                MODULE.validate_benches_run(root, catalog),
+                [
+                    "db bench target 'unnamed_default' is named by no workflow --bench",
+                    "db bench target 'unnamed_gated' is named by no workflow --bench",
+                ],
+            )
+
+    def test_rust_ci_paths_cover_embedded_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "rust-ci.yml").write_text(
+                "on:\n  pull_request:\n    paths:\n"
+                '      - "crates/**"\n'
+                "      # Embedded fixtures.\n"
+                '      - "fixtures/*.json"\n'
+                "  push:\n"
+            )
+            source = root / "crates" / "a" / "src"
+            source.mkdir(parents=True)
+            (source / "lib.rs").write_text(
+                'const A: &str = include_str!("../../../fixtures/a.json");\n'
+                'const B: &[u8] = include_bytes!("../../../fixtures/nested/b.json");\n'
+                'const C: &str = include_str!("../../../docs/c.md");\n'
+                'const D: &str = include_str!("data.txt");\n'
+            )
+            self.assertEqual(
+                MODULE.validate_rust_ci_paths(root),
+                [
+                    "crates/a/src/lib.rs embeds fixtures/nested/b.json, which no "
+                    "Rust CI pull_request path matches",
+                    "crates/a/src/lib.rs embeds docs/c.md, which no "
+                    "Rust CI pull_request path matches",
+                ],
+            )
+
     def test_yaml_folded_commands_keep_multiline_target_flags(self):
         text = """steps:
   - run: >-

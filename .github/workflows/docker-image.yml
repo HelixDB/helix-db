@@ -40,10 +40,10 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
-  quality:
-    name: Workspace and tooling quality
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+  tooling:
+    name: Image tooling
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -51,20 +51,8 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: docker-image/tests/requirements.txt
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: sdks/typescript/package-lock.json
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
       - name: Install Python coverage tooling
         run: python -m pip install --requirement docker-image/tests/requirements.txt
-      - name: Install TypeScript workspace dependencies
-        run: npm ci --ignore-scripts --no-audit --no-fund
-        working-directory: sdks/typescript
       - name: Archive tooling branch coverage
         run: >-
           python -m coverage run --branch --source=docker-image
@@ -72,38 +60,13 @@ jobs:
           -m unittest discover -s docker-image/tests -p 'test_*.py'
       - name: Enforce archive tooling coverage
         run: python -m coverage report --show-missing --fail-under=90
-      - name: Workspace tests
-        run: cargo test --locked --workspace --all-targets
-      - name: Workspace doctests
-        run: cargo test --locked --workspace --doc
-      - name: Clippy
-        run: cargo clippy --locked --workspace -- -D warnings
-      - name: Formatting
-        run: cargo fmt --all -- --check
       - name: Shell syntax
         run: bash -n docker-image/build.sh docker-image/test.sh docker-image/tests/*.sh
 
-  benchmark-feature:
-    name: Async index benchmark feature
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      # The test profile also lints the cfg(test) unit tests of both crates.
-      - name: Clippy
-        run: >-
-          cargo clippy --locked -p db -p server --lib --bins --profile test
-          --features server/async-index-benchmark -- -D warnings
-      - name: Benchmark unit tests
-        run: >-
-          cargo test --locked -p db -p server --lib
-          --features server/async-index-benchmark benchmark::
-      - name: Benchmark doctests
-        run: cargo test --locked -p server --doc --features async-index-benchmark benchmark
+  rust:
+    name: Rust CI
+    if: github.event_name == 'workflow_dispatch' && inputs.release_version != ''
+    uses: ./.github/workflows/rust-ci.yml
 
   image:
     name: Image (${{ matrix.architecture }})
@@ -157,7 +120,7 @@ jobs:
   publish:
     name: Publish tested image
     if: github.event_name == 'workflow_dispatch' && inputs.release_version != ''
-    needs: [quality, image]
+    needs: [tooling, rust, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

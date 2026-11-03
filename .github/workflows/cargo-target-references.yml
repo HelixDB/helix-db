@@ -1,0 +1,39 @@
+name: Cargo target references
+
+# Exact test filters named by automation are checked against `--list` output,
+# which compiles every referenced test target. Run it only when a workflow,
+# script, integration test, or manifest can change those names.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/tests/**"
+      - "scripts/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-target-references-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate exact test filters
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: python3 scripts/validate-cargo-target-references.py

@@ -405,6 +405,79 @@ def validate_feature_gated_tests_run(root: Path, catalog: Catalog) -> list[str]:
     ]
 
 
+def validate_benches_run(root: Path, catalog: Catalog) -> list[str]:
+    """Require a workflow to name every bench target with --bench.
+
+    Benches have custom harnesses that the nextest archive skips, and
+    `--benches` also reruns every library's unit tests. Targets gated on
+    `production-scale` are release-scale runs on demand.
+    """
+    referenced = {
+        match.group("name")
+        for path in (root / ".github" / "workflows").glob("*.yml")
+        for command in commands(path)
+        for match in REFERENCE.finditer(command)
+        if match.group("flag") == "--bench"
+    }
+    return [
+        f"{package} bench target {name!r} is named by no workflow --bench"
+        for (package, kind, name), features in sorted(catalog.required_features.items())
+        if kind == "bench" and "production-scale" not in features and name not in referenced
+    ]
+
+
+RUST_CI_PATHS = re.compile(
+    r"^  pull_request:\n    paths:\n(?P<paths>(?:      (?:- \"[^\"]+\"|#.*)\n)+)",
+    re.MULTILINE,
+)
+EMBEDDED_FILE = re.compile(r'include_(?:str|bytes)!\(\s*"(?P<path>[^"]+)"\s*\)')
+
+
+def path_pattern(glob: str) -> re.Pattern[str]:
+    """Translates a GitHub Actions path filter into an anchored regex."""
+    parts = re.split(r"(\*\*|\*)", glob)
+    return re.compile(
+        "".join(
+            ".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
+            for part in parts
+        )
+        + "$"
+    )
+
+
+def validate_rust_ci_paths(root: Path) -> list[str]:
+    """Require Rust CI to trigger on every file that Rust sources embed."""
+    workflow = root / ".github" / "workflows" / "rust-ci.yml"
+    match = RUST_CI_PATHS.search(workflow.read_text())
+    if match is None:
+        return [f"{workflow.relative_to(root)}: no pull_request paths filter found"]
+    patterns = [
+        path_pattern(line.strip()[3:-1])
+        for line in match.group("paths").splitlines()
+        if line.strip().startswith("- ")
+    ]
+    sources = (
+        path
+        for directory in ("bindings", "crates", "sdks/rust", "tools")
+        for path in sorted((root / directory).rglob("*.rs"))
+        if "target" not in path.relative_to(root).parts
+    )
+    errors = []
+    for source in sources:
+        for embedded in EMBEDDED_FILE.finditer(source.read_text()):
+            resolved = (source.parent / embedded.group("path")).resolve()
+            try:
+                relative = resolved.relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if not any(pattern.match(relative) for pattern in patterns):
+                errors.append(
+                    f"{source.relative_to(root)} embeds {relative}, which no "
+                    "Rust CI pull_request path matches"
+                )
+    return errors
+
+
 def validate_fuzz_matrices(root: Path, catalog: Catalog) -> list[str]:
     errors = []
     for path in (root / ".github" / "workflows").glob("*.yml"):
@@ -783,6 +856,8 @@ def main() -> int:
     errors = []
     errors.extend(validate_references(root, catalog, automation_files(root)))
     errors.extend(validate_feature_gated_tests_run(root, catalog))
+    errors.extend(validate_benches_run(root, catalog))
+    errors.extend(validate_rust_ci_paths(root))
     errors.extend(validate_fuzz_matrices(root, catalog))
     errors.extend(validate_inventory(root, catalog))
     errors.extend(validate_codec_architecture(root))

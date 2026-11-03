@@ -73,12 +73,15 @@ jobs:
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Run checked-in regression corpus and five-minute fuzz window
         working-directory: ${{ matrix.fuzz_dir }}
+        # cargo-fuzz passes -Z flags, so override the stable rust-toolchain.toml pin.
+        env:
+          RUSTUP_TOOLCHAIN: nightly
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300
 
   workload-matrix:
     name: Deterministic workload seeds
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
