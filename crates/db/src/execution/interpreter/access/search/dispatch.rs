@@ -252,6 +252,7 @@ impl<'db> ExecutionContext<'db> {
                 }
             };
         };
+        let suppression_limit = self.max_suppressed_search_results();
         loop {
             let mut pending_scored = score_pending_vectors::<D>(
                 &self.execution_control,
@@ -279,6 +280,7 @@ impl<'db> ExecutionContext<'db> {
                     let physical_candidates = unsuperseded.as_ref();
                     let settlement = settle_physical(
                         k,
+                        suppression_limit,
                         &pending.superseded,
                         pending.local(),
                         |result: &crate::search::vector::SearchResult| result.entity_id(),
@@ -309,7 +311,7 @@ impl<'db> ExecutionContext<'db> {
                     match settlement {
                         Settlement::Settled(kept) => kept,
                         Settlement::Exceeded { skipped } => {
-                            pending.yield_to_suppression_limit(skipped)?;
+                            pending.yield_to_suppression_limit(skipped, suppression_limit)?;
                             continue;
                         }
                     }
@@ -479,7 +481,10 @@ impl<'db> ExecutionContext<'db> {
             {
                 Settlement::Settled(hits) => return Ok(hits),
                 Settlement::Exceeded { skipped } => {
-                    pending.yield_to_suppression_limit(skipped)?;
+                    pending.yield_to_suppression_limit(
+                        skipped,
+                        self.max_suppressed_search_results(),
+                    )?;
                     overlay.truncate(pending.entities().len());
                 }
             }
@@ -633,6 +638,7 @@ impl<'db> ExecutionContext<'db> {
                     (&manifest, &statistics, &physical_scope);
                 settle_physical(
                     k,
+                    self.max_suppressed_search_results(),
                     &pending.superseded,
                     pending.local(),
                     |hit: &crate::search::text::TextSearchHit| hit.entity_id,
@@ -703,7 +709,8 @@ enum Settlement<T> {
 /// settles whatever it returned. `local`, a subset of `superseded`, holds the
 /// entities the searching write transaction changed itself. Each attempt
 /// grows the request by the superseded results it skipped, up to `k` plus
-/// every local entity plus at most [`MAX_SUPPRESSED_SEARCH_RESULTS`] others:
+/// every local entity plus at most `limit` others, the database's
+/// [`MAX_SUPPRESSED_SEARCH_RESULTS`]:
 /// the widening grows with the transaction's own changes, which it bounds
 /// itself, but not with the committed backlog. A request at that bound keeps
 /// at least `k` results whenever at most that many committed entities are
@@ -713,6 +720,7 @@ enum Settlement<T> {
 /// [`MAX_SUPPRESSED_SEARCH_RESULTS`]: super::limits::MAX_SUPPRESSED_SEARCH_RESULTS
 async fn settle_physical<T, Search>(
     k: usize,
+    limit: usize,
     superseded: &roaring::RoaringTreemap,
     local: Option<&roaring::RoaringTreemap>,
     entity_id: impl Fn(&T) -> u64,
@@ -732,7 +740,7 @@ where
         .saturating_add(
             usize::try_from(superseded.len() - local_count)
                 .unwrap_or(usize::MAX)
-                .min(super::limits::MAX_SUPPRESSED_SEARCH_RESULTS),
+                .min(limit),
         );
     let mut request = k;
     loop {
@@ -1022,6 +1030,7 @@ mod tests {
         let mut requests = Vec::new();
         let settlement = settle_physical(
             k,
+            super::super::limits::MAX_SUPPRESSED_SEARCH_RESULTS,
             superseded,
             local,
             |id: &u64| *id,

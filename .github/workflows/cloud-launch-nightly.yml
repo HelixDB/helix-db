@@ -115,7 +115,7 @@ jobs:
       # ignored golden graph; this step runs them at full scale.
       - name: Full-scale random vector write sequences and the pinned golden graph
         env:
-          GRAPH_SEEDS: "4"
+          GRAPH_SEEDS: "8"
           DIRECT_SEEDS: "24"
           STRAY_SEEDS: "2"
         run: >-

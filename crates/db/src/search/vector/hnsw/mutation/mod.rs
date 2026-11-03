@@ -1495,7 +1495,7 @@ impl<D: Distance> VectorIndex<D> {
         if !mutation_cache.enforces_local_limits() {
             return Ok(());
         }
-        while mutation_cache.neighbor_count() > VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT {
+        while mutation_cache.neighbor_count() > mutation_cache.neighbor_limit() {
             if self
                 .flush_and_evict_oldest_dirty_neighbor(txn, mutation_cache)
                 .await?
@@ -2902,6 +2902,11 @@ pub(in crate::search::vector) struct MutationOpCache<D: Distance> {
     next_touch: CacheSequence,
     stats: VectorBuildSessionStats,
     enforce_local_limits: bool,
+    /// Neighbor rows past which a one-off cache evicts: lowered by tests to
+    /// reach the bound with a small graph; every other build evicts past
+    /// [`VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT`] and carries no field.
+    #[cfg(test)]
+    neighbor_limit: usize,
     /// Rows whose logical value changed during the current entity.
     entity_changed_neighbors: BTreeSet<NeighborRowId>,
     /// Highest layer ever installed in `items`; bounds targeted invalidation.
@@ -2938,6 +2943,8 @@ impl<D: Distance> MutationOpCache<D> {
             next_touch: CacheSequence::initial(),
             stats: VectorBuildSessionStats::default(),
             enforce_local_limits: true,
+            #[cfg(test)]
+            neighbor_limit: VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT,
             entity_changed_neighbors: BTreeSet::new(),
             max_item_layer: 0,
             max_neighbor_layer: 0,
@@ -2954,6 +2961,27 @@ impl<D: Distance> MutationOpCache<D> {
     /// Returns whether one-operation eviction remains authoritative.
     pub(in crate::search::vector) const fn enforces_local_limits(&self) -> bool {
         self.enforce_local_limits
+    }
+
+    /// Lowers the neighbor rows a one-off cache holds before it evicts, so a
+    /// test fills it to its bound with a small graph.
+    #[cfg(test)]
+    pub(in crate::search::vector) const fn with_neighbor_limit_for_tests(
+        mut self,
+        rows: usize,
+    ) -> Self {
+        self.neighbor_limit = rows;
+        self
+    }
+
+    /// Returns the neighbor rows a one-off cache holds before it evicts:
+    /// [`VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT`] outside tests that lowered it.
+    pub(in crate::search::vector) const fn neighbor_limit(&self) -> usize {
+        #[cfg(test)]
+        let rows = self.neighbor_limit;
+        #[cfg(not(test))]
+        let rows = VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT;
+        rows
     }
 
     /// Starts one entity boundary for explicit Serializable Snapshot read intent.

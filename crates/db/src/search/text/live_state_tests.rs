@@ -168,7 +168,13 @@ struct Fixture {
 impl Fixture {
     async fn new(model: &Model) -> Self {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        // Commits wait for the next WAL flush; a short interval keeps the
+        // per-case fixture from waiting out the default 100 ms on each one.
         let db = Db::builder(DB_PATH, Arc::clone(&store))
+            .with_settings(slatedb::config::Settings {
+                flush_interval: Some(std::time::Duration::from_millis(1)),
+                ..Default::default()
+            })
             .build()
             .await
             .unwrap();
@@ -626,9 +632,14 @@ fn hit_rank_orders_by_score_then_lower_entity() {
     }
 }
 
-/// Lazy resolution equals an exhaustive search for every `k` from 1 to past
-/// the candidate count, under both live-state sources, and a V2 hit without
-/// a statistics marker fails exactly when it is served.
+/// Lazy resolution equals an exhaustive search for each `k` at an edge, from
+/// 1 to past the candidate count, under both live-state sources, and a V2 hit
+/// without a statistics marker fails exactly when it is served.
+///
+/// The edges are the first two `k`, both sides of the 64-state minimum batch,
+/// of each split's document count, where a split's first page ends, and of
+/// the candidate count, and half the candidates; one random `k` per case
+/// covers the rest of the range over the cases.
 #[test]
 fn lazy_search_matches_an_exhaustive_search_of_every_split() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -637,26 +648,49 @@ fn lazy_search_matches_an_exhaustive_search_of_every_split() {
         failure_persistence: None,
         ..ProptestConfig::default()
     });
+    let strategy = (
+        model_strategy(),
+        any::<prop::sample::Index>(),
+        any::<prop::sample::Index>(),
+    );
     runner
-        .run(&(model_strategy(), any::<prop::sample::Index>()), |(model, victim)| {
+        .run(&strategy, |(model, victim, random_k)| {
             runtime.block_on(async {
                 let fixture = Fixture::new(&model).await;
                 let scope = model.scope();
                 let candidate_count = model.splits.iter().map(Vec::len).sum::<usize>();
                 let v2_states = model.v2_states();
-                for k in 1..=candidate_count + 2 {
+                let ks = [
+                    1,
+                    2,
+                    63,
+                    64,
+                    65,
+                    candidate_count / 2,
+                    candidate_count - 1,
+                    candidate_count,
+                    candidate_count + 1,
+                    candidate_count + 2,
+                    random_k.index(candidate_count + 2) + 1,
+                ]
+                .into_iter()
+                .chain(model.splits.iter().flat_map(|split| {
+                    (0..usize::BITS)
+                        .map(move |halvings| (split.len() - 1) >> halvings)
+                        .chain([split.len(), split.len() + 1])
+                }))
+                .filter(|k| (1..=candidate_count + 2).contains(k))
+                .collect::<BTreeSet<_>>();
+                // The exhaustive search ranks every live hit in one total
+                // order, so its best `k` are a prefix of that ranking.
+                let legacy_ranking = fixture.exhaustive(&model.states, usize::MAX, &scope).await;
+                let v2_ranking = fixture.exhaustive(&v2_states, usize::MAX, &scope).await;
+                let best = |ranking: &[TextSearchHit], k: usize| ranking[..k.min(ranking.len())].to_vec();
+                for &k in &ks {
                     let (legacy, _) = counted_search(&fixture, false, k, scope.clone()).await;
-                    assert_eq!(
-                        legacy.unwrap(),
-                        fixture.exhaustive(&model.states, k, &scope).await,
-                        "legacy k={k}"
-                    );
+                    assert_eq!(legacy.unwrap(), best(&legacy_ranking, k), "legacy k={k}");
                     let (v2, _) = counted_search(&fixture, true, k, scope.clone()).await;
-                    assert_eq!(
-                        v2.unwrap(),
-                        fixture.exhaustive(&v2_states, k, &scope).await,
-                        "V2 k={k}"
-                    );
+                    assert_eq!(v2.unwrap(), best(&v2_ranking, k), "V2 k={k}");
                 }
 
                 let live = v2_states
@@ -673,8 +707,8 @@ fn lazy_search_matches_an_exhaustive_search_of_every_split() {
                     .delete(marker_key(&fixture.authority, victim))
                     .await
                     .unwrap();
-                for k in 1..=candidate_count + 2 {
-                    let expected = fixture.exhaustive(&v2_states, k, &scope).await;
+                for &k in &ks {
+                    let expected = best(&v2_ranking, k);
                     let (result, _) = counted_search(&fixture, true, k, scope.clone()).await;
                     if expected.iter().any(|hit| hit.entity_id == victim) {
                         assert!(

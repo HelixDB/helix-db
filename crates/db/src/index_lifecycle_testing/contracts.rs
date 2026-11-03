@@ -94,7 +94,7 @@ pub(super) async fn run_repeated_faults() {
             HelixDbSource::InMemory {
                 database: format!("index-lifecycle-lifecycle-repeated-fault-{ordinal}"),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -219,7 +219,7 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                 HelixDbSource::InMemory {
                     database: format!("index-lifecycle-public-boundary-{ordinal}"),
                 },
-                DbConfig::new(),
+                contract_config(),
                 LifecycleTestScheduling::Explicit,
             )
             .await
@@ -401,7 +401,7 @@ fn one_row_lifecycle_config() -> DbConfig {
         defaults.text_compaction(),
     )
     .expect("one-row lifecycle backfill limits remain internally consistent");
-    DbConfig::new()
+    contract_config()
         .with_secondary_index_lifecycle_tuning(
             SecondaryIndexLifecycleTuning::default().with_batch_rows(
                 SecondaryIndexLifecycleBatchRows::new(1)
@@ -852,7 +852,7 @@ async fn run_concurrent_create_convergence() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-concurrent-create".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -1025,7 +1025,7 @@ async fn run_conflicting_create_convergence() {
             HelixDbSource::InMemory {
                 database: format!("index-lifecycle-lifecycle-conflicting-create-{ordinal}"),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -1101,7 +1101,7 @@ async fn run_activation_and_drop_serialization() {
                     if drop_wins { "drop" } else { "activation" }
                 ),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -1193,7 +1193,7 @@ async fn run_active_drop_and_mutation_serialization() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-active-drop-mutation".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -1291,6 +1291,16 @@ async fn run_active_drop_and_mutation_serialization() {
     db.close()
         .await
         .expect("active DROP/mutation writer closes");
+}
+
+/// Contract databases flush SlateDB writes every millisecond, as embedded
+/// in-memory databases do. `DbConfig::new()` keeps SlateDB's 100 ms default,
+/// so every awaited commit would wait out the interval.
+fn contract_config() -> DbConfig {
+    DbConfig::new().with_slate_settings(slatedb::Settings {
+        flush_interval: Some(Duration::from_millis(1)),
+        ..slatedb::Settings::default()
+    })
 }
 
 /// Runs real background workers concurrently with bounded public writers.
@@ -1427,7 +1437,7 @@ async fn run_unique_activation_conflict_repair() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-unique-activation-conflict".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -1544,7 +1554,7 @@ pub(super) async fn run_text_build_reconciliation() {
 
 /// Interleaves source changes with two builds and proves unique repair/retry.
 async fn run_secondary_mutation_interleaving() {
-    let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
+    let config = contract_config().with_secondary_index_lifecycle_tuning(
         SecondaryIndexLifecycleTuning::default().with_batch_rows(
             SecondaryIndexLifecycleBatchRows::new(4).expect("test batch is positive"),
         ),
@@ -2037,7 +2047,7 @@ async fn run_secondary_mutation_interleaving() {
 
 /// Exercises edge inserts, updates, deletes, and Active maintenance.
 async fn run_secondary_edge_mutation_interleaving() {
-    let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
+    let config = contract_config().with_secondary_index_lifecycle_tuning(
         SecondaryIndexLifecycleTuning::default().with_batch_rows(
             SecondaryIndexLifecycleBatchRows::new(2).expect("edge scan batch is positive"),
         ),
@@ -2421,7 +2431,7 @@ async fn run_every_family_public_mutation_interleaving() {
             HelixDbSource::InMemory {
                 database: format!("index-lifecycle-lifecycle-public-mutation-{ordinal}"),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -2520,7 +2530,7 @@ async fn run_partitioned_search_edge_tenant_moves() {
             HelixDbSource::InMemory {
                 database: format!("index-lifecycle-lifecycle-partitioned-edge-{family_ordinal}"),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -3341,7 +3351,7 @@ async fn run_family_shapes() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-family-shapes".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -3417,7 +3427,7 @@ async fn run_create_drop_state_matrix() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-create-drop-matrix".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -3649,7 +3659,7 @@ async fn run_building_drop_stage_matrix() {
             .into_iter()
             .enumerate()
         {
-            let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
+            let config = contract_config().with_secondary_index_lifecycle_tuning(
                 SecondaryIndexLifecycleTuning::default().with_batch_rows(
                     SecondaryIndexLifecycleBatchRows::new(2)
                         .expect("drop matrix scan batch is positive"),
@@ -3815,7 +3825,7 @@ async fn run_active_drop_snapshot_survival() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-active-drop-snapshot-survival".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -3942,7 +3952,7 @@ async fn run_active_vector_drop_snapshot_survival() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-active-vector-drop-snapshot-survival".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -4063,7 +4073,7 @@ async fn run_scope_isolation() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-scope-isolation".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await

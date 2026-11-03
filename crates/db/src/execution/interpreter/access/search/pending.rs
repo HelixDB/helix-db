@@ -409,22 +409,24 @@ impl PendingSelection {
         );
     }
 
-    /// Resolves a search whose answer lies behind more than
-    /// [`MAX_SUPPRESSED_SEARCH_RESULTS`] physical results superseded by
-    /// committed work; its last attempt skipped `skipped` of those. Results
-    /// superseded by the searching write transaction's own changes never
-    /// count, since no publication clears them.
+    /// Resolves a search whose answer lies behind more than `limit`, the
+    /// database's [`MAX_SUPPRESSED_SEARCH_RESULTS`], physical results
+    /// superseded by committed work; its last attempt skipped `skipped` of
+    /// those. Results superseded by the searching write transaction's own
+    /// changes never count, since no publication clears them.
     ///
     /// Strong search fails with retryable index backpressure rather than
     /// widen with the backlog or answer without a committed change. Eventual
-    /// search keeps its first [`MAX_SUPPRESSED_SEARCH_RESULTS`] entities in
-    /// selection order and leaves the rest to their published representation
-    /// until publication, so a rerun supersedes at most that many results and
-    /// always settles.
+    /// search keeps its first `limit` entities in selection order and leaves
+    /// the rest to their published representation until publication, so a
+    /// rerun supersedes at most that many results and always settles.
     ///
     /// [`MAX_SUPPRESSED_SEARCH_RESULTS`]: super::limits::MAX_SUPPRESSED_SEARCH_RESULTS
-    pub(super) fn yield_to_suppression_limit(&mut self, skipped: usize) -> Result<()> {
-        let limit = super::limits::MAX_SUPPRESSED_SEARCH_RESULTS;
+    pub(super) fn yield_to_suppression_limit(
+        &mut self,
+        skipped: usize,
+        limit: usize,
+    ) -> Result<()> {
         match self.consistency {
             SearchConsistency::Strong => Err(HelixDbError::IndexBackpressure {
                 scope: self.target.scope,
@@ -1039,7 +1041,7 @@ mod tests {
         let limit = super::super::limits::MAX_SUPPRESSED_SEARCH_RESULTS;
         let mut strong = deletions(SearchConsistency::Strong, limit as u64 + 1);
         let error = strong
-            .yield_to_suppression_limit(limit + 1)
+            .yield_to_suppression_limit(limit + 1, limit)
             .expect_err("strong search never answers without a committed change");
         assert!(
             matches!(
@@ -1062,7 +1064,9 @@ mod tests {
     fn eventual_selections_keep_their_oldest_entities_within_the_suppression_limit() {
         let limit = super::super::limits::MAX_SUPPRESSED_SEARCH_RESULTS;
         let mut eventual = deletions(SearchConsistency::Eventual, limit as u64 + 5);
-        eventual.yield_to_suppression_limit(limit + 1).unwrap();
+        eventual
+            .yield_to_suppression_limit(limit + 1, limit)
+            .unwrap();
         let oldest = (0..limit as u64).collect::<Vec<_>>();
         assert_eq!(selected(&eventual), oldest);
         assert_eq!(
@@ -1071,7 +1075,7 @@ mod tests {
         );
         // A selection within the limit can never be past it.
         let error = eventual
-            .yield_to_suppression_limit(limit + 1)
+            .yield_to_suppression_limit(limit + 1, limit)
             .expect_err("a selection within the limit cannot exceed it");
         assert!(
             matches!(error, HelixDbError::InvariantViolation(_)),

@@ -1091,14 +1091,16 @@ async fn text_builds_activate_or_block_typed_across_input_budgets_contract() {
     let mut activated = Vec::new();
     let mut blocked = Vec::new();
     for budget in (128_u64..=2_048).step_by(96) {
-        let config = DbConfig::new().with_search_index_backfill_limits(
-            limits(Overrides {
-                input_bytes: Some(budget),
-                manifest_bytes: Some(manifest),
-                ..Overrides::default()
-            })
-            .expect("budget limits validate"),
-        );
+        let config = DbConfig::new()
+            .with_slate_settings(one_ms_flush())
+            .with_search_index_backfill_limits(
+                limits(Overrides {
+                    input_bytes: Some(budget),
+                    manifest_bytes: Some(manifest),
+                    ..Overrides::default()
+                })
+                .expect("budget limits validate"),
+            );
         let (db, inserted, outcome) = build_fixture(
             &format!("queue-text-input-budget-{budget}"),
             config,
@@ -1494,17 +1496,28 @@ async fn per_document_operation_allowances_block_builds_and_queued_writes_contra
 // Damaged builds.
 // ---------------------------------------------------------------------------
 
+/// SlateDB settings that flush every millisecond, so builds that commit
+/// many small steps do not each wait out the 100 ms default.
+fn one_ms_flush() -> slatedb::Settings {
+    slatedb::Settings {
+        flush_interval: Some(Duration::from_millis(1)),
+        ..slatedb::Settings::default()
+    }
+}
+
 /// One split per page and one row per step, so every lane walks several rows.
 fn paged_config() -> DbConfig {
-    DbConfig::new().with_search_index_backfill_limits(
-        limits(Overrides {
-            entities: Some(1),
-            manifest_bytes: Some(one_split_manifest_bytes()),
-            fan_in: Some(1),
-            ..Overrides::default()
-        })
-        .expect("paged limits validate"),
-    )
+    DbConfig::new()
+        .with_slate_settings(one_ms_flush())
+        .with_search_index_backfill_limits(
+            limits(Overrides {
+                entities: Some(1),
+                manifest_bytes: Some(one_split_manifest_bytes()),
+                fan_in: Some(1),
+                ..Overrides::default()
+            })
+            .expect("paged limits validate"),
+        )
 }
 
 /// Pauses a two-document build, applies `damage`, and returns the terminal
