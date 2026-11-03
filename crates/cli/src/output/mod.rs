@@ -242,6 +242,15 @@ pub fn info(message: &str) {
     }
 }
 
+/// A line the user needs in order to carry on (`●  message`), such as a URL to
+/// open by hand or why a prompt is asking again. Prompts still appear under
+/// `--quiet`, so this does too.
+pub fn essential(message: &str) {
+    if Verbosity::current().show_quiet() {
+        log_line(&HelixTheme.info_symbol(), message);
+    }
+}
+
 /// A warning (`▲  message`).
 pub fn warning(message: &str) {
     if Verbosity::current().show_normal() {
