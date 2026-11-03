@@ -35,7 +35,8 @@ pub(crate) fn open_url(url: &str) -> Result<()> {
     if record_action(&HostAction::OpenUrl { url })? {
         return Ok(());
     }
-    open::that(url)?;
+    // `open::that` waits on the launcher, which can stay in the foreground.
+    open::that_detached(url)?;
     Ok(())
 }
 
