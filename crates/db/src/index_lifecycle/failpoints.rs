@@ -197,34 +197,3 @@ fn injected_error(failpoint: IndexOutboxFailpoint) -> HelixDbError {
 #[cfg(test)]
 #[path = "../../tests/unit/index_lifecycle_failpoints.rs"]
 mod control_contract_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stable_names_round_trip_and_one_shot_injection_clears() {
-        for failpoint in IndexOutboxFailpoint::ALL {
-            assert_eq!(
-                IndexOutboxFailpoint::parse(failpoint.as_str()),
-                Some(failpoint)
-            );
-        }
-        assert_eq!(IndexOutboxFailpoint::parse("unknown"), None);
-
-        inject_once(IndexOutboxFailpoint::ClaimBefore).unwrap();
-        assert!(trip(IndexOutboxFailpoint::ClaimBefore).is_err());
-        assert!(was_triggered());
-        assert!(trip(IndexOutboxFailpoint::ClaimBefore).is_ok());
-
-        let expected = IndexOperationId::new_v4();
-        let other = IndexOperationId::new_v4();
-        inject_for_operation_once(IndexOutboxFailpoint::CommitBefore, expected).unwrap();
-        assert!(trip_for_operation(IndexOutboxFailpoint::CommitBefore, other).is_ok());
-        assert!(!was_triggered());
-        assert!(trip(IndexOutboxFailpoint::CommitBefore).is_ok());
-        assert!(!was_triggered());
-        assert!(trip_for_operation(IndexOutboxFailpoint::CommitBefore, expected).is_err());
-        assert!(was_triggered());
-    }
-}

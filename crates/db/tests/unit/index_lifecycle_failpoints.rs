@@ -1,7 +1,7 @@
 //! Contracts for the stable V2 failpoint control boundary.
 //!
 //! They cover stable name parsing, environment-triggered errors and aborts,
-//! one-shot reset, and poisoned synchronization. The environment and failpoint
+//! one-shot and operation-scoped reset, and poisoned synchronization. The environment and failpoint
 //! slot are process-wide, so each contract runs in its own process.
 
 use std::process::Command;
@@ -53,6 +53,18 @@ fn failpoint_control_contracts() {
     assert!(trip(IndexOutboxFailpoint::ClaimBefore).is_err());
     assert!(was_triggered());
     assert!(trip(IndexOutboxFailpoint::ClaimBefore).is_ok());
+
+    // An operation-scoped failpoint trips only for its operation.
+    let expected = IndexOperationId::new_v4();
+    let other = IndexOperationId::new_v4();
+    inject_for_operation_once(IndexOutboxFailpoint::CommitBefore, expected)
+        .expect("operation-scoped failpoint installs");
+    assert!(trip_for_operation(IndexOutboxFailpoint::CommitBefore, other).is_ok());
+    assert!(!was_triggered());
+    assert!(trip(IndexOutboxFailpoint::CommitBefore).is_ok());
+    assert!(!was_triggered());
+    assert!(trip_for_operation(IndexOutboxFailpoint::CommitBefore, expected).is_err());
+    assert!(was_triggered());
 
     // SAFETY: this contract runs alone in its own process, and both variables
     // are removed before this function returns.
