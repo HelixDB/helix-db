@@ -605,28 +605,3 @@ fn exact_ids<D: Distance>(vectors: &[Vec<f32>], query: &[f32], k: usize) -> Vec<
         .map(|(_, entity_id)| entity_id)
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn populated_case_rejects_total_count_overflow() {
-        let result = VectorBatchBenchmarkCase::try_new_with_initial_count(
-            2,
-            usize::MAX,
-            128,
-            VectorBatchBenchmarkMetric::Cosine,
-            VectorBatchBenchmarkWorkload::Fresh,
-        );
-
-        assert!(matches!(result, Err(HelixDbError::Config(_))));
-    }
-
-    #[test]
-    fn cache_limits_reject_zero() {
-        let result = VectorBatchBenchmarkCacheLimits::try_new(0, 1, 1, 1);
-
-        assert!(matches!(result, Err(HelixDbError::Config(_))));
-    }
-}

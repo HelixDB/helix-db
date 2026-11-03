@@ -19,6 +19,7 @@ Cargo discovers these targets:
 | Target | Kind | Source | Role |
 |---|---|---|---|
 | `db` | `lib` | `crates/db/src/lib.rs` | Unit-test behavior, including contracts over private internals whose bodies live in `crates/db/tests/unit/` and are path-included by their owning modules. Unit tests that need `index-lifecycle-testing` live in `lifecycle_testing_tests` modules. Tests that arm process-global failpoints, environment variables, or locks rerun themselves alone in a child process of the test binary. |
+| `bench_internals_contracts` | `test` | `crates/db/tests/bench_internals_contracts.rs` | Requires `bench-internals`. Checks that the vector batch and FTS prefilter benchmark fixtures reject invalid cases, run every metric, workload, layout and strategy, and match the FTS fixture's exact oracle. |
 | `cypher_scaling` | `example` | `crates/db/examples/cypher_scaling.rs` | Runs local release graph workloads with deterministic result, planning-work, storage-read, and memory guards; latency measurements are reported separately. |
 | `embedded_write_latency` | `bench` | `crates/db/benches/embedded_write_latency.rs` | Measures acknowledged-write latency for in-memory and on-disk embedded storage. |
 | `edge_stream_drop` | `test` | `crates/db/tests/edge_stream_drop.rs` | Exercises edge-stream deletion, empty results, traversal selection, transaction rollback, replacement batches, and node cascades through the public query boundary. |

@@ -207,8 +207,8 @@ jobs:
           --bench ast_memory --bench ast_parse --bench ast_rss
           --bench ast_throughput --bench planner_alloc --bench planner_arena
       # Feature-gated benches run full workloads from custom mains, so lint
-      # them without running. The target-reference validator fails when a
-      # bench is named in no workflow.
+      # them without running and test their fixtures instead. The
+      # target-reference validator fails when a bench is named in no workflow.
       - name: Lint feature-gated benches
         run: >-
           cargo clippy --locked -p db
@@ -216,7 +216,12 @@ jobs:
           --bench secondary_equality_hot_path --bench secondary_equality_read_scale
           --bench vector_batch_insert --bench vector_memory_store
           --bench text_transaction_batching --bench fts_prefilter
+          --test bench_internals_contracts
           -- -D warnings
+      - name: Benchmark fixture contracts
+        run: >-
+          cargo test --locked -p db --features bench-internals
+          --test bench_internals_contracts
 
   benchmark-feature:
     name: Async index benchmark feature

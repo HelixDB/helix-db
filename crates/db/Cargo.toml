@@ -145,6 +145,10 @@ harness = false
 required-features = ["bench-internals"]
 
 [[test]]
+name = "bench_internals_contracts"
+required-features = ["bench-internals"]
+
+[[test]]
 name = "production_index_operation_queue"
 required-features = ["index-lifecycle-testing"]
 
