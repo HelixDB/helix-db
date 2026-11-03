@@ -88,6 +88,20 @@ pub struct CompiledRequest {
 }
 
 impl CompiledRequest {
+    pub(crate) fn new(
+        query: r::Query,
+        parameters: BTreeMap<String, query::QueryValue>,
+        text: String,
+        query_name: Option<String>,
+    ) -> Self {
+        Self {
+            query,
+            parameters,
+            text,
+            query_name,
+        }
+    }
+
     /// The validated statement's effect, without parsing or allocating.
     pub fn request_type(&self) -> query::QueryRequestType {
         match self.query.effect() {
@@ -96,7 +110,7 @@ impl CompiledRequest {
         }
     }
 
-    /// The statement as the client sent it.
+    /// The Cypher statement: as the client sent it, or as translated from SQL.
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -127,7 +141,9 @@ fn deserialize_parameters<'de, D: serde::Deserializer<'de>>(
         .collect()
 }
 
-fn decode_parameter(value: serde_json::Value) -> std::result::Result<query::QueryValue, String> {
+pub(crate) fn decode_parameter(
+    value: serde_json::Value,
+) -> std::result::Result<query::QueryValue, String> {
     use query::QueryValue as Q;
     match value {
         serde_json::Value::Array(values) => values

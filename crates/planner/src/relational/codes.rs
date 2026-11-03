@@ -61,6 +61,9 @@ pub mod detail {
         AGGREGATE_ARITY = "aggregate_arity",
         AGGREGATE_IDENTITY_BUDGET = "aggregate_identity_budget",
         AMBIGUOUS_AGGREGATION_EXPRESSION = "ambiguous_aggregation_expression",
+        /// A SQL column without a table qualifier in a statement that reads
+        /// several tables.
+        AMBIGUOUS_COLUMN = "ambiguous_column",
         COLLECTION_LIMIT = "collection_limit",
         COLUMN_NAME_CONFLICT = "column_name_conflict",
         DELETE_CONNECTED_NODE = "delete_connected_node",
@@ -142,6 +145,8 @@ pub mod detail {
         RESULT_LIMIT = "result_limit",
         SCHEMA_DDL = "schema_ddl",
         SHORTEST_PATH = "shortest_path",
+        /// A SQL construct outside the SQL translation. The message names it.
+        SQL_CONSTRUCT = "sql_construct",
         STORED_VALUE_NESTING_LIMIT = "stored_value_nesting_limit",
         STORED_VALUE_TYPE = "stored_value_type",
         TOO_MANY_BINDINGS = "too_many_bindings",

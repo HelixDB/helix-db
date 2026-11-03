@@ -11,10 +11,14 @@ mod lexer;
 mod parser;
 mod print;
 pub mod request;
+pub mod sql;
 pub mod syntax;
 
 use helix_planner::relational::{category, detail};
 pub use helix_planner::relational::{QueryError, Span};
+
+/// The largest statement text either frontend accepts.
+const MAX_QUERY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Parse a single statement without assigning meaning to variable names.
 /// The returned syntax owns its names and literal values.
@@ -28,7 +32,7 @@ pub use helix_planner::relational::{QueryError, Span};
 /// # Ok::<(), helix_cypher::QueryError>(())
 /// ```
 pub fn parse(text: &str) -> Result<syntax::Statement, QueryError> {
-    if text.len() > 16 * 1024 * 1024 {
+    if text.len() > MAX_QUERY_BYTES {
         return Err(QueryError::compile(
             category::RESOURCE_LIMIT,
             detail::QUERY_TOO_LARGE,

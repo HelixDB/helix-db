@@ -1,0 +1,659 @@
+//! `SELECT`: FROM and WHERE become `MATCH`, the select list becomes `RETURN`,
+//! and grouping goes through `WITH` when Cypher's implicit grouping would
+//! group differently from SQL.
+use super::expr::{rewrite, same, visit};
+use super::tables::{is_table_variable, reads_table, Scope};
+use super::{invalid, item, node, unsupported, variable, Translator};
+use crate::syntax::{self, Clause, Expr, ExprKind};
+use helix_planner::relational::{self as r, category, detail, QueryError, Result, Span};
+use sqlparser::ast;
+
+/// Aggregate functions, lowercased, including those the binder rejects, so
+/// that grouping is decided before the binder reports them.
+const AGGREGATES: &[&str] = &[
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "collect",
+    "stdev",
+    "stdevp",
+    "percentilecont",
+    "percentiledisc",
+];
+
+/// One select-list entry after translation.
+struct Projected {
+    /// `None` for `*`.
+    expression: Option<Expr>,
+    /// The printed alias: the SQL alias, or an unqualified column's name.
+    alias: Option<String>,
+    /// The result column: the alias, or the entry's SQL text, made unique.
+    name: String,
+}
+
+/// The result window of a query: `OFFSET`/`SKIP` and `LIMIT`/`FETCH`/`TOP`.
+#[derive(Default)]
+struct Window {
+    skip: Option<Expr>,
+    limit: Option<Expr>,
+}
+
+impl Translator<'_> {
+    pub(super) fn query(&self, query: &ast::Query) -> Result<syntax::Statement> {
+        let span = self.at(query);
+        let ast::Query {
+            with,
+            body,
+            order_by,
+            limit_clause,
+            fetch,
+            locks,
+            for_clause,
+            settings,
+            format_clause,
+            pipe_operators,
+        } = query;
+        if with.is_some() {
+            return Err(unsupported("common table expressions (WITH)", span));
+        }
+        if !locks.is_empty()
+            || for_clause.is_some()
+            || settings.is_some()
+            || format_clause.is_some()
+            || !pipe_operators.is_empty()
+        {
+            return Err(unsupported(
+                "locking, FOR, SETTINGS, FORMAT and pipe clauses",
+                span,
+            ));
+        }
+        let select = match body.as_ref() {
+            ast::SetExpr::Select(select) => select,
+            ast::SetExpr::SetOperation { .. } => {
+                return Err(QueryError::compile(
+                    category::UNSUPPORTED_FEATURE,
+                    detail::UNION,
+                    "SQL translation does not support UNION, INTERSECT or EXCEPT",
+                )
+                .at(span));
+            }
+            ast::SetExpr::Query(_)
+            | ast::SetExpr::Values(_)
+            | ast::SetExpr::Insert(_)
+            | ast::SetExpr::Update(_)
+            | ast::SetExpr::Delete(_)
+            | ast::SetExpr::Merge(_)
+            | ast::SetExpr::Table(_) => {
+                return Err(unsupported("this query form; write a single SELECT", span));
+            }
+        };
+        let window = self.window(
+            limit_clause.as_ref(),
+            fetch.as_ref(),
+            select.top.as_ref(),
+            span,
+        )?;
+        self.select(select, order_by.as_ref(), window)
+    }
+
+    fn window(
+        &self,
+        limit: Option<&ast::LimitClause>,
+        fetch: Option<&ast::Fetch>,
+        top: Option<&ast::Top>,
+        span: Span,
+    ) -> Result<Window> {
+        let empty = Scope::default();
+        let constant = |value: &ast::Expr| self.expr(value, &empty);
+        let mut window = match limit {
+            None => Window::default(),
+            Some(ast::LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            }) => {
+                if !limit_by.is_empty() {
+                    return Err(unsupported("LIMIT BY", span));
+                }
+                Window {
+                    skip: offset.as_ref().map(|o| constant(&o.value)).transpose()?,
+                    limit: limit.as_ref().map(constant).transpose()?,
+                }
+            }
+            Some(ast::LimitClause::OffsetCommaLimit { offset, limit }) => Window {
+                skip: Some(constant(offset)?),
+                limit: Some(constant(limit)?),
+            },
+        };
+        let extra = match (fetch, top) {
+            (None, None) => None,
+            (Some(_), Some(_)) => return Err(unsupported("both FETCH and TOP", span)),
+            (
+                Some(ast::Fetch {
+                    with_ties: false,
+                    percent: false,
+                    quantity: Some(quantity),
+                }),
+                None,
+            ) => Some(constant(quantity)?),
+            (
+                None,
+                Some(ast::Top {
+                    with_ties: false,
+                    percent: false,
+                    quantity: Some(quantity),
+                }),
+            ) => Some(match quantity {
+                ast::TopQuantity::Expr(quantity) => constant(quantity)?,
+                ast::TopQuantity::Constant(quantity) => super::literal(
+                    r::Value::Integer(i64::try_from(*quantity).map_err(|_| {
+                        invalid(
+                            detail::INTEGER_OVERFLOW,
+                            "TOP exceeds the integer range",
+                            span,
+                        )
+                    })?),
+                    span,
+                )?,
+            }),
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(unsupported(
+                    "FETCH or TOP with ties, percent or no count",
+                    span,
+                ));
+            }
+        };
+        if let Some(extra) = extra {
+            if window.limit.is_some() {
+                return Err(unsupported("LIMIT together with FETCH or TOP", span));
+            }
+            window.limit = Some(extra);
+        }
+        Ok(window)
+    }
+
+    fn select(
+        &self,
+        select: &ast::Select,
+        order_by: Option<&ast::OrderBy>,
+        window: Window,
+    ) -> Result<syntax::Statement> {
+        let span = self.at(select);
+        if !select.optimizer_hints.is_empty()
+            || select.select_modifiers.is_some()
+            || select.exclude.is_some()
+            || select.into.is_some()
+            || !select.lateral_views.is_empty()
+            || select.prewhere.is_some()
+            || !select.connect_by.is_empty()
+            || !select.cluster_by.is_empty()
+            || !select.distribute_by.is_empty()
+            || !select.sort_by.is_empty()
+            || !select.named_window.is_empty()
+            || select.qualify.is_some()
+            || select.value_table_mode.is_some()
+            || !matches!(select.flavor, ast::SelectFlavor::Standard)
+        {
+            return Err(unsupported(
+                "dialect-specific SELECT clauses such as INTO, QUALIFY, WINDOW and CLUSTER BY",
+                span,
+            ));
+        }
+        let distinct = match &select.distinct {
+            None | Some(ast::Distinct::All) => false,
+            Some(ast::Distinct::Distinct) => true,
+            Some(ast::Distinct::On(_)) => return Err(unsupported("DISTINCT ON", span)),
+        };
+        let (patterns, mut scope) = self.from(&select.from)?;
+        let predicate = select
+            .selection
+            .as_ref()
+            .map(|selection| self.expr(selection, &scope))
+            .transpose()?;
+        let projected = unique(
+            select
+                .projection
+                .iter()
+                .map(|entry| self.projected(entry, &scope))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        let explicit: Vec<(String, Expr)> = select
+            .projection
+            .iter()
+            .zip(&projected)
+            .filter(|(entry, _)| matches!(entry, ast::SelectItem::ExprWithAlias { .. }))
+            .filter_map(|(_, projected)| {
+                Some((projected.name.clone(), projected.expression.clone()?))
+            })
+            .collect();
+        // GROUP BY reads an alias as its expression; HAVING and ORDER BY read
+        // it as the projected column.
+        scope.aliases = explicit.clone();
+        let keys = self.group_keys(&select.group_by, &projected, &scope, span)?;
+        scope.aliases = explicit
+            .iter()
+            .map(|(name, _)| Ok((name.clone(), variable(name, span)?)))
+            .collect::<Result<_>>()?;
+        let having = select
+            .having
+            .as_ref()
+            .map(|having| self.expr(having, &scope))
+            .transpose()?;
+        let ordering = order_by
+            .map(|order_by| self.ordering(order_by, &projected, &scope))
+            .transpose()?
+            .unwrap_or_default();
+        let mut clauses = Vec::new();
+        if !patterns.is_empty() {
+            clauses.push(Clause::Match {
+                patterns,
+                optional: false,
+                predicate,
+            });
+        } else if predicate.is_some() {
+            return Err(unsupported("WHERE without FROM", span));
+        }
+        let aggregating = !keys.is_empty()
+            || having.is_some()
+            || projected
+                .iter()
+                .filter_map(|p| p.expression.as_ref())
+                .any(aggregates);
+        if !aggregating {
+            clauses.push(Clause::Project {
+                returning: true,
+                items: projected.into_iter().map(Projected::item).collect(),
+                distinct,
+                ordering,
+                skip: window.skip,
+                limit: window.limit,
+                predicate: None,
+            });
+            return Ok(syntax::Statement { clauses });
+        }
+        let expressions = projected
+            .iter()
+            .map(|p| {
+                p.expression.as_ref().ok_or_else(|| {
+                    invalid(
+                        detail::INVALID_AGGREGATION,
+                        "`*` cannot be selected together with grouping or aggregates",
+                        span,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Every column outside an aggregate must be grouped, as SQL requires.
+        let grouped = |expression: &Expr| -> Result<bool> {
+            let rest = rewrite(expression, &mut |e| {
+                (aggregate_call(e) || keys.iter().any(|k| same(k, e)))
+                    .then(|| node(ExprKind::Literal(r::Value::Null), e.span))
+                    .transpose()
+            })?;
+            Ok(!reads_table(&scope, &rest))
+        };
+        for (expression, p) in expressions.iter().zip(&projected) {
+            if !grouped(expression)? {
+                return Err(invalid(
+                    detail::INVALID_AGGREGATION,
+                    format!(
+                        "`{}` must appear in GROUP BY or be used in an aggregate",
+                        p.name
+                    ),
+                    expression.span,
+                ));
+            }
+        }
+        let simple = having.is_none()
+            && keys
+                .iter()
+                .all(|key| expressions.iter().any(|e| !aggregates(e) && same(e, key)))
+            && expressions.iter().all(|e| {
+                aggregates(e) || keys.iter().any(|key| same(e, key)) || !reads_table(&scope, e)
+            })
+            && ordering.iter().all(|(order, _)| {
+                matches!(order.kind(), ExprKind::Variable(_))
+                    || expressions.iter().any(|e| same(e, order))
+            });
+        if simple {
+            clauses.push(Clause::Project {
+                returning: true,
+                items: projected.into_iter().map(Projected::item).collect(),
+                distinct,
+                ordering,
+                skip: window.skip,
+                limit: window.limit,
+                predicate: None,
+            });
+            return Ok(syntax::Statement { clauses });
+        }
+        // Explicit grouping: WITH projects every select entry under its name,
+        // grouping keys and HAVING or ORDER BY aggregates that are not
+        // selected, then RETURN reads the names.
+        let mut with: Vec<(Expr, String)> = expressions
+            .iter()
+            .zip(&projected)
+            .map(|(e, p)| ((*e).clone(), p.name.clone()))
+            .collect();
+        let mut counter = 0;
+        let mut hidden = |prefix: &str, expression: &Expr, with: &mut Vec<(Expr, String)>| {
+            let name = format!("__{prefix}_col_{counter}");
+            counter += 1;
+            with.push((expression.clone(), name.clone()));
+            name
+        };
+        for key in &keys {
+            if !with.iter().any(|(e, _)| same(e, key)) {
+                hidden("group", key, &mut with);
+            }
+        }
+        let mut lift = |expression: &Expr, prefix: &str, with: &mut Vec<(Expr, String)>| {
+            let lifted = rewrite(expression, &mut |e| {
+                if let Some((_, name)) = with.iter().find(|(w, _)| same(w, e)) {
+                    return Ok(Some(variable(name, e.span)?));
+                }
+                if aggregate_call(e) {
+                    let name = hidden(prefix, e, with);
+                    return Ok(Some(variable(&name, e.span)?));
+                }
+                Ok(None)
+            })?;
+            if reads_table(&scope, &lifted) {
+                return Err(invalid(
+                    detail::INVALID_AGGREGATION,
+                    "HAVING and ORDER BY may only use grouped columns and aggregates",
+                    expression.span,
+                ));
+            }
+            Ok(lifted)
+        };
+        let having = having
+            .map(|having| lift(&having, "having", &mut with))
+            .transpose()?;
+        let ordering = ordering
+            .into_iter()
+            .map(|(order, descending)| Ok((lift(&order, "having", &mut with)?, descending)))
+            .collect::<Result<Vec<_>>>()?;
+        clauses.push(Clause::Project {
+            returning: false,
+            items: with
+                .into_iter()
+                .map(|(expression, name)| item(expression, Some(name)))
+                .collect(),
+            distinct: false,
+            ordering: Vec::new(),
+            skip: None,
+            limit: None,
+            predicate: having,
+        });
+        clauses.push(Clause::Project {
+            returning: true,
+            items: projected
+                .iter()
+                .map(|p| {
+                    Ok(syntax::Item::Expression {
+                        expression: variable(&p.name, span)?,
+                        alias: None,
+                        text: p.name.clone(),
+                    })
+                })
+                .collect::<Result<_>>()?,
+            distinct,
+            ordering,
+            skip: window.skip,
+            limit: window.limit,
+            predicate: None,
+        });
+        Ok(syntax::Statement { clauses })
+    }
+
+    /// A select list, as for `RETURNING`.
+    pub(super) fn items(
+        &self,
+        items: &[ast::SelectItem],
+        scope: &Scope,
+    ) -> Result<Vec<syntax::Item>> {
+        Ok(unique(
+            items
+                .iter()
+                .map(|entry| self.projected(entry, scope))
+                .collect::<Result<Vec<_>>>()?,
+        )
+        .into_iter()
+        .map(Projected::item)
+        .collect())
+    }
+
+    /// One select-list entry.
+    fn projected(&self, entry: &ast::SelectItem, scope: &Scope) -> Result<Projected> {
+        let span = self.at(entry);
+        match entry {
+            ast::SelectItem::UnnamedExpr(value) => {
+                let expression = self.expr(value, scope)?;
+                // An unqualified column keeps its SQL name, as neo4j-jdbc does.
+                let alias = if let ast::Expr::Identifier(column) = value
+                    && matches!(expression.kind(), ExprKind::Property(..))
+                {
+                    Some(column.value.clone())
+                } else {
+                    None
+                };
+                let name = alias.clone().unwrap_or_else(|| {
+                    if is_table_variable(scope, &expression) {
+                        expression.to_string()
+                    } else {
+                        value.to_string()
+                    }
+                });
+                Ok(Projected {
+                    expression: Some(expression),
+                    alias,
+                    name,
+                })
+            }
+            ast::SelectItem::ExprWithAlias { expr, alias } => Ok(Projected {
+                expression: Some(self.expr(expr, scope)?),
+                alias: Some(alias.value.clone()),
+                name: alias.value.clone(),
+            }),
+            ast::SelectItem::QualifiedWildcard(
+                ast::SelectItemQualifiedWildcardKind::ObjectName(name),
+                options,
+            ) if plain(options) => {
+                let table = scope.table(name, span)?;
+                let expression =
+                    super::call("properties", vec![variable(&table.variable, span)?], span)?;
+                Ok(Projected {
+                    expression: Some(expression),
+                    alias: Some(table.variable.clone()),
+                    name: table.variable.clone(),
+                })
+            }
+            ast::SelectItem::Wildcard(options) if plain(options) => {
+                if scope.written().next().is_none() {
+                    return Err(invalid(
+                        detail::NO_VARIABLES_IN_SCOPE,
+                        "`*` needs a table in FROM",
+                        span,
+                    ));
+                }
+                Ok(Projected {
+                    expression: None,
+                    alias: None,
+                    name: "*".to_owned(),
+                })
+            }
+            ast::SelectItem::QualifiedWildcard(..)
+            | ast::SelectItem::Wildcard(_)
+            | ast::SelectItem::ExprWithAliases { .. } => Err(unsupported(
+                "this select-list form; list columns or use `*` or `t.*`",
+                span,
+            )),
+        }
+    }
+
+    fn group_keys(
+        &self,
+        group_by: &ast::GroupByExpr,
+        projected: &[Projected],
+        scope: &Scope,
+        span: Span,
+    ) -> Result<Vec<Expr>> {
+        let ast::GroupByExpr::Expressions(keys, modifiers) = group_by else {
+            return Err(unsupported("GROUP BY ALL", span));
+        };
+        if !modifiers.is_empty() {
+            return Err(unsupported(
+                "GROUP BY modifiers such as ROLLUP and CUBE",
+                span,
+            ));
+        }
+        keys.iter()
+            .map(|key| match self.position(key, projected)? {
+                Some(index) => projected[index].expression.clone().ok_or_else(|| {
+                    invalid(
+                        detail::INVALID_AGGREGATION,
+                        "cannot group by `*`",
+                        self.at(key),
+                    )
+                }),
+                None => self.expr(key, scope),
+            })
+            .collect()
+    }
+
+    fn ordering(
+        &self,
+        order_by: &ast::OrderBy,
+        projected: &[Projected],
+        scope: &Scope,
+    ) -> Result<Vec<(Expr, bool)>> {
+        let span = self.at(order_by);
+        let ast::OrderBy {
+            kind: ast::OrderByKind::Expressions(expressions),
+            interpolate: None,
+        } = order_by
+        else {
+            return Err(unsupported("ORDER BY ALL and INTERPOLATE", span));
+        };
+        expressions
+            .iter()
+            .map(|order| {
+                let span = self.at(&order.expr);
+                let descending = match order.options.sort {
+                    None | Some(ast::OrderBySort::Asc) => false,
+                    Some(ast::OrderBySort::Desc) => true,
+                    Some(ast::OrderBySort::Using(_)) => {
+                        return Err(unsupported("ORDER BY USING", span));
+                    }
+                };
+                // Cypher sorts nulls last ascending and first descending.
+                if order
+                    .options
+                    .nulls_first
+                    .is_some_and(|first| first != descending)
+                    || order.with_fill.is_some()
+                {
+                    return Err(unsupported(
+                        "NULLS FIRST ascending, NULLS LAST descending and WITH FILL",
+                        span,
+                    ));
+                }
+                let expression = match self.position(&order.expr, projected)? {
+                    Some(index) => {
+                        let p = &projected[index];
+                        match (&p.alias, &p.expression) {
+                            (Some(alias), _) => variable(alias, span)?,
+                            (None, Some(expression)) => expression.clone(),
+                            (None, None) => {
+                                return Err(invalid(
+                                    detail::INVALID_STATEMENT,
+                                    "cannot order by `*`",
+                                    span,
+                                ));
+                            }
+                        }
+                    }
+                    None => self.expr(&order.expr, scope)?,
+                };
+                Ok((expression, descending))
+            })
+            .collect()
+    }
+
+    /// A 1-based select-list position, as in `ORDER BY 1`.
+    fn position(&self, expression: &ast::Expr, projected: &[Projected]) -> Result<Option<usize>> {
+        let ast::Expr::Value(ast::ValueWithSpan {
+            value: ast::Value::Number(text, _),
+            ..
+        }) = expression
+        else {
+            return Ok(None);
+        };
+        text.parse::<usize>()
+            .ok()
+            .filter(|position| (1..=projected.len()).contains(position))
+            .map(|position| Some(position - 1))
+            .ok_or_else(|| {
+                invalid(
+                    detail::INVALID_STATEMENT,
+                    format!("{text} is not a select-list position"),
+                    self.at(expression),
+                )
+            })
+    }
+}
+
+impl Projected {
+    /// The entry as a projection item. A column without an alias is named by
+    /// its SQL text, as written, rather than by the translated Cypher.
+    fn item(self) -> syntax::Item {
+        match self.expression {
+            None => syntax::Item::Wildcard,
+            Some(expression) => syntax::Item::Expression {
+                expression,
+                text: self.name,
+                alias: self.alias,
+            },
+        }
+    }
+}
+
+/// Number repeated names of unaliased entries, as `name`, `name_2`, …, so
+/// that `SELECT 1, 1` has two columns. Aliases stay as written.
+fn unique(mut projected: Vec<Projected>) -> Vec<Projected> {
+    let mut seen: Vec<String> = Vec::new();
+    for entry in &mut projected {
+        if entry.alias.is_none() && entry.expression.is_some() && seen.contains(&entry.name) {
+            let base = entry.name.clone();
+            entry.name = (2..)
+                .map(|n| format!("{base}_{n}"))
+                .find(|candidate| !seen.contains(candidate))
+                .expect("a free name exists");
+        }
+        seen.push(entry.name.clone());
+    }
+    projected
+}
+
+fn plain(options: &ast::WildcardAdditionalOptions) -> bool {
+    options.opt_ilike.is_none()
+        && options.opt_exclude.is_none()
+        && options.opt_except.is_none()
+        && options.opt_replace.is_none()
+        && options.opt_rename.is_none()
+        && options.opt_alias.is_none()
+}
+
+fn aggregate_call(expression: &Expr) -> bool {
+    matches!(expression.kind(), ExprKind::Call { name, .. }
+        if AGGREGATES.iter().any(|a| name.eq_ignore_ascii_case(a)))
+}
+
+fn aggregates(expression: &Expr) -> bool {
+    let mut found = false;
+    visit(expression, &mut |e| found |= aggregate_call(e));
+    found
+}
