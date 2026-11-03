@@ -342,9 +342,6 @@ Current production-linked replacements:
   `node_vector_write_paths_cover_non_cosine_metrics` at the public vector
   façade for cosine, Euclidean, and Manhattan. Binary/f16 remain outside the
   active descriptor contract.
-- `public_vector_parameter_types_reject_invalid_states` and
-  `public_vector_dimension_types_bind_exact_lengths` cover every exported
-  numeric/dimension constructor family through the production library.
 - `public_vector_memory_store_hydrates_and_evicts_typed_rows` covers typed
   SimHash dimension rejection, compatible/bounded/shutdown hydration, and
   public typed row eviction without using `cfg(test)` cache constructors.
