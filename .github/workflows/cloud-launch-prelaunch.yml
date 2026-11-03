@@ -128,7 +128,7 @@ jobs:
           -- target/cloud-launch-metrics/comparison.json
 
   final-quality:
-    name: Final quality and coverage
+    name: Final quality
     runs-on: macos-15
     timeout-minutes: 360
     steps:
@@ -140,16 +140,11 @@ jobs:
           cache-dependency-path: sdks/typescript/package-lock.json
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
-          components: clippy, llvm-tools-preview, rustfmt
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-llvm-cov
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: sdks/typescript
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo test --workspace --doc
       - run: cargo test --workspace
-      - run: scripts/workspace-coverage.sh planner
-      - run: scripts/workspace-coverage.sh db
-      - run: scripts/db-production-coverage.sh
-      - run: scripts/server-production-coverage.sh

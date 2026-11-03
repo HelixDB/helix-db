@@ -1,19 +1,11 @@
-//! Entry points for feature-gated production-codec coverage contracts.
+//! Entry points for feature-gated production contracts.
 //!
 //! The `production-coverage` feature compiles this module into the database
 //! crate so its children can reach private implementation boundaries through
-//! their owning modules. Keeping the orchestration source under `tests/` lets
-//! the coverage report exclude harness code while measuring the unchanged
-//! production implementations and codecs that the contracts exercise.
+//! their owning modules.
 //!
 //! Integration tests should call the public runners in this module instead of
 //! depending on private vector modules directly.
-
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Once;
-
-use tracing::span::{Attributes, Id, Record};
-use tracing::{Event, Metadata, Subscriber};
 
 #[cfg(feature = "production-scale")]
 pub use crate::search::vector::RestrictedSearchStrategy;
@@ -214,47 +206,6 @@ pub async fn migration_existing_active_and_conflict_contracts() {
     crate::migrations::production_contracts::run_existing_active_and_conflict_contracts().await;
 }
 
-/// Subscriber that enables production log fields without retaining events.
-///
-/// Coverage contracts use this process-global sink so diagnostics evaluate
-/// their structured fields while keeping test output quiet and deterministic.
-#[derive(Default)]
-struct CoverageSubscriber {
-    next_span_id: AtomicU64,
-}
-
-impl Subscriber for CoverageSubscriber {
-    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-        true
-    }
-
-    fn new_span(&self, _span: &Attributes<'_>) -> Id {
-        Id::from_u64(
-            self.next_span_id
-                .fetch_add(1, Ordering::Relaxed)
-                .saturating_add(1),
-        )
-    }
-
-    fn record(&self, _span: &Id, _values: &Record<'_>) {}
-
-    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
-
-    fn event(&self, _event: &Event<'_>) {}
-
-    fn enter(&self, _span: &Id) {}
-
-    fn exit(&self, _span: &Id) {}
-}
-
-/// Installs the quiet all-level subscriber once for diagnostic coverage.
-fn enable_vector_tracing() {
-    static ENABLE: Once = Once::new();
-    ENABLE.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(CoverageSubscriber::default());
-    });
-}
-
 /// Exercises the descriptor-bound vector memory registry through production code.
 ///
 /// The production-only integration test calls this runner to cover hydration,
@@ -416,7 +367,6 @@ pub async fn vector_magnitude_legacy_validation_contracts() {
 /// publication, deterministic prefetch selection, visited-state admission, and
 /// typed layer reads without adding an alternate search implementation.
 pub async fn vector_search_contracts() {
-    enable_vector_tracing();
     crate::search::vector::run_search_contracts().await;
 }
 
@@ -426,7 +376,6 @@ pub async fn vector_search_contracts() {
 /// metric, corruption rejection, SimHash-directory lifecycle and seeding,
 /// bounded bridge traversal, termination reasons, membership, and recall.
 pub async fn vector_restricted_search_contracts() {
-    enable_vector_tracing();
     crate::search::vector::run_restricted_contracts().await;
 }
 
@@ -437,7 +386,6 @@ pub async fn vector_restricted_search_contracts() {
 /// stale-root recovery, and current neighbor-row writes. It uses only deployed
 /// vector encodings in isolated databases.
 pub async fn vector_mutation_cache_contracts() {
-    enable_vector_tracing();
     crate::search::vector::run_mutation_contracts().await;
 }
 

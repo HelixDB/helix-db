@@ -339,6 +339,72 @@ def validate_references(
     return errors
 
 
+# Cargo, nextest and libtest options that take a separate value.
+VALUE_OPTIONS = {
+    "-E", "-F", "-Z", "-j", "-p", "--archive-file", "--bench", "--bin", "--build-jobs",
+    "--cargo-profile", "--color", "--config", "--example", "--extract-to", "--features",
+    "--filterset", "--format", "--logfile", "--manifest-path", "--message-format",
+    "--package", "--partition", "--profile", "--target", "--target-dir", "--test",
+    "--test-threads", "--workspace-remap",
+}
+
+
+def runs_whole_test_targets(command: str) -> bool:
+    """Whether `command` runs every test of the targets it names.
+
+    Only `cargo test` and `cargo nextest run` without `--no-run` run tests. A
+    test-name filter, `--exact`, `--skip`, or a nextest filterset that does not
+    keep `kind(test)` whole runs part of a target.
+    """
+    try:
+        tokens = shlex.split(re.sub(r"\$\{\{[^}]*\}\}", "EXPR", command))
+    except ValueError:
+        return False
+    for start, token in enumerate(tokens):
+        if token == "test" or (token == "run" and tokens[start - 1 : start] == ["nextest"]):
+            break
+    else:
+        return False
+    if {"--no-run", "--exact", "--skip"} & set(tokens):
+        return False
+    remaining = iter(tokens[start + 1 :])
+    for token in remaining:
+        if token in {"-E", "--filterset"}:
+            if "kind(test)" not in next(remaining, ""):
+                return False
+        elif token in VALUE_OPTIONS:
+            next(remaining, None)
+        elif not token.startswith("-"):
+            return False
+    return True
+
+
+def validate_feature_gated_tests_run(root: Path, catalog: Catalog) -> list[str]:
+    """Require a workflow to run every test target that `--all-targets` skips.
+
+    A reference counts only from a command that runs the whole target: a
+    filtered run of one test leaves the rest of the target unrun. Targets gated
+    on `production-scale` are release-scale soaks run on demand.
+    """
+    referenced = {
+        match.group("name")
+        for path in (root / ".github" / "workflows").glob("*.yml")
+        for command in commands(path)
+        if runs_whole_test_targets(command)
+        for match in REFERENCE.finditer(command)
+        if match.group("flag") == "--test"
+    }
+    return [
+        f"{package} test target {name!r} requires {', '.join(features)} "
+        "but no workflow runs the whole target with --test"
+        for (package, kind, name), features in sorted(catalog.required_features.items())
+        if kind == "test"
+        and features
+        and "production-scale" not in features
+        and name not in referenced
+    ]
+
+
 def validate_fuzz_matrices(root: Path, catalog: Catalog) -> list[str]:
     errors = []
     for path in (root / ".github" / "workflows").glob("*.yml"):
@@ -716,6 +782,7 @@ def main() -> int:
     catalog = load_catalog(root)
     errors = []
     errors.extend(validate_references(root, catalog, automation_files(root)))
+    errors.extend(validate_feature_gated_tests_run(root, catalog))
     errors.extend(validate_fuzz_matrices(root, catalog))
     errors.extend(validate_inventory(root, catalog))
     errors.extend(validate_codec_architecture(root))

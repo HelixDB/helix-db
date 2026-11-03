@@ -1,0 +1,64 @@
+name: Vector kernels
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - ".github/workflows/vector-kernels.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/db/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vector-kernels-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  architecture-kernels:
+    name: ${{ matrix.kernel }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: x86_64 scalar reference
+            runner: ubuntu-24.04
+            rustflags: -C target-cpu=x86-64
+            features: production-coverage,force-vector-scalar-kernel
+          - kernel: x86_64 SSE4.1
+            runner: ubuntu-24.04
+            rustflags: -C target-cpu=x86-64 -C target-feature=+sse4.1,-avx,-avx2,-fma
+            features: production-coverage
+          - kernel: x86_64 AVX FMA
+            runner: ubuntu-24.04
+            rustflags: -C target-cpu=x86-64 -C target-feature=+sse4.1,+avx,+avx2,+fma
+            features: production-coverage
+          - kernel: aarch64 scalar reference
+            runner: ubuntu-24.04-arm
+            rustflags: ""
+            features: production-coverage,force-vector-scalar-kernel
+          - kernel: aarch64 NEON
+            runner: ubuntu-24.04-arm
+            rustflags: -C target-feature=+neon
+            features: production-coverage
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Exercise scalar and native kernels directly
+        run: >-
+          cargo test -p db --features ${{ matrix.features }}
+          --test production_internal_contracts
+          vector_distance_neighbors_exercise_metric_and_graph_invariants
