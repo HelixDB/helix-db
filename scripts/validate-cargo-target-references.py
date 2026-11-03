@@ -482,24 +482,97 @@ LIFECYCLE_TESTING_UNIT_MODULE = re.compile(
     r'#\[cfg\(all\(test, feature = "index-lifecycle-testing"\)\)\]\s*'
     r'(?:#\[path = "[^"]*"\]\s*)?(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+)'
 )
+# A file module that compiles only with `index-lifecycle-testing`, in any cfg form.
+LIFECYCLE_TESTING_FILE_MODULE = re.compile(
+    r'#\[cfg\((?P<cfg>[^\[\]]*"index-lifecycle-testing"[^\[\]]*)\)\]\s*'
+    r'(?:#\[path = "(?P<path>[^"]*)"\]\s*)?(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+);'
+)
+TEST_MODULE = re.compile(
+    r'#\[cfg\(test\)\]\s*(?:#\[path = "[^"]*"\]\s*)?(?:pub(?:\([^)]*\))?\s+)?'
+    r"mod\s+(?P<name>\w+)"
+)
+
+
+def cfg_holds(expression: str, test: bool, features: set[str]) -> bool:
+    """Evaluates a `cfg` of `all`/`any`/`not`, `test` and `feature = "..."`."""
+    tokens = re.findall(r'all|any|not|test|feature\s*=\s*"[^"]*"|[(),]', expression)
+    position = 0
+
+    def parse() -> bool:
+        nonlocal position
+        token = tokens[position]
+        position += 1
+        if token in {"all", "any", "not"}:
+            position += 1
+            values = []
+            while tokens[position] != ")":
+                values.append(parse())
+                position += tokens[position] == ","
+            position += 1
+            return {"all": all, "any": any}.get(token, lambda v: not v[0])(values)
+        if token == "test":
+            return test
+        return token.split('"')[1] in features
+
+    return parse()
+
+
+def module_file(declaring: Path, name: str, path: str | None) -> Path | None:
+    """Resolves a non-inline `mod name;` declared in `declaring`."""
+    if path is not None:
+        return declaring.parent / path
+    directory = (
+        declaring.parent
+        if declaring.name in {"lib.rs", "main.rs", "mod.rs"}
+        else declaring.parent / declaring.stem
+    )
+    return next(
+        (
+            candidate
+            for candidate in (directory / f"{name}.rs", directory / name / "mod.rs")
+            if candidate.exists()
+        ),
+        None,
+    )
 
 
 def validate_lifecycle_testing_unit_tests(root: Path) -> list[str]:
     """Keep feature-gated unit tests where the contracts job selects them.
 
     `--all-targets` builds the library without `index-lifecycle-testing`, so a
-    workflow runs the library's `lifecycle_testing_tests` modules by name.
+    workflow runs the library's `lifecycle_testing_tests` modules by name. That
+    covers modules gated on `all(test, feature = "index-lifecycle-testing")` and
+    test modules inside a file that compiles only with the feature.
     """
     errors = []
     gated = False
+
+    def require_name(path: Path, name: str) -> None:
+        if name != "lifecycle_testing_tests":
+            errors.append(
+                f"{path.relative_to(root)}: index-lifecycle-testing unit tests must "
+                f"live in a `lifecycle_testing_tests` module, not {name!r}"
+            )
+
     for path in sorted((root / "crates" / "db" / "src").rglob("*.rs")):
-        for match in LIFECYCLE_TESTING_UNIT_MODULE.finditer(path.read_text()):
+        text = path.read_text()
+        for match in LIFECYCLE_TESTING_UNIT_MODULE.finditer(text):
             gated = True
-            if match.group("name") != "lifecycle_testing_tests":
-                errors.append(
-                    f"{path.relative_to(root)}: index-lifecycle-testing unit tests must "
-                    f"live in a `lifecycle_testing_tests` module, not {match.group('name')!r}"
-                )
+            require_name(path, match.group("name"))
+        for match in LIFECYCLE_TESTING_FILE_MODULE.finditer(text):
+            cfg = match.group("cfg")
+            # Tests a default test build compiles run in the archive; the
+            # `all(test, ...)` form is the module check above.
+            if cfg_holds(cfg, test=True, features=set()) or re.fullmatch(
+                r'all\(test, feature = "index-lifecycle-testing"\)', cfg
+            ):
+                continue
+            child = module_file(path, match.group("name"), match.group("path"))
+            if child is None:
+                continue
+            for test_module in TEST_MODULE.finditer(child.read_text()):
+                gated = True
+                require_name(child, test_module.group("name"))
     selected = any(
         "--lib" in command and "lifecycle_testing_tests" in command
         for path in (root / ".github" / "workflows").glob("*.yml")
