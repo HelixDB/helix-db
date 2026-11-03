@@ -240,6 +240,7 @@ fn corruption(reason: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(reason.into())
 }
 
+#[cfg(test)]
 #[path = "../../../tests/unit/index_lifecycle_active_text_retirement.rs"]
 mod contract_tests;
 
