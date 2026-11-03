@@ -13,6 +13,7 @@ use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{self, work};
+use crate::transaction::Mutation;
 
 /// Stable-view statistics for one analyzed OR-term query.
 #[derive(Debug, Clone)]
@@ -553,7 +554,7 @@ impl PreparedTextStatisticsBatch {
                 continue;
             }
             match &row.replacement {
-                Some(value) => transaction.put(&row.key, value)?,
+                Some(value) => Mutation::put(transaction, &row.key, value)?,
                 None => transaction.delete(&row.key)?,
             }
         }

@@ -80,6 +80,7 @@ use crate::index_lifecycle::{
     VectorBuildStage, VectorCleanupProgress, VectorPhysicalIdWatermark, VectorPhysicalIndexId,
     VectorPhysicalLayout, VectorRoutingLayoutV2,
 };
+use crate::transaction::Mutation;
 
 /// Vector lifecycle driver sharing scope gates and the bounded SimHash owner.
 pub(crate) struct VectorIndexDriver {
@@ -1424,7 +1425,8 @@ async fn step_cleanup<D: Distance>(
                             "vector abort found a reservation owned by another generation",
                         ));
                     };
-                    transaction.put(
+                    Mutation::put(
+                        transaction,
                         IndexKey::Global {
                             kind: GlobalKey::LegacyVectorPhysicalReservation(physical_index_id),
                         }
@@ -2257,7 +2259,8 @@ async fn step_build<D: Distance>(
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorReservationTransitionBefore,
                 )?;
-                transaction.put(
+                Mutation::put(
+                    transaction,
                     IndexKey::Global {
                         kind: GlobalKey::LegacyVectorPhysicalReservation(physical_index_id),
                     }
@@ -3964,7 +3967,8 @@ fn stage_applied(
         entity_id,
     );
     match next_partition {
-        Some(partition) => transaction.put(
+        Some(partition) => Mutation::put(
+            transaction,
             key,
             encode_applied_state(&AppliedEntityStateValue {
                 index_id: operation.index_id(),

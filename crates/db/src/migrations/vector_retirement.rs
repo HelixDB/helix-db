@@ -33,6 +33,7 @@ use crate::index_lifecycle::{
     ValidatedVectorIndexDefinition, VectorPhysicalIndexId,
 };
 use crate::search::vector::{self, VectorIndexConfig};
+use crate::transaction::Mutation;
 
 use super::{
     scan_bounds_for_prefix, LegacyDefinitionRow, LegacyDynamicIndexCatalogEntry,
@@ -380,7 +381,7 @@ pub(super) async fn fence_sources_batch(
         if let Some(value) = output {
             #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteBefore)?;
-            transaction.put(row.key.clone(), value)?;
+            Mutation::put(transaction, row.key.clone(), value)?;
             #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteAfter)?;
         }

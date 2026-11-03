@@ -43,6 +43,7 @@ use crate::index_lifecycle::{
 };
 #[cfg(test)]
 use crate::migrations::tenant::envelope as tenant_envelope_migration;
+use crate::transaction::Mutation;
 
 const MIGRATION_BATCH_SIZE: usize = 256;
 
@@ -180,7 +181,8 @@ pub(crate) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
 
     trip(EqualityBitmapMigrationFailpoint::PublicationBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
-    transaction.put(
+    Mutation::put(
+        &transaction,
         ManagedIndexKey::Global {
             kind: GlobalKey::StorageVersion,
         }
@@ -672,8 +674,13 @@ async fn restart_building_generation(db: &Db, building: &BuildingEqualityGenerat
         },
     )
     .map_err(|error| corruption(&error.to_string()))?;
-    transaction.put(operation_key, encode_operation_record(&restarted))?;
-    transaction.put(
+    Mutation::put(
+        &transaction,
+        operation_key,
+        encode_operation_record(&restarted),
+    )?;
+    Mutation::put(
+        &transaction,
         ManagedIndexKey::Global {
             kind: GlobalKey::OperationPointer(building.operation_id),
         }

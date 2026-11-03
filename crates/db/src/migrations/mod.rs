@@ -53,6 +53,7 @@ use crate::encoding::v2::legacy::index_catalog::{
 use crate::encoding::{EdgeId, NodeId};
 use crate::error::{HelixDbError, Result};
 use crate::search;
+use crate::transaction::Mutation;
 use crate::HelixWriter;
 
 const MIGRATION_JOB_PREFIX: &[u8] = b"kv_migration_job:";
@@ -1159,7 +1160,7 @@ pub(crate) async fn ensure_migration_job(
     #[cfg(test)]
     trip_migration_failpoint(MigrationFailpoint::JobCreationBeforeCommit)?;
     let job = MigrationJob::new(id, mode);
-    txn.put(key.into_bytes(), encode_json(&job)?)?;
+    Mutation::put(&txn, key.into_bytes(), encode_json(&job)?)?;
     txn.commit().await?;
     #[cfg(test)]
     trip_migration_failpoint(MigrationFailpoint::JobCreationAfterCommit)?;
@@ -1213,7 +1214,8 @@ pub(crate) async fn ensure_graph_format_v1_ready(db: &Db, scope: DataScope) -> R
         return Ok(());
     }
     let txn = db.begin(IsolationLevel::Snapshot).await?;
-    txn.put(
+    Mutation::put(
+        &txn,
         scoped_metadata_key(scope, GRAPH_FORMAT_V1_READY),
         Bytes::from_static(b"1"),
     )?;
@@ -1275,7 +1277,8 @@ pub(crate) async fn tenant_key_envelope_ready(
 
 /// Stages tenant-envelope completion in the caller's migration transaction.
 pub(crate) fn stage_tenant_key_envelope_ready(transaction: &DbTransaction) -> Result<()> {
-    transaction.put(
+    Mutation::put(
+        transaction,
         scoped_metadata_key(DataScope::LegacyUnscoped, TENANT_KEY_ENVELOPE_READY),
         Bytes::from_static(b"1"),
     )?;
@@ -1289,7 +1292,8 @@ pub(crate) fn stage_current_storage_schema_ready(transaction: &DbTransaction) ->
         INDEX_V2_MIGRATION_READY,
         STORAGE_SCHEMA_COMPLETE,
     ] {
-        transaction.put(
+        Mutation::put(
+            transaction,
             scoped_metadata_key(DataScope::LegacyUnscoped, marker),
             Bytes::from_static(b"1"),
         )?;
@@ -1306,7 +1310,8 @@ pub(crate) fn stage_reader_compatible_storage_schema_for_tests(
 
 /// Stages V4 cleanup completion in the caller's existing transaction.
 pub(crate) fn stage_index_storage_v4_cleanup_ready(transaction: &DbTransaction) -> Result<()> {
-    transaction.put(
+    Mutation::put(
+        transaction,
         scoped_metadata_key(DataScope::LegacyUnscoped, INDEX_STORAGE_V4_CLEANUP_READY),
         Bytes::from_static(b"1"),
     )?;
@@ -1425,7 +1430,8 @@ async fn publish_storage_schema_completion(db: &Db, scope: DataScope) -> Result<
                 .to_string(),
         });
     }
-    transaction.put(
+    Mutation::put(
+        &transaction,
         scoped_metadata_key(scope, STORAGE_SCHEMA_COMPLETE),
         Bytes::from_static(b"1"),
     )?;
@@ -1695,7 +1701,8 @@ pub(crate) async fn migrate_legacy_definitions(db: &crate::HelixDB) -> Result<()
             reason: "legacy vector physical cleanup is not durably complete".to_string(),
         });
     }
-    transaction.put(
+    Mutation::put(
+        &transaction,
         scoped_metadata_key(scope, INDEX_V2_MIGRATION_READY),
         Bytes::from_static(b"1"),
     )?;
@@ -2190,7 +2197,8 @@ pub(crate) async fn preflight_legacy_vector_reservations(db: &Db) -> Result<()> 
         );
         #[cfg(test)]
         trip_migration_failpoint(MigrationFailpoint::LegacyVectorReservationBefore)?;
-        transaction.put(
+        Mutation::put(
+            &transaction,
             IndexKey::Global {
                 kind: GlobalKey::LegacyVectorPhysicalReservation(physical_id),
             }
@@ -3082,9 +3090,10 @@ async fn process_migration_once_by_id_with_catalog_measured(
             if rewrite_completed {
                 trip_migration_failpoint(MigrationFailpoint::RewriteCompletionBefore)?;
             }
-            txn.put(key.into_bytes(), encode_json(&job)?)?;
+            Mutation::put(&txn, key.into_bytes(), encode_json(&job)?)?;
             if rewrite_completed {
-                txn.put(
+                Mutation::put(
+                    &txn,
                     scoped_metadata_key(scope, GRAPH_FORMAT_V1_READY),
                     Bytes::from_static(b"1"),
                 )?;
@@ -3118,7 +3127,8 @@ async fn process_migration_once_by_id_with_catalog_measured(
             job.fail(err.to_string());
             txn.rollback();
             let failed_txn = writer.db().begin(IsolationLevel::Snapshot).await?;
-            failed_txn.put(
+            Mutation::put(
+                &failed_txn,
                 MigrationJobKey::new(scope, id).into_bytes(),
                 encode_json(&job)?,
             )?;

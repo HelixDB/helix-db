@@ -41,7 +41,28 @@ cognitive-complexity-threshold = 25
 const-literal-digits-threshold = 30
 disallowed-fields = []
 disallowed-macros = []
-disallowed-methods = []
+# Raw backend puts skip the guard that keeps merge-maintained membership rows
+# decodable. Production code stages every put through `transaction::Mutation`.
+disallowed-methods = [
+    { path = "slatedb::DbTransaction::put", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::DbTransaction::put_with_options", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::DbTransaction::put_bytes", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::DbTransaction::put_bytes_with_options", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::Db::put", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::Db::put_with_options", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::Db::put_bytes", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::Db::put_bytes_with_options", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::WriteBatch::put", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::WriteBatch::put_with_options", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::WriteBatch::put_bytes", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::WriteBatch::put_bytes_with_options", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::DbTransactionOps::put", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::DbTransactionOps::put_with_options", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::DbTransactionOps::put_bytes", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::DbTransactionOps::put_bytes_with_options", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::DbWriteOps::put", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+    { path = "slatedb::DbWriteOps::put_with_options", reason = "membership rows must stay mergeable: stage puts through transaction::Mutation::put or put_bytes" },
+]
 disallowed-names = ["foo", "baz", "quux"]
 disallowed-types = []
 doc-valid-idents = ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "MHz", "GHz", "THz", "AccessKit", "CoAP", "CoreFoundation", "CoreGraphics", "CoreText", "DevOps", "Direct2D", "Direct3D", "DirectWrite", "DirectX", "ECMAScript", "GPLv2", "GPLv3", "GitHub", "GitLab", "IPv4", "IPv6", "InfiniBand", "RoCE", "ClojureScript", "CoffeeScript", "JavaScript", "PostScript", "PureScript", "TypeScript", "PowerPC", "PowerShell", "WebAssembly", "NaN", "NaNs", "OAuth", "GraphQL", "SQLite", "MySQL", "PostgreSQL", "MariaDB", "MongoDB", "OCaml", "OpenAL", "OpenDNS", "OpenGL", "OpenMP", "OpenSSH", "OpenSSL", "OpenStreetMap", "OpenTelemetry", "OpenType", "WebGL", "WebGL2", "WebGPU", "WebRTC", "WebSocket", "WebTransport", "WebP", "OpenExr", "YCbCr", "sRGB", "TensorFlow", "TrueType", "iOS", "macOS", "FreeBSD", "NetBSD", "OpenBSD", "NixOS", "TeX", "LaTeX", "BibTeX", "BibLaTeX", "MinGW", "CamelCase"]

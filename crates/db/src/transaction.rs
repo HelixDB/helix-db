@@ -125,8 +125,9 @@ pub(crate) trait Mutation: DbReadOps + Send + Sync + sealed::Sealed {
     /// Stages a full value. A value for a merge-maintained membership row must
     /// decode exactly as the merge operator decodes that row's stored value,
     /// so later deltas can always merge into it; see [`validate_put`]. With
-    /// [`put_unbatched`], this is the only production path to the backend's
-    /// puts: clippy.toml disallows the raw ones.
+    /// [`put_unbatched`], this is the production path to the backend's puts:
+    /// clippy.toml disallows the raw ones. The only raw put left is the
+    /// tenant-envelope startup copy, which moves legacy rows verbatim.
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         &self,
         key: K,

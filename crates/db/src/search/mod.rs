@@ -53,6 +53,7 @@ use crate::encoding::v2::values::indexes::{BitmapMembershipDelta, SecondaryEqual
 use crate::encoding::{EdgeId, NodeId};
 use crate::error::HelixDbError;
 use crate::query_resources::{self, bitmap};
+use crate::transaction::Mutation;
 use slatedb::DbReadOps;
 
 fn bounded_prefix_end(prefix: &Bytes) -> Bytes {
@@ -652,7 +653,7 @@ pub async fn add_to_range_index_with_direction_scoped(
         ))),
     }
     .to_bytes();
-    txn.put(&key, Bytes::new())?; // Empty value - presence is membership
+    Mutation::put(txn, &key, Bytes::new())?; // Empty value - presence is membership
     Ok(())
 }
 
@@ -2071,7 +2072,7 @@ pub async fn add_to_edge_range_index_with_direction_scoped(
         kind: out_key,
     }
     .to_bytes();
-    txn.put(&out_key, Bytes::new())?;
+    Mutation::put(txn, &out_key, Bytes::new())?;
 
     let in_key = edge_range_key_with_direction(
         EdgeRangeDirection::In,
@@ -2086,7 +2087,7 @@ pub async fn add_to_edge_range_index_with_direction_scoped(
         kind: in_key,
     }
     .to_bytes();
-    txn.put(&in_key, Bytes::new())?;
+    Mutation::put(txn, &in_key, Bytes::new())?;
 
     let global_key = global_edge_range_key_with_direction(property, value, edge_id, direction);
     let global_key = DataKey::Data {
@@ -2094,7 +2095,7 @@ pub async fn add_to_edge_range_index_with_direction_scoped(
         kind: global_key,
     }
     .to_bytes();
-    txn.put(&global_key, Bytes::new())?;
+    Mutation::put(txn, &global_key, Bytes::new())?;
 
     Ok(())
 }
@@ -2881,7 +2882,7 @@ pub async fn store_edge_properties_by_id_scoped(
         kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(edge_id)),
     }
     .to_bytes();
-    txn.put_bytes(key, encode_properties(properties))?;
+    Mutation::put_bytes(txn, key, encode_properties(properties))?;
     Ok(())
 }
 

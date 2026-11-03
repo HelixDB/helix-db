@@ -20,6 +20,7 @@ use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{IndexElementKind, ValidatedDynamicIndexDefinition};
 use crate::search;
 use crate::search::vector::{self, VectorIndex};
+use crate::transaction::Mutation;
 
 use super::{
     scan_bounds_for_prefix, LegacyDynamicIndexCatalogEntry, LegacyDynamicIndexDefinition,
@@ -274,7 +275,7 @@ async fn materialize_batch(
         if changed {
             #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteBefore)?;
-            transaction.put(property_key, encoded)?;
+            Mutation::put(transaction, property_key, encoded)?;
             #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteAfter)?;
         }

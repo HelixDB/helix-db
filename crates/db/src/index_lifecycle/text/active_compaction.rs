@@ -13,6 +13,7 @@ use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{self, work};
+use crate::transaction::Mutation;
 
 const STATE_BATCH_SIZE: usize = 512;
 
@@ -383,10 +384,11 @@ async fn commit_replacement(
             "Active text compaction replacement exceeds the manifest page limit",
         ));
     }
-    transaction.put(root_key, root_value)?;
-    transaction.put(page_key, page_value)?;
+    Mutation::put(&transaction, root_key, root_value)?;
+    Mutation::put(&transaction, page_key, page_value)?;
     if select_tier(page.entries(), limits).is_some() {
-        transaction.put(
+        Mutation::put(
+            &transaction,
             &selected.pointer_key,
             index_values::encode_metadata_value(
                 &index_lifecycle::IndexV2MetadataValue::TextCompactionPointer(
