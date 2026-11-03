@@ -98,6 +98,7 @@ class CargoTargetReferenceTests(unittest.TestCase):
             ("db", "test", "default_contracts"): (),
             ("db", "test", "listed_contracts"): ("production-coverage",),
             ("db", "test", "unlisted_contracts"): ("index-lifecycle-testing",),
+            ("db", "test", "filtered_contracts"): ("index-lifecycle-testing",),
             ("db", "test", "scale_soak"): ("production-scale",),
         })
         with tempfile.TemporaryDirectory() as directory:
@@ -107,14 +108,33 @@ class CargoTargetReferenceTests(unittest.TestCase):
             (workflows / "ci.yml").write_text(
                 "steps:\n  - run: >-\n      cargo test -p db\n"
                 "      --features production-coverage --test listed_contracts\n"
+                "  - run: cargo test -p db --test filtered_contracts one_test -- --exact\n"
+                "  - run: cargo clippy -p db --test unlisted_contracts\n"
             )
             self.assertEqual(
                 MODULE.validate_feature_gated_tests_run(root, catalog),
                 [
+                    "db test target 'filtered_contracts' requires "
+                    "index-lifecycle-testing but no workflow runs the whole target with --test",
                     "db test target 'unlisted_contracts' requires "
-                    "index-lifecycle-testing but no workflow runs it with --test"
+                    "index-lifecycle-testing but no workflow runs the whole target with --test",
                 ],
             )
+
+    def test_whole_target_runs_exclude_filters_and_non_test_commands(self):
+        runs = MODULE.runs_whole_test_targets
+        self.assertTrue(runs("cargo test -p db --features a,b --test t"))
+        self.assertTrue(runs("cargo test --release -p db --test t -- --nocapture --test-threads=1"))
+        self.assertTrue(
+            runs("cargo nextest run --profile ci -p db --test t -E 'kind(test) or test(/x/)'")
+        )
+        self.assertTrue(runs("cargo test -p db --features ${{ matrix.features }} --test t"))
+        self.assertFalse(runs("cargo test -p db --test t some_test"))
+        self.assertFalse(runs("cargo test -p db --test t -- --exact some_test"))
+        self.assertFalse(runs("cargo test -p db --test t -- --skip slow"))
+        self.assertFalse(runs("cargo nextest run -p db --test t -E 'test(/x/)'"))
+        self.assertFalse(runs("cargo test -p db --no-run --test t"))
+        self.assertFalse(runs("cargo clippy -p db --test t -- -D warnings"))
 
     def test_yaml_folded_commands_keep_multiline_target_flags(self):
         text = """steps:
