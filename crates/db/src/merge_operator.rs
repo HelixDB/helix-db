@@ -8,6 +8,7 @@ use roaring::RoaringTreemap;
 use serde::Serialize;
 use slatedb::{MergeOperator, MergeOperatorError, MergeResult};
 
+use crate::encoding::error::EncodingError;
 use crate::encoding::keys::scope::DataScope;
 use crate::encoding::v2::keys::indexes::vector::{
     KEY_KIND_LAYER0_VEC_KS, VECTOR_HOT_KEYSPACE_PREFIX,
@@ -16,6 +17,7 @@ use crate::encoding::v2::keys::indexes::PropertyIndexKey;
 use crate::encoding::v2::keys::{DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{ManagedIndexKey as V2Key, ScopedKey as V2ScopedKey};
 use crate::encoding::v2::values::indexes::operation_queue;
+use crate::encoding::v2::values::indexes::SecondaryEqualityValue;
 use crate::encoding::v2::values::{adjacency as edges, indexes::vector as vectors};
 use crate::encoding::v2::values::{BitmapMembershipDelta, SecondaryEqualityBitmapValue};
 use crate::encoding::NodeId;
@@ -64,8 +66,46 @@ fn decode_bitmap_add(bytes: &[u8]) -> Option<u64> {
     ))
 }
 
-#[derive(Debug, Clone, Default)]
-struct BitmapMergeOperator;
+/// How a bitmap row's stored value decodes, matching that row's readers.
+///
+/// Only the stored row differs: operands always decode strictly, and a
+/// membership-delta frame is strict under both rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BitmapBase {
+    /// Lifecycle-managed equality bitmaps and range presence rows: trailing
+    /// bytes after the portable bitmap are rejected.
+    Strict,
+    /// Built-in membership rows (labels, built-in equality and edge pairs):
+    /// readers decode the portable prefix and ignore the trailing bytes older
+    /// rows carry, so the operator does too.
+    PortablePrefix,
+}
+
+impl BitmapBase {
+    fn decode(self, stored: &[u8]) -> Result<RoaringTreemap, MergeOperatorError> {
+        match self {
+            Self::Strict => SecondaryEqualityBitmapValue::decode(stored)
+                .map(SecondaryEqualityBitmapValue::into_ids),
+            Self::PortablePrefix => {
+                SecondaryEqualityValue::decode(stored).map(SecondaryEqualityValue::into_ids)
+            }
+        }
+        .map_err(merge_decode_error)
+    }
+
+    /// Allocation-free bound on [`Self::decode`] of `stored`.
+    fn allocation_bound(self, stored: &[u8]) -> Result<usize, EncodingError> {
+        Ok(match self {
+            Self::Strict => SecondaryEqualityBitmapValue::prepare(stored)?.allocation_bound(),
+            Self::PortablePrefix => SecondaryEqualityValue::prepare(stored)?.allocation_bound(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BitmapMergeOperator {
+    base: BitmapBase,
+}
 
 impl BitmapMergeOperator {
     fn decode_operand(bytes: &[u8]) -> Result<BitmapMembershipDelta, MergeOperatorError> {
@@ -109,9 +149,7 @@ impl MergeOperator for BitmapMergeOperator {
             delta.compose(&operand);
             return Ok(delta.encode());
         }
-        let mut bitmap = SecondaryEqualityBitmapValue::decode(&existing)
-            .map_err(merge_decode_error)?
-            .into_ids();
+        let mut bitmap = self.base.decode(&existing)?;
         operand.apply_to(&mut bitmap);
         Self::encode(&bitmap)
     }
@@ -135,9 +173,7 @@ impl MergeOperator for BitmapMergeOperator {
             existing_delta.compose(&delta);
             return Ok(existing_delta.encode());
         }
-        let mut bitmap = SecondaryEqualityBitmapValue::decode(&existing)
-            .map_err(merge_decode_error)?
-            .into_ids();
+        let mut bitmap = self.base.decode(&existing)?;
         delta.apply_to(&mut bitmap);
         Self::encode(&bitmap)
     }
@@ -150,10 +186,8 @@ impl MergeOperator for BitmapMergeOperator {
     ) -> Result<MergeResult, MergeOperatorError> {
         let mut bitmap = existing_value
             .as_deref()
-            .map(SecondaryEqualityBitmapValue::decode)
-            .transpose()
-            .map_err(merge_decode_error)?
-            .map(SecondaryEqualityBitmapValue::into_ids)
+            .map(|existing| self.base.decode(existing))
+            .transpose()?
             .unwrap_or_default();
         for operand in operands {
             Self::decode_operand(operand)?.apply_to(&mut bitmap);
@@ -172,7 +206,7 @@ impl MergeOperator for BitmapMergeOperator {
         operands: &[Bytes],
     ) -> Result<(), MergeOperatorError> {
         if let Some(existing) = existing_value {
-            SecondaryEqualityBitmapValue::decode(&existing).map_err(merge_decode_error)?;
+            self.base.decode(&existing)?;
         }
         for operand in operands {
             Self::decode_operand(operand)?;
@@ -741,14 +775,81 @@ impl MergeOperator for OperationQueueMergeOperator {
     }
 }
 
+/// A merge-maintained membership row: its value is a base that membership
+/// deltas merge into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MembershipRow {
+    Bitmap(BitmapBase),
+    Adjacency,
+}
+
+impl MembershipRow {
+    /// Classifies `key` with the operator's own dispatch, or `None` for any
+    /// row deltas never merge into. Range presence rows share the bitmap
+    /// dispatch but hold empty values and never receive merges.
+    ///
+    /// The key is parsed once. Keys outside the membership prefixes, such as
+    /// property rows, are rejected from their first bytes without a full parse.
+    pub(crate) fn of(key: &[u8]) -> Option<Self> {
+        match HelixMergeOperator::key_type(key) {
+            MergeKeyType::Bitmap(base) => Some(Self::Bitmap(base)),
+            MergeKeyType::Edge => Some(Self::Adjacency),
+            MergeKeyType::Presence
+            | MergeKeyType::Layer0
+            | MergeKeyType::Counter
+            | MergeKeyType::OperationQueue
+            | MergeKeyType::Other => None,
+        }
+    }
+
+    /// Allocation-free bound on [`Self::validate_base`] of `stored`. A value
+    /// the bound rejects is rejected by the decoder too.
+    pub(crate) fn base_allocation_bound(self, stored: &[u8]) -> Result<usize, EncodingError> {
+        match self {
+            Self::Bitmap(base) => base.allocation_bound(stored),
+            Self::Adjacency => Ok(edges::prepare_edges(stored)?.allocation_bound()),
+        }
+    }
+
+    /// Decodes `stored` exactly as the merge operator decodes this row's
+    /// stored value, so a value that passes can always take a delta.
+    pub(crate) fn validate_base(self, stored: &[u8]) -> Result<(), MergeOperatorError> {
+        match self {
+            Self::Bitmap(base) => base.decode(stored).map(drop),
+            Self::Adjacency => edges::decode_edges(stored)
+                .map(drop)
+                .map_err(merge_decode_error),
+        }
+    }
+}
+
 /// Combined merge operator for durable Helix storage keyspaces.
-#[derive(Default)]
 pub(crate) struct HelixMergeOperator {
     edge: EdgeMergeOperator,
+    /// Built-in membership rows.
     bitmap: BitmapMergeOperator,
+    /// Lifecycle-managed equality bitmaps and range presence rows.
+    strict_bitmap: BitmapMergeOperator,
     layer0: Layer0NeighborMergeOperator,
     counter: CounterMergeOperator,
     operation_queue: OperationQueueMergeOperator,
+}
+
+impl Default for HelixMergeOperator {
+    fn default() -> Self {
+        Self {
+            edge: EdgeMergeOperator,
+            bitmap: BitmapMergeOperator {
+                base: BitmapBase::PortablePrefix,
+            },
+            strict_bitmap: BitmapMergeOperator {
+                base: BitmapBase::Strict,
+            },
+            layer0: Layer0NeighborMergeOperator,
+            counter: CounterMergeOperator,
+            operation_queue: OperationQueueMergeOperator::default(),
+        }
+    }
 }
 
 impl HelixMergeOperator {
@@ -766,48 +867,6 @@ impl HelixMergeOperator {
         }
     }
 
-    /// Rejects a full value that a merge-maintained bitmap or adjacency row
-    /// could not later resolve as its base.
-    ///
-    /// Membership deltas are staged without reading the stored row, so this is
-    /// what keeps those rows decodable: a memtable holding both an undecodable
-    /// base and a delta for one key would fail to build its L0 table. The value
-    /// goes through the operator's own base validation. Range rows share the
-    /// property-index prefix but only hold empty presence values and never
-    /// receive merges, so they are not checked.
-    pub(crate) fn validate_put(key: &[u8], value: &[u8]) -> Result<(), slatedb::Error> {
-        let membership = match Self::key_type(key) {
-            MergeKeyType::Bitmap => !matches!(
-                DataKeyKind::parse_from_slice(logical_key(key)),
-                Ok(DataKeyKind::PropertyIndex(
-                    PropertyIndexKey::Range(_)
-                        | PropertyIndexKey::EdgeRange(_)
-                        | PropertyIndexKey::GlobalEdgeRange(_)
-                ))
-            ),
-            MergeKeyType::Edge => true,
-            MergeKeyType::Layer0
-            | MergeKeyType::Counter
-            | MergeKeyType::OperationQueue
-            | MergeKeyType::Other => false,
-        };
-        if !membership {
-            return Ok(());
-        }
-        Self::new()
-            .validate_merge_with_base(
-                &Bytes::copy_from_slice(key),
-                Some(Bytes::copy_from_slice(value)),
-                &[],
-            )
-            .map_err(|error| {
-                slatedb::Error::invalid(
-                    "full value for a merge-maintained row does not decode".to_owned(),
-                )
-                .with_source(Box::new(error))
-            })
-    }
-
     fn is_hnsw_layer0_key(key: &[u8]) -> bool {
         key.len() == VECTOR_LAYER0_KEY_LEN
             && key[0] == VECTOR_HOT_KEYSPACE_PREFIX
@@ -819,7 +878,7 @@ impl HelixMergeOperator {
             Ok(V2Key::Data {
                 kind: V2ScopedKey::SecondaryEqualityBitmap(_),
                 ..
-            }) => return MergeKeyType::Bitmap,
+            }) => return MergeKeyType::Bitmap(BitmapBase::Strict),
             Ok(V2Key::Data {
                 kind: V2ScopedKey::IndexOperationQueue(_),
                 ..
@@ -832,15 +891,21 @@ impl HelixMergeOperator {
         }
         match logical.first().copied() {
             Some(prefix) if prefix == KeyPrefix::Adjacency.as_u8() => MergeKeyType::Edge,
-            Some(prefix) if prefix == KeyPrefix::EdgePairIndex.as_u8() => MergeKeyType::Bitmap,
-            Some(prefix)
-                if prefix == KeyPrefix::PropertyIndex.as_u8()
-                    && matches!(
-                        DataKeyKind::parse_from_slice(logical),
-                        Ok(DataKeyKind::PropertyIndex(_))
-                    ) =>
-            {
-                MergeKeyType::Bitmap
+            Some(prefix) if prefix == KeyPrefix::EdgePairIndex.as_u8() => {
+                MergeKeyType::Bitmap(BitmapBase::PortablePrefix)
+            }
+            Some(prefix) if prefix == KeyPrefix::PropertyIndex.as_u8() => {
+                match DataKeyKind::parse_from_slice(logical) {
+                    Ok(DataKeyKind::PropertyIndex(
+                        PropertyIndexKey::Range(_)
+                        | PropertyIndexKey::EdgeRange(_)
+                        | PropertyIndexKey::GlobalEdgeRange(_),
+                    )) => MergeKeyType::Presence,
+                    Ok(DataKeyKind::PropertyIndex(_)) => {
+                        MergeKeyType::Bitmap(BitmapBase::PortablePrefix)
+                    }
+                    Ok(_) | Err(_) => MergeKeyType::Other,
+                }
             }
             Some(prefix) if prefix == KeyPrefix::Metadata.as_u8() => MergeKeyType::Counter,
             _ => MergeKeyType::Other,
@@ -857,7 +922,12 @@ impl MergeOperator for HelixMergeOperator {
     ) -> Result<Bytes, MergeOperatorError> {
         match Self::key_type(key) {
             MergeKeyType::Edge => self.edge.merge(key, existing_value, operand),
-            MergeKeyType::Bitmap => self.bitmap.merge(key, existing_value, operand),
+            MergeKeyType::Bitmap(BitmapBase::PortablePrefix) => {
+                self.bitmap.merge(key, existing_value, operand)
+            }
+            MergeKeyType::Bitmap(BitmapBase::Strict) | MergeKeyType::Presence => {
+                self.strict_bitmap.merge(key, existing_value, operand)
+            }
             MergeKeyType::Layer0 => self.layer0.merge(key, existing_value, operand),
             MergeKeyType::Counter => self.counter.merge(key, existing_value, operand),
             MergeKeyType::OperationQueue => {
@@ -875,7 +945,12 @@ impl MergeOperator for HelixMergeOperator {
     ) -> Result<Bytes, MergeOperatorError> {
         match Self::key_type(key) {
             MergeKeyType::Edge => self.edge.merge_batch(key, existing_value, operands),
-            MergeKeyType::Bitmap => self.bitmap.merge_batch(key, existing_value, operands),
+            MergeKeyType::Bitmap(BitmapBase::PortablePrefix) => {
+                self.bitmap.merge_batch(key, existing_value, operands)
+            }
+            MergeKeyType::Bitmap(BitmapBase::Strict) | MergeKeyType::Presence => self
+                .strict_bitmap
+                .merge_batch(key, existing_value, operands),
             MergeKeyType::Layer0 => self.layer0.merge_batch(key, existing_value, operands),
             MergeKeyType::Counter => self.counter.merge_batch(key, existing_value, operands),
             MergeKeyType::OperationQueue => {
@@ -900,10 +975,13 @@ impl MergeOperator for HelixMergeOperator {
             MergeKeyType::Edge => self
                 .edge
                 .merge_batch_with_base(key, existing_value, operands),
-            MergeKeyType::Bitmap => {
+            MergeKeyType::Bitmap(BitmapBase::PortablePrefix) => {
                 self.bitmap
                     .merge_batch_with_base(key, existing_value, operands)
             }
+            MergeKeyType::Bitmap(BitmapBase::Strict) | MergeKeyType::Presence => self
+                .strict_bitmap
+                .merge_batch_with_base(key, existing_value, operands),
             MergeKeyType::Layer0 => self
                 .layer0
                 .merge_batch(key, existing_value, operands)
@@ -935,10 +1013,12 @@ impl MergeOperator for HelixMergeOperator {
             MergeKeyType::Edge => self
                 .edge
                 .validate_merge_with_base(key, existing_value, operands),
-            MergeKeyType::Bitmap => {
-                self.bitmap
-                    .validate_merge_with_base(key, existing_value, operands)
-            }
+            MergeKeyType::Bitmap(BitmapBase::PortablePrefix) => self
+                .bitmap
+                .validate_merge_with_base(key, existing_value, operands),
+            MergeKeyType::Bitmap(BitmapBase::Strict) | MergeKeyType::Presence => self
+                .strict_bitmap
+                .validate_merge_with_base(key, existing_value, operands),
             MergeKeyType::Layer0 => {
                 self.layer0
                     .validate_merge_with_base(key, existing_value, operands)
@@ -963,7 +1043,10 @@ impl MergeOperator for HelixMergeOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MergeKeyType {
     Edge,
-    Bitmap,
+    Bitmap(BitmapBase),
+    /// Range presence rows share the property-index prefix and the strict
+    /// bitmap dispatch, but hold empty values and never receive merges.
+    Presence,
     Layer0,
     Counter,
     OperationQueue,
@@ -1235,53 +1318,50 @@ mod tests {
         }
     }
 
+    /// Every membership row accepts exactly the stored values the operator can
+    /// merge a delta into, and the allocation-free bound never admits a value
+    /// the decoder rejects. Presence and property rows are not membership rows.
     #[test]
-    fn validated_puts_accept_exactly_the_bases_the_operator_resolves() {
-        use crate::encoding::indexes::equality::{
-            EdgeDirection as EqualityDirection, EdgeEqualityIndexKey, EqualityIndexKey,
-            GlobalEdgeEqualityIndexKey,
-        };
-        use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey};
-        use crate::encoding::indexes::range::{
-            EdgeRangeIndexDirection, EdgeRangeIndexKey, GlobalEdgeRangeIndexKey, RangeIndexKey,
-        };
-        use crate::encoding::indexes::{hash_property_name, hash_property_value, EdgeDirection};
+    fn membership_rows_accept_exactly_the_bases_the_operator_resolves() {
+        use crate::encoding::indexes::{equality, label, range};
         use std::borrow::Cow;
 
-        let property = hash_property_name("status");
-        let value = hash_property_value("shared");
+        let property = crate::encoding::indexes::hash_property_name("status");
+        let value = crate::encoding::indexes::hash_property_value("shared");
         let membership = [
-            PropertyIndexKey::Equality(EqualityIndexKey::new(property, value)),
-            PropertyIndexKey::EdgeEquality(EdgeEqualityIndexKey::new(
-                EqualityDirection::Out,
+            PropertyIndexKey::Equality(equality::EqualityIndexKey::new(property, value)),
+            PropertyIndexKey::EdgeEquality(equality::EdgeEqualityIndexKey::new(
+                equality::EdgeDirection::Out,
                 1,
                 property,
                 value,
             )),
-            PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(value)),
-            PropertyIndexKey::EdgeLabelNeighbor(EdgeLabelNeighborKey::new(
-                EdgeDirection::In,
+            PropertyIndexKey::EdgeLabel(label::EdgeLabelKey::new(value)),
+            PropertyIndexKey::EdgeLabelNeighbor(label::EdgeLabelNeighborKey::new(
+                crate::encoding::indexes::EdgeDirection::In,
                 1,
                 value,
             )),
-            PropertyIndexKey::GlobalEdgeEquality(GlobalEdgeEqualityIndexKey::new(property, value)),
+            PropertyIndexKey::GlobalEdgeEquality(equality::GlobalEdgeEqualityIndexKey::new(
+                property, value,
+            )),
         ];
         let presence = [
-            PropertyIndexKey::Range(RangeIndexKey::new(
+            PropertyIndexKey::Range(range::RangeIndexKey::new(
                 RangeIndexDirection::Asc,
                 property,
                 Cow::Borrowed("shared"),
                 1,
             )),
-            PropertyIndexKey::EdgeRange(EdgeRangeIndexKey::new(
-                EdgeDirection::Out,
-                EdgeRangeIndexDirection::Desc,
+            PropertyIndexKey::EdgeRange(range::EdgeRangeIndexKey::new(
+                crate::encoding::indexes::EdgeDirection::Out,
+                range::EdgeRangeIndexDirection::Desc,
                 1,
                 property,
                 Cow::Borrowed("shared"),
                 2,
             )),
-            PropertyIndexKey::GlobalEdgeRange(GlobalEdgeRangeIndexKey::new(
+            PropertyIndexKey::GlobalEdgeRange(range::GlobalEdgeRangeIndexKey::new(
                 RangeIndexDirection::Desc,
                 property,
                 Cow::Borrowed("shared"),
@@ -1296,8 +1376,7 @@ mod tests {
         bitmap_delta.remove(2);
         let mut adjacency_delta = edges::AdjacencyMembershipDelta::default();
         adjacency_delta.add_out(3);
-        let mut trailing = portable_bitmap([1]).to_vec();
-        trailing.push(0xFF);
+        let trailing = |bytes: Bytes| Bytes::from([&bytes[..], &[0xFF]].concat());
         let values = [
             portable_bitmap([1, 2]),
             bitmap_delta.encode(),
@@ -1305,7 +1384,10 @@ mod tests {
             edges::encode_edges(&edges),
             adjacency_delta.encode(),
             Bytes::new(),
-            Bytes::from(trailing),
+            trailing(portable_bitmap([1])),
+            trailing(bitmap_delta.encode()),
+            trailing(edges::encode_edges(&edges)),
+            trailing(adjacency_delta.encode()),
             Bytes::from_static(b"corrupt"),
         ];
         let operator = HelixMergeOperator::new();
@@ -1313,7 +1395,7 @@ mod tests {
             DataScope::LegacyUnscoped,
             DataScope::Tenant(TenantId::from_u128(7)),
         ] {
-            let bitmaps = membership
+            let built_in = membership
                 .iter()
                 .map(|key| {
                     DataKey::Data {
@@ -1322,34 +1404,43 @@ mod tests {
                     }
                     .to_bytes()
                 })
-                .chain([
+                .chain([DataKey::Data {
+                    scope,
+                    kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 2)),
+                }
+                .to_bytes()])
+                .map(|key| {
+                    (
+                        key,
+                        MembershipRow::Bitmap(BitmapBase::PortablePrefix),
+                        encode_bitmap_add(9),
+                    )
+                });
+            let rows = built_in.chain([
+                (
+                    v4_bitmap_key(scope),
+                    MembershipRow::Bitmap(BitmapBase::Strict),
+                    encode_bitmap_add(9),
+                ),
+                (
                     DataKey::Data {
                         scope,
-                        kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 2)),
+                        kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
                     }
                     .to_bytes(),
-                    v4_bitmap_key(scope),
-                ])
-                .map(|key| (key, encode_bitmap_add(9)));
-            let adjacency = (
-                DataKey::Data {
-                    scope,
-                    kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
-                }
-                .to_bytes(),
-                adjacency_delta.encode(),
-            );
-            let mut rejected = 0;
-            for (key, operand) in bitmaps.chain([adjacency]) {
-                assert!(matches!(
-                    HelixMergeOperator::key_type(&key),
-                    MergeKeyType::Bitmap | MergeKeyType::Edge
-                ));
+                    MembershipRow::Adjacency,
+                    adjacency_delta.encode(),
+                ),
+            ]);
+            for (key, expected, operand) in rows {
+                let row = MembershipRow::of(&key);
+                assert_eq!(row, Some(expected), "{key:?}");
+                let row = row.unwrap();
+                let (mut accepted, mut rejected) = (0, 0);
                 for value in &values {
-                    let accepted = HelixMergeOperator::validate_put(&key, value).is_ok();
-                    rejected += usize::from(!accepted);
+                    let valid = row.validate_base(value).is_ok();
                     assert_eq!(
-                        accepted,
+                        valid,
                         operator
                             .merge_batch_with_base(
                                 &key,
@@ -1359,10 +1450,14 @@ mod tests {
                             .is_ok(),
                         "{key:?} {value:?}"
                     );
+                    if row.base_allocation_bound(value).is_ok() {
+                        assert!(valid, "{key:?} bounded an undecodable {value:?}");
+                    }
+                    accepted += usize::from(valid);
+                    rejected += usize::from(!valid);
                 }
+                assert!(accepted > 0 && rejected > 0, "{key:?}");
             }
-            assert!(rejected > 0);
-            // Presence rows share the bitmap dispatch but are never merged.
             let unmerged = presence
                 .iter()
                 .map(|key| {
@@ -1378,21 +1473,201 @@ mod tests {
                 }
                 .to_bytes()]);
             for key in unmerged {
-                for value in &values {
-                    HelixMergeOperator::validate_put(&key, value).unwrap();
-                }
+                assert_eq!(MembershipRow::of(&key), None, "{key:?}");
             }
         }
-        let error = HelixMergeOperator::validate_put(
-            &DataKey::Data {
-                scope: DataScope::LegacyUnscoped,
-                kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
+    }
+
+    /// Built-in bitmap rows decode their stored value as readers do: a
+    /// trailing suffix after the portable bitmap is ignored. Valid rows merge
+    /// to exactly the bytes the strict decode produced; operands, delta frames
+    /// and malformed rows still fail; managed V4 rows stay strict.
+    #[test]
+    fn built_in_bitmap_rows_ignore_trailing_bytes_only_on_the_stored_row() {
+        let key = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 3)),
+        }
+        .to_bytes();
+        let operator = HelixMergeOperator::new();
+        // The pre-change decode of these rows, for byte comparison.
+        let strict = BitmapMergeOperator {
+            base: BitmapBase::Strict,
+        };
+        let mut runs = roaring::RoaringBitmap::from_iter(0..10_000);
+        runs.optimize();
+        let mut delta = BitmapMembershipDelta::default();
+        delta.add(5);
+        delta.remove(1);
+        let valid_rows = [
+            portable_bitmap([]),
+            portable_bitmap([1, 3, u64::MAX]),
+            portable_bitmap((0..20_000).map(|id| id * 2)),
+            portable_bitmap([1 << 32, 1 << 48, 7]),
+            BitmapMergeOperator::encode(&RoaringTreemap::from_bitmaps([(0, runs)])).unwrap(),
+            delta.encode(),
+        ];
+        let mut operand_delta = BitmapMembershipDelta::default();
+        operand_delta.add(2);
+        operand_delta.remove(3);
+        let operands = [
+            encode_bitmap_add(9),
+            operand_delta.encode(),
+            portable_bitmap([4, 5]),
+        ];
+        let suffix = |row: &Bytes| Bytes::from([&row[..], b"deployed trailing bytes"].concat());
+        for row in &valid_rows {
+            for operand in &operands {
+                let expected = (
+                    strict
+                        .merge(&key, Some(row.clone()), operand.clone())
+                        .unwrap(),
+                    strict
+                        .merge_batch(&key, Some(row.clone()), std::slice::from_ref(operand))
+                        .unwrap(),
+                    strict
+                        .merge_batch_with_base(
+                            &key,
+                            Some(row.clone()),
+                            std::slice::from_ref(operand),
+                        )
+                        .unwrap(),
+                );
+                let merged = |stored: &Bytes| {
+                    (
+                        operator.merge(&key, Some(stored.clone()), operand.clone()),
+                        operator.merge_batch(
+                            &key,
+                            Some(stored.clone()),
+                            std::slice::from_ref(operand),
+                        ),
+                        operator.merge_batch_with_base(
+                            &key,
+                            Some(stored.clone()),
+                            std::slice::from_ref(operand),
+                        ),
+                    )
+                };
+                let (merge, batch, with_base) = merged(row);
+                assert_eq!(
+                    (merge.unwrap(), batch.unwrap(), with_base.unwrap()),
+                    expected,
+                    "valid row {row:?}"
+                );
+                operator
+                    .validate_merge_with_base(
+                        &key,
+                        Some(row.clone()),
+                        std::slice::from_ref(operand),
+                    )
+                    .unwrap();
+                if delta.encode() == row {
+                    // Delta framing stays strict on the stored row.
+                    let (merge, batch, with_base) = merged(&suffix(row));
+                    assert!(merge.is_err() && batch.is_err() && with_base.is_err());
+                    continue;
+                }
+                // A suffixed portable row merges to the same bytes as without it.
+                let (merge, batch, with_base) = merged(&suffix(row));
+                assert_eq!(
+                    (merge.unwrap(), batch.unwrap(), with_base.unwrap()),
+                    expected,
+                    "suffixed row {row:?}"
+                );
+                operator
+                    .validate_merge_with_base(
+                        &key,
+                        Some(suffix(row)),
+                        std::slice::from_ref(operand),
+                    )
+                    .unwrap();
+                // The strict rule still refuses it, as managed V4 rows do.
+                assert!(strict
+                    .validate_merge_with_base(
+                        &key,
+                        Some(suffix(row)),
+                        std::slice::from_ref(operand)
+                    )
+                    .is_err());
             }
-            .to_bytes(),
-            b"corrupt",
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), slatedb::ErrorKind::Invalid);
+        }
+        let mut bad_cookie = portable_bitmap([1]).to_vec();
+        bad_cookie[12] ^= 0xFF;
+        let truncated = portable_bitmap((0..100).map(|id| id * 7));
+        for malformed in [
+            Bytes::from_static(b"corrupt"),
+            Bytes::from(bad_cookie),
+            truncated.slice(..truncated.len() - 1),
+            Bytes::new(),
+        ] {
+            assert!(operator
+                .merge_batch_with_base(&key, Some(malformed.clone()), &[encode_bitmap_add(1)])
+                .is_err());
+            assert!(operator
+                .merge(&key, Some(malformed.clone()), encode_bitmap_add(1))
+                .is_err());
+            assert!(operator
+                .validate_merge_with_base(&key, Some(malformed), &[encode_bitmap_add(1)])
+                .is_err());
+        }
+        for operand in [
+            suffix(&portable_bitmap([2])),
+            suffix(&operand_delta.encode()),
+        ] {
+            assert!(operator
+                .merge_batch_with_base(
+                    &key,
+                    Some(portable_bitmap([1])),
+                    std::slice::from_ref(&operand),
+                )
+                .is_err());
+            assert!(operator
+                .merge(&key, Some(portable_bitmap([1])), operand.clone())
+                .is_err());
+            assert!(operator
+                .validate_merge_with_base(&key, None, &[operand])
+                .is_err());
+        }
+    }
+
+    /// Adjacency rows already decode as their readers do: a plain row ignores
+    /// trailing bytes and a delta frame is strict.
+    #[test]
+    fn adjacency_rows_ignore_trailing_bytes_only_on_plain_stored_rows() {
+        let key = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
+        }
+        .to_bytes();
+        let operator = HelixMergeOperator::new();
+        let mut stored = edges::Edges::new();
+        stored.add_out(1);
+        stored.add_in(2);
+        let plain = edges::encode_edges(&stored);
+        let mut delta = edges::AdjacencyMembershipDelta::default();
+        delta.add_out(3);
+        let suffix = |row: &Bytes| Bytes::from([&row[..], b"deployed trailing bytes"].concat());
+        let expected = operator
+            .merge_batch_with_base(&key, Some(plain.clone()), &[delta.encode()])
+            .unwrap();
+        assert_eq!(
+            operator
+                .merge_batch_with_base(&key, Some(suffix(&plain)), &[delta.encode()])
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            operator
+                .merge(&key, Some(suffix(&plain)), delta.encode())
+                .unwrap(),
+            operator.merge(&key, Some(plain), delta.encode()).unwrap()
+        );
+        assert!(operator
+            .merge_batch_with_base(&key, Some(suffix(&delta.encode())), &[delta.encode()])
+            .is_err());
+        assert!(operator
+            .validate_merge_with_base(&key, None, &[suffix(&delta.encode())])
+            .is_err());
     }
 
     #[test]
@@ -1639,16 +1914,22 @@ mod tests {
             .to_bytes(),
         ];
         for key in negative_keys {
-            assert_ne!(HelixMergeOperator::key_type(&key), MergeKeyType::Bitmap);
+            assert!(!matches!(
+                HelixMergeOperator::key_type(&key),
+                MergeKeyType::Bitmap(_)
+            ));
         }
 
         let valid = v4_bitmap_key(DataScope::LegacyUnscoped);
-        assert_eq!(HelixMergeOperator::key_type(&valid), MergeKeyType::Bitmap);
+        assert_eq!(
+            HelixMergeOperator::key_type(&valid),
+            MergeKeyType::Bitmap(BitmapBase::Strict)
+        );
         for truncated_len in 0..valid.len() {
-            assert_ne!(
+            assert!(!matches!(
                 HelixMergeOperator::key_type(&valid[0..truncated_len]),
-                MergeKeyType::Bitmap
-            );
+                MergeKeyType::Bitmap(_)
+            ));
         }
     }
 
