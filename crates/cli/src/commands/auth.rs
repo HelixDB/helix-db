@@ -752,7 +752,6 @@ mod tests {
     impl ScriptedHost {
         fn new(callbacks: &[&'static str], codes: &[&'static str]) -> Self {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
             let port = listener.local_addr().unwrap().port();
             Self {
                 listener,
@@ -778,7 +777,12 @@ mod tests {
             if self.port_busy {
                 return bind_callback(self.port).await;
             }
-            Ok(TcpListener::from_std(self.listener.try_clone()?)?)
+            // `from_std` needs a non-blocking socket, and Windows does not carry the
+            // mode over to a duplicate. A blocking accept would stall the test's
+            // single-threaded runtime for good.
+            let listener = self.listener.try_clone()?;
+            listener.set_nonblocking(true)?;
+            Ok(TcpListener::from_std(listener)?)
         }
 
         fn open_browser(&mut self, url: &str) {
