@@ -203,27 +203,29 @@ async fn status() -> Result<()> {
             .collect::<Vec<_>>(),
     });
     output::emit(&summary, |_| {
-        let names = workspaces
-            .iter()
-            .map(|workspace| workspace.label())
-            .collect::<Vec<_>>()
-            .join(", ");
-        print!(
-            "{}",
-            table::key_values(&[
-                ("Email", email.clone()),
-                (
-                    "Workspaces",
-                    if names.is_empty() {
-                        "none".to_owned()
-                    } else {
-                        names
-                    }
-                ),
-            ])
-        );
+        print!("{}", status_view(&email, &workspaces));
         Ok(())
     })
+}
+
+/// `auth status` for a person: the account, then one workspace per line by name,
+/// since an account can belong to enough of them to wrap a single line.
+fn status_view(email: &str, workspaces: &[Workspace]) -> String {
+    let count = match workspaces.len() {
+        0 => "none".to_owned(),
+        count => count.to_string(),
+    };
+    let details = table::key_values(&[("Email", email.to_owned()), ("Workspaces", count)]);
+    if workspaces.is_empty() {
+        return details;
+    }
+    let mut sorted: Vec<&Workspace> = workspaces.iter().collect();
+    sorted.sort_by_key(|workspace| workspace.label().to_lowercase());
+    let mut rows = table::Table::new(["NAME", "ID"]);
+    for workspace in sorted {
+        rows.row([workspace.label(), workspace.id.as_str()]);
+    }
+    format!("{details}\n{}", rows.render())
 }
 
 async fn logout() -> Result<()> {
@@ -255,6 +257,39 @@ pub async fn require_auth() -> Result<CloudClient> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_lists_one_workspace_per_line_by_name() {
+        let workspaces: Vec<Workspace> = serde_json::from_value(json!([
+            {"id": "ws-1", "displayName": "Zeta Labs"},
+            {"id": "ws-2", "displayName": "alpha"},
+            {"id": "ws-3", "slug": "only-a-slug"},
+            {"id": "ws-4"},
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            console::strip_ansi_codes(&status_view("person@test.dev", &workspaces)),
+            "\
+Email       person@test.dev
+Workspaces  4
+
+NAME         ID
+alpha        ws-2
+only-a-slug  ws-3
+ws-4         ws-4
+Zeta Labs    ws-1
+"
+        );
+    }
+
+    #[test]
+    fn status_without_workspaces_prints_no_table() {
+        assert_eq!(
+            console::strip_ansi_codes(&status_view("person@test.dev", &[])),
+            "Email       person@test.dev\nWorkspaces  none\n"
+        );
+    }
 
     #[tokio::test]
     async fn callback_requires_code_and_state() {

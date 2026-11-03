@@ -10397,7 +10397,7 @@ helix auth logout
 
 ### Status and logout
 
-- `status` verifies the session by listing your workspaces through the Helix Cloud API, then prints `Email` and `Workspaces` (by name).
+- `status` verifies the session by listing your workspaces through the Helix Cloud API, then prints `Email`, the number of `Workspaces`, and a table of their names and IDs, sorted by name.
 - `logout` asks the Helix Cloud API to revoke the session when possible and always deletes the local file.
 
 ## Examples
