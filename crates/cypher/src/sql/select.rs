@@ -580,7 +580,8 @@ impl Translator<'_> {
                 span,
             ));
         }
-        keys.iter()
+        let keys = keys
+            .iter()
             .map(|key| match self.position(key, projected)? {
                 Some(index) => projected[index]
                     .expression
@@ -596,7 +597,15 @@ impl Translator<'_> {
                     }),
                 None => self.expr(key, scope),
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        match keys.iter().find(|key| aggregates(key)) {
+            Some(key) => Err(invalid(
+                detail::INVALID_AGGREGATION,
+                "GROUP BY cannot use an aggregate",
+                key.span,
+            )),
+            None => Ok(keys),
+        }
     }
 
     fn ordering(
@@ -688,11 +697,17 @@ impl Projected {
         match self.expression {
             None => syntax::Item::Wildcard,
             Some(expression) => syntax::Item::Expression {
-                expression,
+                // Cypher names an unaliased variable after itself, so a
+                // renumbered table variable needs an alias.
                 alias: match self.alias {
                     Alias::Explicit | Alias::Derived => Some(self.name.clone()),
-                    Alias::Text => None,
+                    Alias::Text => matches!(
+                        expression.kind(),
+                        ExprKind::Variable(variable) if *variable != self.name
+                    )
+                    .then(|| self.name.clone()),
                 },
+                expression,
                 text: self.name,
             },
         }

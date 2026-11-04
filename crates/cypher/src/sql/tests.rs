@@ -270,8 +270,13 @@ fn relationship_tables_resolve_endpoints() {
         category::UNSUPPORTED_FEATURE,
         detail::SQL_CONSTRUCT,
     );
+    assert_eq!(
+        cypher("SELECT k.since, l.stars, k_end.name FROM Person_KNOWS_Person k, Person_LIKES_Movie l"),
+        "MATCH (k_start:Person)-[k:KNOWS]->(k_end:Person), (l_start:Person)-[l:LIKES]->(l_end:Movie) \
+         RETURN k.since, l.stars, k_end.name"
+    );
     assert_error(
-        "SELECT 1 FROM Person_ACTED_IN_Movie, Person_LIKES_Movie",
+        "SELECT 1 FROM Person_KNOWS_Person k, Person_LIKES_Movie l, Movie k_start",
         category::SYNTAX_ERROR,
         detail::VARIABLE_ALREADY_BOUND,
     );
@@ -1092,5 +1097,47 @@ fn rare_forms_follow_their_rules() {
         ),
     ] {
         assert_eq!(probe(sql), expected, "{sql}");
+    }
+}
+
+#[test]
+fn helpers_stay_out_of_results_and_names_stay_unique() {
+    for (sql, expected) in [
+        (
+            "UPDATE Person p SET a = p.b, b = p.a RETURNING *",
+            "MATCH (p:Person) WITH p, p.b AS __set_0, p.a AS __set_1 \
+             SET p.a = __set_0, p.b = __set_1 WITH p RETURN *",
+        ),
+        (
+            "INSERT INTO Person (name) VALUES ('a'), ('b') RETURNING *",
+            "UNWIND [{name: 'a'}, {name: 'b'}] AS properties CREATE (person:Person) \
+             SET person = properties WITH person RETURN *",
+        ),
+        (
+            "INSERT INTO Person (name) VALUES ('a') RETURNING *",
+            "CREATE (person:Person {name: 'a'}) RETURN *",
+        ),
+        (
+            "SELECT p, p FROM Person p",
+            "MATCH (p:Person) RETURN p, p AS p_2",
+        ),
+        (
+            "SELECT V$PERSON_ID FROM Person",
+            "MATCH (person:Person) RETURN id(person)",
+        ),
+        (
+            "SELECT SUBSTRING('abc' FROM 0 FOR 3), SUBSTRING('abc', -1), \
+             SUBSTRING('abc' FROM -5 FOR 3), SUBSTRING('abc' FROM 0 FOR t.n) FROM t",
+            "MATCH (t:t) RETURN substring('abc', 0, 2), substring('abc', 0), \
+             substring('abc', 0, 0), substring('abc', 0, t.n - 1)",
+        ),
+    ] {
+        assert_eq!(cypher(sql), expected, "{sql}");
+    }
+    for sql in [
+        "SELECT count(*) AS c FROM Person p GROUP BY c",
+        "SELECT count(*) FROM Person p GROUP BY 1",
+    ] {
+        assert_error(sql, category::SYNTAX_ERROR, detail::INVALID_AGGREGATION);
     }
 }

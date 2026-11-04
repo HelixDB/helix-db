@@ -5,7 +5,8 @@
 //! `SUBSTRING` starts at 1, `(a, b) <> (c, d)` holds when any pair differs,
 //! two-argument `REPLACE` removes the search string, and `||` and `CONCAT`
 //! join their operands as strings, `CONCAT` skipping nulls as PostgreSQL does.
-//! `SUM` of no values is null. `CAST` uses Cypher's conversions: to an integer it truncates toward zero,
+//! `SUM` of no values is null. `TRIM` and its variants remove all leading or
+//! trailing whitespace, as Cypher's do, not only spaces. `CAST` uses Cypher's conversions: to an integer it truncates toward zero,
 //! and text that does not convert becomes null rather than an error.
 use super::tables::Scope;
 use super::{binary, call, invalid, literal, unsupported, Translator};
@@ -1025,27 +1026,41 @@ const CYPHER_FUNCTIONS: &[&str] = &[
 ];
 
 /// SQL's 1-based `SUBSTRING(value FROM start FOR length)` on Cypher's 0-based
-/// `substring`.
+/// `substring`. SQL drops the positions of a literal start below 1 from the
+/// length, which this folds; a computed start below 1 makes Cypher's
+/// `substring` fail rather than return different text.
 fn substring(value: Expr, start: Option<Expr>, length: Option<Expr>, span: Span) -> Result<Expr> {
-    let start = match start {
-        None => literal(r::Value::Integer(0), span)?,
-        Some(start) => {
-            let folded = 'fold: {
-                let ExprKind::Literal(r::Value::Integer(position)) = start.kind() else {
-                    break 'fold None;
+    let integer = |value: i64| literal(r::Value::Integer(value), span);
+    let constant = |value: Option<&Expr>| -> Option<i64> {
+        let ExprKind::Literal(r::Value::Integer(value)) = value?.kind() else {
+            return None;
+        };
+        Some(*value)
+    };
+    let (start, length) = match start {
+        None => (integer(0)?, length),
+        Some(start) => match constant(Some(&start)) {
+            // Positions before the first character take part of the length.
+            Some(first) if first < 1 => {
+                let dropped = 1_i64.saturating_sub(first);
+                let length = match (constant(length.as_ref()), length) {
+                    (Some(length), _) => Some(integer(length.saturating_sub(dropped).max(0))?),
+                    (None, Some(length)) => Some(binary(
+                        r::Binary::Subtract,
+                        length,
+                        integer(dropped)?,
+                        span,
+                    )?),
+                    (None, None) => None,
                 };
-                position.checked_sub(1)
-            };
-            match folded {
-                Some(previous) => literal(r::Value::Integer(previous), span)?,
-                None => binary(
-                    r::Binary::Subtract,
-                    start,
-                    literal(r::Value::Integer(1), span)?,
-                    span,
-                )?,
+                (integer(0)?, length)
             }
-        }
+            Some(first) => (integer(first - 1)?, length),
+            None => (
+                binary(r::Binary::Subtract, start, integer(1)?, span)?,
+                length,
+            ),
+        },
     };
     call(
         "substring",
@@ -1209,9 +1224,17 @@ pub(super) fn rewrite(
     expression: &Expr,
     replace: &mut dyn FnMut(&Expr) -> Result<Option<Expr>>,
 ) -> Result<Expr> {
-    if let Some(replacement) = replace(expression)? {
-        return Ok(replacement);
+    match replace(expression)? {
+        Some(replacement) => Ok(replacement),
+        None => rebuild(expression, replace),
     }
+}
+
+/// `expression` with each child rewritten by [`rewrite`].
+fn rebuild(
+    expression: &Expr,
+    replace: &mut dyn FnMut(&Expr) -> Result<Option<Expr>>,
+) -> Result<Expr> {
     let mut again = |value: &Expr| rewrite(value, replace);
     let kind = match expression.kind() {
         kind @ (ExprKind::Literal(_)

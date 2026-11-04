@@ -69,7 +69,8 @@ is a property of the start node, `Movie.title` or `_end.title` of the end node,
 and `person_name` is shorthand for `_start.name` when only the start label is
 `Person`, in reads, `UPDATE` and `INSERT` alike. The start and end each need a
 lowercase letter, so upper-case table names such as `ORDER_LINE_ITEMS` stay node
-labels.
+labels. When a `FROM` names several relationship tables, each
+one's nodes are `<alias>_start` and `<alias>_end` instead.
 
 ## Joins
 
@@ -166,8 +167,10 @@ and `'%x'` `ENDS WITH`.
 Functions with a Cypher equivalent are renamed: `lower` and `upper` become
 `toLower` and `toUpper`, `length` and `char_length` become `size`, `nvl` and
 `ifnull` become `coalesce`, `array_agg` becomes `collect`, and `nullif` and
-`nvl2` become `CASE`. `SUBSTRING` counts from 1, as in SQL. Other names pass
-through, so the [Cypher profile](/database/helix-db/query-guides/cypher#what-is-supported)
+`nvl2` become `CASE`. `SUBSTRING` counts from 1, as in SQL; a start below 1
+must be a literal, since a computed one fails. `TRIM`, `LTRIM` and `RTRIM`
+remove all surrounding whitespace, as Cypher's do, not only spaces. Other names
+pass through, so the [Cypher profile](/database/helix-db/query-guides/cypher#what-is-supported)
 decides which functions run.
 
 ## What is not supported

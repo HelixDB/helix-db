@@ -79,11 +79,13 @@ impl Translator<'_> {
             ));
         }
         let rows = self.rows(source.as_deref(), columns.len(), span)?;
+        // Several rows UNWIND through a helper variable.
+        let unwound = rows.len() > 1;
         let mut scope = Scope::default();
         let class = reference.class.clone();
         let target = reference.variable.clone();
         let table = reference.name.clone();
-        let pattern = self.single(reference, &mut scope)?;
+        let pattern = self.single(reference, &mut scope, false)?;
         let mut clauses = match class {
             Class::Node(_) => self.node_insert(pattern, &table, &target, columns, rows)?,
             Class::Relationship { start, kind, end } => {
@@ -91,7 +93,7 @@ impl Translator<'_> {
                 self.relationship_insert(&labels, &table, &target, columns, rows, span)?
             }
         };
-        clauses.extend(self.returning(returning.as_deref(), &scope)?);
+        clauses.extend(self.returning(returning.as_deref(), &scope, unwound, span)?);
         Ok(syntax::Statement { clauses })
     }
 
@@ -244,7 +246,11 @@ impl Translator<'_> {
         rows: Vec<Vec<Expr>>,
         span: Span,
     ) -> Result<Vec<Clause>> {
-        const ROW: &str = "properties";
+        let row = if target == "properties" {
+            "row"
+        } else {
+            "properties"
+        };
         let roles = columns
             .iter()
             .map(|column| self.role(column, labels, table, target))
@@ -270,7 +276,7 @@ impl Translator<'_> {
             if single {
                 return Ok(rows[0][index].clone());
             }
-            let row = variable(ROW, at)?;
+            let row = variable(row, at)?;
             match role {
                 Role::Property(side, key) => property(property(row, side.group(), at)?, key, at),
                 Role::StartId => property(row, "start_id", at),
@@ -367,7 +373,7 @@ impl Translator<'_> {
                     ),
                     span,
                 )?,
-                name: ROW.to_owned(),
+                name: row.to_owned(),
             });
         }
         clauses.push(Clause::Match {
@@ -407,7 +413,8 @@ impl Translator<'_> {
         let (qualifier, name) = self.column_name(column, span)?;
         let side = match qualifier.as_deref() {
             None => {
-                let id = name
+                let lowered = name.to_ascii_lowercase();
+                let id = lowered
                     .strip_prefix("v$")
                     .and_then(|rest| rest.strip_suffix("_id"))
                     .map(|label| {
@@ -610,7 +617,7 @@ impl Translator<'_> {
                 .collect()
         };
         clauses.push(Clause::Set(assignments));
-        clauses.extend(self.returning(update.returning.as_deref(), &scope)?);
+        clauses.extend(self.returning(update.returning.as_deref(), &scope, sequential, span)?);
         Ok(syntax::Statement { clauses })
     }
 
@@ -640,7 +647,7 @@ impl Translator<'_> {
         let mut scope = Scope::default();
         let reference = self.reference(relation)?;
         let target = reference.variable.clone();
-        let pattern = self.single(reference, &mut scope)?;
+        let pattern = self.single(reference, &mut scope, false)?;
         let predicate = delete
             .selection
             .as_ref()
@@ -688,7 +695,7 @@ impl Translator<'_> {
         let reference: Reference = self.named(name, None, span)?;
         let detach = matches!(reference.class, Class::Node(_));
         let target = reference.variable.clone();
-        let pattern = self.single(reference, &mut Scope::default())?;
+        let pattern = self.single(reference, &mut Scope::default(), false)?;
         Ok(syntax::Statement {
             clauses: vec![
                 Clause::Match {
@@ -704,25 +711,38 @@ impl Translator<'_> {
         })
     }
 
-    /// `RETURNING` as a final `RETURN`.
+    /// `RETURNING` as a final `RETURN`. When the statement bound helper
+    /// variables, a `WITH` of the table variables drops them first, so that
+    /// `RETURNING *` lists only tables.
     fn returning(
         &self,
         returning: Option<&[ast::SelectItem]>,
         scope: &Scope,
-    ) -> Result<Option<Clause>> {
-        returning
-            .map(|items| {
-                Ok(Clause::Project {
-                    returning: true,
-                    items: self.items(items, scope)?,
-                    distinct: false,
-                    ordering: Vec::new(),
-                    skip: None,
-                    limit: None,
-                    predicate: None,
-                })
-            })
-            .transpose()
+        helpers: bool,
+        span: Span,
+    ) -> Result<Vec<Clause>> {
+        let Some(items) = returning else {
+            return Ok(Vec::new());
+        };
+        let project = |returning: bool, items: Vec<syntax::Item>| Clause::Project {
+            returning,
+            items,
+            distinct: false,
+            ordering: Vec::new(),
+            skip: None,
+            limit: None,
+            predicate: None,
+        };
+        let mut clauses = Vec::new();
+        if helpers {
+            let tables = scope
+                .variables()
+                .map(|name| Ok(super::item(variable(name, span)?, None)))
+                .collect::<Result<Vec<_>>>()?;
+            clauses.push(project(false, tables));
+        }
+        clauses.push(project(true, self.items(items, scope)?));
+        Ok(clauses)
     }
 }
 

@@ -235,11 +235,12 @@ impl Scope {
                 };
                 // `v$<table>_id` is the id of the table with that variable or label.
                 let virtual_id = || {
-                    let target = name.strip_prefix("v$")?.strip_suffix("_id")?.to_lowercase();
+                    let lowered = name.to_lowercase();
+                    let target = lowered.strip_prefix("v$")?.strip_suffix("_id")?;
                     let indices = self
                         .by_alias
-                        .get(&target)
-                        .or_else(|| self.by_label.get(&target))
+                        .get(target)
+                        .or_else(|| self.by_label.get(target))
                         .map_or(&[][..], Vec::as_slice);
                     Some(match indices {
                         [index] => id(&self.tables[*index]),
@@ -442,19 +443,39 @@ impl Translator<'_> {
             .flatten()
             .map(|(reference, _)| reference.variable.clone())
             .collect();
+        // Several relationship tables on their own each need endpoint
+        // variables of their own: `<variable>_start` and `<variable>_end`.
+        let prefixed = chains
+            .iter()
+            .filter(|chain| {
+                matches!(
+                    chain.as_slice(),
+                    [(
+                        Reference {
+                            class: Class::Relationship { .. },
+                            ..
+                        },
+                        _
+                    )]
+                )
+            })
+            .count()
+            > 1;
         let mut scope = Scope::default();
         let patterns = chains
             .into_iter()
-            .map(|chain| self.chain(chain, &mut scope, &mut taken))
+            .map(|chain| self.chain(chain, &mut scope, &mut taken, prefixed))
             .collect::<Result<_>>()?;
         Ok((patterns, scope))
     }
 
-    /// One standalone table: a node, or a relationship table with its endpoints.
+    /// One standalone table: a node, or a relationship table with its
+    /// endpoints, named `_start` and `_end` unless `prefixed`.
     pub(super) fn single(
         &self,
         reference: Reference,
         scope: &mut Scope,
+        prefixed: bool,
     ) -> Result<syntax::Pattern> {
         let span = reference.span;
         match reference.class {
@@ -477,21 +498,32 @@ impl Translator<'_> {
                 })
             }
             Class::Relationship { start, kind, end } => {
+                let (start_variable, end_variable) = if prefixed {
+                    (
+                        format!("{}{START}", reference.variable),
+                        format!("{}{END}", reference.variable),
+                    )
+                } else {
+                    (START.to_owned(), END.to_owned())
+                };
                 let pattern = syntax::Pattern {
                     name: None,
-                    nodes: vec![pattern_node(START, &start), pattern_node(END, &end)],
+                    nodes: vec![
+                        pattern_node(&start_variable, &start),
+                        pattern_node(&end_variable, &end),
+                    ],
                     relationships: vec![relationship(
                         Some(reference.variable.clone()),
                         &kind,
                         r::Direction::Outgoing,
                     )],
                 };
-                for (variable, label) in [(START, start), (END, end)] {
+                for (variable, label) in [(start_variable, start), (end_variable, end)] {
                     scope.add(
                         Table {
                             name: label.clone(),
                             alias: None,
-                            variable: variable.to_owned(),
+                            variable,
                             kind: Kind::Node { label },
                             role: Role::Endpoint,
                         },
@@ -519,6 +551,7 @@ impl Translator<'_> {
         chain: Vec<(Reference, Option<&ast::JoinConstraint>)>,
         scope: &mut Scope,
         taken: &mut HashSet<String>,
+        prefixed: bool,
     ) -> Result<syntax::Pattern> {
         let mut tables = chain.into_iter();
         let Some((first, _)) = tables.next() else {
@@ -526,7 +559,7 @@ impl Translator<'_> {
         };
         let joins: Vec<_> = tables.collect();
         if joins.is_empty() {
-            return self.single(first, scope);
+            return self.single(first, scope, prefixed);
         }
         let mut pattern = syntax::Pattern {
             name: None,
@@ -536,9 +569,8 @@ impl Translator<'_> {
         let mut rest = joins.into_iter().peekable();
         // An odd number of joins starts with a direct join between two node
         // tables; every later pair is a relationship table and a node table.
-        if rest.len() % 2 == 1
-            && let Some((right, constraint)) = rest.next()
-        {
+        if rest.len() % 2 == 1 {
+            let (right, constraint) = rest.next().expect("an odd number of joins has a first");
             let constraint = constraint.expect("chain joins carry a constraint");
             let left = scope
                 .written()
