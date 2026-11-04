@@ -853,3 +853,37 @@ pub fn recall_at_k(
         .count();
     hits as f64 / expected as f64
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    /// Recall counts a returned id that ties the k-th neighbour within float
+    /// rounding as a hit, and a clearly worse neighbour as a miss. The
+    /// release recall gate trusts this helper, so it runs on every PR.
+    #[test]
+    fn recall_counts_a_near_tie_at_rank_k_but_not_a_worse_neighbour() {
+        let query = [1.0, 0.0, 0.0, 0.0];
+        let candidates = vec![
+            (1, vec![1.0, 0.0, 0.0, 0.0]),
+            // Cosine 0.6, the 2nd neighbour.
+            (2, vec![3.0, 4.0, 0.0, 0.0]),
+            // Cosine 0.6 - 1.2e-8: ranked 3rd, within 4 * f32::EPSILON of the 2nd.
+            (3, vec![3.0, 4.0, 0.0, 1e-3]),
+            // Cosine 0.59988: 1.2e-4 below the 2nd.
+            (4, vec![3.0, 4.0, 0.0, 0.1]),
+        ];
+        let recall = |returned: &[u64]| {
+            super::recall_at_k(&candidates, &query, 2, &returned.iter().copied().collect())
+        };
+        assert_eq!(recall(&[1, 2]), 1.0);
+        assert_eq!(recall(&[1, 3]), 1.0);
+        assert_eq!(recall(&[1, 4]), 0.5);
+        assert_eq!(recall(&[3, 4]), 0.5);
+        assert_eq!(super::recall_at_k(&[], &query, 2, &HashSet::new()), 0.0);
+        assert_eq!(
+            super::recall_at_k(&candidates, &query, 0, &HashSet::new()),
+            0.0
+        );
+    }
+}

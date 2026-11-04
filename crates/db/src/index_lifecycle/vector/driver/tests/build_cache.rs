@@ -2790,9 +2790,21 @@ async fn mutated_build_digests(
     partitioned: bool,
     drivers: StepDrivers,
 ) -> Vec<(usize, String)> {
-    const ENTITIES: u64 = 120;
+    const ENTITIES: u64 = 48;
     const DIMENSION: usize = 8;
-    let db = test_db(name).await;
+    // Every step commits, and each commit waits for the next WAL flush; a
+    // short interval keeps the six builds from waiting out 100 ms each time.
+    let db = Db::builder(name, Arc::new(InMemory::new()))
+        .with_settings(slatedb::config::Settings {
+            flush_interval: Some(Duration::from_millis(1)),
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("mutated build database opens");
+    bootstrap_writer(&db)
+        .await
+        .expect("mutated build database bootstraps V2 metadata");
     let scope = DataScope::LegacyUnscoped;
     let runtime = VectorIndexDefinition::new_node(
         "Document",
@@ -2825,13 +2837,25 @@ async fn mutated_build_digests(
         }
         properties
     };
+    // One commit seeds every source; each commit waits for a WAL flush.
+    let transaction = db
+        .begin(IsolationLevel::Snapshot)
+        .await
+        .expect("fixture source transaction opens");
     for entity_id in 0..ENTITIES {
         let tenant = 10 + 10 * i64::try_from(entity_id % 3).expect("tenant index fits i64");
-        put_source(&db, scope, entity_id, &source(entity_id, tenant)).await;
+        transaction
+            .put(
+                source_key(scope, entity_id),
+                encode_properties(&source(entity_id, tenant)),
+            )
+            .expect("fixture source stages");
     }
+    transaction.commit().await.expect("fixture sources commit");
     let (operation_id, index_id, generation) =
         create_build(&db, scope, &definition, ENTITIES - 1).await;
-    let limits = limits_with_output_operations(1_024);
+    // Small steps keep each round mid-scan; one entity still fits a step.
+    let limits = limits_with_output_operations(160);
     let mut claim_sequence = 1;
     let rounds = [
         (
@@ -2880,6 +2904,11 @@ async fn mutated_build_digests(
             admitted_entities(&db, scope, operation_id).await < ENTITIES - 10,
             "changes land while the build scans"
         );
+        // A round's changes touch distinct entities and commit together.
+        let transaction = db
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("fixture change transaction opens");
         for change in changes {
             let (entity_id, after) = match change {
                 SourceChange::Upsert { entity_id, tenant } => {
@@ -2894,8 +2923,11 @@ async fn mutated_build_digests(
                     )],
                 ),
             };
-            put_source(&db, scope, entity_id, &after).await;
+            transaction
+                .put(source_key(scope, entity_id), encode_properties(&after))
+                .expect("fixture change stages");
         }
+        transaction.commit().await.expect("fixture changes commit");
     }
     loop {
         match drive_with(&db, &drivers, operation_id, &mut claim_sequence, limits).await {

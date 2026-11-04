@@ -53,6 +53,7 @@ use crate::encoding::v2::values::indexes::{BitmapMembershipDelta, SecondaryEqual
 use crate::encoding::{EdgeId, NodeId};
 use crate::error::HelixDbError;
 use crate::query_resources::{self, bitmap};
+use crate::transaction::Mutation;
 use slatedb::DbReadOps;
 
 fn bounded_prefix_end(prefix: &Bytes) -> Bytes {
@@ -384,52 +385,6 @@ pub(crate) fn hash_property_value_component(value: &PropertyValue) -> u64 {
     hasher.finish()
 }
 
-#[cfg(test)]
-pub(crate) fn property_value_is_secondary_indexable(value: &PropertyValue) -> bool {
-    !matches!(value, PropertyValue::Array(_) | PropertyValue::Object(_))
-}
-
-/// Convert a PropertyValue to a string for indexing
-#[cfg(test)]
-pub fn property_value_to_index_string(value: &PropertyValue) -> String {
-    match value {
-        PropertyValue::Null => "null".to_string(),
-        PropertyValue::Bool(b) => b.to_string(),
-        PropertyValue::I64(n) => format!("{:020}", n),
-        PropertyValue::DateTime(n) => PropertyValue::DateTime(*n).to_index_string(),
-        PropertyValue::F64(n) => format!("{:+024.15e}", n),
-        PropertyValue::F32(n) => format!("{:+024.15e}", n),
-        PropertyValue::String(s) => s.clone(),
-        PropertyValue::Bytes(b) => format!("<bytes:{:?}>", b),
-        PropertyValue::I64Array(a) => format!("<i64[{}]>", a.len()),
-        PropertyValue::F64Array(a) => format!("<f64[{}]>", a.len()),
-        PropertyValue::StringArray(a) => format!("<str[{}]>", a.len()),
-        PropertyValue::F32Array(items) => format!("<f32[{}]>", items.len()),
-        PropertyValue::Array(items) => format!("<array[{}]>", items.len()),
-        PropertyValue::Object(items) => format!("<object[{}]>", items.len()),
-    }
-}
-
-#[cfg(test)]
-fn property_value_type_name(value: &PropertyValue) -> &'static str {
-    match value {
-        PropertyValue::Null => "Null",
-        PropertyValue::Bool(_) => "Bool",
-        PropertyValue::I64(_) => "I64",
-        PropertyValue::DateTime(_) => "DateTime",
-        PropertyValue::F64(_) => "F64",
-        PropertyValue::F32(_) => "F32",
-        PropertyValue::String(_) => "String",
-        PropertyValue::Bytes(_) => "Bytes",
-        PropertyValue::I64Array(_) => "I64Array",
-        PropertyValue::F64Array(_) => "F64Array",
-        PropertyValue::F32Array(_) => "F32Array",
-        PropertyValue::StringArray(_) => "StringArray",
-        PropertyValue::Array(_) => "Array",
-        PropertyValue::Object(_) => "Object",
-    }
-}
-
 /// Encode a RoaringTreemap to bytes
 pub fn encode_roaring_treemap(bitmap: &RoaringTreemap) -> Bytes {
     SecondaryEqualityValue::encode_ids(bitmap)
@@ -440,7 +395,7 @@ pub fn decode_roaring_treemap(data: &[u8]) -> Result<RoaringTreemap, HelixDbErro
     Ok(SecondaryEqualityValue::decode(data)?.into_ids())
 }
 
-async fn stage_shared_bitmap_membership(
+fn stage_shared_bitmap_membership(
     txn: &DbTransaction,
     key: &Bytes,
     entity_id: u64,
@@ -452,22 +407,22 @@ async fn stage_shared_bitmap_membership(
     } else {
         delta.remove(entity_id);
     }
-    txn.merge_disjoint_tokens_checked(key, [u128::from(entity_id)], delta.encode())
-        .await?;
-    Ok(())
+    let mut merges = crate::transaction::Mutation::merge_batch(txn, 1)?;
+    merges.bitmap(crate::transaction::merges::Key::Encoded(key), &delta)?;
+    merges.stage()
 }
 
 /// Add a node to an equality index
-pub async fn add_to_equality_index(
+pub fn add_to_equality_index(
     txn: &DbTransaction,
     property: &str,
     value: &str,
     node_id: NodeId,
 ) -> Result<(), HelixDbError> {
-    add_to_equality_index_scoped(txn, property, value, node_id, DataScope::LegacyUnscoped).await
+    add_to_equality_index_scoped(txn, property, value, node_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn add_to_equality_index_scoped(
+pub fn add_to_equality_index_scoped(
     txn: &DbTransaction,
     property: &str,
     value: &str,
@@ -483,21 +438,20 @@ pub async fn add_to_equality_index_scoped(
     }
     .to_bytes();
 
-    stage_shared_bitmap_membership(txn, &key, node_id, true).await
+    stage_shared_bitmap_membership(txn, &key, node_id, true)
 }
 
 /// Remove a node from an equality index
-pub async fn remove_from_equality_index(
+pub fn remove_from_equality_index(
     txn: &DbTransaction,
     property: &str,
     value: &str,
     node_id: NodeId,
 ) -> Result<(), HelixDbError> {
     remove_from_equality_index_scoped(txn, property, value, node_id, DataScope::LegacyUnscoped)
-        .await
 }
 
-pub async fn remove_from_equality_index_scoped(
+pub fn remove_from_equality_index_scoped(
     txn: &DbTransaction,
     property: &str,
     value: &str,
@@ -513,7 +467,7 @@ pub async fn remove_from_equality_index_scoped(
     }
     .to_bytes();
 
-    stage_shared_bitmap_membership(txn, &key, node_id, false).await
+    stage_shared_bitmap_membership(txn, &key, node_id, false)
 }
 
 /// Look up nodes by equality index
@@ -699,7 +653,7 @@ pub async fn add_to_range_index_with_direction_scoped(
         ))),
     }
     .to_bytes();
-    txn.put(&key, Bytes::new())?; // Empty value - presence is membership
+    Mutation::put(txn, &key, Bytes::new())?; // Empty value - presence is membership
     Ok(())
 }
 
@@ -1417,16 +1371,16 @@ pub(crate) async fn delete_global_edge_range_index_entries_for_property_with_dir
 ///
 /// Updates both the outgoing index (source -> targets with label)
 /// and the incoming index (target -> sources with label).
-pub async fn add_to_edge_label_index(
+pub fn add_to_edge_label_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
     label: &str,
 ) -> Result<(), HelixDbError> {
-    add_to_edge_label_index_scoped(txn, from, to, label, DataScope::LegacyUnscoped).await
+    add_to_edge_label_index_scoped(txn, from, to, label, DataScope::LegacyUnscoped)
 }
 
-pub async fn add_to_edge_label_index_scoped(
+pub fn add_to_edge_label_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1443,7 +1397,7 @@ pub async fn add_to_edge_label_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &out_key, to, true).await?;
+    stage_shared_bitmap_membership(txn, &out_key, to, true)?;
 
     // Update incoming index: to + label -> from
     let in_key = DataKey::Data {
@@ -1453,20 +1407,20 @@ pub async fn add_to_edge_label_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &in_key, from, true).await
+    stage_shared_bitmap_membership(txn, &in_key, from, true)
 }
 
 /// Remove an edge from the edge label index
-pub async fn remove_from_edge_label_index(
+pub fn remove_from_edge_label_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
     label: &str,
 ) -> Result<(), HelixDbError> {
-    remove_from_edge_label_index_scoped(txn, from, to, label, DataScope::LegacyUnscoped).await
+    remove_from_edge_label_index_scoped(txn, from, to, label, DataScope::LegacyUnscoped)
 }
 
-pub async fn remove_from_edge_label_index_scoped(
+pub fn remove_from_edge_label_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1483,7 +1437,7 @@ pub async fn remove_from_edge_label_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &out_key, to, false).await?;
+    stage_shared_bitmap_membership(txn, &out_key, to, false)?;
 
     // Update incoming index
     let in_key = DataKey::Data {
@@ -1493,7 +1447,7 @@ pub async fn remove_from_edge_label_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &in_key, from, false).await
+    stage_shared_bitmap_membership(txn, &in_key, from, false)
 }
 
 /// Look up outgoing neighbors by edge label
@@ -1579,7 +1533,7 @@ pub(crate) async fn lookup_in_neighbors_by_label_admitted(
 // =============================================================================
 
 /// Add an edge to the equality index (both directions)
-pub async fn add_to_edge_equality_index(
+pub fn add_to_edge_equality_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1596,10 +1550,9 @@ pub async fn add_to_edge_equality_index(
         value,
         DataScope::LegacyUnscoped,
     )
-    .await
 }
 
-pub async fn add_to_edge_equality_index_scoped(
+pub fn add_to_edge_equality_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1620,7 +1573,7 @@ pub async fn add_to_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &out_key, edge_id, true).await?;
+    stage_shared_bitmap_membership(txn, &out_key, edge_id, true)?;
 
     let in_key = DataKey::Data {
         scope: tenant_scope,
@@ -1634,7 +1587,7 @@ pub async fn add_to_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &in_key, edge_id, true).await?;
+    stage_shared_bitmap_membership(txn, &in_key, edge_id, true)?;
 
     let global_key = DataKey::Data {
         scope: tenant_scope,
@@ -1646,11 +1599,11 @@ pub async fn add_to_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &global_key, edge_id, true).await
+    stage_shared_bitmap_membership(txn, &global_key, edge_id, true)
 }
 
 /// Remove an edge from the equality index (both directions)
-pub async fn remove_from_edge_equality_index(
+pub fn remove_from_edge_equality_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1667,10 +1620,9 @@ pub async fn remove_from_edge_equality_index(
         value,
         DataScope::LegacyUnscoped,
     )
-    .await
 }
 
-pub async fn remove_from_edge_equality_index_scoped(
+pub fn remove_from_edge_equality_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1691,7 +1643,7 @@ pub async fn remove_from_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &out_key, edge_id, false).await?;
+    stage_shared_bitmap_membership(txn, &out_key, edge_id, false)?;
 
     let in_key = DataKey::Data {
         scope: tenant_scope,
@@ -1705,7 +1657,7 @@ pub async fn remove_from_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &in_key, edge_id, false).await?;
+    stage_shared_bitmap_membership(txn, &in_key, edge_id, false)?;
 
     let global_key = DataKey::Data {
         scope: tenant_scope,
@@ -1717,7 +1669,7 @@ pub async fn remove_from_edge_equality_index_scoped(
         )),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &global_key, edge_id, false).await
+    stage_shared_bitmap_membership(txn, &global_key, edge_id, false)
 }
 
 /// Look up edges by equality (outgoing from source)
@@ -1815,15 +1767,15 @@ pub async fn scan_edges_out_by_equality_property_prefix(
 }
 
 /// Add an edge to the global label -> edge IDs index.
-pub async fn add_to_global_edge_label_index(
+pub fn add_to_global_edge_label_index(
     txn: &DbTransaction,
     label: &str,
     edge_id: EdgeId,
 ) -> Result<(), HelixDbError> {
-    add_to_global_edge_label_index_scoped(txn, label, edge_id, DataScope::LegacyUnscoped).await
+    add_to_global_edge_label_index_scoped(txn, label, edge_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn add_to_global_edge_label_index_scoped(
+pub fn add_to_global_edge_label_index_scoped(
     txn: &DbTransaction,
     label: &str,
     edge_id: EdgeId,
@@ -1836,19 +1788,19 @@ pub async fn add_to_global_edge_label_index_scoped(
         ))),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &key, edge_id, true).await
+    stage_shared_bitmap_membership(txn, &key, edge_id, true)
 }
 
 /// Remove an edge from the global label -> edge IDs index.
-pub async fn remove_from_global_edge_label_index(
+pub fn remove_from_global_edge_label_index(
     txn: &DbTransaction,
     label: &str,
     edge_id: EdgeId,
 ) -> Result<(), HelixDbError> {
-    remove_from_global_edge_label_index_scoped(txn, label, edge_id, DataScope::LegacyUnscoped).await
+    remove_from_global_edge_label_index_scoped(txn, label, edge_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn remove_from_global_edge_label_index_scoped(
+pub fn remove_from_global_edge_label_index_scoped(
     txn: &DbTransaction,
     label: &str,
     edge_id: EdgeId,
@@ -1861,7 +1813,7 @@ pub async fn remove_from_global_edge_label_index_scoped(
         ))),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &key, edge_id, false).await
+    stage_shared_bitmap_membership(txn, &key, edge_id, false)
 }
 
 /// Look up all edge IDs for a label from the global edge-label index.
@@ -1965,16 +1917,16 @@ pub(crate) async fn lookup_edge_pair_index_admitted(
 }
 
 /// Add an edge id to the exact `(from, to)` multigraph pair index.
-pub async fn add_to_edge_pair_index(
+pub fn add_to_edge_pair_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
     edge_id: EdgeId,
 ) -> Result<(), HelixDbError> {
-    add_to_edge_pair_index_scoped(txn, from, to, edge_id, DataScope::LegacyUnscoped).await
+    add_to_edge_pair_index_scoped(txn, from, to, edge_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn add_to_edge_pair_index_scoped(
+pub fn add_to_edge_pair_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -1986,20 +1938,20 @@ pub async fn add_to_edge_pair_index_scoped(
         kind: DataKeyKind::EdgePairIndex(crate::encoding::keys::EdgePairIndexKey::new(from, to)),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &key, edge_id, true).await
+    stage_shared_bitmap_membership(txn, &key, edge_id, true)
 }
 
 /// Remove an edge id from the exact `(from, to)` multigraph pair index.
-pub async fn remove_from_edge_pair_index(
+pub fn remove_from_edge_pair_index(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
     edge_id: EdgeId,
 ) -> Result<(), HelixDbError> {
-    remove_from_edge_pair_index_scoped(txn, from, to, edge_id, DataScope::LegacyUnscoped).await
+    remove_from_edge_pair_index_scoped(txn, from, to, edge_id, DataScope::LegacyUnscoped)
 }
 
-pub async fn remove_from_edge_pair_index_scoped(
+pub fn remove_from_edge_pair_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
     to: NodeId,
@@ -2011,7 +1963,7 @@ pub async fn remove_from_edge_pair_index_scoped(
         kind: DataKeyKind::EdgePairIndex(crate::encoding::keys::EdgePairIndexKey::new(from, to)),
     }
     .to_bytes();
-    stage_shared_bitmap_membership(txn, &key, edge_id, false).await
+    stage_shared_bitmap_membership(txn, &key, edge_id, false)
 }
 
 /// Delete all node `$label` equality-index entries before a full rebuild.
@@ -2120,7 +2072,7 @@ pub async fn add_to_edge_range_index_with_direction_scoped(
         kind: out_key,
     }
     .to_bytes();
-    txn.put(&out_key, Bytes::new())?;
+    Mutation::put(txn, &out_key, Bytes::new())?;
 
     let in_key = edge_range_key_with_direction(
         EdgeRangeDirection::In,
@@ -2135,7 +2087,7 @@ pub async fn add_to_edge_range_index_with_direction_scoped(
         kind: in_key,
     }
     .to_bytes();
-    txn.put(&in_key, Bytes::new())?;
+    Mutation::put(txn, &in_key, Bytes::new())?;
 
     let global_key = global_edge_range_key_with_direction(property, value, edge_id, direction);
     let global_key = DataKey::Data {
@@ -2143,7 +2095,7 @@ pub async fn add_to_edge_range_index_with_direction_scoped(
         kind: global_key,
     }
     .to_bytes();
-    txn.put(&global_key, Bytes::new())?;
+    Mutation::put(txn, &global_key, Bytes::new())?;
 
     Ok(())
 }
@@ -2930,7 +2882,7 @@ pub async fn store_edge_properties_by_id_scoped(
         kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(edge_id)),
     }
     .to_bytes();
-    txn.put_bytes(key, encode_properties(properties))?;
+    Mutation::put_bytes(txn, key, encode_properties(properties))?;
     Ok(())
 }
 
@@ -2986,24 +2938,6 @@ mod tests {
     use crate::config::scoped_secondary_index_property;
     use proptest::prelude::*;
     use slatedb::IsolationLevel;
-
-    #[test]
-    fn test_property_value_to_index_string() {
-        assert_eq!(property_value_to_index_string(&PropertyValue::Null), "null");
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Bool(true)),
-            "true"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::String("hello".to_string())),
-            "hello"
-        );
-
-        // I64 should be zero-padded for lexicographic ordering
-        let i64_str = property_value_to_index_string(&PropertyValue::I64(42));
-        assert!(i64_str.starts_with('0'));
-        assert!(i64_str.contains("42"));
-    }
 
     fn current_range_bytes(direction: RangeIndexDirection, value: &PropertyValue) -> Vec<u8> {
         let crate::encoding::v2::values::property::range_index_value::RangeValueProjection::Indexed(
@@ -3302,101 +3236,7 @@ mod tests {
     }
 
     #[test]
-    fn property_value_index_strings_cover_all_variants() {
-        let mut object = std::collections::BTreeMap::new();
-        object.insert("nested".to_string(), PropertyValue::Bool(true));
-
-        assert_eq!(property_value_to_index_string(&PropertyValue::Null), "null");
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Bool(false)),
-            "false"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::I64(42)),
-            "00000000000000000042"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::DateTime(42)),
-            PropertyValue::DateTime(42).to_index_string()
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::F64(1.5)),
-            "+00001.500000000000000e0"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::F32(1.5)),
-            "+00001.500000000000000e0"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::String("hello".to_string())),
-            "hello"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Bytes(vec![1, 2])),
-            "<bytes:[1, 2]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::I64Array(vec![1, 2])),
-            "<i64[2]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::F64Array(vec![1.0])),
-            "<f64[1]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::F32Array(vec![1.0, 2.0])),
-            "<f32[2]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::StringArray(vec!["a".to_string()])),
-            "<str[1]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Array(vec![PropertyValue::Null])),
-            "<array[1]>"
-        );
-        assert_eq!(
-            property_value_to_index_string(&PropertyValue::Object(object)),
-            "<object[1]>"
-        );
-    }
-
-    #[test]
-    fn property_value_hashes_and_type_names_cover_all_variants() {
-        let mut object = std::collections::BTreeMap::new();
-        object.insert("nested".to_string(), PropertyValue::I64(7));
-
-        let values = [
-            (PropertyValue::Null, "Null"),
-            (PropertyValue::Bool(true), "Bool"),
-            (PropertyValue::I64(42), "I64"),
-            (PropertyValue::DateTime(42), "DateTime"),
-            (PropertyValue::F64(1.5), "F64"),
-            (PropertyValue::F32(1.5), "F32"),
-            (PropertyValue::String("hello".to_string()), "String"),
-            (PropertyValue::Bytes(vec![1, 2]), "Bytes"),
-            (PropertyValue::I64Array(vec![1, 2]), "I64Array"),
-            (PropertyValue::F64Array(vec![1.0, 2.0]), "F64Array"),
-            (PropertyValue::F32Array(vec![1.0, 2.0]), "F32Array"),
-            (
-                PropertyValue::StringArray(vec!["a".to_string(), "b".to_string()]),
-                "StringArray",
-            ),
-            (
-                PropertyValue::Array(vec![PropertyValue::Bool(false)]),
-                "Array",
-            ),
-            (PropertyValue::Object(object), "Object"),
-        ];
-
-        for (value, type_name) in values {
-            assert_eq!(property_value_type_name(&value), type_name);
-            assert_eq!(
-                hash_property_value_component(&value),
-                hash_property_value_component(&value)
-            );
-        }
-
+    fn property_value_hash_distinguishes_variant_types() {
         assert_ne!(
             hash_property_value_component(&PropertyValue::Bool(true)),
             hash_property_value_component(&PropertyValue::I64(1))
@@ -3405,20 +3245,6 @@ mod tests {
             hash_property_value_component(&PropertyValue::F64(1.0)),
             hash_property_value_component(&PropertyValue::F32(1.0))
         );
-    }
-
-    #[test]
-    fn secondary_indexable_values_reject_only_nested_array_and_object() {
-        assert!(property_value_is_secondary_indexable(&PropertyValue::Null));
-        assert!(property_value_is_secondary_indexable(
-            &PropertyValue::StringArray(vec!["a".to_string()])
-        ));
-        assert!(!property_value_is_secondary_indexable(
-            &PropertyValue::Array(vec![PropertyValue::Bool(true)])
-        ));
-        assert!(!property_value_is_secondary_indexable(
-            &PropertyValue::Object(std::collections::BTreeMap::new())
-        ));
     }
 
     #[tokio::test]
@@ -3435,15 +3261,9 @@ mod tests {
             .expect("transaction starts");
         let property = scoped_secondary_index_property("User", "status");
 
-        add_to_equality_index(&txn, &property, "active", 2)
-            .await
-            .expect("add active node 2");
-        add_to_equality_index(&txn, &property, "active", 1)
-            .await
-            .expect("add active node 1");
-        add_to_equality_index(&txn, &property, "inactive", 3)
-            .await
-            .expect("add inactive node");
+        add_to_equality_index(&txn, &property, "active", 2).expect("add active node 2");
+        add_to_equality_index(&txn, &property, "active", 1).expect("add active node 1");
+        add_to_equality_index(&txn, &property, "inactive", 3).expect("add inactive node");
 
         assert_eq!(
             lookup_equality_index(&txn, &property, "active")
@@ -3480,18 +3300,14 @@ mod tests {
         assert!(filtered.contains(3));
         assert_eq!(filtered.len(), 2);
 
-        remove_from_equality_index(&txn, &property, "active", 2)
-            .await
-            .expect("remove active node 2");
+        remove_from_equality_index(&txn, &property, "active", 2).expect("remove active node 2");
         assert_eq!(
             lookup_equality_index(&txn, &property, "active")
                 .await
                 .expect("active lookup after first remove succeeds"),
             vec![1]
         );
-        remove_from_equality_index(&txn, &property, "active", 1)
-            .await
-            .expect("remove active node 1");
+        remove_from_equality_index(&txn, &property, "active", 1).expect("remove active node 1");
         assert!(lookup_equality_index(&txn, &property, "active")
             .await
             .expect("active lookup after all removes succeeds")
@@ -3520,10 +3336,8 @@ mod tests {
         let scope_b = DataScope::Tenant(tenant_b);
 
         add_to_equality_index_scoped(&txn, "status", "active", 10, scope_a)
-            .await
             .expect("tenant a equality write succeeds");
         add_to_equality_index_scoped(&txn, "status", "active", 20, scope_b)
-            .await
             .expect("tenant b equality write succeeds");
 
         assert_eq!(
@@ -3562,7 +3376,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_bitmap_staging_rejects_corruption() {
+    async fn shared_bitmap_staging_never_reads_a_corrupt_row() {
         for present in [false, true] {
             let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
                 database: format!("search-corrupt-shared-bitmap-{present}"),
@@ -3587,12 +3401,9 @@ mod tests {
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .unwrap();
-            assert!(
-                stage_shared_bitmap_membership(&txn, &key, 7, present)
-                    .await
-                    .is_err(),
-                "present={present}"
-            );
+            stage_shared_bitmap_membership(&txn, &key, 7, present)
+                .unwrap_or_else(|error| panic!("present={present}: {error}"));
+            assert!(txn.get(&key).await.is_err(), "present={present}");
             txn.rollback();
             assert_eq!(db.inner_db().get(&key).await.unwrap(), Some(corrupt));
             db.close().await.unwrap();
@@ -3631,25 +3442,18 @@ mod tests {
                     .expect("transaction starts");
 
                 add_to_equality_index_scoped(&txn, "$label", "User", node_id, scope)
-                    .await
                     .expect("node label insert succeeds");
                 add_to_equality_index_scoped(&txn, &normal_property, "active", node_id, scope)
-                    .await
                     .expect("node equality insert succeeds");
                 add_to_edge_label_index_scoped(&txn, 31, node_id + 30_000, "FOLLOWS", scope)
-                    .await
                     .expect("outgoing edge-label insert succeeds");
                 add_to_edge_label_index_scoped(&txn, node_id + 40_000, 32, "FOLLOWS", scope)
-                    .await
                     .expect("incoming edge-label insert succeeds");
                 add_to_edge_equality_index_scoped(&txn, 41, 42, edge_id, "status", "active", scope)
-                    .await
                     .expect("edge equality insert succeeds");
                 add_to_global_edge_label_index_scoped(&txn, "FOLLOWS", edge_id, scope)
-                    .await
                     .expect("global edge-label insert succeeds");
                 add_to_edge_pair_index_scoped(&txn, 51, 52, edge_id, scope)
-                    .await
                     .expect("edge-pair insert succeeds");
                 transactions.push(txn);
             }
@@ -3771,9 +3575,7 @@ mod tests {
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .expect("seed transaction starts");
-            add_to_equality_index(&seed, "race", value, 1)
-                .await
-                .expect("seed insert succeeds");
+            add_to_equality_index(&seed, "race", value, 1).expect("seed insert succeeds");
             seed.commit().await.expect("seed transaction commits");
 
             let insert = db
@@ -3786,12 +3588,8 @@ mod tests {
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .expect("remove transaction starts");
-            add_to_equality_index(&insert, "race", value, 2)
-                .await
-                .expect("racing insert buffers");
-            remove_from_equality_index(&remove, "race", value, 1)
-                .await
-                .expect("racing removal buffers");
+            add_to_equality_index(&insert, "race", value, 2).expect("racing insert buffers");
+            remove_from_equality_index(&remove, "race", value, 1).expect("racing removal buffers");
 
             if insert_commits_first {
                 insert.commit().await.expect("insert commits first");
@@ -4198,13 +3996,10 @@ mod tests {
         let property = scoped_secondary_index_property("FOLLOWS", "status");
 
         add_to_edge_equality_index(&txn, 1, 2, 100, &property, "active")
-            .await
             .expect("add edge 100 equality");
         add_to_edge_equality_index(&txn, 1, 3, 101, &property, "active")
-            .await
             .expect("add edge 101 equality");
         add_to_edge_equality_index(&txn, 1, 4, 102, &property, "inactive")
-            .await
             .expect("add edge 102 equality");
 
         let active_out = lookup_edges_out_by_equality(&txn, 1, &property, "active")
@@ -4233,7 +4028,6 @@ mod tests {
         assert_eq!(any_status.len(), 3);
 
         remove_from_edge_equality_index(&txn, 1, 2, 100, &property, "active")
-            .await
             .expect("remove edge 100 equality");
         assert!(!lookup_edges_out_by_equality(&txn, 1, &property, "active")
             .await
@@ -4246,21 +4040,15 @@ mod tests {
                 .contains(100)
         );
 
-        add_to_edge_pair_index(&txn, 1, 2, 100)
-            .await
-            .expect("add edge pair 100");
-        add_to_edge_pair_index(&txn, 1, 2, 103)
-            .await
-            .expect("add edge pair 103");
+        add_to_edge_pair_index(&txn, 1, 2, 100).expect("add edge pair 100");
+        add_to_edge_pair_index(&txn, 1, 2, 103).expect("add edge pair 103");
         let pair = lookup_edge_pair_index(&txn, 1, 2)
             .await
             .expect("edge pair lookup succeeds");
         assert!(pair.contains(100));
         assert!(pair.contains(103));
         assert_eq!(pair.len(), 2);
-        remove_from_edge_pair_index(&txn, 1, 2, 100)
-            .await
-            .expect("remove edge pair 100");
+        remove_from_edge_pair_index(&txn, 1, 2, 100).expect("remove edge pair 100");
         assert!(!lookup_edge_pair_index(&txn, 1, 2)
             .await
             .expect("edge pair after remove succeeds")
@@ -4271,7 +4059,6 @@ mod tests {
                 .expect("valid tenant");
         let scope = DataScope::Tenant(tenant);
         add_to_edge_equality_index_scoped(&txn, 1, 2, 200, "status", "active", scope)
-            .await
             .expect("tenant edge equality write succeeds");
         assert!(
             lookup_edges_out_by_equality_scoped(&txn, 1, "status", "active", scope)
@@ -4567,7 +4354,6 @@ mod tests {
             ("a\0", FF_PREFIX_ID),
         ] {
             add_to_edge_equality_index(&txn, 1, 2, edge_id, "target", value)
-                .await
                 .expect("target edge equality row stages");
             add_to_edge_range_index_with_direction(
                 &txn,
@@ -4582,7 +4368,6 @@ mod tests {
             .expect("target ascending edge range row stages");
         }
         add_to_edge_equality_index(&txn, 1, 2, 7, "other", "a\0")
-            .await
             .expect("unrelated edge equality row stages");
         add_to_edge_range_index_with_direction(
             &txn,
@@ -4708,12 +4493,8 @@ mod tests {
             .await
             .expect("transaction starts");
 
-        add_to_equality_index(&txn, "status", "active", 1)
-            .await
-            .unwrap();
-        add_to_equality_index(&txn, "other", "active", 2)
-            .await
-            .unwrap();
+        add_to_equality_index(&txn, "status", "active", 1).unwrap();
+        add_to_equality_index(&txn, "other", "active", 2).unwrap();
         delete_equality_index_entries_for_property(&txn, "status")
             .await
             .unwrap();
@@ -4757,12 +4538,8 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        add_to_edge_equality_index(&txn, 1, 2, 10, "status", "active")
-            .await
-            .unwrap();
-        add_to_edge_equality_index(&txn, 1, 3, 11, "other", "active")
-            .await
-            .unwrap();
+        add_to_edge_equality_index(&txn, 1, 2, 10, "status", "active").unwrap();
+        add_to_edge_equality_index(&txn, 1, 3, 11, "other", "active").unwrap();
         delete_edge_equality_index_entries_for_property(&txn, "status")
             .await
             .unwrap();
@@ -4779,12 +4556,8 @@ mod tests {
             .unwrap()
             .contains(11));
 
-        add_to_edge_label_index(&txn, 1, 2, "FOLLOWS")
-            .await
-            .unwrap();
-        remove_from_edge_label_index(&txn, 1, 2, "FOLLOWS")
-            .await
-            .unwrap();
+        add_to_edge_label_index(&txn, 1, 2, "FOLLOWS").unwrap();
+        remove_from_edge_label_index(&txn, 1, 2, "FOLLOWS").unwrap();
         assert!(lookup_out_neighbors_by_label(&txn, 1, "FOLLOWS")
             .await
             .unwrap()
@@ -4794,18 +4567,10 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        add_to_global_edge_label_index(&txn, "FOLLOWS", 20)
-            .await
-            .unwrap();
-        add_to_global_edge_label_index(&txn, "FOLLOWS", 21)
-            .await
-            .unwrap();
-        remove_from_global_edge_label_index(&txn, "FOLLOWS", 20)
-            .await
-            .unwrap();
-        remove_from_global_edge_label_index(&txn, "FOLLOWS", 99)
-            .await
-            .unwrap();
+        add_to_global_edge_label_index(&txn, "FOLLOWS", 20).unwrap();
+        add_to_global_edge_label_index(&txn, "FOLLOWS", 21).unwrap();
+        remove_from_global_edge_label_index(&txn, "FOLLOWS", 20).unwrap();
+        remove_from_global_edge_label_index(&txn, "FOLLOWS", 99).unwrap();
         assert_eq!(
             lookup_global_edge_label_index(&txn, "FOLLOWS")
                 .await
@@ -4815,9 +4580,7 @@ mod tests {
             vec![21]
         );
 
-        add_to_equality_index(&txn, "$label", "User", 1)
-            .await
-            .unwrap();
+        add_to_equality_index(&txn, "$label", "User", 1).unwrap();
         clear_node_label_indexes(&txn).await.unwrap();
         assert!(lookup_equality_index(&txn, "$label", "User")
             .await
@@ -4830,9 +4593,7 @@ mod tests {
             vec![2]
         );
 
-        add_to_global_edge_label_index(&txn, "LIKES", 22)
-            .await
-            .unwrap();
+        add_to_global_edge_label_index(&txn, "LIKES", 22).unwrap();
         clear_global_edge_label_indexes(&txn).await.unwrap();
         assert!(lookup_global_edge_label_index(&txn, "FOLLOWS")
             .await
@@ -4858,11 +4619,8 @@ mod tests {
             .expect("transaction starts");
         let label_hash = hash_property_value("FOLLOWS");
 
-        add_to_edge_label_index(&txn, 1, 2, "FOLLOWS")
-            .await
-            .expect("neighbor index write succeeds");
+        add_to_edge_label_index(&txn, 1, 2, "FOLLOWS").expect("neighbor index write succeeds");
         add_to_global_edge_label_index(&txn, "FOLLOWS", 99)
-            .await
             .expect("global label index write succeeds");
 
         let out_key = DataKey::Data {
@@ -4942,10 +4700,8 @@ mod tests {
         let scope_b = DataScope::Tenant(tenant_b);
 
         add_to_edge_label_index_scoped(&txn, 1, 2, "FOLLOWS", scope_a)
-            .await
             .expect("tenant neighbor index write succeeds");
         add_to_global_edge_label_index_scoped(&txn, "FOLLOWS", 99, scope_a)
-            .await
             .expect("tenant global label index write succeeds");
 
         assert!(

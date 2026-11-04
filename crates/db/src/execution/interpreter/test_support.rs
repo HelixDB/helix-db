@@ -413,8 +413,9 @@ pub(crate) async fn add_edge_with_properties(
     *id
 }
 
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) async fn run_production_contracts() {
+/// Proves the shared fixtures build their indexes, plans, and graph rows.
+#[tokio::test]
+async fn fixtures_build_indexes_plans_and_graph_rows() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let config = in_memory_config_with_store("interpreter-support-contracts", Arc::clone(&store))
         .with_range_desc_index("User", "rank")

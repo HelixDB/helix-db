@@ -14,7 +14,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
   push:
-    branches: [main, "codex/**"]
+    branches: [main]
     paths:
       - ".github/workflows/python-js-packages.yml"
       - "bindings/uniffi/**"
@@ -28,6 +28,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: python-js-packages-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   python-sdk:
@@ -69,15 +73,7 @@ jobs:
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
-          - name: macos-universal2
-            runner: macos-14
-            target: universal2-apple-darwin
-            manylinux: "off"
-          - name: windows-x86_64
-            runner: windows-2025
-            target: x86_64-pc-windows-msvc
-            manylinux: "off"
-    steps:
+    steps: &embedded-wheel-steps
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
@@ -115,9 +111,35 @@ jobs:
           path: bindings/uniffi/dist/*
           if-no-files-found: error
 
+  # macOS and Windows wheels take ~20 min each, so pull requests build only the
+  # Linux wheels; main and manual runs build every platform.
+  python-embedded-other:
+    name: Python embedded (${{ matrix.name }})
+    if: github.event_name != 'pull_request'
+    needs: python-sdk
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-universal2
+            runner: macos-14
+            target: universal2-apple-darwin
+            manylinux: "off"
+          - name: windows-x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            manylinux: "off"
+    steps: *embedded-wheel-steps
+
   javascript:
     name: JavaScript packages
-    needs: python-embedded
+    needs: [python-embedded, python-embedded-other]
+    if: >-
+      !cancelled() && needs.python-embedded.result == 'success' &&
+      (needs.python-embedded-other.result == 'success' ||
+      (github.event_name == 'pull_request' && needs.python-embedded-other.result == 'skipped'))
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -139,16 +161,21 @@ jobs:
         run: |
           mkdir -p \
             native-libraries/linux-x64-gnu \
-            native-libraries/linux-arm64-gnu \
-            native-libraries/darwin-arm64 \
-            native-libraries/darwin-x64 \
-            native-libraries/win32-x64
+            native-libraries/linux-arm64-gnu
           unzip -p wheel-artifacts/helix-db-embedded-python-manylinux-x86_64/*.whl \
             helixdb_uniffi/libhelixdb_uniffi.so \
             > native-libraries/linux-x64-gnu/libhelixdb_uniffi.so
           unzip -p wheel-artifacts/helix-db-embedded-python-manylinux-aarch64/*.whl \
             helixdb_uniffi/libhelixdb_uniffi.so \
             > native-libraries/linux-arm64-gnu/libhelixdb_uniffi.so
+          # Pull requests build Linux wheels only.
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            exit 0
+          fi
+          mkdir -p \
+            native-libraries/darwin-arm64 \
+            native-libraries/darwin-x64 \
+            native-libraries/win32-x64
           unzip -p wheel-artifacts/helix-db-embedded-python-macos-universal2/*.whl \
             helixdb_uniffi/libhelixdb_uniffi.dylib \
             > native-libraries/darwin-arm64/libhelixdb_uniffi.dylib

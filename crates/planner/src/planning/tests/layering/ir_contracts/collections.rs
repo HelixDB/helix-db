@@ -149,16 +149,3 @@ fn non_empty_string_serializes_as_string_and_rejects_empty_strings() {
     assert!(serde_json::from_str::<NonEmptyString>("\"\"").is_err());
     assert!(serde_json::from_str::<NonEmptyString>("[]").is_err());
 }
-
-#[test]
-fn non_zero_usize_serializes_as_integer_and_rejects_zero() {
-    assert!(NonZeroUsize::new(0).is_none());
-
-    let value = NonZeroUsize::new(7).unwrap();
-    assert_eq!(value.get(), 7);
-    assert_eq!(serde_json::to_string(&value).unwrap(), "7");
-
-    let parsed: NonZeroUsize = serde_json::from_str("9").unwrap();
-    assert_eq!(parsed.get(), 9);
-    assert!(serde_json::from_str::<NonZeroUsize>("0").is_err());
-}

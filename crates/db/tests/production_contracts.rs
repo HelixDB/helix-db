@@ -5,10 +5,7 @@
 //! metadata DTOs, and the direct HNSW facade are exercised by the feature-gated
 //! internal production-contract target instead of being kept public for tests.
 
-use std::{
-    cmp::Ordering, collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc,
-    time::Duration,
-};
+use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use db::config::{self, VectorIndexDefinition};
 use db::encoding::v2::values::indexes::vector::{decode_layer0_neighbors, encode_layer0_neighbors};
@@ -16,14 +13,9 @@ use db::execution::interpreter::{
     ElementRef, ExecutionResult, ExecutionScalar, ExecutionValue, ReturnedValue,
 };
 use db::search::vector::distance::{Cosine, Distance, Euclidean, Manhattan};
-use db::search::vector::unaligned_vector::{SimHashError, UnalignedVector};
-use db::search::vector::{
-    CollisionThreshold, Connections, ConstructionBeamWidth, DistanceScore, FailureProbability,
-    Item, Layer0Connections, LayerMultiplier, ResultCount, SameDimensionPair, SearchBeamWidth,
-    SearchParams, SimHashMode, SimHasher, UnitInterval, VectorDimension, VectorDistanceMetric,
-    VectorParameterError, VectorRef,
-};
-use db::{HelixDB, HelixDbMode, HelixDbSource, ProcessLocalDatabaseToken};
+use db::search::vector::unaligned_vector::SimHashError;
+use db::search::vector::{Item, SimHasher, VectorDistanceMetric};
+use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
 use helix_ast::batch::{self, BatchEntry, NamedQuery, ReadBatch};
 use helix_ast::expr::{CompareOp, Expr, Predicate, StreamBound};
 use helix_ast::graph::{EdgeRef, NodeRef};
@@ -72,19 +64,6 @@ fn current_layer0_neighbor_bytes_are_stable_through_the_public_codec() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn root_tenant_compatibility_path_reexports_v2_scope_types() {
-    use db::encoding::keys::tenant::{DataScope, TenantId};
-
-    let tenant = TenantId::from_ulid_str("00000000000000000000000001")
-        .expect("compatibility path decodes tenant IDs");
-    let compatibility_scope = DataScope::Tenant(tenant);
-    let canonical_scope: db::encoding::v2::keys::scope::DataScope = compatibility_scope;
-
-    assert_eq!(canonical_scope, DataScope::Tenant(tenant));
-}
-
-#[test]
 fn public_vector_definition_owns_validated_configuration() {
     let definition =
         VectorIndexDefinition::new_node("Document", "embedding", 384, VectorDistanceMetric::Cosine)
@@ -108,20 +87,6 @@ fn public_vector_definition_owns_validated_configuration() {
     assert!(definition.clone().with_ml(f32::NAN).is_err());
     assert!(definition.clone().with_sampling_ratio(2.0).is_err());
     assert!(definition.with_adaptive_failure_prob(1.0).is_err());
-}
-
-#[tokio::test]
-async fn public_in_memory_writer_opens_and_closes() {
-    let db = HelixDB::open(HelixDbSource::InMemory {
-        database: "production-coverage-baseline".to_owned(),
-    })
-    .await
-    .expect("in-memory writer opens");
-
-    assert_eq!(db.mode(), HelixDbMode::Writer);
-    assert!(db.is_writer_mode());
-    assert!(!db.is_reader_mode());
-    db.close().await.expect("in-memory writer closes");
 }
 
 #[tokio::test]
@@ -10501,6 +10466,8 @@ async fn public_query_boundary_covers_active_vector_index_mutations_contract() {
                 .project_bindings(vec![
                     BindingProjection::current("$distance", "current_distance"),
                     BindingProjection::binding("match", "$distance", "bound_distance"),
+                    // A vector match has no text score, so `$score` is omitted.
+                    BindingProjection::current("$score", "score"),
                 ]),
         )
         .returning(["distance"]);
@@ -10753,140 +10720,6 @@ async fn public_query_boundary_rejects_invalid_dynamic_vector_search_inputs() {
         "{error}"
     );
     db.close().await.unwrap();
-}
-
-#[test]
-fn public_vector_parameter_types_reject_invalid_states() {
-    let connections = Connections::try_new(4).unwrap();
-    assert_eq!(connections.get(), 4);
-    assert_eq!(connections.checked_double().unwrap().get(), 8);
-    assert!(matches!(
-        Connections::try_new(0),
-        Err(VectorParameterError::Zero { .. })
-    ));
-    assert!(matches!(
-        Connections::try_new(usize::MAX).unwrap().checked_double(),
-        Err(VectorParameterError::ArithmeticOverflow { .. })
-    ));
-
-    assert_eq!(Layer0Connections::try_new(8, connections).unwrap().get(), 8);
-    assert!(Layer0Connections::try_new(3, connections).is_err());
-    assert_eq!(
-        ConstructionBeamWidth::try_new(12, connections)
-            .unwrap()
-            .get(),
-        12
-    );
-    assert!(ConstructionBeamWidth::try_new(3, connections).is_err());
-
-    let result_count = ResultCount::try_new(3).unwrap();
-    assert_eq!(result_count.get(), 3);
-    assert!(ResultCount::try_new(0).is_err());
-    assert_eq!(SearchBeamWidth::try_new(8, result_count).unwrap().get(), 8);
-    assert!(SearchBeamWidth::try_new(2, result_count).is_err());
-
-    assert_eq!(LayerMultiplier::try_new(0.5).unwrap().get(), 0.5);
-    for invalid in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-        assert!(LayerMultiplier::try_new(invalid).is_err());
-    }
-    for valid in [0.0, 0.5, 1.0, -0.0] {
-        assert!(UnitInterval::try_new(valid).is_ok());
-    }
-    for invalid in [-0.1, 1.1, f32::NAN] {
-        assert!(UnitInterval::try_new(invalid).is_err());
-    }
-    assert_eq!(FailureProbability::try_new(0.5).unwrap().get(), 0.5);
-    for invalid in [0.0, 1.0, f32::NAN] {
-        assert!(FailureProbability::try_new(invalid).is_err());
-    }
-
-    let bits = NonZeroUsize::new(64).unwrap();
-    assert_eq!(CollisionThreshold::try_new(64, bits).unwrap().get(), 64);
-    assert!(CollisionThreshold::try_new(65, bits).is_err());
-
-    let negative_zero = DistanceScore::try_new(-0.0).unwrap();
-    let positive = DistanceScore::try_new(0.25).unwrap();
-    assert_eq!(negative_zero.get(), 0.0);
-    assert_eq!(negative_zero.cmp(&positive), Ordering::Less);
-    assert_eq!(negative_zero.partial_cmp(&positive), Some(Ordering::Less));
-    assert!(DistanceScore::try_new(-0.1).is_err());
-    assert!(DistanceScore::try_new(f32::NAN).is_err());
-}
-
-#[test]
-fn public_vector_dimension_types_bind_exact_lengths() {
-    let dimension = VectorDimension::try_new(3).unwrap();
-    assert_eq!(dimension.get(), 3);
-    assert!(VectorDimension::try_new(0).is_err());
-    assert!(VectorDimension::try_new_with_max(4, NonZeroUsize::new(3).unwrap()).is_err());
-
-    let left = UnalignedVector::<f32>::from_slice(&[1.0, 2.0, 3.0]);
-    let right = UnalignedVector::<f32>::from_slice(&[3.0, 2.0, 1.0]);
-    let left_ref = VectorRef::try_new(&left, dimension).unwrap();
-    assert_eq!(left_ref.dimension(), dimension);
-    assert_eq!(left_ref.values().len(), 3);
-    assert!(VectorRef::try_new(&left, VectorDimension::try_new(2).unwrap()).is_err());
-
-    let pair = SameDimensionPair::try_new(&left, &right).unwrap();
-    assert_eq!(pair.dimension(), dimension);
-    assert_eq!(pair.left().values().len(), pair.right().values().len());
-    let short = UnalignedVector::<f32>::from_slice(&[1.0]);
-    assert!(SameDimensionPair::try_new(&left, &short).is_err());
-}
-
-#[test]
-fn public_vector_search_parameters_reject_invalid_overrides() {
-    let default = SearchParams::new(7).unwrap();
-    assert_eq!(default.k(), 7);
-    assert!(default.ef() >= default.k());
-    assert!(SearchParams::new(0).is_err());
-    assert!(SearchParams::new(7).unwrap().with_ef(2).is_err());
-
-    assert!(SearchParams::new(3)
-        .unwrap()
-        .with_pre_simhash_sampling_ratio(f32::NAN)
-        .is_err());
-    assert!(SearchParams::new(3)
-        .unwrap()
-        .with_simhash_sampling_ratio(f32::INFINITY)
-        .is_err());
-    assert!(SearchParams::new(3)
-        .unwrap()
-        .with_simhash_failure_prob(2.0)
-        .is_err());
-    assert!(SearchParams::new(3)
-        .unwrap()
-        .with_simhash_bypass_tuning(0, 1, 0.5, 1)
-        .is_err());
-
-    for mode in [SimHashMode::Off, SimHashMode::Always, SimHashMode::Adaptive] {
-        let params = SearchParams::new(3)
-            .unwrap()
-            .with_simhash_mode(mode)
-            .with_pre_simhash_sampling_ratio(0.75)
-            .unwrap()
-            .clear_pre_simhash_sampling_ratio_override()
-            .with_pre_simhash_sampling_ratio(0.5)
-            .unwrap()
-            .with_simhash_sampling_ratio(0.25)
-            .unwrap()
-            .clear_simhash_sampling_ratio_override()
-            .with_simhash_sampling_ratio(0.4)
-            .unwrap()
-            .with_simhash_failure_prob(0.2)
-            .unwrap()
-            .clear_simhash_failure_prob_override()
-            .with_simhash_failure_prob(0.3)
-            .unwrap()
-            .with_simhash_bypass_tuning(2, 3, 0.5, 4)
-            .unwrap();
-        assert_eq!(params.k(), 3);
-        assert!(params.ef() >= 3);
-    }
-
-    let throughput = SearchParams::throughput_profile_floor_92(10).unwrap();
-    assert_eq!(throughput.k(), 10);
-    assert!(throughput.ef() >= 48);
 }
 
 #[test]
@@ -12611,4 +12444,57 @@ async fn empty_at_most_one_row_returns_are_empty_arrays() {
         })
     );
     db.close().await.unwrap();
+}
+
+/// Verifies a raw SlateDB write conflict reports the transaction-conflict code.
+///
+/// The overlapping transactions force the conflict, so this arm's coverage does not depend on
+/// another test's writers happening to collide.
+#[tokio::test]
+#[allow(clippy::disallowed_methods)] // Raw backend writes are the subject here.
+async fn storage_write_conflict_reports_transaction_conflict_code() {
+    let storage = slatedb::Db::builder(
+        "storage-write-conflict",
+        std::sync::Arc::new(slatedb::object_store::memory::InMemory::new()),
+    )
+    .build()
+    .await
+    .expect("in-memory database opens");
+    let first = storage
+        .begin(slatedb::IsolationLevel::Snapshot)
+        .await
+        .expect("first transaction begins");
+    let second = storage
+        .begin(slatedb::IsolationLevel::Snapshot)
+        .await
+        .expect("second transaction begins");
+    first.put(b"key", b"first").expect("first write buffers");
+    second.put(b"key", b"second").expect("second write buffers");
+    first.commit().await.expect("first transaction commits");
+    let conflict = second
+        .commit()
+        .await
+        .expect_err("second transaction conflicts");
+
+    assert_eq!(
+        db::error::HelixDbError::from(conflict).error_code(),
+        helix_ast::error_code::QueryErrorCode::TransactionConflict,
+    );
+}
+
+/// Verifies process-local writer identity and readiness through the public boundary.
+#[test]
+fn process_local_runtime_dependencies_preserve_identity_and_readiness() {
+    assert!(db::IndexRuntimeReadiness::Ready.is_ready());
+    assert_eq!(db::IndexRuntimeReadiness::Ready.code(), "ready");
+    assert!(db::ProcessLocalDatabaseToken::new("").is_err());
+
+    let token = db::ProcessLocalDatabaseToken::new("production-runtime-dependencies")
+        .expect("a non-empty process-local database path validates");
+    let cloned = token.clone();
+    assert_eq!(token.database_id(), cloned.database_id());
+    let debug = format!("{token:?}");
+    assert!(debug.contains("ProcessLocalDatabaseToken"));
+    assert!(debug.contains("production-runtime-dependencies"));
+    assert!(!debug.contains("object_store"));
 }

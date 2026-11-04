@@ -29,6 +29,7 @@ use crate::search::vector::{
     self, Distance, ValidatedVectorGenerationHandle, VectorIndex, VectorWriteMeasurement,
     VectorWriteRecorder,
 };
+use crate::transaction::Mutation;
 
 use super::{
     decode_json, encode_json, scan_bounds_for_prefix, scoped_metadata_key, MigrationResumeKey,
@@ -285,7 +286,7 @@ async fn ensure_job(db: &Db, scope: DataScope) -> Result<()> {
     let key = job_key(scope);
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     if transaction.get(&key).await?.is_none() {
-        transaction.put(&key, encode_json(&MigrationJob::initial())?)?;
+        Mutation::put(&transaction, &key, encode_json(&MigrationJob::initial())?)?;
         transaction.commit().await?;
     } else {
         transaction.rollback();
@@ -314,7 +315,7 @@ async fn record_resume(db: &Db, scope: DataScope) -> Result<()> {
             .resume_count
             .checked_add(1)
             .ok_or_else(|| overflow("resume count"))?;
-        transaction.put(&key, encode_json(&job)?)?;
+        Mutation::put(&transaction, &key, encode_json(&job)?)?;
         transaction.commit().await?;
     } else {
         transaction.rollback();
@@ -447,7 +448,7 @@ async fn select_target(
             after_index_key: last_key,
         },
     };
-    transaction.put(job_key(scope), encode_json(&job)?)?;
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
     transaction.commit().await?;
     tracing::info!(
         migration = "vector_simhash_directory_v1",
@@ -584,13 +585,13 @@ async fn preflight<D: Distance>(
             existing_markers,
         }
     };
-    transaction.put(job_key(scope), encode_json(&job)?)?;
-    #[cfg(feature = "production-coverage")]
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
+    #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPreflightCommitBefore,
     )?;
     transaction.commit().await?;
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPreflightCommitAfter,
     )?;
@@ -703,13 +704,13 @@ async fn backfill<D: Distance>(
             marker_writes,
         }
     };
-    transaction.put(job_key(scope), encode_json(&job)?)?;
-    #[cfg(feature = "production-coverage")]
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
+    #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryBackfillCommitBefore,
     )?;
     transaction.commit().await?;
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::VectorDirectoryBackfillCommitAfter)?;
     log_batch(
         &target,
@@ -799,13 +800,13 @@ async fn verify<D: Distance>(
             verified_markers,
         }
     };
-    transaction.put(job_key(scope), encode_json(&job)?)?;
-    #[cfg(feature = "production-coverage")]
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
+    #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryVerificationCommitBefore,
     )?;
     transaction.commit().await?;
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryVerificationCommitAfter,
     )?;
@@ -883,18 +884,23 @@ async fn publish(db: &Db, scope: DataScope, mut job: MigrationJob) -> Result<()>
     job.state = MigrationState::SelectTarget {
         after_index_key: Some(target.index_key.clone()),
     };
-    transaction.put(
+    Mutation::put(
+        &transaction,
         target.index_key.as_bytes(),
         encode_index_record(&next_record),
     )?;
-    transaction.put(operation_key, encode_operation_record(&next_operation))?;
-    transaction.put(job_key(scope), encode_json(&job)?)?;
-    #[cfg(feature = "production-coverage")]
+    Mutation::put(
+        &transaction,
+        operation_key,
+        encode_operation_record(&next_operation),
+    )?;
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
+    #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPublicationCommitBefore,
     )?;
     transaction.commit().await?;
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPublicationCommitAfter,
     )?;
@@ -1266,7 +1272,7 @@ pub(super) async fn run_measured_for_scale(
 }
 
 /// Projects the dedicated job into migration status without exposing raw cursors.
-#[cfg(feature = "production-coverage")]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(super) async fn parity_status(
     db: &Db,
     scope: DataScope,
@@ -1347,15 +1353,8 @@ mod tests {
         SimHashDirectoryValidationOutcome, VectorDistanceMetric, VectorIndexConfig,
     };
 
-    #[cfg(not(feature = "production-coverage"))]
     static VECTOR_MIGRATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    #[cfg(feature = "production-coverage")]
-    async fn migration_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        super::super::production_contracts::failpoint_contract_guard().await
-    }
-
-    #[cfg(not(feature = "production-coverage"))]
     async fn migration_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
         VECTOR_MIGRATION_TEST_LOCK.lock().await
     }
@@ -1939,10 +1938,20 @@ mod tests {
         writer.close().await.expect("writer closes");
     }
 
-    #[cfg(feature = "production-coverage")]
-    #[tokio::test]
-    async fn every_directory_commit_boundary_recovers_without_duplicate_writes() {
-        let _failpoint_guard = migration_test_guard().await;
+    /// Migration failpoints are process-global, so the boundary matrix runs
+    /// alone in its own process.
+    #[test]
+    fn every_directory_commit_boundary_recovers_without_duplicate_writes() {
+        crate::test_isolation::in_own_process(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("boundary matrix runtime builds")
+                .block_on(directory_commit_boundary_matrix());
+        });
+    }
+
+    async fn directory_commit_boundary_matrix() {
         const BOUNDARIES: [super::super::MigrationFailpoint; 8] = [
             super::super::MigrationFailpoint::VectorDirectoryPreflightCommitBefore,
             super::super::MigrationFailpoint::VectorDirectoryPreflightCommitAfter,

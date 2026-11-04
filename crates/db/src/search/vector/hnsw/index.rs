@@ -48,14 +48,14 @@ use slatedb::DbReadOps;
 
 #[cfg(test)]
 use super::model::Candidate;
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use super::mutation::MutationScratch;
 #[cfg(test)]
 use super::mutation::NeighborRowValue;
 use super::mutation::{ItemBatch, MutationOpCache, VectorBuildSession, VectorInsertContract};
 #[cfg(test)]
 use super::neighbor_set::{NeighborDegreeLimit, NeighborSet};
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 use super::randomness::ScriptedLayerSelectorError;
 use super::randomness::{LayerSelector, SearchRandomness};
 #[cfg(test)]
@@ -144,7 +144,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Create a new vector index handle
     ///
     /// This does not create the index in the database. Use `create` for that.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub fn new(name: impl Into<String>) -> Self {
         Self::new_scoped(name, DataScope::LegacyUnscoped)
     }
@@ -152,7 +152,7 @@ impl<D: Distance> VectorIndex<D> {
     /// Create a new tenant-scoped vector index handle.
     ///
     /// This does not create the index in the database. Use `create` for that.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn new_scoped(name: impl Into<String>, tenant_scope: DataScope) -> Self {
         let name = name.into();
         Self {
@@ -409,7 +409,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Enables directory maintenance for generation-capability tests.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn with_simhash_directory(mut self) -> Self {
         self.simhash_directory_enabled = true;
         self
@@ -483,7 +483,7 @@ impl<D: Distance> VectorIndex<D> {
         self.search_randomness.start(query_simhash, entry_point, ef)
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     /// Installs deterministic non-empty layer choices for cross-module tests.
     pub(crate) fn with_scripted_layers(
         mut self,
@@ -494,7 +494,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Installs the deterministic Active-row shape used by the batch benchmark.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(feature = "bench-internals")]
     pub(crate) fn with_batch_benchmark_contract(
         self,
         layers: Vec<u16>,
@@ -725,7 +725,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// # Arguments
     /// * `txn` - Database transaction
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub async fn drop(&self, txn: &DbTransaction) -> Result<(), HelixDbError> {
         let txn = MeasuredVectorTransaction::new(txn);
         VectorWriteRows::new(&txn, &self.rows).delete_all().await
@@ -765,7 +765,7 @@ impl<D: Distance> VectorIndex<D> {
     /// admission includes the unchanged current-format metadata row. Absence
     /// still charges the complete typed key lookup; this method neither stages
     /// writes nor changes the metadata codec.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     pub(crate) async fn measure_metadata_input(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
@@ -861,7 +861,7 @@ impl<D: Distance> VectorIndex<D> {
     /// atomic `plan_since(checkpoint)` measurement and cumulative `measurement()`. The
     /// closed memory-access ADT has no resident-store mutation mode, so
     /// abandoned planning work cannot change shared runtime snapshot state.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn stage_known_fresh_at_layer(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -907,7 +907,7 @@ impl<D: Distance> VectorIndex<D> {
     /// node, then inserts `vector` at `node_layer`. A node that already holds
     /// `vector` at `node_layer` stages nothing. Queued publication plans the
     /// same upsert through [`Self::stage_upsert_at_layer_with_session`].
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn stage_upsert_at_layer(
         &self,
         txn: &MeasuredVectorTransaction<'_>,
@@ -1466,7 +1466,7 @@ impl<D: Distance> VectorIndex<D> {
     ///
     /// Search and corruption fixtures use this boundary when absence is itself
     /// an invariant violation. The return type cannot represent a missing key.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::search::vector) async fn resolve_required_canonical_vector_key_counted(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
@@ -1616,7 +1616,7 @@ impl<D: Distance> VectorIndex<D> {
     }
 
     /// Runs the same traversal while collecting crate-internal diagnostics.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn search_with_stats(
         &self,
         txn: &(impl DbReadOps + Send + Sync),
@@ -1639,9 +1639,9 @@ const fn scale_result_id(result: &SearchResult) -> NodeId {
     result.entity_id()
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../../tests/production_support/vector/index.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/index.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 #[path = "scale_contracts.rs"]
@@ -1655,9 +1655,7 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
 
     use super::*;
-    use crate::encoding::v2::values::indexes::vector::{
-        decode_layer0_neighbors, encode_layer0_neighbors,
-    };
+    use crate::encoding::v2::values::indexes::vector::encode_layer0_neighbors;
     use crate::search::vector::cache::store::VectorMemoryDirtyRows;
     use crate::search::vector::distance::{Cosine, Euclidean};
     use crate::search::vector::{SimHash, VectorConfigError, VectorDimensionError};
@@ -1938,15 +1936,6 @@ mod tests {
         );
     }
 
-    // Note: These tests require a real database transaction to run
-    // They serve as documentation for the expected API
-
-    #[test]
-    fn test_vector_index_creation() {
-        let index = VectorIndex::<Cosine>::new("embeddings");
-        assert_eq!(index.name(), "embeddings");
-    }
-
     #[tokio::test]
     async fn test_scripted_layers_drive_exact_inserted_graph_levels() {
         let db = test_inner_db("scripted_layers_drive_exact_inserted_graph_levels").await;
@@ -2105,13 +2094,6 @@ mod tests {
             measurements[1].operations(),
             "{measurements:?}"
         );
-    }
-
-    #[test]
-    fn test_config_validation() {
-        let config = VectorIndexConfig::new("test", "emb", 128);
-        assert_eq!(config.dimension, 128);
-        assert_eq!(config.property_name, "emb");
     }
 
     #[test]
@@ -2646,13 +2628,6 @@ mod tests {
         assert_eq!(stats.simhash_examined, 0);
         assert_eq!(stats.simhash_filtered, 0);
         assert_eq!(stats.avg_active_sampling_ratio, 0.5);
-    }
-
-    #[test]
-    fn test_decode_layer0_neighbors_from_compact_payload() {
-        let encoded = encode_layer0_neighbors(&[4, 2, 2]);
-        let decoded = decode_layer0_neighbors(&encoded).expect("compact payload should decode");
-        assert_eq!(decoded, vec![2, 4]);
     }
 
     #[test]

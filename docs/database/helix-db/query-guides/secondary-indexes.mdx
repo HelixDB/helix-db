@@ -98,8 +98,67 @@ helix.WriteQuery("create_user_status_index").
 
 </CodeGroup>
 
-The returned DDL receipt identifies the durable operation. Poll it until the index is
-active before depending on indexed performance.
+The returned DDL receipt identifies the durable operation. A build is not listed as an
+active index until it succeeds, so poll its `operation_id` before depending on indexed
+performance.
+
+## Track an index operation
+
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as("status", g().get_index_operation(operation_id))
+    .returning(["status"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs("status", g().getIndexOperation(operationId))
+  .returning(["status"]);
+```
+
+```go Go
+helix.ReadQuery("index_operation").
+	VarAs("status", helix.G().GetIndexOperation(operationID)).
+	Returning("status")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as("status", g().get_index_operation(operation_id))
+    .returning(["status"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "status",
+          "root": { "get_index_operation": { "operation_id": "<operation_id>" } }
+        }
+      }],
+      "returns": ["status"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+`status` is `queued`, `running`, `blocked`, `succeeded`, or `aborted`. A `blocked`
+operation carries a `blocker_code` and does not resume on its own. Fix the cause, then
+run `retry_index_operation` (`retryIndexOperation`) as a write with the same
+`operation_id`, or `abort_index_operation` (`abortIndexOperation`) to discard the build.
+While the build is in flight, repeating the same CREATE returns `existing_operation`
+with the same `operation_id` instead of starting another build. Once the index is
+active, it returns `already_active` without an `operation_id`. After an abort finishes,
+it starts a new build with a new `operation_id`.
 
 ## Query indexed data
 

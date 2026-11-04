@@ -51,8 +51,8 @@ scripts, add `--json` for machine-readable output; commands then never prompt. S
 
 ## How Cloud queries are authorized
 
-- `helix auth login` creates a WorkOS session that identifies you. The CLI never uses
-  database API keys.
+- `helix auth login` creates a WorkOS session that identifies you, using GitHub, Google,
+  Microsoft, single sign-on, or an email and password. The CLI never uses database API keys.
 - Cloud queries go through the Helix Cloud backend (the broker), not directly to the
   database gateway. The broker forwards each authorized request with its own gateway
   credentials, which the CLI never receives.

@@ -360,13 +360,11 @@ mod tests {
             Arc::new(ram_directory),
             RangeCache::new(CacheCapacity::Unbounded),
         );
-        assert_eq!(format!("{caching_directory:?}"), "CachingDirectory");
         assert!(caching_directory.exists(test_path)?);
         assert!(!caching_directory.exists(Path::new("missing"))?);
 
         let file_handle = caching_directory.get_file_handle(test_path)?;
         assert_eq!(file_handle.len(), 16);
-        assert!(format!("{file_handle:?}").contains("CachingFileHandle"));
         assert_eq!(
             caching_directory
                 .open_read(test_path)?

@@ -6,7 +6,7 @@
 //! under contention.
 //!
 //! Run with:
-//! `cargo bench -p db --features production-coverage --bench vector_memory_store`
+//! `cargo bench -p db --features bench-internals --bench vector_memory_store`
 //!
 //! Tunables: `HELIX_VM_BENCH_NODES` (100000), `HELIX_VM_BENCH_DIMENSIONS`
 //! (128), `HELIX_VM_BENCH_M` (16), `HELIX_VM_BENCH_ROUNDS` (5),
@@ -18,7 +18,7 @@ mod benchmark {
     use std::sync::Barrier;
     use std::time::Instant;
 
-    use db::production_coverage::{
+    use db::bench_internals::{
         VectorMemoryBenchmarkFixture, VectorMemoryBenchmarkShape, VectorMemoryBenchmarkStore,
     };
     use serde::Serialize;

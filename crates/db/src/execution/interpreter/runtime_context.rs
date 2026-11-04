@@ -314,7 +314,7 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
 }
 
 impl<'db> ExecutionContext<'db> {
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::execution::interpreter) fn new(
         db: &'db HelixDB,
         params: context::ParamBindings,
@@ -326,7 +326,7 @@ impl<'db> ExecutionContext<'db> {
         )
     }
 
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::execution::interpreter) fn new_scoped(
         db: &'db HelixDB,
         params: context::ParamBindings,

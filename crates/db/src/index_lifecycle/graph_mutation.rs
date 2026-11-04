@@ -20,6 +20,9 @@ use super::{IndexElementKind, IndexEntityId};
 pub(crate) mod map;
 
 #[cfg(test)]
+#[path = "../../tests/unit/graph_mutation_representation.rs"]
+mod representation_tests;
+#[cfg(test)]
 mod write_tests;
 
 /// Graph identity whose element kind is encoded by its enum variant.
@@ -339,7 +342,7 @@ impl GraphMutationTransition {
     }
 
     /// Applies one edit and returns a replacement only when bytes must change.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "index-lifecycle-testing"))]
     pub(crate) fn edit(
         scope: DataScope,
         entity: GraphEntity,

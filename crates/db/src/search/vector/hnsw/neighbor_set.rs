@@ -194,7 +194,7 @@ pub(crate) struct NeighborDifference<'set> {
 
 impl<'set> NeighborDifference<'set> {
     /// Returns true when no physical neighbor or reverse-locator write is needed.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.old == self.new
     }
@@ -216,7 +216,7 @@ impl<'set> NeighborDifference<'set> {
     }
 
     /// Collects both ordered sides.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn into_parts(self) -> (Vec<NodeId>, Vec<NodeId>) {
         (self.removed().collect(), self.added().collect())
     }

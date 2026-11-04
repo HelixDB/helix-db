@@ -56,7 +56,7 @@ use crate::search::vector::{
     VectorWriteRecorder,
 };
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use super::vector_document;
 use super::{stored_vector_document, VectorIndexedDocument};
 use crate::index_lifecycle::outbox::{
@@ -80,6 +80,7 @@ use crate::index_lifecycle::{
     VectorBuildStage, VectorCleanupProgress, VectorPhysicalIdWatermark, VectorPhysicalIndexId,
     VectorPhysicalLayout, VectorRoutingLayoutV2,
 };
+use crate::transaction::Mutation;
 
 /// Vector lifecycle driver sharing scope gates and the bounded SimHash owner.
 pub(crate) struct VectorIndexDriver {
@@ -226,7 +227,7 @@ impl OfferedVectorBuild {
     }
 
     /// Offers `session` at `checkpoint` under a new lease of `cache`'s budget.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn for_tests(
         cache: &VectorBuildCache,
         checkpoint: VectorPlanningCheckpoint,
@@ -247,7 +248,7 @@ impl OfferedVectorBuild {
 
 impl RetainedVectorBuild {
     /// Returns the build checkpoint this session mirrors, if a build retained it.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn build_checkpoint(&self) -> Option<&VectorBuildCheckpoint> {
         match &self.checkpoint {
             VectorPlanningCheckpoint::Build(checkpoint) => Some(checkpoint),
@@ -372,7 +373,7 @@ impl RetainedSessions {
     }
 
     /// Returns every retained session.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn iter(&self) -> impl DoubleEndedIterator<Item = &RetainedVectorBuild> {
         self.builds.iter().chain(&self.pending).chain(&self.drained)
     }
@@ -662,7 +663,7 @@ impl VectorBuildCache {
 
     /// Checks out a fresh session of unbounded demand, as a build step
     /// would, without taking any retained one.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) async fn checkout_fresh<D: Distance>(&self) -> CheckedOutSession<D> {
         let (lease, _) = self
             .lease(None, |_| false, |_| LeaseDemand::Unbounded)
@@ -1424,7 +1425,8 @@ async fn step_cleanup<D: Distance>(
                             "vector abort found a reservation owned by another generation",
                         ));
                     };
-                    transaction.put(
+                    Mutation::put(
+                        transaction,
                         IndexKey::Global {
                             kind: GlobalKey::LegacyVectorPhysicalReservation(physical_index_id),
                         }
@@ -2233,7 +2235,7 @@ async fn step_build<D: Distance>(
                 )
                 .map_err(|error| corruption(error.to_string()))?;
                 let legacy = VectorIndex::<D>::for_legacy_migration(source.physical_name(), scope);
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorMetadataPublicationBefore,
                 )?;
@@ -2249,15 +2251,16 @@ async fn step_build<D: Distance>(
                         "legacy vector activation did not transcode exactly one metadata row",
                     ));
                 }
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorMetadataPublicationAfter,
                 )?;
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorReservationTransitionBefore,
                 )?;
-                transaction.put(
+                Mutation::put(
+                    transaction,
                     IndexKey::Global {
                         kind: GlobalKey::LegacyVectorPhysicalReservation(physical_index_id),
                     }
@@ -2266,16 +2269,16 @@ async fn step_build<D: Distance>(
                         active_reservation,
                     )),
                 )?;
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorReservationTransitionAfter,
                 )?;
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyDefinitionRetirementBefore,
                 )?;
                 transaction.delete(source.storage_key())?;
-                #[cfg(feature = "production-coverage")]
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyDefinitionRetirementAfter,
                 )?;
@@ -2412,7 +2415,7 @@ async fn adopt_legacy<D: Distance>(
     };
     let started = std::time::Instant::now();
     let legacy = VectorIndex::<D>::for_legacy_migration(legacy_name, scope);
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     crate::migrations::trip_migration_failpoint(
         crate::migrations::MigrationFailpoint::LegacyVectorValidationCheckpointBefore,
     )?;
@@ -2476,7 +2479,7 @@ async fn adopt_legacy<D: Distance>(
             vector::LegacyVectorValidationOutcome::Valid { .. } => unreachable!(),
         }
     };
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     crate::migrations::trip_migration_failpoint(
         crate::migrations::MigrationFailpoint::LegacyVectorValidationCheckpointAfter,
     )?;
@@ -3964,7 +3967,8 @@ fn stage_applied(
         entity_id,
     );
     match next_partition {
-        Some(partition) => transaction.put(
+        Some(partition) => Mutation::put(
+            transaction,
             key,
             encode_applied_state(&AppliedEntityStateValue {
                 index_id: operation.index_id(),
@@ -4407,17 +4411,17 @@ fn operation_error(error: crate::index_lifecycle::IndexOperationModelError) -> H
     HelixDbError::InvariantViolation(error.to_string())
 }
 
-#[cfg(all(feature = "production-coverage", not(test)))]
-#[path = "../../../tests/production_support/vector_build_cache.rs"]
-pub(super) mod build_cache_production_contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/vector_build_cache.rs"]
+mod build_cache_contract_tests;
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/vector_driver_contracts.rs"]
+#[cfg(test)]
+#[path = "../../../tests/unit/vector_driver_contracts.rs"]
 pub(super) mod driver_contracts;
 
-#[cfg(all(feature = "production-coverage", not(test)))]
-#[path = "../../../tests/production_support/vector_publication_contracts.rs"]
-pub(super) mod publication_production_contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/vector_publication_contracts.rs"]
+pub(super) mod publication_contract_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4439,8 +4443,7 @@ mod tests {
     };
     use crate::index_lifecycle::outbox::{
         claim_operation, execute_claimed_step, observe_operation_pointer, ClaimPermission,
-        CommittedOperationStep, OperationPointerObservation, SameEpochRecoveryProof,
-        WriteDuringStepDriver,
+        CommittedOperationStep, OperationPointerObservation, WriteDuringStepDriver,
     };
     use crate::index_lifecycle::{
         ActiveIndexHandle, ClaimSequence, IndexDdlReceipt, IndexOperationId, IndexScopeGates,
@@ -4808,7 +4811,8 @@ mod tests {
     /// A write repairs the invalid source row 0 after the Scan step reads it
     /// and before the step commits. The step reads its blocker's row through
     /// the serializable transaction, so the commit fails instead of blocking
-    /// the build durably, and the retried step indexes the repaired row.
+    /// the build durably: the claim returns to the queue after a delay, and
+    /// the retried step indexes the repaired row.
     #[tokio::test]
     async fn scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
         let db = test_db("vector-driver-scan-repaired-blocker").await;
@@ -4851,32 +4855,43 @@ mod tests {
         .await
         .expect("vector claim succeeds")
         .expect("vector revision is claimable");
-        let error = execute_claimed_step(&db, &claimed, &racing, limits, NOW_MILLIS)
-            .await
-            .expect_err("a blocker whose row was repaired does not commit");
-        assert!(error.is_transaction_conflict(), "{error}");
+        assert_eq!(
+            execute_claimed_step(&db, &claimed, &racing, limits, NOW_MILLIS)
+                .await
+                .expect("a lost commit conflict releases the claim"),
+            CommittedOperationStep::TransientFailure,
+            "a blocker whose row was repaired does not commit"
+        );
 
-        // The supervisor rejoins its task and retries the same step.
-        let OperationPointerObservation::ClaimedByCurrentWriter(eligible) =
+        // The same step is queued again once its delay elapses.
+        let OperationPointerObservation::Delayed { delay_millis } =
             observe_operation_pointer(&db, build_id, writer_epoch, NOW_MILLIS)
                 .await
                 .expect("vector operation pointer is readable")
         else {
-            panic!("the failed step leaves its claim with this writer");
+            panic!("the conflicting step is requeued after a delay");
+        };
+        let retry_at = NOW_MILLIS + delay_millis;
+        let OperationPointerObservation::Eligible(eligible) =
+            observe_operation_pointer(&db, build_id, writer_epoch, retry_at)
+                .await
+                .expect("vector operation pointer is readable")
+        else {
+            panic!("the requeued step is eligible after its delay");
         };
         let claimed = claim_operation(
             &db,
             &eligible,
             writer_epoch,
             ClaimSequence::new(2).expect("claim sequence is non-zero"),
-            NOW_MILLIS,
-            ClaimPermission::SameEpochRecovery(SameEpochRecoveryProof::after_join(writer_epoch)),
+            retry_at,
+            ClaimPermission::Normal,
         )
         .await
-        .expect("vector recovery claim succeeds")
-        .expect("vector revision is reclaimable");
+        .expect("vector retry claim succeeds")
+        .expect("vector revision is claimable");
         assert_eq!(
-            execute_claimed_step(&db, &claimed, &inner, limits, NOW_MILLIS)
+            execute_claimed_step(&db, &claimed, &inner, limits, retry_at)
                 .await
                 .expect("the retried vector step commits"),
             CommittedOperationStep::Progressed

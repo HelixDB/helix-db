@@ -94,15 +94,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_clones_share_one_in_memory_store() {
-        let token = ProcessLocalDatabaseToken::new("shared-token").unwrap();
-        let clone = token.clone();
-        assert_eq!(token.database_id(), clone.database_id());
-        assert_eq!(token.database(), clone.database());
-        assert!(Arc::ptr_eq(&token.object_store(), &clone.object_store()));
-    }
-
-    #[test]
     fn fresh_tokens_do_not_alias() {
         let first = ProcessLocalDatabaseToken::new("same-name").unwrap();
         let second = ProcessLocalDatabaseToken::new("same-name").unwrap();

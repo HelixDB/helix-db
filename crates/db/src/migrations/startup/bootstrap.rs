@@ -11,6 +11,7 @@ use crate::index_lifecycle::{
     IndexId, IndexStorageVersion, IndexV2MetadataValue, LogicalIndexIdWatermark,
     VectorPhysicalIdWatermark, VectorPhysicalIndexId,
 };
+use crate::transaction::Mutation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriterBootstrapPlan {
@@ -90,7 +91,8 @@ async fn publish_current_version(db: &Db) -> Result<()> {
             ),
         });
     }
-    transaction.put(
+    Mutation::put(
+        &transaction,
         marker_key,
         encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
             IndexStorageVersion::CURRENT,
@@ -279,13 +281,15 @@ fn stage_writer_bootstrap_initialization(transaction: &DbTransaction) -> Result<
     let marker_key = global_key(GlobalKey::StorageVersion);
     let logical_key = global_key(GlobalKey::LogicalIndexIdWatermark);
     let vector_key = global_key(GlobalKey::VectorPhysicalIdWatermark);
-    transaction.put(
+    Mutation::put(
+        transaction,
         marker_key,
         encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
             IndexStorageVersion::CURRENT,
         )),
     )?;
-    transaction.put(
+    Mutation::put(
+        transaction,
         logical_key,
         encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
             LogicalIndexIdWatermark {
@@ -293,7 +297,8 @@ fn stage_writer_bootstrap_initialization(transaction: &DbTransaction) -> Result<
             },
         )),
     )?;
-    transaction.put(
+    Mutation::put(
+        transaction,
         vector_key,
         encode_metadata_value(&IndexV2MetadataValue::VectorPhysicalIdWatermark(
             VectorPhysicalIdWatermark {

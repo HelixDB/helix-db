@@ -1,6 +1,6 @@
 //! Retired text generation-manifest JSON format.
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use bytes::Bytes;
 
 use crate::search::text::TextIndexGenerationManifest;
@@ -17,7 +17,7 @@ pub(crate) enum LegacyTextManifestError {
     InvalidPrimarySplit,
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) fn encode_for_contract(
     manifest: &TextIndexGenerationManifest,
 ) -> Result<Bytes, LegacyTextManifestError> {

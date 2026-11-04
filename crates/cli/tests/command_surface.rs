@@ -28,6 +28,11 @@ fn every_retained_command_renders_help() {
         &["shell", "--help"],
         &["explorer", "--help"],
         &["auth", "login", "--help"],
+        &["auth", "login", "github", "--help"],
+        &["auth", "login", "google", "--help"],
+        &["auth", "login", "microsoft", "--help"],
+        &["auth", "login", "sso", "--help"],
+        &["auth", "login", "password", "--help"],
         &["auth", "status", "--help"],
         &["auth", "logout", "--help"],
         &["workspace", "list", "--help"],
@@ -96,21 +101,81 @@ fn obsolete_cloud_commands_and_auth_paths_are_absent() {
 }
 
 #[test]
-fn local_commands_do_not_require_cloud_credentials() {
-    let fixture = CliFixture::new_with_fake_runtime();
-    let project = fixture.root().join("local-only");
-    fixture
-        .command()
-        .args(["init", "--path"])
-        .arg(&project)
-        .args(["local", "--no-skills"])
-        .assert()
-        .success();
-    fixture
-        .command()
-        .current_dir(&project)
-        .args(["status", "dev"])
-        .assert()
-        .success();
+fn login_flags_only_exist_where_they_apply() {
+    let fixture = CliFixture::new();
+    for args in [
+        &["auth", "login", "--email", "person@test.dev"][..],
+        &["auth", "login", "github", "--email", "person@test.dev"][..],
+        &["auth", "login", "google", "--email", "person@test.dev"][..],
+        &["auth", "login", "microsoft", "--email", "person@test.dev"][..],
+        // Passwords only come from the hidden prompt, never from argv.
+        &["auth", "login", "password", "--password", "secret"][..],
+        &["auth", "login", "--password", "secret"][..],
+    ] {
+        assert!(
+            stderr(fixture.command().args(args).assert().failure()).contains("unexpected argument"),
+            "{args:?}"
+        );
+    }
+    // A typo or an unset shell variable must not get as far as a prompt or a
+    // request.
+    for method in ["sso", "password"] {
+        for email in ["", " ", "person@", "not-an-email"] {
+            assert!(
+                stderr(
+                    fixture
+                        .command()
+                        .args(["auth", "login", method, "--email", email])
+                        .assert()
+                        .failure()
+                )
+                .contains("valid email address"),
+                "{method} {email:?}"
+            );
+        }
+    }
+    assert!(stderr(
+        fixture
+            .command()
+            .args(["auth", "login", "carrier-pigeon"])
+            .assert()
+            .failure()
+    )
+    .contains("unrecognized subcommand"));
+}
+
+#[test]
+fn login_needs_a_terminal_for_every_method() {
+    let fixture = CliFixture::new();
+    for args in [
+        &["auth", "login", "--json"][..],
+        &["auth", "login", "github", "--json"][..],
+        &["auth", "login", "google", "--json"][..],
+        &["auth", "login", "microsoft", "--json"][..],
+        &[
+            "auth",
+            "login",
+            "sso",
+            "--email",
+            "person@test.dev",
+            "--json",
+        ][..],
+        &[
+            "auth",
+            "login",
+            "password",
+            "--email",
+            "person@test.dev",
+            "--json",
+        ][..],
+    ] {
+        let error: serde_json::Value =
+            serde_json::from_str(stderr(fixture.command().args(args).assert().failure()).trim())
+                .unwrap();
+        assert_eq!(
+            error["error"]["message"], "logging in needs an interactive terminal",
+            "{args:?}"
+        );
+    }
     assert!(!fixture.helix_home().join("credentials").exists());
 }

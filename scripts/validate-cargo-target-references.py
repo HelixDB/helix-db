@@ -339,6 +339,250 @@ def validate_references(
     return errors
 
 
+# Cargo, nextest and libtest options that take a separate value.
+VALUE_OPTIONS = {
+    "-E", "-F", "-Z", "-j", "-p", "--archive-file", "--bench", "--bin", "--build-jobs",
+    "--cargo-profile", "--color", "--config", "--example", "--extract-to", "--features",
+    "--filterset", "--format", "--logfile", "--manifest-path", "--message-format",
+    "--package", "--partition", "--profile", "--target", "--target-dir", "--test",
+    "--test-threads", "--workspace-remap",
+}
+
+
+def runs_whole_test_targets(command: str) -> bool:
+    """Whether `command` runs every test of the targets it names.
+
+    Only `cargo test` and `cargo nextest run` without `--no-run` run tests. A
+    test-name filter, `--exact`, `--skip`, or a nextest filterset that does not
+    keep `kind(test)` whole runs part of a target.
+    """
+    try:
+        tokens = shlex.split(re.sub(r"\$\{\{[^}]*\}\}", "EXPR", command))
+    except ValueError:
+        return False
+    for start, token in enumerate(tokens):
+        if token == "test" or (token == "run" and tokens[start - 1 : start] == ["nextest"]):
+            break
+    else:
+        return False
+    if {"--no-run", "--exact", "--skip"} & set(tokens):
+        return False
+    remaining = iter(tokens[start + 1 :])
+    for token in remaining:
+        if token in {"-E", "--filterset"}:
+            if "kind(test)" not in next(remaining, ""):
+                return False
+        elif token in VALUE_OPTIONS:
+            next(remaining, None)
+        elif not token.startswith("-"):
+            return False
+    return True
+
+
+def validate_feature_gated_tests_run(root: Path, catalog: Catalog) -> list[str]:
+    """Require a workflow to run every test target that `--all-targets` skips.
+
+    A reference counts only from a command that runs the whole target: a
+    filtered run of one test leaves the rest of the target unrun. Targets gated
+    on `production-scale` are release-scale soaks run on demand.
+    """
+    referenced = {
+        match.group("name")
+        for path in (root / ".github" / "workflows").glob("*.yml")
+        for command in commands(path)
+        if runs_whole_test_targets(command)
+        for match in REFERENCE.finditer(command)
+        if match.group("flag") == "--test"
+    }
+    return [
+        f"{package} test target {name!r} requires {', '.join(features)} "
+        "but no workflow runs the whole target with --test"
+        for (package, kind, name), features in sorted(catalog.required_features.items())
+        if kind == "test"
+        and features
+        and "production-scale" not in features
+        and name not in referenced
+    ]
+
+
+def validate_benches_run(root: Path, catalog: Catalog) -> list[str]:
+    """Require a workflow to name every bench target with --bench.
+
+    Benches have custom harnesses that the nextest archive skips, and
+    `--benches` also reruns every library's unit tests. Targets gated on
+    `production-scale` are release-scale runs on demand.
+    """
+    referenced = {
+        match.group("name")
+        for path in (root / ".github" / "workflows").glob("*.yml")
+        for command in commands(path)
+        for match in REFERENCE.finditer(command)
+        if match.group("flag") == "--bench"
+    }
+    return [
+        f"{package} bench target {name!r} is named by no workflow --bench"
+        for (package, kind, name), features in sorted(catalog.required_features.items())
+        if kind == "bench" and "production-scale" not in features and name not in referenced
+    ]
+
+
+RUST_CI_PATHS = re.compile(
+    r"^  pull_request:\n    paths:\n(?P<paths>(?:      (?:- \"[^\"]+\"|#.*)\n)+)",
+    re.MULTILINE,
+)
+EMBEDDED_FILE = re.compile(r'include_(?:str|bytes)!\(\s*"(?P<path>[^"]+)"\s*\)')
+
+
+def path_pattern(glob: str) -> re.Pattern[str]:
+    """Translates a GitHub Actions path filter into an anchored regex."""
+    parts = re.split(r"(\*\*|\*)", glob)
+    return re.compile(
+        "".join(
+            ".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part)
+            for part in parts
+        )
+        + "$"
+    )
+
+
+def validate_rust_ci_paths(root: Path) -> list[str]:
+    """Require Rust CI to trigger on every file that Rust sources embed."""
+    workflow = root / ".github" / "workflows" / "rust-ci.yml"
+    match = RUST_CI_PATHS.search(workflow.read_text())
+    if match is None:
+        return [f"{workflow.relative_to(root)}: no pull_request paths filter found"]
+    patterns = [
+        path_pattern(line.strip()[3:-1])
+        for line in match.group("paths").splitlines()
+        if line.strip().startswith("- ")
+    ]
+    sources = (
+        path
+        for directory in ("bindings", "crates", "sdks/rust", "tools")
+        for path in sorted((root / directory).rglob("*.rs"))
+        if "target" not in path.relative_to(root).parts
+    )
+    errors = []
+    for source in sources:
+        for embedded in EMBEDDED_FILE.finditer(source.read_text()):
+            resolved = (source.parent / embedded.group("path")).resolve()
+            try:
+                relative = resolved.relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if not any(pattern.match(relative) for pattern in patterns):
+                errors.append(
+                    f"{source.relative_to(root)} embeds {relative}, which no "
+                    "Rust CI pull_request path matches"
+                )
+    return errors
+
+
+LIFECYCLE_TESTING_UNIT_MODULE = re.compile(
+    r'#\[cfg\(all\(test, feature = "index-lifecycle-testing"\)\)\]\s*'
+    r'(?:#\[path = "[^"]*"\]\s*)?(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+)'
+)
+# A file module that compiles only with `index-lifecycle-testing`, in any cfg form.
+LIFECYCLE_TESTING_FILE_MODULE = re.compile(
+    r'#\[cfg\((?P<cfg>[^\[\]]*"index-lifecycle-testing"[^\[\]]*)\)\]\s*'
+    r'(?:#\[path = "(?P<path>[^"]*)"\]\s*)?(?:pub(?:\([^)]*\))?\s+)?mod\s+(?P<name>\w+);'
+)
+TEST_MODULE = re.compile(
+    r'#\[cfg\(test\)\]\s*(?:#\[path = "[^"]*"\]\s*)?(?:pub(?:\([^)]*\))?\s+)?'
+    r"mod\s+(?P<name>\w+)"
+)
+
+
+def cfg_holds(expression: str, test: bool, features: set[str]) -> bool:
+    """Evaluates a `cfg` of `all`/`any`/`not`, `test` and `feature = "..."`."""
+    tokens = re.findall(r'all|any|not|test|feature\s*=\s*"[^"]*"|[(),]', expression)
+    position = 0
+
+    def parse() -> bool:
+        nonlocal position
+        token = tokens[position]
+        position += 1
+        if token in {"all", "any", "not"}:
+            position += 1
+            values = []
+            while tokens[position] != ")":
+                values.append(parse())
+                position += tokens[position] == ","
+            position += 1
+            return {"all": all, "any": any}.get(token, lambda v: not v[0])(values)
+        if token == "test":
+            return test
+        return token.split('"')[1] in features
+
+    return parse()
+
+
+def module_file(declaring: Path, name: str, path: str | None) -> Path | None:
+    """Resolves a non-inline `mod name;` declared in `declaring`."""
+    if path is not None:
+        return declaring.parent / path
+    directory = (
+        declaring.parent
+        if declaring.name in {"lib.rs", "main.rs", "mod.rs"}
+        else declaring.parent / declaring.stem
+    )
+    return next(
+        (
+            candidate
+            for candidate in (directory / f"{name}.rs", directory / name / "mod.rs")
+            if candidate.exists()
+        ),
+        None,
+    )
+
+
+def validate_lifecycle_testing_unit_tests(root: Path) -> list[str]:
+    """Keep feature-gated unit tests where the contracts job selects them.
+
+    `--all-targets` builds the library without `index-lifecycle-testing`, so a
+    workflow runs the library's `lifecycle_testing_tests` modules by name. That
+    covers modules gated on `all(test, feature = "index-lifecycle-testing")` and
+    test modules inside a file that compiles only with the feature.
+    """
+    errors = []
+    gated = False
+
+    def require_name(path: Path, name: str) -> None:
+        if name != "lifecycle_testing_tests":
+            errors.append(
+                f"{path.relative_to(root)}: index-lifecycle-testing unit tests must "
+                f"live in a `lifecycle_testing_tests` module, not {name!r}"
+            )
+
+    for path in sorted((root / "crates" / "db" / "src").rglob("*.rs")):
+        text = path.read_text()
+        for match in LIFECYCLE_TESTING_UNIT_MODULE.finditer(text):
+            gated = True
+            require_name(path, match.group("name"))
+        for match in LIFECYCLE_TESTING_FILE_MODULE.finditer(text):
+            cfg = match.group("cfg")
+            # Tests a default test build compiles run in the archive; the
+            # `all(test, ...)` form is the module check above.
+            if cfg_holds(cfg, test=True, features=set()) or re.fullmatch(
+                r'all\(test, feature = "index-lifecycle-testing"\)', cfg
+            ):
+                continue
+            child = module_file(path, match.group("name"), match.group("path"))
+            if child is None:
+                continue
+            for test_module in TEST_MODULE.finditer(child.read_text()):
+                gated = True
+                require_name(child, test_module.group("name"))
+    selected = any(
+        "--lib" in command and "lifecycle_testing_tests" in command
+        for path in (root / ".github" / "workflows").glob("*.yml")
+        for command in commands(path)
+    )
+    if gated and not selected:
+        errors.append("no workflow runs the library's lifecycle_testing_tests modules")
+    return errors
+
+
 def validate_fuzz_matrices(root: Path, catalog: Catalog) -> list[str]:
     errors = []
     for path in (root / ".github" / "workflows").glob("*.yml"):
@@ -668,10 +912,10 @@ def validate_codec_architecture(root: Path) -> list[str]:
             or relative_path == "crates/db/src/migrations.rs"
             or relative_path.startswith("crates/db/src/migrations/")
             or relative_path == "crates/db/tests/public_encoding_compatibility.rs"
-            or relative_path == "crates/db/tests/production_support/v1_migration.rs"
-            or relative_path.startswith("crates/db/tests/production_support/v1_migration/")
-            or relative_path
-            == "crates/db/tests/production_support/migration_text_rebuild.rs"
+            or relative_path == "crates/db/tests/unit/v1_migration.rs"
+            or relative_path.startswith("crates/db/tests/unit/v1_migration/")
+            or relative_path == "crates/db/tests/unit/legacy_text_fixtures.rs"
+            or relative_path == "crates/db/tests/unit/migration_lifecycle_contracts.rs"
         )
 
     for path in (root / "crates").rglob("*.rs"):
@@ -716,6 +960,10 @@ def main() -> int:
     catalog = load_catalog(root)
     errors = []
     errors.extend(validate_references(root, catalog, automation_files(root)))
+    errors.extend(validate_feature_gated_tests_run(root, catalog))
+    errors.extend(validate_benches_run(root, catalog))
+    errors.extend(validate_rust_ci_paths(root))
+    errors.extend(validate_lifecycle_testing_unit_tests(root))
     errors.extend(validate_fuzz_matrices(root, catalog))
     errors.extend(validate_inventory(root, catalog))
     errors.extend(validate_codec_architecture(root))

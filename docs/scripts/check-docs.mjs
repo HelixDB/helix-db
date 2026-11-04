@@ -633,10 +633,36 @@ for (const staleCommand of [
   "helix start local",
   "helix stop local",
   "helix dashboard",
+  "queries.rs",
 ]) {
   if (quickstart.includes(staleCommand)) {
     errors.push(
       `database/helix-db/start-here/quickstart.mdx: stale command ${staleCommand}`,
+    );
+  }
+}
+// crates/cli/tests/e2e_cli.rs runs exactly these commands against a fixture.
+const quickstartCommands = [
+  "helix init local",
+  "helix start dev",
+  "helix query dev --file examples/request.json",
+  "helix stop dev",
+];
+const documentedQuickstartCommands = quickstart
+  .split(/\r?\n/)
+  .filter((line) => line.startsWith("helix "));
+if (documentedQuickstartCommands.join("\n") !== quickstartCommands.join("\n")) {
+  errors.push(
+    `database/helix-db/start-here/quickstart.mdx: helix commands must be exactly ${quickstartCommands.join(", ")}`,
+  );
+}
+for (const expected of [
+  "- A terminal on macOS or Linux, or PowerShell on Windows",
+  'container_runtime = "podman"',
+]) {
+  if (!quickstart.includes(expected)) {
+    errors.push(
+      `database/helix-db/start-here/quickstart.mdx: missing ${expected}`,
     );
   }
 }

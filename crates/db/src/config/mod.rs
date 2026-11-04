@@ -50,8 +50,8 @@ pub use search_index_backfill::{
 };
 pub use secondary_index_lifecycle::{
     SecondaryIndexLifecycleActiveIntervalMillis, SecondaryIndexLifecycleBatchRows,
-    SecondaryIndexLifecycleCatchUpTailDelayMillis, SecondaryIndexLifecycleIdleIntervalMillis,
-    SecondaryIndexLifecycleTuning, SecondaryIndexLifecycleWorkerMode,
+    SecondaryIndexLifecycleIdleIntervalMillis, SecondaryIndexLifecycleTuning,
+    SecondaryIndexLifecycleWorkerMode,
 };
 pub use utils::{ConfigError, ConfigResult, DiskCacheConfig, NonEmptyPathBuf};
 

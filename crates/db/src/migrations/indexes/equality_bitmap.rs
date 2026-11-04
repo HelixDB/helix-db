@@ -17,15 +17,15 @@ use crate::encoding::property::decode_properties;
 use crate::encoding::v2::keys::scope::DataScope;
 #[cfg(test)]
 use crate::encoding::v2::keys::scope::TenantId;
-#[cfg(all(test, feature = "production-coverage"))]
+#[cfg(test)]
 use crate::encoding::v2::keys::SecondaryEntryKey;
 use crate::encoding::v2::keys::{
     CanonicalSecondaryValue, GlobalKey, IndexEntity, ManagedIndexKey, RecordKind, ScopedKey,
     SecondaryEntryLane, SecondaryEqualityBitmapKey,
 };
-#[cfg(all(test, feature = "production-coverage"))]
+#[cfg(test)]
 use crate::encoding::v2::values::decode_metadata_value;
-#[cfg(all(test, feature = "production-coverage"))]
+#[cfg(test)]
 use crate::encoding::v2::values::encode_secondary_entry;
 use crate::encoding::v2::values::{
     decode_index_record, decode_operation_record, encode_metadata_value, encode_operation_record,
@@ -33,7 +33,7 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result};
 
-#[cfg(all(test, feature = "production-coverage"))]
+#[cfg(test)]
 use crate::index_lifecycle::IndexElementKind;
 use crate::index_lifecycle::{
     self, IndexOperationExecutionState, IndexOperationProgress, IndexOperationRecord, IndexStateV2,
@@ -43,6 +43,7 @@ use crate::index_lifecycle::{
 };
 #[cfg(test)]
 use crate::migrations::tenant::envelope as tenant_envelope_migration;
+use crate::transaction::Mutation;
 
 const MIGRATION_BATCH_SIZE: usize = 256;
 
@@ -180,7 +181,8 @@ pub(crate) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
 
     trip(EqualityBitmapMigrationFailpoint::PublicationBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
-    transaction.put(
+    Mutation::put(
+        &transaction,
         ManagedIndexKey::Global {
             kind: GlobalKey::StorageVersion,
         }
@@ -207,7 +209,7 @@ pub(crate) async fn cleanup_v3_nonunique_equality_rows(db: &Db) -> Result<()> {
 /// This inverse exists only for storage-version compatibility tests. Existing
 /// bitmaps remain as a valid partial-migration state so already-open current
 /// readers stay correct. The caller must quiesce every write before invoking it.
-#[cfg(all(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Result<()> {
     if !matches!(version, 2 | 3) {
         return Err(HelixDbError::Config(format!(
@@ -261,7 +263,7 @@ pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Resul
     Ok(())
 }
 
-#[cfg(all(test, feature = "production-coverage"))]
+#[cfg(test)]
 async fn copy_bitmap_generation_to_legacy_entries(
     db: &Db,
     generation: &EqualityGeneration,
@@ -672,8 +674,13 @@ async fn restart_building_generation(db: &Db, building: &BuildingEqualityGenerat
         },
     )
     .map_err(|error| corruption(&error.to_string()))?;
-    transaction.put(operation_key, encode_operation_record(&restarted))?;
-    transaction.put(
+    Mutation::put(
+        &transaction,
+        operation_key,
+        encode_operation_record(&restarted),
+    )?;
+    Mutation::put(
+        &transaction,
         ManagedIndexKey::Global {
             kind: GlobalKey::OperationPointer(building.operation_id),
         }
@@ -986,7 +993,6 @@ mod tests {
             entity_id,
             scope,
         )
-        .await
         .unwrap();
         transaction.commit().await.unwrap();
     }
@@ -1021,7 +1027,6 @@ mod tests {
             entity_id,
             scope,
         )
-        .await
         .unwrap();
         transaction.commit().await.unwrap();
     }
@@ -1212,7 +1217,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     #[tokio::test]
     async fn migration_parity_fixture_adds_v2_and_v3_rows_without_removing_bitmaps() {
         let _guard = TEST_LOCK.lock().await;

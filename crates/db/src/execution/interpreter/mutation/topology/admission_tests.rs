@@ -55,7 +55,7 @@ async fn rejected_first_member_leaves_no_empty_row_for_flush() {
             .begin(slatedb::IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        runtime.flush(&transaction).await.unwrap();
+        runtime.flush(&transaction).unwrap();
         assert!(runtime.staged_keys.is_empty());
         assert_eq!(budget.available(), limit);
     }
@@ -168,7 +168,7 @@ async fn collection_epochs_preserve_overlays_and_release_consumed_delta_state() 
                 .unwrap();
         }
         assert!(budget.available() < before);
-        indexes.flush_topology(&transaction).await.unwrap();
+        indexes.flush_topology(&transaction).unwrap();
         // Collection ownership ends at flush, while canonical key aliases and
         // the backend's growing operand history remain admitted.
         assert!(budget.available() < before);
@@ -228,7 +228,7 @@ async fn rejected_both_direction_update_preserves_the_first_direction() {
         Err(HelixDbError::QueryMemoryLimitExceeded)
     ));
     drop(occupied);
-    indexes.flush_topology(&transaction).await.unwrap();
+    indexes.flush_topology(&transaction).unwrap();
     let values = indexes
         .observe_topology(&transaction, std::slice::from_ref(&key))
         .await
@@ -240,7 +240,7 @@ async fn rejected_both_direction_update_preserves_the_first_direction() {
         .topology_mutations()
         .add_adjacency(scope, 9, 2, helix_planner::ir::ExpandDirection::Both)
         .unwrap();
-    indexes.flush_topology(&transaction).await.unwrap();
+    indexes.flush_topology(&transaction).unwrap();
     let values = indexes
         .observe_topology(&transaction, std::slice::from_ref(&key))
         .await
@@ -298,7 +298,7 @@ async fn topology_debug_shows_pending_rows_and_staged_keys_without_admission() {
         .begin(slatedb::IsolationLevel::SerializableSnapshot)
         .await
         .unwrap();
-    runtime.flush(&transaction).await.unwrap();
+    runtime.flush(&transaction).unwrap();
     let flushed = format!("{runtime:?}");
     assert!(
         flushed.starts_with("TopologyMutationRuntime { state: Collecting, staged_keys: {b\""),

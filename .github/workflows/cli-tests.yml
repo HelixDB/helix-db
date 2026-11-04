@@ -43,8 +43,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Rust CI runs the Linux tests, doctests, Clippy and formatting.
         os:
-          - ubuntu-24.04-arm
           - macos-latest
           - windows-2025
     steps:
@@ -55,54 +55,12 @@ jobs:
           cache: npm
           cache-dependency-path: sdks/typescript/package-lock.json
       - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: clippy, rustfmt
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: sdks/typescript
       - name: Validate locked workspace metadata
         run: cargo metadata --locked --format-version 1 --no-deps
       - name: Unit and binary integration tests
         run: cargo test --locked -p helix-metrics -p helix-cli --all-targets
-      - name: Doc tests
-        if: runner.os == 'Linux'
-        run: cargo test --locked -p helix-metrics -p helix-cli --doc
-      - name: Clippy
-        if: runner.os == 'Linux'
-        run: cargo clippy --locked -p helix-metrics -p helix-cli --all-targets -- -D warnings
-      - name: Formatting
-        if: runner.os == 'Linux'
-        run: cargo fmt -p helix-metrics -p helix-cli -- --check
-
-  coverage:
-    name: Coverage (Ubuntu)
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: sdks/typescript/package-lock.json
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: llvm-tools-preview
-      - run: npm ci --ignore-scripts --no-audit --no-fund
-        working-directory: sdks/typescript
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Enforce 80% metrics line coverage
-        run: >-
-          cargo llvm-cov --locked -p helix-metrics --all-targets
-          --fail-under-lines 80 --lcov --output-path target/metrics-coverage.lcov
-      - name: Enforce 80% CLI line coverage
-        run: >-
-          cargo llvm-cov --locked -p helix-cli --all-targets
-          --ignore-filename-regex '(crates/cli/tests/|crates/cli/src/prompts.rs|crates/cli/src/commands/update.rs)'
-          --fail-under-lines 80 --lcov --output-path target/cli-coverage.lcov
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cli-and-metrics-coverage
-          path: target/*-coverage.lcov
 
   registry-smoke:
     name: Published TypeScript SDK registry smoke

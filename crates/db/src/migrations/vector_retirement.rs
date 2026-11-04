@@ -33,6 +33,7 @@ use crate::index_lifecycle::{
     ValidatedVectorIndexDefinition, VectorPhysicalIndexId,
 };
 use crate::search::vector::{self, VectorIndexConfig};
+use crate::transaction::Mutation;
 
 use super::{
     scan_bounds_for_prefix, LegacyDefinitionRow, LegacyDynamicIndexCatalogEntry,
@@ -258,7 +259,7 @@ pub(super) async fn fence_sources_batch(
     };
     let prefix = MigrationStage::FenceLegacyVectorSources.prefix(scope);
     let bounds = scan_bounds_for_prefix(&prefix, resume_after_key.as_ref());
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadBefore)?;
     let mut rows = transaction.scan(bounds).await?;
     let mut processed_rows = 0_u64;
@@ -378,17 +379,17 @@ pub(super) async fn fence_sources_batch(
             break;
         }
         if let Some(value) = output {
-            #[cfg(feature = "production-coverage")]
+            #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteBefore)?;
-            transaction.put(row.key.clone(), value)?;
-            #[cfg(feature = "production-coverage")]
+            Mutation::put(transaction, row.key.clone(), value)?;
+            #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteAfter)?;
         }
         admitted_bytes = next_admitted_bytes;
         processed_rows = processed_rows.saturating_add(1);
         committed_cursor = MigrationResumeKey::new(row.key.to_vec());
     }
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadAfter)?;
     let Some(resume_after_key) = committed_cursor else {
         return Ok(MigrationBatch::StageComplete);
@@ -427,7 +428,7 @@ pub(super) async fn delete_dedicated_lane_batch(
     };
     let prefix = stage.prefix(scope);
     let bounds = scan_bounds_for_prefix(&prefix, resume_after_key.as_ref());
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadBefore)?;
     let mut rows = transaction.scan(bounds).await?;
     let mut processed_rows = 0_u64;
@@ -505,17 +506,17 @@ pub(super) async fn delete_dedicated_lane_batch(
             break;
         }
         if delete {
-            #[cfg(feature = "production-coverage")]
+            #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteBefore)?;
             transaction.delete(row.key.clone())?;
-            #[cfg(feature = "production-coverage")]
+            #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteAfter)?;
         }
         admitted_bytes = next_admitted_bytes;
         processed_rows = processed_rows.saturating_add(1);
         committed_cursor = MigrationResumeKey::new(row.key.to_vec());
     }
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadAfter)?;
     let Some(resume_after_key) = committed_cursor else {
         return Ok(MigrationBatch::StageComplete);
@@ -544,7 +545,7 @@ pub(super) async fn delete_core_batch(
     };
     let prefix = MigrationStage::LegacyVectorCoreRows.prefix(scope);
     let bounds = scan_bounds_for_prefix(&prefix, resume_after_key.as_ref());
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadBefore)?;
     let mut rows = transaction.scan(bounds).await?;
     let mut processed_rows = 0_u64;
@@ -637,10 +638,10 @@ pub(super) async fn delete_core_batch(
         if retiring {
             for (key, value) in keys.into_iter().zip(values) {
                 if value.is_some() {
-                    #[cfg(feature = "production-coverage")]
+                    #[cfg(test)]
                     super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteBefore)?;
                     transaction.delete(key)?;
-                    #[cfg(feature = "production-coverage")]
+                    #[cfg(test)]
                     super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteAfter)?;
                 }
             }
@@ -649,7 +650,7 @@ pub(super) async fn delete_core_batch(
         processed_rows = processed_rows.saturating_add(1);
         committed_cursor = MigrationResumeKey::new(row.key.to_vec());
     }
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadAfter)?;
     let Some(resume_after_key) = committed_cursor else {
         return Ok(MigrationBatch::StageComplete);
@@ -679,7 +680,7 @@ pub(super) async fn delete_definitions_batch(
     };
     let prefix = MigrationStage::LegacyVectorDefinitions.prefix(scope);
     let bounds = scan_bounds_for_prefix(&prefix, resume_after_key.as_ref());
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadBefore)?;
     let mut rows = transaction.scan(bounds).await?;
     let mut processed_rows = 0_u64;
@@ -749,16 +750,16 @@ pub(super) async fn delete_definitions_batch(
             }
             break;
         }
-        #[cfg(feature = "production-coverage")]
+        #[cfg(test)]
         super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteBefore)?;
         transaction.delete(row.key.clone())?;
-        #[cfg(feature = "production-coverage")]
+        #[cfg(test)]
         super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteAfter)?;
         admitted_bytes = next_admitted_bytes;
         processed_rows = processed_rows.saturating_add(1);
         committed_cursor = MigrationResumeKey::new(row.key.to_vec());
     }
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadAfter)?;
     let Some(resume_after_key) = committed_cursor else {
         return Ok(MigrationBatch::StageComplete);
@@ -790,7 +791,7 @@ pub(super) async fn release_reservations_batch(
     };
     let prefix = MigrationStage::ReleaseLegacyVectorReservations.prefix(scope);
     let bounds = scan_bounds_for_prefix(&prefix, resume_after_key.as_ref());
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadBefore)?;
     let mut rows = transaction.scan(bounds).await?;
     let mut processed_rows = 0_u64;
@@ -907,17 +908,17 @@ pub(super) async fn release_reservations_batch(
             break;
         }
         if delete {
-            #[cfg(feature = "production-coverage")]
+            #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteBefore)?;
             transaction.delete(row.key.clone())?;
-            #[cfg(feature = "production-coverage")]
+            #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteAfter)?;
         }
         admitted_bytes = next_admitted_bytes;
         processed_rows = processed_rows.saturating_add(1);
         committed_cursor = MigrationResumeKey::new(row.key.to_vec());
     }
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadAfter)?;
     let Some(resume_after_key) = committed_cursor else {
         return Ok(MigrationBatch::StageComplete);

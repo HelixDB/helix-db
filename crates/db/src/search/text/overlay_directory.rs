@@ -117,7 +117,6 @@ mod tests {
             overlay.atomic_read(Path::new("missing")),
             Err(OpenReadError::FileDoesNotExist(_))
         ));
-        assert!(format!("{overlay:?}").contains("OverlayDirectory"));
         Ok(())
     }
 

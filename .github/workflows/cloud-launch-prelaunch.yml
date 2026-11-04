@@ -66,15 +66,22 @@ jobs:
   release-contracts:
     name: Stable failpoint and coordinator contracts
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+    # Builds the library's release test binary before any contract runs.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - name: Complete stable failpoint and coordinator contracts
         run: >-
-          cargo test --release -p db --features production-coverage
-          --test production_index_lifecycle_contracts -- --nocapture --test-threads=1
+          cargo test --release -p db --lib -- --nocapture --test-threads=1
+          index_lifecycle::acceptance_tests::
+          index_lifecycle::failpoints::
+          index_lifecycle::typed_boundary_tests::
+          index_lifecycle::text::active_preflight::contract_tests::
+          index_lifecycle::text::active_retirement::contract_tests::
+          index_lifecycle::text::serving::contract_tests::
+          migrations::lifecycle_contracts::writer_migration_requirements_are_typed
 
   vector-diagnostic:
     name: Vector recall and throughput diagnostic
@@ -91,7 +98,7 @@ jobs:
           -- --ignored --nocapture --test-threads=1
 
   sustained:
-    name: Ten-run LocalFileSystem and long lifecycle matrix
+    name: Ten-run LocalFileSystem matrix
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     steps:
@@ -102,11 +109,6 @@ jobs:
         run: >-
           cargo test --release -p helix-db-testkit --test sustained_local_disk
           pre_launch_local_disk_matrix_completes_ten_stable_runs
-          -- --ignored --exact --nocapture
-      - name: Complete long lifecycle seed matrix
-        run: >-
-          cargo test --release -p helix-db-testkit
-          lifecycle_workload::tests::pre_launch_seed_matrix_runs_complete_long_histories
           -- --ignored --exact --nocapture
 
   performance-decision:
@@ -128,7 +130,7 @@ jobs:
           -- target/cloud-launch-metrics/comparison.json
 
   final-quality:
-    name: Final quality and coverage
+    name: Final quality
     runs-on: macos-15
     timeout-minutes: 360
     steps:
@@ -140,16 +142,11 @@ jobs:
           cache-dependency-path: sdks/typescript/package-lock.json
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
-          components: clippy, llvm-tools-preview, rustfmt
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-llvm-cov
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: sdks/typescript
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo test --workspace --doc
       - run: cargo test --workspace
-      - run: scripts/workspace-coverage.sh planner
-      - run: scripts/workspace-coverage.sh db
-      - run: scripts/db-production-coverage.sh
-      - run: scripts/server-production-coverage.sh

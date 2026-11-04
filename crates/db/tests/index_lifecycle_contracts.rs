@@ -48,8 +48,9 @@ fn index_lifecycle_backfill_mutations_and_unique_retry_converge() {
 }
 
 /// Proves every shape converges after repeated late writes at each build
-/// boundary: secondary builds re-enter catch-up, while vector/text writes are
-/// queued operations published after activation.
+/// boundary: secondary validation and activation drain late deltas under
+/// their gate, while vector/text writes are queued operations published after
+/// activation.
 #[test]
 fn index_lifecycle_all_index_shapes_converge_after_late_writes_at_every_stage() {
     std::thread::Builder::new()
@@ -73,6 +74,17 @@ fn index_lifecycle_all_index_shapes_converge_after_late_writes_at_every_stage() 
         .expect("all-index validation test thread should spawn")
         .join()
         .expect("all-index validation test thread should not panic");
+}
+
+/// Proves a secondary build activates while public write batches never stop,
+/// both between explicit steps and under the automatic worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_lifecycle_secondary_build_activates_under_sustained_public_writes() {
+    let _permit = CONTRACT_SUITE
+        .acquire()
+        .await
+        .expect("lifecycle contract semaphore remains open");
+    db::index_lifecycle_testing::run_secondary_sustained_write_contracts().await;
 }
 
 /// Proves real public writes survive every secondary/vector build boundary.

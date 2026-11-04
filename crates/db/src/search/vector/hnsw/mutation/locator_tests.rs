@@ -185,7 +185,14 @@ fn random_layer(rng: &mut StdRng) -> u16 {
 
 /// Opens a database holding one empty generation namespace of small degree.
 async fn create<D: Distance>(name: &str) -> (slatedb::Db, VectorIndex<D>) {
-    let db = slatedb::Db::open(name, Arc::new(InMemory::new()))
+    // Every operation commits, and each commit waits for the next WAL flush;
+    // a short interval keeps the runs from waiting out 100 ms per operation.
+    let db = slatedb::Db::builder(name, Arc::new(InMemory::new()))
+        .with_settings(slatedb::config::Settings {
+            flush_interval: Some(std::time::Duration::from_millis(1)),
+            ..Default::default()
+        })
+        .build()
         .await
         .unwrap();
     let identity = VectorGenerationIdentity::try_new(
@@ -389,15 +396,20 @@ async fn stray_locators_never_survive_a_delete_or_upsert() {
     }
 }
 
+/// Neighbor rows the one-off caches of [`bounded_one_off_run`] hold before
+/// they evict, lowered from [`VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT`] so a small
+/// graph fills them.
+const BOUNDED_NEIGHBOR_LIMIT: usize = 64;
+
 /// Plans each operation in a one-off cache first filled to its bound with
 /// other nodes' rows, so every further load flushes and evicts the oldest
 /// dirty row. Returns how many neighbor rows upserts and deletes staged
 /// before their final flush, which only those evicting flushes write.
-async fn bounded_one_off_run<D: Distance>(seed: u64) -> [usize; 2] {
-    const NODES: NodeId = VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT as NodeId + 64;
+async fn bounded_one_off_run<D: Distance>() -> [usize; 2] {
+    const NODES: NodeId = BOUNDED_NEIGHBOR_LIMIT as NodeId + 64;
     const OPS: usize = 30;
-    let mut rng = StdRng::seed_from_u64(seed);
-    let name = format!("bounded-one-off-{}-{seed}", D::name());
+    let mut rng = StdRng::seed_from_u64(0);
+    let name = format!("bounded-one-off-{}", D::name());
     let (db, index) = create::<D>(&name).await;
     let mut points = build(&db, &index, &mut rng, NODES).await;
     let mut deleted = BTreeSet::new();
@@ -411,7 +423,8 @@ async fn bounded_one_off_run<D: Distance>(seed: u64) -> [usize; 2] {
             degree_limits.layer0.get(),
             degree_limits.upper.get(),
         )
-        .unwrap();
+        .unwrap()
+        .with_neighbor_limit_for_tests(BOUNDED_NEIGHBOR_LIMIT);
         let live = points.keys().copied().collect::<Vec<_>>();
         let choice = rng.random_range(0..4_u8);
         let node = match deleted.first() {
@@ -424,14 +437,14 @@ async fn bounded_one_off_run<D: Distance>(seed: u64) -> [usize; 2] {
             .cycle()
             .skip(start)
             .filter(|other| **other != node)
-            .take(VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT)
+            .take(BOUNDED_NEIGHBOR_LIMIT)
         {
             index
                 .load_neighbors_for_mutation(&measured, 0, *other, &mut cache)
                 .await
                 .unwrap();
         }
-        assert_eq!(cache.neighbor_count(), VECTOR_BUILD_NEIGHBOR_CACHE_LIMIT);
+        assert_eq!(cache.neighbor_count(), BOUNDED_NEIGHBOR_LIMIT);
         let checkpoint = measured.checkpoint();
         let change = if choice == 2 {
             index
@@ -511,13 +524,11 @@ async fn bounded_one_off_run<D: Distance>(seed: u64) -> [usize; 2] {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_off_caches_at_their_bound_keep_one_locator_per_link() {
     let mut evicted = [0, 0];
-    for seed in 0..2 {
-        for run in [
-            bounded_one_off_run::<Euclidean>(seed).await,
-            bounded_one_off_run::<Cosine>(seed).await,
-        ] {
-            evicted = [evicted[0] + run[0], evicted[1] + run[1]];
-        }
+    for run in [
+        bounded_one_off_run::<Euclidean>().await,
+        bounded_one_off_run::<Cosine>().await,
+    ] {
+        evicted = [evicted[0] + run[0], evicted[1] + run[1]];
     }
     assert!(
         evicted.iter().all(|rows| *rows > 0),

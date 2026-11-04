@@ -657,6 +657,9 @@ async fn writes_forget_only_sets_whose_footprint_they_reach_contract() {
         ),
         label_membership(Predicate::eq("$label", "Attribute"), None),
     ];
+    // Every write is aborted, so each one starts from the same fixture, and
+    // only resolves counted from its own start are its sets'.
+    let fixture = fixture("retention-writes").await;
     // The first two plans differ only in their residual, so they share one
     // entry: the second finds the set the first resolved.
     for (write, resolves) in [
@@ -673,14 +676,14 @@ async fn writes_forget_only_sets_whose_footprint_they_reach_contract() {
         (Write::DropAttribute, [1, 0, 1, 1]),
         (Write::Relabel, [1, 0, 1, 1]),
     ] {
-        let fixture = fixture(&format!("retention-write-{write:?}")).await;
         let mut ctx = write_context(&fixture, context::ParamBindings::default()).await;
         let before = live_rows(&fixture, None, None);
+        let start = resolved(&fixture.db);
         let mut warm = Vec::new();
         for set in &sets {
             warm.push(exact(&mut ctx, set, &before).await);
         }
-        assert_eq!(resolved(&fixture.db), sets.len() - 1, "{write:?}");
+        assert_eq!(resolved(&fixture.db) - start, sets.len() - 1, "{write:?}");
         assert_eq!(ctx.prepared_memberships.len(), sets.len() - 1, "{write:?}");
 
         let (created, deleted) = write.apply(&mut ctx, &fixture).await;
