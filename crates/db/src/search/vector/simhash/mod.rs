@@ -14,6 +14,7 @@ use crate::encoding::NodeId;
 use crate::error::HelixDbError;
 use crate::search::vector::generation::{CURRENT_SIMHASH_ALGORITHM_VERSION, CURRENT_SIMHASH_SEED};
 use crate::search::vector::storage::transaction::MeasuredVectorTransaction;
+use crate::transaction::Mutation;
 
 use self::registry::SimHasherRegistryError;
 use super::{unaligned_vector::UnalignedVectorCodec, ValidatedMetricVector};
@@ -223,7 +224,7 @@ impl SimHashCache {
         simhash: SimHash,
     ) -> Result<(), HelixDbError> {
         let key = self.make_simhash_key(node_id);
-        txn.put(key, encode_simhash(simhash.bits()))?;
+        Mutation::put(txn, key, encode_simhash(simhash.bits()))?;
         Ok(())
     }
 

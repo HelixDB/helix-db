@@ -1,4 +1,17 @@
 #![recursion_limit = "256"]
+// Tests and the test, soak and bench-only features seed fixtures and inject
+// corrupt rows with the backend's raw puts. Shipped builds stage every put
+// through `transaction::Mutation`, which keeps merge-maintained membership
+// rows decodable; clippy.toml forbids the raw puts there.
+#![cfg_attr(
+    any(
+        test,
+        feature = "index-lifecycle-testing",
+        feature = "production-scale",
+        feature = "bench-internals"
+    ),
+    allow(clippy::disallowed_methods)
+)]
 
 //! Helix database runtime, storage, query execution, and index lifecycle API.
 

@@ -12247,6 +12247,7 @@ async fn empty_at_most_one_row_returns_are_empty_arrays() {
 /// The overlapping transactions force the conflict, so this arm's coverage does not depend on
 /// another test's writers happening to collide.
 #[tokio::test]
+#[allow(clippy::disallowed_methods)] // Raw backend writes are the subject here.
 async fn storage_write_conflict_reports_transaction_conflict_code() {
     let storage = slatedb::Db::builder(
         "storage-write-conflict",

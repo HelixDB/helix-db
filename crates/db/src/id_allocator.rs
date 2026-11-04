@@ -270,7 +270,7 @@ impl IdAllocator {
 
         // Persist new high watermark to storage
         let encoded = IdAllocationWatermarkValue::new(new_lease_end).encode();
-        self.db.put(&self.watermark_key, &encoded).await?;
+        crate::transaction::put_unbatched(&self.db, &self.watermark_key, &encoded).await?;
 
         // Update in-memory lease boundary
         self.lease_end.store(new_lease_end, Ordering::Release);

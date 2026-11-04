@@ -29,6 +29,7 @@ use crate::search::vector::{
     self, Distance, ValidatedVectorGenerationHandle, VectorIndex, VectorWriteMeasurement,
     VectorWriteRecorder,
 };
+use crate::transaction::Mutation;
 
 use super::{
     decode_json, encode_json, scan_bounds_for_prefix, scoped_metadata_key, MigrationResumeKey,
@@ -285,7 +286,7 @@ async fn ensure_job(db: &Db, scope: DataScope) -> Result<()> {
     let key = job_key(scope);
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     if transaction.get(&key).await?.is_none() {
-        transaction.put(&key, encode_json(&MigrationJob::initial())?)?;
+        Mutation::put(&transaction, &key, encode_json(&MigrationJob::initial())?)?;
         transaction.commit().await?;
     } else {
         transaction.rollback();
@@ -314,7 +315,7 @@ async fn record_resume(db: &Db, scope: DataScope) -> Result<()> {
             .resume_count
             .checked_add(1)
             .ok_or_else(|| overflow("resume count"))?;
-        transaction.put(&key, encode_json(&job)?)?;
+        Mutation::put(&transaction, &key, encode_json(&job)?)?;
         transaction.commit().await?;
     } else {
         transaction.rollback();
@@ -447,7 +448,7 @@ async fn select_target(
             after_index_key: last_key,
         },
     };
-    transaction.put(job_key(scope), encode_json(&job)?)?;
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
     transaction.commit().await?;
     tracing::info!(
         migration = "vector_simhash_directory_v1",
@@ -584,7 +585,7 @@ async fn preflight<D: Distance>(
             existing_markers,
         }
     };
-    transaction.put(job_key(scope), encode_json(&job)?)?;
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
     #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPreflightCommitBefore,
@@ -703,7 +704,7 @@ async fn backfill<D: Distance>(
             marker_writes,
         }
     };
-    transaction.put(job_key(scope), encode_json(&job)?)?;
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
     #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryBackfillCommitBefore,
@@ -799,7 +800,7 @@ async fn verify<D: Distance>(
             verified_markers,
         }
     };
-    transaction.put(job_key(scope), encode_json(&job)?)?;
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
     #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryVerificationCommitBefore,
@@ -883,12 +884,17 @@ async fn publish(db: &Db, scope: DataScope, mut job: MigrationJob) -> Result<()>
     job.state = MigrationState::SelectTarget {
         after_index_key: Some(target.index_key.clone()),
     };
-    transaction.put(
+    Mutation::put(
+        &transaction,
         target.index_key.as_bytes(),
         encode_index_record(&next_record),
     )?;
-    transaction.put(operation_key, encode_operation_record(&next_operation))?;
-    transaction.put(job_key(scope), encode_json(&job)?)?;
+    Mutation::put(
+        &transaction,
+        operation_key,
+        encode_operation_record(&next_operation),
+    )?;
+    Mutation::put(&transaction, job_key(scope), encode_json(&job)?)?;
     #[cfg(test)]
     super::trip_migration_failpoint(
         super::MigrationFailpoint::VectorDirectoryPublicationCommitBefore,

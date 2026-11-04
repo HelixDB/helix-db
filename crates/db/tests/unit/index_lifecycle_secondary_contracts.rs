@@ -208,7 +208,7 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
         EntityWrite::Bitmap { present: true, .. }
     ));
     assert!(matches!(add.writes[1], EntityWrite::Put { .. }));
-    add.stage(&transaction).await.unwrap();
+    add.stage(&transaction).unwrap();
 
     // The applied row proves the generation already holds the value.
     let EntityReconciliation::Writes { plan: noop, .. } = reconciliation_plan(
@@ -262,7 +262,7 @@ async fn reconciliation_executes_exact_bitmap_add_noop_and_remove_programs() {
         EntityWrite::Bitmap { present: false, .. }
     ));
     assert!(matches!(remove.writes[1], EntityWrite::Delete(_)));
-    remove.stage(&transaction).await.unwrap();
+    remove.stage(&transaction).unwrap();
     transaction.rollback();
     db.close().await.unwrap();
 }

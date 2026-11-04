@@ -361,7 +361,7 @@ impl<'db> ExecutionContext<'db> {
 
         let mut scope = self.take_or_begin_write_scope().await?;
         if !edge_ids.is_empty() {
-            scope.index_context.flush_topology(&scope.txn).await?;
+            scope.index_context.flush_topology(&scope.txn)?;
             let mut observed_edges = self
                 .observe_edge_deletions(&scope.txn, edge_ids.iter().copied(), &scope.index_context)
                 .await?;
@@ -409,7 +409,7 @@ impl<'db> ExecutionContext<'db> {
         }
 
         let mut scope = self.take_or_begin_write_scope().await?;
-        scope.index_context.flush_topology(&scope.txn).await?;
+        scope.index_context.flush_topology(&scope.txn)?;
         let tenant_scope = self.tenant_scope;
         let pair_keys = source_nodes
             .iter()
@@ -483,7 +483,7 @@ impl<'db> ExecutionContext<'db> {
         }
 
         let mut scope = self.take_or_begin_write_scope().await?;
-        scope.index_context.flush_topology(&scope.txn).await?;
+        scope.index_context.flush_topology(&scope.txn)?;
         let mut observed_edges = self
             .observe_edge_deletions(&scope.txn, edge_ids.iter().copied(), &scope.index_context)
             .await?;

@@ -47,19 +47,36 @@ pub(crate) async fn migrate_all_tenant_keys(db: &Db) -> Result<()> {
         return Ok(());
     }
 
-    copy_legacy_tenant_keys(db).await?;
+    let legacy_rows = copy_legacy_tenant_keys(db).await?;
     verify_legacy_tenant_keys(db).await?;
+    // Copied rows are not validated, and membership deltas are staged without
+    // reading their row. Flushing the copies before any writer runs keeps a
+    // legacy row that does not decode out of the memtable a later delta lands
+    // in, so it can never fail a memtable flush; reads of it fail closed. The
+    // flush precedes cleanup: until cleanup commits, a restart finds the
+    // legacy rows again and flushes again. A database without legacy rows
+    // skips it.
+    if legacy_rows {
+        db.flush_with_options(slatedb::config::FlushOptions {
+            flush_type: slatedb::config::FlushType::MemTable,
+        })
+        .await?;
+    }
     cleanup_legacy_tenant_keys(db).await?;
     publish_completion(db).await
 }
 
-async fn copy_legacy_tenant_keys(db: &Db) -> Result<()> {
+/// Copies every legacy row and reports whether any exists, copied by this
+/// run or an interrupted earlier one.
+async fn copy_legacy_tenant_keys(db: &Db) -> Result<bool> {
     let mut rows = db.scan(..).await?;
     let mut batch = Vec::with_capacity(MIGRATION_BATCH_SIZE);
+    let mut found = false;
     while let Some(row) = rows.next().await? {
         let Some(row) = migration_row(row.key, row.value)? else {
             continue;
         };
+        found = true;
         batch.push(row);
         if batch.len() == MIGRATION_BATCH_SIZE {
             copy_batch(db, core::mem::take(&mut batch)).await?;
@@ -68,7 +85,7 @@ async fn copy_legacy_tenant_keys(db: &Db) -> Result<()> {
     if !batch.is_empty() {
         copy_batch(db, batch).await?;
     }
-    Ok(())
+    Ok(found)
 }
 
 async fn copy_batch(db: &Db, batch: Vec<TenantKeyMigrationRow>) -> Result<()> {
@@ -88,6 +105,10 @@ async fn copy_batch(db: &Db, batch: Vec<TenantKeyMigrationRow>) -> Result<()> {
                 ));
             }
             None => {
+                // Legacy rows are copied verbatim. Readers and the merge
+                // operator accept the trailing bytes older built-in bitmaps
+                // carry; refusing a row here would fail every startup retry.
+                #[allow(clippy::disallowed_methods)]
                 transaction.put(row.destination_key, row.destination_value)?;
                 changed = true;
             }
@@ -709,6 +730,119 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    /// Older built-in bitmaps can carry trailing bytes that readers ignore.
+    /// The startup copy moves every legacy row verbatim, so such a row, or one
+    /// already corrupt, never fails startup. Deltas keep merging into the
+    /// tolerated rows after the move, and a delta onto the corrupt row still
+    /// lets the next memtable flush build: the copy was flushed first.
+    #[tokio::test]
+    async fn legacy_membership_rows_migrate_verbatim_and_keep_taking_deltas() {
+        use crate::encoding::v2::keys::{AdjacencyKey, EdgePairIndexKey};
+        use crate::encoding::v2::values::{adjacency, indexes::SecondaryEqualityValue};
+        use crate::transaction::{merges, Mutation};
+
+        let db = Db::builder("one-byte-tenant-membership", Arc::new(InMemory::new()))
+            .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+            .build()
+            .await
+            .unwrap();
+        let tenant = TenantId::from_u128(0x0102_0304_0506_0708_1112_1314_1516_1718);
+        let scope = DataScope::Tenant(tenant);
+        let suffixed =
+            |value: Bytes| Bytes::from([&value[..], b"deployed trailing bytes"].concat());
+        let mut edges = adjacency::Edges::new();
+        edges.add_out(1);
+        let bitmap = DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 2));
+        let adjacency_row = DataKeyKind::Adjacency(AdjacencyKey::new(1));
+        let rows = [
+            (
+                bitmap.clone(),
+                suffixed(SecondaryEqualityValue::encode_ids(
+                    &roaring::RoaringTreemap::from_iter([1, 2]),
+                )),
+            ),
+            (
+                adjacency_row.clone(),
+                suffixed(adjacency::encode_edges(&edges)),
+            ),
+            (
+                DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(3, 4)),
+                Bytes::from_static(b"corrupt"),
+            ),
+        ];
+        for (kind, value) in &rows {
+            let mut legacy = Vec::new();
+            legacy.put_u128(tenant.as_u128());
+            legacy.put_slice(&kind.to_bytes());
+            db.put(legacy, value.clone()).await.unwrap();
+        }
+
+        migrate_all_tenant_keys(&db).await.unwrap();
+
+        assert!(crate::migrations::tenant_key_envelope_ready(&db)
+            .await
+            .unwrap());
+        let destination = |kind: &DataKeyKind<'static>| {
+            GraphKey::Data {
+                scope,
+                kind: kind.clone(),
+            }
+            .to_bytes()
+        };
+        for (kind, value) in &rows {
+            assert_eq!(
+                db.get(destination(kind)).await.unwrap().as_ref(),
+                Some(value)
+            );
+        }
+        let bitmap_key = destination(&bitmap);
+        let adjacency_key = destination(&adjacency_row);
+        let corrupt_key = destination(&rows[2].0);
+        let mut delta = crate::encoding::v2::values::BitmapMembershipDelta::default();
+        delta.add(3);
+        let mut edge_delta = adjacency::AdjacencyMembershipDelta::default();
+        edge_delta.add_in(2);
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let mut batch = Mutation::merge_batch(&transaction, 3).unwrap();
+        drop(
+            batch
+                .bitmap(merges::Key::Encoded(&bitmap_key), &delta)
+                .unwrap(),
+        );
+        drop(
+            batch
+                .bitmap(merges::Key::Encoded(&corrupt_key), &delta)
+                .unwrap(),
+        );
+        drop(
+            batch
+                .adjacency(merges::Key::Encoded(&adjacency_key), &edge_delta)
+                .unwrap(),
+        );
+        batch.stage().unwrap();
+        transaction.commit().await.unwrap();
+        db.flush_with_options(slatedb::config::FlushOptions {
+            flush_type: slatedb::config::FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            SecondaryEqualityValue::decode(&db.get(&bitmap_key).await.unwrap().unwrap())
+                .unwrap()
+                .into_ids(),
+            roaring::RoaringTreemap::from_iter([1, 2, 3])
+        );
+        let merged =
+            adjacency::decode_edges(&db.get(&adjacency_key).await.unwrap().unwrap()).unwrap();
+        assert_eq!(merged.iter_out().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(merged.iter_in().collect::<Vec<_>>(), vec![2]);
+        assert!(db.get(&corrupt_key).await.is_err());
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn conflicting_destination_fails_without_deleting_the_source() {
         let db = Db::builder("one-byte-tenant-conflict", Arc::new(InMemory::new()))
@@ -857,7 +991,7 @@ mod tests {
             .to_bytes();
             db.put(&old, Bytes::from_static(b"value")).await.unwrap();
 
-            copy_legacy_tenant_keys(&db).await.unwrap();
+            assert!(copy_legacy_tenant_keys(&db).await.unwrap());
             assert!(db.get(&old).await.unwrap().is_some());
             assert!(db.get(&new).await.unwrap().is_some());
             if cleanup_before_restart {

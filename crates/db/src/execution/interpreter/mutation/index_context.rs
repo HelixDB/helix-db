@@ -145,11 +145,11 @@ impl MutationIndexContext {
     }
 
     /// Flushes one topology epoch before topology-dependent reads.
-    pub(crate) async fn flush_topology(
+    pub(crate) fn flush_topology(
         &mut self,
         transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
-        self.topology_runtime.flush(transaction).await
+        self.topology_runtime.flush(transaction)
     }
 
     /// Reads current topology rows through the runtime's staged overlay.
@@ -162,11 +162,11 @@ impl MutationIndexContext {
     }
 
     /// Flushes and seals topology state at the commit boundary.
-    pub(crate) async fn prepare_topology(
+    pub(crate) fn prepare_topology(
         &mut self,
         transaction: &impl crate::transaction::Mutation,
     ) -> Result<(), crate::HelixDbError> {
-        self.topology_runtime.prepare(transaction).await
+        self.topology_runtime.prepare(transaction)
     }
 
     /// Flushes routed secondary mutations through one ordered observation batch.

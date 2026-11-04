@@ -477,6 +477,8 @@ async fn fenced_commit_outcome_crosses_http_once_and_is_terminal_to_the_rust_sdk
         .begin(slatedb::IsolationLevel::Snapshot)
         .await
         .expect("old transaction begins before fencing");
+    // A raw backend write: the fence contract concerns the backend itself.
+    #[allow(clippy::disallowed_methods)]
     old_transaction
         .put(b"business-id", b"exactly-once")
         .expect("old transaction stages a write");
