@@ -194,6 +194,17 @@ impl Scope {
         self.variables.contains(name)
     }
 
+    /// Whether an unqualified name resolves to a table rather than a column.
+    pub(super) fn is_table(&self, name: &str) -> bool {
+        self.by_alias
+            .get(&name.to_lowercase())
+            .is_some_and(|indices| {
+                indices
+                    .iter()
+                    .any(|&i| self.tables[i].role == Role::Written)
+            })
+    }
+
     /// Every table variable, in written order.
     pub(super) fn variables(&self) -> impl Iterator<Item = &str> {
         self.tables.iter().map(|t| t.variable.as_str())

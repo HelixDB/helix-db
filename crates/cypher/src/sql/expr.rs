@@ -273,6 +273,34 @@ impl Translator<'_> {
                 ),
                 span(),
             ),
+            // `user.name`, where sqlparser reads the bare word `user` as a
+            // function, names a column of a table with that variable.
+            E::CompoundFieldAccess { root, access_chain } => {
+                let table = match root.as_ref() {
+                    E::Function(ast::Function {
+                        name,
+                        args: ast::FunctionArguments::None,
+                        ..
+                    }) => match name.0.as_slice() {
+                        [ast::ObjectNamePart::Identifier(table)]
+                            if table.quote_style.is_none() && scope.is_table(&table.value) =>
+                        {
+                            Some(table.clone())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                match (table, access_chain.as_slice()) {
+                    (Some(table), [ast::AccessExpr::Dot(E::Identifier(column))]) => {
+                        scope.column(&[table, column.clone()], span())
+                    }
+                    _ => Err(unsupported(
+                        format!("the expression `{}`", self.excerpt(span())),
+                        span(),
+                    )),
+                }
+            }
             E::Exists { .. } | E::Subquery(_) | E::InSubquery { .. } => Err(QueryError::compile(
                 category::UNSUPPORTED_FEATURE,
                 detail::PROCEDURES_AND_SUBQUERIES,
@@ -624,6 +652,15 @@ impl Translator<'_> {
             )
             .at(span));
         };
+        // sqlparser reads some bare words, such as `user`, as functions without
+        // parentheses; when a table has that variable, the word is the table,
+        // so a `User` table's default variable stays usable.
+        if matches!(function.args, ast::FunctionArguments::None)
+            && name.quote_style.is_none()
+            && scope.is_table(&name.value)
+        {
+            return scope.column(std::slice::from_ref(name), span);
+        }
         let (arguments, distinct, star) = match &function.args {
             ast::FunctionArguments::None => (Vec::new(), false, false),
             ast::FunctionArguments::Subquery(_) => {

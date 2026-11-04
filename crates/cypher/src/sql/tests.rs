@@ -1181,3 +1181,18 @@ fn windows_apply_before_columns_are_read() {
         detail::INVALID_STATEMENT,
     );
 }
+
+#[test]
+fn bare_words_naming_a_table_are_the_table() {
+    assert_eq!(
+        cypher("INSERT INTO User (name) VALUES ('a'), ('b') RETURNING id(user) AS id"),
+        "UNWIND [{name: 'a'}, {name: 'b'}] AS properties CREATE (user:User) \
+         SET user = properties WITH user RETURN id(user) AS id"
+    );
+    assert_eq!(
+        cypher("SELECT user, user.name FROM User WHERE user.name = 'a'"),
+        "MATCH (user:User) WHERE user.name = 'a' RETURN user, user.name"
+    );
+    // Without such a table, the word stays a function for the binder to judge.
+    assert_eq!(cypher("SELECT user"), "RETURN user()");
+}
