@@ -190,6 +190,10 @@ impl Scope {
         self.tables.iter().filter(|t| t.role == Role::Written)
     }
 
+    pub(super) fn has_variable(&self, name: &str) -> bool {
+        self.variables.contains(name)
+    }
+
     /// Every table variable, in written order.
     pub(super) fn variables(&self) -> impl Iterator<Item = &str> {
         self.tables.iter().map(|t| t.variable.as_str())

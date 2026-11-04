@@ -284,6 +284,7 @@ impl Translator<'_> {
             .transpose()?
             .unwrap_or_default();
         let mut clauses = Vec::new();
+        let patterns_empty = patterns.is_empty();
         if !patterns.is_empty() {
             clauses.push(Clause::Match {
                 patterns,
@@ -300,6 +301,64 @@ impl Translator<'_> {
                 .filter_map(|p| p.expression.as_ref())
                 .any(aggregates);
         if !aggregating {
+            // Reading a column can fail, so Cypher only stops a scan at a
+            // LIMIT whose projection passes variables along. Windowing the
+            // table variables in a WITH, then reading columns in RETURN,
+            // returns the same rows and lets the scan stop early.
+            let windowed = (window.skip.is_some() || window.limit.is_some())
+                && !distinct
+                && !patterns_empty
+                // An alias that shadows a table variable would change what
+                // ORDER BY means outside RETURN.
+                && projected
+                    .iter()
+                    .filter(|p| p.alias != Alias::Text)
+                    .all(|p| !scope.has_variable(&p.name));
+            if windowed {
+                let aliased: HashMap<&str, &Expr> = projected
+                    .iter()
+                    .filter(|p| p.alias != Alias::Text)
+                    .filter_map(|p| Some((p.name.as_str(), p.expression.as_ref()?)))
+                    .collect();
+                let ordering = ordering
+                    .into_iter()
+                    .map(|(order, descending)| {
+                        // Before RETURN, an alias is its select-list expression.
+                        let order = rewrite(&order, &mut |e| {
+                            let ExprKind::Variable(name) = e.kind() else {
+                                return Ok(None);
+                            };
+                            aliased
+                                .get(name.as_str())
+                                .map(|expression| self.copy(expression))
+                                .transpose()
+                        })?;
+                        Ok((order, descending))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                clauses.push(Clause::Project {
+                    returning: false,
+                    items: scope
+                        .variables()
+                        .map(|name| Ok(item(variable(name, span)?, None)))
+                        .collect::<Result<_>>()?,
+                    distinct: false,
+                    ordering,
+                    skip: window.skip,
+                    limit: window.limit,
+                    predicate: None,
+                });
+                clauses.push(Clause::Project {
+                    returning: true,
+                    items: projected.into_iter().map(Projected::item).collect(),
+                    distinct: false,
+                    ordering: Vec::new(),
+                    skip: None,
+                    limit: None,
+                    predicate: None,
+                });
+                return Ok(syntax::Statement { clauses });
+            }
             clauses.push(Clause::Project {
                 returning: true,
                 items: projected.into_iter().map(Projected::item).collect(),

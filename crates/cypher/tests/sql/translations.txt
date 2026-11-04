@@ -10,7 +10,9 @@
 # `divergence:` comments mark where HelixDB's translation differs from
 # neo4j-jdbc's and why. Throughout, SUM(x) becomes
 # `CASE count(x) WHEN 0 THEN NULL ELSE sum(x) END`: SQL's SUM of no values is
-# null, Cypher's sum is 0.
+# null, Cypher's sum is 0. A window (ORDER BY with SKIP or LIMIT) without
+# DISTINCT or grouping applies to the table variables in a WITH before RETURN
+# reads columns, so HelixDB can stop a scan at the LIMIT.
 
 # simple.adoc t1_1
 SELECT 1
@@ -87,15 +89,15 @@ SELECT p.`productName`, p.`unitPrice`
 FROM products as p
 ORDER BY p.`unitPrice` DESC
 LIMIT 10
-=> MATCH (p:Product) RETURN p.productName, p.unitPrice ORDER BY p.unitPrice DESC LIMIT 10
+=> MATCH (p:Product) WITH p ORDER BY p.unitPrice DESC LIMIT 10 RETURN p.productName, p.unitPrice
 
 # simple.adoc offset_queries
 SELECT name, age FROM People p ORDER BY name LIMIT 5 OFFSET 10
-=> MATCH (p:People) RETURN p.name AS name, p.age AS age ORDER BY p.name SKIP 10 LIMIT 5
+=> MATCH (p:People) WITH p ORDER BY p.name SKIP 10 LIMIT 5 RETURN p.name AS name, p.age AS age
 
 # simple.adoc offset_queries
 SELECT name FROM People p ORDER BY name LIMIT 3 OFFSET 0
-=> MATCH (p:People) RETURN p.name AS name ORDER BY p.name SKIP 0 LIMIT 3
+=> MATCH (p:People) WITH p ORDER BY p.name SKIP 0 LIMIT 3 RETURN p.name AS name
 
 # simple.adoc offset_queries
 SELECT department, count(*) AS cnt FROM People p GROUP BY department ORDER BY department LIMIT 2 OFFSET 1
@@ -235,14 +237,14 @@ SELECT COUNT(o) FROM Orders o
 SELECT TOP 25 Country
 FROM Customers
 ORDER BY Country, ContactName
-=> MATCH (customers:Customer) RETURN customers.Country AS Country ORDER BY customers.Country, customers.ContactName LIMIT 25
+=> MATCH (customers:Customer) WITH customers ORDER BY customers.Country, customers.ContactName LIMIT 25 RETURN customers.Country AS Country
 
 # SqlToCypherTests directCompare blog
 -- tables: Customers=Customer
 SELECT TOP 25 c
 FROM Customers c
 ORDER BY Country, ContactName
-=> MATCH (c:Customer) RETURN c ORDER BY c.Country, c.ContactName LIMIT 25
+=> MATCH (c:Customer) WITH c ORDER BY c.Country, c.ContactName LIMIT 25 RETURN c
 
 # SqlToCypherTests directCompare blog
 -- tables: Customers=Customer

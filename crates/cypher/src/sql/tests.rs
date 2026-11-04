@@ -428,15 +428,15 @@ fn select_clauses_follow_sql() {
     for (sql, expected) in [
         (
             "SELECT t.a FROM t LIMIT 2, 5",
-            "MATCH (t:t) RETURN t.a SKIP 2 LIMIT 5",
+            "MATCH (t:t) WITH t SKIP 2 LIMIT 5 RETURN t.a",
         ),
         (
             "SELECT t.a FROM t OFFSET 3 ROWS FETCH FIRST 4 ROWS ONLY",
-            "MATCH (t:t) RETURN t.a SKIP 3 LIMIT 4",
+            "MATCH (t:t) WITH t SKIP 3 LIMIT 4 RETURN t.a",
         ),
         (
             "SELECT t.a FROM t LIMIT ? OFFSET ?",
-            "MATCH (t:t) RETURN t.a SKIP $2 LIMIT $1",
+            "MATCH (t:t) WITH t SKIP $2 LIMIT $1 RETURN t.a",
         ),
         (
             "SELECT t.a AS x FROM t ORDER BY x DESC NULLS FIRST, t.b ASC NULLS LAST",
@@ -1052,7 +1052,7 @@ fn rare_forms_follow_their_rules() {
         ),
         (
             "SELECT TOP (5) t.a FROM t",
-            "ok MATCH (t:t) RETURN t.a LIMIT 5",
+            "ok MATCH (t:t) WITH t LIMIT 5 RETURN t.a",
         ),
         (
             "SELECT TOP 18446744073709551615 t.a FROM t",
@@ -1140,4 +1140,44 @@ fn helpers_stay_out_of_results_and_names_stay_unique() {
     ] {
         assert_error(sql, category::SYNTAX_ERROR, detail::INVALID_AGGREGATION);
     }
+}
+
+/// A window without DISTINCT or grouping applies to the table variables
+/// before RETURN reads columns; ORDER BY reads aliases as their expressions.
+#[test]
+fn windows_apply_before_columns_are_read() {
+    for (sql, expected) in [
+        (
+            "SELECT u.name AS name FROM User u WHERE u.active ORDER BY name DESC LIMIT 10",
+            "MATCH (u:User) WHERE u.active WITH u ORDER BY u.name DESC LIMIT 10 RETURN u.name AS name",
+        ),
+        (
+            "SELECT * FROM User u NATURAL JOIN FOLLOWS NATURAL JOIN User f ORDER BY f.name LIMIT 3",
+            "MATCH (u:User)-[follows:FOLLOWS]->(f:User) WITH u, follows, f ORDER BY f.name LIMIT 3 RETURN *",
+        ),
+        (
+            "SELECT u.a + 1 AS x FROM User u ORDER BY x OFFSET 2",
+            "MATCH (u:User) WITH u ORDER BY u.a + 1 SKIP 2 RETURN u.a + 1 AS x",
+        ),
+        (
+            "SELECT DISTINCT u.name FROM User u LIMIT 5",
+            "MATCH (u:User) RETURN DISTINCT u.name LIMIT 5",
+        ),
+        (
+            "SELECT u.name AS u FROM User u LIMIT 5",
+            "MATCH (u:User) RETURN u.name AS u LIMIT 5",
+        ),
+        ("SELECT 1 LIMIT 1", "RETURN 1 LIMIT 1"),
+        (
+            "SELECT u.name FROM User u, Post p LIMIT 2",
+            "MATCH (u:User), (p:Post) WITH u, p LIMIT 2 RETURN u.name",
+        ),
+    ] {
+        assert_eq!(cypher(sql), expected, "{sql}");
+    }
+    assert_error(
+        "SELECT * FROM User u ORDER BY 1 LIMIT 3",
+        category::SYNTAX_ERROR,
+        detail::INVALID_STATEMENT,
+    );
 }
