@@ -201,6 +201,13 @@ impl Translator<'_> {
                 span,
             ));
         }
+        if select.projection.is_empty() {
+            return Err(invalid(
+                detail::INVALID_STATEMENT,
+                "SELECT needs at least one column",
+                span,
+            ));
+        }
         let distinct = match &select.distinct {
             None | Some(ast::Distinct::All) => false,
             Some(ast::Distinct::Distinct) => true,

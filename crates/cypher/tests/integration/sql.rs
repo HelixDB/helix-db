@@ -109,7 +109,11 @@ fn the_corpus_translates_as_expected() {
                         })
                         .to_string();
                     let actual = statement.to_string();
-                    if actual != expected {
+                    // The printed translation is valid Cypher for the same tree.
+                    let reprinted = helix_cypher::parse(&actual).map(|s| s.to_string());
+                    if reprinted.as_ref() != Ok(&actual) {
+                        Some(format!("printed `{actual}` parses as {reprinted:?}"))
+                    } else if actual != expected {
                         Some(format!("expected `{expected}`\n     got `{actual}`"))
                     } else {
                         match (helix_cypher::resolve(&statement), rejected) {

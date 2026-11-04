@@ -211,8 +211,10 @@ const MAX_TOKENS: usize = 1_000_000;
 const MAX_OPERATORS: usize = 1024;
 
 /// An overestimate of sqlparser's token count without tokenizing: every
-/// whitespace or punctuation character is a token, as is every run of word
-/// characters, quoted text or comment.
+/// whitespace or punctuation character is a token, as is every run of
+/// letters or of ASCII digits, and every quoted text or comment. A quote ends
+/// at its first closing quote, never later than sqlparser ends it, so quoted
+/// text cannot hide tokens.
 fn token_estimate(text: &str) -> usize {
     let mut characters = text.chars().peekable();
     let mut count = 0;
@@ -234,11 +236,17 @@ fn token_estimate(text: &str) -> usize {
                     .by_ref()
                     .find(|&next| std::mem::replace(&mut previous, next) == '*' && next == '/');
             }
-            c if c.is_alphanumeric() || c == '_' => {
-                while characters
-                    .next_if(|next| next.is_alphanumeric() || *next == '_')
-                    .is_some()
-                {}
+            c if c.is_alphabetic() || c.is_ascii_digit() || c == '_' => {
+                // sqlparser can split a run where digits start or stop, as in `0a`.
+                let mut digit = c.is_ascii_digit();
+                while let Some(next) = characters
+                    .next_if(|next| next.is_alphabetic() || next.is_ascii_digit() || *next == '_')
+                {
+                    if next.is_ascii_digit() != digit {
+                        digit = !digit;
+                        count += 1;
+                    }
+                }
             }
             _ => {}
         }
@@ -247,7 +255,9 @@ fn token_estimate(text: &str) -> usize {
 }
 
 /// Binary and postfix operator tokens. A sign after an operator, an opening
-/// bracket or a comma is unary: the parser bounds those by its depth limit.
+/// bracket, a comma or a keyword that starts an expression is unary: the
+/// parser bounds those by its depth limit. Only the token before a sign
+/// decides, so no chain of binary signs goes uncounted.
 #[expect(
     clippy::wildcard_enum_match_arm,
     reason = "sqlparser's token set is open-ended; every other symbol counts as an operator"
@@ -260,15 +270,43 @@ fn operators(tokens: &[tokenizer::TokenWithSpan]) -> usize {
         .filter(|token| !matches!(token.token, T::Whitespace(_)))
         .filter(|token| {
             let (operand, operator) = match &token.token {
-                T::Word(word) => {
-                    let keyword = [
-                        "AND", "OR", "XOR", "IS", "LIKE", "ILIKE", "IN", "BETWEEN", "COLLATE",
-                    ]
-                    .iter()
-                    .any(|k| word.value.eq_ignore_ascii_case(k))
-                        && word.quote_style.is_none();
-                    (!keyword, keyword)
+                T::Word(word) if word.quote_style.is_none() => {
+                    use sqlparser::keywords::Keyword as K;
+                    match word.keyword {
+                        K::AND
+                        | K::OR
+                        | K::XOR
+                        | K::IS
+                        | K::LIKE
+                        | K::ILIKE
+                        | K::IN
+                        | K::BETWEEN
+                        | K::COLLATE => (false, true),
+                        K::SELECT
+                        | K::WHERE
+                        | K::NOT
+                        | K::ON
+                        | K::BY
+                        | K::WHEN
+                        | K::THEN
+                        | K::ELSE
+                        | K::CASE
+                        | K::VALUES
+                        | K::SET
+                        | K::HAVING
+                        | K::LIMIT
+                        | K::OFFSET
+                        | K::RETURNING
+                        | K::DISTINCT
+                        | K::ALL
+                        | K::TOP
+                        | K::FETCH
+                        | K::FIRST
+                        | K::NEXT => (false, false),
+                        _ => (true, false),
+                    }
                 }
+                T::Word(_) => (true, false),
                 T::Number(..)
                 | T::Char(_)
                 | T::SingleQuotedString(_)

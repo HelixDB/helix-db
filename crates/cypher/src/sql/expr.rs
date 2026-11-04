@@ -205,6 +205,13 @@ impl Translator<'_> {
                 ..
             } => {
                 let span = span();
+                if substring_from.is_none() && substring_for.is_none() {
+                    return Err(invalid(
+                        detail::INVALID_NUMBER_OF_ARGUMENTS,
+                        "SUBSTRING needs a start or a length",
+                        span,
+                    ));
+                }
                 let value = self.expr(expr, scope)?;
                 let start = substring_from
                     .as_deref()
@@ -216,12 +223,19 @@ impl Translator<'_> {
                     .transpose()?;
                 substring(value, start, length, span)
             }
+            // Cypher trims whitespace, so the only characters to trim are spaces.
             E::Trim {
                 trim_where,
-                trim_what: None,
+                trim_what,
                 expr,
                 trim_characters: None,
-            } => {
+            } if trim_what.as_deref().is_none_or(|what| {
+                matches!(what, E::Value(ast::ValueWithSpan {
+                    value: ast::Value::SingleQuotedString(text),
+                    ..
+                }) if text == " ")
+            }) =>
+            {
                 let function = match trim_where {
                     None | Some(ast::TrimWhereField::Both) => "trim",
                     Some(ast::TrimWhereField::Leading) => "ltrim",

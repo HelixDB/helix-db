@@ -594,34 +594,39 @@ impl Translator<'_> {
                         self.at(condition),
                     ));
                 };
-                let [Some(_), Some(second)] = [left, second].map(|side| column_parts(side)) else {
+                let [Some(first), Some(second)] = [left, second].map(|side| column_parts(side))
+                else {
                     return Err(unsupported(
                         "join conditions other than one column equality; move filters to WHERE",
                         self.at(condition),
                     ));
                 };
+                let names_right = |q: &str| {
+                    right.is_some_and(|right| {
+                        right.alias.as_deref().map_or_else(
+                            || right.name.eq_ignore_ascii_case(q),
+                            |alias| alias.eq_ignore_ascii_case(q),
+                        )
+                    })
+                };
+                // Both columns must belong to tables of the join.
+                for parts in [&first, &second] {
+                    if let [.., qualifier, _] = parts.as_slice()
+                        && !names_right(&qualifier.value)
+                    {
+                        scope.qualified(&qualifier.value, self.at(condition))?;
+                    }
+                }
                 let (qualifier, column) = match second.as_slice() {
                     [column] => (None, column),
                     [.., qualifier, column] => (Some(qualifier.value.as_str()), column),
                     [] => return Err(unsupported("an empty column name", span)),
                 };
                 // The relationship leaves the table that owns the second column.
-                let right = right.filter(|right| {
-                    qualifier.is_some_and(|q| {
-                        right.alias.as_deref().map_or_else(
-                            || right.name.eq_ignore_ascii_case(q),
-                            |alias| alias.eq_ignore_ascii_case(q),
-                        )
-                    })
-                });
-                let direction = match (right, qualifier) {
-                    (Some(_), _) => r::Direction::Incoming,
-                    (None, Some(q)) => {
-                        // Check that the qualifier names a table of the join.
-                        scope.qualified(q, self.at(condition))?;
-                        r::Direction::Outgoing
-                    }
-                    (None, None) => r::Direction::Outgoing,
+                let direction = if qualifier.is_some_and(names_right) {
+                    r::Direction::Incoming
+                } else {
+                    r::Direction::Outgoing
                 };
                 Ok(Join {
                     column: Some(column.value.clone()),
