@@ -1,0 +1,214 @@
+---
+title: "Query HelixDB with SQL"
+description: "Run SQL statements against the graph: how tables, columns and joins map to nodes and relationships, and which SQL HelixDB translates"
+sidebarTitle: "SQL"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+HelixDB translates SQL statements into its [Cypher profile](/database/helix-db/query-guides/cypher)
+and runs them on the same graph, transactions, and indexes. A table is a node
+label, a column is a property, and a join is a relationship. The translation
+reads no schema: it follows fixed naming rules, which you can adjust with
+mappings.
+
+The translation is a port of the SQL-to-Cypher translator in the
+[Neo4j JDBC driver](https://github.com/neo4j/neo4j-jdbc). It covers `SELECT`,
+`INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE`. Everything it cannot translate
+faithfully is rejected before anything runs.
+
+## Run a statement
+
+Send one statement to `POST /v2/sql` on a local server. The request, results,
+headers, and errors are those of [`POST /v2/cypher`](/database/helix-db/query-guides/http-api#cypher),
+plus optional `mappings`:
+
+```sh
+curl http://localhost:6969/v2/sql \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"SELECT p.name, p.born FROM Person p WHERE p.born > ? ORDER BY p.born","parameters":[1900]}'
+```
+
+```json
+{ "columns": ["p.name", "p.born"], "rows": [["Grace", 1906], ["Alan", 1912]] }
+```
+
+`?` placeholders bind to `parameters` given as a list, in written order: the
+first `?` is the first value. `:name` and `$name` placeholders bind to
+`parameters` given as an object. Values use the
+[lossless JSON encoding](/database/helix-db/query-guides/cypher#values-and-parameters).
+
+A result column keeps its SQL name: an unqualified column is named after the
+column, an alias after the alias, and any other entry after its text as written,
+such as `p.name` or `COUNT(*)`. Repeated names are numbered: `SELECT 1, 1`
+returns the columns `1` and `1_2`.
+
+## Tables and columns
+
+| SQL | Cypher |
+| --- | --- |
+| `FROM Person p` | `MATCH (p:Person)`; the variable is the lowercased alias |
+| `FROM Person` | `MATCH (person:Person)`; the variable is the lowercased table name |
+| `SELECT p.name`, or `SELECT name` with one table | `p.name` |
+| `SELECT p` | the node itself |
+| `SELECT p.*` | `properties(p)`, a map of the node's properties |
+| `SELECT *` | every table variable |
+| `SELECT v$id` | `id(p)` |
+
+Labels and properties are case-sensitive and keep the case you write. Schema
+prefixes such as `public.Person` are ignored. With more than one table, every
+column needs a table qualifier.
+
+A table named `Start_TYPE_End`, such as `Person_ACTED_IN_Movie`, is a
+**relationship table**. On its own it matches
+`(_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie)`. Its
+unqualified columns are relationship properties, `Person.name` or `_start.name`
+is a property of the start node, `Movie.title` or `_end.title` of the end node,
+and `person_name` is shorthand for `_start.name`. The start and end each need a
+lowercase letter, so upper-case table names such as `ORDER_LINE_ITEMS` stay node
+labels.
+
+## Joins
+
+Joins become relationship patterns by these rules:
+
+| SQL | Cypher |
+| --- | --- |
+| `Person p JOIN Movie m ON m.id = p.directed` | `(p:Person)-[directed:DIRECTED]->(m:Movie)` |
+| `Customer c JOIN Order o ON c.id = o.customer_id` | `(c:Customer)<-[customer_id:CUSTOMER_ID]-(o:Order)` |
+| `Person p JOIN Movie m USING (ACTED_IN)` | `(p:Person)-[acted_in:ACTED_IN]->(m:Movie)` |
+| `Person p NATURAL JOIN Movie m` | `(p:Person)-->(m:Movie)` |
+| `Person p JOIN ACTED_IN r ON .. JOIN Movie m ON ..` | `(p:Person)-[r:ACTED_IN]->(m:Movie)` |
+| `Person p, Movie m` or `CROSS JOIN` | `(p:Person), (m:Movie)` |
+
+- In a direct join, the second column of the `=` names the relationship type,
+  uppercased, and the relationship points away from the table it belongs to.
+- In a chain of three tables, the middle one is the relationship; longer chains
+  continue in pairs, and the last `ON` of each pair sets the direction.
+- Every `ON` must compare two columns with `=`. Put other conditions in `WHERE`.
+
+### Mappings
+
+`mappings` renames tables and join columns. Keys match case-insensitively:
+
+```json
+{
+  "query": "SELECT p.name, m.title FROM people p JOIN movies m ON m.id = p.movie_id",
+  "mappings": {
+    "tables": { "people": "Person", "movies": "Movie" },
+    "join_columns": { "people.movie_id": "DIRECTED" }
+  }
+}
+```
+
+This matches `(p:Person)-[directed:DIRECTED]->(m:Movie)`. A `join_columns` key
+names the join's left table and the column that names the type.
+
+## Statements
+
+| SQL | Cypher |
+| --- | --- |
+| `SELECT .. FROM .. WHERE ..` | `MATCH .. WHERE .. RETURN ..` |
+| `DISTINCT`, `ORDER BY`, `LIMIT`, `OFFSET`, `FETCH FIRST`, `TOP` | `DISTINCT`, `ORDER BY`, `LIMIT`, `SKIP` |
+| `GROUP BY`, `HAVING` | implicit grouping, or `WITH .. WHERE ..` when SQL groups differently |
+| `INSERT INTO Person (name, born) VALUES (..)` | `CREATE (person:Person {name: .., born: ..})` |
+| `INSERT .. VALUES (..), (..)` | `UNWIND [{..}, {..}] AS properties CREATE .. SET person = properties` |
+| `UPDATE Person SET born = born + 1 WHERE ..` | `MATCH (person:Person) WHERE .. SET person.born = person.born + 1` |
+| `DELETE FROM Person WHERE ..` | `MATCH (person:Person) WHERE .. DELETE person` |
+| `TRUNCATE TABLE Person` | `MATCH (person:Person) DETACH DELETE person` |
+| `RETURNING ..` on `INSERT` or `UPDATE` | `RETURN ..` |
+
+Grouping follows SQL: a selected column must be grouped or aggregated, and
+`ORDER BY 1` or `GROUP BY 1` refer to select-list positions.
+
+`DELETE` of a node that still has relationships fails and changes nothing, like
+a foreign key; delete the relationships first or use `TRUNCATE`.
+
+An `INSERT` into a relationship table connects existing nodes. Columns of the
+start and end nodes find them, and the other columns become relationship
+properties:
+
+```sql
+INSERT INTO Person_ACTED_IN_Movie (Person.name, Movie.title, role)
+VALUES ('Ada', 'Hidden', 'lead')
+```
+
+```cypher
+MATCH (_start:Person {name: 'Ada'}), (_end:Movie {title: 'Hidden'})
+CREATE (_start)-[person_acted_in_movie:ACTED_IN {role: 'lead'}]->(_end)
+```
+
+It connects every pair of nodes the columns match, and creates nothing when
+either node is missing. To connect nodes by id, use `_start.v$id` and
+`_end.v$id`, or `v$person_id` when the label tells the ends apart.
+
+## Expressions and functions
+
+Comparisons, `AND`, `OR`, `NOT`, `IS [NOT] NULL`, `IS [NOT] TRUE`,
+`IS [NOT] DISTINCT FROM`, `IN` lists, `BETWEEN`, arithmetic, `||`, `CASE`,
+`CAST`, and row values such as `(a, b) < (1, 2)` translate with SQL semantics.
+`LIKE` and `ILIKE` translate when the pattern is a literal whose only wildcards
+are a leading or trailing `%`: `'%x%'` becomes `CONTAINS`, `'x%'` `STARTS WITH`,
+and `'%x'` `ENDS WITH`.
+
+Functions with a Cypher equivalent are renamed: `lower` and `upper` become
+`toLower` and `toUpper`, `length` and `char_length` become `size`, `nvl` and
+`ifnull` become `coalesce`, `array_agg` becomes `collect`, and `nullif` and
+`nvl2` become `CASE`. `SUBSTRING` counts from 1, as in SQL. Other names pass
+through, so the [Cypher profile](/database/helix-db/query-guides/cypher#what-is-supported)
+decides which functions run.
+
+## What is not supported
+
+These are rejected before anything runs, mostly with the error category
+`unsupported_feature` and the detail `sql_construct`:
+
+| Construct | Detail |
+| --- | --- |
+| Outer joins (`LEFT`, `RIGHT`, `FULL`) | `sql_construct` |
+| `ON` conditions other than one column equality | `sql_construct` |
+| Subqueries, `EXISTS`, `IN (SELECT ..)` | `procedures_and_subqueries` |
+| `UNION`, `INTERSECT`, `EXCEPT` | `union` |
+| Common table expressions (`WITH ..`) and window functions | `sql_construct` |
+| Upserts: `ON CONFLICT`, `ON DUPLICATE KEY`, `REPLACE`, `INSERT OR` | `merge` |
+| `INSERT` without a column list, `INSERT .. SELECT` | `invalid_statement`, `sql_construct` |
+| `LIKE` with `_`, escapes, inner `%`, or a non-literal pattern | `sql_construct` |
+| Unparenthesized `XOR` inside `AND`, `NOT` or a comparison | `sql_construct` |
+| Dates, intervals, and casts to types other than strings, numbers and booleans | `sql_construct` |
+| DDL and every other statement | `sql_construct` |
+| Several statements in one request | `multiple_statements` |
+
+An unqualified column in a statement with several tables is a `syntax_error`
+with the detail `ambiguous_column`.
+
+## Limits
+
+A SQL statement has the [Cypher limits](/database/helix-db/query-guides/cypher#limits),
+plus about a million tokens, counting each whitespace character, and 1,024
+binary operators. Exceeding either fails with `resource_limit`.
+
+## Errors
+
+Errors use the [Cypher error body](/database/helix-db/query-guides/cypher#errors).
+Translation errors and the errors of the translated statement both report a
+`span` in the SQL text:
+
+```json
+{
+  "error": "unsupported_feature",
+  "msg": "the Cypher MVP profile does not support function `sqrt`",
+  "details": { "detail": "function", "phase": "compile", "span": { "start": 7, "end": 16 } }
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Cypher" icon="diagram-project" href="/database/helix-db/query-guides/cypher">
+    The Cypher profile that SQL translates to, and how it plans indexes.
+  </Card>
+  <Card title="HTTP API" icon="code" href="/database/helix-db/query-guides/http-api#sql">
+    Request headers, status codes, and the OpenAPI contract for `/v2/sql`.
+  </Card>
+</CardGroup>

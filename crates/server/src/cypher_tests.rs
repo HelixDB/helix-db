@@ -590,3 +590,165 @@ async fn cypher_executions_emit_anonymous_query_telemetry() {
     started.runtime.shutdown().await;
     db.close().await.unwrap();
 }
+
+/// `POST /v2/sql` translates, routes and reports exactly like `/v2/cypher`.
+#[tokio::test]
+async fn sql_http_translates_routes_and_reports_like_cypher() {
+    let db = Arc::new(
+        db::HelixDB::open(db::HelixDbSource::InMemory {
+            database: "sql-transport".into(),
+        })
+        .await
+        .unwrap(),
+    );
+    let identity =
+        helix_metrics::query::OssIdentity::new(helix_metrics::query::InstallationId::now(), None);
+    let started = helix_metrics::query::transport::start(
+        helix_metrics::telemetry::Source::Server,
+        &identity,
+        "http://127.0.0.1:9",
+    )
+    .unwrap();
+    let state = state::ServerState::new(
+        Arc::clone(&db),
+        Some(started.recorder.clone()),
+        crate::StorageConfig::Memory,
+    );
+    let router = http::router(state);
+    let post = |body: String, headers: &[(&str, &str)]| {
+        let mut request = Request::post(helix_cypher::api::HTTP_SQL_PATH)
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let router = router.clone();
+        async move {
+            let response = router
+                .oneshot(request.body(Body::from(body)).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            )
+        }
+    };
+
+    let (status, value) = post(
+        json!({
+            "query": "INSERT INTO people (name, born) VALUES (?, ?), ('Grace', 1906)",
+            "parameters": ["Ada", {"$type": "integer", "value": "1815"}],
+            "mappings": {"tables": {"people": "Person"}},
+            "query_name": "seed",
+        })
+        .to_string(),
+        &[("x-helix-await-durable", "true")],
+    )
+    .await;
+    assert_eq!(
+        (status, value),
+        (StatusCode::OK, json!({"columns": [], "rows": []}))
+    );
+    let (status, value) = post(
+        json!({"query": "SELECT name, born FROM Person p WHERE born < :year ORDER BY name",
+               "parameters": {"year": 2000}})
+        .to_string(),
+        &[("x-helix-warm", "true")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        value,
+        json!({"columns": ["name", "born"], "rows": [["Ada", 1815], ["Grace", 1906]]})
+    );
+    // The same graph serves Cypher.
+    assert_eq!(
+        db.cypher(db::cypher::Request::new("MATCH (p:Person) RETURN count(p)"))
+            .await
+            .unwrap()
+            .rows,
+        vec![vec![json!(2)]]
+    );
+
+    for (body, headers, expected_status, expected_error, expected_detail) in [
+        (
+            json!({"query": "INSERT INTO Person (name) VALUES ('warm')"}).to_string(),
+            vec![("x-helix-warm", "true")],
+            StatusCode::BAD_REQUEST,
+            "invalid_request_option",
+            None,
+        ),
+        (
+            "{".to_owned(),
+            vec![],
+            StatusCode::BAD_REQUEST,
+            "invalid_query_json",
+            None,
+        ),
+        (
+            json!({"query": "SELECT 1", "unknown": true}).to_string(),
+            vec![],
+            StatusCode::BAD_REQUEST,
+            "invalid_query_json",
+            None,
+        ),
+        (
+            json!({"query": "SELECT 1 UNION SELECT 2"}).to_string(),
+            vec![],
+            StatusCode::BAD_REQUEST,
+            "unsupported_feature",
+            Some("union"),
+        ),
+        (
+            json!({"query": "SELECT sqrt(p.born) FROM Person p"}).to_string(),
+            vec![],
+            StatusCode::BAD_REQUEST,
+            "unsupported_feature",
+            Some("function"),
+        ),
+        (
+            json!({"query": format!("SELECT {}1", "1,".repeat(600_000))}).to_string(),
+            vec![],
+            StatusCode::TOO_MANY_REQUESTS,
+            "resource_limit",
+            Some("too_many_tokens"),
+        ),
+        (
+            json!({"query": "DELETE FROM Person WHERE name = ?"}).to_string(),
+            vec![],
+            StatusCode::BAD_REQUEST,
+            "parameter_missing",
+            Some("missing_parameter"),
+        ),
+    ] {
+        let (status, value) = post(body.clone(), &headers).await;
+        assert_eq!(status, expected_status, "{value}");
+        assert_eq!(value["error"], expected_error, "{value}");
+        if let Some(detail) = expected_detail {
+            assert_eq!(value["details"]["detail"], detail, "{value}");
+            assert_eq!(value["details"]["phase"], "compile", "{value}");
+        }
+    }
+    let (_, value) = post(
+        json!({"query": "SELECT sqrt(p.born) FROM Person p"}).to_string(),
+        &[],
+    )
+    .await;
+    assert_eq!(value["details"]["span"], json!({"start": 7, "end": 18}));
+    // Rejected requests changed nothing.
+    assert_eq!(
+        db.cypher(db::cypher::Request::new("MATCH (p:Person) RETURN count(p)"))
+            .await
+            .unwrap()
+            .rows,
+        vec![vec![json!(2)]]
+    );
+    // Executed SQL is recorded like Cypher, including the DELETE that failed
+    // for its missing parameter; requests rejected before execution are not.
+    assert_eq!(started.recorder.counters().emitted_events, 3);
+    drop(router);
+    started.runtime.shutdown().await;
+    db.close().await.unwrap();
+}
