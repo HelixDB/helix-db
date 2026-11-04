@@ -5806,19 +5806,62 @@ The translation is a port of the SQL-to-Cypher translator in the
 faithfully is rejected with a specific error before the statement reads or writes
 anything.
 
-`POST /v2/sql` is served by local servers built from the
-[repository checkout](https://github.com/HelixDB/helix-db). Helix Cloud gateways,
-the SDKs, and the CLI do not expose SQL yet; send SQL to a local server over HTTP.
+SQL is served by local servers and embedded databases built from the
+[repository checkout](https://github.com/HelixDB/helix-db), and by SDKs built
+from it. Helix Cloud gateways and the CLI do not expose SQL yet.
 
 ## Run a statement
 
-Send one statement, with optional parameters, a query name, and mappings, to
-`POST /v2/sql`. The server translates it and works out whether it reads or writes.
+Send one statement, with optional parameters, mappings, and a query name, to
+`POST /v2/sql`. The server translates it and works out whether it reads or
+writes. Parameters given as a list bind each `?` in order.
 
-```sh
-curl http://localhost:6969/v2/sql \
-  -H 'Content-Type: application/json' \
-  --data '{"query":"SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name","parameters":[30],"query_name":"adults"}'
+```rust Rust
+let result = client
+    .sql(
+        "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+        vec![serde_json::json!(30)],
+        &helix_db::SqlMappings::default(),
+        Some("adults"),
+    )
+    .await?;
+// result.columns == ["name"]; result.rows == [["Ada"], ...]
+```
+
+```ts TypeScript
+const result = await client.sql(
+  "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+  [30],
+  {},
+  "adults",
+);
+// { columns: ["name"], rows: [["Ada"], ...] }
+```
+
+```go Go
+result, err := client.SQL(ctx, helix.SQLRequest{
+	Query:     "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+	Args:      []any{30},
+	QueryName: "adults",
+})
+// result.Columns == ["name"]; result.Rows == [["Ada"], ...]
+```
+
+```python Python
+result = client.sql(
+    "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+    [30],
+    query_name="adults",
+)
+# {"columns": ["name"], "rows": [["Ada"], ...]}
+```
+
+```json JSON
+{
+  "query": "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+  "parameters": [30],
+  "query_name": "adults"
+}
 ```
 
 HelixDB runs the statement as this Cypher:
@@ -5846,18 +5889,87 @@ returns the columns `1` and `1_2`. Duplicate rows are kept unless the statement
 uses `DISTINCT` or `GROUP BY`, row order is only defined by `ORDER BY`, and a
 write without `RETURNING` succeeds with empty `columns` and `rows`.
 
-### Request options
+### Over HTTP
 
-The native request options apply to SQL too, as HTTP headers:
+A local server has no authentication:
 
-| Option | HTTP header |
-| --- | --- |
-| Run on the writer | `X-Helix-Require-Writer: true` |
-| Warm caches only (reads) | `X-Helix-Warm: true` |
-| Wait for durability (writes) | `X-Helix-Await-Durable: true` |
+```sh
+curl http://localhost:6969/v2/sql \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"SELECT p.name AS name FROM Person p WHERE p.age >= ?","parameters":[30]}'
+```
 
 The [HTTP API reference](/database/helix-db/query-guides/http-api#sql) describes
-the request, status codes, and errors in full.
+the request, status codes, and errors in full. gRPC serves the same bodies
+through `ExecuteSql` and `ExplainSql`.
+
+### Request options
+
+The native request options apply to SQL too:
+
+| Option | Rust | TypeScript | Go | Python | HTTP header |
+| --- | --- | --- | --- | --- | --- |
+| Run on the writer | `.writer_only()` | `.writerOnly()` | `helix.WriterOnly()` | `writer_only=True` | `X-Helix-Require-Writer: true` |
+| Warm caches only (reads) | `.warm_only()` | `.warmOnly()` | `helix.WarmOnly()` | `warm_only=True` | `X-Helix-Warm: true` |
+| Wait for durability (writes) | `.should_await_durability(true)` | `.shouldAwaitDurability(true)` | `helix.AwaitDurability(true)` | `await_durability=True` | `X-Helix-Await-Durable: true` |
+
+Rust and TypeScript set options on `request_builder()` / `requestBuilder()` before
+`.sql(...)`; Go and Python pass them to `SQL` and `sql`. Embedded clients reject
+request options.
+
+## Explain a statement
+
+`POST /v2/sql/explain` takes the same body, translates the statement, and plans
+the translated Cypher without running it, exactly like
+[explaining Cypher](/database/helix-db/query-guides/cypher#explain-a-statement).
+Explaining a write changes nothing. Planning checks parameters, so supply every
+parameter the statement uses.
+
+```rust Rust
+let plan = client
+    .explain_sql(
+        "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+        std::collections::BTreeMap::from([(
+            "email".to_string(),
+            serde_json::json!("ada@example.com"),
+        )]),
+        &helix_db::SqlMappings::default(),
+        None,
+    )
+    .await?;
+// plan["effect"] == "Read"
+```
+
+```ts TypeScript
+const plan = await client.explainSql(
+  "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+  { email: "ada@example.com" },
+);
+// plan.effect === "Read"
+```
+
+```go Go
+plan, err := client.ExplainSQL(ctx, helix.SQLRequest{
+	Query:      "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+	Parameters: map[string]any{"email": "ada@example.com"},
+})
+// plan["effect"] == "Read"
+```
+
+```python Python
+plan = client.explain_sql(
+    "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+    {"email": "ada@example.com"},
+)
+# plan["effect"] == "Read"
+```
+
+```json JSON
+{
+  "query": "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+  "parameters": { "email": "ada@example.com" }
+}
+```
 
 ## What is supported
 
@@ -5964,6 +6076,10 @@ Joins become relationship patterns by these rules:
 
 This matches `(p:Person)-[directed:DIRECTED]->(m:Movie)`. A `join_columns` key
 names the join's left table and the column that names the type.
+
+The SDKs take the same mappings: `helix_db::SqlMappings` in Rust,
+`{ tables, joinColumns }` in TypeScript, `helix.SQLMappings` in Go, and the
+`mappings=` dictionary in Python.
 
 ## Statements
 
@@ -6456,6 +6572,11 @@ and `parameters` may be a list that binds `?` placeholders in written order:
 }
 ```
 
+`POST /v2/sql/explain` takes the same body and plans the translated statement
+without executing it, exactly like `POST /v2/cypher/explain`: it returns the same
+planning report and uses read request options, so `X-Helix-Await-Durable:true`
+is invalid.
+
 The [SQL guide](/database/helix-db/query-guides/sql) describes how tables, columns
 and joins translate, and which SQL is rejected.
 
@@ -6547,7 +6668,7 @@ batch.
 
 ## Cypher errors
 
-`POST /v2/cypher`, `POST /v2/cypher/explain` and `POST /v2/sql` report a failed
+`POST /v2/cypher`, `POST /v2/cypher/explain`, `POST /v2/sql` and `POST /v2/sql/explain` report a failed
 statement with the same `error` and `msg` fields and a `details` object:
 
 ```json

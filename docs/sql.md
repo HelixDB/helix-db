@@ -19,17 +19,26 @@ the guide in step when behavior changes.
 `sql::Mappings` holds table → label and `table.column` → relationship type
 mappings; its keys match case-insensitively.
 
-Transports decode a body with `helix_cypher::sql::request::Request`, which accepts
-`parameters` as an object of named values or as a list that binds `?` placeholders
-as `$1`, `$2`, …. `Request::compile` returns the ordinary `CompiledRequest`, so
-`POST /v2/sql` routes by `request_type()` and executes through
+Transports decode a body with `helix_cypher::sql::request::Request` (re-exported
+as `db::cypher::sql`), which accepts `parameters` as an object of named values or
+as a list that binds `?` placeholders as `$1`, `$2`, …. `Request::compile` returns
+the ordinary `CompiledRequest`, so `POST /v2/sql` and gRPC `ExecuteSql` route by
+`request_type()` and execute through
 `HelixQueryService::execute_compiled_cypher_json_scoped_controlled`, exactly like
 `POST /v2/cypher`: the same request options, durability, limits, cancellation,
-error body and status codes apply. The compiled request's text is the translated
-Cypher, which `syntax::Statement`'s `Display` prints, so telemetry records the
-statement's Cypher shape with literals redacted. Translation reads no storage or
-catalog, so a gateway could route SQL by effect as it routes Cypher. Only the
-local server serves SQL today; gRPC, the SDKs and the CLI have no SQL methods.
+error body and status codes apply. `POST /v2/sql/explain` and gRPC `ExplainSql`
+plan through `explain_compiled_cypher_scoped_controlled`, which Cypher explain
+shares. The compiled request's text is the translated Cypher, which
+`syntax::Statement`'s `Display` prints, so telemetry records the statement's
+Cypher shape with literals redacted. Translation reads no storage or catalog, so a
+gateway could route SQL by effect as it routes Cypher.
+
+Embedded databases expose `HelixDB::sql`, `sql_json` and `explain_sql`, and the
+UniFFI bindings `sql_json` and `explain_sql_json`. Each SDK has `sql` and
+`explain_sql` methods (`SQL` and `ExplainSQL` in Go) beside its Cypher methods,
+over HTTP and embedded. The shared SDK parity corpus
+(`sdks/tests/cypher/runtime.json`) includes SQL cases, marked `"language": "sql"`,
+that every SDK runs. Helix Cloud gateways and the CLI have no SQL routes yet.
 
 ## Translation pipeline
 
@@ -140,6 +149,10 @@ never reach the printed statement that telemetry records.
   conversion, and the largest accepted inputs on a 2 MiB stack.
 - `crates/cypher/src/print/tests.rs` property-tests that printing round-trips.
 - `crates/db/tests/cypher/sql.rs` runs SQL through the query service against a
-  database, and `crates/server/src/cypher_tests.rs` covers the HTTP route.
+  database, and `crates/server/src/cypher_tests.rs` covers the HTTP and gRPC
+  routes, including explain.
+- Each SDK's unit tests cover its SQL methods over HTTP and embedded, and the
+  SDK parity harness runs the SQL cases of `sdks/tests/cypher/runtime.json`
+  through every SDK against embedded memory, embedded disk and the HTTP server.
 - `docker-image/tests/sql_contracts.py` checks `/v2/sql` in the server image,
   across a restart.

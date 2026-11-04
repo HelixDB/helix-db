@@ -1,9 +1,11 @@
-# Cypher SDK runtime contract
+# Cypher and SQL SDK runtime contract
 
-`runtime.json` contains sixteen ordered cases, with independently authored expected
-results. Each SDK executes the same query text and parameters through its public
-Cypher method. Drivers record actual results and structured errors; they never
-retry mutations or substitute an expected response.
+`runtime.json` contains twenty-four ordered cases, with independently authored
+expected results. Each SDK executes the same query text and parameters through its
+public Cypher method, or its SQL method for a case marked `"language": "sql"`; a
+SQL case may give `parameters` as a list and `mappings` as in `POST /v2/sql`.
+Drivers record actual results and structured errors; they never retry mutations
+or substitute an expected response.
 
 The cases cover nested lossless integers, nonfinite floats, escaped maps,
 Unicode, node/relationship/path values, creation, rollback after a failed plain
@@ -11,7 +13,10 @@ node deletion, map/property updates, persistence, and detach deletion. A read af
 DISTINCT followed by an optional named-path MATCH and a top-k return, including
 duplicated keys, unmatched keys and nulls. Further cases cover mixed aggregate
 ordering, output-alias shadowing, empty aggregate input, renamed-node ordering,
-and aggregate-argument errors followed by an independent rollback observation.
+and aggregate-argument errors followed by an independent rollback observation. The
+SQL cases insert nodes and a relationship from positional and named parameters,
+read them through a join, reject a connected-node delete, update with `RETURNING`,
+aggregate empty input (where `SUM` is null), and reject a subquery at compile time.
 Aggregate results above the JavaScript safe-integer range must retain their
 lossless tags through every client. Graph IDs
 are compared using fixture identities only after checking canonical unsigned

@@ -479,9 +479,7 @@ impl StatementRequest<'_, '_> {
                 let body = self.body.clone();
                 let explanation = match self.language {
                     Language::Cypher => {
-                        database
-                            .explain_cypher(serde_json::from_value(body)?)
-                            .await
+                        database.explain_cypher(serde_json::from_value(body)?).await
                     }
                     Language::Sql => database.explain_sql(serde_json::from_value(body)?).await,
                 }
@@ -2060,10 +2058,12 @@ mod client_tests {
         let mappings = SqlMappings::default()
             .table("people", "Person")
             .join_column("people.team_id", "MEMBER_OF");
-        let request =
-            client
-                .request_builder::<()>()
-                .sql("SELECT 1", vec![serde_json::json!(i64::MAX)], &mappings, Some("named"));
+        let request = client.request_builder::<()>().sql(
+            "SELECT 1",
+            vec![serde_json::json!(i64::MAX)],
+            &mappings,
+            Some("named"),
+        );
         assert_eq!(request.language, Language::Sql);
         assert_eq!(
             request.body,
@@ -2129,7 +2129,12 @@ mod client_tests {
         let (base, handle) = spawn_capture_server(400, body).await;
         let error = Client::new(Some(&base))
             .unwrap()
-            .sql("SELECT (SELECT 1)", SqlParameters::default(), &SqlMappings::default(), None)
+            .sql(
+                "SELECT (SELECT 1)",
+                SqlParameters::default(),
+                &SqlMappings::default(),
+                None,
+            )
             .await
             .expect_err("a SQL diagnostic is a remote error");
         assert_eq!(handle.await.unwrap().0, "/v2/sql");
@@ -2487,7 +2492,12 @@ mod client_tests {
         assert_eq!(names.rows, vec![vec![serde_json::json!("Ada")]]);
 
         let error = client
-            .sql("SELECT (SELECT 1)", SqlParameters::default(), &mappings, None)
+            .sql(
+                "SELECT (SELECT 1)",
+                SqlParameters::default(),
+                &mappings,
+                None,
+            )
             .await
             .expect_err("subqueries are rejected");
         assert!(

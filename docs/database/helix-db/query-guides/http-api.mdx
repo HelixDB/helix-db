@@ -279,6 +279,11 @@ and `parameters` may be a list that binds `?` placeholders in written order:
 }
 ```
 
+`POST /v2/sql/explain` takes the same body and plans the translated statement
+without executing it, exactly like `POST /v2/cypher/explain`: it returns the same
+planning report and uses read request options, so `X-Helix-Await-Durable:true`
+is invalid.
+
 The [SQL guide](/database/helix-db/query-guides/sql) describes how tables, columns
 and joins translate, and which SQL is rejected.
 

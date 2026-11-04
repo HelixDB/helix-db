@@ -497,9 +497,11 @@ mod tests {
         let plan: serde_json::Value = serde_json::from_slice(&plan).expect("plan is JSON");
         assert_eq!(plan["effect"], "Write");
 
-        db.sql_json(br#"{"query":"INSERT INTO Person (name) VALUES (?)","parameters":["Ada"]}"#.to_vec())
-            .await
-            .expect("SQL should insert");
+        db.sql_json(
+            br#"{"query":"INSERT INTO Person (name) VALUES (?)","parameters":["Ada"]}"#.to_vec(),
+        )
+        .await
+        .expect("SQL should insert");
         let rejected = db
             .sql_json(br#"{"query":"SELECT (SELECT 1) FROM Person p"}"#.to_vec())
             .await

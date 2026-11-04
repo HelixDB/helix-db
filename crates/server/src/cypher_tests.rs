@@ -753,3 +753,183 @@ async fn sql_http_translates_routes_and_reports_like_cypher() {
     started.runtime.shutdown().await;
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn sql_explain_and_grpc_share_the_cypher_paths() {
+    let db = Arc::new(
+        db::HelixDB::open(db::HelixDbSource::InMemory {
+            database: "sql-explain-transport".into(),
+        })
+        .await
+        .unwrap(),
+    );
+    let state = state::ServerState::new(Arc::clone(&db), None, crate::StorageConfig::Memory);
+    let router = http::router(state.clone());
+    let grpc = grpc::GrpcService::new(state);
+    let explain = |body: serde_json::Value, headers: &[(&str, &str)]| {
+        let mut request = Request::post(helix_cypher::api::HTTP_SQL_EXPLAIN_PATH)
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let router = router.clone();
+        async move {
+            let response = router
+                .oneshot(request.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            )
+        }
+    };
+    let request = |body: serde_json::Value, warm_only, await_durable| {
+        tonic::Request::new(grpc::pb::QueryJsonRequest {
+            body: body.to_string().into_bytes().into(),
+            warm_only,
+            require_writer: false,
+            await_durable,
+        })
+    };
+    let insert = json!({
+        "query": "INSERT INTO people (name) VALUES (?)",
+        "parameters": ["Ada"],
+        "mappings": {"tables": {"people": "Person"}},
+    });
+
+    // Explaining plans a write as a read request and writes nothing, over
+    // HTTP and gRPC alike; both report the plan of the translated Cypher.
+    // Plans compare without the planner's own timing.
+    let untimed = |mut plan: serde_json::Value| {
+        plan["planner"]
+            .as_object_mut()
+            .expect("plans report planner metrics")
+            .remove("optimization_micros")
+            .expect("plans time optimization");
+        plan
+    };
+    let (status, http_plan) = explain(insert.clone(), &[("x-helix-warm", "true")]).await;
+    assert_eq!(status, StatusCode::OK, "{http_plan}");
+    assert_eq!(http_plan["effect"], "Write");
+    let http_plan = untimed(http_plan);
+    let grpc_plan = grpc
+        .explain_sql(request(insert.clone(), true, false))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        untimed(serde_json::from_slice(&grpc_plan.body).unwrap()),
+        http_plan
+    );
+    let cypher_plan = db
+        .explain_cypher(
+            serde_json::from_value(json!({
+                "query": "CREATE (people:Person {name: $1})",
+                "parameters": {"1": "Ada"},
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        untimed(serde_json::to_value(&cypher_plan).unwrap()),
+        http_plan
+    );
+    let (status, error) = explain(insert.clone(), &[("x-helix-await-durable", "true")]).await;
+    assert_eq!(
+        (status, &error["error"]),
+        (StatusCode::BAD_REQUEST, &json!("invalid_request_option"))
+    );
+    let (status, error) = explain(json!({"query": "SELECT ?"}), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["details"]["detail"], "missing_parameter");
+    let (status, error) = explain(json!({"query": "SELECT 1 UNION SELECT 2"}), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["details"]["detail"], "union");
+    assert_eq!(
+        db.cypher(db::cypher::Request::new("MATCH (p:Person) RETURN count(p)"))
+            .await
+            .unwrap()
+            .rows,
+        vec![vec![json!(0)]]
+    );
+
+    // gRPC executes SQL with the request options of ExecuteCypher.
+    let inserted = grpc
+        .execute_sql(request(insert.clone(), false, true))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&inserted.body).unwrap(),
+        json!({"columns": [], "rows": []})
+    );
+    let read = grpc
+        .execute_sql(request(
+            json!({"query": "SELECT p.name FROM Person p", "parameters": {}}),
+            true,
+            false,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&read.body).unwrap(),
+        json!({"columns": ["p.name"], "rows": [["Ada"]]})
+    );
+    let warm_write = grpc
+        .execute_sql(request(insert.clone(), true, false))
+        .await
+        .unwrap_err();
+    assert_eq!(warm_write.code(), tonic::Code::InvalidArgument);
+    for (body, code, metadata) in [
+        (
+            json!({"query": "SELECT 1", "mapping": {}}),
+            tonic::Code::InvalidArgument,
+            Some("invalid_query_json"),
+        ),
+        (
+            json!({"query": "SELECT (SELECT 1)"}),
+            tonic::Code::InvalidArgument,
+            None,
+        ),
+    ] {
+        for status in [
+            grpc.execute_sql(request(body.clone(), false, false))
+                .await
+                .unwrap_err(),
+            grpc.explain_sql(request(body.clone(), false, false))
+                .await
+                .unwrap_err(),
+        ] {
+            assert_eq!(status.code(), code);
+            match metadata {
+                Some(metadata) => assert_eq!(
+                    status
+                        .metadata()
+                        .get(grpc::HELIX_ERROR_CODE_METADATA)
+                        .unwrap(),
+                    metadata
+                ),
+                None => {
+                    let details: serde_json::Value =
+                        serde_json::from_slice(status.details()).unwrap();
+                    assert_eq!(details["details"]["detail"], "procedures_and_subqueries");
+                }
+            }
+        }
+    }
+    assert_eq!(
+        db.cypher(db::cypher::Request::new("MATCH (p:Person) RETURN count(p)"))
+            .await
+            .unwrap()
+            .rows,
+        vec![vec![json!(1)]]
+    );
+    drop(grpc);
+    drop(router);
+    db.close().await.unwrap();
+}

@@ -42,7 +42,9 @@ impl Case {
                     serde_json::Value::Null => BTreeMap::new(),
                     parameters => serde_json::from_value(parameters)?,
                 };
-                client.cypher(&self.query, parameters, Some(&self.name)).await
+                client
+                    .cypher(&self.query, parameters, Some(&self.name))
+                    .await
             }
             Language::Sql => {
                 let parameters = match parameters {

@@ -36,7 +36,7 @@
     },
     {
       "name": "SQL",
-      "description": "Execute SQL statements on a local HelixDB server by translating them to the supported Cypher profile."
+      "description": "Execute or explain SQL statements on a local HelixDB server by translating them to the supported Cypher profile."
     },
     {
       "name": "Health",
@@ -841,6 +841,115 @@
           },
           "503": {
             "description": "Writer required, server access mode unavailable, or uncertain write commit. A local uncertain outcome carries retryable:false; Helix Cloud reports one as write_outcome_unknown with retryable:false, like native queries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/sql/explain": {
+      "post": {
+        "operationId": "explainSql",
+        "summary": "Explain a SQL statement",
+        "description": "Translates one SQL statement exactly like POST /v2/sql, then plans the translated Cypher like POST /v2/cypher/explain: against the current catalog, without executing it. Uses read request options even for a modifying statement; X-Helix-Await-Durable:true is invalid. Planning checks parameters, so supply every value the statement uses. Served by local servers; request bodies up to 16 MiB. The response limit is 16 MiB, and resource exhaustion returns an error instead of truncation.",
+        "tags": [
+          "SQL"
+        ],
+        "x-helix-request-body-limits": {
+          "localBytes": 16777216
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WarmOnly"
+          },
+          {
+            "$ref": "#/components/parameters/RequireWriter"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SqlRequest"
+              },
+              "examples": {
+                "read": {
+                  "summary": "Join through a relationship table",
+                  "value": {
+                    "query": "SELECT p.name, m.title FROM Person p JOIN ACTED_IN r ON r.person_id = p.id JOIN Movie m ON m.id = r.movie_id WHERE p.born > ?",
+                    "parameters": [
+                      1950
+                    ]
+                  }
+                },
+                "write": {
+                  "summary": "Insert rows with table mappings (plan only)",
+                  "value": {
+                    "query": "INSERT INTO people (name, born) VALUES (:name, :born)",
+                    "parameters": {
+                      "name": "Ada",
+                      "born": 1815
+                    },
+                    "mappings": {
+                      "tables": {
+                        "people": "Person"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Statement translated and planned without execution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherExplanation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, invalid request options, a SQL statement outside the translation, or a classified Cypher compile error of the translated statement. The 16 MiB body limit returns invalid_request_body with this status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Cypher resource limit exceeded (inspect details.detail).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal planner, storage, execution-control, or serialization failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A request option requires a writer but the server is read-only.",
             "content": {
               "application/json": {
                 "schema": {
