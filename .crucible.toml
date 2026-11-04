@@ -1,0 +1,13 @@
+# Crucible (https://crucibl.sh) settings for this repo, read from the default branch.
+
+[resources]
+# One test build peaks at about 6.8 GiB, more than a standard VM (2 vCPU / 4 GiB).
+size = "large"            # 8 vCPU / 16 GiB
+build_timeout_secs = 2700 # base builds; default 1800
+
+[test]
+timeout_secs = 1800       # per test VM; default 900
+
+[checks]
+# PR CI runs as GitHub Actions; Crucible runs are for agents (CLI / MCP).
+pull_requests = false
