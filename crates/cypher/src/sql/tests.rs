@@ -997,3 +997,100 @@ fn shorthand_and_placeholders_are_unambiguous() {
         "MATCH (c:Customers)<-[customer_id:CUSTOMER_ID]-(o:Orders) RETURN customer_id.since"
     );
 }
+
+/// Rare SQL forms: each translates, or fails with the error its rule names.
+#[test]
+fn rare_forms_follow_their_rules() {
+    let probe = |sql: &str| match translate(sql, &Mappings::default()) {
+        Ok(statement) => format!("ok {statement}"),
+        Err(error) => format!("{} {}", error.category, error.detail),
+    };
+    for (sql, expected) in [
+        ("SELECT CURRENT_TIMESTAMP", "ok RETURN localdatetime()"),
+        (
+            "SELECT ARRAY(SELECT 1)",
+            "unsupported_feature procedures_and_subqueries",
+        ),
+        (
+            "SELECT string_agg(t.a, ',' ORDER BY t.a) FROM t",
+            "unsupported_feature sql_construct",
+        ),
+        (
+            "SELECT `substring`('abc', 2), `substr`('abc', 2, 1)",
+            "ok RETURN substring('abc', 1), substring('abc', 1, 1)",
+        ),
+        (
+            "SELECT E'a\\nb', N'x', $$dollar$$, U&'\\0061'",
+            "ok RETURN 'a\\nb', 'x', 'dollar', 'a'",
+        ),
+        ("SELECT 'abc", "syntax_error unexpected_syntax"),
+        (
+            "INSERT INTO Person_RATED_Movie (person_name, movie_title) VALUES ('a', 'b')",
+            "ok MATCH (_start:Person {name: 'a'}), (_end:Movie {title: 'b'}) \
+             CREATE (_start)-[person_rated_movie:RATED]->(_end)",
+        ),
+        (
+            "INSERT INTO Person_KNOWS_Person (v$person_id, _end.x) VALUES (1, 2)",
+            "syntax_error ambiguous_column",
+        ),
+        (
+            "UPDATE t SET a = 1 LIMIT 1",
+            "unsupported_feature sql_construct",
+        ),
+        (
+            "DELETE FROM t JOIN u ON u.id = t.u",
+            "unsupported_feature sql_construct",
+        ),
+        (
+            "SELECT TOP 1 t.a FROM t FETCH FIRST 1 ROWS ONLY",
+            "unsupported_feature sql_construct",
+        ),
+        (
+            "SELECT TOP (5) t.a FROM t",
+            "ok MATCH (t:t) RETURN t.a LIMIT 5",
+        ),
+        (
+            "SELECT TOP 18446744073709551615 t.a FROM t",
+            "syntax_error integer_overflow",
+        ),
+        (
+            "SELECT t.a FROM t GROUP BY ALL",
+            "unsupported_feature sql_construct",
+        ),
+        (
+            "SELECT t.a FROM t GROUP BY t.a WITH ROLLUP",
+            "unsupported_feature sql_construct",
+        ),
+        (
+            "SELECT * FROM t GROUP BY 1",
+            "syntax_error invalid_aggregation",
+        ),
+        (
+            "SELECT p.v$id FROM Person p",
+            "ok MATCH (p:Person) RETURN id(p)",
+        ),
+        (
+            "SELECT * FROM t WITH (NOLOCK)",
+            "unsupported_feature sql_construct",
+        ),
+        (
+            "SELECT p.name FROM Person p JOIN Person_ACTED_IN_Movie r ON r.p = p.id \
+             JOIN Movie m ON m.id = r.m",
+            "ok MATCH (p:Person)-[r:ACTED_IN]->(m:Movie) RETURN p.name",
+        ),
+        (
+            "SELECT * FROM a JOIN b",
+            "unsupported_feature sql_construct",
+        ),
+        (
+            "SELECT * FROM a CROSS APPLY b",
+            "unsupported_feature sql_construct",
+        ),
+        (
+            "SELECT * FROM a LEFT SEMI JOIN b ON b.id = a.b",
+            "unsupported_feature sql_construct",
+        ),
+    ] {
+        assert_eq!(probe(sql), expected, "{sql}");
+    }
+}
