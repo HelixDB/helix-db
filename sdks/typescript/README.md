@@ -389,3 +389,22 @@ three parts in `code` as `category:phase:detail`, such as
 Embedded clients reject server request options with an `InvalidRequest` error,
 as for native queries. `explainCypher(...)` needs an embedded package with
 Cypher explain support; older packages raise `EmbeddedUnavailable`.
+
+## SQL
+
+SQL statements are translated to Cypher and run the same way. A parameter list
+binds each `?` in order; an object binds `:name`, `$name` and `@name`. Mappings
+rename tables and join columns. See the [SQL guide](https://docs.helix-db.com/database/helix-db/query-guides/sql).
+
+```ts
+const result = await client.sql("SELECT u.name AS name FROM people u WHERE u.age >= ?", [30], { tables: { people: "User" } }, "adults");
+// { columns: ["name"], rows: [["Ada"], ...] }
+
+const plan = await client.explainSql("INSERT INTO User (name) VALUES (:name)", { name: "Ada" });
+await client.requestBuilder().writerOnly().sql("UPDATE User SET seen = TRUE").send();
+```
+
+`sql(query, parameters = [], mappings = {}, queryName?)` sends `POST /v2/sql`
+and `explainSql(...)` sends `POST /v2/sql/explain`, with the results, options,
+errors and embedded behavior of the Cypher methods. Embedded SQL needs a native
+package with SQL support; older packages raise `EmbeddedUnavailable`.
