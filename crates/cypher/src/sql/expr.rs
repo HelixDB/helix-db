@@ -319,15 +319,17 @@ impl Translator<'_> {
             }
         };
         let span = self.at(whole);
-        if let (ast::Expr::Tuple(left), ast::Expr::Tuple(right)) = (left, right) {
-            return self.row_comparison(operator, left, right, scope, span);
+        match (left, right) {
+            (ast::Expr::Tuple(left), ast::Expr::Tuple(right)) => {
+                self.row_comparison(operator, left, right, scope, span)
+            }
+            _ => binary(
+                operator,
+                self.logical(left, scope)?,
+                self.logical(right, scope)?,
+                span,
+            ),
         }
-        binary(
-            operator,
-            self.logical(left, scope)?,
-            self.logical(right, scope)?,
-            span,
-        )
     }
 
     /// A run of one connective as one flat node, like Cypher's parser builds,
@@ -1184,9 +1186,4 @@ pub(super) fn rewrite(
         },
     };
     node(kind, expression.span)
-}
-
-/// Structural equality, ignoring spans.
-pub(super) fn same(a: &Expr, b: &Expr) -> bool {
-    a.to_string() == b.to_string()
 }

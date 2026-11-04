@@ -1,12 +1,13 @@
 //! `SELECT`: FROM and WHERE become `MATCH`, the select list becomes `RETURN`,
 //! and grouping goes through `WITH` when Cypher's implicit grouping would
 //! group differently from SQL.
-use super::expr::{rewrite, same, visit};
+use super::expr::{rewrite, visit};
 use super::tables::{is_table_variable, reads_table, Scope};
 use super::{invalid, item, node, unsupported, variable, Translator};
 use crate::syntax::{self, Clause, Expr, ExprKind};
 use helix_planner::relational::{self as r, category, detail, QueryError, Result, Span};
 use sqlparser::ast;
+use std::collections::{HashMap, HashSet};
 
 /// Aggregate functions, lowercased, including those the binder rejects, so
 /// that grouping is decided before the binder reports them.
@@ -31,6 +32,27 @@ struct Projected {
     alias: Option<String>,
     /// The result column: the alias, or the entry's SQL text, made unique.
     name: String,
+}
+
+/// The entries of a grouping `WITH`, findable by expression.
+#[derive(Default)]
+struct With {
+    items: Vec<(Expr, String)>,
+    names: HashMap<String, String>,
+}
+
+impl With {
+    fn push(&mut self, expression: Expr, name: String) {
+        self.names
+            .entry(expression.to_string())
+            .or_insert_with(|| name.clone());
+        self.items.push((expression, name));
+    }
+
+    /// The name of the first entry that computes `expression`.
+    fn name(&self, expression: &Expr) -> Option<&str> {
+        self.names.get(&expression.to_string()).map(String::as_str)
+    }
 }
 
 /// The result window of a query: `OFFSET`/`SKIP` and `LIMIT`/`FETCH`/`TOP`.
@@ -165,11 +187,12 @@ impl Translator<'_> {
                 ));
             }
         };
-        if let Some(extra) = extra {
-            if window.limit.is_some() {
+        match (extra, &window.limit) {
+            (Some(_), Some(_)) => {
                 return Err(unsupported("LIMIT together with FETCH or TOP", span));
             }
-            window.limit = Some(extra);
+            (Some(extra), None) => window.limit = Some(extra),
+            (None, _) => {}
         }
         Ok(window)
     }
@@ -237,7 +260,7 @@ impl Translator<'_> {
             .collect();
         // GROUP BY reads an alias as its expression; HAVING and ORDER BY read
         // it as the projected column.
-        scope.aliases = explicit.clone();
+        scope.aliases = explicit.iter().cloned().collect();
         let keys = self.group_keys(&select.group_by, &projected, &scope, span)?;
         scope.aliases = explicit
             .iter()
@@ -292,10 +315,14 @@ impl Translator<'_> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        // Expressions compare by their printed text, which is canonical and
+        // injective, through hash sets so that wide statements stay linear.
+        let keys_printed: HashSet<String> = keys.iter().map(Expr::to_string).collect();
+        let items_printed: Vec<String> = expressions.iter().map(|e| e.to_string()).collect();
         // Every column outside an aggregate must be grouped, as SQL requires.
         let grouped = |expression: &Expr| -> Result<bool> {
             let rest = rewrite(expression, &mut |e| {
-                (aggregate_call(e) || keys.iter().any(|k| same(k, e)))
+                (aggregate_call(e) || keys_printed.contains(&e.to_string()))
                     .then(|| node(ExprKind::Literal(r::Value::Null), e.span))
                     .transpose()
             })?;
@@ -313,16 +340,21 @@ impl Translator<'_> {
                 ));
             }
         }
+        let plain: HashSet<&str> = expressions
+            .iter()
+            .zip(&items_printed)
+            .filter(|(e, _)| !aggregates(e))
+            .map(|(_, text)| text.as_str())
+            .collect();
+        let selected: HashSet<&str> = items_printed.iter().map(String::as_str).collect();
         let simple = having.is_none()
-            && keys
-                .iter()
-                .all(|key| expressions.iter().any(|e| !aggregates(e) && same(e, key)))
-            && expressions.iter().all(|e| {
-                aggregates(e) || keys.iter().any(|key| same(e, key)) || !reads_table(&scope, e)
+            && keys_printed.iter().all(|key| plain.contains(key.as_str()))
+            && expressions.iter().zip(&items_printed).all(|(e, text)| {
+                aggregates(e) || keys_printed.contains(text) || !reads_table(&scope, e)
             })
             && ordering.iter().all(|(order, _)| {
                 matches!(order.kind(), ExprKind::Variable(_))
-                    || expressions.iter().any(|e| same(e, order))
+                    || selected.contains(order.to_string().as_str())
             });
         if simple {
             clauses.push(Clause::Project {
@@ -339,33 +371,31 @@ impl Translator<'_> {
         // Explicit grouping: WITH projects every select entry under its name,
         // grouping keys and HAVING or ORDER BY aggregates that are not
         // selected, then RETURN reads the names.
-        let mut with: Vec<(Expr, String)> = expressions
+        let mut with = With::default();
+        expressions
             .iter()
             .zip(&projected)
-            .map(|(e, p)| ((*e).clone(), p.name.clone()))
-            .collect();
+            .for_each(|(e, p)| with.push((*e).clone(), p.name.clone()));
         let mut counter = 0;
-        let mut hidden = |prefix: &str, expression: &Expr, with: &mut Vec<(Expr, String)>| {
+        let mut hidden = |prefix: &str, expression: &Expr, with: &mut With| {
             let name = format!("__{prefix}_col_{counter}");
             counter += 1;
-            with.push((expression.clone(), name.clone()));
+            with.push(expression.clone(), name.clone());
             name
         };
         for key in &keys {
-            if !with.iter().any(|(e, _)| same(e, key)) {
+            if with.name(key).is_none() {
                 hidden("group", key, &mut with);
             }
         }
-        let mut lift = |expression: &Expr, prefix: &str, with: &mut Vec<(Expr, String)>| {
-            let lifted = rewrite(expression, &mut |e| {
-                if let Some((_, name)) = with.iter().find(|(w, _)| same(w, e)) {
-                    return Ok(Some(variable(name, e.span)?));
-                }
-                if aggregate_call(e) {
-                    let name = hidden(prefix, e, with);
-                    return Ok(Some(variable(&name, e.span)?));
-                }
-                Ok(None)
+        let mut lift = |expression: &Expr, prefix: &str, with: &mut With| {
+            let lifted = rewrite(expression, &mut |e| match (
+                with.name(e).map(str::to_owned),
+                aggregate_call(e),
+            ) {
+                (Some(name), _) => Ok(Some(variable(&name, e.span)?)),
+                (None, true) => Ok(Some(variable(&hidden(prefix, e, with), e.span)?)),
+                (None, false) => Ok(None),
             })?;
             if reads_table(&scope, &lifted) {
                 return Err(invalid(
@@ -386,6 +416,7 @@ impl Translator<'_> {
         clauses.push(Clause::Project {
             returning: false,
             items: with
+                .items
                 .into_iter()
                 .map(|(expression, name)| item(expression, Some(name)))
                 .collect(),
@@ -631,16 +662,22 @@ impl Projected {
 /// Number repeated names of unaliased entries, as `name`, `name_2`, …, so
 /// that `SELECT 1, 1` has two columns. Aliases stay as written.
 fn unique(mut projected: Vec<Projected>) -> Vec<Projected> {
-    let mut seen: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    // The next suffix to try per repeated name, so numbering stays linear.
+    let mut next: HashMap<String, usize> = HashMap::new();
     for entry in &mut projected {
         if entry.alias.is_none() && entry.expression.is_some() && seen.contains(&entry.name) {
-            let base = entry.name.clone();
-            entry.name = (2..)
-                .map(|n| format!("{base}_{n}"))
-                .find(|candidate| !seen.contains(candidate))
-                .expect("a free name exists");
+            let suffix = next.entry(entry.name.clone()).or_insert(2);
+            let name = std::iter::repeat_with(|| {
+                let candidate = format!("{}_{suffix}", entry.name);
+                *suffix += 1;
+                candidate
+            })
+            .find(|candidate| !seen.contains(candidate))
+            .expect("a free name exists");
+            entry.name = name;
         }
-        seen.push(entry.name.clone());
+        seen.insert(entry.name.clone());
     }
     projected
 }

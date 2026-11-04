@@ -4,17 +4,27 @@ use super::{invalid, property, unsupported, variable, Translator};
 use crate::syntax::{self, Expr, ExprKind};
 use helix_planner::relational::{self as r, detail, QueryError, Result, Span};
 use sqlparser::ast;
+use std::collections::{HashMap, HashSet};
 
 /// Variables of the nodes a single relationship table connects.
 pub(super) const START: &str = "_start";
 pub(super) const END: &str = "_end";
 
-/// The tables of one statement, in written order.
+/// The tables of one statement, in written order, indexed so that each
+/// column resolves in constant time however many tables a statement names.
 #[derive(Debug, Default)]
 pub(super) struct Scope {
     tables: Vec<Table>,
+    /// Table variables.
+    variables: HashSet<String>,
+    /// Lowercased aliases and variables.
+    by_alias: HashMap<String, Vec<usize>>,
+    /// Lowercased table names, endpoint labels and relationship types.
+    by_name: HashMap<String, Vec<usize>>,
+    /// Lowercased node labels.
+    by_label: HashMap<String, Vec<usize>>,
     /// Explicit select-list aliases, visible to `HAVING` and `ORDER BY`.
-    pub(super) aliases: Vec<(String, Expr)>,
+    pub(super) aliases: HashMap<String, Expr>,
 }
 
 /// A table in scope and the Cypher variable that stands for it.
@@ -99,7 +109,7 @@ pub(super) fn relationship_table(label: &str) -> Option<(&str, &str, &str)> {
 
 impl Scope {
     fn add(&mut self, table: Table, span: Span) -> Result<()> {
-        if self.tables.iter().any(|t| t.variable == table.variable) {
+        if !self.variables.insert(table.variable.clone()) {
             return Err(invalid(
                 detail::VARIABLE_ALREADY_BOUND,
                 format!(
@@ -108,6 +118,30 @@ impl Scope {
                 ),
                 span,
             ));
+        }
+        let index = self.tables.len();
+        let index_by = |map: &mut HashMap<String, Vec<usize>>, keys: Vec<String>| {
+            let mut keys = keys;
+            keys.sort();
+            keys.dedup();
+            keys.into_iter()
+                .for_each(|key| map.entry(key).or_default().push(index));
+        };
+        let aliases = std::iter::once(table.variable.to_lowercase())
+            .chain(table.alias.as_deref().map(str::to_lowercase))
+            .collect();
+        index_by(&mut self.by_alias, aliases);
+        let names = std::iter::once(table.name.to_lowercase())
+            .chain(match &table.kind {
+                Kind::Node { label } if table.role == Role::Endpoint => Some(label.to_lowercase()),
+                Kind::Relationship { kind } => Some(kind.to_lowercase()),
+                Kind::Node { .. } => None,
+            })
+            .collect();
+        index_by(&mut self.by_name, names);
+        match &table.kind {
+            Kind::Node { label } => index_by(&mut self.by_label, vec![label.to_lowercase()]),
+            Kind::Relationship { .. } => {}
         }
         self.tables.push(table);
         Ok(())
@@ -119,28 +153,14 @@ impl Scope {
 
     /// The table a qualifier names: its alias or variable, then its name.
     fn qualified(&self, qualifier: &str, span: Span) -> Result<&Table> {
-        let by = |matches: &dyn Fn(&Table) -> bool| -> Vec<&Table> {
-            self.tables.iter().filter(|t| matches(t)).collect()
-        };
-        let mut found = by(&|t| {
-            t.alias
-                .as_deref()
-                .is_some_and(|a| a.eq_ignore_ascii_case(qualifier))
-                || t.variable.eq_ignore_ascii_case(qualifier)
-        });
-        if found.is_empty() {
-            found = by(&|t| {
-                t.name.eq_ignore_ascii_case(qualifier)
-                    || match &t.kind {
-                        Kind::Node { label } => {
-                            t.role == Role::Endpoint && label.eq_ignore_ascii_case(qualifier)
-                        }
-                        Kind::Relationship { kind } => kind.eq_ignore_ascii_case(qualifier),
-                    }
-            });
-        }
-        match found.as_slice() {
-            [table] => Ok(table),
+        let key = qualifier.to_lowercase();
+        let found = self
+            .by_alias
+            .get(&key)
+            .or_else(|| self.by_name.get(&key))
+            .map_or(&[][..], Vec::as_slice);
+        match found {
+            [index] => Ok(&self.tables[*index]),
             [] => Err(invalid(
                 detail::UNDEFINED_VARIABLE,
                 format!("`{qualifier}` is not a table of this statement"),
@@ -162,29 +182,26 @@ impl Scope {
                 let name = column.value.as_str();
                 let alias = self
                     .aliases
-                    .iter()
-                    .find(|(alias, _)| alias == name)
-                    .map(|(_, expression)| Ok(expression.clone()));
+                    .get(name)
+                    .map(|expression| Ok(expression.clone()));
                 let entity = || {
-                    self.written()
-                        .find(|t| {
-                            t.variable.eq_ignore_ascii_case(name)
-                                || t.alias
-                                    .as_deref()
-                                    .is_some_and(|a| a.eq_ignore_ascii_case(name))
-                        })
+                    self.by_alias
+                        .get(&name.to_lowercase())
+                        .into_iter()
+                        .flatten()
+                        .map(|&index| &self.tables[index])
+                        .find(|t| t.role == Role::Written)
                         .map(|table| variable(&table.variable, span))
                 };
                 // `v$<table>_id` is the id of the table with that variable or label.
                 let virtual_id = || {
-                    let target = name.strip_prefix("v$")?.strip_suffix("_id")?;
+                    let target = name.strip_prefix("v$")?.strip_suffix("_id")?.to_lowercase();
                     Some(
-                        self.tables
-                            .iter()
-                            .find(|t| {
-                                t.variable.eq_ignore_ascii_case(target)
-                                    || matches!(&t.kind, Kind::Node { label } if label.eq_ignore_ascii_case(target))
-                            })
+                        self.by_alias
+                            .get(&target)
+                            .or_else(|| self.by_label.get(&target))
+                            .and_then(|indices| indices.first())
+                            .map(|&index| &self.tables[index])
                             .ok_or_else(|| {
                                 invalid(
                                     detail::UNDEFINED_VARIABLE,
@@ -702,7 +719,7 @@ fn relationship(name: Option<String>, kind: &str, direction: r::Direction) -> sy
 
 /// `true` when `expression` is a variable that stands for one of `scope`'s tables.
 pub(super) fn is_table_variable(scope: &Scope, expression: &Expr) -> bool {
-    matches!(expression.kind(), ExprKind::Variable(name) if scope.tables.iter().any(|t| &t.variable == name))
+    matches!(expression.kind(), ExprKind::Variable(name) if scope.variables.contains(name))
 }
 
 /// Table variables `expression` reads, for grouping validation.

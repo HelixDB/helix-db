@@ -384,11 +384,26 @@ fn parse_error(lines: &Lines<'_>, error: sqlparser::parser::ParserError) -> Quer
     }
 }
 
-/// Byte offsets of line starts, for converting sqlparser's 1-based character
-/// locations into the byte spans every Cypher error reports.
+/// Converts sqlparser's 1-based line and character locations into the byte
+/// offsets every Cypher error span reports, in constant time per location.
 struct Lines<'a> {
     text: &'a str,
+    /// Byte offset of each line start.
     starts: Vec<usize>,
+    /// For text with multibyte characters only.
+    characters: Option<Characters>,
+}
+
+/// Character positions of non-ASCII text: the character index of each line
+/// start, and the byte offset of every [`Characters::STRIDE`]th character, so
+/// a lookup walks at most one stride.
+struct Characters {
+    lines: Vec<usize>,
+    marks: Vec<usize>,
+}
+
+impl Characters {
+    const STRIDE: usize = 64;
 }
 
 impl<'a> Lines<'a> {
@@ -396,21 +411,46 @@ impl<'a> Lines<'a> {
         let starts = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(index, _)| index + 1))
             .collect();
-        Self { text, starts }
+        let characters = (!text.is_ascii()).then(|| {
+            let (mut lines, mut marks) = (vec![0], Vec::new());
+            for (index, (offset, c)) in text.char_indices().enumerate() {
+                if index % Characters::STRIDE == 0 {
+                    marks.push(offset);
+                }
+                if c == '\n' {
+                    lines.push(index + 1);
+                }
+            }
+            Characters { lines, marks }
+        });
+        Self {
+            text,
+            starts,
+            characters,
+        }
     }
 
     fn offset(&self, location: tokenizer::Location) -> Option<usize> {
         let line = usize::try_from(location.line).ok()?.checked_sub(1)?;
         let column = usize::try_from(location.column).ok()?.checked_sub(1)?;
         let start = *self.starts.get(line)?;
-        let rest = &self.text[start..];
-        Some(
-            start
-                + rest
+        let offset = match &self.characters {
+            None => start.saturating_add(column),
+            Some(characters) => {
+                let index = characters.lines.get(line)? + column;
+                let mark = characters
+                    .marks
+                    .get(index / Characters::STRIDE)
+                    .copied()
+                    .unwrap_or(self.text.len());
+                let rest = &self.text[mark..];
+                mark + rest
                     .char_indices()
-                    .nth(column)
-                    .map_or(rest.len(), |(index, _)| index),
-        )
+                    .nth(index % Characters::STRIDE)
+                    .map_or(rest.len(), |(offset, _)| offset)
+            }
+        };
+        Some(offset.min(self.text.len()))
     }
 }
 

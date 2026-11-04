@@ -176,17 +176,17 @@ impl Translator<'_> {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
-        if let Some(duplicate) = keys
-            .iter()
+        let mut seen = std::collections::HashSet::new();
+        keys.iter()
             .enumerate()
-            .find(|(index, key)| keys[..*index].contains(key))
-        {
-            return Err(invalid(
-                detail::INVALID_STATEMENT,
-                format!("column `{}` is listed twice", duplicate.1),
-                self.at(&columns[duplicate.0]),
-            ));
-        }
+            .find(|(_, key)| !seen.insert(*key))
+            .map_or(Ok(()), |(index, key)| {
+                Err(invalid(
+                    detail::INVALID_STATEMENT,
+                    format!("column `{key}` is listed twice"),
+                    self.at(&columns[index]),
+                ))
+            })?;
         let entries = |row: Vec<Expr>| keys.iter().cloned().zip(row).collect::<Vec<_>>();
         let mut rows = rows.into_iter();
         let first = rows.next().expect("VALUES has a row");

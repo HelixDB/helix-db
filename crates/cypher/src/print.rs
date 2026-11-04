@@ -48,9 +48,9 @@ impl Display for Clause {
                 }
                 f.write_str("MATCH ")?;
                 list(f, patterns)?;
-                if let Some(predicate) = predicate {
-                    write!(f, " WHERE {predicate}")?;
-                }
+                predicate
+                    .iter()
+                    .try_for_each(|predicate| write!(f, " WHERE {predicate}"))?;
                 Ok(())
             }
             Clause::Project {
@@ -82,15 +82,13 @@ impl Display for Clause {
                         },
                     )?;
                 }
-                if let Some(skip) = skip {
-                    write!(f, " SKIP {skip}")?;
-                }
-                if let Some(limit) = limit {
-                    write!(f, " LIMIT {limit}")?;
-                }
-                if let Some(predicate) = predicate {
-                    write!(f, " WHERE {predicate}")?;
-                }
+                skip.iter().try_for_each(|skip| write!(f, " SKIP {skip}"))?;
+                limit
+                    .iter()
+                    .try_for_each(|limit| write!(f, " LIMIT {limit}"))?;
+                predicate
+                    .iter()
+                    .try_for_each(|predicate| write!(f, " WHERE {predicate}"))?;
                 Ok(())
             }
             Clause::Unwind { expression, name } => {
@@ -140,10 +138,9 @@ impl Display for Item {
                 expression, alias, ..
             } => {
                 write!(f, "{expression}")?;
-                if let Some(alias) = alias {
-                    write!(f, " AS {}", Name(alias))?;
-                }
-                Ok(())
+                alias
+                    .iter()
+                    .try_for_each(|alias| write!(f, " AS {}", Name(alias)))
             }
         }
     }
@@ -151,13 +148,14 @@ impl Display for Item {
 
 impl Display for Pattern {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if let Some(name) = &self.name {
-            write!(f, "{} = ", Name(name))?;
-        }
+        self.name
+            .iter()
+            .try_for_each(|name| write!(f, "{} = ", Name(name)))?;
         let mut nodes = self.nodes.iter();
-        if let Some(first) = nodes.next() {
-            write!(f, "{first}")?;
-        }
+        nodes
+            .next()
+            .iter()
+            .try_for_each(|first| write!(f, "{first}"))?;
         self.relationships
             .iter()
             .zip(nodes)
@@ -168,9 +166,9 @@ impl Display for Pattern {
 impl Display for Node {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_char('(')?;
-        if let Some(name) = &self.name {
-            write!(f, "{}", Name(name))?;
-        }
+        self.name
+            .iter()
+            .try_for_each(|name| write!(f, "{}", Name(name)))?;
         self.labels
             .iter()
             .try_for_each(|label| write!(f, ":{}", Name(label)))?;
@@ -192,9 +190,9 @@ impl Display for Relationship {
         })?;
         if self.name.is_some() || !self.types.is_empty() || !self.properties.is_empty() {
             f.write_char('[')?;
-            if let Some(name) = &self.name {
-                write!(f, "{}", Name(name))?;
-            }
+            self.name
+                .iter()
+                .try_for_each(|name| write!(f, "{}", Name(name)))?;
             self.types
                 .iter()
                 .enumerate()
@@ -265,13 +263,9 @@ impl Display for Expr {
             ExprKind::Slice { value, start, end } => {
                 operand(f, value, precedence(value.kind()) < POSTFIX)?;
                 f.write_char('[')?;
-                if let Some(start) = start {
-                    write!(f, "{start}")?;
-                }
+                start.iter().try_for_each(|start| write!(f, "{start}"))?;
                 f.write_str("..")?;
-                if let Some(end) = end {
-                    write!(f, "{end}")?;
-                }
+                end.iter().try_for_each(|end| write!(f, "{end}"))?;
                 f.write_char(']')
             }
             ExprKind::Unary(U::Not, value) => {
@@ -355,15 +349,15 @@ impl Display for Expr {
                 otherwise,
             } => {
                 f.write_str("CASE")?;
-                if let Some(subject) = subject {
-                    write!(f, " {subject}")?;
-                }
+                subject
+                    .iter()
+                    .try_for_each(|subject| write!(f, " {subject}"))?;
                 branches
                     .iter()
                     .try_for_each(|(when, then)| write!(f, " WHEN {when} THEN {then}"))?;
-                if let Some(otherwise) = otherwise {
-                    write!(f, " ELSE {otherwise}")?;
-                }
+                otherwise
+                    .iter()
+                    .try_for_each(|otherwise| write!(f, " ELSE {otherwise}"))?;
                 f.write_str(" END")
             }
             ExprKind::HasLabel(value, label) => {

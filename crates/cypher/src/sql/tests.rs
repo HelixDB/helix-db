@@ -726,3 +726,59 @@ fn requests_decode_named_positional_and_lossless_parameters() {
         detail::FUNCTION
     );
 }
+
+proptest! {
+    /// Constant-time location lookups agree with walking the text.
+    #[test]
+    fn locations_convert_to_byte_offsets(text in "[a-cé€😀\n]{0,300}") {
+        let lines = super::Lines::new(&text);
+        for (number, line) in text.split('\n').enumerate() {
+            let start = text.split('\n').take(number).map(|l| l.len() + 1).sum::<usize>();
+            for (column, (offset, _)) in line.char_indices().chain([(line.len(), ' ')]).enumerate() {
+                let location = sqlparser::tokenizer::Location {
+                    line: number as u64 + 1,
+                    column: column as u64 + 1,
+                };
+                prop_assert_eq!(lines.offset(location), Some(start + offset));
+            }
+        }
+    }
+}
+
+/// Wide and long statements translate in time linear in their size:
+/// lookups, grouping checks and span conversion are indexed.
+#[test]
+fn wide_statements_translate_in_linear_time() {
+    let started = std::time::Instant::now();
+    let columns: Vec<String> = (0..4_000).map(|i| format!("t.c{i}")).collect();
+    let grouped = format!(
+        "SELECT {}, count(*) FROM t GROUP BY {}",
+        columns.join(", "),
+        columns.join(", ")
+    );
+    assert!(cypher(&grouped).starts_with("MATCH (t:t) RETURN t.c0, t.c1"));
+    let hidden = format!(
+        "SELECT count(*) FROM t GROUP BY {} HAVING count(*) > 1 ORDER BY 1",
+        columns.join(", ")
+    );
+    assert!(cypher(&hidden).contains("__group_col_3999"));
+    let tables: Vec<String> = (0..4_000).map(|i| format!("t{i}")).collect();
+    let joined = format!(
+        "SELECT {} FROM {}",
+        tables
+            .iter()
+            .map(|t| format!("{t}.x"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        tables.join(", ")
+    );
+    assert!(cypher(&joined).starts_with("MATCH (t0:t0), (t1:t1)"));
+    // One long line with multibyte text and many nodes.
+    let long = format!("SELECT 'é€😀', {}", vec!["1"; 200_000].join(", "));
+    assert!(translate(&long, &Mappings::default()).is_ok());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "took {:?}",
+        started.elapsed()
+    );
+}
