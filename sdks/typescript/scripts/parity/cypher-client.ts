@@ -6,10 +6,16 @@ import { parityProgress } from "./progress.js";
 
 /** Record actual public SDK responses. Mutations are executed exactly once. */
 export async function writeCypherCase(client: Client, fixture: CypherCase, root: string): Promise<void> {
-  parityProgress(`Cypher: ${fixture.name}`);
+  parityProgress(`${fixture.statement.language === "sql" ? "SQL" : "Cypher"}: ${fixture.name}`);
+  const { statement } = fixture;
   let output: unknown;
   try {
-    output = { result: await client.cypher(fixture.query, fixture.parameters, fixture.name) };
+    output = {
+      result:
+        statement.language === "sql"
+          ? await client.sql(fixture.query, statement.parameters, statement.mappings, fixture.name)
+          : await client.cypher(fixture.query, statement.parameters, fixture.name),
+    };
   } catch (error) {
     output =
       error instanceof HelixError ? { error: String(error), code: error.code, details: error.serverDetails } : { error: String(error) };

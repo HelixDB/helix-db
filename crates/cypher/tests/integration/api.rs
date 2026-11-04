@@ -3,9 +3,11 @@ use helix_cypher::{QueryError, Span};
 use serde_json::json;
 
 #[test]
-fn paths_are_the_public_cypher_routes() {
+fn paths_are_the_public_cypher_and_sql_routes() {
     assert_eq!(api::HTTP_PATH, "/v2/cypher");
     assert_eq!(api::HTTP_EXPLAIN_PATH, "/v2/cypher/explain");
+    assert_eq!(api::HTTP_SQL_PATH, "/v2/sql");
+    assert_eq!(api::HTTP_SQL_EXPLAIN_PATH, "/v2/sql/explain");
 }
 
 #[test]

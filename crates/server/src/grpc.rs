@@ -56,22 +56,15 @@ pub(crate) fn server_service(state: ServerState) -> HelixDbServerServer<GrpcServ
         .max_decoding_message_size(MAX_QUERY_BODY_BYTES + PROTOBUF_ENVELOPE_ALLOWANCE)
 }
 
-#[tonic::async_trait]
-impl HelixDbServer for GrpcService {
-    async fn execute_cypher(
+impl GrpcService {
+    /// Route and execute a compiled Cypher or SQL statement under the
+    /// request's options, recording telemetry for `tenant_id`.
+    async fn execute_compiled(
         &self,
-        request: Request<QueryJsonRequest>,
+        request: QueryJsonRequest,
+        query: db::cypher::CompiledRequest,
+        tenant_id: Option<helix_metrics::query::TenantId>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let metrics_tenant_id = crate::query_metrics_tenant_id(
-            request
-                .metadata()
-                .get(crate::TENANT_ID_HEADER_NAME)
-                .and_then(|value| value.to_str().ok()),
-        );
-        let request = request.into_inner();
-        let query = cypher_request(&request.body)?
-            .compile()
-            .map_err(|e| cypher_status(e.into()))?;
         validate_options_for_request_type(
             request.warm_only,
             request.require_writer,
@@ -88,7 +81,7 @@ impl HelixDbServer for GrpcService {
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
                 db::cypher::Limits::default(),
-                metrics_tenant_id,
+                tenant_id,
             )
             .await
             .map_err(cypher_status)?;
@@ -103,13 +96,13 @@ impl HelixDbServer for GrpcService {
         }))
     }
 
-    async fn explain_cypher(
+    /// Plan a compiled Cypher or SQL statement without executing it. Explaining
+    /// never executes, so even a modifying statement uses read options.
+    async fn explain_compiled(
         &self,
-        request: Request<QueryJsonRequest>,
+        request: QueryJsonRequest,
+        query: db::cypher::CompiledRequest,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let request = request.into_inner();
-        let query = cypher_request(&request.body)?;
-        // Explaining never executes, so even a modifying statement uses read options.
         validate_options_for_request_type(
             request.warm_only,
             request.require_writer,
@@ -120,7 +113,7 @@ impl HelixDbServer for GrpcService {
         let explanation = self
             .state
             .query_service()
-            .explain_cypher_scoped_controlled(
+            .explain_compiled_cypher_scoped_controlled(
                 query,
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
@@ -132,17 +125,61 @@ impl HelixDbServer for GrpcService {
             .map_err(|e| status_from_service_error(QueryServiceError::JsonSerialize(e)))?;
         Ok(Response::new(QueryJsonResponse { body: body.into() }))
     }
+}
+
+#[tonic::async_trait]
+impl HelixDbServer for GrpcService {
+    async fn execute_cypher(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let tenant_id = metrics_tenant_id(&request);
+        let request = request.into_inner();
+        let query = json_request::<db::cypher::Request>(&request.body)?
+            .compile()
+            .map_err(|e| cypher_status(e.into()))?;
+        self.execute_compiled(request, query, tenant_id).await
+    }
+
+    async fn explain_cypher(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let request = request.into_inner();
+        let query = json_request::<db::cypher::Request>(&request.body)?
+            .compile()
+            .map_err(|e| cypher_status(e.into()))?;
+        self.explain_compiled(request, query).await
+    }
+
+    async fn execute_sql(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let tenant_id = metrics_tenant_id(&request);
+        let request = request.into_inner();
+        let query = json_request::<db::cypher::sql::request::Request>(&request.body)?
+            .compile()
+            .map_err(|e| cypher_status(e.into()))?;
+        self.execute_compiled(request, query, tenant_id).await
+    }
+
+    async fn explain_sql(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let request = request.into_inner();
+        let query = json_request::<db::cypher::sql::request::Request>(&request.body)?
+            .compile()
+            .map_err(|e| cypher_status(e.into()))?;
+        self.explain_compiled(request, query).await
+    }
 
     async fn execute_query(
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let metrics_tenant_id = crate::query_metrics_tenant_id(
-            request
-                .metadata()
-                .get(crate::TENANT_ID_HEADER_NAME)
-                .and_then(|value| value.to_str().ok()),
-        );
+        let metrics_tenant_id = metrics_tenant_id(&request);
         let QueryJsonRequest {
             body,
             warm_only,
@@ -220,8 +257,19 @@ fn query_mode(warm_only: bool) -> QueryMode {
     }
 }
 
-/// Decode a Cypher body with the same size limit and error codes as native queries.
-fn cypher_request(body: &[u8]) -> Result<db::cypher::Request, Status> {
+/// The telemetry tenant a request names in its metadata.
+fn metrics_tenant_id<T>(request: &Request<T>) -> Option<helix_metrics::query::TenantId> {
+    crate::query_metrics_tenant_id(
+        request
+            .metadata()
+            .get(crate::TENANT_ID_HEADER_NAME)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+/// Decode a Cypher or SQL body with the same size limit and error codes as
+/// native queries.
+fn json_request<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Status> {
     if body.len() > MAX_QUERY_BODY_BYTES {
         return Err(status_with_error_code(
             error_code::QueryErrorCode::InvalidRequestBody,

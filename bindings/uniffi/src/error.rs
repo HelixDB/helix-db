@@ -67,6 +67,14 @@ impl HelixError {
             msg: error.to_string(),
         }
     }
+
+    /// A SQL request body that is not the `POST /v2/sql` JSON contract.
+    pub(crate) fn invalid_sql_json(error: serde_json::Error) -> Self {
+        Self::InvalidRequest {
+            error: "invalid_sql_json".into(),
+            msg: error.to_string(),
+        }
+    }
 }
 
 impl From<HelixDbError> for HelixError {

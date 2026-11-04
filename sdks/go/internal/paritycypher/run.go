@@ -1,4 +1,5 @@
-// Package paritycypher executes the shared runtime corpus through the public SDK.
+// Package paritycypher executes the shared Cypher and SQL runtime corpus
+// through the public SDK.
 // Assertions are performed independently by the cross-language parity checker.
 package paritycypher
 
@@ -16,10 +17,14 @@ import (
 )
 
 type fixture struct {
-	Name            string         `json:"name"`
-	Query           string         `json:"query"`
-	Parameters      map[string]any `json:"parameters"`
-	AfterDiskReopen bool           `json:"after_disk_reopen"`
+	Name     string `json:"name"`
+	Language string `json:"language"`
+	Query    string `json:"query"`
+	// Parameters is an object of named values, or for SQL a list that binds
+	// each ? in order.
+	Parameters      any               `json:"parameters"`
+	Mappings        helix.SQLMappings `json:"mappings"`
+	AfterDiskReopen bool              `json:"after_disk_reopen"`
 }
 
 func load() ([]fixture, error) {
@@ -40,7 +45,7 @@ func load() ([]fixture, error) {
 	if err := decoder.Decode(&corpus); err != nil {
 		return nil, err
 	}
-	if corpus.SchemaVersion != 1 || len(corpus.Cases) != 16 {
+	if corpus.SchemaVersion != 1 || len(corpus.Cases) != 24 {
 		return nil, fmt.Errorf("unsupported or incomplete Cypher parity corpus")
 	}
 	valid := regexp.MustCompile(`^[a-z0-9-]+$`)
@@ -50,15 +55,38 @@ func load() ([]fixture, error) {
 			return nil, fmt.Errorf("Cypher parity names must be unique safe basenames")
 		}
 		seen[f.Name] = true
+		if f.Language != "" && f.Language != "sql" {
+			return nil, fmt.Errorf("unknown parity language %q", f.Language)
+		}
 	}
 	return corpus.Cases, nil
 }
 
 // writeCase records actual responses and errors; it never retries a write.
 func writeCase(client *helix.Client, f fixture, root string) error {
-	response, err := client.Cypher(context.Background(), helix.CypherRequest{
-		Query: f.Query, Parameters: f.Parameters, QueryName: f.Name,
-	})
+	var response *helix.CypherResponse
+	var err error
+	if f.Language == "sql" {
+		request := helix.SQLRequest{Query: f.Query, QueryName: f.Name, Mappings: f.Mappings}
+		switch parameters := f.Parameters.(type) {
+		case []any:
+			request.Args = parameters
+		case map[string]any:
+			request.Parameters = parameters
+		case nil:
+		default:
+			return fmt.Errorf("%s: SQL parameters must be a list or an object", f.Name)
+		}
+		response, err = client.SQL(context.Background(), request)
+	} else {
+		parameters, ok := f.Parameters.(map[string]any)
+		if !ok && f.Parameters != nil {
+			return fmt.Errorf("%s: Cypher parameters must be an object", f.Name)
+		}
+		response, err = client.Cypher(context.Background(), helix.CypherRequest{
+			Query: f.Query, Parameters: parameters, QueryName: f.Name,
+		})
+	}
 	output := map[string]any{"result": response}
 	if err != nil {
 		output = map[string]any{"error": err.Error()}

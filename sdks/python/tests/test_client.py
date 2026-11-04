@@ -207,6 +207,8 @@ class ClientTests(unittest.TestCase):
                 "query",
                 "cypher",
                 "explain_cypher",
+                "sql",
+                "explain_sql",
                 "base_url",
                 "execute",
                 "graph",

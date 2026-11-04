@@ -232,12 +232,91 @@ impl fmt::Debug for Client {
 /// Backwards-compatible alias for [`Client`].
 pub type HelixDBClient = Client;
 
-/// Lossless Cypher result. Graph IDs and integers outside the JSON safe range
-/// use tagged values; applications may retain these envelopes unchanged.
+/// Lossless Cypher or SQL result. Graph IDs and integers outside the JSON safe
+/// range use tagged values; applications may retain these envelopes unchanged.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct CypherResponse {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
+}
+
+/// The parameters of a SQL statement, in the lossless JSON of Cypher parameters.
+///
+/// `Positional` values bind each `?` in order (`$1`, `$2`, …); `Named` values
+/// bind `:name`, `$name`, `@name` and `?N` placeholders by name.
+///
+/// ```
+/// use helix_db::SqlParameters;
+/// let positional = SqlParameters::from(vec![serde_json::json!(30)]);
+/// assert_eq!(serde_json::to_value(&positional).unwrap(), serde_json::json!([30]));
+/// let named = SqlParameters::from(std::collections::BTreeMap::from([(
+///     "age".to_string(),
+///     serde_json::json!(30),
+/// )]));
+/// assert_eq!(serde_json::to_value(&named).unwrap(), serde_json::json!({"age": 30}));
+/// ```
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum SqlParameters {
+    Positional(Vec<serde_json::Value>),
+    Named(std::collections::BTreeMap<String, serde_json::Value>),
+}
+
+impl Default for SqlParameters {
+    fn default() -> Self {
+        Self::Positional(Vec::new())
+    }
+}
+
+impl From<Vec<serde_json::Value>> for SqlParameters {
+    fn from(values: Vec<serde_json::Value>) -> Self {
+        Self::Positional(values)
+    }
+}
+
+impl From<std::collections::BTreeMap<String, serde_json::Value>> for SqlParameters {
+    fn from(values: std::collections::BTreeMap<String, serde_json::Value>) -> Self {
+        Self::Named(values)
+    }
+}
+
+/// How SQL names map onto the graph for one request: a table to a node label
+/// (or a join's middle table to a relationship type), and a join's `ON` column,
+/// written `table.column`, to a relationship type. Names without a mapping are
+/// used as written.
+///
+/// ```
+/// let mappings = helix_db::SqlMappings::default()
+///     .table("people", "Person")
+///     .join_column("people.movie_id", "DIRECTED");
+/// assert_eq!(
+///     serde_json::to_value(&mappings).unwrap(),
+///     serde_json::json!({"tables": {"people": "Person"}, "join_columns": {"people.movie_id": "DIRECTED"}}),
+/// );
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlMappings {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tables: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub join_columns: std::collections::BTreeMap<String, String>,
+}
+
+impl SqlMappings {
+    /// Map a table to a node label or relationship type.
+    #[must_use]
+    pub fn table(mut self, table: impl Into<String>, label: impl Into<String>) -> Self {
+        self.tables.insert(table.into(), label.into());
+        self
+    }
+
+    /// Map a join column, written `table.column`, to a relationship type.
+    #[must_use]
+    pub fn join_column(mut self, column: impl Into<String>, kind: impl Into<String>) -> Self {
+        self.join_columns.insert(column.into(), kind.into());
+        self
+    }
 }
 
 impl Client {
@@ -282,25 +361,81 @@ impl Client {
             .explain()
             .await
     }
+
+    /// Translate one SQL statement to Cypher and execute it like
+    /// [`Client::cypher`] (`POST /v2/sql`).
+    ///
+    /// ```no_run
+    /// # async fn example(client: helix_db::Client) -> Result<(), helix_db::HelixError> {
+    /// let mappings = helix_db::SqlMappings::default().table("people", "Person");
+    /// let response = client
+    ///     .sql("SELECT p.name FROM people p WHERE p.age > ?", vec![serde_json::json!(30)], &mappings, None)
+    ///     .await?;
+    /// assert_eq!(response.columns, ["name"]);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn sql(
+        &self,
+        query: &str,
+        parameters: impl Into<SqlParameters>,
+        mappings: &SqlMappings,
+        query_name: Option<&str>,
+    ) -> Result<CypherResponse, HelixError> {
+        self.request_builder::<()>()
+            .sql(query, parameters, mappings, query_name)
+            .send()
+            .await
+    }
+
+    /// Plan one SQL statement's translation without executing it, like
+    /// [`Client::explain_cypher`] (`POST /v2/sql/explain`).
+    pub async fn explain_sql(
+        &self,
+        query: &str,
+        parameters: impl Into<SqlParameters>,
+        mappings: &SqlMappings,
+        query_name: Option<&str>,
+    ) -> Result<serde_json::Value, HelixError> {
+        self.request_builder::<()>()
+            .sql(query, parameters, mappings, query_name)
+            .explain()
+            .await
+    }
 }
 
-/// A Cypher statement ready to [`send`](Self::send) or [`explain`](Self::explain),
-/// produced by [`QueryBuilder::cypher`]. Request options toggled on the builder
-/// apply to either route.
-pub struct CypherExecutionRequest<'hlx, 'a> {
+/// The statement language of a [`StatementRequest`], which selects its routes
+/// and embedded methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Language {
+    Cypher,
+    Sql,
+}
+
+/// A Cypher or SQL statement ready to [`send`](Self::send) or
+/// [`explain`](Self::explain), produced by [`QueryBuilder::cypher`] or
+/// [`QueryBuilder::sql`]. Request options toggled on the builder apply to
+/// either route.
+pub struct StatementRequest<'hlx, 'a> {
     client: &'hlx HelixDBClient,
     headers: [Option<(&'a str, &'a str)>; 4],
+    language: Language,
     body: serde_json::Value,
 }
 
-impl CypherExecutionRequest<'_, '_> {
-    /// Execute the statement (`POST /v2/cypher`). A modifying statement commits
-    /// atomically; the request is sent once and never retried. A warm-only read
-    /// that Helix Cloud answers with `204 No Content` returns no columns or rows.
+impl StatementRequest<'_, '_> {
+    /// Execute the statement (`POST /v2/cypher` or `POST /v2/sql`). A modifying
+    /// statement commits atomically; the request is sent once and never
+    /// retried. A warm-only read that Helix Cloud answers with
+    /// `204 No Content` returns no columns or rows.
     pub async fn send(self) -> Result<CypherResponse, HelixError> {
         let mut bytes = match &self.client.backend {
             ClientBackend::Server(server) => {
-                let Some(bytes) = self.post(server, "/v2/cypher").await? else {
+                let path = match self.language {
+                    Language::Cypher => "/v2/cypher",
+                    Language::Sql => "/v2/sql",
+                };
+                let Some(bytes) = self.post(server, path).await? else {
                     return Ok(CypherResponse {
                         columns: Vec::new(),
                         rows: Vec::new(),
@@ -310,33 +445,47 @@ impl CypherExecutionRequest<'_, '_> {
             }
             #[cfg(feature = "embedded")]
             ClientBackend::Embedded(database) => {
-                let response = database
-                    .cypher(self.embedded_request()?)
-                    .await
-                    .map_err(embedded_cypher_error)?;
+                self.reject_embedded_options()?;
+                let body = self.body.clone();
+                let response = match self.language {
+                    Language::Cypher => database.cypher(serde_json::from_value(body)?).await,
+                    Language::Sql => database.sql(serde_json::from_value(body)?).await,
+                }
+                .map_err(embedded_cypher_error)?;
                 serde_json::to_vec(&response)?
             }
         };
         Ok(simd_json::from_slice(&mut bytes)?)
     }
 
-    /// Plan the statement without executing it (`POST /v2/cypher/explain`). A
-    /// warm-only request that Helix Cloud answers with `204 No Content` returns
-    /// [`serde_json::Value::Null`].
+    /// Plan the statement without executing it (`POST /v2/cypher/explain` or
+    /// `POST /v2/sql/explain`). A warm-only request that Helix Cloud answers
+    /// with `204 No Content` returns [`serde_json::Value::Null`].
     pub async fn explain(self) -> Result<serde_json::Value, HelixError> {
         let mut bytes = match &self.client.backend {
             ClientBackend::Server(server) => {
-                let Some(bytes) = self.post(server, "/v2/cypher/explain").await? else {
+                let path = match self.language {
+                    Language::Cypher => "/v2/cypher/explain",
+                    Language::Sql => "/v2/sql/explain",
+                };
+                let Some(bytes) = self.post(server, path).await? else {
                     return Ok(serde_json::Value::Null);
                 };
                 bytes
             }
             #[cfg(feature = "embedded")]
             ClientBackend::Embedded(database) => {
-                let explanation = database
-                    .explain_cypher(self.embedded_request()?)
-                    .await
-                    .map_err(embedded_cypher_error)?;
+                self.reject_embedded_options()?;
+                let body = self.body.clone();
+                let explanation = match self.language {
+                    Language::Cypher => {
+                        database
+                            .explain_cypher(serde_json::from_value(body)?)
+                            .await
+                    }
+                    Language::Sql => database.explain_sql(serde_json::from_value(body)?).await,
+                }
+                .map_err(embedded_cypher_error)?;
                 serde_json::to_vec(&explanation)?
             }
         };
@@ -365,13 +514,13 @@ impl CypherExecutionRequest<'_, '_> {
     }
 
     #[cfg(feature = "embedded")]
-    fn embedded_request(&self) -> Result<db::cypher::Request, HelixError> {
+    fn reject_embedded_options(&self) -> Result<(), HelixError> {
         if self.headers.iter().skip(1).any(Option::is_some) {
             return Err(HelixError::InvalidRequest {
                 details: "request options require server mode".to_string(),
             });
         }
-        Ok(serde_json::from_value(self.body.clone())?)
+        Ok(())
     }
 }
 
@@ -915,19 +1064,44 @@ impl<'hlx, 'a, R> QueryBuilder<'hlx, 'a, R> {
     }
 
     /// Target the Cypher routes with one statement and its lossless JSON
-    /// parameters, then [`send`](CypherExecutionRequest::send) or
-    /// [`explain`](CypherExecutionRequest::explain) it.
+    /// parameters, then [`send`](StatementRequest::send) or
+    /// [`explain`](StatementRequest::explain) it.
     #[must_use]
     pub fn cypher(
         self,
         query: &str,
         parameters: std::collections::BTreeMap<String, serde_json::Value>,
         query_name: Option<&str>,
-    ) -> CypherExecutionRequest<'hlx, 'a> {
-        CypherExecutionRequest {
+    ) -> StatementRequest<'hlx, 'a> {
+        StatementRequest {
             client: self.client,
             headers: self.headers,
+            language: Language::Cypher,
             body: serde_json::json!({"query": query, "parameters": parameters, "query_name": query_name}),
+        }
+    }
+
+    /// Target the SQL routes with one statement, its parameters and name
+    /// mappings, then [`send`](StatementRequest::send) or
+    /// [`explain`](StatementRequest::explain) it.
+    #[must_use]
+    pub fn sql(
+        self,
+        query: &str,
+        parameters: impl Into<SqlParameters>,
+        mappings: &SqlMappings,
+        query_name: Option<&str>,
+    ) -> StatementRequest<'hlx, 'a> {
+        StatementRequest {
+            client: self.client,
+            headers: self.headers,
+            language: Language::Sql,
+            body: serde_json::json!({
+                "query": query,
+                "parameters": parameters.into(),
+                "query_name": query_name,
+                "mappings": mappings,
+            }),
         }
     }
 }
@@ -1881,6 +2055,89 @@ mod client_tests {
     }
 
     #[tokio::test]
+    async fn sql_routes_bodies_and_explains() {
+        let client = Client::new(Some("http://localhost:6969")).unwrap();
+        let mappings = SqlMappings::default()
+            .table("people", "Person")
+            .join_column("people.team_id", "MEMBER_OF");
+        let request =
+            client
+                .request_builder::<()>()
+                .sql("SELECT 1", vec![serde_json::json!(i64::MAX)], &mappings, Some("named"));
+        assert_eq!(request.language, Language::Sql);
+        assert_eq!(
+            request.body,
+            serde_json::json!({
+                "query": "SELECT 1",
+                "parameters": [i64::MAX],
+                "query_name": "named",
+                "mappings": {"tables": {"people": "Person"}, "join_columns": {"people.team_id": "MEMBER_OF"}},
+            })
+        );
+        let named = client.request_builder::<()>().sql(
+            "SELECT :n",
+            std::collections::BTreeMap::from([("n".into(), serde_json::json!(1))]),
+            &SqlMappings::default(),
+            None,
+        );
+        assert_eq!(
+            named.body,
+            serde_json::json!({"query": "SELECT :n", "parameters": {"n": 1}, "query_name": null, "mappings": {}})
+        );
+
+        let (base, handle) = spawn_capture_server(200, r#"{"columns":["n"],"rows":[[1]]}"#).await;
+        let response = Client::new(Some(&base))
+            .unwrap()
+            .with_database_id(Some("db_123"))
+            .sql("SELECT 1 AS n", SqlParameters::default(), &mappings, None)
+            .await
+            .unwrap();
+        let (target, head) = handle.await.unwrap();
+        assert_eq!(target, "/v2/sql");
+        assert!(head.contains("x-helix-database-id: db_123"), "{head}");
+        assert_eq!(response.rows, vec![vec![serde_json::json!(1)]]);
+
+        let (base, handle) = spawn_capture_server(200, r#"{"effect":"Read","operators":[]}"#).await;
+        let plan = Client::new(Some(&base))
+            .unwrap()
+            .explain_sql("SELECT 1", SqlParameters::default(), &mappings, None)
+            .await
+            .unwrap();
+        assert_eq!(handle.await.unwrap().0, "/v2/sql/explain");
+        assert_eq!(plan["effect"], "Read");
+
+        for explain in [false, true] {
+            let (base, handle) = spawn_capture_server(204, "").await;
+            let client = Client::new(Some(&base)).unwrap();
+            let request = client.request_builder::<()>().warm_only().sql(
+                "SELECT 1",
+                SqlParameters::default(),
+                &SqlMappings::default(),
+                None,
+            );
+            if explain {
+                assert_eq!(request.explain().await.unwrap(), serde_json::Value::Null);
+            } else {
+                let response = request.send().await.unwrap();
+                assert!(response.columns.is_empty() && response.rows.is_empty());
+            }
+            let (_, head) = handle.await.unwrap();
+            assert!(head.contains("x-helix-warm: true"), "{head}");
+        }
+
+        let body = r#"{"error":"unsupported_feature","msg":"no subqueries","details":{"detail":"procedures_and_subqueries","phase":"compile","span":null}}"#;
+        let (base, handle) = spawn_capture_server(400, body).await;
+        let error = Client::new(Some(&base))
+            .unwrap()
+            .sql("SELECT (SELECT 1)", SqlParameters::default(), &SqlMappings::default(), None)
+            .await
+            .expect_err("a SQL diagnostic is a remote error");
+        assert_eq!(handle.await.unwrap().0, "/v2/sql");
+        assert_eq!(error.status_code(), Some(400));
+        assert_eq!(error.remote_code(), Some("unsupported_feature"));
+    }
+
+    #[tokio::test]
     async fn native_queries_send_the_database_id() {
         let (base, handle) = spawn_capture_server(200, "{}").await;
         let client = Client::new(Some(&base))
@@ -2181,6 +2438,67 @@ mod client_tests {
             .writer_only()
             .cypher("RETURN 1", std::collections::BTreeMap::new(), None)
             .send()
+            .await
+            .expect_err("server options need a server");
+        assert!(matches!(error, HelixError::InvalidRequest { .. }));
+        client.close().await.unwrap();
+    }
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn embedded_sql_executes_explains_and_rejects_server_options() {
+        let client = Client::open(HelixDbSource::InMemory {
+            database: "rust-sdk-embedded-sql".to_string(),
+        })
+        .await
+        .expect("embedded client should open");
+        let mappings = SqlMappings::default().table("people", "Person");
+
+        let plan = client
+            .explain_sql(
+                "INSERT INTO people (name) VALUES (?)",
+                vec![serde_json::json!("Planned")],
+                &mappings,
+                None,
+            )
+            .await
+            .expect("embedded SQL explain should plan");
+        assert_eq!(plan["effect"], "Write");
+        let inserted = client
+            .sql(
+                "INSERT INTO people (name, score) VALUES (?, ?) RETURNING name, score",
+                vec![serde_json::json!("Ada"), serde_json::json!(i64::MAX)],
+                &mappings,
+                None,
+            )
+            .await
+            .expect("embedded SQL should insert");
+        assert_eq!(inserted.columns, ["name", "score"]);
+        assert_eq!(inserted.rows[0][1]["value"], "9223372036854775807");
+        let names = client
+            .sql(
+                "SELECT p.name FROM people p WHERE p.name <> :skip",
+                std::collections::BTreeMap::from([("skip".into(), serde_json::json!("x"))]),
+                &mappings,
+                Some("names"),
+            )
+            .await
+            .expect("embedded SQL should read");
+        assert_eq!(names.rows, vec![vec![serde_json::json!("Ada")]]);
+
+        let error = client
+            .sql("SELECT (SELECT 1)", SqlParameters::default(), &mappings, None)
+            .await
+            .expect_err("subqueries are rejected");
+        assert!(
+            matches!(&error, HelixError::EmbeddedError { code, .. } if code == "unsupported_feature:compile:procedures_and_subqueries"),
+            "{error:?}"
+        );
+        let error = client
+            .request_builder::<()>()
+            .writer_only()
+            .sql("SELECT 1", SqlParameters::default(), &mappings, None)
+            .explain()
             .await
             .expect_err("server options need a server");
         assert!(matches!(error, HelixError::InvalidRequest { .. }));

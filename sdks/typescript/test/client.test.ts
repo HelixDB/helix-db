@@ -161,6 +161,16 @@ function handle() {
       if (queryError !== undefined) throw Object.assign(new Error(queryError.msg), queryError);
       return new TextEncoder().encode('{"effect":"Write","operators":[{"position":0,"rows":-9007199254740993}],"notices":[]}');
     },
+    async sql_json(request) {
+      cypherBodies.push(["sql", this.marker, new TextDecoder().decode(request)]);
+      if (queryError !== undefined) throw Object.assign(new Error(queryError.msg), queryError);
+      return new TextEncoder().encode('{"columns":["name"],"rows":[["Ada"]]}');
+    },
+    async explain_sql_json(request) {
+      cypherBodies.push(["explain_sql", this.marker, new TextDecoder().decode(request)]);
+      if (queryError !== undefined) throw Object.assign(new Error(queryError.msg), queryError);
+      return new TextEncoder().encode('{"effect":"Read","operators":[]}');
+    },
     async close() {
       closed = true;
     },
@@ -706,6 +716,93 @@ await withFakeNativeModule(async () => {
   }
 }
 
+// ---- SQL over HTTP ----------------------------------------------------------
+
+{
+  const result = { columns: ["score"], rows: [[{ $type: "integer", value: "9223372036854775807" }]] };
+  const server = await spawnCaptureServer({ body: JSON.stringify(result) });
+  try {
+    const client = new Client(server.base).withApiKey("local-test").withDatabaseId("db_sql");
+    const response = await client
+      .requestBuilder()
+      .writerOnly()
+      .sql(
+        "INSERT INTO people (name, score) VALUES (?, ?) RETURNING score",
+        ["Ada", 9223372036854775807n],
+        { tables: { people: "Person" }, joinColumns: { "people.team_id": "MEMBER_OF" } },
+        "insert_person",
+      )
+      .send();
+    const request = await server.captured;
+    assert.deepEqual(response, result);
+    assert.equal(request.method, "POST");
+    assert.equal(request.path, "/v2/sql");
+    assert.equal(request.headers.authorization, "Bearer local-test");
+    assert.equal(request.headers["x-helix-database-id"], "db_sql");
+    assert.equal(request.headers["x-helix-require-writer"], "true");
+    assert.deepEqual(JSON.parse(request.body), {
+      query: "INSERT INTO people (name, score) VALUES (?, ?) RETURNING score",
+      parameters: ["Ada", { $type: "integer", value: "9223372036854775807" }],
+      query_name: "insert_person",
+      mappings: { tables: { people: "Person" }, join_columns: { "people.team_id": "MEMBER_OF" } },
+    });
+    assert.equal(server.requestCount(), 1);
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  const explanation = { effect: "Read", operators: [] };
+  const server = await spawnCaptureServer({ body: JSON.stringify(explanation) });
+  try {
+    assert.deepEqual(await new Client(server.base).explainSql("SELECT p.name FROM Person p WHERE p.age > :age", { age: 30 }), explanation);
+    const request = await server.captured;
+    assert.equal(request.path, "/v2/sql/explain");
+    // Omitted mappings are sent empty and an absent name is not sent.
+    assert.deepEqual(JSON.parse(request.body), {
+      query: "SELECT p.name FROM Person p WHERE p.age > :age",
+      parameters: { age: 30 },
+      mappings: { tables: {}, join_columns: {} },
+    });
+  } finally {
+    await server.close();
+  }
+}
+
+for (const explain of [false, true]) {
+  const server = await spawnCaptureServer({ status: 204, body: "" });
+  try {
+    const request = new Client(server.base).requestBuilder().warmOnly().sql("SELECT 1");
+    assert.deepEqual(await (explain ? request.explain() : request.send()), explain ? undefined : { columns: [], rows: [] });
+    const captured = await server.captured;
+    assert.equal(captured.path, explain ? "/v2/sql/explain" : "/v2/sql");
+    assert.equal(captured.headers["x-helix-warm"], "true");
+    assert.deepEqual(JSON.parse(captured.body).parameters, []);
+  } finally {
+    await server.close();
+  }
+}
+
+{
+  const body = {
+    error: "unsupported_feature",
+    msg: "SQL translation does not support subqueries",
+    details: { detail: "procedures_and_subqueries", phase: "compile", span: { start: 7, end: 17, line: 1, column: 8 } },
+  };
+  const server = await spawnCaptureServer({ status: 400, body: JSON.stringify(body) });
+  try {
+    await assert.rejects(
+      new Client(server.base).sql("SELECT (SELECT 1)"),
+      (error: unknown) =>
+        error instanceof HelixError && error.kind === "Remote" && error.statusCode === 400 && error.code === "unsupported_feature",
+    );
+    assert.equal((await server.captured).path, "/v2/sql");
+  } finally {
+    await server.close();
+  }
+}
+
 // ---- Cloud warm 204 is a successful Cypher response without a payload -------
 
 {
@@ -869,6 +966,35 @@ await withFakeNativeModule(async (moduleUrl) => {
   }
   assert.equal(native.cypherBodies.length, 3);
 
+  assert.deepEqual(await client.sql("SELECT p.name FROM people p WHERE p.age > ?", [30n], { tables: { people: "Person" } }, "sql"), {
+    columns: ["name"],
+    rows: [["Ada"]],
+  });
+  assert.deepEqual(await client.explainSql("SELECT 1"), { effect: "Read", operators: [] });
+  assert.deepEqual(
+    native.cypherBodies.slice(3).map(([method, marker, body]) => [method, marker, JSON.parse(body)]),
+    [
+      [
+        "sql",
+        "native-handle",
+        {
+          query: "SELECT p.name FROM people p WHERE p.age > ?",
+          parameters: [{ $type: "integer", value: "30" }],
+          query_name: "sql",
+          mappings: { tables: { people: "Person" }, join_columns: {} },
+        },
+      ],
+      ["explain_sql", "native-handle", { query: "SELECT 1", parameters: [], mappings: { tables: {}, join_columns: {} } }],
+    ],
+  );
+  for (const run of [
+    () => client.requestBuilder().warmOnly().sql("SELECT 1").send(),
+    () => client.requestBuilder().writerOnly().sql("SELECT 1").explain(),
+  ]) {
+    await assert.rejects(run(), (error: unknown) => error instanceof HelixError && error.kind === "InvalidRequest");
+  }
+  assert.equal(native.cypherBodies.length, 5);
+
   native.setQueryError("syntax_error:compile:unexpected_end", "unexpected token");
   for (const run of [() => client.cypher("RETURN"), () => client.explainCypher("RETURN")]) {
     await assert.rejects(
@@ -878,6 +1004,22 @@ await withFakeNativeModule(async (moduleUrl) => {
         error.kind === "Embedded" &&
         error.code === "syntax_error:compile:unexpected_end" &&
         error.details === "unexpected token",
+    );
+  }
+  await client.close();
+});
+
+await withFakeNativeModule(async (moduleUrl) => {
+  const native = (await import(moduleUrl)) as FakeNative;
+  native.removeMethod("sql_json");
+  native.removeMethod("explain_sql_json");
+  const client = await Client.embedded({ kind: "inMemory", database: "ts-sdk-no-sql" });
+
+  for (const run of [() => client.sql("SELECT 1"), () => client.explainSql("SELECT 1")]) {
+    await assert.rejects(
+      run(),
+      (error: unknown) =>
+        error instanceof HelixError && error.kind === "EmbeddedUnavailable" && error.details === "rebuild native bindings with SQL support",
     );
   }
   await client.close();
