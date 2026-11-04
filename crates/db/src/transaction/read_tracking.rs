@@ -51,6 +51,11 @@ impl Tracker {
         })
     }
 
+    /// Transient admission for working memory outside the read ledger.
+    pub(super) fn reserve(&self, bytes: usize) -> Result<Reservation> {
+        admit(self.budget.reserve(bytes))
+    }
+
     fn point(&self, key: &[u8]) -> Result<Reservation> {
         let temporary = admit(
             self.budget.reserve(

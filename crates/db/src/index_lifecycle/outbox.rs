@@ -29,6 +29,7 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result};
 use crate::execution_control;
+use crate::transaction::Mutation;
 
 mod failure;
 #[cfg(test)]
@@ -664,12 +665,14 @@ pub(super) async fn stage_operation(
     if let Some(previous_operation) = previous_operation {
         transaction.delete(previous_operation)?;
     }
-    transaction.put(index_key, encode_index_record(next_index))?;
-    transaction.put(
+    Mutation::put(transaction, index_key, encode_index_record(next_index))?;
+    Mutation::put(
+        transaction,
         scoped_operation_key(scope, operation.operation_id()),
         encode_operation_record(operation),
     )?;
-    transaction.put(
+    Mutation::put(
+        transaction,
         global_operation_key(operation.operation_id()),
         encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
     )?;
@@ -838,8 +841,13 @@ pub(crate) async fn reconcile_legacy_reader_coordination_operations(
                 let next = operation.retry().map_err(operation_model_error)?;
                 let pointer = pointer_for(scope, &next);
                 validate_link(scope, &index, &next, Some(&pointer))?;
-                transaction.put(operation_key.clone(), encode_operation_record(&next))?;
-                transaction.put(
+                Mutation::put(
+                    &transaction,
+                    operation_key.clone(),
+                    encode_operation_record(&next),
+                )?;
+                Mutation::put(
+                    &transaction,
                     global_operation_key(next.operation_id()),
                     encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
                 )?;
@@ -1000,8 +1008,13 @@ pub(crate) async fn claim_operation(
         .map_err(operation_model_error)?;
     let next_pointer = pointer_for(pointer.scope, &claimed);
     validate_link(pointer.scope, &index, &claimed, Some(&next_pointer))?;
-    transaction.put(operation_key, encode_operation_record(&claimed))?;
-    transaction.put(
+    Mutation::put(
+        &transaction,
+        operation_key,
+        encode_operation_record(&claimed),
+    )?;
+    Mutation::put(
+        &transaction,
         pointer_key,
         encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(next_pointer)),
     )?;
@@ -1119,8 +1132,9 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                     .map_err(operation_model_error)?;
                 let next_pointer = pointer_for(claimed.scope, &next);
                 validate_link(claimed.scope, &index, &next, Some(&next_pointer))?;
-                transaction.put(operation_key, encode_operation_record(&next))?;
-                transaction.put(
+                Mutation::put(&transaction, operation_key, encode_operation_record(&next))?;
+                Mutation::put(
+                    &transaction,
                     pointer_key,
                     encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(
                         next_pointer,
@@ -1136,7 +1150,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             IndexOperationStepResult::Blocked(blocker) => {
                 let next = operation.block(blocker).map_err(operation_model_error)?;
                 validate_link(claimed.scope, &index, &next, None)?;
-                transaction.put(operation_key, encode_operation_record(&next))?;
+                Mutation::put(&transaction, operation_key, encode_operation_record(&next))?;
                 failpoints::trip(IndexOutboxFailpoint::QueueRemovalBefore)?;
                 transaction.delete(pointer_key)?;
                 failpoints::trip(IndexOutboxFailpoint::QueueRemovalAfter)?;
@@ -1162,11 +1176,12 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                     .complete(outcome, next_index.revision())
                     .map_err(operation_model_error)?;
                 validate_link(claimed.scope, &next_index, &next, None)?;
-                transaction.put(
+                Mutation::put(
+                    &transaction,
                     scoped_index_key(claimed.scope, &next_index),
                     encode_index_record(&next_index),
                 )?;
-                transaction.put(operation_key, encode_operation_record(&next))?;
+                Mutation::put(&transaction, operation_key, encode_operation_record(&next))?;
                 if matches!(
                     outcome,
                     IndexOperationOutcome::Build(BuildOperationOutcome::Succeeded)
@@ -1342,7 +1357,8 @@ async fn record_driver_failure(
             .block(IndexOperationBlocker::InvariantViolation)
             .map_err(operation_model_error)?;
         validate_link(claimed.scope, &index, &next, None)?;
-        transaction.put(
+        Mutation::put(
+            &transaction,
             scoped_operation_key(claimed.scope, next.operation_id()),
             encode_operation_record(&next),
         )?;
@@ -1463,8 +1479,9 @@ pub(crate) async fn retry_blocked_operation(
             }
             let pointer = pointer_for(scope, &next);
             validate_link(scope, &index, &next, Some(&pointer))?;
-            transaction.put(operation_key, encode_operation_record(&next))?;
-            transaction.put(
+            Mutation::put(&transaction, operation_key, encode_operation_record(&next))?;
+            Mutation::put(
+                &transaction,
                 global_operation_key(operation_id),
                 encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
             )?;
@@ -1625,9 +1642,14 @@ pub(crate) async fn abort_operation_with_control(
                 .map_err(operation_model_error)?;
             let next_pointer = pointer_for(scope, &next_operation);
             validate_link(scope, &next_index, &next_operation, Some(&next_pointer))?;
-            transaction.put(index_key, encode_index_record(&next_index))?;
-            transaction.put(operation_key, encode_operation_record(&next_operation))?;
-            transaction.put(
+            Mutation::put(&transaction, index_key, encode_index_record(&next_index))?;
+            Mutation::put(
+                &transaction,
+                operation_key,
+                encode_operation_record(&next_operation),
+            )?;
+            Mutation::put(
+                &transaction,
                 pointer_key,
                 encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(next_pointer)),
             )?;
@@ -1704,11 +1726,13 @@ async fn release_transient_claim(
     let pointer = pointer_for(claimed.scope, &next);
     validate_link(claimed.scope, &index, &next, Some(&pointer))?;
     failpoints::trip(IndexOutboxFailpoint::CheckpointStagingBefore)?;
-    transaction.put(
+    Mutation::put(
+        &transaction,
         scoped_operation_key(claimed.scope, next.operation_id()),
         encode_operation_record(&next),
     )?;
-    transaction.put(
+    Mutation::put(
+        &transaction,
         global_operation_key(next.operation_id()),
         encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
     )?;

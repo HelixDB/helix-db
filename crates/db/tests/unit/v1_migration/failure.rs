@@ -120,7 +120,6 @@ async fn seed(
             node_id,
             DataScope::LegacyUnscoped,
         )
-        .await
         .expect("unique source label row stages");
         rows.push(V1SemanticRow {
             element_kind: V1ElementKind::Node,
@@ -457,7 +456,6 @@ async fn seed_range_failure(
         node_id,
         DataScope::LegacyUnscoped,
     )
-    .await
     .expect("range failure label row stages");
     let (key, value) =
         crate::migrations::migration_parity_legacy_catalog_row(&range_failure_definition(), false)

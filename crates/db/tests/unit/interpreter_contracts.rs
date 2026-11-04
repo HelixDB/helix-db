@@ -1758,7 +1758,7 @@ async fn topology_mutations_preserve_transactional_semantics() {
     runtime.add_edge_label(scope, 1, 2, "LINK", 10).unwrap();
     runtime.add_edge_label(scope, 1, 2, "LINK", 11).unwrap();
     runtime.add_edge_label(scope, 1, 1, "LINK", 12).unwrap();
-    runtime.flush(&transaction).await.unwrap();
+    runtime.flush(&transaction).unwrap();
 
     assert_eq!(
         topology_bitmap_ids(&transaction, &label_key).await,
@@ -1819,7 +1819,7 @@ async fn topology_mutations_preserve_transactional_semantics() {
     runtime
         .add_adjacency(scope, 7, 10, ExpandDirection::Out)
         .unwrap();
-    runtime.flush(&transaction).await.unwrap();
+    runtime.flush(&transaction).unwrap();
 
     assert!(transaction.get(&pair_key).await.unwrap().is_none());
     assert_eq!(
@@ -1870,8 +1870,8 @@ async fn topology_mutations_preserve_transactional_semantics() {
         vec![42]
     );
 
-    runtime.prepare(&transaction).await.unwrap();
-    assert!(runtime.flush(&transaction).await.is_err());
+    runtime.prepare(&transaction).unwrap();
+    assert!(runtime.flush(&transaction).is_err());
     assert!(runtime.add_node_label(scope, "Person", 7).is_err());
     runtime.consume_prepared().unwrap();
     transaction.commit().await.unwrap();
@@ -1893,7 +1893,7 @@ async fn topology_mutations_preserve_transactional_semantics() {
     rollback_runtime
         .add_node_label(scope, "Rollback", 1)
         .unwrap();
-    rollback_runtime.flush(&rollback).await.unwrap();
+    rollback_runtime.flush(&rollback).unwrap();
     drop(rollback);
     assert!(db.get(&rollback_key).await.unwrap().is_none());
 
@@ -1915,10 +1915,10 @@ async fn topology_mutations_preserve_transactional_semantics() {
     missing_runtime
         .remove_adjacency(scope, 404, 405, ExpandDirection::Both)
         .unwrap();
-    missing_runtime.flush(&missing).await.unwrap();
+    missing_runtime.flush(&missing).unwrap();
     assert!(missing.get(&missing_label_key).await.unwrap().is_none());
     assert!(missing.get(&missing_adjacency_key).await.unwrap().is_none());
-    missing_runtime.prepare(&missing).await.unwrap();
+    missing_runtime.prepare(&missing).unwrap();
     missing_runtime.consume_prepared().unwrap();
     missing.commit().await.unwrap();
 
@@ -1934,12 +1934,24 @@ async fn topology_mutations_preserve_transactional_semantics() {
             true,
         ),
     ] {
+        // Helix refuses to store a membership row it could not merge into.
         let seed = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .unwrap();
-        seed.put(&key, corrupt.clone()).unwrap();
+        assert!(crate::transaction::Mutation::put(&seed, &key, &corrupt).is_err());
+        assert!(
+            crate::transaction::Mutation::put_bytes(&seed, key.clone(), corrupt.clone()).is_err()
+        );
         seed.commit().await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), None);
+        // A row corrupted outside Helix and already flushed is never read by
+        // staging; its delta flushes alone and reads of the row fail closed.
+        db.put(&key, corrupt.clone()).await.unwrap();
+        let memtable = slatedb::config::FlushOptions {
+            flush_type: slatedb::config::FlushType::MemTable,
+        };
+        db.flush_with_options(memtable.clone()).await.unwrap();
         let transaction = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
@@ -1952,9 +1964,11 @@ async fn topology_mutations_preserve_transactional_semantics() {
         } else {
             runtime.remove_node_label(scope, "Corrupt", 1).unwrap();
         }
-        assert!(runtime.flush(&transaction).await.is_err());
-        drop(transaction);
-        assert_eq!(db.get(&key).await.unwrap(), Some(corrupt));
+        runtime.prepare(&transaction).unwrap();
+        runtime.consume_prepared().unwrap();
+        transaction.commit().await.unwrap();
+        db.flush_with_options(memtable).await.unwrap();
+        assert!(db.get(&key).await.is_err());
     }
     db.close().await.unwrap();
 
@@ -1974,14 +1988,14 @@ async fn topology_mutations_preserve_transactional_semantics() {
     losing_runtime
         .remove_node_label(scope, "Conflict", 1)
         .unwrap();
-    losing_runtime.flush(&losing).await.unwrap();
+    losing_runtime.flush(&losing).unwrap();
     let winning = db
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .unwrap();
     winning.put(&conflict_key, topology_bitmap([1, 2])).unwrap();
     winning.commit().await.unwrap();
-    losing_runtime.prepare(&losing).await.unwrap();
+    losing_runtime.prepare(&losing).unwrap();
     losing_runtime.consume_prepared().unwrap();
     assert!(losing.commit().await.is_err());
     assert_eq!(

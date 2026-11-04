@@ -129,7 +129,6 @@ async fn seed(
             node_id,
             DataScope::LegacyUnscoped,
         )
-        .await
         .expect("collision node label row stages");
     }
     for (edge_id, property, value) in [
@@ -165,7 +164,6 @@ async fn seed(
             edge_id,
             DataScope::LegacyUnscoped,
         )
-        .await
         .expect("collision edge label row stages");
     }
 
@@ -189,7 +187,6 @@ async fn seed(
             node_id,
             DataScope::LegacyUnscoped,
         )
-        .await
         .expect("misleading legacy node equality row stages");
     }
     for (property, value, node_id) in [
@@ -222,7 +219,6 @@ async fn seed(
             value,
             DataScope::LegacyUnscoped,
         )
-        .await
         .expect("misleading legacy edge equality row stages");
     }
     for (property, value, edge_id) in [

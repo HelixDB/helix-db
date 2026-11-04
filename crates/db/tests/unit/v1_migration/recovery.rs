@@ -133,7 +133,6 @@ async fn seed(
         NODE_ID,
         DataScope::LegacyUnscoped,
     )
-    .await
     .expect("crash-recovery label row stages");
 
     let legacy_edge_pair_key = Key::Data {

@@ -211,11 +211,7 @@ async fn pending_property_admission_precedes_backend_writes_and_survives_prepara
         .unwrap();
     let storage_bytes = row.encoded().clone();
     drop(row);
-    scope
-        .index_context
-        .prepare_topology(&scope.txn)
-        .await
-        .unwrap();
+    scope.index_context.prepare_topology(&scope.txn).unwrap();
     scope
         .index_context
         .prepare_secondary(&scope.txn)

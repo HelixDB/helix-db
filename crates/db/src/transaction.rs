@@ -118,20 +118,33 @@ impl ReadSource for View<'_> {
 }
 
 /// The native mutation contract preserves backend isolation and write behavior.
-/// Checked disjoint merges deliberately retain their untracked validation reads.
+/// Membership merges never read the stored row; puts keep those rows decodable.
 pub(crate) trait Mutation: DbReadOps + Send + Sync + sealed::Sealed {
     fn mutation_view(&self) -> View<'_>;
 
+    /// Stages a full value. A value for a merge-maintained membership row must
+    /// decode exactly as the merge operator decodes that row's stored value,
+    /// so later deltas can always merge into it; see [`validate_put`]. With
+    /// [`put_unbatched`], this is the production path to the backend's puts:
+    /// clippy.toml disallows the raw ones. The only raw put left is the
+    /// tenant-envelope startup copy, which moves legacy rows verbatim.
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         &self,
         key: K,
         value: V,
     ) -> std::result::Result<(), slatedb::Error> {
-        self.mutation_view().raw.put(key, value)
+        let view = self.mutation_view();
+        validate_put(view.tracking, key.as_ref(), value.as_ref())?;
+        #[allow(clippy::disallowed_methods)]
+        view.raw.put(key, value)
     }
 
+    /// Owned-bytes form of [`Self::put`], with the same validation.
     fn put_bytes(&self, key: Bytes, value: Bytes) -> std::result::Result<(), slatedb::Error> {
-        self.mutation_view().raw.put_bytes(key, value)
+        let view = self.mutation_view();
+        validate_put(view.tracking, &key, &value)?;
+        #[allow(clippy::disallowed_methods)]
+        view.raw.put_bytes(key, value)
     }
 
     fn delete<K: AsRef<[u8]>>(&self, key: K) -> std::result::Result<(), slatedb::Error> {
@@ -193,6 +206,48 @@ impl Mutation for View<'_> {
     fn mutation_view(&self) -> View<'_> {
         *self
     }
+}
+
+/// Writes one value outside any transaction, with [`Mutation::put`]'s check.
+pub(crate) async fn put_unbatched(
+    db: &slatedb::Db,
+    key: &[u8],
+    value: &[u8],
+) -> std::result::Result<slatedb::WriteHandle, slatedb::Error> {
+    validate_put(None, key, value)?;
+    #[allow(clippy::disallowed_methods)]
+    db.put(key, value).await
+}
+
+/// Rejects a full value a membership row could not take deltas on.
+///
+/// Membership deltas are staged without reading the stored row, so this keeps
+/// those rows mergeable: a memtable holding both an undecodable base and a
+/// delta for one key could not build its L0 table. Any other key returns after
+/// classification, without touching the value. A budgeted transaction admits
+/// the decode's allocation bound before decoding.
+fn validate_put(
+    tracking: Option<&read_tracking::Tracker>,
+    key: &[u8],
+    value: &[u8],
+) -> std::result::Result<(), slatedb::Error> {
+    let Some(row) = crate::merge_operator::MembershipRow::of(key) else {
+        return Ok(());
+    };
+    let invalid = |error: Box<dyn std::error::Error + Send + Sync>| {
+        slatedb::Error::invalid("full value for a merge-maintained row does not decode".to_owned())
+            .with_source(error)
+    };
+    let _decode = tracking
+        .map(|tracker| {
+            let bound = row
+                .base_allocation_bound(value)
+                .map_err(|error| invalid(Box::new(error)))?;
+            tracker.reserve(bound).map_err(storage_error)
+        })
+        .transpose()?;
+    row.validate_base(value)
+        .map_err(|error| invalid(Box::new(error)))
 }
 
 /// Private source marker survives SlateDB's required error type. Never infer

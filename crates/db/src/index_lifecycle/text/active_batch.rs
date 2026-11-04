@@ -20,6 +20,7 @@ use crate::encoding::v2::keys::ManagedIndexKey;
 use crate::encoding::v2::values as index_values;
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{self, work};
+use crate::transaction::Mutation;
 
 use super::active_preflight::{ActiveTextMutationMeasurements, ActiveTextMutationUsage};
 
@@ -1367,7 +1368,7 @@ pub(crate) fn stage_active_text_epoch(
         .stage_transaction_observed(transaction)?;
     for destination in &prepared.destinations {
         for write in &destination.writes {
-            transaction.put(&write.key, &write.value)?;
+            Mutation::put(transaction, &write.key, &write.value)?;
         }
     }
     Ok(())

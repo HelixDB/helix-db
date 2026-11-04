@@ -281,7 +281,7 @@ impl ExecutionContext<'_> {
         let mut scope = self.take_or_begin_write_scope().await?;
         // Prior CREATE clauses may still own coalesced pair/adjacency changes.
         // Deletion observations must include them, just like native deletion.
-        scope.index_context.flush_topology(&scope.txn).await?;
+        scope.index_context.flush_topology(&scope.txn)?;
         let edge_count = entities
             .iter()
             .filter(|e| matches!(e, r::Entity::Relationship(_)))
@@ -302,7 +302,7 @@ impl ExecutionContext<'_> {
             self.delete_edge_observed(&scope.txn, id, observed.take(id)?, &mut scope.index_context)
                 .await?;
         }
-        scope.index_context.flush_topology(&scope.txn).await?;
+        scope.index_context.flush_topology(&scope.txn)?;
         for entity in entities {
             let r::Entity::Node(id) = entity else {
                 continue;

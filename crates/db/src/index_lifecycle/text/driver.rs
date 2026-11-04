@@ -64,6 +64,7 @@ use crate::index_lifecycle::{
     PrefixScanProgress, SourceScanProgress, TextBuildProgress, TextBuildStage, TextLogicalVersion,
     TextManifestValidationProgress, ValidatedDynamicIndexDefinition, ValidatedTextIndexDefinition,
 };
+use crate::transaction::Mutation;
 
 /// Inseparable storage services required by split-producing lifecycle work.
 struct TextStorageRuntime {
@@ -266,7 +267,7 @@ impl PreparedTextWrite {
     /// Stages this put or delete.
     fn stage(&self, transaction: &DbTransaction) -> Result<()> {
         match &self.value {
-            Some(value) => transaction.put(&self.key, value)?,
+            Some(value) => Mutation::put(transaction, &self.key, value)?,
             None => transaction.delete(&self.key)?,
         }
         Ok(())
@@ -491,7 +492,11 @@ impl PreparedTextOperationStep {
                 for write in &prepared.lifecycle_writes {
                     write.stage(transaction)?;
                 }
-                transaction.put(&prepared.artifact_key, &prepared.artifact_value)?;
+                Mutation::put(
+                    transaction,
+                    &prepared.artifact_key,
+                    &prepared.artifact_value,
+                )?;
                 if !prepared.retired_artifact_keys.is_empty() {
                     super::compaction::stage_input_retirement(
                         transaction,
@@ -2846,7 +2851,7 @@ async fn scan_source(
         })
     };
     for (key, value) in writes {
-        transaction.put(key, value)?;
+        Mutation::put(transaction, key, value)?;
     }
     statistics_batch.validate(transaction).await?;
     statistics_batch.stage_validated(transaction)?;
