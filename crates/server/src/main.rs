@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::process::ExitCode;
 
 /// The server's allocator. glibc malloc/free was 30-40% of server CPU under

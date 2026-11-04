@@ -272,9 +272,7 @@ impl IndexOperationQueueTuning {
         self.max_members
     }
 
-    /// Returns the requested ceiling for one transaction's operand per queue key.
-    ///
-    /// Open further clamps it to the configured write-ahead-log entry bound.
+    /// Returns the ceiling for one transaction's operand per queue key.
     pub const fn max_operand_bytes(self) -> NonZeroU64 {
         self.max_operand_bytes
     }
@@ -462,23 +460,6 @@ impl IndexOperationQueueTuning {
     pub(crate) const fn starts_paused(self) -> bool {
         self.start_paused
     }
-
-    /// Returns the operand ceiling after applying the WAL replay entry bound.
-    ///
-    /// SlateDB writes one merged entry per key per transaction and rejects a
-    /// WAL whose decoded block cannot fit half of the replay working memory
-    /// (`min(max_inflight_bytes / 4, 64 MiB) / 2`). A single-entry block needs
-    /// its encoded and decoded copies, so an operand must stay below a quarter
-    /// of that working memory, less a small key/framing allowance.
-    pub(crate) fn effective_operand_bytes(self, wal_replay_max_inflight_bytes: usize) -> u64 {
-        const MAX_DECODE_WORKING_BYTES: u64 = 64 * 1024 * 1024;
-        const ENTRY_FRAMING_ALLOWANCE: u64 = 64 * 1024;
-        let working = (u64::try_from(wal_replay_max_inflight_bytes).unwrap_or(u64::MAX) / 4)
-            .min(MAX_DECODE_WORKING_BYTES);
-        let block = working / 2;
-        let entry = (block / 2).saturating_sub(ENTRY_FRAMING_ALLOWANCE);
-        self.max_operand_bytes.get().min(entry)
-    }
 }
 
 #[cfg(test)]
@@ -486,18 +467,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn operand_ceiling_respects_the_wal_replay_entry_bound() {
-        let tuning = IndexOperationQueueTuning::default();
-        // Default SlateDB replay memory (256 MiB) permits the 8 MiB default.
-        assert_eq!(
-            tuning.effective_operand_bytes(256 * 1024 * 1024),
-            8 * 1024 * 1024
-        );
-        // Small replay budgets clamp the operand below the configured ceiling.
-        assert_eq!(
-            tuning.effective_operand_bytes(23 * 1024 * 1024),
-            (23 * 1024 * 1024 / 4 / 2 / 2) - 64 * 1024
-        );
+    fn zero_recovery_sweep_interval_is_rejected() {
         assert_eq!(
             IndexOperationQueueTuning::default().with_recovery_sweep_interval(Duration::ZERO),
             Err(IndexOperationQueueTuningError::ZeroRecoverySweepInterval)

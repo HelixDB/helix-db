@@ -188,7 +188,7 @@ impl ServerConfig {
     ///     else {
     ///         panic!("a hybrid cache builds hybrid tiers");
     ///     };
-    ///     object_store.to_slate_options().cache_puts
+    ///     object_store.to_slate_options().cache_on_flush
     /// };
     /// // SSTs written to a local data directory are not copied into the cache.
     /// assert!(!caches_sst_writes(StorageConfig::Disk {
@@ -1344,7 +1344,7 @@ mod tests {
         assert_eq!(options.max_cache_size_bytes, Some(4 * 1024 * MIB));
         assert_eq!(options.part_size_bytes, 4 * MIB);
         assert_eq!(options.max_open_file_handles, 1000);
-        assert!(options.cache_puts);
+        assert!(options.cache_on_flush && options.cache_on_compaction);
         assert_eq!(
             object_store.vector_part_warm(),
             db::config::VectorPartWarm::Background
@@ -1415,8 +1415,9 @@ mod tests {
             .unwrap();
         assert_eq!(slate_db.memory_bytes(), 128 * MIB);
         assert_eq!(object_store_bytes, disk_bytes / 2);
+        let options = object_store.to_slate_options();
         assert!(
-            !object_store.to_slate_options().cache_puts,
+            !options.cache_on_flush && !options.cache_on_compaction,
             "SSTs written to HELIX_DATA_DIR are not copied into the cache"
         );
         assert_eq!(slate_db.disk().bytes(), 384 * MIB);

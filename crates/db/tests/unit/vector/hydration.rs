@@ -1227,7 +1227,7 @@ async fn reader_outrun_contracts() {
     let reader = slatedb::DbReader::open(
         path,
         object_store,
-        None,
+        slatedb::DbReaderMode::ManagedCheckpoint,
         slatedb::config::DbReaderOptions {
             manifest_poll_interval: std::time::Duration::from_millis(10),
             wal_poll_interval: std::time::Duration::from_millis(10),

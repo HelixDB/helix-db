@@ -537,7 +537,7 @@ async fn hydration_contracts() {
     let reader = DbReader::open(
         reader_path,
         reader_object_store,
-        None,
+        slatedb::DbReaderMode::ManagedCheckpoint,
         DbReaderOptions::default(),
     )
     .await

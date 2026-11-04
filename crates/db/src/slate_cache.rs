@@ -27,6 +27,7 @@ use std::sync::{Arc, LazyLock};
 
 use foyer::DeviceBuilder;
 use slatedb::db_cache::{foyer_hybrid, CachedEntry, CachedKey, DbCache};
+use slatedb::object_store::ObjectStore;
 
 use crate::config;
 use crate::error::{HelixDbError, Result};
@@ -79,6 +80,28 @@ impl SlateDbCache {
         }
         Ok(())
     }
+}
+
+/// SlateDB's `db_cache_id` for the database at `path` in `object_store`.
+///
+/// SlateDB prefixes every cache key with this id. Every open of one database
+/// gets the same id, so its writer and readers on a shared hybrid cache, and
+/// a reopen on the same disk root, read each other's blocks. Different
+/// databases on one cache get different ids, which keeps SlateDB's per-id
+/// cache flushes and evictions to their own database. The path is
+/// normalized as SlateDB normalizes it, so every spelling of one database
+/// path shares an id. `0` is never returned: SlateDB decodes keys written
+/// before it scoped them to `0`.
+///
+/// The store is identified by its `Display`, which for S3 names the bucket
+/// but not the endpoint. Two databases with one bucket and path on different
+/// endpoints therefore share an id: a flush or eviction for one also drops
+/// the other's entries. Reads stay correct: WAL reads bypass this cache, and
+/// every SST cached here is keyed by its globally unique ULID.
+pub(crate) fn db_cache_id(path: &str, object_store: &dyn ObjectStore) -> u64 {
+    let path = slatedb::object_store::path::Path::from(path);
+    let identity = format!("{object_store}\0{path}");
+    xxhash_rust::xxh3::xxh3_64(identity.as_bytes()).max(1)
 }
 
 /// A built hybrid cache and the settings, with a canonical root, it was
@@ -261,13 +284,11 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use slatedb::object_store::memory::InMemory;
-    use slatedb::object_store::ObjectStore;
-
     use super::*;
     use crate::encoding::keys::scope::DataScope;
     use crate::error::WriterMigrationRequirement;
     use crate::{HelixDB, HelixDbSource, ManagedWriterOpenIntent, ProcessLocalDatabaseToken};
+    use slatedb::object_store::memory::InMemory;
 
     /// Time allowed for a closed handle's tasks to drop their cache handles.
     const RELEASE_DEADLINE: Duration = Duration::from_secs(10);
@@ -347,12 +368,23 @@ mod tests {
     }
 
     /// Asserts this process holds exactly one device's partition files under
-    /// `root`, where procfs can tell.
-    fn assert_one_device(root: &Path, context: &str) {
-        let Some(open) = open_partition_files(root) else {
+    /// `root`, where procfs can tell, once in-flight disk I/O has dropped its
+    /// descriptors or [`RELEASE_DEADLINE`] passes.
+    ///
+    /// Foyer's disk tier can hold one partition file twice for a few
+    /// milliseconds while an I/O it started during a close is still running.
+    /// A second device (another full set of partitions) or a leaked
+    /// descriptor never settles, so waiting does not hide either.
+    async fn assert_one_device(root: &Path, context: &str) {
+        let Some(mut open) = open_partition_files(root) else {
             return;
         };
         let partitions = hybrid_slate_cache(root).disk_partitions();
+        let started = Instant::now();
+        while open != partitions && started.elapsed() < RELEASE_DEADLINE {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            open = open_partition_files(root).expect("procfs stays readable");
+        }
         assert_eq!(
             open, partitions,
             "{context}: {open} partition files are open, not one device's {partitions}"
@@ -396,7 +428,7 @@ mod tests {
                 idle,
                 "open attempt {attempt} left a SlateDB handle reading through the cache"
             );
-            assert_one_device(root, &format!("open attempt {attempt}"));
+            assert_one_device(root, &format!("open attempt {attempt}")).await;
         }
     }
 
@@ -408,7 +440,7 @@ mod tests {
         for _ in 0..4 {
             assert!(Arc::ptr_eq(&first, &shared_cache(&config).await));
         }
-        assert_one_device(root.path(), "repeated opens");
+        assert_one_device(root.path(), "repeated opens").await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -424,7 +456,7 @@ mod tests {
         .map(|cache| cache.expect("open task completes"))
         .collect::<Vec<_>>();
         assert!(caches.iter().all(|cache| Arc::ptr_eq(cache, &caches[0])));
-        assert_one_device(root.path(), "concurrent opens");
+        assert_one_device(root.path(), "concurrent opens").await;
     }
 
     /// An open cancelled mid-build leaves the build running on the cache
@@ -446,7 +478,7 @@ mod tests {
         }
         let built = cell.get().expect("a cancelled open's build finishes");
         assert!(Arc::ptr_eq(&built.cache, &shared_cache(&config).await));
-        assert_one_device(root.path(), "an open after a cancelled open");
+        assert_one_device(root.path(), "an open after a cancelled open").await;
     }
 
     /// A failed build leaves the root's cell empty, so the next open builds.
@@ -470,7 +502,7 @@ mod tests {
         std::fs::remove_dir(&blocker).expect("blocking directory removes");
         let cache = shared_cache(&config).await;
         assert!(Arc::ptr_eq(&cache, &shared_cache(&config).await));
-        assert_one_device(root.path(), "an open after a failed build");
+        assert_one_device(root.path(), "an open after a failed build").await;
     }
 
     #[tokio::test]
@@ -515,7 +547,7 @@ mod tests {
                 root.display()
             );
         }
-        assert_one_device(&root, "aliased opens");
+        assert_one_device(&root, "aliased opens").await;
     }
 
     #[tokio::test]
@@ -547,7 +579,7 @@ mod tests {
                 "{message}"
             );
         }
-        assert_one_device(root.path(), "rejected reopens");
+        assert_one_device(root.path(), "rejected reopens").await;
     }
 
     /// Counts the closes that reach it.
@@ -666,6 +698,18 @@ mod tests {
         reader.close().await.expect("reader closes");
     }
 
+    #[test]
+    fn db_cache_id_is_stable_per_database_and_never_zero() {
+        let store = InMemory::new();
+        let id = db_cache_id("tenant-a/db", &store);
+        assert_ne!(id, 0);
+        assert_eq!(id, db_cache_id("tenant-a/db", &InMemory::new()));
+        assert_eq!(id, db_cache_id("/tenant-a/db/", &store));
+        assert_ne!(id, db_cache_id("tenant-b/db", &store));
+        let local = slatedb::object_store::local::LocalFileSystem::new();
+        assert_ne!(id, db_cache_id("tenant-a/db", &local));
+    }
+
     /// A managed reader and writer on one root, as during a role handoff,
     /// read through one cache, and closing both leaves it for the next open.
     #[tokio::test]
@@ -689,7 +733,7 @@ mod tests {
             .expect("reader opens");
         let cache = cache_of(&writer);
         assert!(Arc::ptr_eq(&cache, &cache_of(&reader)));
-        assert_one_device(root.path(), "a writer and reader");
+        assert_one_device(root.path(), "a writer and reader").await;
 
         writer.close().await.expect("writer closes");
         reader.close().await.expect("reader closes");
@@ -698,7 +742,7 @@ mod tests {
             .await
             .expect("reader reopens");
         assert!(Arc::ptr_eq(&cache, &cache_of(&reopened)));
-        assert_one_device(root.path(), "a reopened reader");
+        assert_one_device(root.path(), "a reopened reader").await;
         reopened.close().await.expect("reader closes");
     }
 

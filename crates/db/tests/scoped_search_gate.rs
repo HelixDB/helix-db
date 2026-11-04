@@ -22,6 +22,8 @@
 //! operation is published, and the gate checks that before measuring recall,
 //! so no search overlays unpublished work and each scope keeps one strategy.
 
+#![recursion_limit = "256"]
+
 #[path = "../examples/scoped_search_bench/fixture.rs"]
 mod fixture;
 

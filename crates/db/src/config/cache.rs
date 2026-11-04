@@ -362,7 +362,8 @@ impl SlateObjectStoreCacheSettings {
             root_folder: Some(self.root.to_path_buf()),
             max_cache_size_bytes: self.max_cache_size_bytes.map(NonZeroUsize::get),
             part_size_bytes: self.part_size_bytes.get(),
-            cache_puts: self.cache_puts,
+            cache_on_flush: self.cache_puts,
+            cache_on_compaction: self.cache_puts,
             preload_disk_cache_on_startup: self.warm.to_slate_preload(),
             scan_interval: self.scan_interval,
             max_open_file_handles: self.max_open_file_handles.get(),
@@ -400,7 +401,8 @@ impl SlateObjectStoreCacheSettings {
     ///     8,
     /// )?;
     /// let reads_only = settings.clone().with_cache_puts(false);
-    /// assert!(!reads_only.to_slate_options().cache_puts);
+    /// assert!(!reads_only.to_slate_options().cache_on_flush);
+    /// assert!(!reads_only.to_slate_options().cache_on_compaction);
     /// assert_eq!(reads_only.with_cache_puts(true), settings);
     /// # Ok::<(), db::config::ConfigError>(())
     /// ```
@@ -481,7 +483,6 @@ impl SlateRuntimeConfig {
         object_store_cache: Option<&SlateObjectStoreCacheSettings>,
     ) -> slatedb::config::DbReaderOptions {
         slatedb::config::DbReaderOptions {
-            wal_replay: self.runtime_settings.wal_replay,
             object_store_cache_options: match object_store_cache {
                 None => slatedb::config::ObjectStoreCacheOptions {
                     root_folder: None,

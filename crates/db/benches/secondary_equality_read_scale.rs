@@ -1,5 +1,7 @@
 //! Secondary-equality read benchmark over ten thousand shared-value nodes.
 
+#![recursion_limit = "256"]
+
 use std::num::NonZeroUsize;
 
 use db::bench_internals::{
