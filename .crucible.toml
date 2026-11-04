@@ -9,7 +9,8 @@ build_timeout_secs = 2700 # base builds; default 1800
 timeout_secs = 1800       # per test VM; default 900
 # Same lean build as rust-ci.yml. Full debuginfo and incremental caches fill the
 # VM disk (lld then dies with SIGBUS): about 12 GiB of target/ instead of over 44.
-env = { CARGO_INCREMENTAL = "0", CARGO_PROFILE_DEV_DEBUG = "line-tables-only", CARGO_PROFILE_TEST_DEBUG = "line-tables-only" }
+# The CLI tests post telemetry; point it at a dead loopback port so it never hits egress.
+env = { CARGO_INCREMENTAL = "0", CARGO_PROFILE_DEV_DEBUG = "line-tables-only", CARGO_PROFILE_TEST_DEBUG = "line-tables-only", HELIX_TELEMETRY_ENDPOINT = "http://127.0.0.1:9/v1/events" }
 
 [checks]
 # PR CI runs as GitHub Actions; Crucible runs are for agents (CLI / MCP).
