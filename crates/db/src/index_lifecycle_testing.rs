@@ -1512,10 +1512,11 @@ impl HelixDB {
         config: DbConfig,
         scheduling: LifecycleTestScheduling,
     ) -> Result<Self> {
-        let (path, object_store) = source.into_parts()?;
+        let (path, object_store, gc_boundary_files) = source.into_parts()?;
         Self::open_writer_inner_with_index_scheduling(
             path,
             object_store,
+            gc_boundary_files,
             config,
             WriterOpenMode::Embedded,
             scheduling.internal(),
@@ -1537,6 +1538,7 @@ impl HelixDB {
         Self::open_writer_inner_with_index_scheduling(
             database.into(),
             object_store,
+            crate::GcBoundaryFiles::AsConfigured,
             config,
             WriterOpenMode::Embedded,
             scheduling.internal(),

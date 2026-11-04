@@ -401,22 +401,29 @@ impl HelixDbSource {
         }
     }
 
-    fn into_parts(self) -> Result<(String, Arc<dyn ObjectStore>)> {
-        match self {
+    /// The database path, its object store, and whether a writer's garbage
+    /// collector may advance boundary files on that store.
+    fn into_parts(self) -> Result<(String, Arc<dyn ObjectStore>, GcBoundaryFiles)> {
+        // LocalFileSystem cannot advance GC boundary files: it has no conditional overwrite.
+        let gc_boundary_files = match &self {
+            Self::Disk { .. } => GcBoundaryFiles::Off,
+            Self::InMemory { .. } | Self::InMemoryToken { .. } | Self::ObjectStorage { .. } => {
+                GcBoundaryFiles::AsConfigured
+            }
+        };
+        let (path, object_store): (String, Arc<dyn ObjectStore>) = match self {
             Self::InMemory { database } => {
                 let token = ProcessLocalDatabaseToken::new(database)?;
-                Ok((token.database().to_string(), token.object_store()))
+                (token.database().to_string(), token.object_store())
             }
-            Self::InMemoryToken { token } => {
-                Ok((token.database().to_string(), token.object_store()))
-            }
+            Self::InMemoryToken { token } => (token.database().to_string(), token.object_store()),
             Self::Disk { root, database } => {
                 // A write is durable once SlateDB's put returns, so every put fsyncs its file
                 // and directory. Without it, a crash or a writeback error the kernel never
                 // reports leaves a manifest naming an SST whose bytes never reached the disk.
                 let object_store: Arc<dyn ObjectStore> =
                     Arc::new(LocalFileSystem::new_with_prefix(root)?.with_fsync(true));
-                Ok((database, object_store))
+                (database, object_store)
             }
             Self::ObjectStorage {
                 database,
@@ -434,9 +441,49 @@ impl HelixDbSource {
                 }
                 #[cfg(feature = "async-index-benchmark")]
                 let builder = builder.with_http_connector(benchmark::io::Connector::default());
-                Ok((database, Arc::new(builder.build()?)))
+                (database, Arc::new(builder.build()?))
             }
+        };
+        Ok((path, object_store, gc_boundary_files))
+    }
+}
+
+/// Whether SlateDB's garbage collector advances its boundary files before it
+/// deletes `.manifest` and `.compactions` files.
+///
+/// A boundary file holds the newest metadata ID the collector may have
+/// deleted, so a writer that stalls past the collector's `min_age` in the
+/// middle of an update, and then recreates an ID the collector deleted, is
+/// refused instead of reporting its stale update as committed. Advancing a
+/// boundary overwrites it conditionally (`PutMode::Update`), which
+/// `LocalFileSystem` does not implement: on disk storage every advance after
+/// the first fails with `NotImplemented`, and the collector then deletes no
+/// manifest or compactions file at all. What the collector deletes is the
+/// same either way: never the latest file, a manifest a checkpoint names, or a
+/// file younger than `min_age`. Writers still check a boundary file an earlier
+/// collector wrote, and nothing deletes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GcBoundaryFiles {
+    /// As the writer's SlateDB settings say: on unless they turn them off.
+    AsConfigured,
+    /// Off whatever the settings say: the store has no conditional overwrite.
+    /// A writer runs its compactor and collector in its own process, so
+    /// suspending that process suspends the collector with them.
+    Off,
+}
+
+impl GcBoundaryFiles {
+    /// The SlateDB settings a writer opens with: `config`'s, with boundary
+    /// files off when the store cannot advance them.
+    fn writer_settings(self, config: &DbConfig) -> slatedb::Settings {
+        let mut settings = config
+            .slate()
+            .to_writer_settings(config.cache().object_store_cache());
+        match (self, settings.garbage_collector_options.as_mut()) {
+            (Self::Off, Some(gc)) => gc.boundary_files_enabled = false,
+            (Self::AsConfigured, _) | (Self::Off, None) => {}
         }
+        settings
     }
 }
 
@@ -1004,17 +1051,27 @@ impl HelixDB {
         database: impl Into<String>,
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self> {
-        let db = Self::open_writer_inner(database.into(), object_store, DbConfig::new()).await?;
-        Ok(db.with_embedded_query_metrics().await)
+        Self::open_with_object_store_and_config(database, object_store, DbConfig::new()).await
     }
 
     /// Open a read/write database handle backed by a caller-provided object store and config.
+    ///
+    /// Garbage collection follows `config`'s SlateDB settings. A
+    /// `LocalFileSystem` store needs boundary files off in them, as
+    /// [`HelixDbSource::Disk`] sets, or no manifest or compactions file is
+    /// ever deleted.
     pub async fn open_with_object_store_and_config(
         database: impl Into<String>,
         object_store: Arc<dyn ObjectStore>,
         config: DbConfig,
     ) -> Result<Self> {
-        let db = Self::open_writer_inner(database.into(), object_store, config).await?;
+        let db = Self::open_writer_inner(
+            database.into(),
+            object_store,
+            GcBoundaryFiles::AsConfigured,
+            config,
+        )
+        .await?;
         Ok(db.with_embedded_query_metrics().await)
     }
 
@@ -1025,7 +1082,13 @@ impl HelixDB {
         object_store: Arc<dyn ObjectStore>,
         config: DbConfig,
     ) -> Result<Self> {
-        Self::open_writer_inner(database.into(), object_store, config).await
+        Self::open_writer_inner(
+            database.into(),
+            object_store,
+            GcBoundaryFiles::AsConfigured,
+            config,
+        )
+        .await
     }
 
     /// Open a read/write database handle with explicit tuning config.
@@ -1050,8 +1113,8 @@ impl HelixDB {
     /// # });
     /// ```
     pub async fn open_with_config(source: HelixDbSource, config: DbConfig) -> Result<Self> {
-        let (path, object_store) = source.into_parts()?;
-        let db = Self::open_writer_inner(path, object_store, config).await?;
+        let (path, object_store, gc_boundary_files) = source.into_parts()?;
+        let db = Self::open_writer_inner(path, object_store, gc_boundary_files, config).await?;
         Ok(db.with_embedded_query_metrics().await)
     }
 
@@ -1068,10 +1131,11 @@ impl HelixDB {
         writer_epoch: NonZeroU64,
         intent: ManagedWriterOpenIntent,
     ) -> Result<Self> {
-        let (path, object_store) = source.into_parts()?;
+        let (path, object_store, gc_boundary_files) = source.into_parts()?;
         Self::open_writer_inner_with_index_scheduling(
             path,
             object_store,
+            gc_boundary_files,
             config,
             WriterOpenMode::Managed {
                 writer_epoch,
@@ -1106,8 +1170,8 @@ impl HelixDB {
     /// ```
     #[doc(hidden)]
     pub async fn open_for_server(source: HelixDbSource, config: DbConfig) -> Result<Self> {
-        let (path, object_store) = source.into_parts()?;
-        Self::open_writer_inner(path, object_store, config).await
+        let (path, object_store, gc_boundary_files) = source.into_parts()?;
+        Self::open_writer_inner(path, object_store, gc_boundary_files, config).await
     }
 
     #[cfg(test)]
@@ -1183,11 +1247,13 @@ impl HelixDB {
     async fn open_writer_inner(
         path: String,
         object_store: Arc<dyn ObjectStore>,
+        gc_boundary_files: GcBoundaryFiles,
         config: DbConfig,
     ) -> Result<Self> {
         Self::open_writer_inner_with_index_scheduling(
             path,
             object_store,
+            gc_boundary_files,
             config,
             WriterOpenMode::Embedded,
             IndexLifecycleScheduling::Configured,
@@ -1199,6 +1265,7 @@ impl HelixDB {
     async fn open_writer_inner_with_index_scheduling(
         path: String,
         object_store: Arc<dyn ObjectStore>,
+        gc_boundary_files: GcBoundaryFiles,
         config: DbConfig,
         open_mode: WriterOpenMode,
         index_scheduling: IndexLifecycleScheduling,
@@ -1237,11 +1304,7 @@ impl HelixDB {
         log_stage("slatedb_cache_construction", stage_started);
         let mut builder = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
-            .with_settings(
-                config
-                    .slate()
-                    .to_writer_settings(config.cache().object_store_cache()),
-            );
+            .with_settings(gc_boundary_files.writer_settings(&config));
         if let WriterOpenMode::Managed { writer_epoch, .. } = &open_mode {
             builder = builder.with_writer_epoch(*writer_epoch);
         }
@@ -1414,7 +1477,8 @@ impl HelixDB {
 
     /// Open a read-only database handle with explicit tuning config.
     pub async fn open_reader_with_config(source: HelixDbSource, config: DbConfig) -> Result<Self> {
-        let (path, object_store) = source.into_parts()?;
+        // A reader runs no garbage collector.
+        let (path, object_store, _) = source.into_parts()?;
         let db = Self::open_reader_inner(path, object_store, config).await?;
         Ok(db.with_embedded_query_metrics().await)
     }
@@ -1450,7 +1514,8 @@ impl HelixDB {
     /// ```
     #[doc(hidden)]
     pub async fn open_reader_for_server(source: HelixDbSource, config: DbConfig) -> Result<Self> {
-        let (path, object_store) = source.into_parts()?;
+        // A reader runs no garbage collector.
+        let (path, object_store, _) = source.into_parts()?;
         Self::open_reader_inner(path, object_store, config).await
     }
 
@@ -4250,7 +4315,7 @@ mod tests {
     #[test]
     fn disk_source_fsyncs_every_write() {
         let root = tempfile::tempdir().expect("disk root");
-        let (database, object_store) = HelixDbSource::Disk {
+        let (database, object_store, _) = HelixDbSource::Disk {
             root: root.path().to_path_buf(),
             database: "disk-fsync".to_owned(),
         }
@@ -4259,6 +4324,84 @@ mod tests {
         assert_eq!(database, "disk-fsync");
         // LocalFileSystem shows its fsync setting only through Debug.
         assert!(format!("{object_store:?}").contains("fsync: true"));
+    }
+
+    #[test]
+    fn only_disk_writers_collect_garbage_without_boundary_files() {
+        let root = tempfile::tempdir().expect("disk root");
+        let boundary_files = |source: HelixDbSource, config: &DbConfig| {
+            let (_, _, gc_boundary_files) = source.into_parts().expect("source builds");
+            gc_boundary_files
+                .writer_settings(config)
+                .garbage_collector_options
+                .map(|gc| gc.boundary_files_enabled)
+        };
+        let disk = || HelixDbSource::Disk {
+            root: root.path().to_path_buf(),
+            database: "disk-gc".to_owned(),
+        };
+        let object_storage = || HelixDbSource::ObjectStorage {
+            database: "object-storage-gc".to_owned(),
+            bucket: "test-bucket".to_owned(),
+            region: "us-east-1".to_owned(),
+            endpoint: Some("http://127.0.0.1:9000".to_owned()),
+            allow_http: true,
+        };
+        let memory = || HelixDbSource::InMemory {
+            database: "memory-gc".to_owned(),
+        };
+
+        // LocalFileSystem cannot advance a boundary file; object storage can,
+        // and keeps SlateDB's default.
+        let defaults = DbConfig::new();
+        assert_eq!(boundary_files(disk(), &defaults), Some(false));
+        assert_eq!(boundary_files(object_storage(), &defaults), Some(true));
+        assert_eq!(boundary_files(memory(), &defaults), Some(true));
+        let embedded_disk = disk().embedded_default_config();
+        assert_eq!(boundary_files(disk(), &embedded_disk), Some(false));
+
+        // Disk turns them off even where the settings ask for them, and
+        // object storage keeps settings that turned them off.
+        let gc_config = |boundary_files_enabled| {
+            DbConfig::new().with_slate_settings(slatedb::Settings {
+                garbage_collector_options: Some(slatedb::config::GarbageCollectorOptions {
+                    boundary_files_enabled,
+                    ..slatedb::config::GarbageCollectorOptions::default()
+                }),
+                ..slatedb::Settings::default()
+            })
+        };
+        assert_eq!(boundary_files(disk(), &gc_config(true)), Some(false));
+        assert_eq!(
+            boundary_files(object_storage(), &gc_config(false)),
+            Some(false)
+        );
+
+        // Without a garbage collector there is nothing to turn off.
+        let no_gc = DbConfig::new().with_slate_settings(slatedb::Settings {
+            garbage_collector_options: None,
+            ..slatedb::Settings::default()
+        });
+        assert_eq!(boundary_files(disk(), &no_gc), None);
+
+        // Only the boundary setting changes: the rest is the configuration's.
+        let settings = GcBoundaryFiles::Off.writer_settings(&embedded_disk);
+        assert_eq!(settings.flush_interval, Some(Duration::from_millis(3)));
+        assert_eq!(settings.l0_sst_size_bytes, 16 * 1024 * 1024);
+        let gc = settings
+            .garbage_collector_options
+            .expect("writers collect garbage by default");
+        let gc_defaults = slatedb::config::GarbageCollectorOptions::default();
+        assert_eq!(
+            format!("{gc:?}"),
+            format!(
+                "{:?}",
+                slatedb::config::GarbageCollectorOptions {
+                    boundary_files_enabled: false,
+                    ..gc_defaults
+                }
+            )
+        );
     }
 
     #[tokio::test]
@@ -4354,7 +4497,7 @@ mod tests {
 
     #[test]
     fn object_storage_source_is_constructed_without_io() {
-        let (path, _store) = HelixDbSource::ObjectStorage {
+        let (path, _store, _) = HelixDbSource::ObjectStorage {
             database: "facade-object-storage".into(),
             bucket: "test-bucket".into(),
             region: "us-east-1".into(),
