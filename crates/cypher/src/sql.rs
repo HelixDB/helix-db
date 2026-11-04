@@ -204,51 +204,32 @@ pub fn translate(text: &str, mappings: &Mappings) -> Result<syntax::Statement, Q
     }
 }
 
-/// Upper bound on the tokens sqlparser produces after estimating, matching
-/// the Cypher lexer's budget for non-whitespace tokens.
-const MAX_TOKENS: usize = 1_000_000;
+/// Bound on [`token_estimate`], about 44 MB of sqlparser tokens at most.
+const MAX_TOKENS: usize = 500_000;
 /// Binary and postfix operators per statement.
 const MAX_OPERATORS: usize = 1024;
 
-/// An overestimate of sqlparser's token count without tokenizing: every
-/// whitespace or punctuation character is a token, as is every run of
-/// letters or of ASCII digits, and every quoted text or comment. A quote ends
-/// at its first closing quote, never later than sqlparser ends it, so quoted
-/// text cannot hide tokens.
+/// An upper bound on sqlparser's token count, computed without tokenizing.
+/// Every character is a token except within a run of letters, ASCII digits
+/// and underscores, which counts once plus once more wherever digits start or
+/// stop, as in `0a`. sqlparser only ends tokens at such places, so no quoting
+/// or comment can make this undercount; quoted text and comments simply count
+/// as their words and symbols. Large values belong in parameters, which are
+/// not tokenized.
 fn token_estimate(text: &str) -> usize {
+    let word = |c: &char| c.is_alphabetic() || c.is_ascii_digit() || *c == '_';
     let mut characters = text.chars().peekable();
     let mut count = 0;
     while let Some(c) = characters.next() {
         count += 1;
-        match c {
-            '\'' | '"' | '`' => {
-                // A doubled quote continues the text; counting it as a new
-                // token only overestimates.
-                characters.by_ref().find(|&next| next == c);
-            }
-            '-' if characters.peek() == Some(&'-') => {
-                characters.by_ref().find(|&next| next == '\n');
-            }
-            '/' if characters.peek() == Some(&'*') => {
-                characters.next();
-                let mut previous = ' ';
-                characters
-                    .by_ref()
-                    .find(|&next| std::mem::replace(&mut previous, next) == '*' && next == '/');
-            }
-            c if c.is_alphabetic() || c.is_ascii_digit() || c == '_' => {
-                // sqlparser can split a run where digits start or stop, as in `0a`.
-                let mut digit = c.is_ascii_digit();
-                while let Some(next) = characters
-                    .next_if(|next| next.is_alphabetic() || next.is_ascii_digit() || *next == '_')
-                {
-                    if next.is_ascii_digit() != digit {
-                        digit = !digit;
-                        count += 1;
-                    }
+        let mut digit = c.is_ascii_digit();
+        if word(&c) {
+            while let Some(next) = characters.next_if(word) {
+                if next.is_ascii_digit() != digit {
+                    digit = !digit;
+                    count += 1;
                 }
             }
-            _ => {}
         }
     }
     count

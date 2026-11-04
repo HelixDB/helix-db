@@ -135,10 +135,26 @@ fn accepted_inputs_fit_a_worker_stack() {
 proptest! {
     /// The estimate that guards tokenizing never undercounts sqlparser.
     #[test]
-    fn token_estimate_bounds_sqlparser(text in "[a-z0-9_ ,.()'\"`*+\\-/=<>!|\n\t]{0,64}") {
+    fn token_estimate_bounds_sqlparser(text in "[a-zEXNR0-9_ ,.()'\"`*+\\-/=<>!|\n\t#@$&é²\\\\]{0,64}") {
         if let Ok(tokens) = Tokenizer::new(&GenericDialect {}, &text).tokenize() {
             prop_assert!(token_estimate(&text) >= tokens.len(), "{text}");
         }
+    }
+}
+
+#[test]
+fn token_estimate_bounds_quotes_and_comments() {
+    for text in [
+        "''``--\n",
+        "--\nx",
+        "a--b\n\n",
+        "/* a */\n",
+        "\"\"\"\"\"\"@@`<0a \t",
+        "$$'$$, 1, 2, 3, ''",
+        "E'a\\'b', 1, 2",
+    ] {
+        let tokens = Tokenizer::new(&GenericDialect {}, text).tokenize().unwrap();
+        assert!(token_estimate(text) >= tokens.len(), "{text:?}");
     }
 }
 
@@ -774,7 +790,7 @@ fn wide_statements_translate_in_linear_time() {
     );
     assert!(cypher(&joined).starts_with("MATCH (t0:t0), (t1:t1)"));
     // One long line with multibyte text and many nodes.
-    let long = format!("SELECT 'é€😀', {}", vec!["1"; 200_000].join(", "));
+    let long = format!("SELECT 'é€😀', {}", vec!["1"; 150_000].join(", "));
     assert!(translate(&long, &Mappings::default()).is_ok());
     assert!(
         started.elapsed() < std::time::Duration::from_secs(20),

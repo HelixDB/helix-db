@@ -185,8 +185,10 @@ with the detail `ambiguous_column`.
 ## Limits
 
 A SQL statement has the [Cypher limits](/database/helix-db/query-guides/cypher#limits),
-plus about a million tokens, counting each whitespace character, and 1,024
-binary operators. Exceeding either fails with `resource_limit`.
+plus 1,024 binary operators and about 500,000 tokens, where every word, number,
+symbol and whitespace character counts, including those inside quoted text.
+Exceeding either fails with `resource_limit`. Send large values as parameters,
+which do not count.
 
 ## Errors
 
