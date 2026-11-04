@@ -18,7 +18,9 @@ sends back. To run it, start a local instance as described in
   the body sent to `POST /v2/query`, and the v3 SDKs are typed builders for exactly that
   body. The Cypher tab is the equivalent statement for
   [`POST /v2/cypher`](/database/helix-db/query-guides/cypher), and the steps below show
-  the clauses of that statement that do the same work.
+  the clauses of that statement that do the same work. Other guides add a SQL tab for
+  [`POST /v2/sql`](/database/helix-db/query-guides/sql) where one SQL statement does the
+  same work; this query writes and then reads in one transaction, which SQL cannot.
 </Note>
 
 ## The whole query

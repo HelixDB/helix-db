@@ -67,18 +67,9 @@ decode requests with `helix_cypher::request::Request`, which needs no database.
 
 ## SQL translation
 
-`helix_cypher::sql` translates one SQL statement into the same
-`syntax::Statement` the Cypher parser builds, so binding, planning, execution and
-error reporting are shared, and every span points into the SQL text. It is a port
-of neo4j-jdbc's translator (`neo4j-jdbc-translator/impl`, Apache-2.0); the golden
-corpus in `crates/cypher/tests/sql/translations.txt` carries its tests and marks
-each deliberate divergence. Translation reads no storage or catalog, so a gateway
-can route SQL by effect like Cypher. `sql::request::Request::compile` returns the
-ordinary `CompiledRequest`, whose text is the printed Cypher (`syntax::Statement`
-implements `Display`), so telemetry records the redacted Cypher shape.
-sqlparser materializes every token and builds operator chains left-deep, then
-walks and drops them recursively; the translation therefore bounds an estimate of
-the token count before tokenizing and the binary operators before parsing.
+`helix_cypher::sql` translates SQL into the same `syntax::Statement` the Cypher
+parser builds, so SQL shares binding, planning, execution and error reporting
+with Cypher. The [SQL implementation notes](sql.md) describe the translation.
 
 ## Index selection
 
