@@ -244,6 +244,27 @@ run_native_disk_test() {
   assert_users_state 1 "$(post_json "$first_port" dynamic-read.json)"
 }
 
+run_sql_test() {
+  local port=$((base_port + 15))
+  local first="helixdb-image-sql-a-$resource_suffix"
+  local second="helixdb-image-sql-b-$resource_suffix"
+  local volume="helixdb-image-sql-data-$resource_suffix"
+  local mount="type=volume,source=$volume,target=/var/lib/helix"
+
+  log "Testing SQL translation, writes, errors, and persistence"
+  docker volume create "$volume" >/dev/null
+  volumes+=("$volume")
+  start_container "$first" "$port" -e HELIX_DATA_DIR=/var/lib/helix --mount "$mount"
+  wait_for_http "http://127.0.0.1:${port}/readyz" "$first"
+  python3 "$script_dir/sql_contracts.py" seed "$port"
+  docker stop "$first" >/dev/null
+  docker rm "$first" >/dev/null
+
+  start_container "$second" "$port" -e HELIX_DATA_DIR=/var/lib/helix --mount "$mount"
+  wait_for_http "http://127.0.0.1:${port}/readyz" "$second"
+  python3 "$script_dir/sql_contracts.py" verify "$port"
+}
+
 assert_cache_file() {
   local container=$1
   local pattern=$2
@@ -390,6 +411,7 @@ run_concurrent_membership_test() {
 
 run_memory_test
 run_native_disk_test
+run_sql_test
 run_disk_cache_test
 run_concurrent_membership_test
 run_invalid_configuration_tests
