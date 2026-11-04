@@ -5806,9 +5806,9 @@ The translation is a port of the SQL-to-Cypher translator in the
 faithfully is rejected with a specific error before the statement reads or writes
 anything.
 
-SQL is served by local servers and embedded databases built from the
-[repository checkout](https://github.com/HelixDB/helix-db), and by SDKs built
-from it. Helix Cloud gateways and the CLI do not expose SQL yet.
+SQL is served by Helix Cloud gateways, and by local servers, embedded databases,
+and SDKs built from the [repository checkout](https://github.com/HelixDB/helix-db).
+The CLI does not expose SQL yet.
 
 ## Run a statement
 
@@ -5899,9 +5899,24 @@ curl http://localhost:6969/v2/sql \
   --data '{"query":"SELECT p.name AS name FROM Person p WHERE p.age >= ?","parameters":[30]}'
 ```
 
-The [HTTP API reference](/database/helix-db/query-guides/http-api#sql) describes
-the request, status codes, and errors in full. gRPC serves the same bodies
-through `ExecuteSql` and `ExplainSql`.
+A Helix Cloud gateway takes the same body. Authenticate as for
+[Cypher](/database/helix-db/query-guides/cypher#over-http), with the cluster API
+key and, on a GA shared gateway, the database ID:
+
+```sh
+curl "$HELIX_ENDPOINT/v2/sql" \
+  -H "Authorization: Bearer $HELIX_API_KEY" \
+  -H "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"SELECT count(*) AS nodes FROM Person p"}'
+```
+
+The gateway translates each statement to route it by what it does: reads go to
+readers, and writes go to the elected writer. A read-only API key can read and
+explain, but receives `403` for a statement that writes. The
+[HTTP API reference](/database/helix-db/query-guides/http-api#sql) describes the
+request, status codes, and errors in full. A local server's gRPC API serves the
+same bodies through `ExecuteSql` and `ExplainSql`.
 
 ### Request options
 
@@ -6301,9 +6316,9 @@ lists every category with its HTTP status and retry guidance.
 Page type: Reference
 
 The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`, Cypher
-statements at `POST /v2/cypher`, and read-only Cypher planning at
-`POST /v2/cypher/explain`. Local servers and Helix Cloud gateways serve the same
-contracts.
+statements at `POST /v2/cypher`, read-only Cypher planning at
+`POST /v2/cypher/explain`, and SQL at `POST /v2/sql` and `POST /v2/sql/explain`.
+Local servers and Helix Cloud gateways serve the same contracts.
 
 ## Machine-readable specification
 
@@ -6559,9 +6574,10 @@ request options, so `X-Helix-Await-Durable:true` is invalid.
 
 ## SQL
 
-A local server also accepts one SQL statement at `POST /v2/sql`. It translates
-the statement to Cypher and runs it as `POST /v2/cypher` would, with the same
-execution headers, results, and error body. The body adds optional `mappings`,
+Local servers and Helix Cloud gateways also accept one SQL statement at
+`POST /v2/sql`. It translates the statement to Cypher and runs it as
+`POST /v2/cypher` would, with the same authentication, execution headers,
+routing, results, and error body. The body adds optional `mappings`,
 and `parameters` may be a list that binds `?` placeholders in written order:
 
 ```json
@@ -7199,6 +7215,9 @@ curl --fail-with-body \
   --data '{"query":"MATCH (n) RETURN count(n) AS node_count"}'
 ```
 
+[SQL](/database/helix-db/query-guides/sql) works the same way at `/v2/sql`, for
+example with `{"query":"SELECT count(*) AS people FROM Person p"}`.
+
 Keep API keys in a secrets manager or environment variable. Do not commit them
 to source control.
 
@@ -7218,14 +7237,14 @@ Page type: Guide
 
 Helix Cloud runs a dedicated writer and horizontally scalable readers behind a routing
 gateway. Applications send the same dynamic operation-tree request used in local and
-embedded modes, or a Cypher statement to `POST /v2/cypher`, which the gateway routes
-by whether the statement writes.
+embedded modes, or a Cypher or SQL statement to `POST /v2/cypher` or
+`POST /v2/sql`, which the gateway routes by whether the statement writes.
 
 ## Request flow
 
 ```text
 application
-   │ POST /v2/query or POST /v2/cypher
+   │ POST /v2/query, POST /v2/cypher or POST /v2/sql
    ▼
 gateway
    ├── read request ──► reader
@@ -8045,7 +8064,8 @@ contract. HTTP 429 rate limiting below is a separate mechanism.
 ## Helix Cloud request rate limits
 
 Helix Cloud applies a distributed token bucket to `POST /v2/query`,
-`POST /v2/cypher` and `POST /v2/cypher/explain`. The bucket is scoped to the
+`POST /v2/cypher`, `POST /v2/cypher/explain`, `POST /v2/sql` and
+`POST /v2/sql/explain`. The bucket is scoped to the
 authenticated Cloud database, so reads and writes from every API key, application
 instance, and gateway replica draw from the same allowance.
 
@@ -8298,8 +8318,8 @@ another node already owns a unique value. The gateway reports a failed write as
 
 ## Cypher errors
 
-`POST /v2/cypher` and `POST /v2/cypher/explain` use the same envelope and gateway
-codes. A failed statement also carries a `details` object:
+`POST /v2/cypher`, `POST /v2/cypher/explain`, `POST /v2/sql` and
+`POST /v2/sql/explain` use the same envelope and gateway codes. A failed statement also carries a `details` object:
 
 ```json
 {

@@ -106,6 +106,9 @@ curl --fail-with-body \
   --data '{"query":"MATCH (n) RETURN count(n) AS node_count"}'
 ```
 
+[SQL](/database/helix-db/query-guides/sql) works the same way at `/v2/sql`, for
+example with `{"query":"SELECT count(*) AS people FROM Person p"}`.
+
 Keep API keys in a secrets manager or environment variable. Do not commit them
 to source control.
 

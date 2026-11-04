@@ -22,9 +22,9 @@ faithfully is rejected with a specific error before the statement reads or write
 anything.
 
 <Note>
-SQL is served by local servers and embedded databases built from the
-[repository checkout](https://github.com/HelixDB/helix-db), and by SDKs built
-from it. Helix Cloud gateways and the CLI do not expose SQL yet.
+SQL is served by Helix Cloud gateways, and by local servers, embedded databases,
+and SDKs built from the [repository checkout](https://github.com/HelixDB/helix-db).
+The CLI does not expose SQL yet.
 </Note>
 
 ## Run a statement
@@ -120,9 +120,24 @@ curl http://localhost:6969/v2/sql \
   --data '{"query":"SELECT p.name AS name FROM Person p WHERE p.age >= ?","parameters":[30]}'
 ```
 
-The [HTTP API reference](/database/helix-db/query-guides/http-api#sql) describes
-the request, status codes, and errors in full. gRPC serves the same bodies
-through `ExecuteSql` and `ExplainSql`.
+A Helix Cloud gateway takes the same body. Authenticate as for
+[Cypher](/database/helix-db/query-guides/cypher#over-http), with the cluster API
+key and, on a GA shared gateway, the database ID:
+
+```sh
+curl "$HELIX_ENDPOINT/v2/sql" \
+  -H "Authorization: Bearer $HELIX_API_KEY" \
+  -H "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"SELECT count(*) AS nodes FROM Person p"}'
+```
+
+The gateway translates each statement to route it by what it does: reads go to
+readers, and writes go to the elected writer. A read-only API key can read and
+explain, but receives `403` for a statement that writes. The
+[HTTP API reference](/database/helix-db/query-guides/http-api#sql) describes the
+request, status codes, and errors in full. A local server's gRPC API serves the
+same bodies through `ExecuteSql` and `ExplainSql`.
 
 ### Request options
 

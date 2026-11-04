@@ -61,8 +61,8 @@ another node already owns a unique value. The gateway reports a failed write as
 
 ## Cypher errors
 
-`POST /v2/cypher` and `POST /v2/cypher/explain` use the same envelope and gateway
-codes. A failed statement also carries a `details` object:
+`POST /v2/cypher`, `POST /v2/cypher/explain`, `POST /v2/sql` and
+`POST /v2/sql/explain` use the same envelope and gateway codes. A failed statement also carries a `details` object:
 
 ```json
 {

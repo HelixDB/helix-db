@@ -8,9 +8,9 @@ pageType: "Reference"
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
 The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`, Cypher
-statements at `POST /v2/cypher`, and read-only Cypher planning at
-`POST /v2/cypher/explain`. Local servers and Helix Cloud gateways serve the same
-contracts.
+statements at `POST /v2/cypher`, read-only Cypher planning at
+`POST /v2/cypher/explain`, and SQL at `POST /v2/sql` and `POST /v2/sql/explain`.
+Local servers and Helix Cloud gateways serve the same contracts.
 
 ## Machine-readable specification
 
@@ -266,9 +266,10 @@ request options, so `X-Helix-Await-Durable:true` is invalid.
 
 ## SQL
 
-A local server also accepts one SQL statement at `POST /v2/sql`. It translates
-the statement to Cypher and runs it as `POST /v2/cypher` would, with the same
-execution headers, results, and error body. The body adds optional `mappings`,
+Local servers and Helix Cloud gateways also accept one SQL statement at
+`POST /v2/sql`. It translates the statement to Cypher and runs it as
+`POST /v2/cypher` would, with the same authentication, execution headers,
+routing, results, and error body. The body adds optional `mappings`,
 and `parameters` may be a list that binds `?` placeholders in written order:
 
 ```json

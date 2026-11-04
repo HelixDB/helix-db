@@ -38,7 +38,13 @@ UniFFI bindings `sql_json` and `explain_sql_json`. Each SDK has `sql` and
 `explain_sql` methods (`SQL` and `ExplainSQL` in Go) beside its Cypher methods,
 over HTTP and embedded. The shared SDK parity corpus
 (`sdks/tests/cypher/runtime.json`) includes SQL cases, marked `"language": "sql"`,
-that every SDK runs. Helix Cloud gateways and the CLI have no SQL routes yet.
+that every SDK runs.
+
+Helix Cloud gateways (helix-hyperscale) serve both routes. A gateway translates
+each statement only to route it by effect, then forwards the original body to a
+database node as the `sql_json` or `sql_explain_json` body of its query RPC; the
+node compiles it again and runs it on the compiled Cypher path. The CLI has no
+SQL command yet.
 
 ## Translation pipeline
 
