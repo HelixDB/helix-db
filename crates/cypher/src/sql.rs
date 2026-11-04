@@ -187,6 +187,7 @@ pub fn translate(text: &str, mappings: &Mappings) -> Result<syntax::Statement, Q
         positional,
         depth: Cell::new(0),
         copied: Cell::new(0),
+        printed: Cell::new(0),
     };
     match statements.as_slice() {
         [statement] => translator.statement(statement),
@@ -463,12 +464,21 @@ struct Translator<'a> {
     positional: Vec<usize>,
     /// Current expression nesting, bounded before Cypher's own limit applies.
     depth: Cell<usize>,
-    /// Expression nodes copied so far; see [`Translator::copy`].
+    /// Weight of the expressions copied so far; see [`Translator::copy`].
     copied: Cell<usize>,
+    /// Bytes printed so far to compare expressions; see [`Translator::text`].
+    printed: Cell<usize>,
 }
 
-/// Bound on copied expression nodes per statement, about 10 MB.
-const MAX_COPIED_NODES: usize = 100_000;
+/// Bound on the weight of copied expressions per statement. A node weighs
+/// [`NODE_WEIGHT`] and each byte of its Cypher text one more, so copies hold
+/// about 16 MB at most, whether their nodes are many or carry long names and
+/// literals.
+const MAX_COPIED_WEIGHT: usize = 16 << 20;
+/// About the memory of one expression node.
+const NODE_WEIGHT: usize = 64;
+/// Bound on the Cypher text printed per statement to compare expressions.
+const MAX_PRINTED_BYTES: usize = 64 << 20;
 
 impl Translator<'_> {
     fn label(&self, table: &str) -> String {
@@ -486,12 +496,23 @@ impl Translator<'_> {
     /// Copy a translated expression. SQL forms that repeat an operand, such
     /// as `BETWEEN`, `NULLIF` and references to an alias or select-list
     /// position, copy it, so nesting them could otherwise grow the tree
-    /// exponentially in the text's length; the copies share one budget.
+    /// exponentially in the text's length, and repeating a reference to a
+    /// long literal would copy it each time. The copies share one budget.
     fn copy(&self, expression: &Expr) -> Result<Expr, QueryError> {
-        let mut size = 0;
-        expr::visit(expression, &mut |_| size += 1);
-        let copied = self.copied.get() + size;
-        if copied > MAX_COPIED_NODES {
+        struct Length(usize);
+        impl std::fmt::Write for Length {
+            fn write_str(&mut self, text: &str) -> std::fmt::Result {
+                self.0 += text.len();
+                Ok(())
+            }
+        }
+        let mut nodes = 0;
+        expr::visit(expression, &mut |_| nodes += 1);
+        let mut length = Length(0);
+        std::fmt::write(&mut length, format_args!("{expression}"))
+            .expect("counting text cannot fail");
+        let copied = self.copied.get() + nodes * NODE_WEIGHT + length.0;
+        if copied > MAX_COPIED_WEIGHT {
             return Err(QueryError::compile(
                 category::RESOURCE_LIMIT,
                 detail::QUERY_TOO_LARGE,
@@ -501,6 +522,25 @@ impl Translator<'_> {
         }
         self.copied.set(copied);
         Ok(expression.clone())
+    }
+
+    /// An expression's Cypher text, by which grouping compares expressions:
+    /// printing is canonical and injective. Comparing each subexpression of a
+    /// deep expression prints its innermost parts once per level, so all of
+    /// this printing shares one budget.
+    fn text(&self, expression: &Expr) -> Result<String, QueryError> {
+        let text = expression.to_string();
+        let printed = self.printed.get() + text.len();
+        if printed > MAX_PRINTED_BYTES {
+            return Err(QueryError::compile(
+                category::RESOURCE_LIMIT,
+                detail::QUERY_TOO_LARGE,
+                "the SQL statement's grouped expressions are too large to compare",
+            )
+            .at(expression.span));
+        }
+        self.printed.set(printed);
+        Ok(text)
     }
 
     fn span(&self, span: tokenizer::Span) -> Option<Span> {

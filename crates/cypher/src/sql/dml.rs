@@ -678,7 +678,7 @@ impl Translator<'_> {
             table: _,
             if_exists: false,
             identity: None,
-            cascade: None,
+            cascade,
             on_cluster: None,
         } = truncate
         else {
@@ -693,7 +693,10 @@ impl Translator<'_> {
             return Err(unsupported("TRUNCATE of several tables or with ONLY", span));
         };
         let reference: Reference = self.named(name, None, span)?;
-        let detach = matches!(reference.class, Class::Node(_));
+        // Relationships refer to their nodes as foreign keys do, so emptying
+        // a node table that relationships refer to needs CASCADE, as in SQL.
+        let detach = matches!(reference.class, Class::Node(_))
+            && *cascade == Some(ast::CascadeOption::Cascade);
         let target = reference.variable.clone();
         let pattern = self.single(reference, &mut Scope::default(), false)?;
         Ok(syntax::Statement {

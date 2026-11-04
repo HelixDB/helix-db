@@ -703,8 +703,18 @@ DELETE FROM person p
 => MATCH (p:Person) DELETE p
 
 # dml.adoc d0_4
+# divergence: like SQL, TRUNCATE without CASCADE refuses nodes that
+# relationships refer to, so it deletes without detaching.
 -- tables: people=Person
 TRUNCATE TABLE people
+=> MATCH (people:Person) DELETE people
+
+-- tables: people=Person
+TRUNCATE TABLE people RESTRICT
+=> MATCH (people:Person) DELETE people
+
+-- tables: people=Person
+TRUNCATE TABLE people CASCADE
 => MATCH (people:Person) DETACH DELETE people
 
 # dml.adoc d1_0
@@ -766,6 +776,13 @@ INSERT INTO Movie (Movie.title) VALUES($a)
 # Named parameters with a colon
 SELECT m.title FROM Movie m WHERE m.released > :year AND m.title <> ?
 => MATCH (m:Movie) WHERE m.released > $year AND m.title <> $1 RETURN m.title
+
+# Named parameters with an at sign, as in SQL Server; a quoted name is a column
+SELECT m.title FROM Movie m WHERE m.released > @year AND m."@title" = @title
+=> MATCH (m:Movie) WHERE m.released > $year AND m.`@title` = $title RETURN m.title
+
+INSERT INTO Movie (title) VALUES (@title)
+=> CREATE (movie:Movie {title: $title})
 
 # `?` is numbered in written order, though WHERE translates first
 SELECT m.title, ? FROM Movie m WHERE m.released > ?

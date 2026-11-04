@@ -74,6 +74,14 @@ impl Translator<'_> {
             )
         };
         match expression {
+            // sqlparser's generic dialect reads `@name` as an identifier;
+            // unquoted, it is a named parameter, as in SQL Server.
+            E::Identifier(ident) if ident.quote_style.is_none() && ident.value.starts_with('@') => {
+                Expr::new(
+                    ExprKind::Parameter(self.parameter(&ident.value, ident.span, span())?),
+                    span(),
+                )
+            }
             // A select-list alias in GROUP BY, HAVING or ORDER BY.
             E::Identifier(ident) => match scope.aliases.get(&ident.value.to_lowercase()) {
                 Some(aliased) => self.copy(aliased),

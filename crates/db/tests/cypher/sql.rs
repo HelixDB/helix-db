@@ -254,7 +254,8 @@ async fn grouping_matches_sql() {
 }
 
 /// Writes run as one transaction each: UPDATE and DELETE on nodes and
-/// relationships, connected-node deletes fail atomically, TRUNCATE detaches.
+/// relationships, connected-node deletes and TRUNCATE fail atomically, and
+/// TRUNCATE .. CASCADE detaches.
 #[tokio::test]
 async fn writes_update_and_delete_nodes_and_relationships() {
     let service = movies().await;
@@ -324,7 +325,18 @@ async fn writes_update_and_delete_nodes_and_relationships() {
         rows(&service, "SELECT count(*) FROM Person p", json!({})).await,
         json!([[2]])
     );
-    sql(&service, "TRUNCATE TABLE Movie", json!({})).await;
+    let error = execute(&service, json!({"query": "TRUNCATE TABLE Movie"}))
+        .await
+        .unwrap_err();
+    let cypher::Error::Query(error) = error else {
+        panic!("expected a query error: {error:?}");
+    };
+    assert_eq!(error.detail, "delete_connected_node");
+    assert_eq!(
+        rows(&service, "SELECT count(*) FROM Movie m", json!({})).await,
+        json!([[2]])
+    );
+    sql(&service, "TRUNCATE TABLE Movie CASCADE", json!({})).await;
     for query in [
         "SELECT count(*) FROM Movie m",
         "SELECT count(*) FROM Person_ACTED_IN_Movie",

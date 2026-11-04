@@ -44,7 +44,7 @@ enum Alias {
     Text,
 }
 
-/// The entries of a grouping `WITH`, findable by expression.
+/// The entries of a grouping `WITH`, findable by their expressions' text.
 #[derive(Default)]
 struct With {
     items: Vec<(Expr, String)>,
@@ -52,16 +52,15 @@ struct With {
 }
 
 impl With {
-    fn push(&mut self, expression: Expr, name: String) {
-        self.names
-            .entry(expression.to_string())
-            .or_insert_with(|| name.clone());
+    /// Project `expression`, whose Cypher text is `text`, as `name`.
+    fn push(&mut self, expression: Expr, text: String, name: String) {
+        self.names.entry(text).or_insert_with(|| name.clone());
         self.items.push((expression, name));
     }
 
-    /// The name of the first entry that computes `expression`.
-    fn name(&self, expression: &Expr) -> Option<&str> {
-        self.names.get(&expression.to_string()).map(String::as_str)
+    /// The name of the first entry whose expression's Cypher text is `text`.
+    fn name(&self, text: &str) -> Option<&str> {
+        self.names.get(text).map(String::as_str)
     }
 }
 
@@ -384,12 +383,20 @@ impl Translator<'_> {
             .collect::<Result<Vec<_>>>()?;
         // Expressions compare by their printed text, which is canonical and
         // injective, through hash sets so that wide statements stay linear.
-        let keys_printed: HashSet<String> = keys.iter().map(Expr::to_string).collect();
-        let items_printed: Vec<String> = expressions.iter().map(|e| e.to_string()).collect();
+        let key_texts: Vec<String> = keys
+            .iter()
+            .map(|key| self.text(key))
+            .collect::<Result<_>>()?;
+        let keys_printed: HashSet<&str> = key_texts.iter().map(String::as_str).collect();
+        let items_printed: Vec<String> = expressions
+            .iter()
+            .map(|e| self.text(e))
+            .collect::<Result<_>>()?;
         // Every column outside an aggregate must be grouped, as SQL requires.
         let grouped = |expression: &Expr| -> Result<bool> {
             let rest = rewrite(expression, &mut |e| {
-                (aggregate_call(e) || keys_printed.contains(&e.to_string()))
+                let key = !keys_printed.is_empty() && keys_printed.contains(self.text(e)?.as_str());
+                (aggregate_call(e) || key)
                     .then(|| Expr::new(ExprKind::Literal(r::Value::Null), e.span))
                     .transpose()
             })?;
@@ -429,16 +436,23 @@ impl Translator<'_> {
             .map(|(_, text)| text.as_str())
             .collect();
         let selected: HashSet<&str> = items_printed.iter().map(String::as_str).collect();
+        let ordering_printed = ordering
+            .iter()
+            .map(|(order, _)| self.text(order))
+            .collect::<Result<Vec<_>>>()?;
         let simple = having.is_none()
             && !(global && !plain.is_empty())
-            && keys_printed.iter().all(|key| plain.contains(key.as_str()))
+            && keys_printed.iter().all(|key| plain.contains(key))
             && expressions.iter().zip(&items_printed).all(|(e, text)| {
-                aggregates(e) || keys_printed.contains(text) || !reads_table(&scope, e)
+                aggregates(e) || keys_printed.contains(text.as_str()) || !reads_table(&scope, e)
             })
-            && ordering.iter().all(|(order, _)| {
-                matches!(order.kind(), ExprKind::Variable(_))
-                    || selected.contains(order.to_string().as_str())
-            });
+            && ordering
+                .iter()
+                .zip(&ordering_printed)
+                .all(|((order, _), text)| {
+                    matches!(order.kind(), ExprKind::Variable(_))
+                        || selected.contains(text.as_str())
+                });
         if simple {
             clauses.push(Clause::Project {
                 returning: true,
@@ -458,29 +472,30 @@ impl Translator<'_> {
         let mut with = With::default();
         expressions
             .iter()
+            .zip(items_printed)
             .zip(&projected)
-            .filter(|(e, _)| !global || aggregates(e))
-            .for_each(|(e, p)| with.push((*e).clone(), p.name.clone()));
+            .filter(|((e, _), _)| !global || aggregates(e))
+            .for_each(|((e, text), p)| with.push((*e).clone(), text, p.name.clone()));
         let mut counter = 0;
-        let mut hidden = |prefix: &str, expression: &Expr, with: &mut With| {
+        let mut hidden = |prefix: &str, expression: &Expr, text: String, with: &mut With| {
             let name = format!("__{prefix}_col_{counter}");
             counter += 1;
-            with.push(expression.clone(), name.clone());
+            with.push(expression.clone(), text, name.clone());
             name
         };
-        for key in &keys {
-            if with.name(key).is_none() {
-                hidden("group", key, &mut with);
+        for (key, text) in keys.iter().zip(key_texts) {
+            if with.name(&text).is_none() {
+                hidden("group", key, text, &mut with);
             }
         }
         let mut lift = |expression: &Expr, prefix: &str, with: &mut With| {
-            let lifted = rewrite(expression, &mut |e| match (
-                with.name(e).map(str::to_owned),
-                aggregate_call(e),
-            ) {
-                (Some(name), _) => Ok(Some(variable(&name, e.span)?)),
-                (None, true) => Ok(Some(variable(&hidden(prefix, e, with), e.span)?)),
-                (None, false) => Ok(None),
+            let lifted = rewrite(expression, &mut |e| {
+                let text = self.text(e)?;
+                match (with.name(&text).map(str::to_owned), aggregate_call(e)) {
+                    (Some(name), _) => Ok(Some(variable(&name, e.span)?)),
+                    (None, true) => Ok(Some(variable(&hidden(prefix, e, text, with), e.span)?)),
+                    (None, false) => Ok(None),
+                }
             })?;
             if reads_table(&scope, &lifted) {
                 return Err(invalid(

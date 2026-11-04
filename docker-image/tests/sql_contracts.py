@@ -100,7 +100,7 @@ def verify(port):
     assert rows(port, "SELECT p.name AS name, m.title AS title FROM people p "
                       "NATURAL JOIN ACTED_IN r NATURAL JOIN movies m ORDER BY name",
                 mappings=MOVIES) == cypher["rows"]
-    sql(port, "TRUNCATE TABLE movies", mappings=MOVIES, headers=DURABLE)
+    sql(port, "TRUNCATE TABLE movies CASCADE", mappings=MOVIES, headers=DURABLE)
     assert rows(port, "SELECT count(*) FROM SqlPerson_ACTED_IN_SqlMovie") == [[0]]
     assert rows(port, "SELECT count(*) FROM people p", mappings=MOVIES) == [[3]]
 

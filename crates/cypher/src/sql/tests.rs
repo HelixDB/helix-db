@@ -99,8 +99,9 @@ fn guards_bound_text_tokens_operators_and_nesting() {
     assert!(cypher(&rows).starts_with("UNWIND [{a: -1, b: -2}"));
 }
 
-/// The largest accepted inputs translate on a thread with tokio's default
-/// 2 MiB stack, so no request can overflow a server worker's stack.
+/// The largest accepted inputs translate, print and resolve, as a request
+/// compiles, on a thread with tokio's default 2 MiB stack, so no request can
+/// overflow a server worker's stack.
 #[test]
 fn accepted_inputs_fit_a_worker_stack() {
     let inputs = [
@@ -124,7 +125,10 @@ fn accepted_inputs_fit_a_worker_stack() {
         .stack_size(2 * 1024 * 1024)
         .spawn(move || {
             for input in inputs {
-                let _ = translate(&input, &Mappings::default()).map(|s| crate::resolve(&s));
+                let _ = translate(&input, &Mappings::default()).map(|s| {
+                    let _ = s.to_string();
+                    crate::resolve(&s)
+                });
             }
         })
         .unwrap()
@@ -704,7 +708,7 @@ fn dml_validates_targets_and_columns() {
             detail::SQL_CONSTRUCT,
         ),
         (
-            "TRUNCATE TABLE t CASCADE",
+            "TRUNCATE TABLE t RESTART IDENTITY",
             category::UNSUPPORTED_FEATURE,
             detail::SQL_CONSTRUCT,
         ),
@@ -866,6 +870,58 @@ fn repeated_operands_cannot_grow_exponentially() {
     assert_eq!(
         cypher("SELECT square(t.a), nullif(t.a, 1), t.a BETWEEN 1 AND 2 FROM t"),
         "MATCH (t:t) RETURN t.a * t.a, CASE WHEN t.a = 1 THEN NULL ELSE t.a END, 1 <= t.a AND t.a <= 2"
+    );
+}
+
+/// Copies weigh their text as well as their nodes, so repeating a reference
+/// to one long literal cannot copy it without bound.
+#[test]
+fn copies_of_long_literals_share_the_budget() {
+    let literal = "x".repeat(1 << 20);
+    let grouped = |references: usize| {
+        format!(
+            "SELECT '{literal}' AS a, count(*) FROM t GROUP BY {}",
+            vec!["a"; references].join(", ")
+        )
+    };
+    assert!(translate(&grouped(4), &Mappings::default()).is_ok());
+    assert_error(
+        &grouped(20),
+        category::RESOURCE_LIMIT,
+        detail::QUERY_TOO_LARGE,
+    );
+}
+
+/// Grouping compares every level of a deep expression by its text, which
+/// reprints its innermost parts; that printing has its own budget.
+#[test]
+fn comparing_deep_grouped_expressions_is_bounded() {
+    let literal = "x".repeat(2 << 20);
+    let having = |levels: usize| {
+        format!(
+            "SELECT t.a, count(*) FROM t GROUP BY t.a HAVING count(*) = {}'{literal}'{}",
+            "f(".repeat(levels),
+            ")".repeat(levels)
+        )
+    };
+    assert!(translate(&having(10), &Mappings::default()).is_ok());
+    assert_error(
+        &having(40),
+        category::RESOURCE_LIMIT,
+        detail::QUERY_TOO_LARGE,
+    );
+}
+
+#[test]
+fn at_sign_names_are_parameters_unless_quoted() {
+    assert_eq!(
+        cypher("SELECT t.a FROM t WHERE t.a = @a AND t.\"@b\" = 1"),
+        "MATCH (t:t) WHERE t.a = $a AND t.`@b` = 1 RETURN t.a"
+    );
+    assert_error(
+        "SELECT @",
+        category::SYNTAX_ERROR,
+        detail::UNEXPECTED_SYNTAX,
     );
 }
 

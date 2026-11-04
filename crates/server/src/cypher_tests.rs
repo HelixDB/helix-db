@@ -726,10 +726,11 @@ async fn sql_http_translates_routes_and_reports_like_cypher() {
         let (status, value) = post(body.clone(), &headers).await;
         assert_eq!(status, expected_status, "{value}");
         assert_eq!(value["error"], expected_error, "{value}");
-        if let Some(detail) = expected_detail {
-            assert_eq!(value["details"]["detail"], detail, "{value}");
-            assert_eq!(value["details"]["phase"], "compile", "{value}");
-        }
+        let Some(detail) = expected_detail else {
+            continue;
+        };
+        assert_eq!(value["details"]["detail"], detail, "{value}");
+        assert_eq!(value["details"]["phase"], "compile", "{value}");
     }
     let (_, value) = post(
         json!({"query": "SELECT sqrt(p.born) FROM Person p"}).to_string(),
