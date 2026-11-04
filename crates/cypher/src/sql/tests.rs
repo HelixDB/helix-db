@@ -167,7 +167,9 @@ fn operators_count_binary_positions_only() {
                 .unwrap(),
         )
     };
-    assert_eq!(count("SELECT -1, +2, (-3)"), 0);
+    // A sign after a word counts, since any word may be a column name.
+    assert_eq!(count("SELECT -1, +2, (-3)"), 1);
+    assert_eq!(count("SELECT t.last - t.last - t.top + t.end"), 3);
     assert_eq!(count("SELECT 1 - -1"), 1);
     assert_eq!(count("SELECT a AND b OR c XOR d"), 3);
     assert_eq!(
@@ -334,8 +336,16 @@ fn expressions_translate_with_sql_semantics() {
             "RETURN substring('abc', 1), substring('abc', 0, 2), substring('abc', 0)",
         ),
         (
-            "SELECT CEIL(1.5), FLOOR(1.5), power(2, 3), mod(5, 2), COUNT(*), Sum(1)",
-            "RETURN ceil(1.5), floor(1.5), 2 ^ 3, 5 % 2, count(*), sum(1)",
+            "SELECT CEIL(1.5), FLOOR(1.5), power(2, 3), mod(5, 2)",
+            "RETURN ceil(1.5), floor(1.5), 2 ^ 3, 5 % 2",
+        ),
+        (
+            "SELECT COUNT(*), Sum(1)",
+            "RETURN count(*), CASE count(1) WHEN 0 THEN NULL ELSE sum(1) END",
+        ),
+        (
+            "SELECT 1, COUNT(*)",
+            "WITH count(*) AS `COUNT(*)` RETURN 1, `COUNT(*)`",
         ),
         (
             "SELECT 1::varchar, TRY_CAST('1' AS INT), 1 % 2, 'a' || 1",
@@ -913,4 +923,77 @@ fn names_resolve_like_sql() {
         .to_string()
         .starts_with("MATCH (t0:Label0), (t1:Label1)"));
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn grouping_follows_sql_without_aggregates_and_for_whole_inputs() {
+    for (sql, expected) in [
+        (
+            "SELECT p.city FROM Person p GROUP BY p.city",
+            "MATCH (p:Person) RETURN DISTINCT p.city",
+        ),
+        (
+            "SELECT p.city FROM Person p GROUP BY p.city, p.dept",
+            "MATCH (p:Person) WITH DISTINCT p.city AS `p.city`, p.dept AS __group_col_0 RETURN `p.city`",
+        ),
+        (
+            "SELECT p.city FROM Person p GROUP BY p.city HAVING p.city <> 'x'",
+            "MATCH (p:Person) WITH DISTINCT p.city AS `p.city` WHERE `p.city` <> 'x' RETURN `p.city`",
+        ),
+        (
+            "SELECT 'total', ?, count(*) FROM Person p",
+            "MATCH (p:Person) WITH count(*) AS `count(*)` RETURN 'total', $1, `count(*)`",
+        ),
+        (
+            "SELECT 1 AS one, count(*) FROM t HAVING count(*) >= 0",
+            "MATCH (t:t) WITH count(*) AS `count(*)` WHERE `count(*)` >= 0 RETURN 1 AS one, `count(*)`",
+        ),
+    ] {
+        assert_eq!(cypher(sql), expected, "{sql}");
+    }
+    assert_error(
+        "SELECT 1 FROM t HAVING 1 = 1",
+        category::SYNTAX_ERROR,
+        detail::INVALID_AGGREGATION,
+    );
+}
+
+#[test]
+fn updates_read_the_row_before_the_update() {
+    assert_eq!(
+        cypher("UPDATE Person p SET a = p.b, b = p.a WHERE p.x = 1"),
+        "MATCH (p:Person) WHERE p.x = 1 WITH p, p.b AS __set_0, p.a AS __set_1 \
+         SET p.a = __set_0, p.b = __set_1"
+    );
+    assert_eq!(
+        cypher("UPDATE Person p SET a = 1, b = 2"),
+        "MATCH (p:Person) SET p.a = 1, p.b = 2"
+    );
+}
+
+#[test]
+fn shorthand_and_placeholders_are_unambiguous() {
+    assert_eq!(
+        cypher("INSERT INTO Person_RATED_Movie (_start.name, _end.title, movie_year, stars) VALUES ('a', 'b', 1999, 5)"),
+        "MATCH (_start:Person {name: 'a'}), (_end:Movie {title: 'b', year: 1999}) \
+         CREATE (_start)-[person_rated_movie:RATED {stars: 5}]->(_end)"
+    );
+    assert_eq!(
+        cypher("UPDATE Person_RATED_Movie SET movie_year = 2000, stars = 4"),
+        "MATCH (_start:Person)-[person_rated_movie:RATED]->(_end:Movie) SET _end.year = 2000, person_rated_movie.stars = 4"
+    );
+    for sql in [
+        "SELECT person_name FROM Person_KNOWS_Person",
+        "INSERT INTO Person_KNOWS_Person (person_name, _end.x) VALUES (1, 2)",
+        "SELECT customer_id FROM Customers c JOIN Orders o ON c.id = o.customer_id",
+    ] {
+        assert_error(sql, category::SYNTAX_ERROR, detail::AMBIGUOUS_COLUMN);
+    }
+    for sql in ["SELECT $1, ?", "SELECT ?, :2"] {
+        assert_error(sql, category::SYNTAX_ERROR, detail::INVALID_PARAMETER);
+    }
+    assert_eq!(
+        cypher("SELECT customer_id.since FROM Customers c JOIN Orders o ON c.id = o.customer_id"),
+        "MATCH (c:Customers)<-[customer_id:CUSTOMER_ID]-(o:Orders) RETURN customer_id.since"
+    );
 }

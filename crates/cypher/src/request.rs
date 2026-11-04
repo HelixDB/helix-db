@@ -130,20 +130,23 @@ impl CompiledRequest {
 fn deserialize_parameters<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<BTreeMap<String, query::QueryValue>, D::Error> {
-    let values = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    decode_parameters(BTreeMap::<String, serde_json::Value>::deserialize(
+        deserializer,
+    )?)
+    .map_err(serde::de::Error::custom)
+}
+
+/// Decode named parameters in their lossless JSON encoding.
+pub(crate) fn decode_parameters(
+    values: impl IntoIterator<Item = (String, serde_json::Value)>,
+) -> std::result::Result<BTreeMap<String, query::QueryValue>, String> {
     values
         .into_iter()
-        .map(|(name, value)| {
-            decode_parameter(value)
-                .map(|value| (name, value))
-                .map_err(serde::de::Error::custom)
-        })
+        .map(|(name, value)| decode_parameter(value).map(|value| (name, value)))
         .collect()
 }
 
-pub(crate) fn decode_parameter(
-    value: serde_json::Value,
-) -> std::result::Result<query::QueryValue, String> {
+fn decode_parameter(value: serde_json::Value) -> std::result::Result<query::QueryValue, String> {
     use query::QueryValue as Q;
     match value {
         serde_json::Value::Array(values) => values

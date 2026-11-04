@@ -5,6 +5,8 @@
 //! `SUBSTRING` starts at 1, `(a, b) <> (c, d)` holds when any pair differs,
 //! two-argument `REPLACE` removes the search string, and `||` and `CONCAT`
 //! join their operands as strings, `CONCAT` skipping nulls as PostgreSQL does.
+//! `SUM` of no values is null. `CAST` uses Cypher's conversions: to an integer it truncates toward zero,
+//! and text that does not convert becomes null rather than an error.
 use super::tables::Scope;
 use super::{binary, call, invalid, literal, unsupported, Translator};
 use crate::syntax::{Expr, ExprKind};
@@ -772,6 +774,39 @@ impl Translator<'_> {
                     span,
                 );
             }
+            // SQL's SUM of no values is null, where Cypher's sum is 0.
+            "sum" if !star && arguments.len() == 1 => {
+                let argument = arguments.into_iter().next().expect("one argument");
+                let count = Expr::new(
+                    ExprKind::Call {
+                        name: "count".to_owned(),
+                        arguments: vec![self.copy(&argument)?],
+                        distinct: false,
+                        star: false,
+                    },
+                    span,
+                )?;
+                let sum = Expr::new(
+                    ExprKind::Call {
+                        name: "sum".to_owned(),
+                        arguments: vec![argument],
+                        distinct,
+                        star: false,
+                    },
+                    span,
+                )?;
+                return Expr::new(
+                    ExprKind::Case {
+                        operand: Some(Box::new(count)),
+                        branches: vec![(
+                            literal(r::Value::Integer(0), span)?,
+                            literal(r::Value::Null, span)?,
+                        )],
+                        otherwise: Some(Box::new(sum)),
+                    },
+                    span,
+                );
+            }
             "square" => {
                 arity(1)?;
                 let value = arguments.into_iter().next().expect("one argument");
@@ -881,17 +916,26 @@ impl Translator<'_> {
                     )
                 });
         }
-        placeholder
+        let name = placeholder
             .strip_prefix(['$', ':', '@', '?'])
             .filter(|name| !name.is_empty())
-            .map(str::to_owned)
             .ok_or_else(|| {
                 invalid(
                     detail::INVALID_PARAMETER,
                     format!("`{placeholder}` is not a parameter name"),
                     span,
                 )
-            })
+            })?;
+        // `?` takes the numbers `$1`, `$2`, …, so a numbered placeholder in
+        // the same statement would silently share one of them.
+        if !self.positional.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
+            return Err(invalid(
+                detail::INVALID_PARAMETER,
+                format!("`{placeholder}` cannot be mixed with `?` placeholders"),
+                span,
+            ));
+        }
+        Ok(name.to_owned())
     }
 
     /// Source text for an error message, shortened.
@@ -986,17 +1030,20 @@ fn substring(value: Expr, start: Option<Expr>, length: Option<Expr>, span: Span)
     let start = match start {
         None => literal(r::Value::Integer(0), span)?,
         Some(start) => {
-            if let ExprKind::Literal(r::Value::Integer(position)) = start.kind()
-                && let Some(previous) = position.checked_sub(1)
-            {
-                literal(r::Value::Integer(previous), span)?
-            } else {
-                binary(
+            let folded = 'fold: {
+                let ExprKind::Literal(r::Value::Integer(position)) = start.kind() else {
+                    break 'fold None;
+                };
+                position.checked_sub(1)
+            };
+            match folded {
+                Some(previous) => literal(r::Value::Integer(previous), span)?,
+                None => binary(
                     r::Binary::Subtract,
                     start,
                     literal(r::Value::Integer(1), span)?,
                     span,
-                )?
+                )?,
             }
         }
     };

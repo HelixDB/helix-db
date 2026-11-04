@@ -66,7 +66,8 @@ A table named `Start_TYPE_End`, such as `Person_ACTED_IN_Movie`, is a
 `(_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie)`. Its
 unqualified columns are relationship properties, `Person.name` or `_start.name`
 is a property of the start node, `Movie.title` or `_end.title` of the end node,
-and `person_name` is shorthand for `_start.name`. The start and end each need a
+and `person_name` is shorthand for `_start.name` when only the start label is
+`Person`, in reads, `UPDATE` and `INSERT` alike. The start and end each need a
 lowercase letter, so upper-case table names such as `ORDER_LINE_ITEMS` stay node
 labels.
 
@@ -122,8 +123,11 @@ names the join's left table and the column that names the type.
 | `TRUNCATE TABLE Person` | `MATCH (person:Person) DETACH DELETE person` |
 | `RETURNING ..` on `INSERT` or `UPDATE` | `RETURN ..` |
 
-Grouping follows SQL: a selected column must be grouped or aggregated, and
-`ORDER BY 1` or `GROUP BY 1` refer to select-list positions.
+Grouping follows SQL: a selected column must be grouped or aggregated, `GROUP BY`
+without an aggregate returns each group once, an aggregate without `GROUP BY`
+returns one row even for an empty table, `SUM` of no values is null, and
+`ORDER BY 1` or `GROUP BY 1` refer to select-list positions. `UPDATE` computes every new value from the row before
+the update, so `SET a = b, b = a` swaps.
 
 `DELETE` of a node that still has relationships fails and changes nothing, like
 a foreign key; delete the relationships first or use `TRUNCATE`.
@@ -152,7 +156,9 @@ Comparisons, `AND`, `OR`, `NOT`, `IS [NOT] NULL`, `IS [NOT] TRUE`,
 `IS [NOT] DISTINCT FROM`, `IN` lists, `BETWEEN`, arithmetic, `CASE`, `CAST`, and
 row values such as `(a, b) < (1, 2)` translate with SQL semantics. `||` and
 `CONCAT` join their operands as strings; `||` returns null when an operand is
-null, and `CONCAT` skips nulls, as in PostgreSQL.
+null, and `CONCAT` skips nulls, as in PostgreSQL. `CAST` uses Cypher's
+conversions: to an integer type it truncates toward zero, and text that does not
+convert becomes null rather than an error.
 `LIKE` and `ILIKE` translate when the pattern is a literal whose only wildcards
 are a leading or trailing `%`: `'%x%'` becomes `CONTAINS`, `'x%'` `STARTS WITH`,
 and `'%x'` `ENDS WITH`.

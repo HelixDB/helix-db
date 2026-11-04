@@ -266,22 +266,13 @@ impl Translator<'_> {
             .collect();
         // GROUP BY reads an alias as its expression; HAVING and ORDER BY read
         // it as the projected column.
-        // Unquoted SQL names are case-insensitive; of aliases that differ only
-        // in case, the first wins.
-        let lowered = |entries: Vec<(String, Expr)>| {
-            let mut aliases = HashMap::with_capacity(entries.len());
-            for (name, expression) in entries {
-                aliases.entry(name.to_lowercase()).or_insert(expression);
-            }
-            aliases
-        };
-        scope.aliases = lowered(explicit.clone());
+        scope.aliases = super::lowercased(explicit.clone());
         let keys = self.group_keys(&select.group_by, &projected, &scope, span)?;
-        scope.aliases = lowered(
+        scope.aliases = super::lowercased(
             explicit
                 .iter()
                 .map(|(name, _)| Ok((name.clone(), variable(name, span)?)))
-                .collect::<Result<_>>()?,
+                .collect::<Result<Vec<_>>>()?,
         );
         let having = select
             .having
@@ -357,6 +348,21 @@ impl Translator<'_> {
                 ));
             }
         }
+        // Cypher groups only when a projection aggregates, so GROUP BY
+        // without an aggregate deduplicates instead.
+        let aggregated = expressions.iter().any(|e| aggregates(e))
+            || having.as_ref().is_some_and(aggregates)
+            || ordering.iter().any(|(order, _)| aggregates(order));
+        // Without GROUP BY, SQL aggregates the whole input into one row even
+        // when it is empty; Cypher would group by any constant it projects.
+        let global = keys.is_empty();
+        if global && !aggregated {
+            return Err(invalid(
+                detail::INVALID_AGGREGATION,
+                "HAVING needs GROUP BY or an aggregate",
+                span,
+            ));
+        }
         let plain: HashSet<&str> = expressions
             .iter()
             .zip(&items_printed)
@@ -365,6 +371,7 @@ impl Translator<'_> {
             .collect();
         let selected: HashSet<&str> = items_printed.iter().map(String::as_str).collect();
         let simple = having.is_none()
+            && !(global && !plain.is_empty())
             && keys_printed.iter().all(|key| plain.contains(key.as_str()))
             && expressions.iter().zip(&items_printed).all(|(e, text)| {
                 aggregates(e) || keys_printed.contains(text) || !reads_table(&scope, e)
@@ -377,7 +384,7 @@ impl Translator<'_> {
             clauses.push(Clause::Project {
                 returning: true,
                 items: projected.into_iter().map(Projected::item).collect(),
-                distinct,
+                distinct: distinct || !aggregated,
                 ordering,
                 skip: window.skip,
                 limit: window.limit,
@@ -387,11 +394,13 @@ impl Translator<'_> {
         }
         // Explicit grouping: WITH projects every select entry under its name,
         // grouping keys and HAVING or ORDER BY aggregates that are not
-        // selected, then RETURN reads the names.
+        // selected, then RETURN reads the names. A global aggregate leaves
+        // its constants to RETURN, so that they group nothing.
         let mut with = With::default();
         expressions
             .iter()
             .zip(&projected)
+            .filter(|(e, _)| !global || aggregates(e))
             .for_each(|(e, p)| with.push((*e).clone(), p.name.clone()));
         let mut counter = 0;
         let mut hidden = |prefix: &str, expression: &Expr, with: &mut With| {
@@ -430,6 +439,8 @@ impl Translator<'_> {
             .into_iter()
             .map(|(order, descending)| Ok((lift(&order, "having", &mut with)?, descending)))
             .collect::<Result<Vec<_>>>()?;
+        let projected_names: HashSet<String> =
+            with.items.iter().map(|(_, name)| name.clone()).collect();
         clauses.push(Clause::Project {
             returning: false,
             items: with
@@ -437,7 +448,7 @@ impl Translator<'_> {
                 .into_iter()
                 .map(|(expression, name)| item(expression, Some(name)))
                 .collect(),
-            distinct: false,
+            distinct: !aggregated,
             ordering: Vec::new(),
             skip: None,
             limit: None,
@@ -446,12 +457,15 @@ impl Translator<'_> {
         clauses.push(Clause::Project {
             returning: true,
             items: projected
-                .iter()
+                .into_iter()
                 .map(|p| {
+                    if !projected_names.contains(&p.name) {
+                        return Ok(p.item());
+                    }
                     Ok(syntax::Item::Expression {
                         expression: variable(&p.name, span)?,
                         alias: None,
-                        text: p.name.clone(),
+                        text: p.name,
                     })
                 })
                 .collect::<Result<_>>()?,

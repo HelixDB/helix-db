@@ -4,7 +4,7 @@
 //! into a relationship table finds its endpoints with `MATCH`: neo4j-jdbc
 //! uses `MERGE`, which HelixDB's Cypher profile does not support, so a missing
 //! endpoint creates nothing instead of a new node.
-use super::tables::{Class, Reference, Scope};
+use super::tables::{shorthand, Class, Endpoint, Reference, Scope};
 use super::{invalid, property, unsupported, variable, Translator};
 use crate::syntax::{self, Assignment, Clause, Expr, ExprKind};
 use helix_planner::relational::{self as r, category, detail, QueryError, Result, Span};
@@ -430,7 +430,15 @@ impl Translator<'_> {
                     })
                     .transpose()?;
                 let role = match id {
-                    None => Role::Property(Side::Relationship, name),
+                    None => match shorthand(&name, &labels.start, &labels.end, span)? {
+                        Some((Endpoint::Start, column)) => {
+                            Role::Property(Side::Start, column.to_owned())
+                        }
+                        Some((Endpoint::End, column)) => {
+                            Role::Property(Side::End, column.to_owned())
+                        }
+                        None => Role::Property(Side::Relationship, name),
+                    },
                     Some(Side::Start) => Role::StartId,
                     Some(Side::End) => Role::EndId,
                     Some(Side::Relationship) => unreachable!("an endpoint id names a node"),
@@ -555,20 +563,53 @@ impl Translator<'_> {
                         at,
                     ));
                 }
-                Ok(Assignment::Property(
-                    target,
-                    self.expr(&assignment.value, &scope)?,
-                ))
+                Ok((target, self.expr(&assignment.value, &scope)?))
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut clauses = vec![
-            Clause::Match {
-                patterns,
-                optional: false,
-                predicate,
-            },
-            Clause::Set(assignments),
-        ];
+        let mut clauses = vec![Clause::Match {
+            patterns,
+            optional: false,
+            predicate,
+        }];
+        // SQL computes every new value from the row before the update, while
+        // Cypher applies SET items in turn; computing the values in a WITH
+        // keeps `SET a = b, b = a` a swap.
+        let sequential = assignments.len() > 1
+            && assignments
+                .iter()
+                .any(|(_, value)| super::tables::reads_table(&scope, value));
+        let assignments = if sequential {
+            let mut items = scope
+                .variables()
+                .map(|name| Ok(super::item(variable(name, span)?, None)))
+                .collect::<Result<Vec<_>>>()?;
+            let assignments = assignments
+                .into_iter()
+                .enumerate()
+                .map(|(index, (target, value))| {
+                    let name = format!("__set_{index}");
+                    let at = value.span;
+                    items.push(super::item(value, Some(name.clone())));
+                    Ok(Assignment::Property(target, variable(&name, at)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            clauses.push(Clause::Project {
+                returning: false,
+                items,
+                distinct: false,
+                ordering: Vec::new(),
+                skip: None,
+                limit: None,
+                predicate: None,
+            });
+            assignments
+        } else {
+            assignments
+                .into_iter()
+                .map(|(target, value)| Assignment::Property(target, value))
+                .collect()
+        };
+        clauses.push(Clause::Set(assignments));
         clauses.extend(self.returning(update.returning.as_deref(), &scope)?);
         Ok(syntax::Statement { clauses })
     }

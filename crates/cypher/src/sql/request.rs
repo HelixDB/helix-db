@@ -4,7 +4,7 @@
 //! so transports route, execute and report it exactly like Cypher. Its text is
 //! the translated Cypher, which telemetry records with literals redacted.
 use super::Mappings;
-use crate::request::{decode_parameter, CompiledRequest};
+use crate::request::{decode_parameters, CompiledRequest};
 use helix_ast::query;
 use helix_planner::relational as r;
 use serde::{Deserialize, Serialize};
@@ -73,20 +73,14 @@ enum Parameters {
 fn deserialize_parameters<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<BTreeMap<String, query::QueryValue>, D::Error> {
-    let named: Vec<(String, serde_json::Value)> = match Parameters::deserialize(deserializer)? {
-        Parameters::Named(values) => values.into_iter().collect(),
-        Parameters::Positional(values) => values
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| ((index + 1).to_string(), value))
-            .collect(),
-    };
-    named
-        .into_iter()
-        .map(|(name, value)| {
-            decode_parameter(value)
-                .map(|value| (name, value))
-                .map_err(serde::de::Error::custom)
-        })
-        .collect()
+    match Parameters::deserialize(deserializer)? {
+        Parameters::Named(values) => decode_parameters(values),
+        Parameters::Positional(values) => decode_parameters(
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| ((index + 1).to_string(), value)),
+        ),
+    }
+    .map_err(serde::de::Error::custom)
 }

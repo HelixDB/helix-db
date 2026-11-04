@@ -52,6 +52,9 @@ enum Role {
     /// The start or end node of a relationship table, reachable only by a
     /// qualifier: its label, `_start` or `_end`.
     Endpoint,
+    /// The relationship a direct join generates, reachable only by its
+    /// variable or type, so that an unqualified column never names it.
+    Generated,
 }
 
 /// What a table name means after [`super::Mappings::tables`].
@@ -74,6 +77,41 @@ pub(super) struct Reference {
     pub(super) variable: String,
     pub(super) class: Class,
     pub(super) span: Span,
+}
+
+/// The node a relationship table's column can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Endpoint {
+    Start,
+    End,
+}
+
+/// On a relationship table, an unqualified `<label>_<column>` names an
+/// endpoint's column, as in neo4j-jdbc: `person_name` on
+/// `Person_ACTED_IN_Movie` is the start node's `name`. Reads, writes and
+/// inserts all follow this rule. A name both endpoints match is ambiguous.
+pub(super) fn shorthand<'a>(
+    name: &'a str,
+    start: &str,
+    end: &str,
+    span: Span,
+) -> Result<Option<(Endpoint, &'a str)>> {
+    let column = |label: &str| {
+        name.get(..label.len())
+            .filter(|prefix| prefix.eq_ignore_ascii_case(label))
+            .and_then(|_| name[label.len()..].strip_prefix('_'))
+            .filter(|column| !column.is_empty())
+    };
+    match (column(start), column(end)) {
+        (Some(_), Some(_)) => Err(invalid(
+            detail::AMBIGUOUS_COLUMN,
+            format!("`{name}` could name either endpoint; qualify it with `_start` or `_end`"),
+            span,
+        )),
+        (Some(column), None) => Ok(Some((Endpoint::Start, column))),
+        (None, Some(column)) => Ok(Some((Endpoint::End, column))),
+        (None, None) => Ok(None),
+    }
 }
 
 /// Recognize `Start_TYPE_End`: the shortest start before an underscore-delimited
@@ -152,6 +190,11 @@ impl Scope {
         self.tables.iter().filter(|t| t.role == Role::Written)
     }
 
+    /// Every table variable, in written order.
+    pub(super) fn variables(&self) -> impl Iterator<Item = &str> {
+        self.tables.iter().map(|t| t.variable.as_str())
+    }
+
     /// The table a qualifier names: its alias or variable, then its name.
     fn qualified(&self, qualifier: &str, span: Span) -> Result<&Table> {
         let key = qualifier.to_lowercase();
@@ -217,26 +260,28 @@ impl Scope {
                     if name.eq_ignore_ascii_case("v$id") {
                         return id(table);
                     }
-                    // On a relationship table, `<label>_<column>` reads an
-                    // endpoint, as in neo4j-jdbc: `person_name` is `_start.name`.
-                    let endpoint = matches!(table.kind, Kind::Relationship { .. })
-                        .then(|| {
-                            self.tables
-                                .iter()
-                                .filter(|t| t.role == Role::Endpoint)
-                                .find_map(|t| {
-                                    let Kind::Node { label } = &t.kind else {
-                                        return None;
-                                    };
-                                    let (prefix, column) = name.split_once('_')?;
-                                    (prefix.eq_ignore_ascii_case(label) && !column.is_empty())
-                                        .then_some((t, column))
-                                })
+                    let label = |variable: &str| {
+                        self.tables.iter().find_map(|t| match &t.kind {
+                            Kind::Node { label }
+                                if t.role == Role::Endpoint && t.variable == variable =>
+                            {
+                                Some(label.as_str())
+                            }
+                            Kind::Node { .. } | Kind::Relationship { .. } => None,
                         })
-                        .flatten();
+                    };
+                    let endpoint = match (&table.kind, label(START), label(END)) {
+                        (Kind::Relationship { .. }, Some(start), Some(end)) => {
+                            shorthand(name, start, end, span)?
+                        }
+                        _ => None,
+                    };
                     match endpoint {
-                        Some((endpoint, column)) => {
-                            property(variable(&endpoint.variable, span)?, column, span)
+                        Some((Endpoint::Start, column)) => {
+                            property(variable(START, span)?, column, span)
+                        }
+                        Some((Endpoint::End, column)) => {
+                            property(variable(END, span)?, column, span)
                         }
                         None => property(variable(&table.variable, span)?, name, span),
                     }
@@ -524,7 +569,7 @@ impl Translator<'_> {
                             alias: None,
                             variable: name.clone(),
                             kind: Kind::Relationship { kind: kind.clone() },
-                            role: Role::Written,
+                            role: Role::Generated,
                         },
                         right.span,
                     )?;
@@ -661,9 +706,10 @@ impl Translator<'_> {
                 };
                 // Both columns must belong to tables of the join.
                 for parts in [&first, &second] {
-                    if let [.., qualifier, _] = parts.as_slice()
-                        && !names_right(&qualifier.value)
-                    {
+                    let [.., qualifier, _] = parts.as_slice() else {
+                        continue;
+                    };
+                    if !names_right(&qualifier.value) {
                         scope.qualified(&qualifier.value, self.at(condition))?;
                     }
                 }

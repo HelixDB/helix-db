@@ -109,12 +109,13 @@ impl Mappings {
     }
 }
 
-/// A mapping with lowercased keys, for lookups in constant time. Of keys that
-/// differ only in case, the first in order wins.
-fn lowercased(map: &BTreeMap<String, String>) -> HashMap<String, &str> {
-    let mut lowered = HashMap::with_capacity(map.len());
-    for (key, value) in map {
-        lowered.entry(key.to_lowercase()).or_insert(value.as_str());
+/// Entries by lowercased key, for case-insensitive lookups in constant time,
+/// as unquoted SQL names compare. Of keys that differ only in case, the first
+/// wins.
+fn lowercased<K: AsRef<str>, V>(entries: impl IntoIterator<Item = (K, V)>) -> HashMap<String, V> {
+    let mut lowered = HashMap::new();
+    for (key, value) in entries {
+        lowered.entry(key.as_ref().to_lowercase()).or_insert(value);
     }
     lowered
 }
@@ -181,8 +182,8 @@ pub fn translate(text: &str, mappings: &Mappings) -> Result<syntax::Statement, Q
         .map_err(|error| parse_error(&lines, error))?;
     let translator = Translator {
         lines,
-        labels: lowercased(&mappings.tables),
-        join_types: lowercased(&mappings.join_columns),
+        labels: lowercased(mappings.tables.iter().map(|(k, v)| (k, v.as_str()))),
+        join_types: lowercased(mappings.join_columns.iter().map(|(k, v)| (k, v.as_str()))),
         positional,
         depth: Cell::new(0),
         copied: Cell::new(0),
@@ -238,9 +239,9 @@ fn token_estimate(text: &str) -> usize {
 /// literals and the clause keywords that never join two expressions, so an
 /// infix keyword such as `OVERLAPS`, including one a newer sqlparser adds,
 /// is counted by default; a keyword used as a column name only overcounts.
-/// A sign after an operator, an opening bracket, a comma or a keyword is
-/// unary: the parser bounds those by its depth limit. Only the token before
-/// a sign decides, so no chain of binary signs goes uncounted.
+/// A sign counts unless it follows an opening bracket, a comma or a symbolic
+/// operator, where it can only be unary and the parser bounds it by its depth
+/// limit. Any word may be a column name, so a sign after one always counts.
 #[expect(
     clippy::wildcard_enum_match_arm,
     reason = "sqlparser's token and keyword sets are open-ended; every other one counts as an operator"
@@ -298,8 +299,8 @@ fn operators(tokens: &[tokenizer::TokenWithSpan]) -> usize {
                     | K::THEN
                     | K::ELSE
                     | K::END
-                    | K::CAST => (false, false),
-                    _ => (false, true),
+                    | K::CAST => (true, false),
+                    _ => (true, true),
                 },
                 T::Word(_) => (true, false),
                 T::Number(..)

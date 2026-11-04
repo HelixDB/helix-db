@@ -230,6 +230,20 @@ async fn grouping_matches_sql() {
             "SELECT DISTINCT dept FROM Person p ORDER BY dept DESC",
             json!([["navy"], ["math"]]),
         ),
+        // GROUP BY without an aggregate returns each group once.
+        (
+            "SELECT dept FROM Person p GROUP BY dept ORDER BY dept",
+            json!([["math"], ["navy"]]),
+        ),
+        (
+            "SELECT p.dept FROM Person p GROUP BY p.dept, p.born HAVING p.born > 1900 ORDER BY 1",
+            json!([["math"], ["navy"]]),
+        ),
+        // An aggregate without GROUP BY returns one row, even for no input.
+        (
+            "SELECT 'total', count(*), sum(n.x) FROM Nobody n",
+            json!([["total", 0, null]]),
+        ),
         (
             "SELECT count(DISTINCT p.dept), sum(p.born), avg(m.released) FROM Person p, Movie m",
             json!([[2, 11266, 2015.0]]),
@@ -256,6 +270,22 @@ async fn writes_update_and_delete_nodes_and_relationships() {
         json!({}),
     )
     .await;
+    // Every new value comes from the row before the update.
+    sql(
+        &service,
+        "UPDATE Person p SET born = p.dept, dept = p.born WHERE p.name = 'Grace'",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        rows(
+            &service,
+            "SELECT born, dept FROM Person p WHERE name = 'Grace'",
+            json!({})
+        )
+        .await,
+        json!([["navy", 1906]])
+    );
     assert_eq!(
         rows(
             &service,
