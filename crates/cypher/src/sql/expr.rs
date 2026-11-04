@@ -3,9 +3,10 @@
 //! Each SQL construct maps to the Cypher expression with the same result.
 //! Where neo4j-jdbc's translation differs from SQL, this follows SQL:
 //! `SUBSTRING` starts at 1, `(a, b) <> (c, d)` holds when any pair differs,
-//! and two-argument `REPLACE` removes the search string.
+//! two-argument `REPLACE` removes the search string, and `||` and `CONCAT`
+//! join their operands as strings, `CONCAT` skipping nulls as PostgreSQL does.
 use super::tables::Scope;
-use super::{binary, call, invalid, literal, node, unsupported, Translator};
+use super::{binary, call, invalid, literal, unsupported, Translator};
 use crate::syntax::{Expr, ExprKind};
 use helix_planner::{
     ir::AtLeast,
@@ -64,13 +65,17 @@ impl Translator<'_> {
         // recursive span computation walks a long chain.
         let span = || self.at(expression);
         let unary = |operator, value: &ast::Expr| {
-            node(
+            Expr::new(
                 ExprKind::Unary(operator, Box::new(self.logical(value, scope)?)),
                 span(),
             )
         };
         match expression {
-            E::Identifier(ident) => scope.column(std::slice::from_ref(ident), span()),
+            // A select-list alias in GROUP BY, HAVING or ORDER BY.
+            E::Identifier(ident) => match scope.aliases.get(&ident.value.to_lowercase()) {
+                Some(aliased) => self.copy(aliased),
+                None => scope.column(std::slice::from_ref(ident), span()),
+            },
             E::CompoundIdentifier(parts) => scope.column(parts, span()),
             E::Value(value) => self.value(value, false, span()),
             E::Nested(inner) => self.expr(inner, scope),
@@ -113,7 +118,7 @@ impl Translator<'_> {
                         value: ast::Value::Placeholder(_),
                         ..
                     })] => self.expr(single, scope)?,
-                    items => node(
+                    items => Expr::new(
                         ExprKind::List(
                             items
                                 .iter()
@@ -138,7 +143,7 @@ impl Translator<'_> {
                 let range = connective(
                     r::Connective::And,
                     vec![
-                        binary(r::Binary::LessEqual, low, value.clone(), span)?,
+                        binary(r::Binary::LessEqual, low, self.copy(&value)?, span)?,
                         binary(r::Binary::LessEqual, value, high, span)?,
                     ],
                     span,
@@ -176,7 +181,7 @@ impl Translator<'_> {
                 conditions,
                 else_result,
                 ..
-            } => node(
+            } => Expr::new(
                 ExprKind::Case {
                     operand: operand
                         .as_deref()
@@ -255,7 +260,7 @@ impl Translator<'_> {
                 };
                 call(name, vec![self.expr(expr, scope)?], span())
             }
-            E::Array(array) => node(
+            E::Array(array) => Expr::new(
                 ExprKind::List(
                     array
                         .elem
@@ -300,7 +305,30 @@ impl Translator<'_> {
             O::And => return self.connective_chain(whole, op, r::Connective::And, scope),
             O::Or => return self.connective_chain(whole, op, r::Connective::Or, scope),
             O::Xor => return self.connective_chain(whole, op, r::Connective::Xor, scope),
-            O::Plus | O::StringConcat => B::Add,
+            // SQL concatenates strings; Cypher's `+` would add numbers.
+            O::StringConcat => {
+                let text = |side: &ast::Expr| -> Result<Expr> {
+                    let value = self.logical(side, scope)?;
+                    let textual =
+                        matches!(
+                            side,
+                            ast::Expr::BinaryOp {
+                                op: O::StringConcat,
+                                ..
+                            }
+                        ) || matches!(value.kind(), ExprKind::Literal(r::Value::String(_)));
+                    if textual {
+                        Ok(value)
+                    } else {
+                        {
+                            let at = value.span;
+                            call("toString", vec![value], at)
+                        }
+                    }
+                };
+                return binary(B::Add, text(left)?, text(right)?, self.at(whole));
+            }
+            O::Plus => B::Add,
             O::Minus => B::Subtract,
             O::Multiply => B::Multiply,
             O::Divide => B::Divide,
@@ -392,7 +420,7 @@ impl Translator<'_> {
         let each = |operator| {
             pairs
                 .iter()
-                .map(|(a, b)| binary(operator, a.clone(), b.clone(), span))
+                .map(|(a, b)| binary(operator, self.copy(a)?, self.copy(b)?, span))
                 .collect::<Result<Vec<_>>>()
         };
         match operator {
@@ -408,13 +436,13 @@ impl Translator<'_> {
                 let mut fields = pairs.iter().rev();
                 let (a, b) = fields.next().expect("rows are nonempty");
                 fields.try_fold(
-                    binary(operator, a.clone(), b.clone(), span)?,
+                    binary(operator, self.copy(a)?, self.copy(b)?, span)?,
                     |rest, (a, b)| {
-                        let equal = binary(B::Equal, a.clone(), b.clone(), span)?;
+                        let equal = binary(B::Equal, self.copy(a)?, self.copy(b)?, span)?;
                         connective(
                             r::Connective::Or,
                             vec![
-                                binary(strict, a.clone(), b.clone(), span)?,
+                                binary(strict, self.copy(a)?, self.copy(b)?, span)?,
                                 connective(r::Connective::And, vec![equal, rest], span)?,
                             ],
                             span,
@@ -443,7 +471,7 @@ impl Translator<'_> {
         span: Span,
     ) -> Result<Expr> {
         let ast::Expr::Tuple(fields) = value else {
-            return node(
+            return Expr::new(
                 ExprKind::Unary(test, Box::new(self.logical(value, scope)?)),
                 span,
             );
@@ -452,7 +480,7 @@ impl Translator<'_> {
         let tests = fields
             .iter()
             .map(|field| {
-                node(
+                Expr::new(
                     ExprKind::Unary(test, Box::new(self.expr(field, scope)?)),
                     span,
                 )
@@ -495,17 +523,19 @@ impl Translator<'_> {
     ) -> Result<Expr> {
         let left = self.expr(left, scope)?;
         let right = self.expr(right, scope)?;
-        let null = |value: &Expr| {
-            node(
-                ExprKind::Unary(r::Unary::IsNull, Box::new(value.clone())),
-                span,
-            )
-        };
+        let equal = binary(
+            r::Binary::Equal,
+            self.copy(&left)?,
+            self.copy(&right)?,
+            span,
+        )?;
+        let null =
+            |value: Expr| Expr::new(ExprKind::Unary(r::Unary::IsNull, Box::new(value)), span);
         let same = call(
             "coalesce",
             vec![
-                binary(r::Binary::Equal, left.clone(), right.clone(), span)?,
-                connective(r::Connective::And, vec![null(&left)?, null(&right)?], span)?,
+                equal,
+                connective(r::Connective::And, vec![null(left)?, null(right)?], span)?,
             ],
             span,
         )?;
@@ -664,7 +694,25 @@ impl Translator<'_> {
             "current_timestamp" | "now" => "localdatetime",
             "current_date" => "date",
             "current_time" => "localtime",
+            // PostgreSQL's CONCAT: strings joined, nulls skipped.
             "concat" => {
+                let arguments = arguments
+                    .into_iter()
+                    .map(|argument| {
+                        if matches!(argument.kind(), ExprKind::Literal(r::Value::String(_))) {
+                            return Ok(argument);
+                        }
+                        let at = argument.span;
+                        call(
+                            "coalesce",
+                            vec![
+                                call("toString", vec![argument], at)?,
+                                literal(r::Value::String(String::new()), at)?,
+                            ],
+                            at,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 let mut parts = arguments.into_iter().rev();
                 let last = parts.next().ok_or_else(|| {
                     invalid(
@@ -696,11 +744,11 @@ impl Translator<'_> {
             "nullif" => {
                 arity(2)?;
                 let [value, other]: [Expr; 2] = arguments.try_into().expect("two arguments");
-                return node(
+                return Expr::new(
                     ExprKind::Case {
                         operand: None,
                         branches: vec![(
-                            binary(r::Binary::Equal, value.clone(), other, span)?,
+                            binary(r::Binary::Equal, self.copy(&value)?, other, span)?,
                             literal(r::Value::Null, span)?,
                         )],
                         otherwise: Some(Box::new(value)),
@@ -712,11 +760,11 @@ impl Translator<'_> {
                 arity(3)?;
                 let [value, present, absent]: [Expr; 3] =
                     arguments.try_into().expect("three arguments");
-                return node(
+                return Expr::new(
                     ExprKind::Case {
                         operand: None,
                         branches: vec![(
-                            node(ExprKind::Unary(r::Unary::IsNotNull, Box::new(value)), span)?,
+                            Expr::new(ExprKind::Unary(r::Unary::IsNotNull, Box::new(value)), span)?,
                             present,
                         )],
                         otherwise: Some(Box::new(absent)),
@@ -727,7 +775,7 @@ impl Translator<'_> {
             "square" => {
                 arity(1)?;
                 let value = arguments.into_iter().next().expect("one argument");
-                return binary(r::Binary::Multiply, value.clone(), value, span);
+                return binary(r::Binary::Multiply, self.copy(&value)?, value, span);
             }
             "power" | "pow" => {
                 arity(2)?;
@@ -755,7 +803,7 @@ impl Translator<'_> {
             .find(|known| known.eq_ignore_ascii_case(renamed))
             .copied()
             .unwrap_or(renamed);
-        node(
+        Expr::new(
             ExprKind::Call {
                 name: renamed.to_owned(),
                 arguments,
@@ -774,7 +822,7 @@ impl Translator<'_> {
             V::Number(text, _) => number(text, negative, span)?,
             _ if negative => {
                 let positive = self.value(value, false, span)?;
-                return node(ExprKind::Unary(r::Unary::Negate, Box::new(positive)), span);
+                return Expr::new(ExprKind::Unary(r::Unary::Negate, Box::new(positive)), span);
             }
             V::SingleQuotedString(text)
             | V::DoubleQuotedString(text)
@@ -787,7 +835,7 @@ impl Translator<'_> {
             V::Boolean(value) => r::Value::Boolean(*value),
             V::Null => r::Value::Null,
             V::Placeholder(placeholder) => {
-                return node(
+                return Expr::new(
                     ExprKind::Parameter(self.parameter(placeholder, value.span, span)?),
                     span,
                 );
@@ -1047,7 +1095,7 @@ fn number(text: &str, negative: bool, span: Span) -> Result<r::Value> {
 
 fn negate(value: Expr, negated: bool, span: Span) -> Result<Expr> {
     if negated {
-        node(ExprKind::Unary(r::Unary::Not, Box::new(value)), span)
+        Expr::new(ExprKind::Unary(r::Unary::Not, Box::new(value)), span)
     } else {
         Ok(value)
     }
@@ -1058,7 +1106,7 @@ pub(super) fn connective(kind: r::Connective, operands: Vec<Expr>, span: Span) -
     let mut operands = operands.into_iter();
     match (operands.next(), operands.next()) {
         (Some(single), None) => Ok(single),
-        (first, second) => node(
+        (first, second) => Expr::new(
             ExprKind::Connective(
                 kind,
                 AtLeast::try_from_vec(first.into_iter().chain(second).chain(operands).collect())
@@ -1185,5 +1233,5 @@ pub(super) fn rewrite(
                 .map(Box::new),
         },
     };
-    node(kind, expression.span)
+    Expr::new(kind, expression.span)
 }

@@ -15,13 +15,11 @@
 //! );
 //! # Ok::<(), helix_cypher::QueryError>(())
 //! ```
-use crate::syntax::{
-    Assignment, Clause, Expr, ExprKind, Item, Node, Pattern, Relationship, Statement,
-};
+use crate::syntax::{self, ExprKind};
 use helix_planner::relational as r;
 use std::fmt::{self, Display, Formatter, Write};
 
-impl Display for Statement {
+impl Display for syntax::Statement {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         self.clauses
             .iter()
@@ -35,10 +33,10 @@ impl Display for Statement {
     }
 }
 
-impl Display for Clause {
+impl Display for syntax::Clause {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Clause::Match {
+            syntax::Clause::Match {
                 patterns,
                 optional,
                 predicate,
@@ -53,7 +51,7 @@ impl Display for Clause {
                     .try_for_each(|predicate| write!(f, " WHERE {predicate}"))?;
                 Ok(())
             }
-            Clause::Project {
+            syntax::Clause::Project {
                 returning,
                 items,
                 distinct,
@@ -91,22 +89,22 @@ impl Display for Clause {
                     .try_for_each(|predicate| write!(f, " WHERE {predicate}"))?;
                 Ok(())
             }
-            Clause::Unwind { expression, name } => {
+            syntax::Clause::Unwind { expression, name } => {
                 write!(f, "UNWIND {expression} AS {}", Name(name))
             }
-            Clause::Create(patterns) => {
+            syntax::Clause::Create(patterns) => {
                 f.write_str("CREATE ")?;
                 list(f, patterns)
             }
-            Clause::Set(assignments) => {
+            syntax::Clause::Set(assignments) => {
                 f.write_str("SET ")?;
                 list(f, assignments)
             }
-            Clause::Remove(expressions) => {
+            syntax::Clause::Remove(expressions) => {
                 f.write_str("REMOVE ")?;
                 list(f, expressions)
             }
-            Clause::Delete {
+            syntax::Clause::Delete {
                 expressions,
                 detach,
             } => {
@@ -120,21 +118,21 @@ impl Display for Clause {
     }
 }
 
-impl Display for Assignment {
+impl Display for syntax::Assignment {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Assignment::Property(target, value) => write!(f, "{target} = {value}"),
-            Assignment::Replace(name, value) => write!(f, "{} = {value}", Name(name)),
-            Assignment::Extend(name, value) => write!(f, "{} += {value}", Name(name)),
+            syntax::Assignment::Property(target, value) => write!(f, "{target} = {value}"),
+            syntax::Assignment::Replace(name, value) => write!(f, "{} = {value}", Name(name)),
+            syntax::Assignment::Extend(name, value) => write!(f, "{} += {value}", Name(name)),
         }
     }
 }
 
-impl Display for Item {
+impl Display for syntax::Item {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Item::Wildcard => f.write_char('*'),
-            Item::Expression {
+            syntax::Item::Wildcard => f.write_char('*'),
+            syntax::Item::Expression {
                 expression, alias, ..
             } => {
                 write!(f, "{expression}")?;
@@ -146,7 +144,7 @@ impl Display for Item {
     }
 }
 
-impl Display for Pattern {
+impl Display for syntax::Pattern {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         self.name
             .iter()
@@ -163,7 +161,7 @@ impl Display for Pattern {
     }
 }
 
-impl Display for Node {
+impl Display for syntax::Node {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_char('(')?;
         self.name
@@ -182,7 +180,7 @@ impl Display for Node {
     }
 }
 
-impl Display for Relationship {
+impl Display for syntax::Relationship {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(match self.direction {
             r::Direction::Incoming => "<-",
@@ -215,7 +213,7 @@ impl Display for Relationship {
     }
 }
 
-impl Display for Expr {
+impl Display for syntax::Expr {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         use r::Unary as U;
         match self.kind() {
@@ -443,11 +441,11 @@ fn binary_symbol(operator: r::Binary) -> &'static str {
 
 /// `NOT` reads a whole comparison as its operand, so it is parenthesized
 /// wherever it is the operand of another operator.
-fn is_not(value: &Expr) -> bool {
+fn is_not(value: &syntax::Expr) -> bool {
     matches!(value.kind(), ExprKind::Unary(r::Unary::Not, _))
 }
 
-fn operand(f: &mut Formatter<'_>, value: &Expr, parenthesize: bool) -> fmt::Result {
+fn operand(f: &mut Formatter<'_>, value: &syntax::Expr, parenthesize: bool) -> fmt::Result {
     if parenthesize {
         write!(f, "({value})")
     } else {
@@ -464,7 +462,7 @@ fn list<T: Display>(f: &mut Formatter<'_>, values: &[T]) -> fmt::Result {
     })
 }
 
-fn properties(f: &mut Formatter<'_>, entries: &[(String, Expr)]) -> fmt::Result {
+fn properties(f: &mut Formatter<'_>, entries: &[(String, syntax::Expr)]) -> fmt::Result {
     f.write_char('{')?;
     entries
         .iter()

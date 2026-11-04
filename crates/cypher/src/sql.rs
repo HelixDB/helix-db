@@ -64,7 +64,8 @@
 use crate::syntax::{self, Expr, ExprKind};
 use helix_planner::relational::{self as r, category, detail, QueryError, Span};
 use sqlparser::{ast, dialect::GenericDialect, parser::Parser, tokenizer};
-use std::collections::BTreeMap;
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap};
 
 mod dml;
 mod expr;
@@ -106,20 +107,16 @@ impl Mappings {
         self.join_columns.insert(column.into(), kind.into());
         self
     }
-
-    fn label(&self, table: &str) -> String {
-        lookup(&self.tables, table).unwrap_or(table).to_owned()
-    }
-
-    fn join_type(&self, table: &str, column: &str) -> Option<&str> {
-        lookup(&self.join_columns, &format!("{table}.{column}"))
-    }
 }
 
-fn lookup<'a>(map: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
-    map.iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(key))
-        .map(|(_, value)| value.as_str())
+/// A mapping with lowercased keys, for lookups in constant time. Of keys that
+/// differ only in case, the first in order wins.
+fn lowercased(map: &BTreeMap<String, String>) -> HashMap<String, &str> {
+    let mut lowered = HashMap::with_capacity(map.len());
+    for (key, value) in map {
+        lowered.entry(key.to_lowercase()).or_insert(value.as_str());
+    }
+    lowered
 }
 
 /// Translate one SQL statement into Cypher syntax. The result binds and plans
@@ -184,9 +181,11 @@ pub fn translate(text: &str, mappings: &Mappings) -> Result<syntax::Statement, Q
         .map_err(|error| parse_error(&lines, error))?;
     let translator = Translator {
         lines,
-        mappings,
+        labels: lowercased(&mappings.tables),
+        join_types: lowercased(&mappings.join_columns),
         positional,
-        depth: std::cell::Cell::new(0),
+        depth: Cell::new(0),
+        copied: Cell::new(0),
     };
     match statements.as_slice() {
         [statement] => translator.statement(statement),
@@ -235,15 +234,19 @@ fn token_estimate(text: &str) -> usize {
     count
 }
 
-/// Binary and postfix operator tokens. A sign after an operator, an opening
-/// bracket, a comma or a keyword that starts an expression is unary: the
-/// parser bounds those by its depth limit. Only the token before a sign
-/// decides, so no chain of binary signs goes uncounted.
+/// Binary and postfix operator tokens. Every unquoted keyword counts, except
+/// literals and the clause keywords that never join two expressions, so an
+/// infix keyword such as `OVERLAPS`, including one a newer sqlparser adds,
+/// is counted by default; a keyword used as a column name only overcounts.
+/// A sign after an operator, an opening bracket, a comma or a keyword is
+/// unary: the parser bounds those by its depth limit. Only the token before
+/// a sign decides, so no chain of binary signs goes uncounted.
 #[expect(
     clippy::wildcard_enum_match_arm,
-    reason = "sqlparser's token set is open-ended; every other symbol counts as an operator"
+    reason = "sqlparser's token and keyword sets are open-ended; every other one counts as an operator"
 )]
 fn operators(tokens: &[tokenizer::TokenWithSpan]) -> usize {
+    use sqlparser::keywords::Keyword as K;
     use tokenizer::Token as T;
     let mut previous_operand = false;
     tokens
@@ -251,42 +254,53 @@ fn operators(tokens: &[tokenizer::TokenWithSpan]) -> usize {
         .filter(|token| !matches!(token.token, T::Whitespace(_)))
         .filter(|token| {
             let (operand, operator) = match &token.token {
-                T::Word(word) if word.quote_style.is_none() => {
-                    use sqlparser::keywords::Keyword as K;
-                    match word.keyword {
-                        K::AND
-                        | K::OR
-                        | K::XOR
-                        | K::IS
-                        | K::LIKE
-                        | K::ILIKE
-                        | K::IN
-                        | K::BETWEEN
-                        | K::COLLATE => (false, true),
-                        K::SELECT
-                        | K::WHERE
-                        | K::NOT
-                        | K::ON
-                        | K::BY
-                        | K::WHEN
-                        | K::THEN
-                        | K::ELSE
-                        | K::CASE
-                        | K::VALUES
-                        | K::SET
-                        | K::HAVING
-                        | K::LIMIT
-                        | K::OFFSET
-                        | K::RETURNING
-                        | K::DISTINCT
-                        | K::ALL
-                        | K::TOP
-                        | K::FETCH
-                        | K::FIRST
-                        | K::NEXT => (false, false),
-                        _ => (true, false),
-                    }
-                }
+                T::Word(word) if word.quote_style.is_none() => match word.keyword {
+                    K::NoKeyword | K::NULL | K::TRUE | K::FALSE => (true, false),
+                    K::SELECT
+                    | K::FROM
+                    | K::WHERE
+                    | K::GROUP
+                    | K::BY
+                    | K::HAVING
+                    | K::ORDER
+                    | K::ASC
+                    | K::DESC
+                    | K::NULLS
+                    | K::LAST
+                    | K::LIMIT
+                    | K::OFFSET
+                    | K::FETCH
+                    | K::FIRST
+                    | K::NEXT
+                    | K::ROW
+                    | K::ROWS
+                    | K::ONLY
+                    | K::TOP
+                    | K::DISTINCT
+                    | K::AS
+                    | K::ON
+                    | K::USING
+                    | K::JOIN
+                    | K::INNER
+                    | K::CROSS
+                    | K::NATURAL
+                    | K::INSERT
+                    | K::INTO
+                    | K::VALUES
+                    | K::UPDATE
+                    | K::SET
+                    | K::DELETE
+                    | K::TRUNCATE
+                    | K::TABLE
+                    | K::RETURNING
+                    | K::CASE
+                    | K::WHEN
+                    | K::THEN
+                    | K::ELSE
+                    | K::END
+                    | K::CAST => (false, false),
+                    _ => (false, true),
+                },
                 T::Word(_) => (true, false),
                 T::Number(..)
                 | T::Char(_)
@@ -439,15 +453,55 @@ impl<'a> Lines<'a> {
 /// mappings for names, and owns nothing that outlives one statement.
 struct Translator<'a> {
     lines: Lines<'a>,
-    mappings: &'a Mappings,
+    /// [`Mappings::tables`] by lowercased table name.
+    labels: HashMap<String, &'a str>,
+    /// [`Mappings::join_columns`] by lowercased `table.column`.
+    join_types: HashMap<String, &'a str>,
     /// Byte offsets of every `?` placeholder in written order, so that
     /// translation order cannot renumber them.
     positional: Vec<usize>,
     /// Current expression nesting, bounded before Cypher's own limit applies.
-    depth: std::cell::Cell<usize>,
+    depth: Cell<usize>,
+    /// Expression nodes copied so far; see [`Translator::copy`].
+    copied: Cell<usize>,
 }
 
+/// Bound on copied expression nodes per statement, about 10 MB.
+const MAX_COPIED_NODES: usize = 100_000;
+
 impl Translator<'_> {
+    fn label(&self, table: &str) -> String {
+        self.labels
+            .get(&table.to_lowercase())
+            .map_or_else(|| table.to_owned(), |label| (*label).to_owned())
+    }
+
+    fn join_type(&self, table: &str, column: &str) -> Option<&str> {
+        self.join_types
+            .get(&format!("{table}.{column}").to_lowercase())
+            .copied()
+    }
+
+    /// Copy a translated expression. SQL forms that repeat an operand, such
+    /// as `BETWEEN`, `NULLIF` and references to an alias or select-list
+    /// position, copy it, so nesting them could otherwise grow the tree
+    /// exponentially in the text's length; the copies share one budget.
+    fn copy(&self, expression: &Expr) -> Result<Expr, QueryError> {
+        let mut size = 0;
+        expr::visit(expression, &mut |_| size += 1);
+        let copied = self.copied.get() + size;
+        if copied > MAX_COPIED_NODES {
+            return Err(QueryError::compile(
+                category::RESOURCE_LIMIT,
+                detail::QUERY_TOO_LARGE,
+                "the SQL statement translates to too large a Cypher statement",
+            )
+            .at(expression.span));
+        }
+        self.copied.set(copied);
+        Ok(expression.clone())
+    }
+
     fn span(&self, span: tokenizer::Span) -> Option<Span> {
         Some(Span {
             start: self.lines.offset(span.start)?,
@@ -504,20 +558,16 @@ fn invalid(detail: &str, message: impl Into<String>, span: Span) -> QueryError {
     QueryError::compile(category::SYNTAX_ERROR, detail, message).at(span)
 }
 
-fn node(kind: ExprKind, span: Span) -> Result<Expr, QueryError> {
-    Expr::new(kind, span)
-}
-
 fn variable(name: &str, span: Span) -> Result<Expr, QueryError> {
-    node(ExprKind::Variable(name.to_owned()), span)
+    Expr::new(ExprKind::Variable(name.to_owned()), span)
 }
 
 fn literal(value: r::Value, span: Span) -> Result<Expr, QueryError> {
-    node(ExprKind::Literal(value), span)
+    Expr::new(ExprKind::Literal(value), span)
 }
 
 fn call(name: &str, arguments: Vec<Expr>, span: Span) -> Result<Expr, QueryError> {
-    node(
+    Expr::new(
         ExprKind::Call {
             name: name.to_owned(),
             arguments,
@@ -529,11 +579,11 @@ fn call(name: &str, arguments: Vec<Expr>, span: Span) -> Result<Expr, QueryError
 }
 
 fn property(value: Expr, key: &str, span: Span) -> Result<Expr, QueryError> {
-    node(ExprKind::Property(Box::new(value), key.to_owned()), span)
+    Expr::new(ExprKind::Property(Box::new(value), key.to_owned()), span)
 }
 
 fn binary(operator: r::Binary, left: Expr, right: Expr, span: Span) -> Result<Expr, QueryError> {
-    node(
+    Expr::new(
         ExprKind::Binary(operator, Box::new(left), Box::new(right)),
         span,
     )

@@ -133,6 +133,17 @@ async fn selects_return_sql_shaped_results() {
         rows(&service, "SELECT 1, 1, 'a' || 'b' AS ab", json!({})).await,
         json!([[1, 1, "ab"]])
     );
+    // Concatenation joins strings, as in SQL, and CONCAT skips nulls.
+    assert_eq!(
+        rows(
+            &service,
+            "SELECT p.born || p.name, CONCAT(p.born, p.missing, '!'), p.missing || 'x' \
+             FROM Person p WHERE p.name = 'Ada'",
+            json!({}),
+        )
+        .await,
+        json!([["1815Ada", "1815!", null]])
+    );
     assert_eq!(
         sql(&service, "SELECT 1, 1", json!({})).await["columns"],
         json!(["1", "1_2"])

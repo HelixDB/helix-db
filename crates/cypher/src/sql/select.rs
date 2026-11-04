@@ -3,7 +3,7 @@
 //! group differently from SQL.
 use super::expr::{rewrite, visit};
 use super::tables::{is_table_variable, reads_table, Scope};
-use super::{invalid, item, node, unsupported, variable, Translator};
+use super::{invalid, item, unsupported, variable, Translator};
 use crate::syntax::{self, Clause, Expr, ExprKind};
 use helix_planner::relational::{self as r, category, detail, QueryError, Result, Span};
 use sqlparser::ast;
@@ -28,10 +28,20 @@ const AGGREGATES: &[&str] = &[
 struct Projected {
     /// `None` for `*`.
     expression: Option<Expr>,
-    /// The printed alias: the SQL alias, or an unqualified column's name.
-    alias: Option<String>,
-    /// The result column: the alias, or the entry's SQL text, made unique.
+    /// The result column, made unique unless the SQL wrote it.
     name: String,
+    alias: Alias,
+}
+
+/// Where a select-list entry's column name comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alias {
+    /// Written as `AS name`; printed, and never renamed.
+    Explicit,
+    /// An unqualified column's name or the table of `t.*`; printed.
+    Derived,
+    /// The entry's SQL text, not printed: the item's text names the column.
+    Text,
 }
 
 /// The entries of a grouping `WITH`, findable by expression.
@@ -249,23 +259,30 @@ impl Translator<'_> {
                 .map(|entry| self.projected(entry, &scope))
                 .collect::<Result<Vec<_>>>()?,
         );
-        let explicit: Vec<(String, Expr)> = select
-            .projection
+        let explicit: Vec<(String, Expr)> = projected
             .iter()
-            .zip(&projected)
-            .filter(|(entry, _)| matches!(entry, ast::SelectItem::ExprWithAlias { .. }))
-            .filter_map(|(_, projected)| {
-                Some((projected.name.clone(), projected.expression.clone()?))
-            })
+            .filter(|p| p.alias == Alias::Explicit)
+            .filter_map(|p| Some((p.name.clone(), p.expression.clone()?)))
             .collect();
         // GROUP BY reads an alias as its expression; HAVING and ORDER BY read
         // it as the projected column.
-        scope.aliases = explicit.iter().cloned().collect();
+        // Unquoted SQL names are case-insensitive; of aliases that differ only
+        // in case, the first wins.
+        let lowered = |entries: Vec<(String, Expr)>| {
+            let mut aliases = HashMap::with_capacity(entries.len());
+            for (name, expression) in entries {
+                aliases.entry(name.to_lowercase()).or_insert(expression);
+            }
+            aliases
+        };
+        scope.aliases = lowered(explicit.clone());
         let keys = self.group_keys(&select.group_by, &projected, &scope, span)?;
-        scope.aliases = explicit
-            .iter()
-            .map(|(name, _)| Ok((name.clone(), variable(name, span)?)))
-            .collect::<Result<_>>()?;
+        scope.aliases = lowered(
+            explicit
+                .iter()
+                .map(|(name, _)| Ok((name.clone(), variable(name, span)?)))
+                .collect::<Result<_>>()?,
+        );
         let having = select
             .having
             .as_ref()
@@ -323,7 +340,7 @@ impl Translator<'_> {
         let grouped = |expression: &Expr| -> Result<bool> {
             let rest = rewrite(expression, &mut |e| {
                 (aggregate_call(e) || keys_printed.contains(&e.to_string()))
-                    .then(|| node(ExprKind::Literal(r::Value::Null), e.span))
+                    .then(|| Expr::new(ExprKind::Literal(r::Value::Null), e.span))
                     .transpose()
             })?;
             Ok(!reads_table(&scope, &rest))
@@ -465,36 +482,37 @@ impl Translator<'_> {
     }
 
     /// One select-list entry.
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "only an unqualified column keeps its name; every other expression is named by its text"
+    )]
     fn projected(&self, entry: &ast::SelectItem, scope: &Scope) -> Result<Projected> {
         let span = self.at(entry);
         match entry {
             ast::SelectItem::UnnamedExpr(value) => {
                 let expression = self.expr(value, scope)?;
                 // An unqualified column keeps its SQL name, as neo4j-jdbc does.
-                let alias = if let ast::Expr::Identifier(column) = value
-                    && matches!(expression.kind(), ExprKind::Property(..))
-                {
-                    Some(column.value.clone())
-                } else {
-                    None
-                };
-                let name = alias.clone().unwrap_or_else(|| {
-                    if is_table_variable(scope, &expression) {
-                        expression.to_string()
-                    } else {
-                        value.to_string()
+                let (name, alias) = match value {
+                    ast::Expr::Identifier(column)
+                        if matches!(expression.kind(), ExprKind::Property(..)) =>
+                    {
+                        (column.value.clone(), Alias::Derived)
                     }
-                });
+                    _ if is_table_variable(scope, &expression) => {
+                        (expression.to_string(), Alias::Text)
+                    }
+                    _ => (value.to_string(), Alias::Text),
+                };
                 Ok(Projected {
                     expression: Some(expression),
-                    alias,
                     name,
+                    alias,
                 })
             }
             ast::SelectItem::ExprWithAlias { expr, alias } => Ok(Projected {
                 expression: Some(self.expr(expr, scope)?),
-                alias: Some(alias.value.clone()),
                 name: alias.value.clone(),
+                alias: Alias::Explicit,
             }),
             ast::SelectItem::QualifiedWildcard(
                 ast::SelectItemQualifiedWildcardKind::ObjectName(name),
@@ -505,8 +523,8 @@ impl Translator<'_> {
                     super::call("properties", vec![variable(&table.variable, span)?], span)?;
                 Ok(Projected {
                     expression: Some(expression),
-                    alias: Some(table.variable.clone()),
                     name: table.variable.clone(),
+                    alias: Alias::Derived,
                 })
             }
             ast::SelectItem::Wildcard(options) if plain(options) => {
@@ -519,8 +537,8 @@ impl Translator<'_> {
                 }
                 Ok(Projected {
                     expression: None,
-                    alias: None,
                     name: "*".to_owned(),
+                    alias: Alias::Text,
                 })
             }
             ast::SelectItem::QualifiedWildcard(..)
@@ -550,13 +568,18 @@ impl Translator<'_> {
         }
         keys.iter()
             .map(|key| match self.position(key, projected)? {
-                Some(index) => projected[index].expression.clone().ok_or_else(|| {
-                    invalid(
-                        detail::INVALID_AGGREGATION,
-                        "cannot group by `*`",
-                        self.at(key),
-                    )
-                }),
+                Some(index) => projected[index]
+                    .expression
+                    .as_ref()
+                    .map(|expression| self.copy(expression))
+                    .transpose()?
+                    .ok_or_else(|| {
+                        invalid(
+                            detail::INVALID_AGGREGATION,
+                            "cannot group by `*`",
+                            self.at(key),
+                        )
+                    }),
                 None => self.expr(key, scope),
             })
             .collect()
@@ -602,10 +625,10 @@ impl Translator<'_> {
                 let expression = match self.position(&order.expr, projected)? {
                     Some(index) => {
                         let p = &projected[index];
-                        match (&p.alias, &p.expression) {
-                            (Some(alias), _) => variable(alias, span)?,
-                            (None, Some(expression)) => expression.clone(),
-                            (None, None) => {
+                        match (p.alias, &p.expression) {
+                            (Alias::Explicit | Alias::Derived, _) => variable(&p.name, span)?,
+                            (Alias::Text, Some(expression)) => self.copy(expression)?,
+                            (Alias::Text, None) => {
                                 return Err(invalid(
                                     detail::INVALID_STATEMENT,
                                     "cannot order by `*`",
@@ -652,21 +675,28 @@ impl Projected {
             None => syntax::Item::Wildcard,
             Some(expression) => syntax::Item::Expression {
                 expression,
+                alias: match self.alias {
+                    Alias::Explicit | Alias::Derived => Some(self.name.clone()),
+                    Alias::Text => None,
+                },
                 text: self.name,
-                alias: self.alias,
             },
         }
     }
 }
 
-/// Number repeated names of unaliased entries, as `name`, `name_2`, …, so
-/// that `SELECT 1, 1` has two columns. Aliases stay as written.
+/// Number repeated names of entries without an explicit alias, as `name`,
+/// `name_2`, …, so that `SELECT 1, 1` and `SELECT name, name` have two
+/// columns. Explicit aliases stay as written.
 fn unique(mut projected: Vec<Projected>) -> Vec<Projected> {
     let mut seen: HashSet<String> = HashSet::new();
     // The next suffix to try per repeated name, so numbering stays linear.
     let mut next: HashMap<String, usize> = HashMap::new();
     for entry in &mut projected {
-        if entry.alias.is_none() && entry.expression.is_some() && seen.contains(&entry.name) {
+        if entry.alias != Alias::Explicit
+            && entry.expression.is_some()
+            && seen.contains(&entry.name)
+        {
             let suffix = next.entry(entry.name.clone()).or_insert(2);
             let name = std::iter::repeat_with(|| {
                 let candidate = format!("{}_{suffix}", entry.name);

@@ -23,7 +23,8 @@ pub(super) struct Scope {
     by_name: HashMap<String, Vec<usize>>,
     /// Lowercased node labels.
     by_label: HashMap<String, Vec<usize>>,
-    /// Explicit select-list aliases, visible to `HAVING` and `ORDER BY`.
+    /// Explicit select-list aliases by lowercased name, visible to
+    /// `GROUP BY`, `HAVING` and `ORDER BY`.
     pub(super) aliases: HashMap<String, Expr>,
 }
 
@@ -180,10 +181,6 @@ impl Scope {
         match parts {
             [column] => {
                 let name = column.value.as_str();
-                let alias = self
-                    .aliases
-                    .get(name)
-                    .map(|expression| Ok(expression.clone()));
                 let entity = || {
                     self.by_alias
                         .get(&name.to_lowercase())
@@ -196,54 +193,54 @@ impl Scope {
                 // `v$<table>_id` is the id of the table with that variable or label.
                 let virtual_id = || {
                     let target = name.strip_prefix("v$")?.strip_suffix("_id")?.to_lowercase();
-                    Some(
-                        self.by_alias
-                            .get(&target)
-                            .or_else(|| self.by_label.get(&target))
-                            .and_then(|indices| indices.first())
-                            .map(|&index| &self.tables[index])
-                            .ok_or_else(|| {
-                                invalid(
-                                    detail::UNDEFINED_VARIABLE,
-                                    format!("`{name}` names no table of this statement"),
-                                    span,
-                                )
-                            })
-                            .and_then(id),
-                    )
-                };
-                alias
-                    .or_else(entity)
-                    .or_else(virtual_id)
-                    .unwrap_or_else(|| {
-                        let table = self.single(name, span)?;
-                        if name.eq_ignore_ascii_case("v$id") {
-                            return id(table);
-                        }
-                        // On a relationship table, `<label>_<column>` reads an
-                        // endpoint, as in neo4j-jdbc: `person_name` is `_start.name`.
-                        let endpoint = matches!(table.kind, Kind::Relationship { .. })
-                            .then(|| {
-                                self.tables
-                                    .iter()
-                                    .filter(|t| t.role == Role::Endpoint)
-                                    .find_map(|t| {
-                                        let Kind::Node { label } = &t.kind else {
-                                            return None;
-                                        };
-                                        let (prefix, column) = name.split_once('_')?;
-                                        (prefix.eq_ignore_ascii_case(label) && !column.is_empty())
-                                            .then_some((t, column))
-                                    })
-                            })
-                            .flatten();
-                        match endpoint {
-                            Some((endpoint, column)) => {
-                                property(variable(&endpoint.variable, span)?, column, span)
-                            }
-                            None => property(variable(&table.variable, span)?, name, span),
-                        }
+                    let indices = self
+                        .by_alias
+                        .get(&target)
+                        .or_else(|| self.by_label.get(&target))
+                        .map_or(&[][..], Vec::as_slice);
+                    Some(match indices {
+                        [index] => id(&self.tables[*index]),
+                        [] => Err(invalid(
+                            detail::UNDEFINED_VARIABLE,
+                            format!("`{name}` names no table of this statement"),
+                            span,
+                        )),
+                        [..] => Err(invalid(
+                            detail::AMBIGUOUS_COLUMN,
+                            format!("`{name}` names several tables; use `<alias>.v$id`"),
+                            span,
+                        )),
                     })
+                };
+                entity().or_else(virtual_id).unwrap_or_else(|| {
+                    let table = self.single(name, span)?;
+                    if name.eq_ignore_ascii_case("v$id") {
+                        return id(table);
+                    }
+                    // On a relationship table, `<label>_<column>` reads an
+                    // endpoint, as in neo4j-jdbc: `person_name` is `_start.name`.
+                    let endpoint = matches!(table.kind, Kind::Relationship { .. })
+                        .then(|| {
+                            self.tables
+                                .iter()
+                                .filter(|t| t.role == Role::Endpoint)
+                                .find_map(|t| {
+                                    let Kind::Node { label } = &t.kind else {
+                                        return None;
+                                    };
+                                    let (prefix, column) = name.split_once('_')?;
+                                    (prefix.eq_ignore_ascii_case(label) && !column.is_empty())
+                                        .then_some((t, column))
+                                })
+                        })
+                        .flatten();
+                    match endpoint {
+                        Some((endpoint, column)) => {
+                            property(variable(&endpoint.variable, span)?, column, span)
+                        }
+                        None => property(variable(&table.variable, span)?, name, span),
+                    }
+                })
             }
             [.., qualifier, column] if parts.len() <= 4 => {
                 let table = self.qualified(&qualifier.value, span)?;
@@ -345,7 +342,7 @@ impl Translator<'_> {
             .and_then(ast::ObjectNamePart::as_ident)
             .map(|ident| ident.value.clone())
             .ok_or_else(|| unsupported("this table name", span))?;
-        let label = self.mappings.label(&name);
+        let label = self.label(&name);
         let class = match relationship_table(&label) {
             Some((start, kind, end)) => Class::Relationship {
                 start: start.to_owned(),
@@ -373,26 +370,38 @@ impl Translator<'_> {
         &self,
         from: &[ast::TableWithJoins],
     ) -> Result<(Vec<syntax::Pattern>, Scope)> {
-        let mut scope = Scope::default();
-        let mut patterns = Vec::new();
+        // Read every table first, so that relationship variables a join
+        // generates avoid all of the statement's table variables.
+        let mut chains = Vec::new();
         for item in from {
             let mut chain = vec![(self.reference(&item.relation)?, None)];
             for join in &item.joins {
-                let span = self.at(&join.relation);
                 let reference = self.reference(&join.relation)?;
                 match &join.join_operator {
                     ast::JoinOperator::CrossJoin(ast::JoinConstraint::None) => {
-                        patterns.push(self.chain(std::mem::take(&mut chain), &mut scope)?);
+                        chains.push(std::mem::take(&mut chain));
                         chain.push((reference, None));
                     }
                     ast::JoinOperator::Join(constraint) | ast::JoinOperator::Inner(constraint) => {
                         chain.push((reference, Some(constraint)));
                     }
-                    other => return Err(unsupported(join_kind(other), span)),
+                    other => {
+                        return Err(unsupported(join_kind(other), self.at(&join.relation)));
+                    }
                 }
             }
-            patterns.push(self.chain(chain, &mut scope)?);
+            chains.push(chain);
         }
+        let mut taken: HashSet<String> = chains
+            .iter()
+            .flatten()
+            .map(|(reference, _)| reference.variable.clone())
+            .collect();
+        let mut scope = Scope::default();
+        let patterns = chains
+            .into_iter()
+            .map(|chain| self.chain(chain, &mut scope, &mut taken))
+            .collect::<Result<_>>()?;
         Ok((patterns, scope))
     }
 
@@ -464,6 +473,7 @@ impl Translator<'_> {
         &self,
         chain: Vec<(Reference, Option<&ast::JoinConstraint>)>,
         scope: &mut Scope,
+        taken: &mut HashSet<String>,
     ) -> Result<syntax::Pattern> {
         let mut tables = chain.into_iter();
         let Some((first, _)) = tables.next() else {
@@ -494,12 +504,35 @@ impl Translator<'_> {
             // As in neo4j-jdbc, a mapping is keyed by the left table and the
             // column that names the type, whichever table owns it.
             let kind = join.column.as_ref().map(|column| {
-                self.mappings
-                    .join_type(&left, column)
+                self.join_type(&left, column)
                     .map_or_else(|| column.to_uppercase(), str::to_owned)
             });
+            // The relationship is named after its type, renamed if a table
+            // or another relationship already has that variable.
+            let name = match &kind {
+                None => None,
+                Some(kind) => {
+                    let base = kind.to_lowercase();
+                    let name = std::iter::once(base.clone())
+                        .chain((2..).map(|n| format!("{base}_{n}")))
+                        .find(|candidate| !taken.contains(candidate))
+                        .expect("a free name exists");
+                    taken.insert(name.clone());
+                    scope.add(
+                        Table {
+                            name: kind.clone(),
+                            alias: None,
+                            variable: name.clone(),
+                            kind: Kind::Relationship { kind: kind.clone() },
+                            role: Role::Written,
+                        },
+                        right.span,
+                    )?;
+                    Some(name)
+                }
+            };
             pattern.relationships.push(syntax::Relationship {
-                name: kind.as_ref().map(|kind| kind.to_lowercase()),
+                name,
                 types: kind.into_iter().collect(),
                 direction: join.direction,
                 properties: Vec::new(),

@@ -5,7 +5,7 @@
 //! uses `MERGE`, which HelixDB's Cypher profile does not support, so a missing
 //! endpoint creates nothing instead of a new node.
 use super::tables::{Class, Reference, Scope};
-use super::{invalid, node, property, unsupported, variable, Translator};
+use super::{invalid, property, unsupported, variable, Translator};
 use crate::syntax::{self, Assignment, Clause, Expr, ExprKind};
 use helix_planner::relational::{self as r, category, detail, QueryError, Result, Span};
 use sqlparser::ast;
@@ -213,11 +213,11 @@ impl Translator<'_> {
         };
         let list = std::iter::once(first)
             .chain(rest)
-            .map(|values| super::node(ExprKind::Map(entries(values)), span))
+            .map(|values| Expr::new(ExprKind::Map(entries(values)), span))
             .collect::<Result<Vec<_>>>()?;
         Ok(vec![
             Clause::Unwind {
-                expression: super::node(ExprKind::List(list), span)?,
+                expression: Expr::new(ExprKind::List(list), span)?,
                 name: row.to_owned(),
             },
             Clause::Create(vec![syntax::Pattern {
@@ -340,7 +340,10 @@ impl Translator<'_> {
                             Role::Property(..) | Role::StartId | Role::EndId => None,
                         })
                         .collect();
-                    Ok((side.group().to_owned(), node(ExprKind::Map(entries), span)?))
+                    Ok((
+                        side.group().to_owned(),
+                        Expr::new(ExprKind::Map(entries), span)?,
+                    ))
                 });
                 let ids = roles
                     .iter()
@@ -350,13 +353,13 @@ impl Translator<'_> {
                         Role::EndId => Some(Ok(("end_id".to_owned(), value.clone()))),
                         Role::Property(..) => None,
                     });
-                node(
+                Expr::new(
                     ExprKind::Map(groups.into_iter().chain(ids).collect::<Result<_>>()?),
                     span,
                 )
             };
             clauses.push(Clause::Unwind {
-                expression: node(
+                expression: Expr::new(
                     ExprKind::List(
                         rows.iter()
                             .map(|values| map(values))

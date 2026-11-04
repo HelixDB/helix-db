@@ -245,9 +245,9 @@ fn errors_point_into_the_sql() {
 #[test]
 fn relationship_tables_resolve_endpoints() {
     assert_eq!(
-        cypher("SELECT _start.name, _end.name, v$id, v$person_id FROM Person_KNOWS_Person"),
-        "MATCH (_start:Person)-[person_knows_person:KNOWS]->(_end:Person) \
-         RETURN _start.name, _end.name, id(person_knows_person), id(_start)"
+        cypher("SELECT _start.name, _end.name, v$id, v$movie_id FROM Person_ACTED_IN_Movie"),
+        "MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) \
+         RETURN _start.name, _end.name, id(person_acted_in_movie), id(_end)"
     );
     assert_error(
         "SELECT Person.name FROM Person_KNOWS_Person",
@@ -339,7 +339,7 @@ fn expressions_translate_with_sql_semantics() {
         ),
         (
             "SELECT 1::varchar, TRY_CAST('1' AS INT), 1 % 2, 'a' || 1",
-            "RETURN toString(1), toInteger('1'), 1 % 2, 'a' + 1",
+            "RETURN toString(1), toInteger('1'), 1 % 2, 'a' + toString(1)",
         ),
         (
             "SELECT array_agg(t.a), stddev(t.a) FROM t",
@@ -797,4 +797,120 @@ fn wide_statements_translate_in_linear_time() {
         "took {:?}",
         started.elapsed()
     );
+}
+
+/// Keyword infix operators chain left-deep like symbols, so they count
+/// toward the operator budget, and the largest accepted chains fit a
+/// worker's stack.
+#[test]
+fn keyword_operators_are_bounded() {
+    for chain in [
+        "OVERLAPS 1 ",
+        "SIMILAR TO 'a' ",
+        "AT TIME ZONE 'UTC' ",
+        "MEMBER OF (1) ",
+    ] {
+        let over = format!("SELECT 1 {}", chain.repeat(MAX_OPERATORS + 1));
+        assert_error(&over, category::RESOURCE_LIMIT, detail::EXPRESSION_DEPTH);
+    }
+    let inputs: Vec<String> = ["OVERLAPS 1 ", "SIMILAR TO 'a' ", "REGEXP 'a' ", "DIV 1 "]
+        .iter()
+        .map(|chain| format!("SELECT 1 {}", chain.repeat(MAX_OPERATORS / 2)))
+        .collect();
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            for input in inputs {
+                let _ = translate(&input, &Mappings::default());
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// SQL forms that repeat an operand share a copy budget, so nesting them
+/// cannot grow the translated tree exponentially.
+#[test]
+fn repeated_operands_cannot_grow_exponentially() {
+    let nest = |open: &str, close: &str, levels: usize| {
+        format!("SELECT {}1{}", open.repeat(levels), close.repeat(levels))
+    };
+    for sql in [
+        nest("square(", ")", 40),
+        nest("nullif(", ", 2)", 30),
+        nest("(", " BETWEEN 0 AND 1)", 30),
+        nest("(", " IS DISTINCT FROM 1)", 30),
+    ] {
+        let error = translate(&sql, &Mappings::default()).unwrap_err();
+        assert_eq!(error.category, category::RESOURCE_LIMIT, "{sql}");
+    }
+    let alias = "SELECT t.a + t.b AS x, count(*) FROM t GROUP BY ";
+    let many = format!("{alias}{}", vec!["x"; 100_000].join(", "));
+    assert_error(&many, category::RESOURCE_LIMIT, detail::QUERY_TOO_LARGE);
+    assert_eq!(
+        cypher("SELECT square(t.a), nullif(t.a, 1), t.a BETWEEN 1 AND 2 FROM t"),
+        "MATCH (t:t) RETURN t.a * t.a, CASE WHEN t.a = 1 THEN NULL ELSE t.a END, 1 <= t.a AND t.a <= 2"
+    );
+}
+
+#[test]
+fn concatenation_joins_strings() {
+    assert_eq!(
+        cypher("SELECT CONCAT(t.a, 'x', t.b), t.a || t.b || 'c', 'x' || 1 FROM t"),
+        "MATCH (t:t) RETURN coalesce(toString(t.a), '') + ('x' + coalesce(toString(t.b), '')), \
+         toString(t.a) + toString(t.b) + 'c', 'x' + toString(1)"
+    );
+}
+
+#[test]
+fn join_relationship_variables_stay_unique() {
+    assert_eq!(
+        cypher("SELECT * FROM Person p JOIN Company company ON company.id = p.company"),
+        "MATCH (p:Person)-[company_2:COMPANY]->(company:Company) RETURN *"
+    );
+    assert_eq!(
+        cypher("SELECT 1 FROM A a JOIN B b ON b.id = a.r, C c JOIN D d ON d.id = c.r"),
+        "MATCH (a:A)-[r:R]->(b:B), (c:C)-[r_2:R]->(d:D) RETURN 1"
+    );
+    assert_eq!(
+        cypher("SELECT directed.since FROM Person p JOIN Movie m ON m.id = p.directed"),
+        "MATCH (p:Person)-[directed:DIRECTED]->(m:Movie) RETURN directed.since"
+    );
+}
+
+#[test]
+fn names_resolve_like_sql() {
+    assert_eq!(
+        cypher("SELECT p.name AS N FROM Person p ORDER BY n"),
+        "MATCH (p:Person) RETURN p.name AS N ORDER BY N"
+    );
+    assert_eq!(
+        cypher("SELECT count(*) AS Cnt FROM t GROUP BY t.a HAVING cnt > 1"),
+        "MATCH (t:t) WITH count(*) AS Cnt, t.a AS __group_col_0 WHERE Cnt > 1 RETURN Cnt"
+    );
+    assert_eq!(
+        cypher("SELECT name, name FROM Person"),
+        "MATCH (person:Person) RETURN person.name AS name, person.name AS name_2"
+    );
+    for sql in [
+        "SELECT v$person_id FROM Person a, Person b",
+        "SELECT v$person_id FROM Person_KNOWS_Person",
+    ] {
+        assert_error(sql, category::SYNTAX_ERROR, detail::AMBIGUOUS_COLUMN);
+    }
+    // Mappings index once per statement, however many entries they hold.
+    let mut mappings = Mappings::default();
+    for i in 0..100_000 {
+        mappings
+            .tables
+            .insert(format!("table{i}"), format!("Label{i}"));
+    }
+    let started = std::time::Instant::now();
+    let tables: Vec<String> = (0..2_000).map(|i| format!("TABLE{i} t{i}")).collect();
+    let statement = translate(&format!("SELECT 1 FROM {}", tables.join(", ")), &mappings).unwrap();
+    assert!(statement
+        .to_string()
+        .starts_with("MATCH (t0:Label0), (t1:Label1)"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }

@@ -56,9 +56,10 @@ returns the columns `1` and `1_2`.
 | `SELECT *` | every table variable |
 | `SELECT v$id` | `id(p)` |
 
-Labels and properties are case-sensitive and keep the case you write. Schema
-prefixes such as `public.Person` are ignored. With more than one table, every
-column needs a table qualifier.
+Labels and properties are case-sensitive and keep the case you write; table
+names, aliases and mapping keys are not. Schema prefixes such as
+`public.Person` are ignored. With more than one table, every column needs a
+table qualifier.
 
 A table named `Start_TYPE_End`, such as `Person_ACTED_IN_Movie`, is a
 **relationship table**. On its own it matches
@@ -83,7 +84,9 @@ Joins become relationship patterns by these rules:
 | `Person p, Movie m` or `CROSS JOIN` | `(p:Person), (m:Movie)` |
 
 - In a direct join, the second column of the `=` names the relationship type,
-  uppercased, and the relationship points away from the table it belongs to.
+  uppercased, and the relationship points away from the table it belongs to. Its
+  variable is the lowercased type, numbered when a table already uses it, and
+  columns can read it, as in `directed.since`.
 - In a chain of three tables, the middle one is the relationship; longer chains
   continue in pairs, and the last `ON` of each pair sets the direction.
 - Every `ON` must compare two columns with `=`. Put other conditions in `WHERE`.
@@ -146,8 +149,10 @@ either node is missing. To connect nodes by id, use `_start.v$id` and
 ## Expressions and functions
 
 Comparisons, `AND`, `OR`, `NOT`, `IS [NOT] NULL`, `IS [NOT] TRUE`,
-`IS [NOT] DISTINCT FROM`, `IN` lists, `BETWEEN`, arithmetic, `||`, `CASE`,
-`CAST`, and row values such as `(a, b) < (1, 2)` translate with SQL semantics.
+`IS [NOT] DISTINCT FROM`, `IN` lists, `BETWEEN`, arithmetic, `CASE`, `CAST`, and
+row values such as `(a, b) < (1, 2)` translate with SQL semantics. `||` and
+`CONCAT` join their operands as strings; `||` returns null when an operand is
+null, and `CONCAT` skips nulls, as in PostgreSQL.
 `LIKE` and `ILIKE` translate when the pattern is a literal whose only wildcards
 are a leading or trailing `%`: `'%x%'` becomes `CONTAINS`, `'x%'` `STARTS WITH`,
 and `'%x'` `ENDS WITH`.
