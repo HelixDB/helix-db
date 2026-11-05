@@ -338,7 +338,25 @@ impl Display for syntax::Expr {
             }
             ExprKind::List(values) => {
                 f.write_char('[')?;
-                list(f, values)?;
+                // `[name IN` opens a list comprehension, so a first value
+                // that prints that way is parenthesized.
+                let [first, rest @ ..] = values.as_slice() else {
+                    return f.write_char(']');
+                };
+                let text = first.to_string();
+                let mut words = text.split_whitespace();
+                let comprehension = words.next().is_some_and(|word| {
+                    word.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                        && word.chars().all(|c| c.is_alphanumeric() || c == '_')
+                }) && words
+                    .next()
+                    .is_some_and(|word| word.eq_ignore_ascii_case("IN"));
+                if comprehension {
+                    write!(f, "({text})")?;
+                } else {
+                    f.write_str(&text)?;
+                }
+                rest.iter().try_for_each(|value| write!(f, ", {value}"))?;
                 f.write_char(']')
             }
             ExprKind::Map(entries) => properties(f, entries),
