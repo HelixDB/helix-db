@@ -239,6 +239,12 @@ impl LoadedV2ScopeCatalog {
         Ok(())
     }
 
+    /// Returns whether two loads project exactly the same Active handles.
+    #[cfg(test)]
+    pub(crate) fn same_active_handles(&self, other: &Self) -> bool {
+        self.scope == other.scope && self.active == other.active
+    }
+
     /// Returns the one scope covered by this complete catalog load.
     pub(crate) const fn scope(&self) -> DataScope {
         self.scope

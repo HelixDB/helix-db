@@ -90,7 +90,7 @@ pub mod bench_internals {
 #[path = "../tests/scale_support/mod.rs"]
 pub mod production_scale;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock, Weak};
@@ -724,13 +724,45 @@ impl CatalogGeneration {
     }
 }
 
+/// What a cached scope catalog was loaded against, which decides whether a
+/// later request may reuse it instead of rescanning canonical records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogObservation {
+    /// Loaded by the writer under a shared catalog permit at this version.
+    /// Reused while a later shared permit observes the same version.
+    WriterVersion(index_lifecycle::CatalogVersion),
+    /// Loaded from a reader snapshot at this sequence. Reused by any request
+    /// whose snapshot has the same sequence, so the same canonical rows.
+    ReaderSequence(u64),
+    /// Loaded outside planning authority: at open, or by an explicit refresh
+    /// that may run under an exclusive permit before its change is
+    /// versioned. Never reused.
+    Unverified,
+}
+
 struct LoadedRuntimeCatalog {
     catalog: Arc<index_lifecycle::LoadedV2ScopeCatalog>,
     generation: CatalogGeneration,
+    observation: CatalogObservation,
+}
+
+/// Where a planning-catalog miss loads canonical records from.
+#[derive(Clone, Copy)]
+enum PlanningCatalogSource<'a> {
+    /// The writer loads from a fresh snapshot taken under the caller's
+    /// shared catalog permit.
+    Writer(&'a slatedb::Db),
+    /// A reader loads from the exact snapshot its request executes on.
+    Reader(&'a execution::interpreter::read_view::StableRequestReadView),
 }
 
 struct HelixRuntimeState {
     catalogs: HashMap<DataScope, LoadedRuntimeCatalog>,
+    /// Writer scopes whose obsolete reader-coordination blockers this process
+    /// has requeued. The current codec cannot write that blocker; only an
+    /// older binary could, and writer fencing excludes it once this process
+    /// owns the store. So one successful pass per scope is enough.
+    legacy_blockers_repaired: HashSet<DataScope>,
 }
 
 impl HelixRuntimeState {
@@ -746,17 +778,24 @@ impl HelixRuntimeState {
             LoadedRuntimeCatalog {
                 catalog: Arc::new(catalog),
                 generation: CatalogGeneration::INITIAL,
+                observation: CatalogObservation::Unverified,
             },
         );
-        Self { catalogs }
+        Self {
+            catalogs,
+            legacy_blockers_repaired: HashSet::new(),
+        }
     }
 
     /// Replaces one scope with a fresh configured-plus-canonical projection.
+    ///
+    /// Returns the published catalog so a planner can use exactly what it loaded.
     fn replace_catalog(
         &mut self,
         scope: DataScope,
         catalog: index_lifecycle::LoadedV2ScopeCatalog,
-    ) {
+        observation: CatalogObservation,
+    ) -> Arc<index_lifecycle::LoadedV2ScopeCatalog> {
         assert_eq!(
             scope,
             catalog.scope(),
@@ -768,13 +807,33 @@ impl HelixRuntimeState {
             .map_or(CatalogGeneration::INITIAL, |loaded| {
                 loaded.generation.next()
             });
+        let catalog = Arc::new(catalog);
         self.catalogs.insert(
             scope,
             LoadedRuntimeCatalog {
-                catalog: Arc::new(catalog),
+                catalog: Arc::clone(&catalog),
                 generation,
+                observation,
             },
         );
+        catalog
+    }
+
+    /// Returns the cached catalog when it was loaded against `observation`.
+    ///
+    /// An unverified observation never matches, even itself.
+    fn reusable_catalog(
+        &self,
+        scope: DataScope,
+        observation: CatalogObservation,
+    ) -> Option<Arc<index_lifecycle::LoadedV2ScopeCatalog>> {
+        if observation == CatalogObservation::Unverified {
+            return None;
+        }
+        self.catalogs
+            .get(&scope)
+            .filter(|loaded| loaded.observation == observation)
+            .map(|loaded| Arc::clone(&loaded.catalog))
     }
 
     fn catalog(&self, scope: DataScope) -> RuntimeIndexCatalog {
@@ -787,23 +846,6 @@ impl HelixRuntimeState {
 
     fn planner_snapshot(&self, scope: DataScope) -> IndexCatalogSnapshot {
         self.catalog(scope).planner_snapshot()
-    }
-
-    fn planner_snapshot_with_catalog(
-        &self,
-        scope: DataScope,
-    ) -> (
-        IndexCatalogSnapshot,
-        Arc<index_lifecycle::LoadedV2ScopeCatalog>,
-    ) {
-        let loaded = self
-            .catalogs
-            .get(&scope)
-            .expect("scoped catalog must be loaded before planner access");
-        (
-            loaded.catalog.runtime().planner_snapshot(),
-            Arc::clone(&loaded.catalog),
-        )
     }
 
     #[cfg(test)]
@@ -916,6 +958,9 @@ struct HelixDBInner {
     /// tells tests that a request really read a set.
     #[cfg(test)]
     resolved_index_memberships: std::sync::atomic::AtomicUsize,
+    /// Obsolete reader-blocker repair passes this handle has run.
+    #[cfg(test)]
+    legacy_blocker_repair_passes: std::sync::atomic::AtomicUsize,
     /// Secondary-set children that any concurrent set read has created and
     /// not yet finished. A child counts from the moment the bounded stream
     /// creates its read, before the read is first polled.
@@ -931,21 +976,32 @@ struct HelixDBInner {
 ///
 /// The weak runtime identity prevents a proof from keeping a database alive or
 /// being reused against a different handle. The scope prevents tenant mismatch.
-/// The permit keeps the exact read snapshot and catalog authoritative until a
+/// The permit keeps the catalog authoritative until a read finishes or a
 /// write opens its serializable snapshot and loads the mutation catalog.
 pub(crate) struct CatalogRefreshProof {
     runtime: Weak<HelixDBInner>,
     scope: DataScope,
     catalog_permit: index_lifecycle::IndexScopeCatalogPermit,
     catalog: Arc<index_lifecycle::LoadedV2ScopeCatalog>,
-    read_view: Box<execution::interpreter::read_view::StableRequestReadView>,
+    read_view: PreparedReadView,
+}
+
+/// The storage view a prepared request reads through.
+pub(crate) enum PreparedReadView {
+    /// Reader nodes have no catalog gate across processes, so the catalog was
+    /// loaded from this exact snapshot and execution must read it.
+    Opened(Box<execution::interpreter::read_view::StableRequestReadView>),
+    /// The writer opens its view only when a read starts; writes never need
+    /// one. The proof's shared catalog permit excludes every Active-set
+    /// change, so any snapshot taken while it is held matches the catalog.
+    OpenOnRead,
 }
 
 impl CatalogRefreshProof {
     fn into_read_parts(
         self,
     ) -> (
-        Box<execution::interpreter::read_view::StableRequestReadView>,
+        PreparedReadView,
         Arc<index_lifecycle::LoadedV2ScopeCatalog>,
         index_lifecycle::IndexScopeCatalogPermit,
     ) {
@@ -953,8 +1009,17 @@ impl CatalogRefreshProof {
     }
 
     fn into_write_permit(self) -> index_lifecycle::IndexScopeCatalogPermit {
-        (*self.read_view).close();
+        match self.read_view {
+            PreparedReadView::Opened(view) => view.close(),
+            PreparedReadView::OpenOnRead => {}
+        }
         self.catalog_permit
+    }
+
+    /// Returns how the request will read storage.
+    #[cfg(test)]
+    pub(crate) const fn read_view(&self) -> &PreparedReadView {
+        &self.read_view
     }
 }
 
@@ -1914,6 +1979,8 @@ impl HelixDB {
                 #[cfg(test)]
                 resolved_index_memberships: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(test)]
+                legacy_blocker_repair_passes: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
                 index_child_reads_in_flight: std::sync::atomic::AtomicUsize::new(0),
                 #[cfg(test)]
                 peak_index_child_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -2319,41 +2386,44 @@ impl HelixDB {
     }
 
     /// Build a planner context coupled to proof of its runtime catalog view.
+    ///
+    /// The writer reuses its cached catalog while the scope's catalog version
+    /// is unchanged and opens no storage view here; reads open one when they
+    /// start. Readers reuse a catalog loaded at their snapshot's sequence.
     pub(crate) async fn planner_context_scoped_prepared(
         &self,
         params: ParamBindings,
         tenant_scope: DataScope,
     ) -> Result<PreparedPlannerContext> {
         let catalog_permit = self.index_catalog_scope_permit(tenant_scope).await;
-        let _refresh_permit = self
-            .inner
-            .index_scope_gates
-            .catalog_refresh_permit(tenant_scope)
-            .await;
-        if let HelixStorage::Writer(writer) = self.storage() {
-            let repaired =
-                index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
-                    writer.db(),
+        let (catalog, read_view) = match self.storage() {
+            HelixStorage::Writer(writer) => (
+                self.planning_catalog(
                     tenant_scope,
+                    CatalogObservation::WriterVersion(catalog_permit.version()),
+                    PlanningCatalogSource::Writer(writer.db()),
                 )
-                .await?;
-            if repaired > 0 {
-                self.notify_index_worker();
+                .await?,
+                PreparedReadView::OpenOnRead,
+            ),
+            HelixStorage::Reader(_) => {
+                let view =
+                    execution::interpreter::read_view::StableRequestReadView::open(self).await?;
+                let observation = view.comparable_sequence().map_or(
+                    CatalogObservation::Unverified,
+                    CatalogObservation::ReaderSequence,
+                );
+                let catalog = self
+                    .planning_catalog(
+                        tenant_scope,
+                        observation,
+                        PlanningCatalogSource::Reader(&view),
+                    )
+                    .await?;
+                (catalog, PreparedReadView::Opened(Box::new(view)))
             }
-        }
-        let read_view =
-            execution::interpreter::read_view::StableRequestReadView::open(self).await?;
-        let loaded =
-            index_lifecycle::repository::load_scope_catalog(&read_view, tenant_scope).await?;
-        let (indexes, catalog) = {
-            let mut state = self
-                .inner
-                .runtime_state
-                .write()
-                .expect("runtime state lock is not poisoned");
-            state.replace_catalog(tenant_scope, loaded);
-            state.planner_snapshot_with_catalog(tenant_scope)
         };
+        let indexes = catalog.runtime().planner_snapshot();
         Ok(PreparedPlannerContext {
             context: PlannerContext {
                 params: params.into(),
@@ -2370,9 +2440,123 @@ impl HelixDB {
                 scope: tenant_scope,
                 catalog_permit,
                 catalog,
-                read_view: Box::new(read_view),
+                read_view,
             },
         })
+    }
+
+    /// Returns the planning catalog for `scope`, loading canonical records
+    /// only when no cached load matches `observation`.
+    ///
+    /// Misses for one scope load one at a time behind the scope's refresh
+    /// permit, so requests that waited reuse the load that finished first.
+    async fn planning_catalog(
+        &self,
+        scope: DataScope,
+        observation: CatalogObservation,
+        source: PlanningCatalogSource<'_>,
+    ) -> Result<Arc<index_lifecycle::LoadedV2ScopeCatalog>> {
+        let reusable = || {
+            self.inner
+                .runtime_state
+                .read()
+                .expect("runtime state lock is not poisoned")
+                .reusable_catalog(scope, observation)
+        };
+        let Some(catalog) = reusable() else {
+            let _refresh_permit = self
+                .inner
+                .index_scope_gates
+                .catalog_refresh_permit(scope)
+                .await;
+            let Some(catalog) = reusable() else {
+                let loaded = match source {
+                    PlanningCatalogSource::Writer(db) => {
+                        self.repair_legacy_reader_blockers_once(db, scope).await?;
+                        let snapshot = db.snapshot().await?;
+                        index_lifecycle::repository::load_scope_catalog(snapshot.as_ref(), scope)
+                            .await?
+                    }
+                    PlanningCatalogSource::Reader(view) => {
+                        index_lifecycle::repository::load_scope_catalog(view, scope).await?
+                    }
+                };
+                return Ok(self
+                    .inner
+                    .runtime_state
+                    .write()
+                    .expect("runtime state lock is not poisoned")
+                    .replace_catalog(scope, loaded, observation));
+            };
+            return Ok(catalog);
+        };
+        #[cfg(test)]
+        self.assert_cached_catalog_is_current(scope, &catalog, source)
+            .await?;
+        Ok(catalog)
+    }
+
+    /// Test-only guard: a reused catalog must equal a fresh canonical load.
+    ///
+    /// Every test that plans through a cache hit runs this, so any path that
+    /// changes the Active set without an exclusive catalog permit fails loudly.
+    #[cfg(test)]
+    async fn assert_cached_catalog_is_current(
+        &self,
+        scope: DataScope,
+        cached: &index_lifecycle::LoadedV2ScopeCatalog,
+        source: PlanningCatalogSource<'_>,
+    ) -> Result<()> {
+        let fresh = match source {
+            PlanningCatalogSource::Writer(db) => {
+                let snapshot = db.snapshot().await?;
+                index_lifecycle::repository::load_scope_catalog(snapshot.as_ref(), scope).await?
+            }
+            PlanningCatalogSource::Reader(view) => {
+                index_lifecycle::repository::load_scope_catalog(view, scope).await?
+            }
+        };
+        assert!(
+            cached.same_active_handles(&fresh),
+            "cached planning catalog for {scope:?} diverged from canonical storage"
+        );
+        Ok(())
+    }
+
+    /// Requeues obsolete reader-coordination blockers in `scope` at most once
+    /// per process. A failed pass is retried by the next caller.
+    async fn repair_legacy_reader_blockers_once(
+        &self,
+        db: &slatedb::Db,
+        scope: DataScope,
+    ) -> Result<()> {
+        if self
+            .inner
+            .runtime_state
+            .read()
+            .expect("runtime state lock is not poisoned")
+            .legacy_blockers_repaired
+            .contains(&scope)
+        {
+            return Ok(());
+        }
+        #[cfg(test)]
+        self.inner
+            .legacy_blocker_repair_passes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let repaired =
+            index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(db, scope)
+                .await?;
+        if repaired > 0 {
+            self.notify_index_worker();
+        }
+        self.inner
+            .runtime_state
+            .write()
+            .expect("runtime state lock is not poisoned")
+            .legacy_blockers_repaired
+            .insert(scope);
+        Ok(())
     }
 
     /// Execute a physical plan exactly as emitted by the planner.
@@ -3837,6 +4021,9 @@ impl HelixDB {
     /// The per-scope refresh permit prevents an older overlapping scan from
     /// publishing after a newer scan. Writer scans use a SlateDB snapshot;
     /// read-only scans reject a concurrently advancing reader view.
+    ///
+    /// The result is never reused by planning: callers may hold an exclusive
+    /// permit whose change is versioned only when that permit is released.
     pub(crate) async fn refresh_runtime_catalog(&self, scope: DataScope) -> Result<()> {
         let _refresh_permit = self
             .inner
@@ -3844,15 +4031,8 @@ impl HelixDB {
             .catalog_refresh_permit(scope)
             .await;
         if let HelixStorage::Writer(writer) = self.storage() {
-            let repaired =
-                index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
-                    writer.db(),
-                    scope,
-                )
+            self.repair_legacy_reader_blockers_once(writer.db(), scope)
                 .await?;
-            if repaired > 0 {
-                self.notify_index_worker();
-            }
         }
         let loaded = match self.storage() {
             HelixStorage::Reader(reader) => {
@@ -3881,7 +4061,7 @@ impl HelixDB {
             .runtime_state
             .write()
             .expect("runtime state lock is not poisoned")
-            .replace_catalog(scope, loaded);
+            .replace_catalog(scope, loaded, CatalogObservation::Unverified);
         Ok(())
     }
 
@@ -5599,9 +5779,17 @@ mod tests {
             state.generation(DataScope::LegacyUnscoped),
             CatalogGeneration::INITIAL
         );
-        state.replace_catalog(scope, index_lifecycle::LoadedV2ScopeCatalog::new(scope));
+        state.replace_catalog(
+            scope,
+            index_lifecycle::LoadedV2ScopeCatalog::new(scope),
+            CatalogObservation::Unverified,
+        );
         assert_eq!(state.generation(scope), CatalogGeneration::INITIAL);
-        state.replace_catalog(scope, index_lifecycle::LoadedV2ScopeCatalog::new(scope));
+        state.replace_catalog(
+            scope,
+            index_lifecycle::LoadedV2ScopeCatalog::new(scope),
+            CatalogObservation::Unverified,
+        );
         assert_eq!(state.generation(scope), CatalogGeneration::INITIAL.next());
         let _ = state.planner_snapshot(scope);
         assert_eq!(
@@ -5640,7 +5828,11 @@ mod tests {
         assert!(state
             .catalog(scope)
             .has_scoped_equality_index("User", "email"));
-        state.replace_catalog(scope, index_lifecycle::LoadedV2ScopeCatalog::new(scope));
+        state.replace_catalog(
+            scope,
+            index_lifecycle::LoadedV2ScopeCatalog::new(scope),
+            CatalogObservation::Unverified,
+        );
         assert!(!state
             .catalog(scope)
             .has_scoped_equality_index("User", "email"));
@@ -6265,5 +6457,483 @@ mod tests {
         assert_eq!(tenant_a_json.get("users"), Some(&serde_json::json!(1)));
         assert_eq!(tenant_b_json.get("users"), Some(&serde_json::json!(2)));
         assert_eq!(legacy_json.get("users"), Some(&serde_json::json!(0)));
+    }
+
+    async fn wait_for_index_operation(
+        db: &HelixDB,
+        scope: DataScope,
+        operation_id: index_lifecycle::IndexOperationId,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match db
+                    .get_index_operation(scope, operation_id)
+                    .await
+                    .expect("operation status loads")
+                {
+                    index_lifecycle::IndexOperationStatus::Succeeded { .. } => break,
+                    index_lifecycle::IndexOperationStatus::Blocked { .. }
+                    | index_lifecycle::IndexOperationStatus::Aborted { .. } => {
+                        panic!("index operation must succeed")
+                    }
+                    index_lifecycle::IndexOperationStatus::Queued { .. }
+                    | index_lifecycle::IndexOperationStatus::Running { .. } => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("index operation converges");
+    }
+
+    fn accepted_operation(
+        receipt: index_lifecycle::IndexDdlReceipt,
+    ) -> index_lifecycle::IndexOperationId {
+        let index_lifecycle::IndexDdlReceipt::Accepted { operation_id, .. } = receipt else {
+            panic!("new DDL must return an accepted receipt");
+        };
+        operation_id
+    }
+
+    fn plans_user_email_index(prepared: &PreparedPlannerContext) -> bool {
+        prepared
+            .proof
+            .catalog
+            .runtime()
+            .has_scoped_equality_index("User", "email")
+    }
+
+    /// Planning reloads canonical records only once its scope's catalog
+    /// version moves, and never trusts a load made outside planning authority.
+    #[tokio::test]
+    async fn writer_planning_reuses_its_catalog_until_the_scope_version_moves() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "planning-catalog-reuse".to_string(),
+        })
+        .await
+        .expect("writer opens");
+        db.wait_for_startup_cache_warm().await;
+        let scope = tenant_scope("0000000000000000000000000B");
+        let plan = || db.planner_context_scoped_prepared(ParamBindings::default(), scope);
+
+        let first = plan().await.expect("first planning loads the scope");
+        assert!(
+            matches!(first.proof.read_view(), PreparedReadView::OpenOnRead),
+            "the writer opens no storage view while planning"
+        );
+        drop(first);
+        let loaded = db.runtime_catalog_generation_for_tests(scope);
+        for _ in 0..3 {
+            drop(plan().await.expect("planning reuses the cached catalog"));
+        }
+        assert_eq!(
+            db.runtime_catalog_generation_for_tests(scope),
+            loaded,
+            "an unchanged version reuses the cached load"
+        );
+
+        drop(
+            db.inner
+                .index_scope_gates
+                .catalog_change_permit(DataScope::LegacyUnscoped)
+                .await,
+        );
+        drop(plan().await.expect("planning after another scope's change"));
+        assert_eq!(
+            db.runtime_catalog_generation_for_tests(scope),
+            loaded,
+            "another scope's catalog change never invalidates this scope"
+        );
+
+        drop(
+            db.inner
+                .index_scope_gates
+                .catalog_change_permit(scope)
+                .await,
+        );
+        drop(
+            plan()
+                .await
+                .expect("planning after a catalog change reloads"),
+        );
+        drop(plan().await.expect("planning reuses that reload"));
+        assert_eq!(db.runtime_catalog_generation_for_tests(scope), loaded + 1);
+
+        drop(db.inner.index_scope_gates.lifecycle_permit(scope).await);
+        drop(
+            plan()
+                .await
+                .expect("planning after a lifecycle step reloads"),
+        );
+        assert_eq!(db.runtime_catalog_generation_for_tests(scope), loaded + 2);
+
+        db.refresh_runtime_catalog(scope)
+            .await
+            .expect("explicit refresh succeeds");
+        drop(
+            plan()
+                .await
+                .expect("planning after an explicit refresh reloads"),
+        );
+        assert_eq!(
+            db.runtime_catalog_generation_for_tests(scope),
+            loaded + 4,
+            "an explicit refresh is never reused by planning"
+        );
+        db.close().await.expect("writer closes");
+    }
+
+    /// Activation and DROP both invalidate a cached catalog: an activated
+    /// index plans at once, and a dropped one stops planning as soon as the
+    /// drop is accepted, before its cleanup finishes.
+    #[tokio::test]
+    async fn cached_planning_catalog_follows_activation_and_drop() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "planning-catalog-lifecycle".to_string(),
+        })
+        .await
+        .expect("writer opens");
+        db.wait_for_startup_cache_warm().await;
+        let scope = DataScope::LegacyUnscoped;
+        let key = helix_planner::catalog::ScopedPropertyKey::try_new("User", "email")
+            .expect("valid index key");
+        let plan = || db.planner_context_scoped_prepared(ParamBindings::default(), scope);
+        assert!(!plans_user_email_index(
+            &plan().await.expect("planning before create")
+        ));
+        assert!(!plans_user_email_index(
+            &plan().await.expect("cached planning before create")
+        ));
+
+        let create = accepted_operation(
+            db.enqueue_index_create(
+                scope,
+                &ir::IndexDdlCreateSpec::NodeEquality {
+                    key: key.clone(),
+                    uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
+                },
+                ir::IndexCreateMode::ErrorIfExists,
+            )
+            .await
+            .expect("create is enqueued"),
+        );
+        wait_for_index_operation(&db, scope, create).await;
+        assert!(
+            plans_user_email_index(&plan().await.expect("planning after activation")),
+            "activation invalidates the cached catalog"
+        );
+        assert!(plans_user_email_index(
+            &plan().await.expect("cached planning after activation")
+        ));
+
+        let drop_operation = accepted_operation(
+            db.enqueue_index_drop(
+                scope,
+                &ir::IndexDdlDropSpec::NodeEquality {
+                    key,
+                    uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
+                },
+            )
+            .await
+            .expect("drop is enqueued"),
+        );
+        assert!(
+            !plans_user_email_index(&plan().await.expect("planning after drop acceptance")),
+            "an accepted drop is never planned from a cached catalog"
+        );
+        wait_for_index_operation(&db, scope, drop_operation).await;
+        assert!(!plans_user_email_index(
+            &plan().await.expect("planning after drop cleanup")
+        ));
+        db.close().await.expect("writer closes");
+    }
+
+    /// The writer opens a read's storage view when the read starts, so a
+    /// write committed between planning and execution is visible.
+    #[tokio::test]
+    async fn writer_read_view_opens_when_the_read_starts() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "planning-deferred-read-view".to_string(),
+        })
+        .await
+        .expect("writer opens");
+        db.wait_for_startup_cache_warm().await;
+        let scope = DataScope::LegacyUnscoped;
+        let batch = read_batch()
+            .var_as("count", g().n(NodeRef::all()).count())
+            .returning(["count"]);
+        let prepared = db
+            .planner_context_scoped_prepared(ParamBindings::default(), scope)
+            .await
+            .expect("read plans");
+        let plan = helix_planner::planning::plan_read_batch(&batch, prepared.context())
+            .expect("count plans");
+
+        db.query(QueryRequest::write(write_batch().var_as(
+            "created",
+            g().add_n("User", Vec::<(&str, PropertyInput)>::new()),
+        )))
+        .await
+        .expect("a write commits while the read holds its planning permit");
+
+        let (params, proof) = prepared.into_execution_inputs();
+        let result = db
+            .execute_prepared_scoped_controlled(
+                &plan,
+                params,
+                scope,
+                execution_control::ExecutionControl::unlimited(),
+                proof,
+                helix_ast::query::SearchConsistency::Strong,
+            )
+            .await
+            .expect("prepared read executes");
+        let response = query_service::QueryResponse::from_execution_result(result)
+            .expect("count response converts");
+        assert_eq!(response.returns()["count"], 1);
+        db.close().await.expect("writer closes");
+    }
+
+    /// A reader reuses a catalog only for the snapshot sequence it was loaded
+    /// at, and still follows remote activation and drop without reopening.
+    #[tokio::test]
+    async fn reader_planning_reuses_a_catalog_per_snapshot_sequence() {
+        let token = ProcessLocalDatabaseToken::new("planning-reader-catalog").unwrap();
+        let writer = HelixDB::open(HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        })
+        .await
+        .expect("writer opens");
+        writer
+            .inner_db()
+            .flush()
+            .await
+            .expect("bootstrap becomes reader-visible");
+        let reader = HelixDB::open_reader_with_object_store_for_tests(
+            token.database().to_string(),
+            token.object_store(),
+        )
+        .await
+        .expect("reader opens");
+        let scope = DataScope::LegacyUnscoped;
+        let plan = || reader.planner_context_scoped_prepared(ParamBindings::default(), scope);
+        let sequence = |prepared: &PreparedPlannerContext| match prepared.proof.read_view() {
+            PreparedReadView::Opened(view) => view
+                .comparable_sequence()
+                .expect("reader views are sequenced"),
+            PreparedReadView::OpenOnRead => panic!("a reader plans on the snapshot it executes"),
+        };
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let first = plan().await.expect("reader plans");
+                let first_generation = reader.runtime_catalog_generation_for_tests(scope);
+                let second = plan().await.expect("reader plans again");
+                if sequence(&first) == sequence(&second) {
+                    assert_eq!(
+                        reader.runtime_catalog_generation_for_tests(scope),
+                        first_generation,
+                        "one snapshot sequence loads the catalog once"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an idle reader converges on one sequence");
+
+        let key = helix_planner::catalog::ScopedPropertyKey::try_new("User", "email")
+            .expect("valid index key");
+        let create = accepted_operation(
+            writer
+                .enqueue_index_create(
+                    scope,
+                    &ir::IndexDdlCreateSpec::NodeEquality {
+                        key: key.clone(),
+                        uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
+                    },
+                    ir::IndexCreateMode::ErrorIfExists,
+                )
+                .await
+                .expect("create is enqueued"),
+        );
+        wait_for_index_operation(&writer, scope, create).await;
+        writer
+            .inner_db()
+            .flush()
+            .await
+            .expect("activation becomes reader-visible");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !plans_user_email_index(&plan().await.expect("reader plans")) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an open reader plans a remote activation");
+
+        accepted_operation(
+            writer
+                .enqueue_index_drop(
+                    scope,
+                    &ir::IndexDdlDropSpec::NodeEquality {
+                        key,
+                        uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
+                    },
+                )
+                .await
+                .expect("drop is enqueued"),
+        );
+        writer
+            .inner_db()
+            .flush()
+            .await
+            .expect("drop becomes reader-visible");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while plans_user_email_index(&plan().await.expect("reader plans")) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("an open reader stops planning a remote drop");
+
+        reader.close().await.expect("reader closes");
+        writer.close().await.expect("writer closes");
+    }
+
+    /// The first planning in a scope requeues obsolete reader-coordination
+    /// blockers; later planning, reloads, and explicit refreshes never rescan.
+    #[tokio::test]
+    async fn planning_repairs_obsolete_reader_blockers_once_per_scope() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "planning-legacy-blocker-repair".to_string(),
+        })
+        .await
+        .expect("writer opens");
+        db.wait_for_startup_cache_warm().await;
+        let scope = tenant_scope("0000000000000000000000000D");
+        let other_scope = tenant_scope("0000000000000000000000000E");
+
+        let definition = index_lifecycle::ValidatedDynamicIndexDefinition::try_from(
+            crate::config::SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("secondary definition validates"),
+        )
+        .expect("secondary definition enters V2");
+        let operation_id = index_lifecycle::IndexOperationId::from_bytes([0x5D; 16])
+            .expect("operation id is valid");
+        let index = index_lifecycle::IndexRecordV2::building(
+            index_lifecycle::IndexId::initial(),
+            definition,
+            index_lifecycle::IndexRevision::initial(),
+            index_lifecycle::PhysicalGeneration::Secondary {
+                generation: index_lifecycle::IndexGenerationId::initial(),
+            },
+            operation_id,
+        )
+        .expect("building index record");
+        let blocked = index_lifecycle::IndexOperationRecord::try_new(
+            operation_id,
+            index.index_id(),
+            index.identity().clone(),
+            index.state().generation(),
+            index.revision(),
+            index_lifecycle::IndexOperationRevision::initial(),
+            index_lifecycle::IndexOperationKind::Build,
+            index_lifecycle::IndexOperationFamily::Secondary,
+            index_lifecycle::IndexOperationProgress::SecondaryBuild(
+                index_lifecycle::SecondaryBuildProgress::Constructing(
+                    index_lifecycle::SecondaryBuildStage::Activate(
+                        index_lifecycle::NoCursorProgress {
+                            counters: index_lifecycle::OperationCounters::default(),
+                        },
+                    ),
+                ),
+            ),
+            0,
+            index_lifecycle::IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None,
+            },
+        )
+        .expect("queued build operation")
+        .claim(index_lifecycle::OperationClaim {
+            writer_epoch: index_lifecycle::WriterEpoch::from_bytes([0x5E; 16])
+                .expect("writer epoch is valid"),
+            sequence: index_lifecycle::ClaimSequence::new(1).expect("claim sequence is valid"),
+        })
+        .expect("operation claims")
+        .block(index_lifecycle::IndexOperationBlocker::InvariantViolation)
+        .expect("operation blocks");
+        let mut legacy = encoding::v2::values::encode_operation_record(&blocked).to_vec();
+        const CURRENT_INVARIANT_BLOCKER_TAG: u8 = 0x07;
+        const LEGACY_READER_BLOCKER_TAG: u8 = 0x05;
+        assert_eq!(legacy.last(), Some(&CURRENT_INVARIANT_BLOCKER_TAG));
+        *legacy.last_mut().expect("blocker tag is last") = LEGACY_READER_BLOCKER_TAG;
+        let operation_key = encoding::v2::keys::ManagedIndexKey::Data {
+            scope,
+            kind: encoding::v2::keys::ScopedKey::operation(operation_id),
+        }
+        .to_bytes();
+        db.inner_db()
+            .put(
+                encoding::v2::keys::ManagedIndexKey::Data {
+                    scope,
+                    kind: encoding::v2::keys::ScopedKey::index_record(index.identity().clone()),
+                }
+                .to_bytes(),
+                encoding::v2::values::encode_index_record(&index),
+            )
+            .await
+            .expect("index record is seeded");
+        db.inner_db()
+            .put(&operation_key, legacy)
+            .await
+            .expect("legacy blocked operation is seeded");
+
+        let passes = || {
+            db.inner
+                .legacy_blocker_repair_passes
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let plan = |scope| db.planner_context_scoped_prepared(ParamBindings::default(), scope);
+        let before = passes();
+        drop(plan(scope).await.expect("first planning repairs the scope"));
+        assert_eq!(passes(), before + 1);
+        let stored = db
+            .inner_db()
+            .get(&operation_key)
+            .await
+            .expect("operation reads")
+            .expect("operation persists");
+        let (_, still_legacy) =
+            encoding::v2::values::decode_operation_record_with_compatibility(&stored)
+                .expect("operation decodes");
+        assert!(!still_legacy, "the obsolete blocker is requeued");
+
+        drop(plan(scope).await.expect("cached planning"));
+        drop(
+            db.inner
+                .index_scope_gates
+                .catalog_change_permit(scope)
+                .await,
+        );
+        drop(plan(scope).await.expect("planning after a version change"));
+        db.refresh_runtime_catalog(scope)
+            .await
+            .expect("explicit refresh succeeds");
+        assert_eq!(passes(), before + 1, "a scope is repaired once per process");
+
+        drop(
+            plan(other_scope)
+                .await
+                .expect("another scope's first planning"),
+        );
+        drop(
+            plan(other_scope)
+                .await
+                .expect("another scope's cached planning"),
+        );
+        assert_eq!(passes(), before + 2, "each scope is repaired once");
+        db.close().await.expect("writer closes");
     }
 }

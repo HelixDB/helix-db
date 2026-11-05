@@ -31,7 +31,8 @@ pub(in crate::execution::interpreter) struct ReadScope {
 
 /// Catalog authority that cannot be detached from its matching storage snapshot.
 pub(in crate::execution::interpreter) enum ActiveRequestReadView {
-    /// Planning and execution share one view while lifecycle publication is excluded.
+    /// Execution reads a view whose Active set matches the planning catalog,
+    /// because lifecycle publication stays excluded until the read ends.
     Prepared {
         view: StableRequestReadView,
         catalog: Arc<crate::index_lifecycle::LoadedV2ScopeCatalog>,
@@ -153,9 +154,11 @@ impl StableRequestReadView {
     }
 
     /// Returns the sequence visible to this request-scoped storage view.
-    pub(in crate::execution::interpreter) fn comparable_sequence(&self) -> Option<u64> {
+    pub(crate) fn comparable_sequence(&self) -> Option<u64> {
         Some(match self {
-            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => snapshot.seq(),
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+                snapshot.seq()
+            }
         })
     }
 
@@ -297,8 +300,16 @@ impl<'db> ExecutionContext<'db> {
         let active = match pending {
             runtime_context::PendingCatalogFreshness::Prepared(proof) => {
                 let (view, catalog, catalog_permit) = proof.into_read_parts();
+                // The writer's view opens now, while the proof's shared
+                // catalog permit still excludes every Active-set change.
+                let view = match view {
+                    crate::PreparedReadView::Opened(view) => *view,
+                    crate::PreparedReadView::OpenOnRead => {
+                        StableRequestReadView::open(self.db).await?
+                    }
+                };
                 ActiveRequestReadView::Prepared {
-                    view: *view,
+                    view,
                     catalog,
                     _catalog_permit: Arc::new(catalog_permit),
                 }
@@ -463,9 +474,13 @@ mod tests {
         db.put(b"key-2", b"kept").await.expect("second value");
         let view =
             StableRequestReadView::WriterSnapshot(db.snapshot().await.expect("snapshot opens"));
-        let opened_at = view.comparable_sequence().expect("writer views are sequenced");
+        let opened_at = view
+            .comparable_sequence()
+            .expect("writer views are sequenced");
 
-        db.put(b"key", b"after").await.expect("concurrent overwrite");
+        db.put(b"key", b"after")
+            .await
+            .expect("concurrent overwrite");
         db.delete(b"key-2").await.expect("concurrent delete");
         db.put(b"key-3", b"late").await.expect("concurrent insert");
 
