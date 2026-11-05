@@ -17,6 +17,7 @@ from ._client_common import (
     remote_error,
     serialize_query,
     validate_base_url,
+    validate_database_id,
 )
 from .client import (
     EmbeddedCacheConfig,
@@ -35,6 +36,7 @@ class _ServerBackend:
     base_url: str
     api_key: str | None
     database_id: str | None
+    require_database_id: bool
     http_client: httpx.AsyncClient
     timeout: Timeout
 
@@ -63,6 +65,7 @@ class _ServerRequestBackend:
     base_url: str
     api_key: str | None
     database_id: str | None
+    require_database_id: bool
     http_client: httpx.AsyncClient
     timeout: Timeout
 
@@ -118,6 +121,7 @@ class AsyncClient:
                 validate_base_url(url),
                 api_key,
                 database_id,
+                False,
                 httpx.AsyncClient(**client_options),
                 timeout,
             )
@@ -150,6 +154,33 @@ class AsyncClient:
             limits=limits,
             transport=transport,
         )
+
+    @classmethod
+    def managed(
+        cls,
+        url: str | None,
+        *,
+        api_key: str | None = None,
+        database_id: str,
+        timeout: Timeout = None,
+        limits: httpx.Limits | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> "AsyncClient":
+        """Create a server client that requires a non-blank database ID."""
+
+        validate_database_id(database_id, required=True)
+        client = cls(
+            url,
+            api_key=api_key,
+            database_id=database_id,
+            timeout=timeout,
+            limits=limits,
+            transport=transport,
+        )
+        backend = client._state.backend
+        if isinstance(backend, _ServerBackend):
+            client._state.backend = replace(backend, require_database_id=True)
+        return client
 
     @classmethod
     async def embedded(
@@ -232,6 +263,7 @@ class AsyncClient:
                 backend.base_url,
                 backend.api_key,
                 backend.database_id,
+                backend.require_database_id,
                 backend.http_client,
                 backend.timeout,
             )
@@ -310,7 +342,13 @@ class AsyncClient:
                 raise HelixError.from_embedded(exc) from exc
             return decode_response(bytes(response))
         prepared = _client_common.prepare_cypher_request(
-            backend.base_url, backend.api_key, backend.database_id, route, body, parsed
+            backend.base_url,
+            backend.api_key,
+            backend.database_id,
+            route,
+            body,
+            parsed,
+            require_database_id=backend.require_database_id,
         )
         try:
             async with backend.http_client.stream(
@@ -451,6 +489,7 @@ class AsyncQueryExecutionRequest:
             dict(self._headers),
             self._query,
             self._backend.database_id,
+            require_database_id=self._backend.require_database_id,
         )
         request_timeout = self._backend.timeout if timeout is None else timeout
         try:

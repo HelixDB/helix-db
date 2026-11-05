@@ -17,6 +17,7 @@ from ._client_common import (
     remote_error,
     serialize_query,
     validate_base_url,
+    validate_database_id,
 )
 from .dsl import QueryRequest
 
@@ -38,6 +39,7 @@ class Client:
         self._base_url = validate_base_url(url)
         self._api_key = api_key
         self._database_id = database_id
+        self._require_database_id = False
         self._native: Any | None = None
 
     @classmethod
@@ -49,6 +51,15 @@ class Client:
         database_id: str | None = None,
     ) -> "Client":
         return cls(url, api_key=api_key, database_id=database_id)
+
+    @classmethod
+    def managed(cls, url: str | None, *, api_key: str | None = None, database_id: str) -> "Client":
+        """Create a server client that requires a non-blank database ID."""
+
+        validate_database_id(database_id, required=True)
+        client = cls(url, api_key=api_key, database_id=database_id)
+        client._require_database_id = True
+        return client
 
     @classmethod
     def embedded(
@@ -112,7 +123,12 @@ class Client:
         return self
 
     def request_builder(self) -> "QueryBuilder":
-        return QueryBuilder(self._base_url, self._api_key, _database_id=self._database_id)
+        return QueryBuilder(
+            self._base_url,
+            self._api_key,
+            _database_id=self._database_id,
+            _require_database_id=self._require_database_id,
+        )
 
     def query(self, request: QueryRequest | None = None) -> Any:
         if request is None:
@@ -215,7 +231,13 @@ class Client:
                 raise HelixError.from_embedded(exc) from exc
             return decode_response(bytes(response))
         prepared = _client_common.prepare_cypher_request(
-            self._base_url, self._api_key, self._database_id, route, body, parsed
+            self._base_url,
+            self._api_key,
+            self._database_id,
+            route,
+            body,
+            parsed,
+            require_database_id=self._require_database_id,
         )
         request = Request(
             prepared.url, data=prepared.body, headers=prepared.header_map(), method="POST"
@@ -310,6 +332,7 @@ class QueryBuilder:
     _api_key: str | None = None
     _headers: dict[str, str] | None = None
     _database_id: str | None = None
+    _require_database_id: bool = False
 
     def __post_init__(self) -> None:
         if self._headers is None:
@@ -334,6 +357,7 @@ class QueryBuilder:
             headers=dict(self._headers or {}),
             query=query,
             database_id=self._database_id,
+            require_database_id=self._require_database_id,
         )
 
 
@@ -344,10 +368,16 @@ class QueryExecutionRequest:
     headers: dict[str, str]
     query: QueryRequest
     database_id: str | None = None
+    require_database_id: bool = False
 
     def send_bytes(self) -> bytes:
         prepared = prepare_request(
-            self.base_url, self.api_key, self.headers, self.query, self.database_id
+            self.base_url,
+            self.api_key,
+            self.headers,
+            self.query,
+            self.database_id,
+            require_database_id=self.require_database_id,
         )
         request = Request(
             prepared.url,

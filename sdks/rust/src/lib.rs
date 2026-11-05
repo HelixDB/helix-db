@@ -96,7 +96,8 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = Client::new(Some("https://cluster.helix-db.com"))?
-//!     .with_api_key(Some("hx_your_api_key"));
+//!     .with_api_key(Some("hx_your_api_key"))
+//!     .with_database_id(Some("db_your_database_id"));
 //!
 //! let response: Friends = client.query(friends_of("alice".to_string())?).send().await?;
 //! # let _ = response.friends;
@@ -143,9 +144,10 @@ use thiserror::Error;
 /// Async HTTP client for running queries against a Helix instance.
 ///
 /// A thin async wrapper over [`reqwest`] that knows how to reach a Helix
-/// gateway's query routes. Construct it with [`Client::new`], optionally attach
-/// a bearer API key via [`Client::with_api_key`], then build and send requests
-/// through [`Client::query`].
+/// gateway's query routes. Construct it with [`Client::new`] or
+/// [`Client::managed`], optionally attach a bearer API key via
+/// [`Client::with_api_key`], then build and send requests through
+/// [`Client::query`].
 ///
 /// The client is cheap to [`Clone`] — the underlying `reqwest::Client` shares
 /// its connection pool — so a single instance can be reused across tasks.
@@ -161,9 +163,12 @@ use thiserror::Error;
 /// // Defaults to http://localhost:6969 when the URL is `None`.
 /// let local = Client::new(None)?;
 ///
-/// // Or point at a remote cluster and attach an API key.
-/// let remote = Client::new(Some("https://cluster.helix-db.com"))?
-///     .with_api_key(Some("hx_your_api_key"));
+/// // Or point at Helix Cloud with an API key and dashboard database ID.
+/// let remote = Client::managed(
+///     Some("https://cluster.helix-db.com"),
+///     "db_your_database_id",
+/// )?
+/// .with_api_key(Some("hx_your_api_key"));
 /// # let _ = (local, remote);
 /// # Ok(())
 /// # }
@@ -186,6 +191,7 @@ struct ServerClient {
     url: reqwest::Url,
     api_key: Option<String>,
     database_id: Option<String>,
+    require_database_id: bool,
 }
 
 impl ServerClient {
@@ -345,6 +351,7 @@ impl CypherExecutionRequest<'_, '_> {
 
     /// The successful response body, or `None` for a warm `204 No Content`.
     async fn post(&self, server: &ServerClient, path: &str) -> Result<Option<Vec<u8>>, HelixError> {
+        validate_database_id(server.database_id.as_deref(), server.require_database_id)?;
         let url = server
             .url
             .join(path)
@@ -686,8 +693,32 @@ impl Client {
                 url,
                 api_key: None,
                 database_id: None,
+                require_database_id: false,
             }),
         })
+    }
+
+    /// Create a managed Helix Cloud client with a required database ID.
+    ///
+    /// The database ID is sent as `x-helix-database-id` with every server request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HelixError::InvalidRequest`] when `database_id` is empty or
+    /// contains only whitespace, or [`HelixError::InvalidURL`] for an invalid
+    /// endpoint URL.
+    pub fn managed(url: Option<&str>, database_id: &str) -> Result<Self, HelixError> {
+        validate_database_id(Some(database_id), true)?;
+        let mut client = Self::server(url)?;
+        match &mut client.backend {
+            ClientBackend::Server(server) => {
+                server.database_id = Some(database_id.to_string());
+                server.require_database_id = true;
+            }
+            #[cfg(feature = "embedded")]
+            ClientBackend::Embedded(_) => {}
+        }
+        Ok(client)
     }
 
     /// Create an embedded-mode writer client backed by the DB crate.
@@ -761,7 +792,10 @@ impl Client {
     /// Attach (or clear) the database ID sent with every request.
     ///
     /// Passing `Some(id)` sets the `x-helix-database-id` header, which Helix
-    /// Cloud requires to select a database; passing `None` clears it.
+    /// Cloud requires to select a database; passing `None` clears it. An empty
+    /// or whitespace-only value is rejected when the next server request is
+    /// sent. Use [`Client::managed`] when the endpoint must always have a
+    /// database ID.
     pub fn with_database_id(mut self, database_id: Option<&str>) -> Self {
         match &mut self.backend {
             ClientBackend::Server(server) => {
@@ -837,6 +871,20 @@ fn embedded_error(error: db::error::HelixDbError) -> HelixError {
         code: error.error_code().to_string(),
         details: error.to_string(),
     }
+}
+
+fn validate_database_id(database_id: Option<&str>, required: bool) -> Result<(), HelixError> {
+    if required && database_id.is_none() {
+        return Err(HelixError::InvalidRequest {
+            details: "managed clients require a database ID".to_string(),
+        });
+    }
+    if database_id.is_some_and(|value| value.trim().is_empty()) {
+        return Err(HelixError::InvalidRequest {
+            details: "database ID must not be empty".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Fluent builder for a single request, produced by [`Client::query`].
@@ -951,6 +999,7 @@ impl<'hlx, 'a, R> QueryExecutionRequest<'hlx, 'a, R> {
     async fn execute(self) -> Result<QueryResponse, HelixError> {
         match &self.client.backend {
             ClientBackend::Server(server) => {
+                validate_database_id(server.database_id.as_deref(), server.require_database_id)?;
                 let response = server
                     .post(server.url.clone(), &self.headers)
                     .body(serde_json::to_vec(&self.query)?)
@@ -1602,6 +1651,8 @@ mod client_tests {
         let server = server_backend(&client);
         assert_eq!(server.url.as_str(), "http://localhost:6969/v2/query");
         assert!(server.api_key.is_none());
+        assert!(server.database_id.is_none());
+        assert!(!server.require_database_id);
     }
 
     #[test]
@@ -1629,6 +1680,20 @@ mod client_tests {
 
         let cleared = client.with_database_id(None);
         assert!(server_backend(&cleared).database_id.is_none());
+    }
+
+    #[test]
+    fn managed_requires_a_non_empty_database_id() {
+        for database_id in ["", "   "] {
+            let error =
+                Client::managed(Some("https://cluster.helix-db.com"), database_id).unwrap_err();
+            assert!(matches!(error, HelixError::InvalidRequest { .. }));
+        }
+
+        let client = Client::managed(Some("https://cluster.helix-db.com"), "db_123").unwrap();
+        let server = server_backend(&client);
+        assert_eq!(server.database_id.as_deref(), Some("db_123"));
+        assert!(server.require_database_id);
     }
 
     #[test]
@@ -1744,7 +1809,7 @@ mod client_tests {
 
     // ---- Request routing (exercises the real `send()` path) -----------------
 
-    #[derive(serde::Deserialize)]
+    #[derive(Debug, serde::Deserialize)]
     struct EmptyResp {}
 
     /// Spawn a one-shot HTTP server on a random port. Returns its base URL and a
@@ -1760,9 +1825,21 @@ mod client_tests {
         let body = body.to_string();
         let handle = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let n = socket.read(&mut buf).await.unwrap();
-            let head = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            // A single read can return only part of the request. Accumulate
+            // until the header block is complete before asserting on it.
+            loop {
+                let n = socket.read(&mut tmp).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&buf).to_lowercase();
             let request_line = head.lines().next().unwrap().to_string();
             // `METHOD <target> HTTP/1.1` -> the target.
             let target = request_line.split_whitespace().nth(1).unwrap().to_string();
@@ -1890,6 +1967,32 @@ mod client_tests {
         let (target, head) = handle.await.unwrap();
         assert_eq!(target, "/v2/query");
         assert!(head.contains("x-helix-database-id: db_123"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn managed_query_sends_database_id_header() {
+        let (base, handle) = spawn_capture_server(200, "{}").await;
+        let client = Client::managed(Some(&base), "db_123")
+            .unwrap()
+            .with_api_key(Some("hx_secret"));
+        let _: EmptyResp = client.query(sample_request()).send().await.unwrap();
+        let (target, head) = handle.await.unwrap();
+        assert_eq!(target, "/v2/query");
+        assert!(head.contains("x-helix-database-id: db_123"), "{head}");
+        assert!(head.contains("authorization: bearer hx_secret"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn empty_database_id_is_rejected_before_sending() {
+        let client = Client::new(Some("http://127.0.0.1:1"))
+            .unwrap()
+            .with_database_id(Some(" "));
+        let error = client
+            .query::<EmptyResp>(sample_request())
+            .send()
+            .await
+            .unwrap_err();
+        assert!(matches!(error, HelixError::InvalidRequest { .. }));
     }
 
     async fn request_remote_error(status: u16, body: &str) -> HelixError {
