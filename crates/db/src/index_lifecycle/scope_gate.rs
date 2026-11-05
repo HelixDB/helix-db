@@ -6,12 +6,13 @@
 //! until commit or abort. Active lifecycle publication takes both gates
 //! exclusively, while DROP takes only catalog exclusivity and relies on the
 //! graph transaction's canonical reads for serializable conflict detection.
-//! The registry stores weak references so one-off tenant scopes do not
-//! accumulate forever.
+//! The mutation, refresh, and publication registries store weak references
+//! so one-off tenant scopes do not accumulate forever.
 //!
-//! Each scope also has a [`CatalogVersion`] that exclusive catalog permits
-//! advance when released, so planning can reuse a catalog loaded under an
-//! earlier shared permit instead of rescanning canonical records.
+//! Each scope's catalog gate also carries a [`CatalogVersion`] that exclusive
+//! catalog permits advance when released, so planning can reuse a catalog
+//! loaded under an earlier shared permit instead of rescanning canonical
+//! records. Catalog gates are therefore strong and never removed.
 //!
 //! This gate coordinates only the single writer process. Readers need no gate:
 //! their request-scoped SlateDB snapshots retain the versions they observe.
@@ -115,17 +116,24 @@ impl IndexGenerationPublicationPermit {
     }
 }
 
+/// One scope's catalog gate and the version its exclusive permits advance.
+///
+/// Entries are strong and never removed: a removed version would restart at
+/// a value an earlier cached catalog recorded. That is one lock and one
+/// counter per scope, matching the runtime catalog map, which also keeps
+/// every scope it has loaded.
+#[derive(Debug, Clone, Default)]
+struct CatalogGate {
+    lock: Arc<RwLock<()>>,
+    version: Arc<AtomicU64>,
+}
+
 /// Exact-scope gate registry shared by mutation contexts and family drivers.
 #[derive(Debug, Default)]
 pub(crate) struct IndexScopeGates {
     gates: Mutex<HashMap<DataScope, Weak<RwLock<()>>>>,
-    catalogs: Mutex<HashMap<DataScope, Weak<RwLock<()>>>>,
+    catalogs: Mutex<HashMap<DataScope, CatalogGate>>,
     catalog_refreshes: Mutex<HashMap<DataScope, Weak<AsyncMutex<()>>>>,
-    /// Strong per-scope catalog versions. Entries are never removed: a removed
-    /// counter would restart at a value an earlier cached catalog recorded.
-    /// This holds one counter per scope, like the runtime catalog map, which
-    /// also retains every scope it has loaded.
-    catalog_versions: Mutex<HashMap<DataScope, Arc<AtomicU64>>>,
     publications: Mutex<HashMap<super::queue::QueueTarget, Weak<AsyncMutex<()>>>>,
 }
 
@@ -142,9 +150,10 @@ impl IndexScopeGates {
     /// The version is read after the gate is held, so it is the version every
     /// canonical record visible under this permit was published at.
     pub(crate) async fn catalog_permit(&self, scope: DataScope) -> IndexScopeCatalogPermit {
-        let guard = self.catalog_gate(scope).read_owned().await;
+        let gate = self.catalog_gate(scope);
+        let guard = gate.lock.read_owned().await;
         IndexScopeCatalogPermit {
-            version: CatalogVersion(self.catalog_version(scope).load(Ordering::Acquire)),
+            version: CatalogVersion(gate.version.load(Ordering::Acquire)),
             _guard: guard,
         }
     }
@@ -154,19 +163,21 @@ impl IndexScopeGates {
         &self,
         scope: DataScope,
     ) -> IndexScopeCatalogChangePermit {
-        let guard = self.catalog_gate(scope).write_owned().await;
+        let gate = self.catalog_gate(scope);
+        let guard = gate.lock.write_owned().await;
         IndexScopeCatalogChangePermit {
-            _advance: CatalogVersionAdvance(self.catalog_version(scope)),
+            _advance: CatalogVersionAdvance(gate.version),
             _guard: guard,
         }
     }
 
     /// Acquires catalog then mutation exclusivity for one lifecycle transaction.
     pub(crate) async fn lifecycle_permit(&self, scope: DataScope) -> IndexScopeLifecyclePermit {
-        let catalog_guard = self.catalog_gate(scope).write_owned().await;
+        let catalog = self.catalog_gate(scope);
+        let catalog_guard = catalog.lock.write_owned().await;
         let mutation_guard = self.mutation_gate(scope).write_owned().await;
         IndexScopeLifecyclePermit {
-            _advance: CatalogVersionAdvance(self.catalog_version(scope)),
+            _advance: CatalogVersionAdvance(catalog.version),
             _catalog_guard: catalog_guard,
             _mutation_guard: mutation_guard,
         }
@@ -209,7 +220,7 @@ impl IndexScopeGates {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&scope)
-            .map_or(0, Weak::strong_count)
+            .map_or(0, |gate| Arc::strong_count(&gate.lock) - 1)
     }
 
     fn publication_gate(&self, target: super::queue::QueueTarget) -> Arc<AsyncMutex<()>> {
@@ -240,26 +251,13 @@ impl IndexScopeGates {
         gate
     }
 
-    fn catalog_gate(&self, scope: DataScope) -> Arc<RwLock<()>> {
-        let mut gates = self
-            .catalogs
+    fn catalog_gate(&self, scope: DataScope) -> CatalogGate {
+        self.catalogs
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(gate) = gates.get(&scope).and_then(Weak::upgrade) else {
-            gates.retain(|_, gate| gate.strong_count() != 0);
-            let gate = Arc::new(RwLock::new(()));
-            gates.insert(scope, Arc::downgrade(&gate));
-            return gate;
-        };
-        gate
-    }
-
-    fn catalog_version(&self, scope: DataScope) -> Arc<AtomicU64> {
-        let mut versions = self
-            .catalog_versions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(versions.entry(scope).or_default())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(scope)
+            .or_default()
+            .clone()
     }
 
     fn catalog_refresh_gate(&self, scope: DataScope) -> Arc<AsyncMutex<()>> {
@@ -404,24 +402,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_versions_survive_gate_collection() {
+    async fn catalog_gates_keep_their_version_after_every_permit_drops() {
         let gates = IndexScopeGates::default();
         let scope = DataScope::LegacyUnscoped;
         drop(gates.catalog_change_permit(scope).await);
-        assert!(
-            gates
-                .catalogs
-                .lock()
-                .expect("catalog registry is healthy")
-                .get(&scope)
-                .and_then(Weak::upgrade)
-                .is_none(),
-            "no permit keeps the catalog gate alive"
+        assert_eq!(
+            gates.catalog_permit_holders(scope),
+            0,
+            "no permit holds the catalog gate"
         );
         assert_eq!(
             gates.catalog_permit(scope).await.version().0,
             1,
-            "a rebuilt gate must not restart the version a cached catalog recorded"
+            "an idle gate must not restart the version a cached catalog recorded"
         );
     }
 
@@ -458,17 +451,6 @@ mod tests {
             })
         };
         assert!(poison_catalog_refresh_gates.join().is_err());
-        let poison_catalog_versions = {
-            let gates = Arc::clone(&gates);
-            std::thread::spawn(move || {
-                let _guard = gates
-                    .catalog_versions
-                    .lock()
-                    .expect("catalog version registry starts healthy");
-                panic!("poison catalog version registry");
-            })
-        };
-        assert!(poison_catalog_versions.join().is_err());
 
         let scope = DataScope::LegacyUnscoped;
         let catalog = gates.catalog_permit(scope).await;

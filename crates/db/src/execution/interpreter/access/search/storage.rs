@@ -83,10 +83,7 @@ impl<'db> ExecutionContext<'db> {
             // shared cache rows can be observed safely.
             VectorReadVisibility::Unavailable
         } else if let Some(view) = self.request_read_view() {
-            view.comparable_sequence().map_or(
-                VectorReadVisibility::Unavailable,
-                VectorReadVisibility::Comparable,
-            )
+            VectorReadVisibility::Comparable(view.comparable_sequence())
         } else {
             VectorReadVisibility::Unavailable
         };

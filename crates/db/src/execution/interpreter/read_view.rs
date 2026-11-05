@@ -153,12 +153,12 @@ impl StableRequestReadView {
     }
 
     /// Returns the sequence visible to this request-scoped storage view.
-    pub(crate) fn comparable_sequence(&self) -> Option<u64> {
-        Some(match self {
+    pub(crate) fn comparable_sequence(&self) -> u64 {
+        match self {
             Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
                 snapshot.seq()
             }
-        })
+        }
     }
 
     /// Returns whether this view must execute plan stages serially.
@@ -465,9 +465,7 @@ mod tests {
         db.put(b"key-2", b"kept").await.expect("second value");
         let view =
             StableRequestReadView::WriterSnapshot(db.snapshot().await.expect("snapshot opens"));
-        let opened_at = view
-            .comparable_sequence()
-            .expect("writer views are sequenced");
+        let opened_at = view.comparable_sequence();
 
         db.put(b"key", b"after")
             .await
@@ -476,7 +474,7 @@ mod tests {
         db.put(b"key-3", b"late").await.expect("concurrent insert");
 
         assert!(view.requires_serial_stages());
-        assert_eq!(view.comparable_sequence(), Some(opened_at));
+        assert_eq!(view.comparable_sequence(), opened_at);
         assert_eq!(
             view.storage_compatibility(),
             crate::index_lifecycle::repository::ReaderStorageCompatibility::Current

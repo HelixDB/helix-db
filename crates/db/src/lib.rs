@@ -2204,7 +2204,7 @@ impl HelixDB {
     }
 
     /// Conflicted DROP attempts retried before the conflict reaches the caller.
-    const DROP_CONFLICT_RETRIES: u32 = 32;
+    const DROP_CONFLICT_RETRIES: u32 = 8;
 
     /// Enqueues one request-owned DROP at its exact durable commit boundary.
     pub(crate) async fn enqueue_index_drop_with_control(
@@ -2232,14 +2232,15 @@ impl HelixDB {
         // resolves. If the caller is cancelled mid-commit, SlateDB still
         // applies the batch; releasing the gate first would let a planner
         // cache the pre-drop catalog under the version this release advances.
-        // So a spawned task owns the permit and runs whether or not the
-        // caller keeps waiting.
-        let drop_task = {
+        // `commit_completions` runs the drop in this task and, if the caller
+        // stops waiting, finishes it as a spawned task that close() drains.
+        let drop_index = {
             let writer = Arc::clone(writer);
             let gates = Arc::clone(&self.inner.index_scope_gates);
+            let worker = self.inner.index_worker_wake.clone();
             let spec = spec.clone();
             let execution_control = execution_control.clone();
-            tokio::spawn(async move {
+            async move {
                 let _catalog_permit = gates.catalog_change_permit(scope).await;
                 let Some(record) =
                     index_lifecycle::repository::load_index_record(writer.db(), scope, &identity)
@@ -2253,11 +2254,12 @@ impl HelixDB {
                         record.definition(),
                     )?;
                 // A build step can commit between the drop's reads and its
-                // commit. The losing drop wrote nothing, so it retries against
-                // the operation's new state; the permit already excludes other
-                // drops and activation, so only step progress can race it.
+                // commit. The losing drop wrote nothing and the step is already
+                // visible, so it retries at once against the new state; the
+                // permit excludes other drops and activation, so only step
+                // progress can race it.
                 let mut retries = 0;
-                loop {
+                let receipt = loop {
                     match index_lifecycle::lifecycle::drop_index_operation_with_control(
                         writer.db(),
                         scope,
@@ -2271,24 +2273,19 @@ impl HelixDB {
                                 && retries < Self::DROP_CONFLICT_RETRIES =>
                         {
                             retries += 1;
-                            tokio::time::sleep(Duration::from_millis(1)).await;
+                            tokio::task::yield_now().await;
                         }
                         outcome => break outcome,
                     }
-                }
-            })
-        };
-        let receipt = match drop_task.await {
-            Ok(receipt) => receipt?,
-            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
-            Err(join) => {
-                return Err(HelixDbError::InvariantViolation(format!(
-                    "index drop task stopped before finishing: {join}"
-                )));
+                }?;
+                let Some(worker) = &worker else {
+                    return Ok(receipt);
+                };
+                worker.wake();
+                Ok(receipt)
             }
         };
-        self.notify_index_worker();
-        Ok(receipt)
+        self.inner.commit_completions.run(drop_index)?.await
     }
 
     /// Convergently requeues a blocked operation at its exact checkpoint.
@@ -2444,14 +2441,22 @@ impl HelixDB {
         tenant_scope: DataScope,
     ) -> Result<PreparedPlannerContext> {
         let catalog_permit = self.index_catalog_scope_permit(tenant_scope).await;
+        // Repair before the request snapshot opens, so it sees the requeued
+        // operations.
+        match self.storage() {
+            HelixStorage::Writer(writer) => {
+                self.repair_legacy_reader_blockers_once(writer.db(), tenant_scope)
+                    .await?;
+            }
+            HelixStorage::Reader(_) => {}
+        }
         let read_view =
             execution::interpreter::read_view::StableRequestReadView::open(self).await?;
         let observation = match self.storage() {
             HelixStorage::Writer(_) => CatalogObservation::WriterVersion(catalog_permit.version()),
-            HelixStorage::Reader(_) => read_view.comparable_sequence().map_or(
-                CatalogObservation::Unverified,
-                CatalogObservation::ReaderSequence,
-            ),
+            HelixStorage::Reader(_) => {
+                CatalogObservation::ReaderSequence(read_view.comparable_sequence())
+            }
         };
         let catalog = self
             .planning_catalog(tenant_scope, observation, &read_view)
@@ -2503,13 +2508,6 @@ impl HelixDB {
                 .catalog_refresh_permit(scope)
                 .await;
             let Some(catalog) = reusable() else {
-                match self.storage() {
-                    HelixStorage::Writer(writer) => {
-                        self.repair_legacy_reader_blockers_once(writer.db(), scope)
-                            .await?;
-                    }
-                    HelixStorage::Reader(_) => {}
-                }
                 let loaded = index_lifecycle::repository::load_scope_catalog(view, scope).await?;
                 return Ok(self
                     .inner
@@ -4044,8 +4042,10 @@ impl HelixDB {
     /// publishing after a newer scan. Writer scans use a SlateDB snapshot;
     /// read-only scans reject a concurrently advancing reader view.
     ///
-    /// The result is never reused by planning: callers may hold an exclusive
-    /// permit whose change is versioned only when that permit is released.
+    /// A writer refresh is never reused by planning: callers may hold an
+    /// exclusive permit whose change is versioned only when that permit is
+    /// released. Callers holding a shared permit use
+    /// [`Self::refresh_runtime_catalog_under`].
     pub(crate) async fn refresh_runtime_catalog(&self, scope: DataScope) -> Result<()> {
         let _refresh_permit = self
             .inner
@@ -4056,7 +4056,7 @@ impl HelixDB {
             self.repair_legacy_reader_blockers_once(writer.db(), scope)
                 .await?;
         }
-        let loaded = match self.storage() {
+        match self.storage() {
             HelixStorage::Reader(reader) => {
                 let observed = reader.status();
                 let snapshot = reader.snapshot().await?;
@@ -4072,19 +4072,58 @@ impl HelixDB {
                     return Err(HelixDbError::RequestReadViewChanged);
                 }
                 self.observe_reader_storage_compatibility(compatibility)?;
-                loaded
+                // A reader load is exact for its snapshot sequence, so it is
+                // reusable and ordered like a planning load.
+                self.inner
+                    .runtime_state
+                    .write()
+                    .expect("runtime state lock is not poisoned")
+                    .publish_planning_catalog(
+                        scope,
+                        loaded,
+                        CatalogObservation::ReaderSequence(snapshot.seq()),
+                    );
             }
             HelixStorage::Writer(writer) => {
                 let snapshot = writer.db().snapshot().await?;
-                index_lifecycle::repository::load_scope_catalog(snapshot.as_ref(), scope).await?
+                let loaded =
+                    index_lifecycle::repository::load_scope_catalog(snapshot.as_ref(), scope)
+                        .await?;
+                self.inner
+                    .runtime_state
+                    .write()
+                    .expect("runtime state lock is not poisoned")
+                    .replace_catalog(scope, loaded, CatalogObservation::Unverified);
             }
-        };
-        self.inner
-            .runtime_state
-            .write()
-            .expect("runtime state lock is not poisoned")
-            .replace_catalog(scope, loaded, CatalogObservation::Unverified);
+        }
         Ok(())
+    }
+
+    /// Refreshes the writer's catalog under a shared catalog permit the
+    /// caller already holds, reusing the cached load while the permit's
+    /// version matches it.
+    pub(crate) async fn refresh_runtime_catalog_under(
+        &self,
+        scope: DataScope,
+        permit: &index_lifecycle::IndexScopeCatalogPermit,
+    ) -> Result<()> {
+        let HelixStorage::Writer(writer) = self.storage() else {
+            return Err(HelixDbError::WriterModeRequired {
+                actual: self.mode().as_str(),
+            });
+        };
+        self.repair_legacy_reader_blockers_once(writer.db(), scope)
+            .await?;
+        let view = execution::interpreter::read_view::StableRequestReadView::open(self).await?;
+        let loaded = self
+            .planning_catalog(
+                scope,
+                CatalogObservation::WriterVersion(permit.version()),
+                &view,
+            )
+            .await;
+        view.close();
+        loaded.map(drop)
     }
 
     pub(crate) fn active_index_handles_loaded(
@@ -6782,11 +6821,123 @@ mod tests {
         assert!(!plans_user_email_index(
             &plan().await.expect("cached planning after the drop")
         ));
+        let HelixStorage::Writer(writer) = db.storage() else {
+            panic!("the test database is a writer");
+        };
+        let identity = index_lifecycle::ValidatedDynamicIndexDefinition::try_from(
+            crate::config::SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("secondary definition validates"),
+        )
+        .expect("secondary definition enters V2")
+        .identity();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let record =
+                    index_lifecycle::repository::load_index_record(writer.db(), scope, &identity)
+                        .await
+                        .expect("index record reads")
+                        .expect("dropped indexes keep their record");
+                if matches!(
+                    record.state(),
+                    index_lifecycle::IndexStateV2::Dropped { .. }
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the detached drop wakes the worker, which finishes cleanup");
         Arc::try_unwrap(db)
             .unwrap_or_else(|_| panic!("test owns the only database handle"))
             .close()
             .await
             .expect("writer closes");
+    }
+
+    /// Search execution resolves index definitions from the catalog its plan
+    /// was built from, so a catalog published since cannot hide them.
+    #[tokio::test]
+    async fn prepared_search_resolves_definitions_from_its_planned_catalog() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "planning-catalog-search-definitions".to_string(),
+        })
+        .await
+        .expect("writer opens");
+        db.wait_for_startup_cache_warm().await;
+        let scope = DataScope::LegacyUnscoped;
+        db.query(QueryRequest::write(write_batch().var_as(
+            "created",
+            g().add_n(
+                "Document",
+                vec![("body", PropertyInput::from("needle in a haystack"))],
+            ),
+        )))
+        .await
+        .expect("document writes");
+        let create = accepted_operation(
+            db.enqueue_index_create(
+                scope,
+                &ir::IndexDdlCreateSpec::NodeText {
+                    key: helix_planner::catalog::ScopedPropertyKey::try_new("Document", "body")
+                        .expect("valid index key"),
+                    scope: helix_planner::catalog::SearchIndexScope::Unscoped,
+                },
+                ir::IndexCreateMode::ErrorIfExists,
+            )
+            .await
+            .expect("text create is enqueued"),
+        );
+        wait_for_index_operation(&db, scope, create).await;
+
+        let batch = read_batch()
+            .var_as(
+                "hits",
+                g().n(NodeRef::all())
+                    .text_search("Document", "body", "needle", 10, None)
+                    .id(),
+            )
+            .returning(["hits"]);
+        let prepared = db
+            .planner_context_scoped_prepared(ParamBindings::default(), scope)
+            .await
+            .expect("search plans");
+        let plan = helix_planner::planning::plan_read_batch(&batch, prepared.context())
+            .expect("text search plans");
+        // Another request publishes a catalog without the text index, as an
+        // older reader snapshot or a drop would.
+        db.inner
+            .runtime_state
+            .write()
+            .expect("runtime state lock is not poisoned")
+            .replace_catalog(
+                scope,
+                index_lifecycle::LoadedV2ScopeCatalog::new(scope),
+                CatalogObservation::Unverified,
+            );
+
+        let (params, proof) = prepared.into_execution_inputs();
+        let result = db
+            .execute_prepared_scoped_controlled(
+                &plan,
+                params,
+                scope,
+                execution_control::ExecutionControl::unlimited(),
+                proof,
+                helix_ast::query::SearchConsistency::Strong,
+            )
+            .await
+            .expect("the planned catalog still holds the text index");
+        let response = query_service::QueryResponse::from_execution_result(result)
+            .expect("search response converts");
+        assert_eq!(
+            response.returns()["hits"]
+                .as_array()
+                .expect("hits are a list")
+                .len(),
+            1
+        );
+        db.close().await.expect("writer closes");
     }
 
     /// Text activation publishes under the exclusive lifecycle permit like
@@ -6873,13 +7024,8 @@ mod tests {
         .expect("reader opens");
         let scope = DataScope::LegacyUnscoped;
         let plan = || reader.planner_context_scoped_prepared(ParamBindings::default(), scope);
-        let sequence = |prepared: &PreparedPlannerContext| {
-            prepared
-                .proof
-                .read_view
-                .comparable_sequence()
-                .expect("reader views are sequenced")
-        };
+        let sequence =
+            |prepared: &PreparedPlannerContext| prepared.proof.read_view.comparable_sequence();
 
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {

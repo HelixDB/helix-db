@@ -98,7 +98,9 @@ impl<'db> ExecutionContext<'db> {
             None => {
                 let permit = self.db.index_catalog_scope_permit(self.tenant_scope).await;
                 self.check_execution_deadline()?;
-                self.db.refresh_runtime_catalog(self.tenant_scope).await?;
+                self.db
+                    .refresh_runtime_catalog_under(self.tenant_scope, &permit)
+                    .await?;
                 permit
             }
         };
