@@ -2203,6 +2203,9 @@ impl HelixDB {
             .await
     }
 
+    /// Conflicted DROP attempts retried before the conflict reaches the caller.
+    const DROP_CONFLICT_RETRIES: u32 = 32;
+
     /// Enqueues one request-owned DROP at its exact durable commit boundary.
     pub(crate) async fn enqueue_index_drop_with_control(
         &self,
@@ -2249,13 +2252,30 @@ impl HelixDB {
                         &spec,
                         record.definition(),
                     )?;
-                index_lifecycle::lifecycle::drop_index_operation_with_control(
-                    writer.db(),
-                    scope,
-                    &definition,
-                    &execution_control,
-                )
-                .await
+                // A build step can commit between the drop's reads and its
+                // commit. The losing drop wrote nothing, so it retries against
+                // the operation's new state; the permit already excludes other
+                // drops and activation, so only step progress can race it.
+                let mut retries = 0;
+                loop {
+                    match index_lifecycle::lifecycle::drop_index_operation_with_control(
+                        writer.db(),
+                        scope,
+                        &definition,
+                        &execution_control,
+                    )
+                    .await
+                    {
+                        Err(error)
+                            if error.is_transaction_conflict()
+                                && retries < Self::DROP_CONFLICT_RETRIES =>
+                        {
+                            retries += 1;
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                        outcome => break outcome,
+                    }
+                }
             })
         };
         let receipt = match drop_task.await {
