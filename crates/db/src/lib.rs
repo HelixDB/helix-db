@@ -2234,14 +2234,20 @@ impl HelixDB {
         // cache the pre-drop catalog under the version this release advances.
         // `commit_completions` runs the drop in this task and, if the caller
         // stops waiting, finishes it as a spawned task that close() drains.
+        // Waiting for the permit stays cancellable: a caller that gives up
+        // while queued behind planning or another DROP drops nothing.
+        let catalog_permit = self
+            .inner
+            .index_scope_gates
+            .catalog_change_permit(scope)
+            .await;
         let drop_index = {
             let writer = Arc::clone(writer);
-            let gates = Arc::clone(&self.inner.index_scope_gates);
             let worker = self.inner.index_worker_wake.clone();
             let spec = spec.clone();
             let execution_control = execution_control.clone();
             async move {
-                let _catalog_permit = gates.catalog_change_permit(scope).await;
+                let _catalog_permit = catalog_permit;
                 let Some(record) =
                     index_lifecycle::repository::load_index_record(writer.db(), scope, &identity)
                         .await?
@@ -2516,6 +2522,9 @@ impl HelixDB {
                     .expect("runtime state lock is not poisoned")
                     .publish_planning_catalog(scope, loaded, observation));
             };
+            #[cfg(test)]
+            self.assert_cached_catalog_is_current(scope, &catalog, view)
+                .await?;
             return Ok(catalog);
         };
         #[cfg(test)]
@@ -3237,7 +3246,16 @@ impl HelixDB {
         budget: search::vector::VectorCacheHydrationBudget,
         shutdown: Option<&mut watch::Receiver<bool>>,
     ) -> Result<search::vector::VectorCacheHydrationOutcome> {
-        match self.refresh_runtime_catalog(scope).await {
+        // The writer refreshes through the planning cache under a shared
+        // catalog permit, so a hydration pass never discards a reusable load.
+        let refreshed = match self.storage() {
+            HelixStorage::Writer(_) => {
+                let permit = self.index_catalog_scope_permit(scope).await;
+                self.refresh_runtime_catalog_under(scope, &permit).await
+            }
+            HelixStorage::Reader(_) => self.refresh_runtime_catalog(scope).await,
+        };
+        match refreshed {
             Ok(()) => {}
             // The reader applied newer state during the catalog read, so the
             // scope keeps its stores until a later pass.
@@ -4061,9 +4079,12 @@ impl HelixDB {
     /// [`Self::refresh_runtime_catalog_under`].
     pub(crate) async fn refresh_runtime_catalog(&self, scope: DataScope) -> Result<()> {
         // The repair takes the refresh permit itself, so it runs first.
-        if let HelixStorage::Writer(writer) = self.storage() {
-            self.repair_legacy_reader_blockers_once(writer.db(), scope)
-                .await?;
+        match self.storage() {
+            HelixStorage::Writer(writer) => {
+                self.repair_legacy_reader_blockers_once(writer.db(), scope)
+                    .await?;
+            }
+            HelixStorage::Reader(_) => {}
         }
         let _refresh_permit = self
             .inner
@@ -4128,14 +4149,20 @@ impl HelixDB {
         };
         self.repair_legacy_reader_blockers_once(writer.db(), scope)
             .await?;
+        let observation = CatalogObservation::WriterVersion(permit.version());
+        // A reused catalog needs no storage view; only a miss opens one.
+        if self
+            .inner
+            .runtime_state
+            .read()
+            .expect("runtime state lock is not poisoned")
+            .reusable_catalog(scope, observation)
+            .is_some()
+        {
+            return Ok(());
+        }
         let view = execution::interpreter::read_view::StableRequestReadView::open(self).await?;
-        let loaded = self
-            .planning_catalog(
-                scope,
-                CatalogObservation::WriterVersion(permit.version()),
-                &view,
-            )
-            .await;
+        let loaded = self.planning_catalog(scope, observation, &view).await;
         view.close();
         loaded.map(drop)
     }
@@ -6760,27 +6787,21 @@ mod tests {
         db.close().await.expect("writer closes");
     }
 
-    /// A DROP keeps its exclusive permit until its commit resolves, even when
-    /// its caller is cancelled, so no planner can cache the pre-drop catalog
-    /// under the version that release advances.
-    #[tokio::test]
-    async fn cancelled_drop_still_finishes_before_releasing_planning() {
+    async fn open_with_user_email_index(database: &str) -> Arc<HelixDB> {
         let db = Arc::new(
             HelixDB::open(HelixDbSource::InMemory {
-                database: "planning-catalog-cancelled-drop".to_string(),
+                database: database.to_string(),
             })
             .await
             .expect("writer opens"),
         );
         db.wait_for_startup_cache_warm().await;
-        let scope = DataScope::LegacyUnscoped;
-        let key = helix_planner::catalog::ScopedPropertyKey::try_new("User", "email")
-            .expect("valid index key");
         let create = accepted_operation(
             db.enqueue_index_create(
-                scope,
+                DataScope::LegacyUnscoped,
                 &ir::IndexDdlCreateSpec::NodeEquality {
-                    key: key.clone(),
+                    key: helix_planner::catalog::ScopedPropertyKey::try_new("User", "email")
+                        .expect("valid index key"),
                     uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
                 },
                 ir::IndexCreateMode::ErrorIfExists,
@@ -6788,25 +6809,36 @@ mod tests {
             .await
             .expect("create is enqueued"),
         );
-        wait_for_index_operation(&db, scope, create).await;
-        let plan = || db.planner_context_scoped_prepared(ParamBindings::default(), scope);
-        assert!(plans_user_email_index(
-            &plan().await.expect("planning after activation")
-        ));
+        wait_for_index_operation(&db, DataScope::LegacyUnscoped, create).await;
+        db
+    }
 
+    fn user_email_drop() -> ir::IndexDdlDropSpec {
+        ir::IndexDdlDropSpec::NodeEquality {
+            key: helix_planner::catalog::ScopedPropertyKey::try_new("User", "email")
+                .expect("valid index key"),
+            uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
+        }
+    }
+
+    async fn close_shared(db: Arc<HelixDB>) {
+        Arc::try_unwrap(db)
+            .unwrap_or_else(|_| panic!("test owns the only database handle"))
+            .close()
+            .await
+            .expect("writer closes");
+    }
+
+    /// A DROP cancelled while it still waits for its exclusive permit, here
+    /// queued behind planning, drops nothing.
+    #[tokio::test]
+    async fn drop_cancelled_while_queued_drops_nothing() {
+        let db = open_with_user_email_index("planning-catalog-queued-drop").await;
+        let scope = DataScope::LegacyUnscoped;
         let planning = db.inner.index_scope_gates.catalog_permit(scope).await;
         let caller = {
             let db = Arc::clone(&db);
-            tokio::spawn(async move {
-                db.enqueue_index_drop(
-                    scope,
-                    &ir::IndexDdlDropSpec::NodeEquality {
-                        key,
-                        uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
-                    },
-                )
-                .await
-            })
+            tokio::spawn(async move { db.enqueue_index_drop(scope, &user_email_drop()).await })
         };
         tokio::time::timeout(Duration::from_secs(10), async {
             while db.inner.index_scope_gates.catalog_permit_holders(scope) < 2 {
@@ -6816,15 +6848,47 @@ mod tests {
         .await
         .expect("the drop queues behind the planning permit");
         caller.abort();
-        assert!(
-            caller
-                .await
-                .expect_err("the caller was cancelled")
-                .is_cancelled(),
-            "the caller stops waiting"
-        );
+        assert!(caller
+            .await
+            .expect_err("the caller was cancelled")
+            .is_cancelled());
         drop(planning);
 
+        let prepared = db
+            .planner_context_scoped_prepared(ParamBindings::default(), scope)
+            .await
+            .expect("planning after the cancelled drop");
+        assert!(
+            plans_user_email_index(&prepared),
+            "a drop cancelled before taking its permit leaves the index Active"
+        );
+        drop(prepared);
+        close_shared(db).await;
+    }
+
+    /// Once a DROP holds its exclusive permit, cancelling its caller cannot
+    /// abandon it: it finishes in the background, invalidates planning, and
+    /// wakes the worker to finish cleanup.
+    #[tokio::test]
+    async fn drop_cancelled_after_taking_its_permit_still_finishes() {
+        let db = open_with_user_email_index("planning-catalog-in-flight-drop").await;
+        let scope = DataScope::LegacyUnscoped;
+        let spec = user_email_drop();
+        let mut caller = Box::pin(db.enqueue_index_drop(scope, &spec));
+        let mut polls = 0;
+        loop {
+            let std::task::Poll::Pending = futures::poll!(caller.as_mut()) else {
+                panic!("the drop must wait on storage after taking its permit");
+            };
+            polls += 1;
+            if db.inner.index_scope_gates.catalog_permit_holders(scope) == 1 {
+                break;
+            }
+            assert!(polls < 1000, "the drop takes its permit");
+        }
+        drop(caller);
+
+        let plan = || db.planner_context_scoped_prepared(ParamBindings::default(), scope);
         tokio::time::timeout(Duration::from_secs(10), async {
             while plans_user_email_index(&plan().await.expect("planning during the drop")) {
                 tokio::task::yield_now().await;
@@ -6832,9 +6896,6 @@ mod tests {
         })
         .await
         .expect("the cancelled caller's drop still commits and invalidates planning");
-        assert!(!plans_user_email_index(
-            &plan().await.expect("cached planning after the drop")
-        ));
         let HelixStorage::Writer(writer) = db.storage() else {
             panic!("the test database is a writer");
         };
@@ -6862,11 +6923,7 @@ mod tests {
         })
         .await
         .expect("the detached drop wakes the worker, which finishes cleanup");
-        Arc::try_unwrap(db)
-            .unwrap_or_else(|_| panic!("test owns the only database handle"))
-            .close()
-            .await
-            .expect("writer closes");
+        close_shared(db).await;
     }
 
     /// Search execution resolves index definitions from the catalog its plan
