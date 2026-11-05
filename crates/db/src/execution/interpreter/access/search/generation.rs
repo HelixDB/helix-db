@@ -491,7 +491,15 @@ mod tests {
                 encode_index_record(&record),
             )
             .unwrap();
+        // Publish like a real activation, under the scope's exclusive
+        // lifecycle permit, so cached planning catalogs observe it.
+        let publication = db
+            .inner
+            .index_scope_gates
+            .lifecycle_permit(DataScope::LegacyUnscoped)
+            .await;
         transaction.commit().await.unwrap();
+        drop(publication);
         (record, physical_index_id)
     }
 
@@ -529,7 +537,15 @@ mod tests {
                 encode_index_record(&record),
             )
             .unwrap();
+        // Publish like a real activation, under the scope's exclusive
+        // lifecycle permit, so cached planning catalogs observe it.
+        let publication = db
+            .inner
+            .index_scope_gates
+            .lifecycle_permit(DataScope::LegacyUnscoped)
+            .await;
         transaction.commit().await.unwrap();
+        drop(publication);
         record
     }
 
