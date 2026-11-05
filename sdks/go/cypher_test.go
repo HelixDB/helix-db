@@ -395,12 +395,12 @@ func TestEmbeddedCypherPreservesNativeErrorCodeAndMessage(t *testing.T) {
 	}
 }
 
-func TestPostCypherRejectsUnknownRoute(t *testing.T) {
+func TestPostStatementRejectsUnknownRoute(t *testing.T) {
 	defer func() {
 		if recover() == nil {
 			t.Fatal("expected an unknown route to panic")
 		}
 	}()
 	client := &Client{embedded: &fakeCypherExplainDB{fakeCypherDB: fakeCypherDB{&fakeNativeDB{}}}}
-	_ = client.postCypher(context.Background(), cypherRoute("/v2/unknown"), CypherRequest{}, nil, nil)
+	_ = client.postStatement(context.Background(), statementRoute("/v2/unknown"), CypherRequest{}, nil, nil)
 }

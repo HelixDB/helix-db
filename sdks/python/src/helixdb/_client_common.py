@@ -15,24 +15,38 @@ QUERY_PATH = "/v2/query"
 DATABASE_ID_HEADER = "x-helix-database-id"
 
 
-class CypherRoute(Enum):
-    """One Cypher operation: its HTTP path and the matching embedded binding.
+class StatementRoute(Enum):
+    """One Cypher or SQL operation: its HTTP path and the matching embedded binding.
 
-    >>> CypherRoute.EXPLAIN.path, CypherRoute.EXPLAIN.native_method
-    ('/v2/cypher/explain', 'explain_cypher_json')
+    >>> StatementRoute.SQL_EXPLAIN.path, StatementRoute.SQL_EXPLAIN.native_method
+    ('/v2/sql/explain', 'explain_sql_json')
     """
 
-    EXECUTE = ("/v2/cypher", "cypher_json", "rebuild native bindings with Cypher support")
-    EXPLAIN = (
+    CYPHER_EXECUTE = (
+        "/v2/cypher",
+        "cypher_json",
+        "rebuild native bindings with Cypher support",
+        False,
+    )
+    CYPHER_EXPLAIN = (
         "/v2/cypher/explain",
         "explain_cypher_json",
         "rebuild native bindings with Cypher explain support",
+        True,
+    )
+    SQL_EXECUTE = ("/v2/sql", "sql_json", "rebuild native bindings with SQL support", False)
+    SQL_EXPLAIN = (
+        "/v2/sql/explain",
+        "explain_sql_json",
+        "rebuild native bindings with SQL support",
+        True,
     )
 
-    def __init__(self, path: str, native_method: str, unavailable: str) -> None:
+    def __init__(self, path: str, native_method: str, unavailable: str, explains: bool) -> None:
         self.path = path
         self.native_method = native_method
         self.unavailable = unavailable
+        self.explains = explains
 
     def decode(self, status: int, response_body: bytes) -> Any:
         """Decode a successful server response for this operation.
@@ -40,17 +54,24 @@ class CypherRoute(Enum):
         A successful warm request is answered with 204 No Content: execution
         then yields an empty rectangular result and explain yields ``None``.
 
-        >>> CypherRoute.EXECUTE.decode(204, b"")
+        >>> StatementRoute.SQL_EXECUTE.decode(204, b"")
         {'columns': [], 'rows': []}
-        >>> CypherRoute.EXPLAIN.decode(204, b"") is None
+        >>> StatementRoute.CYPHER_EXPLAIN.decode(204, b"") is None
         True
-        >>> CypherRoute.EXPLAIN.decode(200, b'{"plan": {}}')
+        >>> StatementRoute.SQL_EXPLAIN.decode(200, b'{"plan": {}}')
         {'plan': {}}
         """
 
         if status == 204:
-            return {"columns": [], "rows": []} if self is CypherRoute.EXECUTE else None
+            return None if self.explains else {"columns": [], "rows": []}
         return decode_response(response_body)
+
+
+def _encode_statement(body: dict[str, Any]) -> bytes:
+    try:
+        return json.dumps(body, allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError) as exc:
+        raise HelixError.serialization(str(exc), cause=exc) from exc
 
 
 def serialize_cypher(
@@ -63,17 +84,45 @@ def serialize_cypher(
         raise HelixError.invalid_request("Cypher parameters must be a dictionary")
     if query_name is not None and not isinstance(query_name, str):
         raise HelixError.invalid_request("Cypher query_name must be a string")
-    try:
-        return json.dumps(
-            {
-                "query": query,
-                "parameters": {} if parameters is None else parameters,
-                "query_name": query_name,
-            },
-            allow_nan=False,
-        ).encode("utf-8")
-    except (ValueError, TypeError) as exc:
-        raise HelixError.serialization(str(exc), cause=exc) from exc
+    return _encode_statement(
+        {
+            "query": query,
+            "parameters": {} if parameters is None else parameters,
+            "query_name": query_name,
+        }
+    )
+
+
+def serialize_sql(
+    query: str,
+    parameters: list[Any] | tuple[Any, ...] | dict[str, Any] | None,
+    mappings: Mapping[str, Mapping[str, str]] | None,
+    query_name: str | None,
+) -> bytes:
+    """Serialize a SQL request. A list or tuple binds each ``?`` in order; a
+    dictionary binds named placeholders. ``mappings`` may hold ``tables`` and
+    ``join_columns``, each a dictionary of names.
+
+    >>> body = json.loads(serialize_sql("SELECT ?", (1,), {"tables": {"people": "Person"}}, None))
+    >>> body["parameters"], body["mappings"]
+    ([1], {'tables': {'people': 'Person'}})
+    """
+    if not isinstance(query, str):
+        raise HelixError.invalid_request("SQL query must be a string")
+    if parameters is not None and not isinstance(parameters, (list, tuple, dict)):
+        raise HelixError.invalid_request("SQL parameters must be a list or a dictionary")
+    if mappings is not None and not isinstance(mappings, Mapping):
+        raise HelixError.invalid_request("SQL mappings must be a dictionary")
+    if query_name is not None and not isinstance(query_name, str):
+        raise HelixError.invalid_request("SQL query_name must be a string")
+    return _encode_statement(
+        {
+            "query": query,
+            "parameters": [] if parameters is None else parameters,
+            "query_name": query_name,
+            "mappings": {} if mappings is None else dict(mappings),
+        }
+    )
 
 
 class HelixError(Exception):
@@ -278,24 +327,24 @@ def prepare_request(
     return _prepare(base_url, QUERY_PATH, api_key, database_id, headers, serialize_query(query))
 
 
-def prepare_cypher_request(
+def prepare_statement_request(
     base_url: str,
     api_key: str | None,
     database_id: str | None,
-    route: CypherRoute,
+    route: StatementRoute,
     body: bytes,
     options: ExecuteOptions,
 ) -> PreparedRequest:
-    """Resolve one serialized Cypher body into its server request.
+    """Resolve one serialized Cypher or SQL body into its server request.
 
     Execute and explain share the body, routing options, and client headers;
     only the path differs.
 
-    >>> prepared = prepare_cypher_request(
+    >>> prepared = prepare_statement_request(
     ...     "http://localhost:6969/base",
     ...     "key",
     ...     "db-1",
-    ...     CypherRoute.EXPLAIN,
+    ...     StatementRoute.CYPHER_EXPLAIN,
     ...     serialize_cypher("RETURN 1", None, None),
     ...     ExecuteOptions(warm_only=True),
     ... )

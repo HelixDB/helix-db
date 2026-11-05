@@ -264,8 +264,11 @@ class AsyncClient:
         ``warm_only``, and ``await_durability``. Embedded mode rejects them.
         """
 
-        return await self._cypher(
-            _client_common.CypherRoute.EXECUTE, query, parameters, query_name, timeout, options
+        return await self._statement(
+            _client_common.StatementRoute.CYPHER_EXECUTE,
+            _client_common.serialize_cypher(query, parameters, query_name),
+            timeout,
+            options,
         )
 
     async def explain_cypher(
@@ -282,21 +285,67 @@ class AsyncClient:
         Accepts the same arguments and routing options as :meth:`cypher`.
         """
 
-        return await self._cypher(
-            _client_common.CypherRoute.EXPLAIN, query, parameters, query_name, timeout, options
+        return await self._statement(
+            _client_common.StatementRoute.CYPHER_EXPLAIN,
+            _client_common.serialize_cypher(query, parameters, query_name),
+            timeout,
+            options,
         )
 
-    async def _cypher(
+    async def sql(
         self,
-        route: _client_common.CypherRoute,
         query: str,
-        parameters: dict[str, Any] | None,
-        query_name: str | None,
+        parameters: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
+        *,
+        mappings: dict[str, dict[str, str]] | None = None,
+        query_name: str | None = None,
+        timeout: Timeout = None,
+        **options: Any,
+    ) -> Any:
+        """Translate one SQL statement to Cypher and execute it like :meth:`cypher`.
+
+        A list or tuple of ``parameters`` binds each ``?`` in order; a dictionary
+        binds ``:name``, ``$name``, ``@name`` and ``?N`` placeholders. ``mappings``
+        may map ``tables`` to labels and ``join_columns`` to relationship types.
+        """
+
+        return await self._statement(
+            _client_common.StatementRoute.SQL_EXECUTE,
+            _client_common.serialize_sql(query, parameters, mappings, query_name),
+            timeout,
+            options,
+        )
+
+    async def explain_sql(
+        self,
+        query: str,
+        parameters: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
+        *,
+        mappings: dict[str, dict[str, str]] | None = None,
+        query_name: str | None = None,
+        timeout: Timeout = None,
+        **options: Any,
+    ) -> Any:
+        """Plan one SQL statement's translation without executing it.
+
+        Accepts the same arguments and routing options as :meth:`sql`.
+        """
+
+        return await self._statement(
+            _client_common.StatementRoute.SQL_EXPLAIN,
+            _client_common.serialize_sql(query, parameters, mappings, query_name),
+            timeout,
+            options,
+        )
+
+    async def _statement(
+        self,
+        route: _client_common.StatementRoute,
+        body: bytes,
         timeout: Timeout,
         options: dict[str, Any],
     ) -> Any:
         backend = self._request_backend()
-        body = _client_common.serialize_cypher(query, parameters, query_name)
         parsed = parse_execute_options(
             options, embedded=isinstance(backend, _EmbeddedRequestBackend)
         )
@@ -309,7 +358,7 @@ class AsyncClient:
             except Exception as exc:
                 raise HelixError.from_embedded(exc) from exc
             return decode_response(bytes(response))
-        prepared = _client_common.prepare_cypher_request(
+        prepared = _client_common.prepare_statement_request(
             backend.base_url, backend.api_key, backend.database_id, route, body, parsed
         )
         try:

@@ -337,3 +337,23 @@ If a warm read returns `204 No Content`, `Cypher` returns an empty
 Embedded clients reject options with `ErrorInvalidRequest`, as `Exec` does.
 `ExplainCypher` returns `ErrorEmbeddedUnavailable` when the linked native
 bindings predate Cypher explain support.
+
+## SQL
+
+`Client.SQL` translates one SQL statement to Cypher and posts it to `/v2/sql`;
+`Client.ExplainSQL` plans it through `/v2/sql/explain`. `Args` bind each `?` in
+order and `Parameters` bind `:name`, `$name` and `@name`; set at most one.
+`Mappings` renames tables and join columns. Results, options and errors are
+those of the Cypher methods. See the [SQL guide](https://docs.helix-db.com/database/helix-db/query-guides/sql).
+
+```go
+result, err := client.SQL(ctx, helix.SQLRequest{
+	Query:    "SELECT u.name AS name FROM people u WHERE u.age >= ?",
+	Args:     []any{30},
+	Mappings: helix.SQLMappings{Tables: map[string]string{"people": "User"}},
+})
+plan, err := client.ExplainSQL(ctx, helix.SQLRequest{
+	Query:      "INSERT INTO User (name) VALUES (:name)",
+	Parameters: map[string]any{"name": "Ada"},
+})
+```

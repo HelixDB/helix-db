@@ -5,10 +5,15 @@ import { workspaceRoot } from "./paths.js";
 
 type ObjectValue = Record<string, unknown>;
 type ResultValue = { columns: string[]; rows: unknown[][] };
+type Names = Record<string, string>;
+/** How a case reaches the database: a Cypher statement, or a SQL statement translated to Cypher. */
+export type Statement =
+  | { language: "cypher"; parameters: ObjectValue }
+  | { language: "sql"; parameters: ObjectValue | unknown[]; mappings: { tables: Names; joinColumns: Names } };
 export type CypherCase = {
   name: string;
   query: string;
-  parameters: ObjectValue;
+  statement: Statement;
   afterDiskReopen: boolean;
   expectation:
     | { kind: "result"; value: ResultValue; normalizeGraphIds: boolean }
@@ -20,6 +25,37 @@ export const cypherFixturePath = join(workspaceRoot, "sdks", "tests", "cypher", 
 function object(value: unknown): ObjectValue {
   assert(value !== null && typeof value === "object" && !Array.isArray(value), "expected a JSON object");
   return value as ObjectValue;
+}
+
+function names(value: unknown): Names {
+  const record = value === undefined ? {} : object(value);
+  assert(
+    Object.values(record).every((name) => typeof name === "string"),
+    "mappings map names to names",
+  );
+  return record as Names;
+}
+
+function statement(entry: ObjectValue): Statement {
+  switch (entry.language) {
+    case undefined:
+      assert(!("mappings" in entry), "only SQL cases have mappings");
+      return { language: "cypher", parameters: entry.parameters === undefined ? {} : object(entry.parameters) };
+    case "sql": {
+      const mappings = entry.mappings === undefined ? {} : object(entry.mappings);
+      assert(
+        Object.keys(mappings).every((key) => key === "tables" || key === "join_columns"),
+        "unknown SQL mapping",
+      );
+      return {
+        language: "sql",
+        parameters: Array.isArray(entry.parameters) ? entry.parameters : entry.parameters === undefined ? [] : object(entry.parameters),
+        mappings: { tables: names(mappings.tables), joinColumns: names(mappings.join_columns) },
+      };
+    }
+    default:
+      throw new Error("unknown fixture language");
+  }
 }
 
 function result(value: unknown): ResultValue {
@@ -39,7 +75,7 @@ function result(value: unknown): ResultValue {
 export function parseCypherCases(value: unknown): CypherCase[] {
   const corpus = object(value);
   assert.equal(corpus.schema_version, 1);
-  assert(Array.isArray(corpus.cases) && corpus.cases.length === 16, "missing Cypher runtime cases");
+  assert(Array.isArray(corpus.cases) && corpus.cases.length === 24, "missing Cypher runtime cases");
   const names = new Set<string>();
   const cases: CypherCase[] = corpus.cases.map((value: unknown) => {
     const entry = object(value);
@@ -54,14 +90,14 @@ export function parseCypherCases(value: unknown): CypherCase[] {
     const base = {
       name: entry.name,
       query: entry.query,
-      parameters: entry.parameters === undefined ? {} : object(entry.parameters),
+      statement: statement(entry),
       afterDiskReopen: entry.after_disk_reopen === true,
     };
     if ("expected_error_detail" in entry) {
       assert(!("expected" in entry) && entry.normalize_graph_ids !== true && !base.afterDiskReopen);
       assert(typeof entry.expected_error_detail === "string" && entry.expected_error_detail.length > 0);
       assert(typeof entry.expected_error_category === "string" && entry.expected_error_category.length > 0);
-      assert(typeof entry.expected_error_phase === "string" && /^(parse|bind|plan|runtime)$/.test(entry.expected_error_phase));
+      assert(typeof entry.expected_error_phase === "string" && /^(parse|compile|bind|plan|runtime)$/.test(entry.expected_error_phase));
       return {
         ...base,
         expectation: {
@@ -96,6 +132,14 @@ export function parseCypherCases(value: unknown): CypherCase[] {
       "renamed-node-ordering",
       "detach-delete",
       "deleted-observation",
+      "sql-insert",
+      "sql-insert-team",
+      "sql-insert-relationship",
+      "sql-join",
+      "sql-delete-rollback",
+      "sql-update",
+      "sql-empty-aggregate",
+      "sql-subquery-error",
     ],
     "Cypher runtime case order or denominator changed",
   );

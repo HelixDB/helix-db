@@ -57,6 +57,42 @@ func TestGeneratedEmbeddedClientExplainsCypherWithoutExecuting(t *testing.T) {
 	}
 }
 
+func TestGeneratedEmbeddedClientRunsAndExplainsSQL(t *testing.T) {
+	client, err := NewEmbeddedClient(InMemorySource{Database: "go-generated-embedded-sql"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := client.Close(); err != nil {
+			t.Errorf("close generated embedded client: %v", err)
+		}
+	})
+
+	mappings := SQLMappings{Tables: map[string]string{"people": "Person"}}
+	plan, err := client.ExplainSQL(context.Background(), SQLRequest{Query: "INSERT INTO people (name) VALUES (?)", Args: []any{"Planned"}, Mappings: mappings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan["effect"] != "Write" {
+		t.Fatalf("explain returned no write plan: %#v", plan)
+	}
+	if _, err := client.SQL(context.Background(), SQLRequest{Query: "INSERT INTO people (name) VALUES (?)", Args: []any{"Ada"}, Mappings: mappings}); err != nil {
+		t.Fatal(err)
+	}
+	names, err := client.SQL(context.Background(), SQLRequest{Query: "SELECT p.name FROM people p", Mappings: mappings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names.Rows) != 1 || names.Rows[0][0] != "Ada" {
+		t.Fatalf("SQL read returned %#v", names)
+	}
+	_, err = client.SQL(context.Background(), SQLRequest{Query: "SELECT (SELECT 1)"})
+	var helixErr *HelixError
+	if !errors.As(err, &helixErr) || helixErr.Code != QueryErrorCode("unsupported_feature:compile:procedures_and_subqueries") {
+		t.Fatalf("expected an unsupported subquery, got %T %v", err, err)
+	}
+}
+
 func TestGeneratedEmbeddedErrorPreservesCodeAndMessage(t *testing.T) {
 	client, err := NewEmbeddedClient(InMemorySource{Database: "go-generated-embedded-error"})
 	if err != nil {

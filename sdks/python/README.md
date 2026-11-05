@@ -355,3 +355,23 @@ builds raise `HelixError` with kind `EmbeddedUnavailable`.
 See the [Cypher guide](https://docs.helix-db.com/database/helix-db/query-guides/cypher) for the language profile,
 parameters, lossless values, and transaction behavior. Native DSL query methods
 keep their existing contract.
+
+## SQL
+
+`sql(...)` translates one SQL statement to Cypher and runs it through
+`POST /v2/sql`; `explain_sql(...)` plans it through `POST /v2/sql/explain`. A
+list or tuple of parameters binds each `?` in order; a dictionary binds `:name`,
+`$name` and `@name`. `mappings` renames tables and join columns.
+
+```python
+rows = client.sql(
+    "SELECT u.name AS name FROM people u WHERE u.age >= ?",
+    [30],
+    mappings={"tables": {"people": "User"}},
+    query_name="adults",
+)
+plan = client.explain_sql("INSERT INTO User (name) VALUES (:name)", {"name": "Ada"})
+```
+
+Both take the routing options, `timeout`, and embedded behavior of the Cypher
+methods. See the [SQL guide](https://docs.helix-db.com/database/helix-db/query-guides/sql).

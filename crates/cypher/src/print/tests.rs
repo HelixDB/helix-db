@@ -291,3 +291,18 @@ fn values_without_literal_syntax_print_as_equivalent_expressions() {
         "()--()"
     );
 }
+
+/// A list whose first value starts `name IN` would parse as a list
+/// comprehension, so that value prints parenthesized.
+#[test]
+fn a_list_never_opens_like_a_comprehension() {
+    let element = node(ExprKind::Binary(
+        r::Binary::In,
+        Box::new(node(ExprKind::Variable("a".into()))),
+        Box::new(node(ExprKind::Literal(r::Value::Integer(0)))),
+    ));
+    let list = node(ExprKind::List(vec![element.clone(), element]));
+    let text = format!("RETURN {list}");
+    assert_eq!(text, "RETURN [(a IN 0), a IN 0]");
+    assert_eq!(returned(&text), strip(&list));
+}

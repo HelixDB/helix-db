@@ -1,5 +1,6 @@
-//! Real Cypher calls through the public Rust SDK. The common parity checker
-//! validates these raw results against the independently authored fixture set.
+//! Real Cypher and SQL calls through the public Rust SDK. The common parity
+//! checker validates these raw results against the independently authored
+//! fixture set.
 use helix_db::{CacheConfig, Client, DbConfig, HelixDbSource};
 use std::{collections::BTreeMap, fs, path::Path};
 
@@ -12,11 +13,50 @@ struct Corpus {
 #[derive(serde::Deserialize)]
 struct Case {
     name: String,
+    #[serde(default)]
+    language: Language,
     query: String,
     #[serde(default)]
-    parameters: BTreeMap<String, serde_json::Value>,
+    parameters: Option<serde_json::Value>,
+    #[serde(default)]
+    mappings: helix_db::SqlMappings,
     #[serde(default)]
     after_disk_reopen: bool,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Language {
+    #[default]
+    Cypher,
+    Sql,
+}
+
+impl Case {
+    /// Run the case once through the public Cypher or SQL method.
+    async fn run(&self, client: &Client) -> Result<helix_db::CypherResponse, helix_db::HelixError> {
+        let parameters = self.parameters.clone().unwrap_or(serde_json::Value::Null);
+        match self.language {
+            Language::Cypher => {
+                let parameters = match parameters {
+                    serde_json::Value::Null => BTreeMap::new(),
+                    parameters => serde_json::from_value(parameters)?,
+                };
+                client
+                    .cypher(&self.query, parameters, Some(&self.name))
+                    .await
+            }
+            Language::Sql => {
+                let parameters = match parameters {
+                    serde_json::Value::Null => helix_db::SqlParameters::default(),
+                    parameters => serde_json::from_value(parameters)?,
+                };
+                client
+                    .sql(&self.query, parameters, &self.mappings, Some(&self.name))
+                    .await
+            }
+        }
+    }
 }
 
 fn load() -> Result<Vec<Case>, Box<dyn std::error::Error>> {
@@ -24,7 +64,7 @@ fn load() -> Result<Vec<Case>, Box<dyn std::error::Error>> {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/cypher/runtime.json").into()
     });
     let corpus: Corpus = serde_json::from_slice(&fs::read(fixture)?)?;
-    if corpus.schema_version != 1 || corpus.cases.len() != 16 {
+    if corpus.schema_version != 1 || corpus.cases.len() != 24 {
         return Err("unsupported or incomplete Cypher parity corpus".into());
     }
     let mut names = std::collections::BTreeSet::new();
@@ -54,16 +94,12 @@ pub async fn run(source: HelixDbSource, results: &Path) -> Result<(), Box<dyn st
             {
                 client.close().await?;
                 let reader = Client::open_reader_with_config(source.clone(), config()).await?;
-                let response = reader
-                    .cypher(&case.query, case.parameters.clone(), Some(&case.name))
-                    .await;
+                let response = case.run(&reader).await;
                 reader.close().await?;
                 client = Client::open_with_config(source.clone(), config()).await?;
                 response
             } else {
-                client
-                    .cypher(&case.query, case.parameters.clone(), Some(&case.name))
-                    .await
+                case.run(&client).await
             };
             // Record actual failures without substituting the expected detail.
             // Cypher writes are never retried by this fixture driver.
@@ -110,10 +146,7 @@ pub async fn run_http(
             if reopened != after {
                 continue;
             }
-            let response = match client
-                .cypher(&case.query, case.parameters, Some(&case.name))
-                .await
-            {
+            let response = match case.run(&client).await {
                 Ok(response) => serde_json::json!({"result": {
                     "columns": response.columns,
                     "rows": response.rows,

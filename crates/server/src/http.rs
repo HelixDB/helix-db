@@ -39,8 +39,8 @@ pub async fn serve(
 
 pub(crate) fn router(state: ServerState) -> Router {
     // Paths stay literal: docs/scripts/check-openapi.mjs reads them from this
-    // file. The Cypher and SQL paths equal
-    // `helix_cypher::api::{HTTP_PATH, HTTP_EXPLAIN_PATH, HTTP_SQL_PATH}`.
+    // file. The Cypher and SQL paths equal `helix_cypher::api::{HTTP_PATH,
+    // HTTP_EXPLAIN_PATH, HTTP_SQL_PATH, HTTP_SQL_EXPLAIN_PATH}`.
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -49,6 +49,7 @@ pub(crate) fn router(state: ServerState) -> Router {
         .route("/v2/cypher", post(execute_cypher))
         .route("/v2/cypher/explain", post(explain_cypher))
         .route("/v2/sql", post(execute_sql))
+        .route("/v2/sql/explain", post(explain_sql))
         .with_state(state)
 }
 
@@ -171,12 +172,38 @@ async fn explain_cypher(
         Ok(request) => request,
         Err(response) => return *response,
     };
+    match request.compile() {
+        Ok(request) => explain_compiled(&state, &options, request).await,
+        Err(error) => cypher_error_response(error.into()),
+    }
+}
+
+/// `POST /v2/sql/explain`: translate one SQL statement, then plan it exactly
+/// like `POST /v2/cypher/explain`.
+async fn explain_sql(State(state): State<ServerState>, headers: HeaderMap, body: Body) -> Response {
+    let (options, request) =
+        match read_json_request::<db::cypher::sql::request::Request>(&headers, body).await {
+            Ok(request) => request,
+            Err(response) => return *response,
+        };
+    match request.compile() {
+        Ok(request) => explain_compiled(&state, &options, request).await,
+        Err(error) => cypher_error_response(error.into()),
+    }
+}
+
+/// Explaining never executes, so even a modifying statement uses read options.
+async fn explain_compiled(
+    state: &ServerState,
+    options: &RequestOptions,
+    request: db::cypher::CompiledRequest,
+) -> Response {
     if let Err(error) = options.validate_for_request_type(QueryRequestType::Read, state.db_mode()) {
         return error.into_response();
     }
     match state
         .query_service()
-        .explain_cypher_scoped_controlled(
+        .explain_compiled_cypher_scoped_controlled(
             request,
             db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
@@ -208,7 +235,7 @@ async fn execute_cypher(
 /// execute it exactly like `POST /v2/cypher`.
 async fn execute_sql(State(state): State<ServerState>, headers: HeaderMap, body: Body) -> Response {
     let (options, request) =
-        match read_json_request::<helix_cypher::sql::request::Request>(&headers, body).await {
+        match read_json_request::<db::cypher::sql::request::Request>(&headers, body).await {
             Ok(request) => request,
             Err(response) => return *response,
         };

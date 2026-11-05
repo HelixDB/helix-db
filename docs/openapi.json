@@ -36,7 +36,7 @@
     },
     {
       "name": "SQL",
-      "description": "Execute SQL statements on a local HelixDB server by translating them to the supported Cypher profile."
+      "description": "Execute or explain SQL statements on a local HelixDB server or a Helix Cloud gateway by translating them to the supported Cypher profile."
     },
     {
       "name": "Health",
@@ -724,14 +724,24 @@
       "post": {
         "operationId": "executeSql",
         "summary": "Execute a SQL statement",
-        "description": "Translates one SQL statement to the supported Cypher profile and executes it exactly like POST /v2/cypher: the same read/write routing, request headers, results, lossless values, and error body. SELECT becomes MATCH and RETURN, INSERT becomes CREATE, UPDATE becomes SET, and DELETE and TRUNCATE delete. Tables map to node labels and joins to relationships by syntax alone; `mappings` renames tables and join columns. `?` placeholders bind to `parameters` given as a list, in written order; `:name` and `$name` bind to an object. Translation errors use the Cypher error body with a span in the SQL text. Served by local servers; request bodies up to 16 MiB.",
+        "description": "Translates one SQL statement to the supported Cypher profile and executes it exactly like POST /v2/cypher: the same read/write routing, request headers, authentication, results, lossless values, and error body. SELECT becomes MATCH and RETURN, INSERT becomes CREATE, UPDATE becomes SET, and DELETE and TRUNCATE delete. Tables map to node labels and joins to relationships by syntax alone; `mappings` renames tables and join columns. `?` placeholders bind to `parameters` given as a list, in written order; `:name`, `$name` and `@name` bind to an object. Translation errors use the Cypher error body with a span in the SQL text. Helix Cloud routes reads to readers and writes to the elected writer. Local servers accept request bodies up to 16 MiB. Helix Cloud gateways accept request bodies up to 2 MiB. Local servers apply a 30-second default deadline and Helix Cloud applies the database's query time limit. The response limit is 16 MiB, and resource exhaustion returns an error instead of truncation.",
         "tags": [
           "SQL"
         ],
+        "security": [
+          {},
+          {
+            "bearerAuth": []
+          }
+        ],
         "x-helix-request-body-limits": {
-          "localBytes": 16777216
+          "localBytes": 16777216,
+          "helixCloudBytes": 2097152
         },
         "parameters": [
+          {
+            "$ref": "#/components/parameters/DatabaseId"
+          },
           {
             "$ref": "#/components/parameters/WarmOnly"
           },
@@ -789,8 +799,41 @@
               }
             }
           },
+          "204": {
+            "description": "Helix Cloud completed a cache-warming read and intentionally omitted the response body."
+          },
           "400": {
-            "description": "Malformed body, invalid request options, a SQL statement outside the translation, or a classified Cypher compile/runtime error of the translated statement. The 16 MiB body limit returns invalid_request_body with this status.",
+            "description": "Malformed or oversized body, invalid request options, a missing or disallowed Helix Cloud database header, a SQL statement outside the translation, or a classified Cypher compile/runtime error of the translated statement. The local 16 MiB body limit returns invalid_request_body with this status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The Helix Cloud API key is invalid. Gateway errors use the native {error,msg} envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Helix Cloud query processing is disabled because the tenant has exhausted its credit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The Helix Cloud API key cannot run this statement; a read-only key can read and explain but not write.",
             "content": {
               "application/json": {
                 "schema": {
@@ -809,8 +852,28 @@
               }
             }
           },
+          "408": {
+            "description": "The Helix Cloud query exceeded its wall-clock limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
           "409": {
             "description": "A storage transaction conflict (`transaction_conflict`, `retryable: true`) or a conflict with the database's state, such as `unique_constraint_violation` (`retryable: false`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The Helix Cloud gateway rejected a request body larger than 2 MiB before parsing it, with payload_too_large.",
             "content": {
               "application/json": {
                 "schema": {
@@ -849,7 +912,211 @@
               }
             }
           }
-        }
+        },
+        "servers": [
+          {
+            "url": "http://localhost:6969",
+            "description": "Default local HelixDB server"
+          },
+          {
+            "url": "https://{gatewayHost}",
+            "description": "Helix Cloud query gateway from the database connection details",
+            "variables": {
+              "gatewayHost": {
+                "default": "cluster.helix-db.com",
+                "description": "Placeholder only. Replace it with the managed gateway hostname shown in the Helix Cloud dashboard."
+              }
+            }
+          }
+        ]
+      }
+    },
+    "/v2/sql/explain": {
+      "post": {
+        "operationId": "explainSql",
+        "summary": "Explain a SQL statement",
+        "description": "Translates one SQL statement exactly like POST /v2/sql, then plans the translated Cypher like POST /v2/cypher/explain: against the current catalog, without executing it. Uses read request options even for a modifying statement, so Helix Cloud routes it as a read and a read-only key may explain writes. X-Helix-Await-Durable:true is invalid. Planning checks parameters, so supply every value the statement uses. Local servers accept request bodies up to 16 MiB. Helix Cloud gateways accept request bodies up to 2 MiB. The response limit is 16 MiB, and resource exhaustion returns an error instead of truncation.",
+        "tags": [
+          "SQL"
+        ],
+        "security": [
+          {},
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-helix-request-body-limits": {
+          "localBytes": 16777216,
+          "helixCloudBytes": 2097152
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DatabaseId"
+          },
+          {
+            "$ref": "#/components/parameters/WarmOnly"
+          },
+          {
+            "$ref": "#/components/parameters/RequireWriter"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SqlRequest"
+              },
+              "examples": {
+                "read": {
+                  "summary": "Join through a relationship table",
+                  "value": {
+                    "query": "SELECT p.name, m.title FROM Person p JOIN ACTED_IN r ON r.person_id = p.id JOIN Movie m ON m.id = r.movie_id WHERE p.born > ?",
+                    "parameters": [
+                      1950
+                    ]
+                  }
+                },
+                "write": {
+                  "summary": "Insert rows with table mappings (plan only)",
+                  "value": {
+                    "query": "INSERT INTO people (name, born) VALUES (:name, :born)",
+                    "parameters": {
+                      "name": "Ada",
+                      "born": 1815
+                    },
+                    "mappings": {
+                      "tables": {
+                        "people": "Person"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Statement translated and planned without execution.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherExplanation"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Helix Cloud completed a cache-warming read and intentionally omitted the response body."
+          },
+          "400": {
+            "description": "Malformed or oversized body, invalid request options, a missing or disallowed Helix Cloud database header, a SQL statement outside the translation, or a classified Cypher compile error of the translated statement. The local 16 MiB body limit returns invalid_request_body with this status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The Helix Cloud API key is invalid. Gateway errors use the native {error,msg} envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Helix Cloud query processing is disabled because the tenant has exhausted its credit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The Helix Cloud API key cannot run this statement; a read-only key can read and explain but not write.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The Helix Cloud query exceeded its wall-clock limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The Helix Cloud gateway rejected a request body larger than 2 MiB before parsing it, with payload_too_large.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Cypher resource limit exceeded (inspect details.detail), Helix Cloud rate limit exceeded, or index_backpressure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal planner, storage, execution-control, or serialization failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A request option requires a writer but the server is read-only, or no ready Helix Cloud database is available.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          }
+        },
+        "servers": [
+          {
+            "url": "http://localhost:6969",
+            "description": "Default local HelixDB server"
+          },
+          {
+            "url": "https://{gatewayHost}",
+            "description": "Helix Cloud query gateway from the database connection details",
+            "variables": {
+              "gatewayHost": {
+                "default": "cluster.helix-db.com",
+                "description": "Placeholder only. Replace it with the managed gateway hostname shown in the Helix Cloud dashboard."
+              }
+            }
+          }
+        ]
       }
     }
   },

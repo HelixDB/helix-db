@@ -324,6 +324,124 @@
         "columns": ["remaining"],
         "rows": [[0]]
       }
+    },
+    {
+      "name": "sql-insert",
+      "language": "sql",
+      "query": "INSERT INTO people (name, score) VALUES (?, ?), (?, ?) RETURNING name, score",
+      "parameters": [
+        "Ada",
+        {
+          "$type": "integer",
+          "value": "9223372036854775807"
+        },
+        "Grace",
+        -1
+      ],
+      "mappings": {
+        "tables": {
+          "people": "SqlPerson"
+        }
+      },
+      "expected": {
+        "columns": ["name", "score"],
+        "rows": [
+          [
+            "Ada",
+            {
+              "$type": "integer",
+              "value": "9223372036854775807"
+            }
+          ],
+          ["Grace", -1]
+        ]
+      }
+    },
+    {
+      "name": "sql-insert-team",
+      "language": "sql",
+      "query": "INSERT INTO SqlTeam (name) VALUES ('Compilers')",
+      "expected": {
+        "columns": [],
+        "rows": []
+      }
+    },
+    {
+      "name": "sql-insert-relationship",
+      "language": "sql",
+      "query": "INSERT INTO SqlPerson_MEMBER_OF_SqlTeam (SqlPerson.name, SqlTeam.name, since) VALUES (:person, :team, 2024)",
+      "parameters": {
+        "person": "Ada",
+        "team": "Compilers"
+      },
+      "expected": {
+        "columns": [],
+        "rows": []
+      }
+    },
+    {
+      "name": "sql-join",
+      "language": "sql",
+      "query": "SELECT p.name AS person, t.name AS team, m.since FROM people p NATURAL JOIN MEMBER_OF m NATURAL JOIN SqlTeam t ORDER BY p.name",
+      "mappings": {
+        "tables": {
+          "people": "SqlPerson"
+        }
+      },
+      "expected": {
+        "columns": ["person", "team", "m.since"],
+        "rows": [["Ada", "Compilers", 2024]]
+      }
+    },
+    {
+      "name": "sql-delete-rollback",
+      "language": "sql",
+      "query": "DELETE FROM SqlPerson p WHERE p.name = ?",
+      "parameters": ["Ada"],
+      "expected_error_detail": "delete_connected_node",
+      "expected_error_category": "constraint_verification_failed",
+      "expected_error_phase": "runtime"
+    },
+    {
+      "name": "sql-update",
+      "language": "sql",
+      "query": "UPDATE SqlPerson SET score = :minimum WHERE name = 'Ada' RETURNING name, score",
+      "parameters": {
+        "minimum": {
+          "$type": "integer",
+          "value": "-9223372036854775808"
+        }
+      },
+      "expected": {
+        "columns": ["name", "score"],
+        "rows": [
+          [
+            "Ada",
+            {
+              "$type": "integer",
+              "value": "-9223372036854775808"
+            }
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sql-empty-aggregate",
+      "language": "sql",
+      "query": "SELECT count(*) AS people, sum(p.score) AS total, max(p.name) AS top_name FROM SqlPerson p WHERE p.score > ?",
+      "parameters": [0],
+      "expected": {
+        "columns": ["people", "total", "top_name"],
+        "rows": [[0, null, null]]
+      }
+    },
+    {
+      "name": "sql-subquery-error",
+      "language": "sql",
+      "query": "SELECT p.name FROM SqlPerson p WHERE p.name IN (SELECT t.name FROM SqlTeam t)",
+      "expected_error_detail": "procedures_and_subqueries",
+      "expected_error_category": "unsupported_feature",
+      "expected_error_phase": "compile"
     }
   ]
 }

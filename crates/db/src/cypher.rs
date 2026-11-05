@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 mod explain;
 pub use explain::{explain, Explanation};
 pub use helix_cypher::request::{CompiledRequest, Request};
+pub use helix_cypher::sql;
 pub(crate) mod output;
 mod parameters;
 pub use output::EncodedResponse;
@@ -138,6 +139,52 @@ impl HelixDB {
         execute(
             self,
             request,
+            DataScope::LegacyUnscoped,
+            crate::query_service::QueryMode::Execute,
+            ExecutionControl::from_timeout(DEFAULT_TIMEOUT),
+            Limits::default(),
+        )
+        .await
+    }
+
+    /// Translate one SQL statement to Cypher ([`sql::translate`]) and execute
+    /// it exactly like [`HelixDB::cypher`].
+    ///
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let database = db::HelixDB::open(db::HelixDbSource::InMemory {
+    /// #     database: "sql-example".into(),
+    /// # }).await?;
+    /// let mut insert = db::cypher::sql::request::Request::new("INSERT INTO Person (name) VALUES (?)");
+    /// insert.parameters.insert("1".into(), helix_ast::query::QueryValue::String("Ada".into()));
+    /// database.sql(insert).await?;
+    /// let response = database
+    ///     .sql(db::cypher::sql::request::Request::new("SELECT p.name FROM Person p"))
+    ///     .await?;
+    /// assert_eq!(response.rows, vec![vec![serde_json::json!("Ada")]]);
+    /// # database.close().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn sql(&self, request: sql::request::Request) -> Result<Response> {
+        execute_with::<output::Typed>(
+            self,
+            Input::Compiled(request.compile()?),
+            DataScope::LegacyUnscoped,
+            crate::query_service::QueryMode::Execute,
+            ExecutionControl::from_timeout(DEFAULT_TIMEOUT),
+            Limits::default(),
+        )
+        .await
+    }
+
+    /// Execute one SQL statement like [`HelixDB::sql`], returning the same
+    /// lossless JSON as [`HelixDB::cypher_json`].
+    pub async fn sql_json(&self, request: sql::request::Request) -> Result<EncodedResponse> {
+        execute_with::<output::Json>(
+            self,
+            Input::Compiled(request.compile()?),
             DataScope::LegacyUnscoped,
             crate::query_service::QueryMode::Execute,
             ExecutionControl::from_timeout(DEFAULT_TIMEOUT),

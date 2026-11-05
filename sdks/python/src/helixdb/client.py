@@ -170,8 +170,11 @@ class Client:
         ``warm_only``, and ``await_durability``. Embedded mode rejects them.
         """
 
-        return self._cypher(
-            _client_common.CypherRoute.EXECUTE, query, parameters, query_name, timeout, options
+        return self._statement(
+            _client_common.StatementRoute.CYPHER_EXECUTE,
+            _client_common.serialize_cypher(query, parameters, query_name),
+            timeout,
+            options,
         )
 
     def explain_cypher(
@@ -188,20 +191,66 @@ class Client:
         Accepts the same arguments and routing options as :meth:`cypher`.
         """
 
-        return self._cypher(
-            _client_common.CypherRoute.EXPLAIN, query, parameters, query_name, timeout, options
+        return self._statement(
+            _client_common.StatementRoute.CYPHER_EXPLAIN,
+            _client_common.serialize_cypher(query, parameters, query_name),
+            timeout,
+            options,
         )
 
-    def _cypher(
+    def sql(
         self,
-        route: _client_common.CypherRoute,
         query: str,
-        parameters: dict[str, Any] | None,
-        query_name: str | None,
+        parameters: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
+        *,
+        mappings: dict[str, dict[str, str]] | None = None,
+        query_name: str | None = None,
+        timeout: float = 30,
+        **options: Any,
+    ) -> Any:
+        """Translate one SQL statement to Cypher and execute it like :meth:`cypher`.
+
+        A list or tuple of ``parameters`` binds each ``?`` in order; a dictionary
+        binds ``:name``, ``$name``, ``@name`` and ``?N`` placeholders. ``mappings``
+        may map ``tables`` to labels and ``join_columns`` to relationship types.
+        """
+
+        return self._statement(
+            _client_common.StatementRoute.SQL_EXECUTE,
+            _client_common.serialize_sql(query, parameters, mappings, query_name),
+            timeout,
+            options,
+        )
+
+    def explain_sql(
+        self,
+        query: str,
+        parameters: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
+        *,
+        mappings: dict[str, dict[str, str]] | None = None,
+        query_name: str | None = None,
+        timeout: float = 30,
+        **options: Any,
+    ) -> Any:
+        """Plan one SQL statement's translation without executing it.
+
+        Accepts the same arguments and routing options as :meth:`sql`.
+        """
+
+        return self._statement(
+            _client_common.StatementRoute.SQL_EXPLAIN,
+            _client_common.serialize_sql(query, parameters, mappings, query_name),
+            timeout,
+            options,
+        )
+
+    def _statement(
+        self,
+        route: _client_common.StatementRoute,
+        body: bytes,
         timeout: float,
         options: dict[str, Any],
     ) -> Any:
-        body = _client_common.serialize_cypher(query, parameters, query_name)
         parsed = parse_execute_options(options, embedded=self._mode == "embedded")
         if self._mode == "embedded":
             native_method = getattr(self._native, route.native_method, None)
@@ -214,7 +263,7 @@ class Client:
             except Exception as exc:
                 raise HelixError.from_embedded(exc) from exc
             return decode_response(bytes(response))
-        prepared = _client_common.prepare_cypher_request(
+        prepared = _client_common.prepare_statement_request(
             self._base_url, self._api_key, self._database_id, route, body, parsed
         )
         request = Request(

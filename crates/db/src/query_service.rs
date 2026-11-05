@@ -39,10 +39,10 @@ pub struct HelixQueryService {
 }
 
 impl HelixQueryService {
-    /// Explain a Cypher statement without executing the query.
-    pub async fn explain_cypher_scoped_controlled(
+    /// Explain an already compiled Cypher request without executing the query.
+    pub async fn explain_compiled_cypher_scoped_controlled(
         &self,
-        request: crate::cypher::Request,
+        request: crate::cypher::CompiledRequest,
         scope: DataScope,
         control: ExecutionControl,
         limits: crate::cypher::Limits,

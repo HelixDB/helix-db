@@ -112,6 +112,8 @@ class AsyncClientTests(unittest.IsolatedAsyncioTestCase):
                 "query",
                 "cypher",
                 "explain_cypher",
+                "sql",
+                "explain_sql",
                 "execute",
                 "base_url",
                 "close",

@@ -26,7 +26,20 @@ impl HelixDB {
     pub async fn explain_cypher(&self, request: Request) -> Result<Explanation> {
         explain(
             self,
-            request,
+            request.compile()?,
+            DataScope::LegacyUnscoped,
+            ExecutionControl::from_timeout(DEFAULT_TIMEOUT),
+            Limits::default(),
+        )
+        .await
+    }
+
+    /// Plan a SQL statement's Cypher translation without executing it, like
+    /// [`HelixDB::explain_cypher`].
+    pub async fn explain_sql(&self, request: sql::request::Request) -> Result<Explanation> {
+        explain(
+            self,
+            request.compile()?,
             DataScope::LegacyUnscoped,
             ExecutionControl::from_timeout(DEFAULT_TIMEOUT),
             Limits::default(),
@@ -39,13 +52,13 @@ impl HelixDB {
 /// execution. Explaining a write is safe on a reader because it does not run.
 pub async fn explain(
     db: &HelixDB,
-    request: Request,
+    request: CompiledRequest,
     scope: DataScope,
     control: ExecutionControl,
     limits: Limits,
 ) -> Result<Explanation> {
     control.check()?;
-    let request = prepare_request(Input::Source(request), limits)?;
+    let request = prepare_request(Input::Compiled(request), limits)?;
     let prepared = control
         .run(db.planner_context_scoped_prepared(request.params, scope))
         .await?;
@@ -220,7 +233,7 @@ mod tests {
         db.explain_cypher(request.clone()).await.unwrap();
         let error = explain(
             &db,
-            request.clone(),
+            request.clone().compile().unwrap(),
             DataScope::LegacyUnscoped,
             ExecutionControl::unlimited(),
             Limits {
@@ -233,7 +246,7 @@ mod tests {
         assert!(matches!(error,Error::Query(error) if error.detail=="result_limit"));
         let error = explain(
             &db,
-            request.clone(),
+            request.clone().compile().unwrap(),
             DataScope::LegacyUnscoped,
             ExecutionControl::unlimited(),
             Limits {
@@ -246,7 +259,7 @@ mod tests {
         assert!(matches!(error,Error::Query(error) if error.detail=="invalid_limits"));
         let error = explain(
             &db,
-            request,
+            request.compile().unwrap(),
             DataScope::LegacyUnscoped,
             ExecutionControl::from_timeout(std::time::Duration::ZERO),
             Limits::default(),

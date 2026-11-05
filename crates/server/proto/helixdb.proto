@@ -9,6 +9,12 @@ service HelixDbServer {
   // body is the POST /v2/cypher/explain request/result contract. The
   // statement is planned, never executed, so request options apply as a read.
   rpc ExplainCypher(QueryJsonRequest) returns (QueryJsonResponse);
+  // body is the POST /v2/sql request; the result and errors are those of
+  // ExecuteCypher for the translated statement.
+  rpc ExecuteSql(QueryJsonRequest) returns (QueryJsonResponse);
+  // body is the POST /v2/sql/explain request/result contract, applied like
+  // ExplainCypher.
+  rpc ExplainSql(QueryJsonRequest) returns (QueryJsonResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }
 

@@ -5806,19 +5806,62 @@ The translation is a port of the SQL-to-Cypher translator in the
 faithfully is rejected with a specific error before the statement reads or writes
 anything.
 
-`POST /v2/sql` is served by local servers built from the
-[repository checkout](https://github.com/HelixDB/helix-db). Helix Cloud gateways,
-the SDKs, and the CLI do not expose SQL yet; send SQL to a local server over HTTP.
+SQL is served by Helix Cloud gateways, and by local servers, embedded databases,
+and SDKs built from the [repository checkout](https://github.com/HelixDB/helix-db).
+The CLI does not expose SQL yet.
 
 ## Run a statement
 
-Send one statement, with optional parameters, a query name, and mappings, to
-`POST /v2/sql`. The server translates it and works out whether it reads or writes.
+Send one statement, with optional parameters, mappings, and a query name, to
+`POST /v2/sql`. The server translates it and works out whether it reads or
+writes. Parameters given as a list bind each `?` in order.
 
-```sh
-curl http://localhost:6969/v2/sql \
-  -H 'Content-Type: application/json' \
-  --data '{"query":"SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name","parameters":[30],"query_name":"adults"}'
+```rust Rust
+let result = client
+    .sql(
+        "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+        vec![serde_json::json!(30)],
+        &helix_db::SqlMappings::default(),
+        Some("adults"),
+    )
+    .await?;
+// result.columns == ["name"]; result.rows == [["Ada"], ...]
+```
+
+```ts TypeScript
+const result = await client.sql(
+  "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+  [30],
+  {},
+  "adults",
+);
+// { columns: ["name"], rows: [["Ada"], ...] }
+```
+
+```go Go
+result, err := client.SQL(ctx, helix.SQLRequest{
+	Query:     "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+	Args:      []any{30},
+	QueryName: "adults",
+})
+// result.Columns == ["name"]; result.Rows == [["Ada"], ...]
+```
+
+```python Python
+result = client.sql(
+    "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+    [30],
+    query_name="adults",
+)
+# {"columns": ["name"], "rows": [["Ada"], ...]}
+```
+
+```json JSON
+{
+  "query": "SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name",
+  "parameters": [30],
+  "query_name": "adults"
+}
 ```
 
 HelixDB runs the statement as this Cypher:
@@ -5846,18 +5889,102 @@ returns the columns `1` and `1_2`. Duplicate rows are kept unless the statement
 uses `DISTINCT` or `GROUP BY`, row order is only defined by `ORDER BY`, and a
 write without `RETURNING` succeeds with empty `columns` and `rows`.
 
+### Over HTTP
+
+A local server has no authentication:
+
+```sh
+curl http://localhost:6969/v2/sql \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"SELECT p.name AS name FROM Person p WHERE p.age >= ?","parameters":[30]}'
+```
+
+A Helix Cloud gateway takes the same body. Authenticate as for
+[Cypher](/database/helix-db/query-guides/cypher#over-http), with the cluster API
+key and, on a GA shared gateway, the database ID:
+
+```sh
+curl "$HELIX_ENDPOINT/v2/sql" \
+  -H "Authorization: Bearer $HELIX_API_KEY" \
+  -H "X-Helix-Database-Id: $HELIX_DATABASE_ID" \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"SELECT count(*) AS nodes FROM Person p"}'
+```
+
+The gateway translates each statement to route it by what it does: reads go to
+readers, and writes go to the elected writer. A read-only API key can read and
+explain, but receives `403` for a statement that writes. The
+[HTTP API reference](/database/helix-db/query-guides/http-api#sql) describes the
+request, status codes, and errors in full. A local server's gRPC API serves the
+same bodies through `ExecuteSql` and `ExplainSql`.
+
 ### Request options
 
-The native request options apply to SQL too, as HTTP headers:
+The native request options apply to SQL too:
 
-| Option | HTTP header |
-| --- | --- |
-| Run on the writer | `X-Helix-Require-Writer: true` |
-| Warm caches only (reads) | `X-Helix-Warm: true` |
-| Wait for durability (writes) | `X-Helix-Await-Durable: true` |
+| Option | Rust | TypeScript | Go | Python | HTTP header |
+| --- | --- | --- | --- | --- | --- |
+| Run on the writer | `.writer_only()` | `.writerOnly()` | `helix.WriterOnly()` | `writer_only=True` | `X-Helix-Require-Writer: true` |
+| Warm caches only (reads) | `.warm_only()` | `.warmOnly()` | `helix.WarmOnly()` | `warm_only=True` | `X-Helix-Warm: true` |
+| Wait for durability (writes) | `.should_await_durability(true)` | `.shouldAwaitDurability(true)` | `helix.AwaitDurability(true)` | `await_durability=True` | `X-Helix-Await-Durable: true` |
 
-The [HTTP API reference](/database/helix-db/query-guides/http-api#sql) describes
-the request, status codes, and errors in full.
+Rust and TypeScript set options on `request_builder()` / `requestBuilder()` before
+`.sql(...)`; Go and Python pass them to `SQL` and `sql`. Embedded clients reject
+request options.
+
+## Explain a statement
+
+`POST /v2/sql/explain` takes the same body, translates the statement, and plans
+the translated Cypher without running it, exactly like
+[explaining Cypher](/database/helix-db/query-guides/cypher#explain-a-statement).
+Explaining a write changes nothing. Planning checks parameters, so supply every
+parameter the statement uses.
+
+```rust Rust
+let plan = client
+    .explain_sql(
+        "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+        std::collections::BTreeMap::from([(
+            "email".to_string(),
+            serde_json::json!("ada@example.com"),
+        )]),
+        &helix_db::SqlMappings::default(),
+        None,
+    )
+    .await?;
+// plan["effect"] == "Read"
+```
+
+```ts TypeScript
+const plan = await client.explainSql(
+  "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+  { email: "ada@example.com" },
+);
+// plan.effect === "Read"
+```
+
+```go Go
+plan, err := client.ExplainSQL(ctx, helix.SQLRequest{
+	Query:      "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+	Parameters: map[string]any{"email": "ada@example.com"},
+})
+// plan["effect"] == "Read"
+```
+
+```python Python
+plan = client.explain_sql(
+    "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+    {"email": "ada@example.com"},
+)
+# plan["effect"] == "Read"
+```
+
+```json JSON
+{
+  "query": "SELECT p.name AS name FROM Person p WHERE p.email = :email",
+  "parameters": { "email": "ada@example.com" }
+}
+```
 
 ## What is supported
 
@@ -5964,6 +6091,10 @@ Joins become relationship patterns by these rules:
 
 This matches `(p:Person)-[directed:DIRECTED]->(m:Movie)`. A `join_columns` key
 names the join's left table and the column that names the type.
+
+The SDKs take the same mappings: `helix_db::SqlMappings` in Rust,
+`{ tables, joinColumns }` in TypeScript, `helix.SQLMappings` in Go, and the
+`mappings=` dictionary in Python.
 
 ## Statements
 
@@ -6185,9 +6316,9 @@ lists every category with its HTTP status and retry guidance.
 Page type: Reference
 
 The HelixDB HTTP API accepts operation-tree queries at `POST /v2/query`, Cypher
-statements at `POST /v2/cypher`, and read-only Cypher planning at
-`POST /v2/cypher/explain`. Local servers and Helix Cloud gateways serve the same
-contracts.
+statements at `POST /v2/cypher`, read-only Cypher planning at
+`POST /v2/cypher/explain`, and SQL at `POST /v2/sql` and `POST /v2/sql/explain`.
+Local servers and Helix Cloud gateways serve the same contracts.
 
 ## Machine-readable specification
 
@@ -6443,9 +6574,10 @@ request options, so `X-Helix-Await-Durable:true` is invalid.
 
 ## SQL
 
-A local server also accepts one SQL statement at `POST /v2/sql`. It translates
-the statement to Cypher and runs it as `POST /v2/cypher` would, with the same
-execution headers, results, and error body. The body adds optional `mappings`,
+Local servers and Helix Cloud gateways also accept one SQL statement at
+`POST /v2/sql`. It translates the statement to Cypher and runs it as
+`POST /v2/cypher` would, with the same authentication, execution headers,
+routing, results, and error body. The body adds optional `mappings`,
 and `parameters` may be a list that binds `?` placeholders in written order:
 
 ```json
@@ -6455,6 +6587,11 @@ and `parameters` may be a list that binds `?` placeholders in written order:
   "mappings": { "tables": { "people": "Person" } }
 }
 ```
+
+`POST /v2/sql/explain` takes the same body and plans the translated statement
+without executing it, exactly like `POST /v2/cypher/explain`: it returns the same
+planning report and uses read request options, so `X-Helix-Await-Durable:true`
+is invalid.
 
 The [SQL guide](/database/helix-db/query-guides/sql) describes how tables, columns
 and joins translate, and which SQL is rejected.
@@ -6547,7 +6684,7 @@ batch.
 
 ## Cypher errors
 
-`POST /v2/cypher`, `POST /v2/cypher/explain` and `POST /v2/sql` report a failed
+`POST /v2/cypher`, `POST /v2/cypher/explain`, `POST /v2/sql` and `POST /v2/sql/explain` report a failed
 statement with the same `error` and `msg` fields and a `details` object:
 
 ```json
@@ -7078,6 +7215,9 @@ curl --fail-with-body \
   --data '{"query":"MATCH (n) RETURN count(n) AS node_count"}'
 ```
 
+[SQL](/database/helix-db/query-guides/sql) works the same way at `/v2/sql`, for
+example with `{"query":"SELECT count(*) AS people FROM Person p"}`.
+
 Keep API keys in a secrets manager or environment variable. Do not commit them
 to source control.
 
@@ -7097,14 +7237,14 @@ Page type: Guide
 
 Helix Cloud runs a dedicated writer and horizontally scalable readers behind a routing
 gateway. Applications send the same dynamic operation-tree request used in local and
-embedded modes, or a Cypher statement to `POST /v2/cypher`, which the gateway routes
-by whether the statement writes.
+embedded modes, or a Cypher or SQL statement to `POST /v2/cypher` or
+`POST /v2/sql`, which the gateway routes by whether the statement writes.
 
 ## Request flow
 
 ```text
 application
-   │ POST /v2/query or POST /v2/cypher
+   │ POST /v2/query, POST /v2/cypher or POST /v2/sql
    ▼
 gateway
    ├── read request ──► reader
@@ -7924,7 +8064,8 @@ contract. HTTP 429 rate limiting below is a separate mechanism.
 ## Helix Cloud request rate limits
 
 Helix Cloud applies a distributed token bucket to `POST /v2/query`,
-`POST /v2/cypher` and `POST /v2/cypher/explain`. The bucket is scoped to the
+`POST /v2/cypher`, `POST /v2/cypher/explain`, `POST /v2/sql` and
+`POST /v2/sql/explain`. The bucket is scoped to the
 authenticated Cloud database, so reads and writes from every API key, application
 instance, and gateway replica draw from the same allowance.
 
@@ -8177,8 +8318,8 @@ another node already owns a unique value. The gateway reports a failed write as
 
 ## Cypher errors
 
-`POST /v2/cypher` and `POST /v2/cypher/explain` use the same envelope and gateway
-codes. A failed statement also carries a `details` object:
+`POST /v2/cypher`, `POST /v2/cypher/explain`, `POST /v2/sql` and
+`POST /v2/sql/explain` use the same envelope and gateway codes. A failed statement also carries a `details` object:
 
 ```json
 {

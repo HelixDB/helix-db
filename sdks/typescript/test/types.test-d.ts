@@ -1,7 +1,6 @@
 import {
   BindingProjection,
   Client,
-  CypherExecutionRequest,
   CypherExplanation,
   CypherResponse,
   DateTime,
@@ -9,6 +8,8 @@ import {
   QueryParamType,
   QueryRequest,
   ReadBatch,
+  SqlMappings,
+  StatementRequest,
   WriteBatch,
   defineParams,
   g,
@@ -119,11 +120,7 @@ QueryRequest.read(writeBatch());
 QueryRequest.write(readBatch());
 
 export async function cypherApi(client: Client) {
-  const request: CypherExecutionRequest = client
-    .requestBuilder()
-    .writerOnly()
-    .shouldAwaitDurability(false)
-    .cypher("RETURN $x AS x", { x: 1n });
+  const request: StatementRequest = client.requestBuilder().writerOnly().shouldAwaitDurability(false).cypher("RETURN $x AS x", { x: 1n });
   const response: CypherResponse = await request.send();
   // A builder explanation is absent after a Helix Cloud warm-only 204.
   const warmed: CypherExplanation | undefined = await client.requestBuilder().warmOnly().cypher("MATCH (n) RETURN n").explain();
@@ -144,4 +141,25 @@ export async function cypherApi(client: Client) {
   client.explainCypher("RETURN 1 AS x", {}, 1);
 
   return { response, warmed, unchecked, effect, planner, direct };
+}
+
+export async function sqlApi(client: Client) {
+  const mappings: SqlMappings = { tables: { people: "Person" }, joinColumns: { "people.team_id": "MEMBER_OF" } };
+  const request: StatementRequest = client.requestBuilder().writerOnly().sql("INSERT INTO people (name) VALUES (?)", ["Ada"], mappings);
+  const response: CypherResponse = await request.send();
+  const named: CypherResponse = await client.sql("SELECT p.name FROM people p WHERE p.age > :age", { age: 30n }, mappings, "adults");
+  const plain: CypherResponse = await client.sql("SELECT 1");
+  const explanation: CypherExplanation = await client.explainSql("SELECT 1");
+  const warmed: CypherExplanation | undefined = await client.requestBuilder().warmOnly().sql("SELECT 1").explain();
+
+  // @ts-expect-error SQL parameters are a list or a map of names to values
+  client.sql("SELECT ?", "x");
+
+  // @ts-expect-error mappings name tables and join columns
+  client.sql("SELECT 1", [], { labels: {} });
+
+  // @ts-expect-error the query name is a string
+  client.explainSql("SELECT 1", [], {}, 1);
+
+  return { response, named, plain, explanation, warmed };
 }
