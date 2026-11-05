@@ -2545,19 +2545,32 @@ impl HelixDB {
 
     /// Requeues obsolete reader-coordination blockers in `scope` at most once
     /// per process. A failed pass is retried by the next caller.
+    ///
+    /// Concurrent first requests in a scope run one pass: the scope's refresh
+    /// permit serializes them and each re-checks after acquiring it. Callers
+    /// must not already hold that permit.
     async fn repair_legacy_reader_blockers_once(
         &self,
         db: &slatedb::Db,
         scope: DataScope,
     ) -> Result<()> {
-        if self
+        let repaired = || {
+            self.inner
+                .runtime_state
+                .read()
+                .expect("runtime state lock is not poisoned")
+                .legacy_blockers_repaired
+                .contains(&scope)
+        };
+        if repaired() {
+            return Ok(());
+        }
+        let _refresh_permit = self
             .inner
-            .runtime_state
-            .read()
-            .expect("runtime state lock is not poisoned")
-            .legacy_blockers_repaired
-            .contains(&scope)
-        {
+            .index_scope_gates
+            .catalog_refresh_permit(scope)
+            .await;
+        if repaired() {
             return Ok(());
         }
         #[cfg(test)]
@@ -4047,15 +4060,16 @@ impl HelixDB {
     /// released. Callers holding a shared permit use
     /// [`Self::refresh_runtime_catalog_under`].
     pub(crate) async fn refresh_runtime_catalog(&self, scope: DataScope) -> Result<()> {
+        // The repair takes the refresh permit itself, so it runs first.
+        if let HelixStorage::Writer(writer) = self.storage() {
+            self.repair_legacy_reader_blockers_once(writer.db(), scope)
+                .await?;
+        }
         let _refresh_permit = self
             .inner
             .index_scope_gates
             .catalog_refresh_permit(scope)
             .await;
-        if let HelixStorage::Writer(writer) = self.storage() {
-            self.repair_legacy_reader_blockers_once(writer.db(), scope)
-                .await?;
-        }
         match self.storage() {
             HelixStorage::Reader(reader) => {
                 let observed = reader.status();
@@ -7225,17 +7239,20 @@ mod tests {
             .expect("explicit refresh succeeds");
         assert_eq!(passes(), before + 1, "a scope is repaired once per process");
 
-        drop(
-            plan(other_scope)
-                .await
-                .expect("another scope's first planning"),
-        );
+        let concurrent_first = futures::future::join_all((0..8).map(|_| plan(other_scope))).await;
+        for prepared in concurrent_first {
+            drop(prepared.expect("another scope's concurrent first planning"));
+        }
         drop(
             plan(other_scope)
                 .await
                 .expect("another scope's cached planning"),
         );
-        assert_eq!(passes(), before + 2, "each scope is repaired once");
+        assert_eq!(
+            passes(),
+            before + 2,
+            "concurrent first requests in a scope run one repair pass"
+        );
         db.close().await.expect("writer closes");
     }
 }
