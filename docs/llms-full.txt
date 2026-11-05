@@ -10362,6 +10362,7 @@ never need it.
 
 ```bash
 helix auth login [github | google | microsoft | sso | password]
+helix auth login [--provider <github|google|microsoft|sso>]
 helix auth status
 helix auth logout
 ```
@@ -10387,6 +10388,7 @@ helix auth logout
 | Flag | Description | Default |
 | --- | --- | --- |
 | `--json` | Print the result as JSON on stdout and never prompt. `status` prints `{"email":"...","workspaces":[{"id":"...","name":"..."}]}`. | Off |
+| `--provider <provider>` | Identity provider for browser sign-in (`github`, `google`, `microsoft`, `sso`). | None |
 
 ## Behavior
 
@@ -10420,6 +10422,7 @@ helix auth login
 
 # Sign in with a specific method
 helix auth login google
+helix auth login --provider google
 helix auth login sso --email you@company.com
 helix auth login password --email you@company.com
 
