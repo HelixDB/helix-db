@@ -746,16 +746,6 @@ struct LoadedRuntimeCatalog {
     observation: CatalogObservation,
 }
 
-/// Where a planning-catalog miss loads canonical records from.
-#[derive(Clone, Copy)]
-enum PlanningCatalogSource<'a> {
-    /// The writer loads from a fresh snapshot taken under the caller's
-    /// shared catalog permit.
-    Writer(&'a slatedb::Db),
-    /// A reader loads from the exact snapshot its request executes on.
-    Reader(&'a execution::interpreter::read_view::StableRequestReadView),
-}
-
 struct HelixRuntimeState {
     catalogs: HashMap<DataScope, LoadedRuntimeCatalog>,
     /// Writer scopes whose obsolete reader-coordination blockers this process
@@ -976,32 +966,21 @@ struct HelixDBInner {
 ///
 /// The weak runtime identity prevents a proof from keeping a database alive or
 /// being reused against a different handle. The scope prevents tenant mismatch.
-/// The permit keeps the catalog authoritative until a read finishes or a
+/// The permit keeps the exact read snapshot and catalog authoritative until a
 /// write opens its serializable snapshot and loads the mutation catalog.
 pub(crate) struct CatalogRefreshProof {
     runtime: Weak<HelixDBInner>,
     scope: DataScope,
     catalog_permit: index_lifecycle::IndexScopeCatalogPermit,
     catalog: Arc<index_lifecycle::LoadedV2ScopeCatalog>,
-    read_view: PreparedReadView,
-}
-
-/// The storage view a prepared request reads through.
-pub(crate) enum PreparedReadView {
-    /// Reader nodes have no catalog gate across processes, so the catalog was
-    /// loaded from this exact snapshot and execution must read it.
-    Opened(Box<execution::interpreter::read_view::StableRequestReadView>),
-    /// The writer opens its view only when a read starts; writes never need
-    /// one. The proof's shared catalog permit excludes every Active-set
-    /// change, so any snapshot taken while it is held matches the catalog.
-    OpenOnRead,
+    read_view: Box<execution::interpreter::read_view::StableRequestReadView>,
 }
 
 impl CatalogRefreshProof {
     fn into_read_parts(
         self,
     ) -> (
-        PreparedReadView,
+        Box<execution::interpreter::read_view::StableRequestReadView>,
         Arc<index_lifecycle::LoadedV2ScopeCatalog>,
         index_lifecycle::IndexScopeCatalogPermit,
     ) {
@@ -1009,17 +988,8 @@ impl CatalogRefreshProof {
     }
 
     fn into_write_permit(self) -> index_lifecycle::IndexScopeCatalogPermit {
-        match self.read_view {
-            PreparedReadView::Opened(view) => view.close(),
-            PreparedReadView::OpenOnRead => {}
-        }
+        (*self.read_view).close();
         self.catalog_permit
-    }
-
-    /// Returns how the request will read storage.
-    #[cfg(test)]
-    pub(crate) const fn read_view(&self) -> &PreparedReadView {
-        &self.read_view
     }
 }
 
@@ -2388,41 +2358,28 @@ impl HelixDB {
     /// Build a planner context coupled to proof of its runtime catalog view.
     ///
     /// The writer reuses its cached catalog while the scope's catalog version
-    /// is unchanged and opens no storage view here; reads open one when they
-    /// start. Readers reuse a catalog loaded at their snapshot's sequence.
+    /// is unchanged; readers reuse one loaded at their snapshot's sequence.
+    /// Either way the catalog matches the request's snapshot: the shared
+    /// permit excludes every writer Active-set change while it is held, and a
+    /// reader sequence fixes the canonical rows.
     pub(crate) async fn planner_context_scoped_prepared(
         &self,
         params: ParamBindings,
         tenant_scope: DataScope,
     ) -> Result<PreparedPlannerContext> {
         let catalog_permit = self.index_catalog_scope_permit(tenant_scope).await;
-        let (catalog, read_view) = match self.storage() {
-            HelixStorage::Writer(writer) => (
-                self.planning_catalog(
-                    tenant_scope,
-                    CatalogObservation::WriterVersion(catalog_permit.version()),
-                    PlanningCatalogSource::Writer(writer.db()),
-                )
-                .await?,
-                PreparedReadView::OpenOnRead,
+        let read_view =
+            execution::interpreter::read_view::StableRequestReadView::open(self).await?;
+        let observation = match self.storage() {
+            HelixStorage::Writer(_) => CatalogObservation::WriterVersion(catalog_permit.version()),
+            HelixStorage::Reader(_) => read_view.comparable_sequence().map_or(
+                CatalogObservation::Unverified,
+                CatalogObservation::ReaderSequence,
             ),
-            HelixStorage::Reader(_) => {
-                let view =
-                    execution::interpreter::read_view::StableRequestReadView::open(self).await?;
-                let observation = view.comparable_sequence().map_or(
-                    CatalogObservation::Unverified,
-                    CatalogObservation::ReaderSequence,
-                );
-                let catalog = self
-                    .planning_catalog(
-                        tenant_scope,
-                        observation,
-                        PlanningCatalogSource::Reader(&view),
-                    )
-                    .await?;
-                (catalog, PreparedReadView::Opened(Box::new(view)))
-            }
         };
+        let catalog = self
+            .planning_catalog(tenant_scope, observation, &read_view)
+            .await?;
         let indexes = catalog.runtime().planner_snapshot();
         Ok(PreparedPlannerContext {
             context: PlannerContext {
@@ -2440,7 +2397,7 @@ impl HelixDB {
                 scope: tenant_scope,
                 catalog_permit,
                 catalog,
-                read_view,
+                read_view: Box::new(read_view),
             },
         })
     }
@@ -2454,7 +2411,7 @@ impl HelixDB {
         &self,
         scope: DataScope,
         observation: CatalogObservation,
-        source: PlanningCatalogSource<'_>,
+        view: &execution::interpreter::read_view::StableRequestReadView,
     ) -> Result<Arc<index_lifecycle::LoadedV2ScopeCatalog>> {
         let reusable = || {
             self.inner
@@ -2470,17 +2427,14 @@ impl HelixDB {
                 .catalog_refresh_permit(scope)
                 .await;
             let Some(catalog) = reusable() else {
-                let loaded = match source {
-                    PlanningCatalogSource::Writer(db) => {
-                        self.repair_legacy_reader_blockers_once(db, scope).await?;
-                        let snapshot = db.snapshot().await?;
-                        index_lifecycle::repository::load_scope_catalog(snapshot.as_ref(), scope)
-                            .await?
+                match self.storage() {
+                    HelixStorage::Writer(writer) => {
+                        self.repair_legacy_reader_blockers_once(writer.db(), scope)
+                            .await?;
                     }
-                    PlanningCatalogSource::Reader(view) => {
-                        index_lifecycle::repository::load_scope_catalog(view, scope).await?
-                    }
-                };
+                    HelixStorage::Reader(_) => {}
+                }
+                let loaded = index_lifecycle::repository::load_scope_catalog(view, scope).await?;
                 return Ok(self
                     .inner
                     .runtime_state
@@ -2491,7 +2445,7 @@ impl HelixDB {
             return Ok(catalog);
         };
         #[cfg(test)]
-        self.assert_cached_catalog_is_current(scope, &catalog, source)
+        self.assert_cached_catalog_is_current(scope, &catalog, view)
             .await?;
         Ok(catalog)
     }
@@ -2505,17 +2459,9 @@ impl HelixDB {
         &self,
         scope: DataScope,
         cached: &index_lifecycle::LoadedV2ScopeCatalog,
-        source: PlanningCatalogSource<'_>,
+        view: &execution::interpreter::read_view::StableRequestReadView,
     ) -> Result<()> {
-        let fresh = match source {
-            PlanningCatalogSource::Writer(db) => {
-                let snapshot = db.snapshot().await?;
-                index_lifecycle::repository::load_scope_catalog(snapshot.as_ref(), scope).await?
-            }
-            PlanningCatalogSource::Reader(view) => {
-                index_lifecycle::repository::load_scope_catalog(view, scope).await?
-            }
-        };
+        let fresh = index_lifecycle::repository::load_scope_catalog(view, scope).await?;
         assert!(
             cached.same_active_handles(&fresh),
             "cached planning catalog for {scope:?} diverged from canonical storage"
@@ -6517,12 +6463,7 @@ mod tests {
         let scope = tenant_scope("0000000000000000000000000B");
         let plan = || db.planner_context_scoped_prepared(ParamBindings::default(), scope);
 
-        let first = plan().await.expect("first planning loads the scope");
-        assert!(
-            matches!(first.proof.read_view(), PreparedReadView::OpenOnRead),
-            "the writer opens no storage view while planning"
-        );
-        drop(first);
+        drop(plan().await.expect("first planning loads the scope"));
         let loaded = db.runtime_catalog_generation_for_tests(scope);
         for _ in 0..3 {
             drop(plan().await.expect("planning reuses the cached catalog"));
@@ -6649,49 +6590,64 @@ mod tests {
         db.close().await.expect("writer closes");
     }
 
-    /// The writer opens a read's storage view when the read starts, so a
-    /// write committed between planning and execution is visible.
+    /// Text activation publishes under the exclusive lifecycle permit like
+    /// every other family, so a cached catalog plans a text index as soon as
+    /// its build succeeds.
     #[tokio::test]
-    async fn writer_read_view_opens_when_the_read_starts() {
+    async fn cached_planning_catalog_follows_text_activation() {
         let db = HelixDB::open(HelixDbSource::InMemory {
-            database: "planning-deferred-read-view".to_string(),
+            database: "planning-catalog-text-activation".to_string(),
         })
         .await
         .expect("writer opens");
         db.wait_for_startup_cache_warm().await;
         let scope = DataScope::LegacyUnscoped;
-        let batch = read_batch()
-            .var_as("count", g().n(NodeRef::all()).count())
-            .returning(["count"]);
-        let prepared = db
-            .planner_context_scoped_prepared(ParamBindings::default(), scope)
+        let plans_text_index = |prepared: &PreparedPlannerContext| {
+            prepared
+                .proof
+                .catalog
+                .runtime()
+                .text_indexes()
+                .any(|index| index.label() == "Document" && index.property() == "body")
+        };
+        let plan = || db.planner_context_scoped_prepared(ParamBindings::default(), scope);
+        assert!(!plans_text_index(
+            &plan().await.expect("planning before create")
+        ));
+        let before = db
+            .inner
+            .index_scope_gates
+            .catalog_permit(scope)
             .await
-            .expect("read plans");
-        let plan = helix_planner::planning::plan_read_batch(&batch, prepared.context())
-            .expect("count plans");
+            .version();
 
-        db.query(QueryRequest::write(write_batch().var_as(
-            "created",
-            g().add_n("User", Vec::<(&str, PropertyInput)>::new()),
-        )))
-        .await
-        .expect("a write commits while the read holds its planning permit");
-
-        let (params, proof) = prepared.into_execution_inputs();
-        let result = db
-            .execute_prepared_scoped_controlled(
-                &plan,
-                params,
+        let create = accepted_operation(
+            db.enqueue_index_create(
                 scope,
-                execution_control::ExecutionControl::unlimited(),
-                proof,
-                helix_ast::query::SearchConsistency::Strong,
+                &ir::IndexDdlCreateSpec::NodeText {
+                    key: helix_planner::catalog::ScopedPropertyKey::try_new("Document", "body")
+                        .expect("valid index key"),
+                    scope: helix_planner::catalog::SearchIndexScope::Unscoped,
+                },
+                ir::IndexCreateMode::ErrorIfExists,
             )
             .await
-            .expect("prepared read executes");
-        let response = query_service::QueryResponse::from_execution_result(result)
-            .expect("count response converts");
-        assert_eq!(response.returns()["count"], 1);
+            .expect("text create is enqueued"),
+        );
+        wait_for_index_operation(&db, scope, create).await;
+        assert_ne!(
+            db.inner
+                .index_scope_gates
+                .catalog_permit(scope)
+                .await
+                .version(),
+            before,
+            "text activation advances the scope's catalog version"
+        );
+        assert!(
+            plans_text_index(&plan().await.expect("planning after activation")),
+            "a cached catalog plans the activated text index"
+        );
         db.close().await.expect("writer closes");
     }
 
@@ -6718,11 +6674,12 @@ mod tests {
         .expect("reader opens");
         let scope = DataScope::LegacyUnscoped;
         let plan = || reader.planner_context_scoped_prepared(ParamBindings::default(), scope);
-        let sequence = |prepared: &PreparedPlannerContext| match prepared.proof.read_view() {
-            PreparedReadView::Opened(view) => view
+        let sequence = |prepared: &PreparedPlannerContext| {
+            prepared
+                .proof
+                .read_view
                 .comparable_sequence()
-                .expect("reader views are sequenced"),
-            PreparedReadView::OpenOnRead => panic!("a reader plans on the snapshot it executes"),
+                .expect("reader views are sequenced")
         };
 
         tokio::time::timeout(Duration::from_secs(10), async {

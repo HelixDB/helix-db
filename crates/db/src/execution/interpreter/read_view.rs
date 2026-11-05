@@ -31,8 +31,7 @@ pub(in crate::execution::interpreter) struct ReadScope {
 
 /// Catalog authority that cannot be detached from its matching storage snapshot.
 pub(in crate::execution::interpreter) enum ActiveRequestReadView {
-    /// Execution reads a view whose Active set matches the planning catalog,
-    /// because lifecycle publication stays excluded until the read ends.
+    /// Planning and execution share one view while lifecycle publication is excluded.
     Prepared {
         view: StableRequestReadView,
         catalog: Arc<crate::index_lifecycle::LoadedV2ScopeCatalog>,
@@ -300,16 +299,8 @@ impl<'db> ExecutionContext<'db> {
         let active = match pending {
             runtime_context::PendingCatalogFreshness::Prepared(proof) => {
                 let (view, catalog, catalog_permit) = proof.into_read_parts();
-                // The writer's view opens now, while the proof's shared
-                // catalog permit still excludes every Active-set change.
-                let view = match view {
-                    crate::PreparedReadView::Opened(view) => *view,
-                    crate::PreparedReadView::OpenOnRead => {
-                        StableRequestReadView::open(self.db).await?
-                    }
-                };
                 ActiveRequestReadView::Prepared {
-                    view,
+                    view: *view,
                     catalog,
                     _catalog_permit: Arc::new(catalog_permit),
                 }
