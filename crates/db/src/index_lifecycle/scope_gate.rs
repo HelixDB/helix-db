@@ -41,7 +41,7 @@ pub(crate) struct IndexScopeMutationPermit {
 /// change while any shared [`IndexScopeCatalogPermit`] is held. So a catalog
 /// loaded under a shared permit at version `v` is still exact for any later
 /// request that observes `v` under its own shared permit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct CatalogVersion(u64);
 
 /// Advances one scope's catalog version when dropped.
@@ -199,6 +199,16 @@ impl IndexScopeGates {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&target)
+            .map_or(0, Weak::strong_count)
+    }
+
+    /// Returns how many tasks hold or await `scope`'s catalog gate.
+    #[cfg(test)]
+    pub(crate) fn catalog_permit_holders(&self, scope: DataScope) -> usize {
+        self.catalogs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&scope)
             .map_or(0, Weak::strong_count)
     }
 

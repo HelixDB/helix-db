@@ -740,6 +740,18 @@ enum CatalogObservation {
     Unverified,
 }
 
+impl CatalogObservation {
+    /// Returns whether `self` was loaded from strictly newer canonical rows
+    /// than `other`. Different kinds and unverified loads are not ordered.
+    fn supersedes(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::WriterVersion(newer), Self::WriterVersion(older)) => newer > older,
+            (Self::ReaderSequence(newer), Self::ReaderSequence(older)) => newer > older,
+            _ => false,
+        }
+    }
+}
+
 struct LoadedRuntimeCatalog {
     catalog: Arc<index_lifecycle::LoadedV2ScopeCatalog>,
     generation: CatalogGeneration,
@@ -807,6 +819,29 @@ impl HelixRuntimeState {
             },
         );
         catalog
+    }
+
+    /// Publishes a planning load unless the cached catalog came from strictly
+    /// newer canonical rows, and returns the load either way.
+    ///
+    /// A reader request on an older snapshot can miss after a request on a
+    /// newer one has published. Execution reads index definitions from the
+    /// published catalog, so overwriting it would hide indexes the newer
+    /// request already planned.
+    fn publish_planning_catalog(
+        &mut self,
+        scope: DataScope,
+        catalog: index_lifecycle::LoadedV2ScopeCatalog,
+        observation: CatalogObservation,
+    ) -> Arc<index_lifecycle::LoadedV2ScopeCatalog> {
+        let cached_is_newer = self
+            .catalogs
+            .get(&scope)
+            .is_some_and(|loaded| loaded.observation.supersedes(observation));
+        if cached_is_newer {
+            return Arc::new(catalog);
+        }
+        self.replace_catalog(scope, catalog, observation)
     }
 
     /// Returns the cached catalog when it was loaded against `observation`.
@@ -2190,27 +2225,48 @@ impl HelixDB {
                 actual: self.mode().as_str(),
             });
         };
-        let _catalog_permit = self
-            .inner
-            .index_scope_gates
-            .catalog_change_permit(scope)
-            .await;
-        let Some(record) =
-            index_lifecycle::repository::load_index_record(writer.db(), scope, &identity).await?
-        else {
-            return Err(HelixDbError::IndexNotFound(format!("{identity:?}")));
+        // The exclusive permit must stay held until the drop's commit
+        // resolves. If the caller is cancelled mid-commit, SlateDB still
+        // applies the batch; releasing the gate first would let a planner
+        // cache the pre-drop catalog under the version this release advances.
+        // So a spawned task owns the permit and runs whether or not the
+        // caller keeps waiting.
+        let drop_task = {
+            let writer = Arc::clone(writer);
+            let gates = Arc::clone(&self.inner.index_scope_gates);
+            let spec = spec.clone();
+            let execution_control = execution_control.clone();
+            tokio::spawn(async move {
+                let _catalog_permit = gates.catalog_change_permit(scope).await;
+                let Some(record) =
+                    index_lifecycle::repository::load_index_record(writer.db(), scope, &identity)
+                        .await?
+                else {
+                    return Err(HelixDbError::IndexNotFound(format!("{identity:?}")));
+                };
+                let definition =
+                    runtime_catalog::dynamic_index_definition_from_canonical_drop_spec(
+                        &spec,
+                        record.definition(),
+                    )?;
+                index_lifecycle::lifecycle::drop_index_operation_with_control(
+                    writer.db(),
+                    scope,
+                    &definition,
+                    &execution_control,
+                )
+                .await
+            })
         };
-        let definition = runtime_catalog::dynamic_index_definition_from_canonical_drop_spec(
-            spec,
-            record.definition(),
-        )?;
-        let receipt = index_lifecycle::lifecycle::drop_index_operation_with_control(
-            writer.db(),
-            scope,
-            &definition,
-            execution_control,
-        )
-        .await?;
+        let receipt = match drop_task.await {
+            Ok(receipt) => receipt?,
+            Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+            Err(join) => {
+                return Err(HelixDbError::InvariantViolation(format!(
+                    "index drop task stopped before finishing: {join}"
+                )));
+            }
+        };
         self.notify_index_worker();
         Ok(receipt)
     }
@@ -2440,7 +2496,7 @@ impl HelixDB {
                     .runtime_state
                     .write()
                     .expect("runtime state lock is not poisoned")
-                    .replace_catalog(scope, loaded, observation));
+                    .publish_planning_catalog(scope, loaded, observation));
             };
             return Ok(catalog);
         };
@@ -5714,6 +5770,47 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    /// A planning load from older canonical rows never replaces a newer
+    /// cached load, but still serves the request that made it.
+    #[test]
+    fn planning_publication_never_replaces_a_newer_observation() {
+        let scope = tenant_scope("0000000000000000000000000F");
+        let mut state = HelixRuntimeState::new(
+            DataScope::LegacyUnscoped,
+            index_lifecycle::LoadedV2ScopeCatalog::new(DataScope::LegacyUnscoped),
+        );
+        let catalog = || index_lifecycle::LoadedV2ScopeCatalog::new(scope);
+        let newer = CatalogObservation::ReaderSequence(12);
+        let older = CatalogObservation::ReaderSequence(10);
+
+        let published = state.publish_planning_catalog(scope, catalog(), newer);
+        let generation = state.generation(scope);
+        let unpublished = state.publish_planning_catalog(scope, catalog(), older);
+        assert!(!Arc::ptr_eq(&published, &unpublished));
+        assert_eq!(
+            state.generation(scope),
+            generation,
+            "the older load is not cached"
+        );
+        assert!(state.reusable_catalog(scope, newer).is_some());
+        assert!(state.reusable_catalog(scope, older).is_none());
+
+        state.publish_planning_catalog(scope, catalog(), newer);
+        assert_eq!(
+            state.generation(scope),
+            generation.next(),
+            "an equal observation replaces the cached load"
+        );
+        state.replace_catalog(scope, catalog(), CatalogObservation::Unverified);
+        state.publish_planning_catalog(scope, catalog(), older);
+        assert!(
+            state.reusable_catalog(scope, older).is_some(),
+            "an unverified load is never newer than a planning load"
+        );
+        assert!(!CatalogObservation::Unverified.supersedes(older));
+        assert!(!older.supersedes(CatalogObservation::Unverified));
+    }
+
     #[test]
     fn runtime_state_tracks_loaded_catalogs_per_scope() {
         let scope = tenant_scope("0000000000000000000000000A");
@@ -6588,6 +6685,88 @@ mod tests {
             &plan().await.expect("planning after drop cleanup")
         ));
         db.close().await.expect("writer closes");
+    }
+
+    /// A DROP keeps its exclusive permit until its commit resolves, even when
+    /// its caller is cancelled, so no planner can cache the pre-drop catalog
+    /// under the version that release advances.
+    #[tokio::test]
+    async fn cancelled_drop_still_finishes_before_releasing_planning() {
+        let db = Arc::new(
+            HelixDB::open(HelixDbSource::InMemory {
+                database: "planning-catalog-cancelled-drop".to_string(),
+            })
+            .await
+            .expect("writer opens"),
+        );
+        db.wait_for_startup_cache_warm().await;
+        let scope = DataScope::LegacyUnscoped;
+        let key = helix_planner::catalog::ScopedPropertyKey::try_new("User", "email")
+            .expect("valid index key");
+        let create = accepted_operation(
+            db.enqueue_index_create(
+                scope,
+                &ir::IndexDdlCreateSpec::NodeEquality {
+                    key: key.clone(),
+                    uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
+                },
+                ir::IndexCreateMode::ErrorIfExists,
+            )
+            .await
+            .expect("create is enqueued"),
+        );
+        wait_for_index_operation(&db, scope, create).await;
+        let plan = || db.planner_context_scoped_prepared(ParamBindings::default(), scope);
+        assert!(plans_user_email_index(
+            &plan().await.expect("planning after activation")
+        ));
+
+        let planning = db.inner.index_scope_gates.catalog_permit(scope).await;
+        let caller = {
+            let db = Arc::clone(&db);
+            tokio::spawn(async move {
+                db.enqueue_index_drop(
+                    scope,
+                    &ir::IndexDdlDropSpec::NodeEquality {
+                        key,
+                        uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
+                    },
+                )
+                .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while db.inner.index_scope_gates.catalog_permit_holders(scope) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the drop queues behind the planning permit");
+        caller.abort();
+        assert!(
+            caller
+                .await
+                .expect_err("the caller was cancelled")
+                .is_cancelled(),
+            "the caller stops waiting"
+        );
+        drop(planning);
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while plans_user_email_index(&plan().await.expect("planning during the drop")) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cancelled caller's drop still commits and invalidates planning");
+        assert!(!plans_user_email_index(
+            &plan().await.expect("cached planning after the drop")
+        ));
+        Arc::try_unwrap(db)
+            .unwrap_or_else(|_| panic!("test owns the only database handle"))
+            .close()
+            .await
+            .expect("writer closes");
     }
 
     /// Text activation publishes under the exclusive lifecycle permit like
