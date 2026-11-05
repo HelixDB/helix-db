@@ -35,6 +35,10 @@
       "description": "Execute or explain the supported Cypher profile on a local HelixDB server or a Helix Cloud gateway."
     },
     {
+      "name": "SQL",
+      "description": "Execute SQL statements on a local HelixDB server by translating them to the supported Cypher profile."
+    },
+    {
       "name": "Health",
       "description": "Inspect process liveness and database readiness."
     }
@@ -714,6 +718,138 @@
             }
           }
         ]
+      }
+    },
+    "/v2/sql": {
+      "post": {
+        "operationId": "executeSql",
+        "summary": "Execute a SQL statement",
+        "description": "Translates one SQL statement to the supported Cypher profile and executes it exactly like POST /v2/cypher: the same read/write routing, request headers, results, lossless values, and error body. SELECT becomes MATCH and RETURN, INSERT becomes CREATE, UPDATE becomes SET, and DELETE and TRUNCATE delete. Tables map to node labels and joins to relationships by syntax alone; `mappings` renames tables and join columns. `?` placeholders bind to `parameters` given as a list, in written order; `:name` and `$name` bind to an object. Translation errors use the Cypher error body with a span in the SQL text. Served by local servers; request bodies up to 16 MiB.",
+        "tags": [
+          "SQL"
+        ],
+        "x-helix-request-body-limits": {
+          "localBytes": 16777216
+        },
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WarmOnly"
+          },
+          {
+            "$ref": "#/components/parameters/RequireWriter"
+          },
+          {
+            "$ref": "#/components/parameters/AwaitDurable"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SqlRequest"
+              },
+              "examples": {
+                "read": {
+                  "summary": "Join through a relationship table",
+                  "value": {
+                    "query": "SELECT p.name, m.title FROM Person p JOIN ACTED_IN r ON r.person_id = p.id JOIN Movie m ON m.id = r.movie_id WHERE p.born > ?",
+                    "parameters": [
+                      1950
+                    ]
+                  }
+                },
+                "write": {
+                  "summary": "Insert rows with table mappings",
+                  "value": {
+                    "query": "INSERT INTO people (name, born) VALUES (:name, :born)",
+                    "parameters": {
+                      "name": "Ada",
+                      "born": 1815
+                    },
+                    "mappings": {
+                      "tables": {
+                        "people": "Person"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Statement translated and executed successfully, including writes without RETURNING.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, invalid request options, a SQL statement outside the translation, or a classified Cypher compile/runtime error of the translated statement. The 16 MiB body limit returns invalid_request_body with this status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The statement reached a missing index.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A storage transaction conflict (`transaction_conflict`, `retryable: true`) or a conflict with the database's state, such as `unique_constraint_violation` (`retryable: false`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Cypher resource limit exceeded (inspect details.detail), Helix Cloud rate limit exceeded, or index_backpressure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal planner, storage, execution-control, or serialization failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Writer required, server access mode unavailable, or uncertain write commit. A local uncertain outcome carries retryable:false; Helix Cloud reports one as write_outcome_unknown with retryable:false, like native queries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -1969,6 +2105,70 @@
           }
         },
         "description": "Read-only planning response. Explaining a modifying statement does not execute it. Planner internals may evolve independently of the stable columns/rows execution response."
+      },
+      "SqlRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "One SQL statement: SELECT, INSERT, UPDATE, DELETE or TRUNCATE. Statements outside the translation return a classified query error."
+          },
+          "parameters": {
+            "description": "Values for `?` placeholders as a list in written order (the first binds `$1`), or named values for `:name` and `$name` placeholders.",
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CypherParameterValue"
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/CypherParameterValue"
+                }
+              }
+            ],
+            "default": {}
+          },
+          "query_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional caller-supplied query name."
+          },
+          "mappings": {
+            "$ref": "#/components/schemas/SqlMappings"
+          }
+        }
+      },
+      "SqlMappings": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "How SQL names map onto the graph; keys match case-insensitively.",
+        "properties": {
+          "tables": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Table name to node label, or to relationship type for the middle table of a join.",
+            "default": {}
+          },
+          "join_columns": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "`table.column` of a join condition to relationship type; the table is the join's left table.",
+            "default": {}
+          }
+        }
       }
     }
   }

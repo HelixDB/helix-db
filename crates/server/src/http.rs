@@ -39,7 +39,8 @@ pub async fn serve(
 
 pub(crate) fn router(state: ServerState) -> Router {
     // Paths stay literal: docs/scripts/check-openapi.mjs reads them from this
-    // file. The Cypher paths equal `helix_cypher::api::{HTTP_PATH, HTTP_EXPLAIN_PATH}`.
+    // file. The Cypher and SQL paths equal
+    // `helix_cypher::api::{HTTP_PATH, HTTP_EXPLAIN_PATH, HTTP_SQL_PATH}`.
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -47,6 +48,7 @@ pub(crate) fn router(state: ServerState) -> Router {
         .route("/v2/query", post(execute_query))
         .route("/v2/cypher", post(execute_cypher))
         .route("/v2/cypher/explain", post(explain_cypher))
+        .route("/v2/sql", post(execute_sql))
         .with_state(state)
 }
 
@@ -143,14 +145,15 @@ async fn read_body(body: Body) -> Result<Bytes, Box<Response>> {
     })
 }
 
-async fn read_cypher_request(
+/// Read the options and JSON body of a Cypher or SQL request.
+async fn read_json_request<T: serde::de::DeserializeOwned>(
     headers: &HeaderMap,
     body: Body,
-) -> Result<(RequestOptions, db::cypher::Request), Box<Response>> {
+) -> Result<(RequestOptions, T), Box<Response>> {
     let options =
         RequestOptions::from_headers(headers).map_err(|error| Box::new(error.into_response()))?;
     let bytes = read_body(body).await?;
-    let request = serde_json::from_slice::<db::cypher::Request>(&bytes).map_err(|error| {
+    let request = serde_json::from_slice::<T>(&bytes).map_err(|error| {
         Box::new(error_response(
             error_code::QueryErrorCode::InvalidQueryJson,
             error.to_string(),
@@ -164,7 +167,7 @@ async fn explain_cypher(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let (options, request) = match read_cypher_request(&headers, body).await {
+    let (options, request) = match read_json_request::<db::cypher::Request>(&headers, body).await {
         Ok(request) => request,
         Err(response) => return *response,
     };
@@ -191,14 +194,35 @@ async fn execute_cypher(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let (options, request) = match read_cypher_request(&headers, body).await {
+    let (options, request) = match read_json_request::<db::cypher::Request>(&headers, body).await {
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let request = match request.compile() {
-        Ok(request) => request,
-        Err(error) => return cypher_error_response(error.into()),
-    };
+    match request.compile() {
+        Ok(request) => execute_compiled(&state, &options, request).await,
+        Err(error) => cypher_error_response(error.into()),
+    }
+}
+
+/// `POST /v2/sql`: translate one SQL statement to Cypher, then route and
+/// execute it exactly like `POST /v2/cypher`.
+async fn execute_sql(State(state): State<ServerState>, headers: HeaderMap, body: Body) -> Response {
+    let (options, request) =
+        match read_json_request::<helix_cypher::sql::request::Request>(&headers, body).await {
+            Ok(request) => request,
+            Err(response) => return *response,
+        };
+    match request.compile() {
+        Ok(request) => execute_compiled(&state, &options, request).await,
+        Err(error) => cypher_error_response(error.into()),
+    }
+}
+
+async fn execute_compiled(
+    state: &ServerState,
+    options: &RequestOptions,
+    request: db::cypher::CompiledRequest,
+) -> Response {
     if let Err(error) = options.validate_for_request_type(request.request_type(), state.db_mode()) {
         return error.into_response();
     }

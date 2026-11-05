@@ -264,6 +264,24 @@ budget warnings. This endpoint returns planning data separately from query
 results and does not execute the statement, including writes. It uses read
 request options, so `X-Helix-Await-Durable:true` is invalid.
 
+## SQL
+
+A local server also accepts one SQL statement at `POST /v2/sql`. It translates
+the statement to Cypher and runs it as `POST /v2/cypher` would, with the same
+execution headers, results, and error body. The body adds optional `mappings`,
+and `parameters` may be a list that binds `?` placeholders in written order:
+
+```json
+{
+  "query": "SELECT p.name FROM people p WHERE p.born > ?",
+  "parameters": [1900],
+  "mappings": { "tables": { "people": "Person" } }
+}
+```
+
+The [SQL guide](/database/helix-db/query-guides/sql) describes how tables, columns
+and joins translate, and which SQL is rejected.
+
 ## Next steps
 
 - [`helix query`](/cli/command-reference/query) builds and sends requests from JSON or the TypeScript DSL.

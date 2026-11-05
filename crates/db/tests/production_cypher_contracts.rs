@@ -87,6 +87,9 @@ mod graph_mutations;
 #[path = "cypher/production_paths_matching.rs"]
 mod production_paths_matching;
 
+#[path = "cypher/sql.rs"]
+mod sql;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;

@@ -1,0 +1,898 @@
+# SQL → Cypher translations, ported from neo4j-jdbc's translator tests
+# (neo4j-jdbc-translator/impl/src/test, Apache-2.0) and extended.
+#
+# Each block: `#` comments, optional `-- tables: a=B, c=D` and
+# `-- joins: t.col=TYPE` mappings, the SQL, then `=>` and either the expected
+# Cypher or `error: <category> <detail>`. Expected Cypher compares after
+# parsing and printing, so spacing and redundant parentheses do not matter.
+# A trailing `!! <category> <detail>` expects HelixDB to reject the translated
+# Cypher when it compiles; otherwise it must compile.
+# `divergence:` comments mark where HelixDB's translation differs from
+# neo4j-jdbc's and why. Throughout, SUM(x) becomes
+# `CASE count(x) WHEN 0 THEN NULL ELSE sum(x) END`: SQL's SUM of no values is
+# null, Cypher's sum is 0. A window (ORDER BY with SKIP or LIMIT) without
+# DISTINCT or grouping applies to the table variables in a WITH before RETURN
+# reads columns, so HelixDB can stop a scan at the LIMIT.
+
+# simple.adoc t1_1
+SELECT 1
+=> RETURN 1
+
+# simple.adoc t1_0
+SELECT t.a, t.b
+FROM My_Table -- comment
+  AS t
+WHERE t.a = 1
+=> MATCH (t:My_Table) WHERE t.a = 1 RETURN t.a, t.b
+
+# simple.adoc star_1
+SELECT m.title FROM Movie m
+=> MATCH (m:Movie) RETURN m.title
+
+# simple.adoc star_2
+SELECT title FROM Movie
+=> MATCH (movie:Movie) RETURN movie.title AS title
+
+# simple.adoc star_3
+SELECT title AS title FROM Movie
+=> MATCH (movie:Movie) RETURN movie.title AS title
+
+# simple.adoc star_5
+SELECT * FROM Person p
+=> MATCH (p:Person) RETURN *
+
+# simple.adoc star_6b, without metadata
+SELECT * FROM Person p ORDER BY name ASC
+=> MATCH (p:Person) RETURN * ORDER BY p.name
+
+# simple.adoc star_4
+# divergence: `m{.*}` map projections are outside HelixDB's Cypher profile;
+# properties(m) returns the same map.
+SELECT m.*, p.*
+FROM Person p
+JOIN Movie m ON m.id = p.acted_in
+=> MATCH (p:Person)-[acted_in:ACTED_IN]->(m:Movie) RETURN properties(m) AS m, properties(p) AS p
+
+# simple.adoc star_n
+SELECT m FROM Movie m
+=> MATCH (m:Movie) RETURN m
+
+# simple.adoc star_n2
+SELECT m AS node FROM Movie m
+=> MATCH (m:Movie) RETURN m AS node
+
+# simple.adoc star_n3
+SELECT movie FROM Movie
+=> MATCH (movie:Movie) RETURN movie
+
+# simple.adoc star_10
+SELECT p, r, m FROM Person p
+JOIN ACTED_IN r ON r.person_id = p.id
+JOIN Movie m ON m.id = r.movie_id
+=> MATCH (p:Person)-[r:ACTED_IN]->(m:Movie) RETURN p, r, m
+
+# simple.adoc t2_0
+-- tables: products=Product
+SELECT p.*
+FROM products as p
+=> MATCH (p:Product) RETURN properties(p) AS p
+
+# simple.adoc t2_0a
+-- tables: products=Product
+SELECT p
+FROM products as p
+=> MATCH (p:Product) RETURN p
+
+# simple.adoc t2_1
+-- tables: products=Product
+SELECT p.`productName`, p.`unitPrice`
+FROM products as p
+ORDER BY p.`unitPrice` DESC
+LIMIT 10
+=> MATCH (p:Product) WITH p ORDER BY p.unitPrice DESC LIMIT 10 RETURN p.productName, p.unitPrice
+
+# simple.adoc offset_queries
+SELECT name, age FROM People p ORDER BY name LIMIT 5 OFFSET 10
+=> MATCH (p:People) WITH p ORDER BY p.name SKIP 10 LIMIT 5 RETURN p.name AS name, p.age AS age
+
+# simple.adoc offset_queries
+SELECT name FROM People p ORDER BY name LIMIT 3 OFFSET 0
+=> MATCH (p:People) WITH p ORDER BY p.name SKIP 0 LIMIT 3 RETURN p.name AS name
+
+# simple.adoc offset_queries
+SELECT department, count(*) AS cnt FROM People p GROUP BY department ORDER BY department LIMIT 2 OFFSET 1
+=> MATCH (p:People) RETURN p.department AS department, count(*) AS cnt ORDER BY p.department SKIP 1 LIMIT 2
+
+# simple.adoc t2_2
+SELECT * FROM Movies m ORDER BY m.title
+=> MATCH (m:Movies) RETURN * ORDER BY m.title
+
+# simple.adoc t3_1
+SELECT DISTINCT m.released FROM Movies m
+=> MATCH (m:Movies) RETURN DISTINCT m.released
+
+# simple.adoc t3_2
+SELECT DISTINCT m.* FROM Movies m
+=> MATCH (m:Movies) RETURN DISTINCT properties(m) AS m
+
+# joins.adoc nj1
+SELECT p, m FROM Person p
+NATURAL JOIN Movie m
+=> MATCH (p:Person)-->(m:Movie) RETURN p, m
+
+# joins.adoc nj2, without metadata
+SELECT p.name, r.roles, m.* FROM Person p
+NATURAL JOIN ACTED_IN r
+NATURAL JOIN Movie m
+=> MATCH (p:Person)-[r:ACTED_IN]->(m:Movie) RETURN p.name, r.roles, properties(m) AS m
+
+# joins.adoc r1_1
+-- tables: people=Person, movies=Movie
+SELECT p.name, m.title
+FROM people p
+JOIN movies m ON m.id = p.directed
+=> MATCH (p:Person)-[directed:DIRECTED]->(m:Movie) RETURN p.name, m.title
+
+# joins.adoc r1_1b
+-- tables: people=Person, movies=Movie
+-- joins: people.movie_id=DIRECTED
+SELECT p.name, m.title
+FROM people p
+JOIN movies m ON m.id = p.movie_id
+=> MATCH (p:Person)-[directed:DIRECTED]->(m:Movie) RETURN p.name, m.title
+
+# joins.adoc r1_0
+SELECT p.name, m.title
+FROM `Person` as p
+JOIN `Movie` as m ON (m.id = p.`DIRECTED`)
+=> MATCH (p:Person)-[directed:DIRECTED]->(m:Movie) RETURN p.name, m.title
+
+# joins.adoc r2_0
+-- tables: people=Person, movies=Movie, movie_actors=ACTED_IN
+SELECT p.name, m.title
+FROM people p
+JOIN movie_actors r ON r.person_id = p.id
+JOIN movies m ON m.id = r.person_id
+=> MATCH (p:Person)-[r:ACTED_IN]->(m:Movie) RETURN p.name, m.title
+
+# joins.adoc r2_1
+-- tables: people=Person, movies=Movie, movie_actors=ACTED_IN, movie_directors=DIRECTED
+SELECT p.name AS actor, d.name AS director, m.title
+FROM people p
+ JOIN movie_actors r ON r.person_id = p.id
+ JOIN movies m ON m.id = r.person_id
+ JOIN movie_directors r2 ON r2.movie_id = m.id
+ JOIN people d ON r2.person_id = d.id
+=> MATCH (p:`Person`)-[r:`ACTED_IN`]->(m:`Movie`)<-[r2:`DIRECTED`]-(d:`Person`)
+RETURN p.name AS actor, d.name AS director, m.title
+
+# SqlToCypherTests joinsUsing
+SELECT p, m FROM Person p
+JOIN Movie m USING (ACTED_IN)
+=> MATCH (p:Person)-[acted_in:ACTED_IN]->(m:Movie) RETURN p, m
+
+# SqlToCypherTests naturalJoins
+SELECT p, c FROM Person p
+NATURAL JOIN ACTED_IN r
+NATURAL JOIN Movie m
+NATURAL JOIN PLAYED_IN
+NATURAL JOIN Cinema c
+=> MATCH (p:Person)-[r:ACTED_IN]->(m:Movie)-[played_in:PLAYED_IN]->(c:Cinema) RETURN p, c
+
+# SqlToCypherTests naturalAndUsingJoins
+SELECT p, r, m FROM Person p
+NATURAL JOIN ACTED_IN r
+JOIN Movie m USING (MOVIE_ID)
+=> MATCH (p:Person)-[r:ACTED_IN]->(m:Movie) RETURN p, r, m
+
+# SqlToCypherTests naturalAndOnJoins
+SELECT p, r, m FROM Person p
+NATURAL JOIN ACTED_IN r
+JOIN Movie m ON (m.id = r.movie_id)
+=> MATCH (p:Person)-[r:ACTED_IN]->(m:Movie) RETURN p, r, m
+
+# SqlToCypherTests inClauseWithConstantsJoin
+SELECT * FROM Movie NATURAL JOIN HAS NATURAL JOIN Genre
+WHERE genre.name IN ('action comedy film', 'romcom')
+=> MATCH (movie:Movie)-[has:HAS]->(genre:Genre) WHERE genre.name IN ['action comedy film', 'romcom'] RETURN *
+
+# SqlToCypherTests plainColumnsEverywhere, without metadata
+# divergence: without a schema an unqualified column of a join is ambiguous.
+SELECT title, released from Movie NATURAL JOIN HAS NATURAL JOIN Genre where name IN ('action film') order by title
+=> error: syntax_error ambiguous_column
+
+# grouping.adoc: a direct join whose second column is on the right table points left
+SELECT c.name, count(*) FROM Customers c JOIN Orders o ON c.id = o.customer_id GROUP BY c.name
+=> MATCH (c:Customers)<-[customer_id:CUSTOMER_ID]-(o:Orders) RETURN c.name, count(*)
+
+# SqlToCypherTests directCompare blog: join column mapping keyed by the left table
+-- tables: Customers=Customer, Orders=Order
+-- joins: Orders.CustomerID=PURCHASED
+SELECT o.OrderID, c.Country
+FROM Orders o
+INNER JOIN Customers c ON o.CustomerID = c.CustomerID
+=> MATCH (o:Order)<-[purchased:PURCHASED]-(c:Customer) RETURN o.OrderID, c.Country
+
+# SqlToCypherTests directCompare blog
+-- tables: Customers=Customer, Orders=Order
+-- joins: Orders.CustomerID=PURCHASED
+SELECT c.City, COUNT(*)
+FROM Orders o
+INNER JOIN Customers c ON o.CustomerID = c.CustomerID
+GROUP BY c.City
+=> MATCH (o:Order)<-[purchased:PURCHASED]-(c:Customer) RETURN c.City, count(*)
+
+# SqlToCypherTests directCompare blog
+-- tables: Customers=Customer
+SELECT * FROM Customers
+=> MATCH (customers:Customer) RETURN *
+
+# SqlToCypherTests directCompare blog
+-- tables: Customers=Customer, Orders=Order
+SELECT COUNT(o) FROM Orders o
+=> MATCH (o:Order) RETURN count(o)
+
+# SqlToCypherTests directCompare blog
+-- tables: Customers=Customer
+SELECT TOP 25 Country
+FROM Customers
+ORDER BY Country, ContactName
+=> MATCH (customers:Customer) WITH customers ORDER BY customers.Country, customers.ContactName LIMIT 25 RETURN customers.Country AS Country
+
+# SqlToCypherTests directCompare blog
+-- tables: Customers=Customer
+SELECT TOP 25 c
+FROM Customers c
+ORDER BY Country, ContactName
+=> MATCH (c:Customer) WITH c ORDER BY c.Country, c.ContactName LIMIT 25 RETURN c
+
+# SqlToCypherTests directCompare blog
+-- tables: Customers=Customer
+INSERT INTO Customers (CustomerID, CompanyName, Country) VALUES ('ILYA1', 'Acme Corp', 'USA')
+=> CREATE (customers:Customer {CustomerID: 'ILYA1', CompanyName: 'Acme Corp', Country: 'USA'})
+
+# SqlToCypherTests directCompare blog
+-- tables: Customers=Customer
+UPDATE Customers SET Phone = '000-4321' WHERE CustomerID = 'ILYA'
+=> MATCH (customers:Customer) WHERE customers.CustomerID = 'ILYA' SET customers.Phone = '000-4321'
+
+# SqlToCypherTests simpleUpdateShouldWork
+UPDATE Actor a SET name = 'Foo' WHERE id(a) = 4711
+=> MATCH (a:Actor) WHERE id(a) = 4711 SET a.name = 'Foo'
+
+# predicates.adoc p1_0
+SELECT 1 FROM p WHERE 1 = 1 AND 2 = 2 OR 3 = 3
+=> MATCH (p:p) WHERE ((1 = 1 AND 2 = 2) OR 3 = 3) RETURN 1
+
+# predicates.adoc p1_1
+# divergence: sqlparser binds XOR tighter than `=` and NOT, unlike MySQL and
+# jOOQ, so an unparenthesized XOR operand is rejected rather than misread.
+SELECT 1 FROM p WHERE NOT 1 = 1 XOR 2 = 2
+=> error: unsupported_feature sql_construct
+
+# predicates.adoc p1_1, parenthesized
+SELECT 1 FROM p WHERE (NOT 1 = 1) XOR (2 = 2)
+=> MATCH (p:p) WHERE (NOT (1 = 1) XOR 2 = 2) RETURN 1
+
+# predicates.adoc p2_0
+SELECT 1 FROM p WHERE 1 = 1 AND 2 > 1 AND 1 < 2 AND 1 <= 2 AND 2 >= 1 AND 1 != 2
+=> MATCH (p:p) WHERE (1 = 1 AND 2 > 1 AND 1 < 2 AND 1 <= 2 AND 2 >= 1 AND 1 <> 2) RETURN 1
+
+# predicates.adoc p2_1
+SELECT 1 FROM p WHERE 2 BETWEEN 1 AND 3
+=> MATCH (p:p) WHERE (1 <= 2) AND (2 <= 3) RETURN 1
+
+# predicates.adoc p2_1, negated
+SELECT 1 FROM p WHERE 2 NOT BETWEEN 1 AND 3
+=> MATCH (p:p) WHERE NOT ((1 <= 2) AND (2 <= 3)) RETURN 1
+
+# predicates.adoc p1_2
+# divergence: `(a, b) <> (c, d)` holds when any field differs (OR), as in SQL;
+# neo4j-jdbc requires every field to differ.
+SELECT 1
+FROM p
+WHERE (1, 2) = (3, 4)
+OR (1, 2) < (3, 4)
+OR (1, 2) <= (3, 4)
+OR (1, 2, 3) <> (4, 5, 6)
+OR (1, 2, 3) > (4, 5, 6)
+OR (1, 2, 3) >= (4, 5, 6)
+=> MATCH (p:p)
+WHERE 1 = 3 AND 2 = 4
+OR (1 < 3 OR 1 = 3 AND 2 < 4)
+OR (1 < 3 OR 1 = 3 AND 2 <= 4)
+OR (1 <> 4 OR 2 <> 5 OR 3 <> 6)
+OR (1 > 4 OR 1 = 4 AND (2 > 5 OR 2 = 5 AND 3 > 6))
+OR (1 > 4 OR 1 = 4 AND (2 > 5 OR 2 = 5 AND 3 >= 6))
+RETURN 1
+
+# predicates.adoc p3_0
+SELECT 1 FROM p WHERE 1 IS NULL AND 2 IS NOT NULL
+=> MATCH (p:p) WHERE (1 IS NULL AND 2 IS NOT NULL) RETURN 1
+
+# predicates.adoc p4_0
+SELECT 1 FROM p WHERE (1, 2) IS NULL OR (3, 4) IS NOT NULL
+=> MATCH (p:p) WHERE (1 IS NULL AND 2 IS NULL) OR (3 IS NOT NULL AND 4 IS NOT NULL) RETURN 1
+
+# predicates.adoc p5_0, first operand
+SELECT * FROM movies m WHERE m.title LIKE '%Matrix%'
+=> MATCH (m:movies) WHERE m.title CONTAINS 'Matrix' RETURN *
+
+# predicates.adoc p5_0, second operand
+# divergence: `_` needs a regular expression, which HelixDB's Cypher lacks.
+SELECT * FROM movies m WHERE m.title LIKE 'M_trix'
+=> error: unsupported_feature sql_construct
+
+# SqlToCypherTests directCompare like
+SELECT * FROM blub b WHERE name like '%Test'
+=> MATCH (b:blub) WHERE b.name ENDS WITH 'Test' RETURN *
+
+# SqlToCypherTests directCompare like
+SELECT * FROM blub b WHERE name like 'Test%'
+=> MATCH (b:blub) WHERE b.name STARTS WITH 'Test' RETURN *
+
+# SqlToCypherTests directCompare like: `%` alone matches every string
+SELECT * FROM blub b WHERE name like '%%'
+=> MATCH (b:blub) WHERE b.name CONTAINS '' RETURN *
+
+# LIKE without wildcards is equality; NOT LIKE and ILIKE
+SELECT * FROM blub b WHERE name LIKE 'Test' OR name NOT LIKE 'x%' OR name ILIKE '%TeSt%'
+=> MATCH (b:blub) WHERE b.name = 'Test' OR NOT (b.name STARTS WITH 'x') OR toLower(b.name) CONTAINS 'test' RETURN *
+
+# SqlToCypherTests directCompare like
+SELECT * FROM blub b WHERE name like '%ein%schöner%Name%'
+=> error: unsupported_feature sql_construct
+
+# expressions.adoc e0_0
+SELECT
+    1, TRUE, FALSE, NULL, 'a'
+=> RETURN 1, TRUE, FALSE, NULL, 'a'
+
+# expressions.adoc e1_0
+SELECT
+    1 + 2,
+    1 - 2,
+    1 * 2,
+    1 / 2,
+    square(2)
+=> RETURN (1 + 2), (1 - 2), (1 * 2), (1 / 2), (2 * 2)
+
+# expressions.adoc e2_0
+SELECT
+    abs(1),
+    ceil(1),
+    floor(1),
+    round(1),
+    round(1, 1),
+    sign(1)
+=> RETURN abs(1), ceil(1), floor(1), round(1), round(1, 1), sign(1)
+!! unsupported_feature function
+
+# expressions.adoc e3_0
+SELECT
+    exp(1),
+    ln(1),
+    log(2, 1),
+    log10(1),
+    sqrt(1)
+=> RETURN exp(1), log(1), (log(1) / log(2)), log10(1), sqrt(1)
+!! unsupported_feature function
+
+# expressions.adoc e4_0
+SELECT
+    acos(1),
+    asin(1),
+    atan(1),
+    atan2(1, 2),
+    cos(1),
+    cot(1),
+    degrees(1),
+    pi(),
+    radians(1),
+    sin(1),
+    tan(1)
+=> RETURN acos(1), asin(1), atan(1), atan2(1, 2), cos(1), cot(1), degrees(1), pi(), radians(1), sin(1), tan(1)
+!! unsupported_feature function
+
+# expressions.adoc e5_0, functions in HelixDB's profile
+# divergence: SQL SUBSTRING counts from 1, Cypher's substring from 0.
+SELECT
+    lower('abc'),
+    cast(3 as varchar),
+    trim(' abc '),
+    length('abc'),
+    ltrim(' abc '),
+    reverse('abc'),
+    rtrim(' abc '),
+    substring('abc', 2 - 1),
+    substring('abc', 2 - 1, 2),
+    substring('abc', 2),
+    substring('abc' FROM 2 FOR 1),
+    upper('abc')
+=> RETURN toLower('abc'), toString(3), trim(' abc '), size('abc'), ltrim(' abc '), reverse('abc'),
+  rtrim(' abc '), substring('abc', 2 - 1 - 1), substring('abc', 2 - 1 - 1, 2), substring('abc', 1),
+  substring('abc', 1, 1), toUpper('abc')
+
+# expressions.adoc e5_0, functions outside HelixDB's profile
+# divergence: two-argument REPLACE removes the search string, as in SQL.
+SELECT left('abc', 2), replace('abc', 'b'), replace('abc', 'b', 'x'), right('abc', 2)
+=> RETURN left('abc', 2), replace('abc', 'b', ''), replace('abc', 'b', 'x'), right('abc', 2)
+!! unsupported_feature function
+
+# expressions.adoc e6_0
+SELECT
+    coalesce(1, 2),
+    coalesce(1, 2, 3),
+    nvl(1, 2),
+    cast('1' as boolean),
+    cast(1 as float),
+    cast(1 as double precision),
+    cast(1 as real),
+    cast(1 as tinyint),
+    cast(1 as smallint),
+    cast(1 as int),
+    cast(1 as bigint)
+=> RETURN coalesce(1, 2), coalesce(1, 2, 3), coalesce(1, 2), toBoolean('1'), toFloat(1), toFloat(1),
+  toFloat(1), toInteger(1), toInteger(1), toInteger(1), toInteger(1)
+
+# expressions.adoc e7_0
+SELECT
+    CASE 1 WHEN 2 THEN 3 END,
+    CASE 1 WHEN 2 THEN 3 ELSE 4 END,
+    CASE 1 WHEN 2 THEN 3 WHEN 4 THEN 5 END,
+    CASE 1 WHEN 2 THEN 3 WHEN 4 THEN 5 ELSE 6 END
+=> RETURN CASE 1 WHEN 2 THEN 3 END, CASE 1 WHEN 2 THEN 3 ELSE 4 END, CASE 1 WHEN 2 THEN 3 WHEN 4 THEN 5 END, CASE 1 WHEN 2 THEN 3 WHEN 4 THEN 5 ELSE 6 END
+
+# expressions.adoc e7_1
+SELECT
+    CASE WHEN 1 = 2 THEN 3 END,
+    CASE WHEN 1 = 2 THEN 3 ELSE 4 END,
+    CASE WHEN 1 = 2 THEN 3 WHEN 4 = 5 THEN 6 END,
+    CASE WHEN 1 = 2 THEN 3 WHEN 4 = 5 THEN 6 ELSE 7 END
+=> RETURN CASE WHEN 1 = 2 THEN 3 END, CASE WHEN 1 = 2 THEN 3 ELSE 4 END,
+  CASE WHEN 1 = 2 THEN 3 WHEN 4 = 5 THEN 6 END, CASE WHEN 1 = 2 THEN 3 WHEN 4 = 5 THEN 6 ELSE 7 END
+
+# expressions.adoc e7_2
+SELECT
+    nullif(1, 2),
+    nvl2(1, 2, 3)
+=> RETURN CASE WHEN 1 = 2 THEN NULL ELSE 1 END, CASE WHEN 1 IS NOT NULL THEN 2 ELSE 3 END
+
+# SqlToCypherTests concatShouldWork
+SELECT 'a' || 'b', 'a' || 'b' || 'c', CONCAT('a', 'b'), CONCAT('a'), CONCAT('a', 'b', 'c')
+=> RETURN 'a' + 'b', ('a' + 'b') + 'c', 'a' + 'b', 'a', 'a' + ('b' + 'c')
+
+# SqlToCypherTests singleTable
+SELECT "installed_rank","version","description","success"
+FROM "public"."flyway_schema_history"
+WHERE "installed_rank" > ?
+ORDER BY "installed_rank"
+=> MATCH (flyway_schema_history:flyway_schema_history) WHERE flyway_schema_history.installed_rank > $1
+RETURN flyway_schema_history.installed_rank AS installed_rank, flyway_schema_history.version AS version,
+  flyway_schema_history.description AS description, flyway_schema_history.success AS success
+ORDER BY flyway_schema_history.installed_rank
+
+# SqlToCypherTests countStar
+SELECT count(*) FROM test_write__c
+=> MATCH (test_write__c:test_write__c) RETURN count(*)
+
+# SqlToCypherTests countDistinctStar
+SELECT count(DISTINCT t.n) FROM test_write__c t
+=> MATCH (t:test_write__c) RETURN count(DISTINCT t.n)
+
+# SqlToCypherTests inClauseWithConstants
+SELECT * FROM public.Genre
+WHERE name IN ('action comedy film', 'romcom')
+=> MATCH (genre:Genre) WHERE genre.name IN ['action comedy film', 'romcom'] RETURN *
+
+# SqlToCypherTests projectingRandomColumnsFromTable
+SELECT name, born FROM Person
+=> MATCH (person:Person) RETURN person.name AS name, person.born AS born
+
+# SqlToCypherTests projectingRandomColumnsFromTable2
+SELECT name, born FROM Person p
+=> MATCH (p:Person) RETURN p.name AS name, p.born AS born
+
+# SqlToCypherTests projectingRandomColumnsFromTable3
+SELECT p.name, p.born FROM Person p
+=> MATCH (p:Person) RETURN p.name, p.born
+
+# grouping.adoc withClauseGeneration
+SELECT name, sum(age) FROM People p GROUP BY name, department
+=> MATCH (p:People) WITH p.name AS name, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.department AS __group_col_1 RETURN name, __select_col_0
+
+# grouping.adoc withClauseGeneration
+SELECT name AS x, sum(age) AS y FROM People p GROUP BY x, department
+=> MATCH (p:People) WITH p.name AS x, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS y, p.department AS __group_col_0 RETURN x, y
+
+# grouping.adoc withClauseGeneration
+SELECT count(*) FROM Customers c JOIN Orders o ON c.id = o.customer_id GROUP BY c.name
+=> MATCH (c:Customers)<-[customer_id:CUSTOMER_ID]-(o:Orders) WITH count(*) AS __select_col_0, c.name AS __group_col_1 RETURN __select_col_0
+
+# grouping.adoc withClauseGeneration
+SELECT name, count(*), sum(age), avg(age) FROM People p GROUP BY name
+=> MATCH (p:People) RETURN p.name AS name, count(*), CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END, avg(p.age)
+
+# grouping.adoc withClauseGeneration
+SELECT count(*), sum(age) FROM People p GROUP BY name
+=> MATCH (p:People) WITH count(*) AS __select_col_0, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_1, p.name AS __group_col_2 RETURN __select_col_0, __select_col_1
+
+# grouping.adoc withClauseGeneration
+SELECT sum(age) FROM People p GROUP BY name HAVING sum(age) > 100
+=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.name AS __group_col_1 WHERE __select_col_0 > 100 RETURN __select_col_0
+
+# grouping.adoc withClauseGeneration
+SELECT sum(age) FROM People p GROUP BY name ORDER BY sum(age)
+=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0 ORDER BY __select_col_0
+
+# grouping.adoc havingConditionTranslation
+SELECT name FROM People p GROUP BY name HAVING count(*) > 5
+=> MATCH (p:People) WITH p.name AS name, count(*) AS __having_col_0 WHERE __having_col_0 > 5 RETURN name
+
+# grouping.adoc havingConditionTranslation
+SELECT count(*) FROM People p HAVING count(*) > 5
+=> MATCH (p:People) WITH count(*) AS __select_col_0 WHERE __select_col_0 > 5 RETURN __select_col_0
+
+# grouping.adoc havingConditionTranslation
+SELECT count(*) FROM People p GROUP BY name HAVING name = 'Alice'
+=> MATCH (p:People) WITH count(*) AS __select_col_0, p.name AS __group_col_1 WHERE __group_col_1 = 'Alice' RETURN __select_col_0
+
+# grouping.adoc havingConditionTranslation
+SELECT name, count(*) AS cnt FROM People p GROUP BY name HAVING cnt > 5
+=> MATCH (p:People) WITH p.name AS name, count(*) AS cnt WHERE cnt > 5 RETURN name, cnt
+
+# grouping.adoc havingConditionTranslation
+SELECT name FROM People p GROUP BY name HAVING count(*) > 5 AND max(age) > 50
+=> MATCH (p:People) WITH p.name AS name, count(*) AS __having_col_0, max(p.age) AS __having_col_1 WHERE (__having_col_0 > 5 AND __having_col_1 > 50) RETURN name
+
+# grouping.adoc havingConditionTranslation
+SELECT name, sum(age) FROM People p GROUP BY name HAVING sum(age) > 100 AND count(*) > 2
+=> MATCH (p:People) WITH p.name AS name, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, count(*) AS __having_col_1 WHERE (__select_col_0 > 100 AND __having_col_1 > 2) RETURN name, __select_col_0
+
+# grouping.adoc havingConditionTranslation
+SELECT name FROM People p GROUP BY name HAVING count(*) > 5 ORDER BY name
+=> MATCH (p:People) WITH p.name AS name, count(*) AS __having_col_0 WHERE __having_col_0 > 5 RETURN name ORDER BY name
+
+# grouping.adoc havingConditionTranslation
+SELECT name FROM People p GROUP BY name HAVING count(DISTINCT age) > 3
+=> MATCH (p:People) WITH p.name AS name, count(DISTINCT p.age) AS __having_col_0 WHERE __having_col_0 > 3 RETURN name
+
+# grouping.adoc orderByAggregate
+SELECT name, count(*) AS cnt FROM People p GROUP BY name ORDER BY cnt
+=> MATCH (p:People) RETURN p.name AS name, count(*) AS cnt ORDER BY cnt
+
+# grouping.adoc orderByAggregate
+SELECT name, count(*) AS cnt FROM People p GROUP BY name ORDER BY cnt DESC
+=> MATCH (p:People) RETURN p.name AS name, count(*) AS cnt ORDER BY cnt DESC
+
+# grouping.adoc orderByAggregate
+SELECT department, sum(age) AS total FROM People p GROUP BY department ORDER BY total
+=> MATCH (p:People) RETURN p.department AS department, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS total ORDER BY total
+
+# grouping.adoc orderByAggregate
+SELECT department, count(*) AS cnt, avg(age) AS average FROM People p GROUP BY department ORDER BY cnt DESC, average
+=> MATCH (p:People) RETURN p.department AS department, count(*) AS cnt, avg(p.age) AS average ORDER BY cnt DESC, average
+
+# grouping.adoc aggregates
+SELECT name, count(*) FROM People p GROUP BY name
+=> MATCH (p:People) RETURN p.name AS name, count(*)
+
+# grouping.adoc aggregates
+SELECT name, max(age) FROM People p GROUP BY name
+=> MATCH (p:People) RETURN p.name AS name, max(p.age)
+
+# grouping.adoc aggregates
+SELECT name, min(age) FROM People p GROUP BY name
+=> MATCH (p:People) RETURN p.name AS name, min(p.age)
+
+# grouping.adoc aggregates
+SELECT sum(age) FROM People p GROUP BY name
+=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0
+
+# grouping.adoc aggregates
+SELECT avg(age) FROM People p GROUP BY name
+=> MATCH (p:People) WITH avg(p.age) AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0
+
+# grouping.adoc aggregates
+SELECT percentileCont(age) FROM People p GROUP BY name
+=> MATCH (p:People) WITH percentileCont(p.age) AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0
+!! unsupported_feature function
+
+# grouping.adoc aggregates
+# divergence: the column is named as written; neo4j-jdbc renders jOOQ's name.
+SELECT stDev(age) FROM People p GROUP BY name
+=> MATCH (p:People) WITH stDev(p.age) AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0
+!! unsupported_feature function
+
+# grouping.adoc aggregates
+SELECT stddev_pop(age) AS x FROM People p GROUP BY name
+=> MATCH (p:People) WITH stDevP(p.age) AS x, p.name AS __group_col_0 RETURN x
+!! unsupported_feature function
+
+# grouping.adoc limitAndOffsetWithWithClause
+SELECT sum(age) FROM People p GROUP BY name LIMIT 5
+=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0 LIMIT 5
+
+# grouping.adoc limitAndOffsetWithWithClause
+SELECT name FROM People p GROUP BY name HAVING count(*) > 5 LIMIT 10
+=> MATCH (p:People) WITH p.name AS name, count(*) AS __having_col_0 WHERE __having_col_0 > 5 RETURN name LIMIT 10
+
+# grouping.adoc limitAndOffsetWithWithClause
+SELECT name FROM People p GROUP BY name HAVING count(*) > 5 ORDER BY name LIMIT 10 OFFSET 2
+=> MATCH (p:People) WITH p.name AS name, count(*) AS __having_col_0 WHERE __having_col_0 > 5 RETURN name ORDER BY name SKIP 2 LIMIT 10
+
+# grouping.adoc distinctWithGroupByAndHaving
+SELECT DISTINCT name, count(*) FROM People p GROUP BY name
+=> MATCH (p:People) RETURN DISTINCT p.name AS name, count(*)
+
+# grouping.adoc distinctWithGroupByAndHaving
+SELECT DISTINCT count(*) FROM People p GROUP BY name
+=> MATCH (p:People) WITH count(*) AS __select_col_0, p.name AS __group_col_1 RETURN DISTINCT __select_col_0
+
+# grouping.adoc distinctWithGroupByAndHaving
+SELECT DISTINCT name FROM People p GROUP BY name HAVING count(*) > 5
+=> MATCH (p:People) WITH p.name AS name, count(*) AS __having_col_0 WHERE __having_col_0 > 5 RETURN DISTINCT name
+
+# grouping.adoc groupingCombinations
+SELECT DISTINCT name, sum(age) FROM People p GROUP BY name, department HAVING sum(age) > 100 ORDER BY name LIMIT 5
+=> MATCH (p:People) WITH p.name AS name, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.department AS __group_col_1 WHERE __select_col_0 > 100 WITH DISTINCT name, __select_col_0 ORDER BY name LIMIT 5 RETURN name, __select_col_0
+
+# grouping.adoc groupingCombinations
+SELECT DISTINCT name FROM People p GROUP BY name HAVING count(*) > 5 ORDER BY name LIMIT 10 OFFSET 5
+=> MATCH (p:People) WITH p.name AS name, count(*) AS __having_col_0 WHERE __having_col_0 > 5 RETURN DISTINCT name ORDER BY name SKIP 5 LIMIT 10
+
+# grouping.adoc groupingCombinations
+SELECT DISTINCT department, count(*) AS cnt, max(age) AS max_age FROM People p WHERE age > 18 GROUP BY department HAVING count(*) > 1 AND max(age) > 25 ORDER BY cnt DESC LIMIT 10 OFFSET 2
+=> MATCH (p:People) WHERE p.age > 18 WITH p.department AS department, count(*) AS cnt, max(p.age) AS max_age WHERE (cnt > 1 AND max_age > 25) RETURN DISTINCT department, cnt, max_age ORDER BY cnt DESC SKIP 2 LIMIT 10
+
+# grouping.adoc groupingCombinations
+SELECT department, count(*) AS cnt FROM People p WHERE age > 18 GROUP BY department
+=> MATCH (p:People) WHERE p.age > 18 RETURN p.department AS department, count(*) AS cnt
+
+# grouping.adoc groupingCombinations
+SELECT count(*) AS cnt FROM People p WHERE age > 18 GROUP BY department
+=> MATCH (p:People) WHERE p.age > 18 WITH count(*) AS cnt, p.department AS __group_col_0 RETURN cnt
+
+# grouping.adoc groupingCombinations
+SELECT count(*) AS cnt FROM People p ORDER BY cnt
+=> MATCH (p:People) RETURN count(*) AS cnt ORDER BY cnt
+
+# divergence: SQL rejects a column that is neither grouped nor aggregated;
+# neo4j-jdbc translates it and Cypher groups by it.
+SELECT name, department, count(*) FROM People p GROUP BY name
+=> error: syntax_error invalid_aggregation
+
+# divergence: as above, without GROUP BY.
+SELECT name, count(*) FROM People p
+=> error: syntax_error invalid_aggregation
+
+# A function of a grouping key groups by the key, not by the function's value.
+SELECT upper(name), count(*) FROM People p GROUP BY name
+=> MATCH (p:People) WITH toUpper(p.name) AS __select_col_0, count(*) AS __select_col_1, p.name AS __group_col_2 RETURN __select_col_0, __select_col_1
+
+# Positional GROUP BY and ORDER BY
+SELECT department, count(*) FROM People p GROUP BY 1 ORDER BY 2 DESC, 1
+=> MATCH (p:People) RETURN p.department AS department, count(*) ORDER BY count(*) DESC, department
+
+# dml.adoc d0_0
+DELETE FROM person
+=> MATCH (person:person) DELETE person
+
+# dml.adoc d0_1
+DELETE FROM person
+WHERE person.id = 1
+=> MATCH (person:person) WHERE person.id = 1 DELETE person
+
+# dml.adoc d0_1b
+DELETE FROM person
+WHERE true
+=> MATCH (person:person) WHERE true DELETE person
+
+# dml.adoc d0_1c
+DELETE FROM person
+WHERE false
+=> MATCH (person:person) WHERE false DELETE person
+
+# dml.adoc d0_2
+DELETE FROM person p
+=> MATCH (p:person) DELETE p
+
+# dml.adoc d0_3
+-- tables: person=Person
+DELETE FROM person p
+=> MATCH (p:Person) DELETE p
+
+# dml.adoc d0_4
+# divergence: like SQL, TRUNCATE without CASCADE refuses nodes that
+# relationships refer to, so it deletes without detaching.
+-- tables: people=Person
+TRUNCATE TABLE people
+=> MATCH (people:Person) DELETE people
+
+-- tables: people=Person
+TRUNCATE TABLE people RESTRICT
+=> MATCH (people:Person) DELETE people
+
+-- tables: people=Person
+TRUNCATE TABLE people CASCADE
+=> MATCH (people:Person) DETACH DELETE people
+
+# dml.adoc d1_0
+-- tables: people=Person
+INSERT INTO People (first_name, last_name, born) VALUES ('Helge', 'Schneider', 1955)
+=> CREATE (people:`Person` {first_name: 'Helge', last_name: 'Schneider', born: 1955})
+
+# dml.adoc d1_1
+-- tables: people=Person
+INSERT INTO People (first_name, last_name, born) VALUES (?, ?, ?)
+=> CREATE (people:`Person` {first_name: $1, last_name: $2, born: $3})
+
+# dml.adoc d1_2
+# divergence: without a column list there are no property names.
+-- tables: people=Person
+INSERT INTO People VALUES ('Helge', 'Schneider', 1955)
+=> error: syntax_error invalid_statement
+
+# dml.adoc d1_3
+-- tables: people=Person
+INSERT INTO People (first_name, last_name, born) VALUES
+    ('Helge', 'Schneider', 1955),
+    ('Bela', 'B', 1962)
+=> UNWIND [
+  {first_name: 'Helge', last_name: 'Schneider', born: 1955},
+  {first_name: 'Bela', last_name: 'B', born: 1962}]
+AS properties
+CREATE (people:`Person`)
+SET people = properties
+
+# dml.adoc d1_4
+# divergence: the generic SQL dialect has no INSERT table alias.
+-- tables: people=Person
+INSERT INTO People (name) VALUES (?) RETURNING elementId(people)
+=> CREATE (people:Person {name: $1}) RETURN id(people)
+
+# dml.adoc upsert1
+INSERT INTO Movie(title, released) VALUES(?, ?) ON DUPLICATE KEY UPDATE title = 'x'
+=> error: unsupported_feature merge
+
+# dml.adoc upsert2
+-- tables: actors=Actor
+INSERT INTO actors(name, firstname) VALUES(?, ?) ON CONFLICT DO NOTHING
+=> error: unsupported_feature merge
+
+# dml.adoc upsert3
+INSERT INTO tbl(i, j, k) VALUES (1, 40, 700)
+ON CONFLICT (i) DO UPDATE SET j = 0, k = 2 * EXCLUDED.k
+=> error: unsupported_feature merge
+
+# SqlToCypherTests standardInsertShouldWork
+INSERT INTO Movie (Movie.title) VALUES('a')
+=> CREATE (movie:`Movie` {title: 'a'})
+
+# SqlToCypherTests namedParameterPrefixForParsingShouldBeConfigurable
+INSERT INTO Movie (Movie.title) VALUES($a)
+=> CREATE (movie:`Movie` {title: $a})
+
+# Named parameters with a colon
+SELECT m.title FROM Movie m WHERE m.released > :year AND m.title <> ?
+=> MATCH (m:Movie) WHERE m.released > $year AND m.title <> $1 RETURN m.title
+
+# Named parameters with an at sign, as in SQL Server; a quoted name is a column
+SELECT m.title FROM Movie m WHERE m.released > @year AND m."@title" = @title
+=> MATCH (m:Movie) WHERE m.released > $year AND m.`@title` = $title RETURN m.title
+
+INSERT INTO Movie (title) VALUES (@title)
+=> CREATE (movie:Movie {title: $title})
+
+# `?` is numbered in written order, though WHERE translates first
+SELECT m.title, ? FROM Movie m WHERE m.released > ?
+=> MATCH (m:Movie) WHERE m.released > $2 RETURN m.title, $1
+
+# SqlToCypherTests insertIntoRelationshipTableShouldWork, by element id
+# divergence: endpoints are matched, never merged; HelixDB ids are integers.
+INSERT INTO User_LIKES_Music (v$user_id, v$music_id) VALUES(?,?)
+=> MATCH (_start:User), (_end:Music) WHERE id(_start) = $1 AND id(_end) = $2 CREATE (_start)-[user_likes_music:LIKES]->(_end)
+
+# SqlToCypherTests insertIntoRelationshipTableShouldWork, qualified columns
+INSERT INTO Person_ACTED_IN_Movie (Person.a, Movie.b, c, ACTED_IN.e) VALUES ('a', 'b', 'c', 'e')
+=> MATCH (_start:Person {a: 'a'}), (_end:Movie {b: 'b'}) CREATE (_start)-[person_acted_in_movie:ACTED_IN {c: 'c', e: 'e'}]->(_end)
+
+# SqlToCypherTests insertIntoRelationshipTableShouldWork, several rows
+INSERT INTO Person_ACTED_IN_Movie (Person.a, Movie.b, c, d, ACTED_IN.e) VALUES ('av1', 'bv1', 'cv1', 'dv1', 'ev1'), ('av2', 'bv2', 'cv2', 'dv2', 'ev2')
+=> UNWIND [{start: {a: 'av1'}, rel: {c: 'cv1', d: 'dv1', e: 'ev1'}, end: {b: 'bv1'}}, {start: {a: 'av2'}, rel: {c: 'cv2', d: 'dv2', e: 'ev2'}, end: {b: 'bv2'}}] AS properties
+MATCH (_start:Person {a: properties.start.a}), (_end:Movie {b: properties.end.b})
+CREATE (_start)-[person_acted_in_movie:ACTED_IN {c: properties.rel.c, d: properties.rel.d, e: properties.rel.e}]->(_end)
+
+# divergence: without metadata neo4j-jdbc creates new endpoint nodes; an
+# INSERT here only connects existing nodes, so it needs a column of each.
+INSERT INTO Person_ACTED_IN_Movie (a, b, c) VALUES ('a', 'b', 'c')
+=> error: syntax_error invalid_statement
+
+# SqlToCypherTests updateRelationshipTable, without metadata
+UPDATE Person_ACTED_IN_Movie SET b = 'x' WHERE a = 'y' AND c = 'z'
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) WHERE (person_acted_in_movie.a = 'y' AND person_acted_in_movie.c = 'z') SET person_acted_in_movie.b = 'x'
+
+# SqlToCypherTests updateRelationshipTable, without metadata
+UPDATE Person_ACTED_IN_Movie SET b = 'x' WHERE v$id = 'y'
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) WHERE id(person_acted_in_movie) = 'y' SET person_acted_in_movie.b = 'x'
+
+# SqlToCypherTests updateRelationshipTable, without metadata
+UPDATE Person_ACTED_IN_Movie SET a = 'x' WHERE v$movie_id = 'wurstsalat'
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) WHERE id(_end) = 'wurstsalat' SET person_acted_in_movie.a = 'x'
+
+# SqlToCypherTests updateRelationshipTable, without metadata
+UPDATE Person_ACTED_IN_Movie SET ACTED_IN.b = 'x' WHERE Person.a = 'y' AND Movie.c = 'z'
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) WHERE (_start.a = 'y' AND _end.c = 'z') SET person_acted_in_movie.b = 'x'
+
+# SqlToCypherTests updateRelationshipTable, without metadata
+UPDATE Person_ACTED_IN_Movie SET Person.a = 'x' WHERE v$movie_id = 'wurstsalat'
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) WHERE id(_end) = 'wurstsalat' SET _start.a = 'x'
+
+# SqlToCypherTests deleteFromRelationshipTable, without metadata
+DELETE FROM Person_ACTED_IN_Movie WHERE v$person_id = 'asd'
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) WHERE id(_start) = 'asd' DELETE person_acted_in_movie
+
+# SqlToCypherTests deleteFromRelationshipTable, without metadata
+DELETE FROM Person_ACTED_IN_Movie WHERE ACTED_IN.b = 'x'
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) WHERE person_acted_in_movie.b = 'x' DELETE person_acted_in_movie
+
+# SqlToCypherTests deleteFromRelationshipTable, without metadata
+DELETE FROM Person_ACTED_IN_Movie WHERE Movie.c = 'x'
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) WHERE _end.c = 'x' DELETE person_acted_in_movie
+
+# SqlToCypherTests deleteFromRelationshipTable, without metadata
+TRUNCATE TABLE Person_ACTED_IN_Movie
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) DELETE person_acted_in_movie
+
+# SqlToCypherTests orderByColumnsInRelationshipSelects
+SELECT person_name, role, movie_title
+FROM Person_ACTED_IN_Movie
+WHERE person_name LIKE '%arrie-Anne%'
+ORDER BY person_name, role
+=> MATCH (_start:Person)-[person_acted_in_movie:ACTED_IN]->(_end:Movie) WHERE _start.name CONTAINS 'arrie-Anne'
+RETURN _start.name AS person_name, person_acted_in_movie.role AS role, _end.title AS movie_title
+ORDER BY _start.name, person_acted_in_movie.role
+
+# Upper-case table names stay node labels.
+SELECT * FROM ORDER_LINE_ITEMS
+=> MATCH (order_line_items:ORDER_LINE_ITEMS) RETURN *
+
+# Constructs outside the translation
+SELECT 1 UNION SELECT 2
+=> error: unsupported_feature union
+
+SELECT * FROM Person p WHERE p.id IN (SELECT id FROM Movie)
+=> error: unsupported_feature procedures_and_subqueries
+
+SELECT * FROM (SELECT * FROM Person) p
+=> error: unsupported_feature procedures_and_subqueries
+
+WITH x AS (SELECT 1) SELECT * FROM x
+=> error: unsupported_feature sql_construct
+
+SELECT p.name FROM Person p LEFT JOIN Movie m ON m.id = p.directed
+=> error: unsupported_feature sql_construct
+
+SELECT p.name FROM Person p JOIN Movie m ON m.id = p.directed AND m.year > 2000
+=> error: unsupported_feature sql_construct
+
+SELECT 1; SELECT 2
+=> error: unsupported_feature multiple_statements
+
+CREATE TABLE t (a INT)
+=> error: unsupported_feature sql_construct
+
+SELECT row_number() OVER () FROM Person p
+=> error: unsupported_feature sql_construct
+
+SELECT p.name FROM Person p ORDER BY p.name NULLS FIRST
+=> error: unsupported_feature sql_construct
+
+SELECT nonsense FROM
+=> error: syntax_error unexpected_syntax
+
+SELECT q.name FROM Person p
+=> error: syntax_error undefined_variable
+
+SELECT p.name FROM Person p, Person p
+=> error: syntax_error variable_already_bound

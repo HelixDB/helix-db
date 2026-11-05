@@ -85,8 +85,8 @@ batch.
 
 ## Cypher errors
 
-`POST /v2/cypher` and `POST /v2/cypher/explain` report a failed statement with the
-same `error` and `msg` fields and a `details` object:
+`POST /v2/cypher`, `POST /v2/cypher/explain` and `POST /v2/sql` report a failed
+statement with the same `error` and `msg` fields and a `details` object:
 
 ```json
 {
@@ -121,7 +121,11 @@ envelope and the codes below.
 | `internal_planner_error` | The planner broke one of its own invariants. | 500 | No automatic retry |
 
 The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists
-the `details.detail` code for each construct outside the supported profile.
+the `details.detail` code for each construct outside the supported profile. SQL
+that the translation rejects reports `unsupported_feature` with `sql_construct`
+(`msg` names the construct), and an unqualified column in a statement with several
+tables reports `syntax_error` with `ambiguous_column`; the
+[SQL guide](/database/helix-db/query-guides/sql#what-is-not-supported) lists the rest.
 
 ## Access the code in an SDK
 

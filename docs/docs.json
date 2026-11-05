@@ -170,6 +170,7 @@
               "database/helix-db/query-guides/parameters",
               "database/helix-db/query-guides/advanced",
               "database/helix-db/query-guides/cypher",
+              "database/helix-db/query-guides/sql",
               {
                 "group": "INDEXES AND SEARCH",
                 "pages": [
