@@ -53,17 +53,17 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Writing data](https://docs.helix-db.com/database/helix-db/query-guides/writing-data): Create, update, connect, and remove entities in one typed write batch — Page type: Guide
 - [Reading data](https://docs.helix-db.com/database/helix-db/query-guides/reading-data): Start a traversal from IDs, labels, properties, or previous query results — Page type: Guide
 - [Traverse relationships](https://docs.helix-db.com/database/helix-db/query-guides/traversals): Follow edges, retain row-local bindings, and control duplicate paths — Page type: Guide
-- [Filtering](https://docs.helix-db.com/database/helix-db/query-guides/filtering): Narrow traversal streams with predicates and exact search candidate sets — Page type: Guide
-- [Shape query results](https://docs.helix-db.com/database/helix-db/query-guides/projections): Return properties, computed values, aggregates, and correlated binding rows — Page type: Guide
-- [Bind typed query parameters](https://docs.helix-db.com/database/helix-db/query-guides/parameters): Keep the operation tree stable while request values change — Page type: Guide
-- [Branch, repeat, and condition queries](https://docs.helix-db.com/database/helix-db/query-guides/advanced): Compose sub-traversals and gate named entries without leaving one transaction — Page type: Guide
-- [Query HelixDB with Cypher](https://docs.helix-db.com/database/helix-db/query-guides/cypher): Run Cypher statements beside native queries, and see which parts of openCypher HelixDB supports — Page type: Guide
-- [Query HelixDB with SQL](https://docs.helix-db.com/database/helix-db/query-guides/sql): Run SQL statements against the graph: how tables, columns and joins map to nodes and relationships, and which SQL HelixDB translates — Page type: Guide
 - [Secondary indexes](https://docs.helix-db.com/database/helix-db/query-guides/secondary-indexes): Accelerate equality, uniqueness, and ordered property lookups — Page type: Guide
 - [Vector indexes](https://docs.helix-db.com/database/helix-db/query-guides/vector-indexes): Create vector indexes and run nearest-neighbor search — Page type: Guide
 - [Text indexes](https://docs.helix-db.com/database/helix-db/query-guides/text-indexes): Create BM25 indexes and run ranked full-text search — Page type: Guide
 - [Prefiltered search](https://docs.helix-db.com/database/helix-db/query-guides/prefiltering): Rank only the nodes or edges a traversal reaches with vector or BM25 search — Page type: Guide
 - [Search consistency](https://docs.helix-db.com/database/helix-db/query-guides/search-consistency): Choose whether vector and text searches include unpublished index work, and handle index backpressure — Page type: Guide
+- [Filtering](https://docs.helix-db.com/database/helix-db/query-guides/filtering): Narrow traversal streams with predicates and exact search candidate sets — Page type: Guide
+- [Shape query results](https://docs.helix-db.com/database/helix-db/query-guides/projections): Return properties, computed values, aggregates, and correlated binding rows — Page type: Guide
+- [Bind typed query parameters](https://docs.helix-db.com/database/helix-db/query-guides/parameters): Keep the operation tree stable while request values change — Page type: Guide
+- [Branch, repeat, and condition queries](https://docs.helix-db.com/database/helix-db/query-guides/advanced): Compose sub-traversals and gate named entries without leaving one transaction — Page type: Guide
+- [Query HelixDB with Cypher](https://docs.helix-db.com/database/helix-db/query-guides/cypher): Run Cypher statements beside native queries, and see which parts of openCypher HelixDB supports — Page type: Guide
+- [Query HelixDB with SQL](https://docs.helix-db.com/database/helix-db/query-guides/sql): Run SQL statements against the graph, see how tables, columns, and joins map to nodes and relationships, and which SQL HelixDB translates — Page type: Guide
 - [HelixDB HTTP API and OpenAPI specification](https://docs.helix-db.com/database/helix-db/query-guides/http-api): Call the HelixDB v2 query endpoint and discover its machine-readable OpenAPI 3.1 contract — Page type: Reference
 - [Query error reference](https://docs.helix-db.com/database/helix-db/query-guides/error-handling): Branch on stable error codes, apply retry rules, and look up every HelixDB query error — Page type: Reference
 - [Troubleshoot HelixDB](https://docs.helix-db.com/database/helix-db/query-guides/troubleshooting): Diagnose query, index, vector, embedded, and local runtime failures — Page type: Troubleshooting

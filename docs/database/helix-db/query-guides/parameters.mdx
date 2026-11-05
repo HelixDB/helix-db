@@ -165,11 +165,22 @@ WITH u LIMIT $limit
 RETURN id(u) AS id, u.name AS name, u.tenantId AS tenantId
 ```
 
+```sql SQL
+-- parameters: {"tenant_id": "acme", "limit": 25}
+SELECT id(u) AS id, u.name AS name, u.tenantId AS tenantId
+FROM User u
+WHERE u.tenantId = :tenant_id
+LIMIT :limit
+```
+
 </CodeGroup>
 
 The Cypher statement reads the same values as `$tenant_id` and `$limit`. A Cypher
 request has no `parameter_types`; each value's type comes from its
 [JSON encoding](/database/helix-db/query-guides/cypher#values-and-parameters).
+The SQL statement binds the same values as `:tenant_id` and `:limit`; with `?`
+placeholders instead, `parameters` is a list bound in written order. See
+[SQL values and parameters](/database/helix-db/query-guides/sql#values-and-parameters).
 
 ## Supported parameter families
 

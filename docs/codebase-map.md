@@ -64,13 +64,15 @@ cargo metadata --offline --locked --no-deps --format-version 1
 
 ```mermaid
 flowchart TD
-    TS["TypeScript / Python / Go SDKs"] --> HTTP["HTTP: /v2/query, /v2/cypher"]
+    TS["TypeScript / Python / Go SDKs"] --> HTTP["HTTP: /v2/query, /v2/cypher, /v2/sql"]
     CLI["CLI: query / cypher"] --> HTTP
     GRPC["gRPC methods"] --> SERVICE["db::query_service · request authority"]
     HTTP --> SERVICE
     RUST["Rust SDK / embedded HelixDB"] --> SERVICE
     FFI["UniFFI embedded bindings"] --> SERVICE
     SERVICE --> DSL["Native JSON AST · helix-ast"]
+    HTTP --> SQL["SQL translate · sqlparser → Cypher syntax"]
+    SQL --> CYPHER
     SERVICE --> CYPHER["Cypher compile · lexer → parser → bind"]
     DSL --> NATIVE["planner::planning · native adapters"]
     CYPHER --> ROWS["planner::relational::Query · validated scopes/effects"]
@@ -89,6 +91,7 @@ flowchart TD
 | Request service | [query_service.rs](../crates/db/src/query_service.rs), [cypher.rs](../crates/db/src/cypher.rs) | Tenant scope, execute/explain mode, parameters, catalog observation, cancellation and output format belong to one attempt. |
 | Native language | [AST](../crates/ast/src), [native planning](../crates/planner/src/planning) | SDK JSON contracts and native semantics remain supported. |
 | Cypher language | [frontend](../crates/cypher/src), [requests](../crates/cypher/src/request.rs), [transport contract](../crates/cypher/src/api.rs) | Resolve names to stable slots; reject unsupported semantics before execution; never translate through native DSL syntax. |
+| SQL language | [translator](../crates/cypher/src/sql.rs), [requests](../crates/cypher/src/sql/request.rs) | Translate one statement into Cypher syntax without reading storage; follow SQL's results; reject what Cypher cannot express before execution. |
 | Result encoding | [Cypher output](../crates/db/src/cypher/output.rs), [parameter decoding](../crates/db/src/cypher/parameters.rs) | Ordered columns, rectangular rows, lossless graph IDs and values; diagnostics stay outside result data. Prepare output before committing writes. |
 | Native bindings | [UniFFI](../bindings/uniffi/src), [Rust SDK](../sdks/rust/src) | Own API/language conversion and runtime handles; delegate storage and query execution to the engine. |
 
@@ -195,7 +198,9 @@ Materialisation depends on the selected pipeline:
 Disk spilling is not implemented. Resource exhaustion must fail the query, never
 silently truncate its successful result. The public behaviour is in the
 [Cypher guide](database/helix-db/query-guides/cypher.mdx), and implementation
-detail is in the [Cypher implementation notes](cypher.md).
+detail is in the [Cypher implementation notes](cypher.md). SQL translates into
+the same Cypher syntax; see the [SQL guide](database/helix-db/query-guides/sql.mdx)
+and the [SQL implementation notes](sql.md).
 
 ## Storage, transactions and indexes
 

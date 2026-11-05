@@ -168,9 +168,10 @@ fields. The read must be scoped to the index's label: a source predicate without
 scans every node. A `.where(...)` directly after `nWithLabel("User")` is pushed down to
 the index too; later in a traversal it filters a possibly larger intermediate stream.
 
-Cypher statements use these indexes automatically, without naming them. An
-equality or `IN` match on a labeled node reads an equality index, and range
-comparisons and ordered `LIMIT` reads use a range index:
+Cypher and [SQL](/database/helix-db/query-guides/sql#indexes-and-performance)
+statements use these indexes automatically, without naming them. An equality or
+`IN` match on a labeled node reads an equality index, and range comparisons and
+ordered `LIMIT` reads use a range index:
 
 ```cypher
 // parameters: {"status": "active"}

@@ -105,6 +105,11 @@ MATCH (u:User)
 RETURN id(u) AS user_id, u.name AS name
 ```
 
+```sql SQL
+SELECT id(u) AS user_id, u.name AS name
+FROM User u
+```
+
 </CodeGroup>
 
 ## Project correlated bindings

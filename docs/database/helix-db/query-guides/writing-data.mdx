@@ -150,6 +150,15 @@ CREATE (alice)-[follows:FOLLOWS {since: '2026-07-24'}]->(bob)
 RETURN id(alice) AS alice, id(bob) AS bob, count(follows) AS linked
 ```
 
+```sql SQL
+-- Two requests: SQL sends one statement per request.
+INSERT INTO User (name) VALUES ('Alice'), ('Bob') RETURNING id(user) AS id;
+
+-- Bind the two returned ids, so only the new users are connected.
+INSERT INTO User_FOLLOWS_User (_start.v$id, _end.v$id, since)
+VALUES (?, ?, '2026-07-24');
+```
+
 </CodeGroup>
 
 ## Other mutations
@@ -171,7 +180,8 @@ unless the full request is safe to replay.
 
 Cypher has no batch type: the server detects that a statement writes and runs it in one
 transaction, so the Cypher tab's three `CREATE` clauses also commit or roll back
-together.
+together. SQL sends one statement per request, so the SQL tab is two requests and
+two transactions: the first commits both users, and the second connects them.
 
 ## Next steps
 

@@ -165,12 +165,6 @@
               "database/helix-db/query-guides/writing-data",
               "database/helix-db/query-guides/reading-data",
               "database/helix-db/query-guides/traversals",
-              "database/helix-db/query-guides/filtering",
-              "database/helix-db/query-guides/projections",
-              "database/helix-db/query-guides/parameters",
-              "database/helix-db/query-guides/advanced",
-              "database/helix-db/query-guides/cypher",
-              "database/helix-db/query-guides/sql",
               {
                 "group": "INDEXES AND SEARCH",
                 "pages": [
@@ -181,6 +175,12 @@
                   "database/helix-db/query-guides/search-consistency"
                 ]
               },
+              "database/helix-db/query-guides/filtering",
+              "database/helix-db/query-guides/projections",
+              "database/helix-db/query-guides/parameters",
+              "database/helix-db/query-guides/advanced",
+              "database/helix-db/query-guides/cypher",
+              "database/helix-db/query-guides/sql",
               {
                 "group": "REFERENCE",
                 "pages": [

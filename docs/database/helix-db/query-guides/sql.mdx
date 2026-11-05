@@ -1,48 +1,114 @@
 ---
 title: "Query HelixDB with SQL"
-description: "Run SQL statements against the graph: how tables, columns and joins map to nodes and relationships, and which SQL HelixDB translates"
+description: "Run SQL statements against the graph, see how tables, columns, and joins map to nodes and relationships, and which SQL HelixDB translates"
 sidebarTitle: "SQL"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-HelixDB translates SQL statements into its [Cypher profile](/database/helix-db/query-guides/cypher)
-and runs them on the same graph, transactions, and indexes. A table is a node
-label, a column is a property, and a join is a relationship. The translation
-reads no schema: it follows fixed naming rules, which you can adjust with
-mappings.
+HelixDB accepts SQL statements alongside native queries and Cypher. It translates
+each statement into its [Cypher profile](/database/helix-db/query-guides/cypher)
+and runs it on the same graph, transactions, and indexes, so data written in one
+language is visible to the others. A table is a node label, a column is a
+property, and a join is a relationship. The translation reads no schema: it
+follows fixed naming rules, which you can adjust with mappings.
 
 The translation is a port of the SQL-to-Cypher translator in the
 [Neo4j JDBC driver](https://github.com/neo4j/neo4j-jdbc). It covers `SELECT`,
-`INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE`. Everything it cannot translate
-faithfully is rejected before anything runs.
+`INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE`. Everything in
+[What is supported](#what-is-supported) runs, and everything it cannot translate
+faithfully is rejected with a specific error before the statement reads or writes
+anything.
+
+<Note>
+`POST /v2/sql` is served by local servers built from the
+[repository checkout](https://github.com/HelixDB/helix-db). Helix Cloud gateways,
+the SDKs, and the CLI do not expose SQL yet; send SQL to a local server over HTTP.
+</Note>
 
 ## Run a statement
 
-Send one statement to `POST /v2/sql` on a local server. The request, results,
-headers, and errors are those of [`POST /v2/cypher`](/database/helix-db/query-guides/http-api#cypher),
-plus optional `mappings`:
+Send one statement, with optional parameters, a query name, and mappings, to
+`POST /v2/sql`. The server translates it and works out whether it reads or writes.
 
 ```sh
 curl http://localhost:6969/v2/sql \
   -H 'Content-Type: application/json' \
-  --data '{"query":"SELECT p.name, p.born FROM Person p WHERE p.born > ? ORDER BY p.born","parameters":[1900]}'
+  --data '{"query":"SELECT p.name AS name FROM Person p WHERE p.age >= ? ORDER BY name","parameters":[30],"query_name":"adults"}'
 ```
+
+HelixDB runs the statement as this Cypher:
+
+```cypher
+MATCH (p:Person)
+WHERE p.age >= $1
+RETURN p.name AS name
+ORDER BY name
+```
+
+A successful response has ordered `columns` and rectangular `rows`, with one
+value per column in column order, as for
+[Cypher](/database/helix-db/query-guides/cypher#run-a-statement):
 
 ```json
-{ "columns": ["p.name", "p.born"], "rows": [["Grace", 1906], ["Alan", 1912]] }
+{ "columns": ["name"], "rows": [["Ada"], ["Grace"]] }
 ```
 
-`?` placeholders bind to `parameters` given as a list, in written order: the
-first `?` is the first value. `:name`, `$name` and `@name` placeholders bind to
-`parameters` given as an object. Values use the
-[lossless JSON encoding](/database/helix-db/query-guides/cypher#values-and-parameters).
-
-A result column keeps its SQL name: an unqualified column is named after the
+`query` is required; `parameters`, `query_name`, and `mappings` are optional. A
+result column keeps its SQL name: an unqualified column is named after the
 column, an alias after the alias, and any other entry after its text as written,
 such as `p.name` or `COUNT(*)`. Repeated names are numbered: `SELECT 1, 1`
-returns the columns `1` and `1_2`.
+returns the columns `1` and `1_2`. Duplicate rows are kept unless the statement
+uses `DISTINCT` or `GROUP BY`, row order is only defined by `ORDER BY`, and a
+write without `RETURNING` succeeds with empty `columns` and `rows`.
+
+### Request options
+
+The native request options apply to SQL too, as HTTP headers:
+
+| Option | HTTP header |
+| --- | --- |
+| Run on the writer | `X-Helix-Require-Writer: true` |
+| Warm caches only (reads) | `X-Helix-Warm: true` |
+| Wait for durability (writes) | `X-Helix-Await-Durable: true` |
+
+The [HTTP API reference](/database/helix-db/query-guides/http-api#sql) describes
+the request, status codes, and errors in full.
+
+## What is supported
+
+| Area | Supported |
+| --- | --- |
+| Statements | `SELECT`; `INSERT .. VALUES` with one or more rows; `UPDATE .. SET`; `DELETE`; `TRUNCATE TABLE`; `RETURNING` on `INSERT` and `UPDATE` |
+| Tables | Tables as node labels; `Start_TYPE_End` relationship tables; aliases; schema prefixes; [mappings](#mappings) |
+| Joins | `JOIN .. ON` one column equality, `USING`, `NATURAL JOIN`, chains through a relationship table, comma joins and `CROSS JOIN` |
+| Row clauses | `WHERE`, `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY` (including positions), `LIMIT`, `OFFSET`, `FETCH FIRST`, `TOP` |
+| Expressions | Parameters; literals; arithmetic; comparisons; `AND`, `OR`, `XOR`, `NOT`; `IS [NOT] NULL`, `IS [NOT] TRUE`, `IS [NOT] DISTINCT FROM`; `IN` lists; `BETWEEN`; `LIKE` and `ILIKE` with a leading or trailing `%`; `\|\|`; simple and searched `CASE`; `CAST`; row values such as `(a, b) < (1, 2)` |
+| Functions | `lower`, `upper`, `length`, `trim`, `ltrim`, `rtrim`, `substring`, `concat`, `coalesce`, `nvl`, `nullif`, `nvl2`, `abs`, `square`, `power`, `mod`, and the [Cypher functions](/database/helix-db/query-guides/cypher#what-is-supported) under their own names, such as `id(p)` |
+| Aggregation | `count` (including `count(*)`), `sum`, `avg`, `min`, `max`, `array_agg`, each with `DISTINCT` arguments |
+| Values | The [Cypher values](/database/helix-db/query-guides/cypher#values-and-parameters), with the same lossless JSON encoding |
+
+Create and read a small graph:
+
+```sql
+INSERT INTO Person (name, age) VALUES ('Ada', 30), ('Bob', 40)
+```
+
+```sql
+INSERT INTO Person_KNOWS_Person (_start.name, _end.name, since)
+VALUES ('Ada', 'Bob', 2020)
+```
+
+```sql
+SELECT a.name AS person, array_agg(b.name) AS friends
+FROM Person a
+NATURAL JOIN KNOWS
+NATURAL JOIN Person b
+WHERE a.age >= :minimumAge
+GROUP BY a.name
+ORDER BY person
+```
 
 ## Tables and columns
 
@@ -54,12 +120,13 @@ returns the columns `1` and `1_2`.
 | `SELECT p` | the node itself |
 | `SELECT p.*` | `properties(p)`, a map of the node's properties |
 | `SELECT *` | every table variable |
-| `SELECT v$id` | `id(p)` |
+| `SELECT v$id` or `SELECT id(p)` | `id(p)` |
 
 Labels and properties are case-sensitive and keep the case you write; table
-names, aliases and mapping keys are not. Schema prefixes such as
+names, aliases, and mapping keys are not. Schema prefixes such as
 `public.Person` are ignored. With more than one table, every column needs a
-table qualifier.
+table qualifier. Every table is a label, so a node without a label has no SQL
+form.
 
 A table named `Start_TYPE_End`, such as `Person_ACTED_IN_Movie`, is a
 **relationship table**. On its own it matches
@@ -67,12 +134,12 @@ A table named `Start_TYPE_End`, such as `Person_ACTED_IN_Movie`, is a
 unqualified columns are relationship properties, `Person.name` or `_start.name`
 is a property of the start node, `Movie.title` or `_end.title` of the end node,
 and `person_name` is shorthand for `_start.name` when only the start label is
-`Person`, in reads, `UPDATE` and `INSERT` alike; qualify a relationship property
+`Person`, in reads, `UPDATE`, and `INSERT` alike; qualify a relationship property
 whose name looks like shorthand with the type, as in `ACTED_IN.person_count`.
 The start and end each need a
 lowercase letter, so upper-case table names such as `ORDER_LINE_ITEMS` stay node
-labels. When a `FROM` names several relationship tables, each
-one's nodes are `<alias>_start` and `<alias>_end` instead.
+labels. When a `FROM` names several relationship tables, each one's nodes are
+`<alias>_start` and `<alias>_end` instead.
 
 ## Joins
 
@@ -84,6 +151,7 @@ Joins become relationship patterns by these rules:
 | `Customer c JOIN Order o ON c.id = o.customer_id` | `(c:Customer)<-[customer_id:CUSTOMER_ID]-(o:Order)` |
 | `Person p JOIN Movie m USING (ACTED_IN)` | `(p:Person)-[acted_in:ACTED_IN]->(m:Movie)` |
 | `Person p NATURAL JOIN Movie m` | `(p:Person)-->(m:Movie)` |
+| `Person p NATURAL JOIN ACTED_IN r NATURAL JOIN Movie m` | `(p:Person)-[r:ACTED_IN]->(m:Movie)` |
 | `Person p JOIN ACTED_IN r ON .. JOIN Movie m ON ..` | `(p:Person)-[r:ACTED_IN]->(m:Movie)` |
 | `Person p, Movie m` or `CROSS JOIN` | `(p:Person), (m:Movie)` |
 
@@ -94,6 +162,8 @@ Joins become relationship patterns by these rules:
 - In a chain of three tables, the middle one is the relationship; longer chains
   continue in pairs, and the last `ON` of each pair sets the direction.
 - Every `ON` must compare two columns with `=`. Put other conditions in `WHERE`.
+  The compared columns only name the relationship and its direction; they are
+  not read.
 
 ### Mappings
 
@@ -130,12 +200,18 @@ names the join's left table and the column that names the type.
 Grouping follows SQL: a selected column must be grouped or aggregated, `GROUP BY`
 without an aggregate returns each group once, an aggregate without `GROUP BY`
 returns one row even for an empty table, `SUM` of no values is null, and
-`ORDER BY 1` or `GROUP BY 1` refer to select-list positions. `UPDATE` computes every new value from the row before
-the update, so `SET a = b, b = a` swaps.
+`ORDER BY 1` or `GROUP BY 1` refer to select-list positions. An alias in
+`GROUP BY`, `HAVING`, or `ORDER BY` names its select-list entry.
 
-`DELETE` or `TRUNCATE` of a node that still has relationships fails and changes
-nothing, like a foreign key; delete the relationships first or use
-`TRUNCATE .. CASCADE`.
+```sql
+SELECT c.name AS city, count(*) AS people, avg(p.age) AS averageAge
+FROM Person p
+NATURAL JOIN LIVES_IN
+NATURAL JOIN City c
+GROUP BY c.name
+ORDER BY people DESC
+LIMIT 10
+```
 
 An `INSERT` into a relationship table connects existing nodes. Columns of the
 start and end nodes find them, and the other columns become relationship
@@ -145,6 +221,8 @@ properties:
 INSERT INTO Person_ACTED_IN_Movie (Person.name, Movie.title, role)
 VALUES ('Ada', 'Hidden', 'lead')
 ```
+
+which runs as:
 
 ```cypher
 MATCH (_start:Person {name: 'Ada'}), (_end:Movie {title: 'Hidden'})
@@ -173,7 +251,7 @@ Functions with a Cypher equivalent are renamed: `lower` and `upper` become
 `ifnull` become `coalesce`, `array_agg` becomes `collect` (which, unlike SQL's
 `array_agg`, leaves out nulls), and `nullif` and
 `nvl2` become `CASE`. `SUBSTRING` counts from 1, as in SQL; a start below 1
-must be a literal, since a computed one fails. `TRIM`, `LTRIM` and `RTRIM`
+must be a literal, since a computed one fails. `TRIM`, `LTRIM`, and `RTRIM`
 remove all surrounding whitespace, as Cypher's do, not only spaces. Other names
 pass through, so the [Cypher profile](/database/helix-db/query-guides/cypher#what-is-supported)
 decides which functions run.
@@ -183,38 +261,120 @@ decides which functions run.
 These are rejected before anything runs, mostly with the error category
 `unsupported_feature` and the detail `sql_construct`:
 
-| Construct | Detail |
-| --- | --- |
-| Outer joins (`LEFT`, `RIGHT`, `FULL`) | `sql_construct` |
-| `ON` conditions other than one column equality | `sql_construct` |
-| Subqueries, `EXISTS`, `IN (SELECT ..)` | `procedures_and_subqueries` |
-| `UNION`, `INTERSECT`, `EXCEPT` | `union` |
-| Common table expressions (`WITH ..`) and window functions | `sql_construct` |
-| Upserts: `ON CONFLICT`, `ON DUPLICATE KEY`, `REPLACE`, `INSERT OR` | `merge` |
-| `INSERT` without a column list, `INSERT .. SELECT` | `invalid_statement`, `sql_construct` |
-| `LIKE` with `_`, escapes, inner `%`, or a non-literal pattern | `sql_construct` |
-| Unparenthesized `XOR` inside `AND`, `NOT` or a comparison | `sql_construct` |
-| Dates, intervals, and casts to types other than strings, numbers and booleans | `sql_construct` |
-| DDL and every other statement | `sql_construct` |
-| Several statements in one request | `multiple_statements` |
+| Construct | Example | `details.detail` |
+| --- | --- | --- |
+| Outer joins | `LEFT JOIN Movie m ON ..` | `sql_construct` |
+| `ON` conditions other than one column equality | `ON m.id = p.movie AND m.year > 2000` | `sql_construct` |
+| Subqueries | `WHERE p.id IN (SELECT ..)`, `EXISTS (..)` | `procedures_and_subqueries` |
+| Set operations | `UNION`, `INTERSECT`, `EXCEPT` | `union` |
+| Common table expressions and window functions | `WITH x AS (..)`, `row_number() OVER ()` | `sql_construct` |
+| Upserts | `ON CONFLICT`, `ON DUPLICATE KEY`, `REPLACE`, `INSERT OR` | `merge` |
+| `INSERT` without a column list | `INSERT INTO Person VALUES ('Ada')` | `invalid_statement` |
+| `INSERT .. SELECT` | `INSERT INTO A (x) SELECT ..` | `sql_construct` |
+| `LIKE` patterns that need a regular expression | `LIKE 'M_trix'`, `LIKE '%a%b%'` | `sql_construct` |
+| Unparenthesized `XOR` inside `AND`, `NOT`, or a comparison | `NOT a XOR b` | `sql_construct` |
+| Dates, intervals, and other casts | `DATE '2020-01-01'`, `CAST(x AS DATE)` | `sql_construct` |
+| DDL and other statements | `CREATE TABLE ..` | `sql_construct` |
+| Several statements in one request | `SELECT 1; SELECT 2` | `multiple_statements` |
 
-An unqualified column in a statement with several tables is a `syntax_error`
-with the detail `ambiguous_column`.
+Some fail as ordinary compile errors instead:
+
+- An unqualified column in a statement with several tables is a `syntax_error`
+  (`ambiguous_column`), as is a qualifier that names several tables.
+- A selected column that is neither grouped nor aggregated is a `syntax_error`
+  (`invalid_aggregation`).
+- A function outside the [Cypher profile](/database/helix-db/query-guides/cypher#what-is-not-supported),
+  such as `sqrt`, reports that profile's error.
+
+Nodes without a label, variable-length paths, and vector and full-text search
+have no SQL form; use Cypher or native queries for them.
+
+## Values and parameters
+
+Values in parameters and results use the
+[Cypher encoding](/database/helix-db/query-guides/cypher#values-and-parameters):
+ordinary JSON for most values, tagged values for large integers, non-finite
+floats, nodes, relationships, and paths.
+
+| Placeholder | Binds | `parameters` |
+| --- | --- | --- |
+| `?` | The next value, in written order | A list: `[30, "Ada"]` |
+| `:name`, `$name`, `@name` | The value named `name` | An object: `{"name": "Ada"}` |
+| `$1`, `?1` | The value named `1` | An object: `{"1": 30}` |
+
+A statement that uses `?` cannot also use numbered placeholders, since `?` takes
+those numbers. `IN (?)` binds a list parameter. Labels, relationship types, and
+column names are part of the statement, so keep values in parameters.
+
+## Writes and transactions
+
+Each statement that writes runs in one transaction, including its index changes,
+as a [Cypher write](/database/helix-db/query-guides/cypher#writes-and-transactions)
+does. If any part fails, nothing the statement wrote is kept.
+
+- A multi-row `INSERT` creates every row or none. Inserting into a relationship
+  table that matches no node pair creates nothing and succeeds.
+- `UPDATE` computes every new value from the row before the update, so
+  `SET a = b, b = a` swaps. Setting a column to `NULL` removes the property.
+- `DELETE` or `TRUNCATE` of a node that still has relationships fails, like a
+  foreign key. Delete the relationships first, or use `TRUNCATE .. CASCADE`,
+  which removes them.
+- Stored properties follow the Cypher rules: scalars or lists of one scalar type,
+  and values an index can store.
+- One request is one statement, so a write followed by a read is two requests and
+  two transactions.
+- Do not retry a write automatically when its commit outcome is uncertain; see
+  [error handling](/database/helix-db/query-guides/error-handling#stability-and-retry-rules).
+
+```sql
+UPDATE Person p SET age = p.age + 1, nickname = NULL WHERE p.name = 'Ada'
+RETURNING p.age
+```
+
+## Indexes and performance
+
+SQL runs as the translated Cypher, so it uses existing native indexes the same
+way, without naming them. The
+[Cypher rules](/database/helix-db/query-guides/cypher#indexes-and-performance)
+apply to the translated statement:
+
+- An equality on a table's column, such as `WHERE u.email = ?`, can read an
+  equality index, and so can `IN` lists and `OR`ed equalities on one column.
+- A range such as `WHERE u.age >= 21 AND u.age < ?` can read a range index.
+- `WHERE id(u) = ?`, or `WHERE u.v$id IN (1, 2)` with a list of literal ids,
+  reads those nodes directly. A list parameter, as in `IN (?)`, scans the label.
+- A join reads only the relationship type it names, so name the relationship
+  table or join column rather than joining every relationship.
+- Without `DISTINCT` or grouping, `ORDER BY`, `OFFSET`, and `LIMIT` apply to the
+  matched tables before the select list reads columns, so
+  `SELECT u.name FROM User u LIMIT 10` stops after ten nodes when its `WHERE`
+  cannot fail.
+- `ORDER BY` a range-indexed column in the index's direction, with a range bound
+  on it and a `LIMIT`, reads the index in order and stops after the window, as in
+  `SELECT u.name FROM User u WHERE u.rank >= 0 ORDER BY u.rank DESC LIMIT 10`
+  with a descending index on `rank`.
+
+An index is only used when every other condition on that table cannot fail.
+Comparisons, string predicates, null tests, and their `AND`, `OR`, `XOR`, and
+`NOT` combinations over literals, parameters, and columns qualify. Arithmetic and
+function calls keep the label scan.
 
 ## Limits
 
 A SQL statement has the [Cypher limits](/database/helix-db/query-guides/cypher#limits),
 plus 1,024 binary operators and about 500,000 tokens, where every word, number,
-symbol and whitespace character counts, including those inside quoted text.
+symbol, and whitespace character counts, including those inside quoted text.
 Forms that repeat an operand, such as `BETWEEN` or an alias in `GROUP BY`, may
 copy about 16 MB of it in total. Exceeding any of these fails with
-`resource_limit`. Send large values as parameters, which do not count.
+`resource_limit` (HTTP `429`). Send large values as parameters, which do not
+count.
 
 ## Errors
 
-Errors use the [Cypher error body](/database/helix-db/query-guides/cypher#errors).
-Translation errors and the errors of the translated statement both report a
-`span` in the SQL text:
+A failed statement returns the
+[Cypher error body](/database/helix-db/query-guides/cypher#errors). Translation
+errors and the errors of the translated statement both report a `span`, the byte
+range of the SQL text that failed:
 
 ```json
 {
@@ -224,6 +384,9 @@ Translation errors and the errors of the translated statement both report a
 }
 ```
 
+The [error reference](/database/helix-db/query-guides/error-handling#cypher-errors)
+lists every category with its HTTP status and retry guidance.
+
 ## Next steps
 
 <CardGroup cols={2}>
@@ -232,5 +395,11 @@ Translation errors and the errors of the translated statement both report a
   </Card>
   <Card title="HTTP API" icon="code" href="/database/helix-db/query-guides/http-api#sql">
     Request headers, status codes, and the OpenAPI contract for `/v2/sql`.
+  </Card>
+  <Card title="Error handling" icon="triangle-exclamation" href="/database/helix-db/query-guides/error-handling#cypher-errors">
+    Error categories, HTTP statuses, and when to retry.
+  </Card>
+  <Card title="Secondary indexes" icon="bolt" href="/database/helix-db/query-guides/secondary-indexes">
+    Create the indexes that SQL and Cypher plans read.
   </Card>
 </CardGroup>
