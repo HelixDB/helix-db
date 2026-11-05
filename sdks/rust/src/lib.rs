@@ -369,7 +369,7 @@ impl Client {
     /// # async fn example(client: helix_db::Client) -> Result<(), helix_db::HelixError> {
     /// let mappings = helix_db::SqlMappings::default().table("people", "Person");
     /// let response = client
-    ///     .sql("SELECT p.name FROM people p WHERE p.age > ?", vec![serde_json::json!(30)], &mappings, None)
+    ///     .sql("SELECT p.name AS name FROM people p WHERE p.age > ?", vec![serde_json::json!(30)], &mappings, None)
     ///     .await?;
     /// assert_eq!(response.columns, ["name"]);
     /// # Ok(())
