@@ -157,7 +157,7 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                 let mut columns = Vec::new();
                 let mut missing_alias = false;
                 for item in items {
-                    match item {
+                    let (expression, name) = match item {
                         s::Item::Wildcard => {
                             if binder.scope.is_empty() {
                                 return Err(semantic(
@@ -178,7 +178,9 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                                 });
                                 columns.push((name.clone(), slot));
                             }
+                            continue;
                         }
+                        s::Item::Named { expression, name } => (expression, name.clone()),
                         s::Item::Expression {
                             expression,
                             alias,
@@ -193,55 +195,53 @@ fn bind_clauses(binder: &mut Binder, statement: &s::Statement) -> Result<r::Quer
                                     text.clone()
                                 }
                             };
-                            if output.contains_key(&name) {
-                                return Err(semantic(
-                                    detail::COLUMN_NAME_CONFLICT,
-                                    format!("duplicate projection name {name}"),
-                                ));
-                            }
-                            let expression = binder.expression(
-                                expression,
-                                ScopeRef::Single(&binder.scope),
-                                true,
-                            )?;
-                            let value_type = expression.value_type(&binder.bindings)?;
-                            let kind = match &expression {
-                                r::Expression::Slot(slot) => binder.bindings[slot.0 as usize].kind,
-                                r::Expression::Literal(_)
-                                | r::Expression::Parameter(_)
-                                | r::Expression::Property(..)
-                                | r::Expression::Index(..)
-                                | r::Expression::Slice { .. }
-                                | r::Expression::Unary(..)
-                                | r::Expression::Binary(..)
-                                | r::Expression::Connective(..)
-                                | r::Expression::Function(..)
-                                | r::Expression::Aggregate { .. }
-                                | r::Expression::List(_)
-                                | r::Expression::Map(_)
-                                | r::Expression::Case { .. }
-                                | r::Expression::SimpleCase(_)
-                                | r::Expression::HasLabel(..) => match value_type {
-                                    r::ValueType::Node => r::BindingType::Node,
-                                    r::ValueType::Relationship => r::BindingType::Relationship,
-                                    r::ValueType::Path => r::BindingType::Path,
-                                    r::ValueType::Any
-                                    | r::ValueType::Null
-                                    | r::ValueType::Boolean
-                                    | r::ValueType::Integer
-                                    | r::ValueType::Float
-                                    | r::ValueType::String
-                                    | r::ValueType::List
-                                    | r::ValueType::Map => r::BindingType::Scalar,
-                                },
-                            };
-                            let slot = binder.allocate(name.clone(), kind, true)?;
-                            binder.bindings[slot.0 as usize].value_type = value_type;
-                            output.insert(name.clone(), slot);
-                            columns.push((name, slot));
-                            projections.push(r::Projection { slot, expression });
+                            (expression, name)
                         }
+                    };
+                    if output.contains_key(&name) {
+                        return Err(semantic(
+                            detail::COLUMN_NAME_CONFLICT,
+                            format!("duplicate projection name {name}"),
+                        ));
                     }
+                    let expression =
+                        binder.expression(expression, ScopeRef::Single(&binder.scope), true)?;
+                    let value_type = expression.value_type(&binder.bindings)?;
+                    let kind = match &expression {
+                        r::Expression::Slot(slot) => binder.bindings[slot.0 as usize].kind,
+                        r::Expression::Literal(_)
+                        | r::Expression::Parameter(_)
+                        | r::Expression::Property(..)
+                        | r::Expression::Index(..)
+                        | r::Expression::Slice { .. }
+                        | r::Expression::Unary(..)
+                        | r::Expression::Binary(..)
+                        | r::Expression::Connective(..)
+                        | r::Expression::Function(..)
+                        | r::Expression::Aggregate { .. }
+                        | r::Expression::List(_)
+                        | r::Expression::Map(_)
+                        | r::Expression::Case { .. }
+                        | r::Expression::SimpleCase(_)
+                        | r::Expression::HasLabel(..) => match value_type {
+                            r::ValueType::Node => r::BindingType::Node,
+                            r::ValueType::Relationship => r::BindingType::Relationship,
+                            r::ValueType::Path => r::BindingType::Path,
+                            r::ValueType::Any
+                            | r::ValueType::Null
+                            | r::ValueType::Boolean
+                            | r::ValueType::Integer
+                            | r::ValueType::Float
+                            | r::ValueType::String
+                            | r::ValueType::List
+                            | r::ValueType::Map => r::BindingType::Scalar,
+                        },
+                    };
+                    let slot = binder.allocate(name.clone(), kind, true)?;
+                    binder.bindings[slot.0 as usize].value_type = value_type;
+                    output.insert(name.clone(), slot);
+                    columns.push((name, slot));
+                    projections.push(r::Projection { slot, expression });
                 }
                 let aggregated = projections.iter().any(|p| p.expression.has_aggregate());
                 let mixed = projections.iter().any(|p| {

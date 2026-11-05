@@ -73,7 +73,7 @@ struct Window {
 
 impl Translator<'_> {
     pub(super) fn query(&self, query: &ast::Query) -> Result<syntax::Statement> {
-        let span = self.at(query);
+        let span = self.whole;
         let ast::Query {
             with,
             body,
@@ -212,7 +212,7 @@ impl Translator<'_> {
         order_by: Option<&ast::OrderBy>,
         window: Window,
     ) -> Result<syntax::Statement> {
-        let span = self.at(select);
+        let span = self.whole;
         if !select.optimizer_hints.is_empty()
             || select.select_modifiers.is_some()
             || select.exclude.is_some()
@@ -267,10 +267,22 @@ impl Translator<'_> {
         // it as the projected column.
         scope.aliases = super::lowercased(explicit.clone());
         let keys = self.group_keys(&select.group_by, &projected, &scope, span)?;
+        // Without GROUP BY, SQL aggregates the whole input into one row even
+        // when it is empty; Cypher would group by any constant it projects.
+        let global = keys.is_empty();
+        // A global aggregate leaves its constants out of the grouping WITH
+        // that HAVING filters, so HAVING reads their aliases as expressions.
         scope.aliases = super::lowercased(
             explicit
                 .iter()
-                .map(|(name, _)| Ok((name.clone(), variable(name, span)?)))
+                .map(|(name, expression)| {
+                    let read = if global && !aggregates(expression) {
+                        self.copy(expression)?
+                    } else {
+                        variable(name, span)?
+                    };
+                    Ok((name.clone(), read))
+                })
                 .collect::<Result<Vec<_>>>()?,
         );
         let having = select
@@ -278,6 +290,12 @@ impl Translator<'_> {
             .as_ref()
             .map(|having| self.expr(having, &scope))
             .transpose()?;
+        scope.aliases = super::lowercased(
+            explicit
+                .iter()
+                .map(|(name, _)| Ok((name.clone(), variable(name, span)?)))
+                .collect::<Result<Vec<_>>>()?,
+        );
         let ordering = order_by
             .map(|order_by| self.ordering(order_by, &projected, &scope))
             .transpose()?
@@ -419,9 +437,6 @@ impl Translator<'_> {
         let aggregated = expressions.iter().any(|e| aggregates(e))
             || having.as_ref().is_some_and(aggregates)
             || ordering.iter().any(|(order, _)| aggregates(order));
-        // Without GROUP BY, SQL aggregates the whole input into one row even
-        // when it is empty; Cypher would group by any constant it projects.
-        let global = keys.is_empty();
         if global && !aggregated {
             return Err(invalid(
                 detail::INVALID_AGGREGATION,
@@ -465,35 +480,57 @@ impl Translator<'_> {
             });
             return Ok(syntax::Statement { clauses });
         }
-        // Explicit grouping: WITH projects every select entry under its name,
-        // grouping keys and HAVING or ORDER BY aggregates that are not
-        // selected, then RETURN reads the names. A global aggregate leaves
-        // its constants to RETURN, so that they group nothing.
-        let mut with = With::default();
-        expressions
+        // Explicit grouping: WITH projects the select entries, grouping keys
+        // and HAVING or ORDER BY aggregates that are not selected, then
+        // RETURN reads them. An entry named by its SQL text, which may hold a
+        // literal, projects under a value-free name that RETURN renames
+        // without printing (`Item::Named`), so no literal reaches the printed
+        // statement. Every name the WITH introduces avoids the names in use.
+        // A global aggregate leaves its constants to RETURN, so that they
+        // group nothing.
+        let mut taken: HashSet<String> = projected
             .iter()
-            .zip(items_printed)
-            .zip(&projected)
-            .filter(|((e, _), _)| !global || aggregates(e))
-            .for_each(|((e, text), p)| with.push((*e).clone(), text, p.name.clone()));
+            .map(|p| p.name.clone())
+            .chain(scope.variables().map(str::to_owned))
+            .collect();
         let mut counter = 0;
-        let mut hidden = |prefix: &str, expression: &Expr, text: String, with: &mut With| {
+        let mut fresh = |prefix: &str| loop {
             let name = format!("__{prefix}_col_{counter}");
             counter += 1;
-            with.push(expression.clone(), text, name.clone());
-            name
+            if taken.insert(name.clone()) {
+                break name;
+            }
         };
+        let mut with = With::default();
+        let mut selected = Vec::with_capacity(projected.len());
+        for ((expression, text), p) in expressions.iter().zip(items_printed).zip(&projected) {
+            if global && !aggregates(expression) {
+                selected.push(None);
+                continue;
+            }
+            let name = match p.alias {
+                Alias::Text => fresh("select"),
+                Alias::Explicit | Alias::Derived => p.name.clone(),
+            };
+            with.push((*expression).clone(), text, name.clone());
+            selected.push(Some(name));
+        }
         for (key, text) in keys.iter().zip(key_texts) {
             if with.name(&text).is_none() {
-                hidden("group", key, text, &mut with);
+                let name = fresh("group");
+                with.push(key.clone(), text, name);
             }
         }
-        let mut lift = |expression: &Expr, prefix: &str, with: &mut With| {
+        let mut lift = |expression: &Expr, with: &mut With| {
             let lifted = rewrite(expression, &mut |e| {
                 let text = self.text(e)?;
                 match (with.name(&text).map(str::to_owned), aggregate_call(e)) {
                     (Some(name), _) => Ok(Some(variable(&name, e.span)?)),
-                    (None, true) => Ok(Some(variable(&hidden(prefix, e, text, with), e.span)?)),
+                    (None, true) => {
+                        let name = fresh("having");
+                        with.push(e.clone(), text, name.clone());
+                        Ok(Some(variable(&name, e.span)?))
+                    }
                     (None, false) => Ok(None),
                 }
             })?;
@@ -506,15 +543,11 @@ impl Translator<'_> {
             }
             Ok(lifted)
         };
-        let having = having
-            .map(|having| lift(&having, "having", &mut with))
-            .transpose()?;
+        let having = having.map(|having| lift(&having, &mut with)).transpose()?;
         let ordering = ordering
             .into_iter()
-            .map(|(order, descending)| Ok((lift(&order, "having", &mut with)?, descending)))
+            .map(|(order, descending)| Ok((lift(&order, &mut with)?, descending)))
             .collect::<Result<Vec<_>>>()?;
-        let projected_names: HashSet<String> =
-            with.items.iter().map(|(_, name)| name.clone()).collect();
         clauses.push(Clause::Project {
             returning: false,
             items: with
@@ -528,25 +561,60 @@ impl Translator<'_> {
             limit: None,
             predicate: having,
         });
+        // After DISTINCT only the result's own names are in scope, and an
+        // entry named by its SQL text has none in the statement, so a
+        // DISTINCT result with such an entry is made distinct and ordered in
+        // a WITH of the selected names first.
+        let renamed = projected
+            .iter()
+            .zip(&selected)
+            .any(|(p, name)| p.alias == Alias::Text && name.is_some());
+        let ordered_first = distinct && !ordering.is_empty() && renamed;
+        let (ordering, skip, limit) = if ordered_first {
+            clauses.push(Clause::Project {
+                returning: false,
+                items: selected
+                    .iter()
+                    .flatten()
+                    .map(|name| Ok(item(variable(name, span)?, None)))
+                    .collect::<Result<_>>()?,
+                distinct: true,
+                ordering,
+                skip: window.skip,
+                limit: window.limit,
+                predicate: None,
+            });
+            (Vec::new(), None, None)
+        } else {
+            (ordering, window.skip, window.limit)
+        };
         clauses.push(Clause::Project {
             returning: true,
             items: projected
                 .into_iter()
-                .map(|p| {
-                    if !projected_names.contains(&p.name) {
+                .zip(selected)
+                .map(|(p, name)| {
+                    let Some(name) = name else {
                         return Ok(p.item());
-                    }
-                    Ok(syntax::Item::Expression {
-                        expression: variable(&p.name, span)?,
-                        alias: None,
-                        text: p.name,
+                    };
+                    let expression = variable(&name, span)?;
+                    Ok(match p.alias {
+                        Alias::Text => syntax::Item::Named {
+                            expression,
+                            name: p.name,
+                        },
+                        Alias::Explicit | Alias::Derived => syntax::Item::Expression {
+                            expression,
+                            alias: None,
+                            text: p.name,
+                        },
                     })
                 })
                 .collect::<Result<_>>()?,
-            distinct,
+            distinct: distinct && !ordered_first,
             ordering,
-            skip: window.skip,
-            limit: window.limit,
+            skip,
+            limit,
             predicate: None,
         });
         Ok(syntax::Statement { clauses })
@@ -575,7 +643,7 @@ impl Translator<'_> {
         reason = "only an unqualified column keeps its name; every other expression is named by its text"
     )]
     fn projected(&self, entry: &ast::SelectItem, scope: &Scope) -> Result<Projected> {
-        let span = self.at(entry);
+        let span = self.located(super::spans::select_item(entry));
         match entry {
             ast::SelectItem::UnnamedExpr(value) => {
                 let expression = self.expr(value, scope)?;
@@ -666,7 +734,7 @@ impl Translator<'_> {
                         invalid(
                             detail::INVALID_AGGREGATION,
                             "cannot group by `*`",
-                            self.at(key),
+                            self.expr_at(key),
                         )
                     }),
                 None => self.expr(key, scope),
@@ -688,7 +756,7 @@ impl Translator<'_> {
         projected: &[Projected],
         scope: &Scope,
     ) -> Result<Vec<(Expr, bool)>> {
-        let span = self.at(order_by);
+        let span = self.located(super::spans::deep(order_by));
         let ast::OrderBy {
             kind: ast::OrderByKind::Expressions(expressions),
             interpolate: None,
@@ -699,7 +767,7 @@ impl Translator<'_> {
         expressions
             .iter()
             .map(|order| {
-                let span = self.at(&order.expr);
+                let span = self.expr_at(&order.expr);
                 let descending = match order.options.sort {
                     None | Some(ast::OrderBySort::Asc) => false,
                     Some(ast::OrderBySort::Desc) => true,
@@ -758,7 +826,7 @@ impl Translator<'_> {
                 invalid(
                     detail::INVALID_STATEMENT,
                     format!("{text} is not a select-list position"),
-                    self.at(expression),
+                    self.expr_at(expression),
                 )
             })
     }

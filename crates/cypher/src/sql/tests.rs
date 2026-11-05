@@ -354,7 +354,7 @@ fn expressions_translate_with_sql_semantics() {
         ),
         (
             "SELECT 1, COUNT(*)",
-            "WITH count(*) AS `COUNT(*)` RETURN 1, `COUNT(*)`",
+            "WITH count(*) AS __select_col_0 RETURN 1, __select_col_0",
         ),
         (
             "SELECT 1::varchar, TRY_CAST('1' AS INT), 1 % 2, 'a' || 1",
@@ -452,16 +452,16 @@ fn select_clauses_follow_sql() {
         ),
         (
             "SELECT t.a, count(*) FROM t GROUP BY t.a HAVING t.a > 1 ORDER BY count(*) + 1",
-            "MATCH (t:t) WITH t.a AS `t.a`, count(*) AS `count(*)` WHERE `t.a` > 1 \
-             RETURN `t.a`, `count(*)` ORDER BY `count(*)` + 1",
+            "MATCH (t:t) WITH t.a AS __select_col_0, count(*) AS __select_col_1 \
+             WHERE __select_col_0 > 1 RETURN __select_col_0, __select_col_1 ORDER BY __select_col_1 + 1",
         ),
         (
             "SELECT t.a FROM t GROUP BY t.a ORDER BY max(t.b)",
-            "MATCH (t:t) WITH t.a AS `t.a`, max(t.b) AS __having_col_0 RETURN `t.a` ORDER BY __having_col_0",
+            "MATCH (t:t) WITH t.a AS __select_col_0, max(t.b) AS __having_col_1 RETURN __select_col_0 ORDER BY __having_col_1",
         ),
         (
             "SELECT 1 AS one, count(*) FROM t GROUP BY t.a",
-            "MATCH (t:t) WITH 1 AS one, count(*) AS `count(*)`, t.a AS __group_col_0 RETURN one, `count(*)`",
+            "MATCH (t:t) WITH 1 AS one, count(*) AS __select_col_0, t.a AS __group_col_1 RETURN one, __select_col_0",
         ),
     ] {
         assert_eq!(cypher(sql), expected, "{sql}");
@@ -796,7 +796,7 @@ fn wide_statements_translate_in_linear_time() {
         "SELECT count(*) FROM t GROUP BY {} HAVING count(*) > 1 ORDER BY 1",
         columns.join(", ")
     );
-    assert!(cypher(&hidden).contains("__group_col_3999"));
+    assert!(cypher(&hidden).contains("__group_col_4000"));
     let tables: Vec<String> = (0..4_000).map(|i| format!("t{i}")).collect();
     let joined = format!(
         "SELECT {} FROM {}",
@@ -925,6 +925,106 @@ fn at_sign_names_are_parameters_unless_quoted() {
     );
 }
 
+/// Every reference to a mapped table copies its label, so a long mapped
+/// label referenced many times counts against the copy budget.
+#[test]
+fn mapped_names_count_against_the_copy_budget() {
+    let label = "L".repeat(1 << 20);
+    let references = |count: usize| {
+        format!(
+            "SELECT 1 FROM {}",
+            (0..count)
+                .map(|i| format!("t a{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mappings = Mappings::default().table("t", label.as_str());
+    assert!(translate(&references(2), &mappings).is_ok());
+    let error = translate(&references(1_000), &mappings).unwrap_err();
+    assert_eq!(
+        (error.category.as_str(), error.detail.as_str()),
+        (category::RESOURCE_LIMIT, detail::QUERY_TOO_LARGE)
+    );
+    let joins = Mappings::default().join_column("t.r", label.as_str());
+    let joined = |count: usize| {
+        format!(
+            "SELECT 1 FROM {}",
+            (0..count)
+                .map(|i| format!("t a{i} JOIN u b{i} ON b{i}.id = a{i}.r"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    assert!(translate(&joined(2), &joins).is_ok());
+    let error = translate(&joined(10), &joins).unwrap_err();
+    assert_eq!(
+        (error.category.as_str(), error.detail.as_str()),
+        (category::RESOURCE_LIMIT, detail::QUERY_TOO_LARGE)
+    );
+}
+
+/// Grouped columns named by their SQL text keep that text, and any literal
+/// in it, out of the printed statement that telemetry records.
+#[test]
+fn grouped_column_names_keep_literals_out_of_the_statement() {
+    let sql = "SELECT count(*) + length('my-secret'), p.city FROM Person p \
+               GROUP BY p.city, p.dept HAVING count(*) > 0";
+    let statement = translate(sql, &Mappings::default()).unwrap();
+    let printed = statement.to_string();
+    let redacted = crate::redact_literals(&printed).unwrap();
+    assert!(!redacted.contains("my-secret"), "{redacted}");
+    let query = crate::resolve(&statement).unwrap();
+    let names: Vec<&str> = query
+        .returns()
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(names, ["count(*) + length('my-secret')", "p.city"]);
+    // A DISTINCT result with such a column orders before its names change.
+    let ordered = "SELECT DISTINCT count(*) FROM Person p GROUP BY p.dept ORDER BY count(*)";
+    let statement = translate(ordered, &Mappings::default()).unwrap();
+    assert_eq!(
+        statement.to_string(),
+        "MATCH (p:Person) WITH count(*) AS __select_col_0, p.dept AS __group_col_1 \
+         WITH DISTINCT __select_col_0 ORDER BY __select_col_0 RETURN __select_col_0"
+    );
+    let query = crate::resolve(&statement).unwrap();
+    assert_eq!(query.returns()[0].0, "count(*)");
+}
+
+/// Helper names skip every name the statement already uses.
+#[test]
+fn helper_names_avoid_names_in_use() {
+    for sql in [
+        "SELECT count(*) AS __group_col_0 FROM Person p GROUP BY p.dept",
+        "SELECT count(*), max(p.a) AS __select_col_0 FROM Person p GROUP BY p.dept",
+        "SELECT p.dept FROM Person __select_col_0, Person p GROUP BY p.dept HAVING count(*) > 1",
+        "UPDATE Person __set_0 SET a = __set_0.b, b = __set_0.a",
+    ] {
+        let statement =
+            translate(sql, &Mappings::default()).unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+        crate::resolve(&statement).unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+    }
+    assert_eq!(
+        cypher("UPDATE Person __set_0 SET a = __set_0.b, b = __set_0.a"),
+        "MATCH (__set_0:Person) WITH __set_0, __set_0.b AS __set_1, __set_0.a AS __set_2 \
+         SET __set_0.a = __set_1, __set_0.b = __set_2"
+    );
+}
+
+/// A global aggregate leaves its constants out of the grouping WITH, so
+/// HAVING reads a constant's alias as its value.
+#[test]
+fn having_reads_constant_aliases_of_global_aggregates() {
+    let sql = "SELECT 1 AS x, count(*) FROM Person p HAVING x = 1";
+    assert_eq!(
+        cypher(sql),
+        "MATCH (p:Person) WITH count(*) AS __select_col_0 WHERE 1 = 1 RETURN 1 AS x, __select_col_0"
+    );
+    crate::resolve(&translate(sql, &Mappings::default()).unwrap()).unwrap();
+}
+
 #[test]
 fn concatenation_joins_strings() {
     assert_eq!(
@@ -995,19 +1095,19 @@ fn grouping_follows_sql_without_aggregates_and_for_whole_inputs() {
         ),
         (
             "SELECT p.city FROM Person p GROUP BY p.city, p.dept",
-            "MATCH (p:Person) WITH DISTINCT p.city AS `p.city`, p.dept AS __group_col_0 RETURN `p.city`",
+            "MATCH (p:Person) WITH DISTINCT p.city AS __select_col_0, p.dept AS __group_col_1 RETURN __select_col_0",
         ),
         (
             "SELECT p.city FROM Person p GROUP BY p.city HAVING p.city <> 'x'",
-            "MATCH (p:Person) WITH DISTINCT p.city AS `p.city` WHERE `p.city` <> 'x' RETURN `p.city`",
+            "MATCH (p:Person) WITH DISTINCT p.city AS __select_col_0 WHERE __select_col_0 <> 'x' RETURN __select_col_0",
         ),
         (
             "SELECT 'total', ?, count(*) FROM Person p",
-            "MATCH (p:Person) WITH count(*) AS `count(*)` RETURN 'total', $1, `count(*)`",
+            "MATCH (p:Person) WITH count(*) AS __select_col_0 RETURN 'total', $1, __select_col_0",
         ),
         (
             "SELECT 1 AS one, count(*) FROM t HAVING count(*) >= 0",
-            "MATCH (t:t) WITH count(*) AS `count(*)` WHERE `count(*)` >= 0 RETURN 1 AS one, `count(*)`",
+            "MATCH (t:t) WITH count(*) AS __select_col_0 WHERE __select_col_0 >= 0 RETURN 1 AS one, __select_col_0",
         ),
     ] {
         assert_eq!(cypher(sql), expected, "{sql}");

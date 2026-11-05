@@ -499,7 +499,7 @@ SELECT p.name, p.born FROM Person p
 
 # grouping.adoc withClauseGeneration
 SELECT name, sum(age) FROM People p GROUP BY name, department
-=> MATCH (p:People) WITH p.name AS name, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS `sum(age)`, p.department AS __group_col_0 RETURN name, `sum(age)`
+=> MATCH (p:People) WITH p.name AS name, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.department AS __group_col_1 RETURN name, __select_col_0
 
 # grouping.adoc withClauseGeneration
 SELECT name AS x, sum(age) AS y FROM People p GROUP BY x, department
@@ -507,7 +507,7 @@ SELECT name AS x, sum(age) AS y FROM People p GROUP BY x, department
 
 # grouping.adoc withClauseGeneration
 SELECT count(*) FROM Customers c JOIN Orders o ON c.id = o.customer_id GROUP BY c.name
-=> MATCH (c:Customers)<-[customer_id:CUSTOMER_ID]-(o:Orders) WITH count(*) AS `count(*)`, c.name AS __group_col_0 RETURN `count(*)`
+=> MATCH (c:Customers)<-[customer_id:CUSTOMER_ID]-(o:Orders) WITH count(*) AS __select_col_0, c.name AS __group_col_1 RETURN __select_col_0
 
 # grouping.adoc withClauseGeneration
 SELECT name, count(*), sum(age), avg(age) FROM People p GROUP BY name
@@ -515,15 +515,15 @@ SELECT name, count(*), sum(age), avg(age) FROM People p GROUP BY name
 
 # grouping.adoc withClauseGeneration
 SELECT count(*), sum(age) FROM People p GROUP BY name
-=> MATCH (p:People) WITH count(*) AS `count(*)`, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS `sum(age)`, p.name AS __group_col_0 RETURN `count(*)`, `sum(age)`
+=> MATCH (p:People) WITH count(*) AS __select_col_0, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_1, p.name AS __group_col_2 RETURN __select_col_0, __select_col_1
 
 # grouping.adoc withClauseGeneration
 SELECT sum(age) FROM People p GROUP BY name HAVING sum(age) > 100
-=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS `sum(age)`, p.name AS __group_col_0 WHERE `sum(age)` > 100 RETURN `sum(age)`
+=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.name AS __group_col_1 WHERE __select_col_0 > 100 RETURN __select_col_0
 
 # grouping.adoc withClauseGeneration
 SELECT sum(age) FROM People p GROUP BY name ORDER BY sum(age)
-=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS `sum(age)`, p.name AS __group_col_0 RETURN `sum(age)` ORDER BY `sum(age)`
+=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0 ORDER BY __select_col_0
 
 # grouping.adoc havingConditionTranslation
 SELECT name FROM People p GROUP BY name HAVING count(*) > 5
@@ -531,11 +531,11 @@ SELECT name FROM People p GROUP BY name HAVING count(*) > 5
 
 # grouping.adoc havingConditionTranslation
 SELECT count(*) FROM People p HAVING count(*) > 5
-=> MATCH (p:People) WITH count(*) AS `count(*)` WHERE `count(*)` > 5 RETURN `count(*)`
+=> MATCH (p:People) WITH count(*) AS __select_col_0 WHERE __select_col_0 > 5 RETURN __select_col_0
 
 # grouping.adoc havingConditionTranslation
 SELECT count(*) FROM People p GROUP BY name HAVING name = 'Alice'
-=> MATCH (p:People) WITH count(*) AS `count(*)`, p.name AS __group_col_0 WHERE __group_col_0 = 'Alice' RETURN `count(*)`
+=> MATCH (p:People) WITH count(*) AS __select_col_0, p.name AS __group_col_1 WHERE __group_col_1 = 'Alice' RETURN __select_col_0
 
 # grouping.adoc havingConditionTranslation
 SELECT name, count(*) AS cnt FROM People p GROUP BY name HAVING cnt > 5
@@ -547,7 +547,7 @@ SELECT name FROM People p GROUP BY name HAVING count(*) > 5 AND max(age) > 50
 
 # grouping.adoc havingConditionTranslation
 SELECT name, sum(age) FROM People p GROUP BY name HAVING sum(age) > 100 AND count(*) > 2
-=> MATCH (p:People) WITH p.name AS name, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS `sum(age)`, count(*) AS __having_col_0 WHERE (`sum(age)` > 100 AND __having_col_0 > 2) RETURN name, `sum(age)`
+=> MATCH (p:People) WITH p.name AS name, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, count(*) AS __having_col_1 WHERE (__select_col_0 > 100 AND __having_col_1 > 2) RETURN name, __select_col_0
 
 # grouping.adoc havingConditionTranslation
 SELECT name FROM People p GROUP BY name HAVING count(*) > 5 ORDER BY name
@@ -587,21 +587,21 @@ SELECT name, min(age) FROM People p GROUP BY name
 
 # grouping.adoc aggregates
 SELECT sum(age) FROM People p GROUP BY name
-=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS `sum(age)`, p.name AS __group_col_0 RETURN `sum(age)`
+=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0
 
 # grouping.adoc aggregates
 SELECT avg(age) FROM People p GROUP BY name
-=> MATCH (p:People) WITH avg(p.age) AS `avg(age)`, p.name AS __group_col_0 RETURN `avg(age)`
+=> MATCH (p:People) WITH avg(p.age) AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0
 
 # grouping.adoc aggregates
 SELECT percentileCont(age) FROM People p GROUP BY name
-=> MATCH (p:People) WITH percentileCont(p.age) AS `percentileCont(age)`, p.name AS __group_col_0 RETURN `percentileCont(age)`
+=> MATCH (p:People) WITH percentileCont(p.age) AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0
 !! unsupported_feature function
 
 # grouping.adoc aggregates
 # divergence: the column is named as written; neo4j-jdbc renders jOOQ's name.
 SELECT stDev(age) FROM People p GROUP BY name
-=> MATCH (p:People) WITH stDev(p.age) AS `stDev(age)`, p.name AS __group_col_0 RETURN `stDev(age)`
+=> MATCH (p:People) WITH stDev(p.age) AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0
 !! unsupported_feature function
 
 # grouping.adoc aggregates
@@ -611,7 +611,7 @@ SELECT stddev_pop(age) AS x FROM People p GROUP BY name
 
 # grouping.adoc limitAndOffsetWithWithClause
 SELECT sum(age) FROM People p GROUP BY name LIMIT 5
-=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS `sum(age)`, p.name AS __group_col_0 RETURN `sum(age)` LIMIT 5
+=> MATCH (p:People) WITH CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.name AS __group_col_1 RETURN __select_col_0 LIMIT 5
 
 # grouping.adoc limitAndOffsetWithWithClause
 SELECT name FROM People p GROUP BY name HAVING count(*) > 5 LIMIT 10
@@ -627,7 +627,7 @@ SELECT DISTINCT name, count(*) FROM People p GROUP BY name
 
 # grouping.adoc distinctWithGroupByAndHaving
 SELECT DISTINCT count(*) FROM People p GROUP BY name
-=> MATCH (p:People) WITH count(*) AS `count(*)`, p.name AS __group_col_0 RETURN DISTINCT `count(*)`
+=> MATCH (p:People) WITH count(*) AS __select_col_0, p.name AS __group_col_1 RETURN DISTINCT __select_col_0
 
 # grouping.adoc distinctWithGroupByAndHaving
 SELECT DISTINCT name FROM People p GROUP BY name HAVING count(*) > 5
@@ -635,7 +635,7 @@ SELECT DISTINCT name FROM People p GROUP BY name HAVING count(*) > 5
 
 # grouping.adoc groupingCombinations
 SELECT DISTINCT name, sum(age) FROM People p GROUP BY name, department HAVING sum(age) > 100 ORDER BY name LIMIT 5
-=> MATCH (p:People) WITH p.name AS name, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS `sum(age)`, p.department AS __group_col_0 WHERE `sum(age)` > 100 RETURN DISTINCT name, `sum(age)` ORDER BY name LIMIT 5
+=> MATCH (p:People) WITH p.name AS name, CASE count(p.age) WHEN 0 THEN NULL ELSE sum(p.age) END AS __select_col_0, p.department AS __group_col_1 WHERE __select_col_0 > 100 WITH DISTINCT name, __select_col_0 ORDER BY name LIMIT 5 RETURN name, __select_col_0
 
 # grouping.adoc groupingCombinations
 SELECT DISTINCT name FROM People p GROUP BY name HAVING count(*) > 5 ORDER BY name LIMIT 10 OFFSET 5
@@ -668,7 +668,7 @@ SELECT name, count(*) FROM People p
 
 # A function of a grouping key groups by the key, not by the function's value.
 SELECT upper(name), count(*) FROM People p GROUP BY name
-=> MATCH (p:People) WITH toUpper(p.name) AS `upper(name)`, count(*) AS `count(*)`, p.name AS __group_col_0 RETURN `upper(name)`, `count(*)`
+=> MATCH (p:People) WITH toUpper(p.name) AS __select_col_0, count(*) AS __select_col_1, p.name AS __group_col_2 RETURN __select_col_0, __select_col_1
 
 # Positional GROUP BY and ORDER BY
 SELECT department, count(*) FROM People p GROUP BY 1 ORDER BY 2 DESC, 1

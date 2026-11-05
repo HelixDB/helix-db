@@ -353,7 +353,7 @@ impl Translator<'_> {
         reason = "sqlparser's FROM items are open-ended; only plain tables translate"
     )]
     pub(super) fn reference(&self, factor: &ast::TableFactor) -> Result<Reference> {
-        let span = self.at(factor);
+        let span = self.located(super::spans::table(factor));
         let ast::TableFactor::Table {
             name,
             alias,
@@ -403,7 +403,7 @@ impl Translator<'_> {
             .and_then(ast::ObjectNamePart::as_ident)
             .map(|ident| ident.value.clone())
             .ok_or_else(|| unsupported("this table name", span))?;
-        let label = self.label(&name);
+        let label = self.label(&name, span)?;
         let class = match relationship_table(&label) {
             Some((start, kind, end)) => Class::Relationship {
                 start: start.to_owned(),
@@ -447,7 +447,10 @@ impl Translator<'_> {
                         chain.push((reference, Some(constraint)));
                     }
                     other => {
-                        return Err(unsupported(join_kind(other), self.at(&join.relation)));
+                        return Err(unsupported(
+                            join_kind(other),
+                            self.located(super::spans::table(&join.relation)),
+                        ));
                     }
                 }
             }
@@ -595,10 +598,15 @@ impl Translator<'_> {
             let join = self.join(constraint, scope, Some(&right), right.span)?;
             // As in neo4j-jdbc, a mapping is keyed by the left table and the
             // column that names the type, whichever table owns it.
-            let kind = join.column.as_ref().map(|column| {
-                self.join_type(&left, column)
-                    .map_or_else(|| column.to_uppercase(), str::to_owned)
-            });
+            let kind = join
+                .column
+                .as_ref()
+                .map(|column| {
+                    Ok(self
+                        .join_type(&left, column, right.span)?
+                        .map_or_else(|| column.to_uppercase(), str::to_owned))
+                })
+                .transpose()?;
             // The relationship is named after its type, renamed if a table
             // or another relationship already has that variable.
             let name = match &kind {
@@ -733,14 +741,14 @@ impl Translator<'_> {
                 else {
                     return Err(unsupported(
                         "join conditions other than one column equality; move filters to WHERE",
-                        self.at(condition),
+                        self.expr_at(condition),
                     ));
                 };
                 let [Some(first), Some(second)] = [left, second].map(|side| column_parts(side))
                 else {
                     return Err(unsupported(
                         "join conditions other than one column equality; move filters to WHERE",
-                        self.at(condition),
+                        self.expr_at(condition),
                     ));
                 };
                 let names_right = |q: &str| {
@@ -757,7 +765,7 @@ impl Translator<'_> {
                         continue;
                     };
                     if !names_right(&qualifier.value) {
-                        scope.qualified(&qualifier.value, self.at(condition))?;
+                        scope.qualified(&qualifier.value, self.expr_at(condition))?;
                     }
                 }
                 let (qualifier, column) = match second.as_slice() {

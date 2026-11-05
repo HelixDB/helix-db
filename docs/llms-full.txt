@@ -4510,7 +4510,8 @@ and `'%x'` `ENDS WITH`.
 
 Functions with a Cypher equivalent are renamed: `lower` and `upper` become
 `toLower` and `toUpper`, `length` and `char_length` become `size`, `nvl` and
-`ifnull` become `coalesce`, `array_agg` becomes `collect`, and `nullif` and
+`ifnull` become `coalesce`, `array_agg` becomes `collect` (which, unlike SQL's
+`array_agg`, leaves out nulls), and `nullif` and
 `nvl2` become `CASE`. `SUBSTRING` counts from 1, as in SQL; a start below 1
 must be a literal, since a computed one fails. `TRIM`, `LTRIM` and `RTRIM`
 remove all surrounding whitespace, as Cypher's do, not only spaces. Other names

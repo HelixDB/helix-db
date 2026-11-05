@@ -5,7 +5,8 @@
 //! `SUBSTRING` starts at 1, `(a, b) <> (c, d)` holds when any pair differs,
 //! two-argument `REPLACE` removes the search string, and `||` and `CONCAT`
 //! join their operands as strings, `CONCAT` skipping nulls as PostgreSQL does.
-//! `SUM` of no values is null. `TRIM` and its variants remove all leading or
+//! `SUM` of no values is null. `ARRAY_AGG` leaves out nulls, as Cypher's
+//! `collect` does, where SQL keeps them. `TRIM` and its variants remove all leading or
 //! trailing whitespace, as Cypher's do, not only spaces. `CAST` uses Cypher's conversions: to an integer it truncates toward zero,
 //! and text that does not convert becomes null rather than an error.
 use super::tables::Scope;
@@ -31,10 +32,12 @@ impl Translator<'_> {
                 detail::EXPRESSION_DEPTH,
                 "SQL expression nesting exceeds the translation limit",
             )
-            .at(self.at(expression)));
+            .at(self.expr_at(expression)));
         }
         self.depth.set(depth);
-        let result = self.expr_at_depth(expression, scope);
+        // Each level grows the stack when it runs low, so the deepest
+        // accepted nesting fits a worker thread in any build.
+        let result = super::spans::grown(|| self.expr_at_depth(expression, scope));
         self.depth.set(depth - 1);
         result
     }
@@ -52,7 +55,7 @@ impl Translator<'_> {
         ) {
             return Err(unsupported(
                 "XOR inside a comparison, NOT or AND without parentheses; parenthesize it",
-                self.at(expression),
+                self.expr_at(expression),
             ));
         }
         self.expr(expression, scope)
@@ -66,7 +69,7 @@ impl Translator<'_> {
         use ast::Expr as E;
         // Spans of connective chains come from their operands, so no
         // recursive span computation walks a long chain.
-        let span = || self.at(expression);
+        let span = || self.expr_at(expression);
         let unary = |operator, value: &ast::Expr| {
             Expr::new(
                 ExprKind::Unary(operator, Box::new(self.logical(value, scope)?)),
@@ -321,7 +324,7 @@ impl Translator<'_> {
             )),
             other => Err(unsupported(
                 format!("the expression `{}`", self.excerpt(span())),
-                self.at(other),
+                self.expr_at(other),
             )),
         }
     }
@@ -365,7 +368,7 @@ impl Translator<'_> {
                         }
                     }
                 };
-                return binary(B::Add, text(left)?, text(right)?, self.at(whole));
+                return binary(B::Add, text(left)?, text(right)?, self.expr_at(whole));
             }
             O::Plus => B::Add,
             O::Minus => B::Subtract,
@@ -381,11 +384,11 @@ impl Translator<'_> {
             other => {
                 return Err(unsupported(
                     format!("the operator `{other}`"),
-                    self.at(whole),
+                    self.expr_at(whole),
                 ));
             }
         };
-        let span = self.at(whole);
+        let span = self.expr_at(whole);
         match (left, right) {
             (ast::Expr::Tuple(left), ast::Expr::Tuple(right)) => {
                 self.row_comparison(operator, left, right, scope, span)
@@ -705,7 +708,7 @@ impl Translator<'_> {
                                 | ast::FunctionArg::Named { .. }
                                 | ast::FunctionArg::ExprNamed { .. } => Err(unsupported(
                                     "named or wildcard function arguments",
-                                    self.at(argument),
+                                    self.located(super::spans::argument(argument)),
                                 )),
                             })
                             .collect::<Result<Vec<_>>>()?,

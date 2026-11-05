@@ -71,6 +71,7 @@ mod dml;
 mod expr;
 pub mod request;
 mod select;
+mod spans;
 mod tables;
 
 /// How SQL names map onto the graph. Keys match case-insensitively.
@@ -180,6 +181,7 @@ pub fn translate(text: &str, mappings: &Mappings) -> Result<syntax::Statement, Q
         .with_tokens_with_locations(tokens)
         .parse_statements()
         .map_err(|error| parse_error(&lines, error))?;
+    let leading = text.len() - text.trim_start().len();
     let translator = Translator {
         lines,
         labels: lowercased(mappings.tables.iter().map(|(k, v)| (k, v.as_str()))),
@@ -188,6 +190,10 @@ pub fn translate(text: &str, mappings: &Mappings) -> Result<syntax::Statement, Q
         depth: Cell::new(0),
         copied: Cell::new(0),
         printed: Cell::new(0),
+        whole: Span {
+            start: leading,
+            end: text.trim_end().len().max(leading),
+        },
     };
     match statements.as_slice() {
         [statement] => translator.statement(statement),
@@ -468,6 +474,10 @@ struct Translator<'a> {
     copied: Cell<usize>,
     /// Bytes printed so far to compare expressions; see [`Translator::text`].
     printed: Cell<usize>,
+    /// The statement's text without surrounding whitespace, the span of
+    /// statement-wide errors. sqlparser would compute a statement's span by
+    /// visiting every expression in it.
+    whole: Span,
 }
 
 /// Bound on the weight of copied expressions per statement. A node weighs
@@ -477,20 +487,50 @@ struct Translator<'a> {
 const MAX_COPIED_WEIGHT: usize = 16 << 20;
 /// About the memory of one expression node.
 const NODE_WEIGHT: usize = 64;
+/// About the copies of a mapped label or type each table reference keeps:
+/// the reference, its scope entry, its pattern and the result's names.
+const MAPPED_NAME_COPIES: usize = 4;
 /// Bound on the Cypher text printed per statement to compare expressions.
 const MAX_PRINTED_BYTES: usize = 64 << 20;
 
 impl Translator<'_> {
-    fn label(&self, table: &str) -> String {
-        self.labels
-            .get(&table.to_lowercase())
-            .map_or_else(|| table.to_owned(), |label| (*label).to_owned())
+    /// The label a table maps to, or its own name. A mapped label is not
+    /// in the statement's text, yet every reference to the table copies it,
+    /// so the copies count against the copy budget.
+    fn label(&self, table: &str, span: Span) -> Result<String, QueryError> {
+        let Some(label) = self.labels.get(&table.to_lowercase()) else {
+            return Ok(table.to_owned());
+        };
+        self.charge(MAPPED_NAME_COPIES * label.len(), span)?;
+        Ok((*label).to_owned())
     }
 
-    fn join_type(&self, table: &str, column: &str) -> Option<&str> {
-        self.join_types
+    /// The relationship type a join column maps to, charged like [`Self::label`].
+    fn join_type(&self, table: &str, column: &str, span: Span) -> Result<Option<&str>, QueryError> {
+        let Some(kind) = self
+            .join_types
             .get(&format!("{table}.{column}").to_lowercase())
             .copied()
+        else {
+            return Ok(None);
+        };
+        self.charge(MAPPED_NAME_COPIES * kind.len(), span)?;
+        Ok(Some(kind))
+    }
+
+    /// Count `weight` against the copy budget.
+    fn charge(&self, weight: usize, span: Span) -> Result<(), QueryError> {
+        let copied = self.copied.get() + weight;
+        if copied > MAX_COPIED_WEIGHT {
+            return Err(QueryError::compile(
+                category::RESOURCE_LIMIT,
+                detail::QUERY_TOO_LARGE,
+                "the SQL statement translates to too large a Cypher statement",
+            )
+            .at(span));
+        }
+        self.copied.set(copied);
+        Ok(())
     }
 
     /// Copy a translated expression. SQL forms that repeat an operand, such
@@ -511,16 +551,7 @@ impl Translator<'_> {
         let mut length = Length(0);
         std::fmt::write(&mut length, format_args!("{expression}"))
             .expect("counting text cannot fail");
-        let copied = self.copied.get() + nodes * NODE_WEIGHT + length.0;
-        if copied > MAX_COPIED_WEIGHT {
-            return Err(QueryError::compile(
-                category::RESOURCE_LIMIT,
-                detail::QUERY_TOO_LARGE,
-                "the SQL statement translates to too large a Cypher statement",
-            )
-            .at(expression.span));
-        }
-        self.copied.set(copied);
+        self.charge(nodes * NODE_WEIGHT + length.0, expression.span)?;
         Ok(expression.clone())
     }
 
@@ -550,12 +581,22 @@ impl Translator<'_> {
         })
     }
 
-    /// The span of a node, or the whole statement when sqlparser has none.
+    /// A sqlparser span as a byte range, or the whole statement when
+    /// sqlparser has none.
+    fn located(&self, span: tokenizer::Span) -> Span {
+        self.span(span).unwrap_or(self.whole)
+    }
+
+    /// The span of a node without expressions inside, such as a name or a
+    /// column. Expressions use [`Translator::expr_at`], whose span computation
+    /// cannot overflow the stack however deep the expression nests.
     fn at(&self, node: &impl ast::Spanned) -> Span {
-        self.span(node.span()).unwrap_or(Span {
-            start: 0,
-            end: self.lines.text.len(),
-        })
+        self.located(node.span())
+    }
+
+    /// The span of an expression.
+    fn expr_at(&self, expression: &ast::Expr) -> Span {
+        self.located(spans::expr(expression))
     }
 
     #[expect(
@@ -571,7 +612,7 @@ impl Translator<'_> {
             ast::Statement::Truncate(truncate) => self.truncate(truncate),
             other => Err(unsupported(
                 format!("the statement `{}`", first_words(&other.to_string())),
-                self.at(other),
+                self.whole,
             )),
         }
     }

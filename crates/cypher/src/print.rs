@@ -132,6 +132,7 @@ impl Display for syntax::Item {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             syntax::Item::Wildcard => f.write_char('*'),
+            syntax::Item::Named { expression, .. } => write!(f, "{expression}"),
             syntax::Item::Expression {
                 expression, alias, ..
             } => {

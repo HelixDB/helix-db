@@ -12,7 +12,7 @@ use sqlparser::ast;
 
 impl Translator<'_> {
     pub(super) fn insert(&self, insert: &ast::Insert) -> Result<syntax::Statement> {
-        let span = self.at(insert);
+        let span = self.whole;
         let ast::Insert {
             insert_token: _,
             optimizer_hints,
@@ -137,7 +137,14 @@ impl Translator<'_> {
                             "a VALUES row has {} values for {width} columns",
                             row.content.len()
                         ),
-                        self.at(row),
+                        self.located(
+                            row.content
+                                .iter()
+                                .map(super::spans::expr)
+                                .fold(sqlparser::tokenizer::Span::empty(), |span, value| {
+                                    span.union(&value)
+                                }),
+                        ),
                     ));
                 }
                 row.content
@@ -521,7 +528,7 @@ impl Translator<'_> {
     }
 
     pub(super) fn update(&self, update: &ast::Update) -> Result<syntax::Statement> {
-        let span = self.at(update);
+        let span = self.whole;
         if update.from.is_some() {
             return Err(unsupported(
                 "UPDATE ... FROM; join in the UPDATE target instead",
@@ -549,7 +556,7 @@ impl Translator<'_> {
                 let ast::AssignmentTarget::ColumnName(column) = &assignment.target else {
                     return Err(unsupported(
                         "assigning a row of columns",
-                        self.at(assignment),
+                        self.located(super::spans::deep(assignment)),
                     ));
                 };
                 let at = self.at(column);
@@ -590,11 +597,14 @@ impl Translator<'_> {
                 .variables()
                 .map(|name| Ok(super::item(variable(name, span)?, None)))
                 .collect::<Result<Vec<_>>>()?;
+            // Helper names skip any table variable that already has one.
+            let mut names = (0..)
+                .map(|index| format!("__set_{index}"))
+                .filter(|name| !scope.has_variable(name));
             let assignments = assignments
                 .into_iter()
-                .enumerate()
-                .map(|(index, (target, value))| {
-                    let name = format!("__set_{index}");
+                .map(|(target, value)| {
+                    let name = names.next().expect("a free name exists");
                     let at = value.span;
                     items.push(super::item(value, Some(name.clone())));
                     Ok(Assignment::Property(target, variable(&name, at)?))
@@ -622,7 +632,7 @@ impl Translator<'_> {
     }
 
     pub(super) fn delete(&self, delete: &ast::Delete) -> Result<syntax::Statement> {
-        let span = self.at(delete);
+        let span = self.whole;
         if !delete.tables.is_empty()
             || delete.using.is_some()
             || delete.returning.is_some()
@@ -671,7 +681,7 @@ impl Translator<'_> {
     /// `TRUNCATE t` deletes every node with the table's label and its
     /// relationships, or every relationship of a relationship table.
     pub(super) fn truncate(&self, truncate: &ast::Truncate) -> Result<syntax::Statement> {
-        let span = self.at(truncate);
+        let span = self.whole;
         let ast::Truncate {
             table_names,
             partitions: None,
