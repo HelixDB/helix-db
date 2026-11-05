@@ -154,8 +154,9 @@ RETURN id(alice) AS alice, id(bob) AS bob, count(follows) AS linked
 -- Two requests: SQL sends one statement per request.
 INSERT INTO User (name) VALUES ('Alice'), ('Bob') RETURNING id(user) AS id;
 
-INSERT INTO User_FOLLOWS_User (_start.name, _end.name, since)
-VALUES ('Alice', 'Bob', '2026-07-24');
+-- Bind the two returned ids, so only the new users are connected.
+INSERT INTO User_FOLLOWS_User (_start.v$id, _end.v$id, since)
+VALUES (?, ?, '2026-07-24');
 ```
 
 </CodeGroup>

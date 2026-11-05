@@ -99,7 +99,7 @@ therefore enforces, before or while it builds anything large:
 | Token estimate | 500,000 | `resource_limit` / `too_many_tokens` |
 | Binary operators | 1,024 | `resource_limit` / `expression_depth` |
 | Translation nesting | 96 levels | `resource_limit` / `expression_depth` |
-| Copied expressions | 16 MiB of weight: 64 per node plus its Cypher text | `resource_limit` / `query_too_large` |
+| Copied expressions and mapped names | 16 MiB of weight: 64 per node plus its Cypher text, and each mapped label or type 4 times per reference | `resource_limit` / `query_too_large` |
 | Text printed to compare grouped expressions | 64 MiB | `resource_limit` / `query_too_large` |
 
 The token estimate never undercounts sqlparser: it ignores quoting and comments,
@@ -109,11 +109,26 @@ every keyword other than literals and clause keywords, and every sign after a
 word, so no infix chain goes uncounted. The copy budget covers the SQL forms that
 repeat an operand, such as `BETWEEN`, `NULLIF` and alias references, which could
 otherwise grow the tree exponentially, and repeated references to one long
-literal, which would otherwise copy it each time. Grouping compares expressions
-by their printed Cypher through hash sets; comparing each level of a deep
-expression reprints its inner parts, so that printing has its own budget. Scope
-and mapping lookups use hash maps, and span conversion takes constant time per
-location, so cost stays linear in the statement's size.
+literal, which would otherwise copy it each time. A mapped label or type is
+not in the text, yet every reference to its table copies it, so those copies
+count too. Grouping compares expressions by their printed Cypher through hash
+sets; comparing each level of a deep expression reprints its inner parts, so
+that printing has its own budget. Scope and mapping lookups use hash maps, and
+span conversion takes constant time per location, so cost stays linear in the
+statement's size.
+
+sqlparser builds operator chains in a loop, so they can nest as deep as the
+operator bound, and its `Spanned` recurses through them. `sql/spans.rs`
+computes the same spans one level at a time on a stack that grows on demand
+(`stacker`), translation recurses the same way, and statement-wide spans are
+the statement's text, so the deepest accepted statement fits a worker thread
+in unoptimized builds too.
+
+A grouped column named by its SQL text, such as `count(*) + length('x')`, is
+projected in the grouping `WITH` under a value-free name such as
+`__select_col_0`, and `RETURN` gives it its SQL name through
+`syntax::Item::Named`, which printing omits. Literals in SQL names therefore
+never reach the printed statement that telemetry records.
 
 ## Tests
 

@@ -341,7 +341,8 @@ apply to the translated statement:
 - An equality on a table's column, such as `WHERE u.email = ?`, can read an
   equality index, and so can `IN` lists and `OR`ed equalities on one column.
 - A range such as `WHERE u.age >= 21 AND u.age < ?` can read a range index.
-- `WHERE id(u) = ?` or `WHERE u.v$id IN (?)` reads those nodes directly.
+- `WHERE id(u) = ?`, or `WHERE u.v$id IN (1, 2)` with a list of literal ids,
+  reads those nodes directly. A list parameter, as in `IN (?)`, scans the label.
 - A join reads only the relationship type it names, so name the relationship
   table or join column rather than joining every relationship.
 - Without `DISTINCT` or grouping, `ORDER BY`, `OFFSET`, and `LIMIT` apply to the
