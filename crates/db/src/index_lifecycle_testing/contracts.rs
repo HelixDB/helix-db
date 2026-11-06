@@ -1863,19 +1863,16 @@ async fn run_secondary_mutation_interleaving() {
     .await;
     assert_build_deltas_empty(&db, scope, &alias_definition).await;
 
+    // Both rows already hold the duplicate when the build starts, so the
+    // scan blocks on it; a write cannot add one while the build runs.
     let unique_ids = allocate_node_ids(&db, 2).await;
     let duplicate = "duplicate-while-building";
     for entity_id in unique_ids.clone() {
-        let unique = if entity_id == unique_ids.start {
-            duplicate.to_string()
-        } else {
-            format!("initial-unique-{entity_id}")
-        };
         let properties = document_with_values(
             "IndexedUser",
             format!("unique-source-{entity_id}@example.com"),
             format!("unique-source-alias-{entity_id}"),
-            unique,
+            duplicate,
         );
         mutate_source(&db, scope, entity_id, &[], &properties)
             .await
@@ -1901,36 +1898,6 @@ async fn run_secondary_mutation_interleaving() {
     else {
         panic!("fresh unique definition must enqueue");
     };
-    drive_until_stage(
-        &db,
-        &controller,
-        scope,
-        unique_operation_id,
-        IndexOperationStage::Validate,
-    )
-    .await;
-    let conflicting_id = unique_ids.end - 1;
-    let conflicting_before = document_with_values(
-        "IndexedUser",
-        format!("unique-source-{conflicting_id}@example.com"),
-        format!("unique-source-alias-{conflicting_id}"),
-        format!("initial-unique-{conflicting_id}"),
-    );
-    let conflicting_after = document_with_values(
-        "IndexedUser",
-        format!("unique-source-{conflicting_id}@example.com"),
-        format!("unique-source-alias-{conflicting_id}"),
-        duplicate,
-    );
-    mutate_source(
-        &db,
-        scope,
-        conflicting_id,
-        &conflicting_before,
-        &conflicting_after,
-    )
-    .await
-    .expect("duplicate introduced during validation commits as build delta");
     let blocked = drive_to_terminal(&db, &controller, scope, unique_operation_id).await;
     assert!(matches!(blocked, IndexOperationStatus::Blocked { .. }));
 
@@ -1955,6 +1922,27 @@ async fn run_secondary_mutation_interleaving() {
         .await
         .expect("unique build retries from its exact checkpoint");
     assert_eq!(retried.common().stage, blocked.common().stage);
+    drive_until_stage(
+        &db,
+        &controller,
+        scope,
+        unique_operation_id,
+        IndexOperationStage::Validate,
+    )
+    .await;
+    let duplicate_again = document_with_values(
+        "IndexedUser",
+        format!("unique-source-{repaired_id}@example.com"),
+        format!("unique-source-alias-{repaired_id}"),
+        duplicate,
+    );
+    assert!(
+        matches!(
+            mutate_source(&db, scope, repaired_id, &repaired_after, &duplicate_again).await,
+            Err(HelixDbError::UniqueConstraintViolation { .. })
+        ),
+        "a duplicate written during validation fails at write time"
+    );
     assert!(matches!(
         drive_to_terminal(&db, &controller, scope, unique_operation_id).await,
         IndexOperationStatus::Succeeded { .. }
