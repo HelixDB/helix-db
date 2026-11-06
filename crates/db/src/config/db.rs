@@ -500,6 +500,30 @@ impl DbConfig {
         self
     }
 
+    /// Set how often the WAL uploads, in place of SlateDB's default of 100 ms.
+    ///
+    /// A durable commit waits for the next upload, so a shorter interval lowers
+    /// write latency. Each interval with new writes costs one object-store PUT.
+    /// Later [`Self::with_slate_settings`] calls replace this.
+    ///
+    /// ```
+    /// use std::num::NonZeroU64;
+    /// use std::time::Duration;
+    ///
+    /// use db::DbConfig;
+    ///
+    /// let interval = |config: DbConfig| config.slate().to_writer_settings(None).flush_interval;
+    /// assert_eq!(interval(DbConfig::new()), Some(Duration::from_millis(100)));
+    ///
+    /// let twenty_ms = NonZeroU64::new(20).unwrap();
+    /// let config = DbConfig::new().with_wal_flush_interval_ms(twenty_ms);
+    /// assert_eq!(interval(config), Some(Duration::from_millis(20)));
+    /// ```
+    pub fn with_wal_flush_interval_ms(mut self, interval: NonZeroU64) -> Self {
+        self.slate = self.slate.with_wal_flush_interval_ms(interval);
+        self
+    }
+
     /// Set runtime cache configuration.
     pub fn with_cache(mut self, cache: CacheConfig) -> Self {
         self.cache = cache;

@@ -17,6 +17,7 @@ fn memory_config(name: &str) -> ServerConfig {
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
         db_path: name.to_string(),
         storage: StorageConfig::Memory,
+        wal_flush_interval_ms: None,
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     }
 }
@@ -537,6 +538,7 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
             root: data_root.clone(),
             cache: CacheConfig::Hybrid(Box::new(cache)),
         },
+        wal_flush_interval_ms: None,
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let write = query::QueryRequest::write(
@@ -691,6 +693,7 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
                 .unwrap(),
             )),
         },
+        wal_flush_interval_ms: None,
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let search = query::QueryRequest::read(
@@ -846,6 +849,7 @@ async fn a_hybrid_cache_directory_serves_one_server_at_a_time() {
                 .unwrap(),
             )),
         },
+        wal_flush_interval_ms: None,
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let first = open_database(&config(128 * MIB)).await.unwrap();
@@ -927,6 +931,7 @@ async fn a_benchmark_writer_holds_its_hybrid_cache_directory_like_the_server() {
                 .unwrap(),
             )),
         },
+        wal_flush_interval_ms: None,
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let benchmark = crate::benchmark::open_database(
