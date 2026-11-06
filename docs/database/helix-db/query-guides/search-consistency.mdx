@@ -6,8 +6,9 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-A write to an indexed vector or text property commits its index work as a durable
-queued operation, and the index worker publishes it into the index shortly afterwards.
+A write to an indexed vector or text property commits its index work as a queued
+operation, durable along with the write, and the index worker publishes it into the
+index shortly afterwards.
 Search consistency sets how a read request's vector and text searches treat work that
 is committed but not yet published. It applies to whole-index and
 [prefiltered](/database/helix-db/query-guides/prefiltering) searches.

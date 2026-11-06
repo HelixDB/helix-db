@@ -181,7 +181,7 @@ Optional header toggles can be chained before choosing the query kind:
 
 - `.writer_only()` — require the request to be served by a writer node (`x-helix-require-writer`).
 - `.warm_only()` — fan the read out for cache warming (`x-helix-warm`); reads only.
-- `.should_await_durability(true)` — block until the write is durable (`x-helix-await-durable`).
+- `.should_await_durability(false)` — return once the write is applied on the writer instead of waiting until it is durable, so a crash before its WAL upload loses it (`x-helix-await-durable`).
 
 `send()` is generic over the deserialized response type `R` and returns `Result<R, HelixError>`.
 `HelixError` distinguishes transport errors, non-success responses from the server (`RemoteError`),
