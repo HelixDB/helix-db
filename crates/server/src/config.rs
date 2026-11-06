@@ -2130,7 +2130,7 @@ mod tests {
 
     /// `HELIX_SST_COMPRESSION` sets the writer's SST codec on every storage
     /// and cache combination, in any case and with surrounding whitespace;
-    /// unset means zstd.
+    /// unset means none.
     #[test]
     fn sst_compression_sets_the_writer_codec_for_every_storage() {
         use db::config::SstCompression;
