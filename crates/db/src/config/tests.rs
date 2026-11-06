@@ -1457,7 +1457,7 @@ fn secondary_index_lifecycle_batch_rows_reject_zero() {
 }
 
 #[test]
-fn every_profile_compresses_sst_blocks_with_zstd_until_told_otherwise() {
+fn every_profile_leaves_sst_blocks_uncompressed_until_told_otherwise() {
     use super::db::EmbeddedStorageProfile;
     use slatedb::config::CompressionCodec;
 
@@ -1467,45 +1467,45 @@ fn every_profile_compresses_sst_blocks_with_zstd_until_told_otherwise() {
         DbConfig::embedded_default(EmbeddedStorageProfile::InMemory),
         DbConfig::embedded_default(EmbeddedStorageProfile::Disk),
     ] {
-        assert_eq!(codec(&config), Some(CompressionCodec::Zstd));
+        assert_eq!(codec(&config), None);
         let before = config.slate().to_writer_settings(None);
-        let uncompressed = config.with_sst_compression(SstCompression::None);
-        let after = uncompressed.slate().to_writer_settings(None);
-        assert_eq!(after.compression_codec, None);
+        let compressed = config.with_sst_compression(SstCompression::Zstd);
+        let after = compressed.slate().to_writer_settings(None);
+        assert_eq!(after.compression_codec, Some(CompressionCodec::Zstd));
         // Only the codec changes; the profile's other settings stay.
         assert_eq!(after.flush_interval, before.flush_interval);
         assert_eq!(after.l0_sst_size_bytes, before.l0_sst_size_bytes);
         assert_eq!(after.max_unflushed_bytes, before.max_unflushed_bytes);
         assert_eq!(
-            codec(&uncompressed.with_sst_compression(SstCompression::Zstd)),
-            Some(CompressionCodec::Zstd)
+            codec(&compressed.with_sst_compression(SstCompression::None)),
+            None
         );
     }
 
     // Whichever of the two setters runs last decides the codec.
-    let plain = slatedb::Settings {
-        compression_codec: None,
+    let compressed = slatedb::Settings {
+        compression_codec: Some(CompressionCodec::Zstd),
         ..DbConfig::new().slate().to_writer_settings(None)
     };
     assert_eq!(
-        codec(&DbConfig::new().with_slate_settings(plain.clone())),
-        None
-    );
-    assert_eq!(
-        codec(
-            &DbConfig::new()
-                .with_slate_settings(plain.clone())
-                .with_sst_compression(SstCompression::Zstd)
-        ),
+        codec(&DbConfig::new().with_slate_settings(compressed.clone())),
         Some(CompressionCodec::Zstd)
     );
     assert_eq!(
         codec(
             &DbConfig::new()
-                .with_sst_compression(SstCompression::Zstd)
-                .with_slate_settings(plain)
+                .with_slate_settings(compressed.clone())
+                .with_sst_compression(SstCompression::None)
         ),
         None
+    );
+    assert_eq!(
+        codec(
+            &DbConfig::new()
+                .with_sst_compression(SstCompression::None)
+                .with_slate_settings(compressed)
+        ),
+        Some(CompressionCodec::Zstd)
     );
 }
 

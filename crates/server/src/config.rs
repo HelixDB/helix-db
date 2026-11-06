@@ -76,7 +76,7 @@ pub struct ServerConfig {
     /// `None` for SlateDB's default of 100 ms.
     pub wal_flush_interval_ms: Option<NonZeroU64>,
     /// Block codec of the SSTs the writer produces, WAL SSTs included
-    /// (`HELIX_SST_COMPRESSION`, zstd when unset).
+    /// (`HELIX_SST_COMPRESSION`, none when unset).
     pub sst_compression: db::config::SstCompression,
 }
 
@@ -97,7 +97,7 @@ impl ServerConfig {
     /// [`db::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`]).
     /// `HELIX_WAL_FLUSH_INTERVAL_MS`, from 1 to 60000, replaces the default of
     /// 100 ms between WAL uploads ([`db::DbConfig::with_wal_flush_interval_ms`]).
-    /// `HELIX_SST_COMPRESSION`, `zstd` (the default) or `none` in any case,
+    /// `HELIX_SST_COMPRESSION`, `none` (the default) or `zstd` in any case,
     /// picks the block codec of the SSTs the writer produces
     /// ([`db::config::SstCompression`]).
     pub fn from_env() -> Result<Self, ServerConfigError> {
@@ -2161,7 +2161,7 @@ mod tests {
         ];
         for (storage, values) in storages {
             for (raw, compression, codec) in [
-                (None, SstCompression::Zstd, Some(CompressionCodec::Zstd)),
+                (None, SstCompression::None, None),
                 (
                     Some("zstd"),
                     SstCompression::Zstd,

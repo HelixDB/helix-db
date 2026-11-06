@@ -92,7 +92,7 @@ write latency, and each interval with new writes costs one object-store PUT. Sta
 fails naming it when it is out of range.
 
 `HELIX_SST_COMPRESSION` sets the block codec of the SSTs the server writes, WAL SSTs
-included: `zstd` (the default) or `none`, in any case, with any storage. Every SST
+included: `none` (the default) or `zstd`, in any case, with any storage. Every SST
 records its codec, so changing it needs no migration: existing SSTs stay readable and
 compaction rewrites them with the current codec. Images released before zstd support
 cannot read zstd SSTs. Startup fails naming it for any other value.
