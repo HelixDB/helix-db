@@ -9886,12 +9886,16 @@ Code, or `bearer_token_env_var` in Codex's MCP config. Keep it in a secret store
 in a prompt or a repository.
 
 A service credential reaches only the ontologies whose database is in a project it is
-granted, and only an ontology a person has set up.
+granted, or that its sources cover, and only an ontology a person has set up.
 
 | A service credential with | Can |
 | --- | --- |
 | **query-read** | Read those ontologies, their versions, loads, documents and graph, and ask them questions |
 | **query-write** as well | Also make a version or load current, load, revise a version, and upload, move and organise documents |
+| Sources, given under [Access](/foundry/workspace/access) | Read and ask only what those sources hold of each ontology's current load, and change nothing |
+
+To limit an agent to some of your data, make its key in Foundry under **Settings** →
+**Access** → **Agents** and give it sources, rather than granting it a project.
 
 It can't list or sync connections, generate drafts, create ontologies or API sources,
 or settle reviews: those need a person.
@@ -9915,7 +9919,8 @@ goes wrong. Each caller can send 20 an hour, of up to 4,096 bytes each.
 
 Page type: Guide
 
-Everyone in a workspace shares its data, documents, ontologies and plan. Foundry uses the
+Everyone in a workspace shares its data, documents, ontologies and plan, unless an owner
+or admin [restricts them to some sources](/foundry/workspace/access). Foundry uses the
 workspace's Helix Cloud members and roles, so someone you add in either place has access
 in both.
 
@@ -9928,7 +9933,8 @@ joined.
 
 Owners and admins select **Invite people**, enter an email address and choose a role:
 
-- **Member** sees everything in the workspace.
+- **Member** sees everything in the workspace, unless they're given sources under
+  [Access](/foundry/workspace/access): then they see only what those hold.
 - **Admin** also connects data, invites people and manages billing.
 
 The invitation arrives by email and is accepted through Helix. To make someone an owner,
@@ -9940,7 +9946,7 @@ change a role, remove someone or manage pending invitations, use the
 | Action | Owner | Admin | Member |
 | --- | :---: | :---: | :---: |
 | See connections, documents, ontologies, versions, loads, the plan and usage | ✓ | ✓ | ✓ |
-| Ask questions, explore and read records | ✓ | ✓ | With **Query read** on the database's project |
+| Ask questions, explore and read records | ✓ | ✓ | With **Query read** on the database's project, or what [their sources](/foundry/workspace/access) hold |
 | Add, sync, edit and delete connections | ✓ | ✓ | |
 | Create API sources, and make and revoke their send tokens | ✓ | ✓ | |
 | Upload, move, rename and delete documents and sets | ✓ | ✓ | |
@@ -9948,13 +9954,15 @@ change a role, remove someone or manage pending invitations, use the
 | Create and delete ontologies | ✓ | ✓ | |
 | Generate, edit versions, make them current, load and settle reviews | ✓ | ✓ | |
 | Invite people | ✓ | ✓ | |
+| Share sources with members, teams and agent keys | ✓ | ✓ | |
 | Upgrade, switch, cancel and manage billing | ✓ | ✓ | |
 | Choose where the workspace's AI runs, and bring its own key | ✓ | | |
 
 Reading what a load wrote, in the Explorer, Records, Ask and a document's text in an
 ontology, needs **Query read** on the database's Helix project; grant it in the Helix
-dashboard. Creating or deleting an ontology and loading also need write access to that
-project.
+dashboard. Or share sources with the member under [Access](/foundry/workspace/access):
+they then read the part of each ontology those sources hold, and nothing else. Creating
+or deleting an ontology and loading also need write access to that project.
 
 An agent you connect through the [Helix MCP](/foundry/agents/helix-mcp) acts with your
 role and rights: it can do only what the table allows you, and it never adds connections,
@@ -9962,9 +9970,92 @@ deletes anything, invites people or changes billing.
 
 ## Next steps
 
+    Choose what each member, team or agent key reads.
+
     Compare Free, Pro and Max.
 
-    Switch workspaces and find your way around.
+# Share sources with people and agents
+
+Page type: Guide
+
+By default, every member of a workspace sees everything in it. Under **Settings** →
+**Access**, owners and admins can share sources instead. A member, a team or an agent's
+key then reads only what those sources hold of each ontology.
+
+## What you can share
+
+| Source | Shares |
+| --- | --- |
+| A connection | Every table it syncs, now and later, and the document sets it writes |
+| A table | One table of a connection |
+| A document set | Its documents |
+| People enrichment | The profiles a load looked up |
+
+Sharing works on each ontology's current load: the entities, facts and documents that
+those sources filled. Someone who holds every source a load reads reads the whole
+ontology. Someone who holds some of them reads only that part.
+
+## Give someone sources
+
+Taking sources away doesn't lift the restriction. Without them, the member reads less,
+or nothing. To lift it, take away every source they hold, their own and their teams',
+then turn off **Restricted** for them under **People**.
+
+Some people can't be restricted:
+
+- **Owners and admins** always see everything.
+- **Members with raw access** can't be restricted. Raw access means the member writes to
+  a project or queries its databases outside Foundry, which is set in the
+  [Helix dashboard](https://helix-db.com/login). Take that access away there first. A
+  team that has such a member can't be given sources either. If a restricted member is
+  given raw access later, they're flagged **Raw access**, because Foundry can't limit
+  what they do outside it.
+
+## Teams
+
+Under **Teams**, select **New team** and choose its name and members. Then give the team
+sources once, and every member reads what those cover.
+
+Once the team has sources, its members are restricted, and they stay restricted after
+leaving it. Deleting a team takes away what it gave: its members keep only what they
+hold otherwise.
+
+## Agent keys
+
+An agent's key reads and asks only the ontologies its sources cover, through the
+[Helix MCP](/foundry/agents/helix-mcp). It changes nothing.
+
+**Revoke** stops the key at once, and its sources go with it. A key granted **Query read**
+on a project in the Helix dashboard reads that project's ontologies whole, whatever its
+sources.
+
+## See who reads what
+
+**Ontologies** lists each ontology's current load, who it is shared with, and who reads
+only part of it.
+
+Some changes would cut someone off from what they read: loading, making a version or a
+load current, deleting a connection, or moving a document. Before any of these, Foundry
+lists who would stop reading what, and asks first.
+
+## Limits
+
+Someone reading through sources asks up to 10 questions an hour and spends up to $10 a
+month on questions. Their questions also count toward the workspace's own
+[limits](/foundry/reference/limits#ask).
+
+Reading through sources also shows less than full access does:
+
+- Documents open as uploaded, without highlights.
+- Entity pages have no mentions or reviews.
+- A type they hold only part of shows its first records, without pages, and can't be
+  filtered or sorted by what they hold only part of.
+
+## Next steps
+
+    Invite people and see what each role can do.
+
+    Connect an agent to Foundry.
 
 # Plans and billing
 
@@ -10186,6 +10277,8 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Questions running per workspace | 2 |
 | Questions per workspace, per hour | 30 |
 | Spend per workspace, per month | $15, apart from loads' |
+| Questions per member or agent key reading through [sources](/foundry/workspace/access), per hour | 10 |
+| Spend per member or agent key reading through sources, per month | $10 |
 
 ## Helix MCP
 
@@ -10344,7 +10437,15 @@ Find the message Foundry shows, then its cause and fix.
 | The agent can't connect a source | Agents never handle credentials. Open the link the agent gives you, `…/data?add=<kind>`, and connect it there. |
 | A confirmation is refused | It was used already, is over five minutes old, or doesn't match the change. Have the agent prepare the change again. |
 | `resource_exhausted` | A limit was reached, such as the hourly questions or generations, or a send rate. Wait as the message says. |
-| A service credential sees no ontology | It reaches only ontologies whose database is in a project it's granted, and that a person has set up. Grant **query-read** on the project. |
+| A service credential sees no ontology | It reaches only ontologies whose database is in a project it's granted, or that its sources cover, and that a person has set up. Grant **query-read** on the project, or give it sources under [Access](/foundry/workspace/access). |
+
+## Access
+
+| Message or state | Cause and fix |
+| --- | --- |
+| A member sees only some ontologies, or part of one | They're restricted to the sources shared with them. Give them more under [Access](/foundry/workspace/access), or lift the restriction there. |
+| **Restricted** can't be turned off | They still hold sources, their own or a team's. Take those away first. |
+| An ontology shows **Load again to share** | Its current load was made before Foundry kept track of what each load reads. Load it again. |
 
 ## Next steps
 

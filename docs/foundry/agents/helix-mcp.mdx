@@ -133,12 +133,16 @@ Code, or `bearer_token_env_var` in Codex's MCP config. Keep it in a secret store
 in a prompt or a repository.
 
 A service credential reaches only the ontologies whose database is in a project it is
-granted, and only an ontology a person has set up.
+granted, or that its sources cover, and only an ontology a person has set up.
 
 | A service credential with | Can |
 | --- | --- |
 | **query-read** | Read those ontologies, their versions, loads, documents and graph, and ask them questions |
 | **query-write** as well | Also make a version or load current, load, revise a version, and upload, move and organise documents |
+| Sources, given under [Access](/foundry/workspace/access) | Read and ask only what those sources hold of each ontology's current load, and change nothing |
+
+To limit an agent to some of your data, make its key in Foundry under **Settings** →
+**Access** → **Agents** and give it sources, rather than granting it a project.
 
 It can't list or sync connections, generate drafts, create ontologies or API sources,
 or settle reviews: those need a person.

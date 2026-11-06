@@ -128,7 +128,15 @@ Find the message Foundry shows, then its cause and fix.
 | The agent can't connect a source | Agents never handle credentials. Open the link the agent gives you, `…/data?add=<kind>`, and connect it there. |
 | A confirmation is refused | It was used already, is over five minutes old, or doesn't match the change. Have the agent prepare the change again. |
 | `resource_exhausted` | A limit was reached, such as the hourly questions or generations, or a send rate. Wait as the message says. |
-| A service credential sees no ontology | It reaches only ontologies whose database is in a project it's granted, and that a person has set up. Grant **query-read** on the project. |
+| A service credential sees no ontology | It reaches only ontologies whose database is in a project it's granted, or that its sources cover, and that a person has set up. Grant **query-read** on the project, or give it sources under [Access](/foundry/workspace/access). |
+
+## Access
+
+| Message or state | Cause and fix |
+| --- | --- |
+| A member sees only some ontologies, or part of one | They're restricted to the sources shared with them. Give them more under [Access](/foundry/workspace/access), or lift the restriction there. |
+| **Restricted** can't be turned off | They still hold sources, their own or a team's. Take those away first. |
+| An ontology shows **Load again to share** | Its current load was made before Foundry kept track of what each load reads. Load it again. |
 
 ## Next steps
 

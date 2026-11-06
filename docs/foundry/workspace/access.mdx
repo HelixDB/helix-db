@@ -1,0 +1,158 @@
+---
+title: "Share sources with people and agents"
+description: "Choose which connections, tables and document sets a Helix Foundry member, team or agent key can read, and what a restricted member sees"
+sidebarTitle: "Access"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+By default, every member of a workspace sees everything in it. Under **Settings** →
+**Access**, owners and admins can share sources instead. A member, a team or an agent's
+key then reads only what those sources hold of each ontology.
+
+## What you can share
+
+| Source | Shares |
+| --- | --- |
+| A connection | Every table it syncs, now and later, and the document sets it writes |
+| A table | One table of a connection |
+| A document set | Its documents |
+| People enrichment | The profiles a load looked up |
+
+Sharing works on each ontology's current load: the entities, facts and documents that
+those sources filled. Someone who holds every source a load reads reads the whole
+ontology. Someone who holds some of them reads only that part.
+
+## Give someone sources
+
+<Steps>
+  <Step title="Open their sources">
+    In **Settings** → **Access**, open **Agents**, **People** or **Teams**, then select
+    **Sources** on a row.
+  </Step>
+  <Step title="Choose the sources">
+    Tick connections, tables, document sets or People enrichment. Ticking a connection
+    includes its tables and sets.
+
+    As you choose, **Can read** lists each ontology they'll read: all of it, or
+    **Part of it**, which names the sources they're missing. **Can't read yet** lists the
+    other ontologies, each with the sources it reads.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/workspace/access-sources.png" alt="The Sources dialog for a member: the General set ticked, and Customer contracts listed as part of it under Can read" />
+    </Frame>
+  </Step>
+  <Step title="Save">
+    Select **Save**. Giving a member or team their first sources restricts them, so
+    Foundry asks first: select **Save and restrict**.
+  </Step>
+</Steps>
+
+**Load again to share** beside an ontology means its current load can't be shared,
+because it was loaded before Foundry kept track of what each load reads. Load it again.
+
+## Restricted members
+
+Giving a member sources restricts them. A restricted member:
+
+- sees only **Analyst**, **Ontologies** and the **Explorer**: no Data, settings or search;
+- sees only the ontologies their sources cover, and only what those sources hold of them;
+- asks questions and reads records, entities and documents, but changes nothing.
+
+Where they hold only part of an ontology, its pages say so.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/access-restricted.png" alt="A restricted member's view of an ontology they can read part of, with only Analyst, Ontologies and the Explorer in the sidebar" />
+</Frame>
+
+Taking sources away doesn't lift the restriction. Without them, the member reads less,
+or nothing. To lift it, take away every source they hold, their own and their teams',
+then turn off **Restricted** for them under **People**.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/access-people.png" alt="The People tab: the owner, a member who can't be restricted because of raw access, and a restricted member who reads part of an ontology" />
+</Frame>
+
+Some people can't be restricted:
+
+- **Owners and admins** always see everything.
+- **Members with raw access** can't be restricted. Raw access means the member writes to
+  a project or queries its databases outside Foundry, which is set in the
+  [Helix dashboard](https://helix-db.com/login). Take that access away there first. A
+  team that has such a member can't be given sources either. If a restricted member is
+  given raw access later, they're flagged **Raw access**, because Foundry can't limit
+  what they do outside it.
+
+## Teams
+
+Under **Teams**, select **New team** and choose its name and members. Then give the team
+sources once, and every member reads what those cover.
+
+Once the team has sources, its members are restricted, and they stay restricted after
+leaving it. Deleting a team takes away what it gave: its members keep only what they
+hold otherwise.
+
+## Agent keys
+
+An agent's key reads and asks only the ontologies its sources cover, through the
+[Helix MCP](/foundry/agents/helix-mcp). It changes nothing.
+
+<Steps>
+  <Step title="Make a key">
+    Under **Agents**, select **New key**, name it and select **Create key**. Copy the key
+    now: Foundry shows it once.
+  </Step>
+  <Step title="Give it sources">
+    Select **Sources** on its row and choose what it reads, as for a person.
+  </Step>
+  <Step title="Use it">
+    Give the key to the agent as its MCP bearer token, as in
+    [Service credentials](/foundry/agents/helix-mcp#service-credentials).
+  </Step>
+</Steps>
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/access-agents.png" alt="The Agents tab: an agent key and the ontology its sources let it read" />
+</Frame>
+
+**Revoke** stops the key at once, and its sources go with it. A key granted **Query read**
+on a project in the Helix dashboard reads that project's ontologies whole, whatever its
+sources.
+
+## See who reads what
+
+**Ontologies** lists each ontology's current load, who it is shared with, and who reads
+only part of it.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/access-ontologies.png" alt="The Ontologies tab: an ontology shared with an agent key, and in part with a member" />
+</Frame>
+
+Some changes would cut someone off from what they read: loading, making a version or a
+load current, deleting a connection, or moving a document. Before any of these, Foundry
+lists who would stop reading what, and asks first.
+
+## Limits
+
+Someone reading through sources asks up to 10 questions an hour and spends up to $10 a
+month on questions. Their questions also count toward the workspace's own
+[limits](/foundry/reference/limits#ask).
+
+Reading through sources also shows less than full access does:
+
+- Documents open as uploaded, without highlights.
+- Entity pages have no mentions or reviews.
+- A type they hold only part of shows its first records, without pages, and can't be
+  filtered or sorted by what they hold only part of.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Members and roles" icon="users" href="/foundry/workspace/members-and-roles">
+    Invite people and see what each role can do.
+  </Card>
+  <Card title="Helix MCP" icon="plug" href="/foundry/agents/helix-mcp">
+    Connect an agent to Foundry.
+  </Card>
+</CardGroup>
