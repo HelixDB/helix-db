@@ -7,7 +7,8 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Everyone in a workspace shares its data, documents, ontologies and plan. Foundry uses the
+Everyone in a workspace shares its data, documents, ontologies and plan, unless an owner
+or admin [restricts them to some sources](/foundry/workspace/access). Foundry uses the
 workspace's Helix Cloud members and roles, so someone you add in either place has access
 in both.
 
@@ -24,7 +25,8 @@ joined.
 
 Owners and admins select **Invite people**, enter an email address and choose a role:
 
-- **Member** sees everything in the workspace.
+- **Member** sees everything in the workspace, unless they're given sources under
+  [Access](/foundry/workspace/access): then they see only what those hold.
 - **Admin** also connects data, invites people and manages billing.
 
 <Frame>
@@ -40,7 +42,7 @@ change a role, remove someone or manage pending invitations, use the
 | Action | Owner | Admin | Member |
 | --- | :---: | :---: | :---: |
 | See connections, documents, ontologies, versions, loads, the plan and usage | ✓ | ✓ | ✓ |
-| Ask questions, explore and read records | ✓ | ✓ | With **Query read** on the database's project |
+| Ask questions, explore and read records | ✓ | ✓ | With **Query read** on the database's project, or what [their sources](/foundry/workspace/access) hold |
 | Add, sync, edit and delete connections | ✓ | ✓ | |
 | Create API sources, and make and revoke their send tokens | ✓ | ✓ | |
 | Upload, move, rename and delete documents and sets | ✓ | ✓ | |
@@ -48,13 +50,15 @@ change a role, remove someone or manage pending invitations, use the
 | Create and delete ontologies | ✓ | ✓ | |
 | Generate, edit versions, make them current, load and settle reviews | ✓ | ✓ | |
 | Invite people | ✓ | ✓ | |
+| Share sources with members, teams and agent keys | ✓ | ✓ | |
 | Upgrade, switch, cancel and manage billing | ✓ | ✓ | |
 | Choose where the workspace's AI runs, and bring its own key | ✓ | | |
 
 Reading what a load wrote, in the Explorer, Records, Ask and a document's text in an
 ontology, needs **Query read** on the database's Helix project; grant it in the Helix
-dashboard. Creating or deleting an ontology and loading also need write access to that
-project.
+dashboard. Or share sources with the member under [Access](/foundry/workspace/access):
+they then read the part of each ontology those sources hold, and nothing else. Creating
+or deleting an ontology and loading also need write access to that project.
 
 An agent you connect through the [Helix MCP](/foundry/agents/helix-mcp) acts with your
 role and rights: it can do only what the table allows you, and it never adds connections,
@@ -63,10 +67,10 @@ deletes anything, invites people or changes billing.
 ## Next steps
 
 <CardGroup cols={2}>
+  <Card title="Share sources" icon="lock" href="/foundry/workspace/access">
+    Choose what each member, team or agent key reads.
+  </Card>
   <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
     Compare Free, Pro and Max.
-  </Card>
-  <Card title="Workspaces and navigation" icon="compass" href="/foundry/start-here/workspaces-and-navigation">
-    Switch workspaces and find your way around.
   </Card>
 </CardGroup>

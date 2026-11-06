@@ -112,6 +112,7 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 
 ## Workspace
 - [Members and roles](https://docs.helix-db.com/foundry/workspace/members-and-roles): See who is in a Helix Foundry workspace, invite people, and what owners, admins and members can do — Page type: Guide
+- [Share sources with people and agents](https://docs.helix-db.com/foundry/workspace/access): Choose which connections, tables and document sets a Helix Foundry member, team or agent key can read, and what a restricted member sees — Page type: Guide
 - [Plans and billing](https://docs.helix-db.com/foundry/workspace/plans-and-billing): Compare Helix Foundry Free, Pro and Max, which differ in how often connectors sync, upgrade a workspace, switch tiers, cancel, resume and manage payment — Page type: Guide
 - [AI models](https://docs.helix-db.com/foundry/workspace/ai-models): Choose where a Helix Foundry workspace's drafts, document reads and questions run: the default, or your own Anthropic API key on Pro or Max — Page type: Guide
 - [Usage and spending caps](https://docs.helix-db.com/foundry/workspace/usage): See what a Helix Foundry workspace has spent on AI this month, on loads, API sources and questions, against each monthly cap — Page type: Guide

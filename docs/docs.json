@@ -274,6 +274,7 @@
             "group": "Workspace",
             "pages": [
               "foundry/workspace/members-and-roles",
+              "foundry/workspace/access",
               "foundry/workspace/plans-and-billing",
               "foundry/workspace/ai-models",
               "foundry/workspace/usage"
@@ -1574,6 +1575,23 @@
     {
       "source": "/foundry/documents",
       "destination": "/foundry/data/documents"
+    }
+,
+    {
+      "source": "/foundry/access",
+      "destination": "/foundry/workspace/access"
+    },
+    {
+      "source": "/foundry/rbac",
+      "destination": "/foundry/workspace/access"
+    },
+    {
+      "source": "/foundry/permissions",
+      "destination": "/foundry/workspace/access"
+    },
+    {
+      "source": "/foundry/source-grants",
+      "destination": "/foundry/workspace/access"
     }
   ],
   "search": {
