@@ -2403,6 +2403,13 @@ impl ExactDrain<'_> {
     }
 }
 
+/// Rows of a unique validation batch whose authoritative rows and entries
+/// are read in one call each.
+///
+/// Small enough that one group's source rows stay far below the batch's input
+/// budget, large enough that a batch takes few round trips.
+const UNIQUE_VALIDATION_READ_GROUP: usize = 32;
+
 /// One validation batch's applied-state keys, observed outside any
 /// transaction, and whether more rows follow them.
 ///
@@ -2591,98 +2598,116 @@ async fn release_validated_rows(
         .collect::<Vec<_>>();
     let pending_deltas = transaction.multi_get(&delta_keys).await?;
     // A unique row is released only once its authoritative row and entry
-    // agree with it. Both are read for the whole batch at once: the shorter
-    // the batch's transaction, the fewer writes it conflicts with.
-    let (authoritative_rows, entries) = if definition.unique() {
-        let property_keys = candidates
-            .iter()
-            .map(|(_, entity, _)| authoritative_property_key(scope, *entity))
-            .collect::<Vec<_>>();
-        let entry_keys = candidates
-            .iter()
-            .map(|(_, entity, value)| {
-                secondary_entry_key(
-                    scope,
-                    operation.index_id(),
-                    operation.generation(),
-                    definition,
-                    value.clone(),
-                    entity.id,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        (
-            transaction.multi_get(&property_keys).await?,
-            transaction.multi_get(&entry_keys).await?,
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    // agree with it. They are read a group at a time: few round trips keep
+    // the batch's transaction, and so its conflicts, short, while each
+    // group's source rows count against the batch's input budget before the
+    // next group is read.
     let mut scratch = view::Scratch::new();
     let mut cursor = cursor;
-    for (index, (((key, row_value), entity, value), pending_delta)) in
-        candidates.into_iter().zip(pending_deltas).enumerate()
-    {
-        if !accounting.can_read_another() {
-            exhausted = false;
-            break;
-        }
-        let input_bytes = key.len().saturating_add(row_value.len()) as u64;
-        let mut plan = EntityWritePlan::default();
-        if pending_delta.is_none() {
-            if definition.unique() {
-                let properties = authoritative_rows[index]
-                    .as_ref()
-                    .map(|bytes| decode_indexed_source(definition, bytes, &mut scratch))
-                    .transpose()?
-                    .ok_or_else(|| corruption("unique secondary owner source row disappeared"))?;
-                let authoritative = canonical_value(definition, &properties, entity.id)
-                    .map_err(|_| corruption("unique secondary owner source is unsupported"))?;
-                if authoritative.as_ref() != Some(&value) {
-                    return Err(corruption(
-                        "unique secondary applied state differs from authoritative source",
-                    ));
+    let mut rows = candidates.into_iter().zip(pending_deltas).peekable();
+    'groups: while rows.peek().is_some() {
+        let group = rows
+            .by_ref()
+            .take(UNIQUE_VALIDATION_READ_GROUP)
+            .collect::<Vec<_>>();
+        let (authoritative_rows, entries) = if definition.unique() {
+            let property_keys = group
+                .iter()
+                .map(|((_, entity, _), _)| authoritative_property_key(scope, *entity))
+                .collect::<Vec<_>>();
+            let entry_keys = group
+                .iter()
+                .map(|((_, entity, value), _)| {
+                    secondary_entry_key(
+                        scope,
+                        operation.index_id(),
+                        operation.generation(),
+                        definition,
+                        value.clone(),
+                        entity.id,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (
+                transaction.multi_get(&property_keys).await?,
+                transaction.multi_get(&entry_keys).await?,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        for (index, (((key, row_value), entity, value), pending_delta)) in
+            group.into_iter().enumerate()
+        {
+            if !accounting.can_read_another() {
+                exhausted = false;
+                break 'groups;
+            }
+            let source_bytes = authoritative_rows
+                .get(index)
+                .and_then(Option::as_ref)
+                .map_or(0, Bytes::len);
+            let input_bytes = key
+                .len()
+                .saturating_add(row_value.len())
+                .saturating_add(source_bytes) as u64;
+            let mut plan = EntityWritePlan::default();
+            if pending_delta.is_none() {
+                if definition.unique() {
+                    let properties = authoritative_rows[index]
+                        .as_ref()
+                        .map(|bytes| decode_indexed_source(definition, bytes, &mut scratch))
+                        .transpose()?
+                        .ok_or_else(|| {
+                            corruption("unique secondary owner source row disappeared")
+                        })?;
+                    let authoritative = canonical_value(definition, &properties, entity.id)
+                        .map_err(|_| corruption("unique secondary owner source is unsupported"))?;
+                    if authoritative.as_ref() != Some(&value) {
+                        return Err(corruption(
+                            "unique secondary applied state differs from authoritative source",
+                        ));
+                    }
+                    let Some(entry) = entries[index].as_ref() else {
+                        return Err(corruption("unique secondary applied state has no entry"));
+                    };
+                    let owner = decode_secondary_entry_value(
+                        operation.index_id(),
+                        operation.generation(),
+                        definition_lane(definition),
+                        entry,
+                    )?;
+                    if owner != entity.id {
+                        return Ok(IndexOperationStepResult::Blocked(
+                            IndexOperationBlocker::UniquenessViolation {
+                                first_entity_id: owner,
+                                second_entity_id: entity.id,
+                            },
+                        ));
+                    }
                 }
-                let Some(entry) = entries[index].as_ref() else {
-                    return Err(corruption("unique secondary applied state has no entry"));
-                };
-                let owner = decode_secondary_entry_value(
-                    operation.index_id(),
-                    operation.generation(),
-                    definition_lane(definition),
-                    entry,
-                )?;
-                if owner != entity.id {
+                plan.delete(key.clone());
+            }
+            if !accounting.can_admit_input(input_bytes) || !accounting.can_admit_output(&plan) {
+                if accounting.is_empty() {
                     return Ok(IndexOperationStepResult::Blocked(
-                        IndexOperationBlocker::UniquenessViolation {
-                            first_entity_id: owner,
-                            second_entity_id: entity.id,
+                        IndexOperationBlocker::OversizedEntity {
+                            entity_kind: entity.kind,
+                            entity_id: entity.id,
+                            observed: input_bytes.max(plan.output_bytes),
+                            limit: limits
+                                .max_input_bytes()
+                                .get()
+                                .min(limits.max_output_bytes().get()),
                         },
                     ));
                 }
+                exhausted = false;
+                break 'groups;
             }
-            plan.delete(key.clone());
+            plan.stage(transaction)?;
+            accounting.admit_scan(input_bytes, Some(&plan))?;
+            cursor = Some(IndexCursor::try_new(key).map_err(operation_error)?);
         }
-        if !accounting.can_admit_input(input_bytes) || !accounting.can_admit_output(&plan) {
-            if accounting.is_empty() {
-                return Ok(IndexOperationStepResult::Blocked(
-                    IndexOperationBlocker::OversizedEntity {
-                        entity_kind: entity.kind,
-                        entity_id: entity.id,
-                        observed: input_bytes.max(plan.output_bytes),
-                        limit: limits
-                            .max_input_bytes()
-                            .get()
-                            .min(limits.max_output_bytes().get()),
-                    },
-                ));
-            }
-            exhausted = false;
-            break;
-        }
-        plan.stage(transaction)?;
-        accounting.admit_scan(input_bytes, Some(&plan))?;
-        cursor = Some(IndexCursor::try_new(key).map_err(operation_error)?);
     }
     let counters = accounting.finish()?;
     let next = if exhausted {
@@ -10103,6 +10128,56 @@ mod tests {
             .await;
             db.close().await.expect("secondary test database closes");
         }
+    }
+
+    /// A unique validation batch counts each entity's source row against its
+    /// input budget, as the scan did, reading source rows a group at a time,
+    /// so large properties cannot make one batch read past the budget.
+    #[tokio::test]
+    async fn a_unique_validation_batch_counts_source_rows_against_its_input_budget() {
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let entities = 6_u64;
+        let (db, _, driver, operation_id, index_id, generation, mut claim_sequence, _) =
+            build_at_stage(
+                "secondary-validation-budget",
+                &definition,
+                entities,
+                is_validation,
+            )
+            .await;
+        let scope = DataScope::LegacyUnscoped;
+        let applied =
+            generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation).await;
+        assert_eq!(applied.len(), 6);
+        let source = db
+            .get(source_key(scope, IndexElementKind::Node, 0))
+            .await
+            .expect("source reads")
+            .expect("source exists");
+        let (key, value) = &applied[0];
+        let per_row = u64::try_from(key.len() + value.len() + source.len()).expect("fits");
+        let generous = 8 * 1024 * 1024;
+        let limits = batch_limits(1024, per_row * 2 + per_row / 2, 4096, generous);
+        assert_eq!(
+            drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed
+        );
+        assert!(is_validation(&build_stage(&db, operation_id).await));
+        assert_eq!(
+            generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation)
+                .await
+                .len(),
+            4,
+            "the budget admits two rows with their source rows"
+        );
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        db.close().await.expect("secondary test database closes");
     }
 
     /// A prepared validation batch observed its keys before its transaction
