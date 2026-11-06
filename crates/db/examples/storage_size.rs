@@ -14,7 +14,11 @@ use db::{cypher, HelixDB, HelixDbSource};
 use helix_ast::prelude::*;
 use helix_ast::{index, query::QueryRequest};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, path::Path, time::Instant};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -58,6 +62,9 @@ async fn run() -> Result<()> {
     } else {
         codecs
     };
+    if events < 2 {
+        return Err("the event count must be at least 2, so the graph has objects".into());
+    }
     let objects = events / 2;
     let mut samples = Vec::new();
     for name in codecs {
@@ -138,14 +145,38 @@ async fn fixture(db: &HelixDB, events: usize, objects: usize) -> Result<usize> {
         index::IndexSpec::node_range("Event", "ocel_time_us"),
         index::IndexSpec::edge_equality("E2O", "qualifier"),
     ];
-    for (position, spec) in indexes.into_iter().enumerate() {
-        let name = format!("index_{position}");
-        db.query(QueryRequest::write(
-            write_batch()
-                .var_as(&name, g().create_index_if_not_exists(spec))
-                .returning(Vec::<String>::new()),
-        ))
-        .await?;
+    // Wait for every build to finish before writing, so each codec measures
+    // the same fully built indexes.
+    for spec in indexes {
+        let receipt = db
+            .query(QueryRequest::write(
+                write_batch()
+                    .var_as("index", g().create_index_if_not_exists(spec))
+                    .returning(["index"]),
+            ))
+            .await?;
+        let operation = receipt["index"]["operation_id"]
+            .as_str()
+            .ok_or("index operation ID")?;
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let response = db
+                    .query(QueryRequest::read(
+                        read_batch()
+                            .var_as("status", g().get_index_operation(operation))
+                            .returning(["status"]),
+                    ))
+                    .await?;
+                match response["status"]["status"].as_str() {
+                    Some("succeeded") => {
+                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+                    }
+                    Some("queued" | "running") => tokio::task::yield_now().await,
+                    _ => return Err(format!("index build did not succeed: {response}").into()),
+                }
+            }
+        })
+        .await??;
     }
 
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
