@@ -67,8 +67,9 @@ if err := client.Exec(ctx, FindUsers("acme", 25), &response); err != nil {
 }
 ```
 
-Write requests can pass `helix.WriterOnly()` and `helix.AwaitDurability(true)` execution
-options. The client does not retry conflicts automatically.
+Writes wait for durability by default. Write requests can pass `helix.WriterOnly()`, or
+`helix.AwaitDurability(false)` to return once the write is applied on the writer, so a
+crash before its WAL upload loses it. The client does not retry conflicts automatically.
 
 ## Release scope
 

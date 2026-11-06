@@ -1108,8 +1108,9 @@ if err := client.Exec(ctx, FindUsers("acme", 25), &response); err != nil {
 }
 ```
 
-Write requests can pass `helix.WriterOnly()` and `helix.AwaitDurability(true)` execution
-options. The client does not retry conflicts automatically.
+Writes wait for durability by default. Write requests can pass `helix.WriterOnly()`, or
+`helix.AwaitDurability(false)` to return once the write is applied on the writer, so a
+crash before its WAL upload loses it. The client does not retry conflicts automatically.
 
 ## Release scope
 
@@ -4163,8 +4164,9 @@ removed the value.
 
 Page type: Guide
 
-A write to an indexed vector or text property commits its index work as a durable
-queued operation, and the index worker publishes it into the index shortly afterwards.
+A write to an indexed vector or text property commits its index work as a queued
+operation, durable along with the write, and the index worker publishes it into the
+index shortly afterwards.
 Search consistency sets how a read request's vector and text searches treat work that
 is committed but not yet published. It applies to whole-index and
 [prefiltered](/database/helix-db/query-guides/prefiltering) searches.
@@ -5499,7 +5501,10 @@ The native request options apply to Cypher too:
 | --- | --- | --- | --- | --- | --- |
 | Run on the writer | `.writer_only()` | `.writerOnly()` | `helix.WriterOnly()` | `writer_only=True` | `X-Helix-Require-Writer: true` |
 | Warm caches only (reads) | `.warm_only()` | `.warmOnly()` | `helix.WarmOnly()` | `warm_only=True` | `X-Helix-Warm: true` |
-| Wait for durability (writes) | `.should_await_durability(true)` | `.shouldAwaitDurability(true)` | `helix.AwaitDurability(true)` | `await_durability=True` | `X-Helix-Await-Durable: true` |
+| Skip the durability wait (writes) | `.should_await_durability(false)` | `.shouldAwaitDurability(false)` | `helix.AwaitDurability(false)` | `await_durability=False` | `X-Helix-Await-Durable: false` |
+
+Writes wait for durability by default. Skipping the wait returns once the write is applied
+on the writer, so a crash before its WAL upload loses it.
 
 Rust and TypeScript set options on `request_builder()` / `requestBuilder()` before
 `.cypher(...)`; Go and Python pass them to `Cypher` and `cypher`. A warm-only read
@@ -5928,7 +5933,10 @@ The native request options apply to SQL too:
 | --- | --- | --- | --- | --- | --- |
 | Run on the writer | `.writer_only()` | `.writerOnly()` | `helix.WriterOnly()` | `writer_only=True` | `X-Helix-Require-Writer: true` |
 | Warm caches only (reads) | `.warm_only()` | `.warmOnly()` | `helix.WarmOnly()` | `warm_only=True` | `X-Helix-Warm: true` |
-| Wait for durability (writes) | `.should_await_durability(true)` | `.shouldAwaitDurability(true)` | `helix.AwaitDurability(true)` | `await_durability=True` | `X-Helix-Await-Durable: true` |
+| Skip the durability wait (writes) | `.should_await_durability(false)` | `.shouldAwaitDurability(false)` | `helix.AwaitDurability(false)` | `await_durability=False` | `X-Helix-Await-Durable: false` |
+
+Writes wait for durability by default. Skipping the wait returns once the write is applied
+on the writer, so a crash before its WAL upload loses it.
 
 Rust and TypeScript set options on `request_builder()` / `requestBuilder()` before
 `.sql(...)`; Go and Python pass them to `SQL` and `sql`. Embedded clients reject

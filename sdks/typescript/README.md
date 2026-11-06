@@ -58,7 +58,7 @@ Advanced server-only headers are available from `requestBuilder<R>()`:
 ```ts
 await client.requestBuilder<MyResponse>().writerOnly().query(request).send();
 await client.requestBuilder<void>().warmOnly().query(request).send();
-await client.requestBuilder<MyResponse>().shouldAwaitDurability(false).query(request).send();
+await client.requestBuilder<MyResponse>().shouldAwaitDurability(true).query(request).send();
 ```
 
 `warmOnly()` is read-only. It sends the ordinary read with
@@ -369,7 +369,7 @@ options, build the request with `requestBuilder()` and finish with `.send()` or
 
 ```ts
 await client.requestBuilder().writerOnly().cypher("CREATE (u:User {name: $name}) RETURN u", { name: "Ada" }).send();
-await client.requestBuilder().shouldAwaitDurability(false).cypher("MATCH (u:User) SET u.seen = true").send();
+await client.requestBuilder().shouldAwaitDurability(true).cypher("MATCH (u:User) SET u.seen = true").send();
 await client.requestBuilder().warmOnly().cypher("MATCH (u:User) RETURN u.name AS name").send();
 await client.requestBuilder().writerOnly().cypher("MATCH (u:User) RETURN u").explain();
 ```
