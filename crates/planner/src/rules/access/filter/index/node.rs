@@ -416,13 +416,22 @@ mod tests {
                 ]),
             }
         );
-        assert_eq!(
-            keyed(&users, Predicate::eq("email", "a")),
-            PartialIndexFilterApplication::Rewritten {
-                source: email(),
-                residual: None,
-            }
-        );
+        // Repeats of the key are decided by its lookup too.
+        for predicate in [
+            Predicate::eq("email", "a"),
+            Predicate::and(vec![
+                Predicate::eq("email", "a"),
+                Predicate::eq("email", "a"),
+            ]),
+        ] {
+            assert_eq!(
+                keyed(&users, predicate),
+                PartialIndexFilterApplication::Rewritten {
+                    source: email(),
+                    residual: None,
+                }
+            );
+        }
 
         for (path, predicate, rejection) in [
             // A key inside a disjunction or a list is not one candidate.

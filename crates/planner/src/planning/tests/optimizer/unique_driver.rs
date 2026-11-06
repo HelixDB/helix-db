@@ -255,3 +255,16 @@ fn only_a_single_non_null_unique_value_is_a_key() {
         );
     }
 }
+
+#[test]
+fn a_key_after_another_filter_still_drives() {
+    for context in contexts(true) {
+        let plan = executable_traversal(
+            g().n_with_label_where("Job", Predicate::lt("claimed_at", 100_i64))
+                .where_(Predicate::eq("job_id", "j1"))
+                .values(vec!["job_id"]),
+            context.clone(),
+        );
+        assert_key_driven(&plan, &context, &Predicate::lt("claimed_at", 100_i64));
+    }
+}

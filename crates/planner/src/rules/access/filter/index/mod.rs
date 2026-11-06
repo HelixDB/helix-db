@@ -116,17 +116,8 @@ fn derive_required_index_access_filter(
             |source| logical::AccessPath::Node(logical::NodeAccessPath::new(source)),
             filter.access(),
         ),
-        logical::AccessPath::Edge(path) => partial_index_application_rewrite(
-            shared::unique_key_filter::<edge::EdgeIndexFamily>(
-                path,
-                &predicate,
-                &label,
-                indexes,
-                planner_limits,
-            ),
-            |source| logical::AccessPath::Edge(logical::EdgeAccessPath::new(source)),
-            filter.access(),
-        ),
+        // Edge equality indexes are never unique.
+        logical::AccessPath::Edge(_) => AccessFilterRewrite::NotApplicable,
     };
     let full = || match filter.access() {
         logical::AccessPath::Node(path) => index_application_rewrite(

@@ -135,33 +135,25 @@ where
     };
     let mut terms = Vec::new();
     conjuncts(predicate, &mut terms);
-    let Some((driver, key)) = terms.iter().enumerate().find_map(|(position, term)| {
-        let Ok(AccessFilterIndexAtom::Equality {
-            property,
-            domain: AccessEqualityDomain::One(value),
-        }) = super::super::atoms::access_filter_index_atom(term, planner_limits)
-        else {
-            return None;
-        };
-        let index = F::equality_index(indexes, &label, &property)?;
-        let key = F::equality_source(
-            index,
-            catalog::ScopedPropertyKey::new(label.clone(), property),
-            value,
-        );
-        F::is_unique_key_source(&key).then_some((position, key))
+    let Some((driver, key)) = terms.iter().find_map(|term| {
+        let atom = super::super::atoms::access_filter_index_atom(term, planner_limits).ok()?;
+        index_source_for_atom::<F>(&label, &atom, indexes)
+            .ok()
+            .filter(F::is_unique_key_source)
+            .map(|key| (*term, key))
     }) else {
         return PartialIndexFilterApplication::NotApplicable(
             PartialIndexFilterRejection::NoUniqueKey,
         );
     };
+    // Every copy of the key is decided by its lookup, so a second rewrite
+    // finds nothing left to change.
     let residual = terms
         .into_iter()
-        .enumerate()
-        .filter(|(position, term)| {
-            *position != driver && !analysis::predicate_is_tautological_for_label(term, &label)
+        .filter(|term| {
+            *term != driver && !analysis::predicate_is_tautological_for_label(term, &label)
         })
-        .map(|(_, term)| term.clone())
+        .cloned()
         .collect();
     PartialIndexFilterApplication::Rewritten {
         source: key,
