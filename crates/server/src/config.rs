@@ -75,6 +75,9 @@ pub struct ServerConfig {
     /// Milliseconds between WAL uploads from `HELIX_WAL_FLUSH_INTERVAL_MS`, or
     /// `None` for SlateDB's default of 100 ms.
     pub wal_flush_interval_ms: Option<NonZeroU64>,
+    /// Block codec of the SSTs the writer produces, WAL SSTs included
+    /// (`HELIX_SST_COMPRESSION`, zstd when unset).
+    pub sst_compression: db::config::SstCompression,
 }
 
 impl ServerConfig {
@@ -94,6 +97,9 @@ impl ServerConfig {
     /// [`db::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`]).
     /// `HELIX_WAL_FLUSH_INTERVAL_MS`, from 1 to 60000, replaces the default of
     /// 100 ms between WAL uploads ([`db::DbConfig::with_wal_flush_interval_ms`]).
+    /// `HELIX_SST_COMPRESSION`, `zstd` (the default) or `none` in any case,
+    /// picks the block codec of the SSTs the writer produces
+    /// ([`db::config::SstCompression`]).
     pub fn from_env() -> Result<Self, ServerConfigError> {
         Self::from_lookup(|name| env::var_os(name))
     }
@@ -134,6 +140,14 @@ impl ServerConfig {
                     })
             })
             .transpose()?;
+        let sst_compression = text(&mut lookup, &["HELIX_SST_COMPRESSION"])?
+            .map(|(_, value)| {
+                value
+                    .parse()
+                    .map_err(|_| ServerConfigError::SstCompression { value })
+            })
+            .transpose()?
+            .unwrap_or_default();
         // Last, so every other variable is valid before a cache directory is
         // created.
         let storage = StorageConfig::from_lookup(&mut lookup)?;
@@ -145,6 +159,7 @@ impl ServerConfig {
             storage,
             index_operation_queue,
             wal_flush_interval_ms,
+            sst_compression,
         })
     }
 
@@ -174,8 +189,8 @@ impl ServerConfig {
         }
     }
 
-    /// Build the DB runtime config for the selected storage, cache, and
-    /// index queue policy.
+    /// Build the DB runtime config for the selected storage, cache, index
+    /// queue policy, and SST codec.
     ///
     /// Memory storage, and disk storage without a hybrid cache, keep
     /// [`db::DbConfig::new`]'s bounded in-memory caches.
@@ -203,6 +218,7 @@ impl ServerConfig {
     ///         db_path: "db/".to_string(),
     ///         storage,
     ///         wal_flush_interval_ms: None,
+    ///         sst_compression: db::config::SstCompression::default(),
     ///         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     ///     };
     ///     let db::config::CacheMode::Hybrid { object_store, .. } =
@@ -242,7 +258,8 @@ impl ServerConfig {
             } => cache.db_config(false),
             StorageConfig::S3 { cache, .. } => cache.db_config(true),
         }
-        .with_index_operation_queue_tuning(self.index_operation_queue);
+        .with_index_operation_queue_tuning(self.index_operation_queue)
+        .with_sst_compression(self.sst_compression);
         match self.wal_flush_interval_ms {
             Some(interval) => config.with_wal_flush_interval_ms(interval),
             None => config,
@@ -263,6 +280,7 @@ impl ServerConfig {
     ///     db_path: "db/".to_string(),
     ///     storage: StorageConfig::Memory,
     ///     wal_flush_interval_ms: None,
+    ///     sst_compression: db::config::SstCompression::default(),
     ///     index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     /// };
     /// assert_eq!(config.required_open_files(), None);
@@ -901,6 +919,12 @@ pub enum ServerConfigError {
         /// Cache variable found.
         variable: &'static str,
     },
+    /// `HELIX_SST_COMPRESSION` was neither `zstd` nor `none`.
+    #[error("invalid HELIX_SST_COMPRESSION `{value}`: expected zstd or none")]
+    SstCompression {
+        /// Raw value.
+        value: String,
+    },
     /// `HELIX_DISK_CACHE_WARM` was neither `on` nor `off`.
     #[error("invalid HELIX_DISK_CACHE_WARM `{value}`: expected on or off")]
     CacheWarm {
@@ -1157,6 +1181,7 @@ mod tests {
                 storage,
                 index_operation_queue: db::config::IndexOperationQueueTuning::default(),
                 wal_flush_interval_ms: None,
+                sst_compression: db::config::SstCompression::default(),
             };
             let default_cache = config.db_config().cache().clone();
 
@@ -2100,6 +2125,98 @@ mod tests {
         assert!(
             !root.exists(),
             "the warm switch is read before the cache directory"
+        );
+    }
+
+    /// `HELIX_SST_COMPRESSION` sets the writer's SST codec on every storage
+    /// and cache combination, in any case and with surrounding whitespace;
+    /// unset means zstd.
+    #[test]
+    fn sst_compression_sets_the_writer_codec_for_every_storage() {
+        use db::config::SstCompression;
+        use slatedb::config::CompressionCodec;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("cache").into_os_string();
+        let cache = [
+            ("HELIX_DISK_CACHE_DIR", root),
+            (
+                "HELIX_DISK_CACHE_BYTES",
+                MIN_CACHE_DISK_BYTES.to_string().into(),
+            ),
+        ];
+        let data = ("HELIX_DATA_DIR", OsString::from("/var/lib/helix"));
+        let storages = [
+            ("memory", vec![]),
+            ("disk", vec![data.clone()]),
+            ("disk with cache", [vec![data], cache.to_vec()].concat()),
+            (
+                "s3",
+                [
+                    vec![("S3_BUCKET", OsString::from("bucket"))],
+                    cache.to_vec(),
+                ]
+                .concat(),
+            ),
+        ];
+        for (storage, values) in storages {
+            for (raw, compression, codec) in [
+                (None, SstCompression::Zstd, Some(CompressionCodec::Zstd)),
+                (
+                    Some("zstd"),
+                    SstCompression::Zstd,
+                    Some(CompressionCodec::Zstd),
+                ),
+                (
+                    Some(" ZSTD\n"),
+                    SstCompression::Zstd,
+                    Some(CompressionCodec::Zstd),
+                ),
+                (Some("none"), SstCompression::None, None),
+                (Some("None"), SstCompression::None, None),
+            ] {
+                let mut values = BTreeMap::from_iter(values.clone());
+                values.extend(raw.map(|raw| ("HELIX_SST_COMPRESSION", OsString::from(raw))));
+                let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
+                assert_eq!(config.sst_compression, compression, "{storage} {raw:?}");
+                assert_eq!(
+                    config
+                        .db_config()
+                        .slate()
+                        .to_writer_settings(None)
+                        .compression_codec,
+                    codec,
+                    "{storage} {raw:?}"
+                );
+            }
+        }
+    }
+
+    /// Any other value fails startup naming the variable, before the cache
+    /// directory is created.
+    #[test]
+    fn invalid_sst_compression_names_the_variable() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("cache");
+        for value in ["", "off", "false", "lz4", "snappy", "zst d"] {
+            let values = BTreeMap::from([
+                ("S3_BUCKET", OsString::from("bucket")),
+                ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
+                ("HELIX_SST_COMPRESSION", OsString::from(value)),
+            ]);
+            let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
+            assert!(
+                matches!(&error, ServerConfigError::SstCompression { value: raw } if raw == value),
+                "{value:?} produced {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("invalid HELIX_SST_COMPRESSION `{value}`: expected zstd or none")
+            );
+        }
+        assert!(
+            !root.exists(),
+            "the codec is read before the cache directory"
         );
     }
 

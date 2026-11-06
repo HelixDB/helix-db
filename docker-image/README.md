@@ -91,6 +91,12 @@ and defaults to 100. A durable write waits for the next upload, so a lower value
 write latency, and each interval with new writes costs one object-store PUT. Startup
 fails naming it when it is out of range.
 
+`HELIX_SST_COMPRESSION` sets the block codec of the SSTs the server writes, WAL SSTs
+included: `zstd` (the default) or `none`, in any case, with any storage. Every SST
+records its codec, so changing it needs no migration: existing SSTs stay readable and
+compaction rewrites them with the current codec. Images released before zstd support
+cannot read zstd SSTs. Startup fails naming it for any other value.
+
 ### Benchmark images
 
 `docker-image/build.sh --async-index-benchmark` builds a separate benchmark
