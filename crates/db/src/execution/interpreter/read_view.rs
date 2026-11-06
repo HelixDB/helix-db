@@ -1,13 +1,16 @@
 //! Stable storage views owned by one executable read request.
 //!
-//! Reader nodes pin one SlateDB [`DbSnapshot`] for the complete request.
-//! Writer nodes use one ordinary [`DbTransaction`] opened at
-//! [`IsolationLevel::Snapshot`]. The two variants make it impossible to build
-//! a request view with the wrong storage capability or isolation level.
+//! Both reader and writer nodes pin one SlateDB [`DbSnapshot`] for the
+//! complete request. Writer nodes deliberately avoid a read transaction:
+//! SlateDB registers every transaction with its transaction manager, behind
+//! one global lock, and keeps every later commit's write set in memory until
+//! the oldest transaction ends. A snapshot only pins the versions it reads.
+//! The two variants keep reader storage compatibility and the writer's
+//! serial scheduling distinct.
 
 use std::sync::Arc;
 
-use slatedb::{DbReadOps, DbSnapshot, DbTransaction, IsolationLevel};
+use slatedb::{DbReadOps, DbSnapshot};
 
 use super::*;
 use crate::HelixStorage;
@@ -124,8 +127,8 @@ pub(crate) enum StableRequestReadView {
         snapshot: Arc<DbSnapshot>,
         compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
     },
-    /// A writer-node read transaction pinned at snapshot isolation.
-    WriterTransaction(DbTransaction),
+    /// A writer-node snapshot, always on the current storage layout.
+    WriterSnapshot(Arc<DbSnapshot>),
 }
 
 impl StableRequestReadView {
@@ -145,27 +148,27 @@ impl StableRequestReadView {
                     compatibility,
                 }
             }
-            HelixStorage::Writer(writer) => {
-                Self::WriterTransaction(writer.db().begin(IsolationLevel::Snapshot).await?)
-            }
+            HelixStorage::Writer(writer) => Self::WriterSnapshot(writer.db().snapshot().await?),
         })
     }
 
     /// Returns the sequence visible to this request-scoped storage view.
-    pub(in crate::execution::interpreter) fn comparable_sequence(&self) -> Option<u64> {
-        Some(match self {
-            Self::ReaderSnapshot { snapshot, .. } => snapshot.seq(),
-            Self::WriterTransaction(transaction) => transaction.seqnum(),
-        })
+    pub(crate) fn comparable_sequence(&self) -> u64 {
+        match self {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+                snapshot.seq()
+            }
+        }
     }
 
     /// Returns whether this view must execute plan stages serially.
     ///
-    /// SlateDB transactions are owned, stateful values and are never shared
-    /// between concurrently executing plan steps. Reader snapshots are
-    /// immutable and may be cloned into isolated parallel contexts.
+    /// Reader snapshots may be cloned into isolated parallel contexts. Writer
+    /// reads keep serial stages: parallel isolated stages have only ever run
+    /// on reader nodes, which serve no queued-index overlays. Lifting that is
+    /// a separate scheduling change, not a property of the snapshot.
     pub(in crate::execution::interpreter) const fn requires_serial_stages(&self) -> bool {
-        matches!(self, Self::WriterTransaction(_))
+        matches!(self, Self::WriterSnapshot(_))
     }
 
     pub(in crate::execution::interpreter) const fn storage_compatibility(
@@ -173,7 +176,7 @@ impl StableRequestReadView {
     ) -> crate::index_lifecycle::repository::ReaderStorageCompatibility {
         match self {
             Self::ReaderSnapshot { compatibility, .. } => *compatibility,
-            Self::WriterTransaction(_) => {
+            Self::WriterSnapshot(_) => {
                 crate::index_lifecycle::repository::ReaderStorageCompatibility::Current
             }
         }
@@ -186,7 +189,7 @@ impl StableRequestReadView {
             compatibility,
         } = self
         else {
-            unreachable!("writer transactions are scheduled serially")
+            unreachable!("writer views are scheduled serially")
         };
         Self::ReaderSnapshot {
             snapshot: Arc::clone(snapshot),
@@ -194,11 +197,12 @@ impl StableRequestReadView {
         }
     }
 
-    /// Ends the request view and explicitly unregisters writer read transactions.
+    /// Ends the request view and releases its pinned snapshot.
     pub(crate) fn close(self) {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } => drop(snapshot),
-            Self::WriterTransaction(transaction) => transaction.rollback(),
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+                drop(snapshot)
+            }
         }
     }
 }
@@ -211,9 +215,8 @@ impl DbReadOps for StableRequestReadView {
         options: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Option<bytes::Bytes>, slatedb::Error> {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } => snapshot.get_with_options(key, options).await,
-            Self::WriterTransaction(transaction) => {
-                transaction.get_with_options(key, options).await
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
+                snapshot.get_with_options(key, options).await
             }
         }
     }
@@ -224,11 +227,8 @@ impl DbReadOps for StableRequestReadView {
         options: &slatedb::config::ReadOptions,
     ) -> std::result::Result<Option<slatedb::KeyValue>, slatedb::Error> {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
                 snapshot.get_key_value_with_options(key, options).await
-            }
-            Self::WriterTransaction(transaction) => {
-                transaction.get_key_value_with_options(key, options).await
             }
         }
     }
@@ -242,11 +242,8 @@ impl DbReadOps for StableRequestReadView {
         K: AsRef<[u8]> + Send + Sync,
     {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
                 snapshot.multi_get_with_options(keys, options).await
-            }
-            Self::WriterTransaction(transaction) => {
-                transaction.multi_get_with_options(keys, options).await
             }
         }
     }
@@ -260,11 +257,8 @@ impl DbReadOps for StableRequestReadView {
         T: slatedb::ByteRangeBounds + Send,
     {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
                 snapshot.scan_with_options(range, options).await
-            }
-            Self::WriterTransaction(transaction) => {
-                transaction.scan_with_options(range, options).await
             }
         }
     }
@@ -280,13 +274,8 @@ impl DbReadOps for StableRequestReadView {
         T: slatedb::ByteRangeBounds + Send,
     {
         match self {
-            Self::ReaderSnapshot { snapshot, .. } => {
+            Self::ReaderSnapshot { snapshot, .. } | Self::WriterSnapshot(snapshot) => {
                 snapshot
-                    .scan_prefix_with_options(prefix, subrange, options)
-                    .await
-            }
-            Self::WriterTransaction(transaction) => {
-                transaction
                     .scan_prefix_with_options(prefix, subrange, options)
                     .await
             }
@@ -467,34 +456,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writer_transaction_keeps_its_initial_snapshot_and_requires_serial_stages() {
+    async fn writer_snapshot_keeps_its_initial_view_and_requires_serial_stages() {
         let object_store: Arc<dyn slatedb::object_store::ObjectStore> = Arc::new(InMemory::new());
         let db = slatedb::Db::open("writer-read-view", object_store)
             .await
             .expect("writer opens");
         db.put(b"key", b"before").await.expect("initial value");
-        let view = StableRequestReadView::WriterTransaction(
-            db.begin(IsolationLevel::Snapshot)
-                .await
-                .expect("snapshot transaction starts"),
-        );
+        db.put(b"key-2", b"kept").await.expect("second value");
+        let view =
+            StableRequestReadView::WriterSnapshot(db.snapshot().await.expect("snapshot opens"));
+        let opened_at = view.comparable_sequence();
 
-        db.put(b"key", b"after").await.expect("concurrent value");
+        db.put(b"key", b"after")
+            .await
+            .expect("concurrent overwrite");
+        db.delete(b"key-2").await.expect("concurrent delete");
+        db.put(b"key-3", b"late").await.expect("concurrent insert");
 
         assert!(view.requires_serial_stages());
+        assert_eq!(view.comparable_sequence(), opened_at);
         assert_eq!(
-            view.get(b"key").await.expect("transaction read"),
+            view.storage_compatibility(),
+            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current
+        );
+        assert_eq!(
+            view.get(b"key").await.expect("snapshot read"),
             Some(bytes::Bytes::from_static(b"before"))
         );
         let key_value = view
             .get_key_value(b"key")
             .await
-            .expect("transaction key-value read")
-            .expect("transaction key-value exists");
+            .expect("snapshot key-value read")
+            .expect("snapshot key-value exists");
         assert_eq!(key_value.key, bytes::Bytes::from_static(b"key"));
         assert_eq!(key_value.value, bytes::Bytes::from_static(b"before"));
+        assert_eq!(
+            view.multi_get(&[b"key-3".as_slice(), b"key-2".as_slice(), b"key".as_slice()])
+                .await
+                .expect("snapshot multi-get"),
+            vec![
+                None,
+                Some(bytes::Bytes::from_static(b"kept")),
+                Some(bytes::Bytes::from_static(b"before")),
+            ],
+            "multi-get keeps order and hides every later write"
+        );
+        let mut rows = view.scan_prefix(b"key", ..).await.expect("snapshot scan");
+        let mut keys = Vec::new();
+        while let Some(row) = rows.next().await.expect("scan row") {
+            keys.push(row.key);
+        }
+        assert_eq!(
+            keys,
+            vec![
+                bytes::Bytes::from_static(b"key"),
+                bytes::Bytes::from_static(b"key-2"),
+            ],
+            "scans see neither the later insert nor the later delete"
+        );
         view.close();
+        assert_eq!(
+            db.get(b"key").await.expect("live read"),
+            Some(bytes::Bytes::from_static(b"after")),
+            "closing the view leaves committed writes intact"
+        );
         db.close().await.expect("writer closes");
+    }
+
+    #[tokio::test]
+    async fn writer_request_view_is_a_snapshot_not_a_transaction() {
+        let db = test_support::open_db("writer-request-view-snapshot").await;
+        let view = StableRequestReadView::open(&db)
+            .await
+            .expect("writer request view opens");
+        assert!(matches!(view, StableRequestReadView::WriterSnapshot(_)));
+        assert!(view.requires_serial_stages());
+        view.close();
     }
 
     #[tokio::test]

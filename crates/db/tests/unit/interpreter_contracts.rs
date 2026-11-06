@@ -582,9 +582,7 @@ async fn exercise_stable_restricted_metric<D: Distance>(db: &Db, name: &str) {
         transaction.commit().await.unwrap();
     }
 
-    let view = read_view::StableRequestReadView::WriterTransaction(
-        db.begin(IsolationLevel::Snapshot).await.unwrap(),
-    );
+    let view = read_view::StableRequestReadView::WriterSnapshot(db.snapshot().await.unwrap());
     let exact = RestrictedVectorCandidates::from_ids([1, 2, 3]).unwrap();
     let exact_results = index
         .search_restricted(&view, &[1.0, 0.0], &SearchParams::new(2).unwrap(), &exact)

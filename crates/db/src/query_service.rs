@@ -937,6 +937,11 @@ mod tests {
             .expect("writer should open"),
         );
         db.wait_for_startup_cache_warm().await;
+        // Start from a catalog planning may not reuse, so the write must load
+        // exactly once.
+        db.refresh_runtime_catalog(DataScope::LegacyUnscoped)
+            .await
+            .expect("explicit refresh succeeds");
         let service = HelixQueryService::new(Arc::clone(&db));
         let before = db.runtime_catalog_generation_for_tests(DataScope::LegacyUnscoped);
 
@@ -1224,6 +1229,11 @@ mod tests {
             .expect("source planner catalog refreshes");
         let plan = helix_planner::planning::plan_write_batch(&batch, prepared.context())
             .expect("write plans");
+        // Start from a catalog the fallback may not reuse, so it must load.
+        target
+            .refresh_runtime_catalog(DataScope::LegacyUnscoped)
+            .await
+            .expect("explicit refresh succeeds");
         let before = target.runtime_catalog_generation_for_tests(DataScope::LegacyUnscoped);
 
         target
@@ -1334,6 +1344,11 @@ mod tests {
         let proof = prepared.into_catalog_proof();
         source.close().await.expect("source writer closes");
         drop(source);
+        // Start from a catalog the fallback may not reuse, so it must load.
+        target
+            .refresh_runtime_catalog(DataScope::LegacyUnscoped)
+            .await
+            .expect("explicit refresh succeeds");
         let before = target.runtime_catalog_generation_for_tests(DataScope::LegacyUnscoped);
 
         target

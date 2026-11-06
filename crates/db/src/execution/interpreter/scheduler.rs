@@ -710,12 +710,12 @@ mod tests {
                 plan.execution_program(),
             )
             .await
-            .expect("writer transaction executes the parallel stage serially");
+            .expect("writer snapshot executes the parallel stage serially");
 
         assert_eq!(context.step_outputs.len(), 1);
         context
             .close_request_read_view()
-            .expect("writer read transaction rolls back");
+            .expect("writer read view closes");
     }
 
     #[tokio::test]

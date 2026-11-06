@@ -811,6 +811,28 @@ async fn planner_tenant_vector_search_ids(db: &HelixDB, tenant: &str, query: Vec
     )
 }
 
+/// Waits until this handle's queued index operations are physically
+/// published.
+///
+/// Vector updates reach their generation through the asynchronous queue;
+/// strong searches see them through the queue overlay before then. Checks
+/// that read the physical generation or its cache wait here first instead
+/// of assuming the publisher keeps pace with back-to-back requests.
+async fn wait_for_index_queue_published(db: &HelixDB) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let stats = db.index_operation_queue_stats();
+            if stats.pending_operations == 0 && stats.uncertain_operations == 0 {
+                break;
+            }
+            db.wake_index_worker().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("queued index operations publish");
+}
+
 async fn exercise_adopted_vector_runtime(
     db: &HelixDB,
     definition: &crate::index_lifecycle::ValidatedVectorIndexDefinition,
@@ -833,13 +855,25 @@ async fn exercise_adopted_vector_runtime(
         crate::search::vector::distance::Cosine,
     >(&active, physical_id)
     .expect("adopted generation validates for cache hydration");
-    db.refresh_vector_memory_cache()
-        .await
-        .expect("adopted vector cache refreshes");
-    let cache_guard = db
-        .vector_cache_registry()
-        .resident_guard_for(&generation)
-        .expect("adopted generation is admitted to the vector cache");
+    wait_for_index_queue_published(db).await;
+    // A background warm pass may own this generation's initial hydration,
+    // which an explicit refresh skips, and a commit to the generation during
+    // that load discards it. Admission is eventual, so refresh until the
+    // generation is resident rather than assuming one call admits it.
+    let cache_guard = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            db.refresh_vector_memory_cache()
+                .await
+                .expect("adopted vector cache refreshes");
+            let Ok(guard) = db.vector_cache_registry().resident_guard_for(&generation) else {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            };
+            break guard;
+        }
+    })
+    .await
+    .expect("adopted generation is admitted to the vector cache");
     assert!(cache_guard.store().estimated_bytes() > 0);
     drop(cache_guard);
 
@@ -1156,6 +1190,8 @@ pub(crate) async fn run_vector_adoption_contract() {
     ))
     .await
     .expect("adopted database cold-reopens");
+    // Operations still queued at close publish after the reopen.
+    wait_for_index_queue_published(&reopened).await;
     assert_vector_search::<crate::search::vector::distance::Cosine>(
         &reopened,
         vector_definition,

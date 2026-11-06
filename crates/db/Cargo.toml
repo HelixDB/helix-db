@@ -112,6 +112,10 @@ name = "embedded_write_latency"
 harness = false
 
 [[bench]]
+name = "concurrent_request_throughput"
+harness = false
+
+[[bench]]
 name = "secondary_equality_hot_path"
 harness = false
 required-features = ["bench-internals"]

@@ -4,30 +4,45 @@ use helix_planner::ir;
 
 use super::*;
 use crate::config::{
-    TextElementType, TextIndexDefinition, VectorElementType, VectorIndexDefinition,
+    RuntimeIndexCatalog, TextElementType, TextIndexDefinition, VectorElementType,
+    VectorIndexDefinition,
 };
 
 impl<'db> ExecutionContext<'db> {
+    /// Runs `find` over the catalog this request planned against.
+    ///
+    /// A prepared read carries the exact catalog its plan was built from, so
+    /// its search definitions never depend on what another request published
+    /// since. Requests without a prepared read view fall back to the published
+    /// catalog.
+    fn with_planned_catalog<T>(&self, find: impl FnOnce(&RuntimeIndexCatalog) -> T) -> T {
+        let Some(planned) = self.request_read_index_catalog() else {
+            return find(&self.db.runtime_config_snapshot_loaded(self.tenant_scope));
+        };
+        find(planned.runtime())
+    }
+
     pub(in crate::execution::interpreter::access::search) fn vector_definition(
         &self,
         element_type: VectorElementType,
         label: &ir::NonEmptyString,
         property: &ir::NonEmptyString,
     ) -> Result<VectorIndexDefinition> {
-        self.db
-            .runtime_config_snapshot_loaded(self.tenant_scope)
-            .vector_indexes()
-            .find(|definition| {
-                definition.element_type() == element_type
-                    && definition.label() == label.as_ref()
-                    && definition.property() == property.as_ref()
-            })
-            .cloned()
-            .ok_or_else(|| {
-                HelixDbError::IndexNotFound(format!(
-                    "physical vector index definition for {element_type:?}:{label}:{property}"
-                ))
-            })
+        self.with_planned_catalog(|catalog| {
+            catalog
+                .vector_indexes()
+                .find(|definition| {
+                    definition.element_type() == element_type
+                        && definition.label() == label.as_ref()
+                        && definition.property() == property.as_ref()
+                })
+                .cloned()
+        })
+        .ok_or_else(|| {
+            HelixDbError::IndexNotFound(format!(
+                "physical vector index definition for {element_type:?}:{label}:{property}"
+            ))
+        })
     }
 
     pub(in crate::execution::interpreter::access::search) fn text_definition(
@@ -36,20 +51,21 @@ impl<'db> ExecutionContext<'db> {
         label: &ir::NonEmptyString,
         property: &ir::NonEmptyString,
     ) -> Result<TextIndexDefinition> {
-        self.db
-            .runtime_config_snapshot_loaded(self.tenant_scope)
-            .text_indexes()
-            .find(|definition| {
-                definition.element_type() == element_type
-                    && definition.label() == label.as_ref()
-                    && definition.property() == property.as_ref()
-            })
-            .cloned()
-            .ok_or_else(|| {
-                HelixDbError::IndexNotFound(format!(
-                    "physical text index definition for {element_type:?}:{label}:{property}"
-                ))
-            })
+        self.with_planned_catalog(|catalog| {
+            catalog
+                .text_indexes()
+                .find(|definition| {
+                    definition.element_type() == element_type
+                        && definition.label() == label.as_ref()
+                        && definition.property() == property.as_ref()
+                })
+                .cloned()
+        })
+        .ok_or_else(|| {
+            HelixDbError::IndexNotFound(format!(
+                "physical text index definition for {element_type:?}:{label}:{property}"
+            ))
+        })
     }
 }
 

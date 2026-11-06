@@ -744,11 +744,15 @@ impl IndexOperationDriver for TextIndexDriver {
                     .await?;
                 Ok(PreparedIndexOperationStep::text(step))
             }
-            TextBuildStage::ScanSource(_)
-            | TextBuildStage::CatchUp(_)
-            | TextBuildStage::Activate(_) => Ok(PreparedIndexOperationStep::driver_owned(
+            TextBuildStage::ScanSource(_) | TextBuildStage::CatchUp(_) => Ok(
+                PreparedIndexOperationStep::driver_owned(IndexOperationFamily::Text, Box::new(())),
+            ),
+            // Activation publishes the index to planning, so like every other
+            // family it holds the scope's exclusive lifecycle permit, which
+            // also advances the scope's catalog version as it is released.
+            TextBuildStage::Activate(_) => Ok(PreparedIndexOperationStep::driver_owned(
                 IndexOperationFamily::Text,
-                Box::new(()),
+                self.acquire_step_permit(scope, operation).await?,
             )),
         }
     }

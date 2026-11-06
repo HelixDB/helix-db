@@ -200,7 +200,8 @@ jobs:
       - run: >-
           cargo test --locked
           -p db -p helix-planner -p helix-graph-algorithms -p helix-ast-bench
-          --bench embedded_write_latency --bench projection_materialization
+          --bench embedded_write_latency --bench concurrent_request_throughput
+          --bench projection_materialization
           --bench property_row_reads --bench write_path_mutations
           --bench planner_scalability --bench v2_plan_quality
           --bench graph_algorithms
