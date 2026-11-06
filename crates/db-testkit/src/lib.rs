@@ -39,6 +39,7 @@
 pub mod action;
 pub mod error;
 pub mod fixtures;
+pub mod gated_wal;
 pub mod ids;
 pub mod launch_gate;
 pub mod lifecycle;
