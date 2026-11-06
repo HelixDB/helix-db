@@ -77,7 +77,7 @@ impl GrpcService {
             .query_service()
             .execute_compiled_cypher_json_scoped_controlled(
                 query,
-                query_mode(request.warm_only),
+                query_mode(request.warm_only, request.await_durable),
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
                 db::cypher::Limits::default(),
@@ -85,12 +85,6 @@ impl GrpcService {
             )
             .await
             .map_err(cypher_status)?;
-        if request.await_durable {
-            self.state
-                .flush_writer()
-                .await
-                .map_err(|e| status_from_service_error(e.into()))?;
-        }
         Ok(Response::new(QueryJsonResponse {
             body: response.into_bytes(),
         }))
@@ -217,18 +211,11 @@ impl HelixDbServer for GrpcService {
             .query_service()
             .execute_query_with_mode_and_metrics_tenant(
                 query,
-                query_mode(warm_only),
+                query_mode(warm_only, await_durable),
                 metrics_tenant_id,
             )
             .await
             .map_err(status_from_service_error)?;
-        if await_durable {
-            self.state
-                .flush_writer()
-                .await
-                .map_err(QueryServiceError::from)
-                .map_err(status_from_service_error)?;
-        }
         let body = response
             .to_json_bytes()
             .map_err(status_from_service_error)?
@@ -249,11 +236,13 @@ impl HelixDbServer for GrpcService {
     }
 }
 
-fn query_mode(warm_only: bool) -> QueryMode {
-    if warm_only {
-        QueryMode::Warm
-    } else {
-        QueryMode::Execute
+/// An unset `await_durable` waits, so only an explicit `false` trades crash
+/// durability for latency.
+fn query_mode(warm_only: bool, await_durable: Option<bool>) -> QueryMode {
+    match (warm_only, await_durable) {
+        (true, _) => QueryMode::Warm,
+        (false, Some(false)) => QueryMode::ExecuteWithoutDurableWait,
+        (false, None | Some(true)) => QueryMode::Execute,
     }
 }
 
@@ -318,7 +307,7 @@ fn cypher_status(error: db::cypher::Error) -> Status {
 fn validate_options_for_request_type(
     warm_only: bool,
     require_writer: bool,
-    await_durable: bool,
+    await_durable: Option<bool>,
     request_type: QueryRequestType,
     db_mode: db::HelixDbMode,
 ) -> Result<(), Status> {
@@ -328,7 +317,7 @@ fn validate_options_for_request_type(
             "warm_only is only valid for read requests",
         ));
     }
-    if await_durable && request_type != QueryRequestType::Write {
+    if await_durable == Some(true) && request_type != QueryRequestType::Write {
         return Err(status_with_error_code(
             error_code::QueryErrorCode::InvalidRequestOption,
             "await_durable is only valid for write requests",
@@ -442,7 +431,7 @@ mod tests {
         let status = validate_options_for_request_type(
             true,
             false,
-            false,
+            None,
             QueryRequestType::Write,
             db::HelixDbMode::Writer,
         )

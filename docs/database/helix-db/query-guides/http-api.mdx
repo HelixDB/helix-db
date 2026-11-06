@@ -133,7 +133,7 @@ when `parameter_types` is present, it must describe every supplied parameter.
 | --- | --- | --- |
 | `X-Helix-Warm` | Reads | Warm eligible execution state before normal traffic. |
 | `X-Helix-Require-Writer` | Reads and writes | Reject execution when the selected server is not a writer. |
-| `X-Helix-Await-Durable` | Writes | Flush the writer before returning success. |
+| `X-Helix-Await-Durable` | Writes | Without it, or with `true`, success means the write is durable. `false` returns once it is applied on the writer, so a crash before its WAL upload loses it. |
 | `X-Helix-Database-Id` | Helix Cloud | Select the managed database behind a gateway. |
 
 Boolean execution headers accept `true`, `false`, `1`, or `0`. Warm writes and

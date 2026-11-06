@@ -39,10 +39,12 @@ Transactions use serializable snapshot isolation:
 Canonical data is persisted by the selected storage source. In Cloud, local memory and
 disk caches are performance layers; object storage is canonical.
 
-Server clients can explicitly set `shouldAwaitDurability(true)` /
-`should_await_durability(true)` when the acknowledgement must wait for the configured
-durability boundary, or `false` when the application accepts an earlier
-acknowledgement. Embedded mode rejects this server-only option.
+Writes wait for the configured durability boundary unless a server client sets
+`shouldAwaitDurability(false)` / `should_await_durability(false)`. That acknowledges a
+write once it is applied on the writer, so a crash before its WAL upload loses it, and
+read replicas see it only after that upload. Index operations stay durable. Managed
+Cloud deployments always wait and reject `false`, and embedded mode rejects this
+server-only option.
 
 ## Index activation
 

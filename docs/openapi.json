@@ -1163,10 +1163,9 @@
         "name": "X-Helix-Await-Durable",
         "in": "header",
         "required": false,
-        "description": "Flush the writer before acknowledging success. Valid only for write requests.",
+        "description": "Omit it or send true, on write requests only, and success means the write is durable. Send false to acknowledge a write once it is applied on the writer, before its WAL upload; a crash before that upload loses it.",
         "schema": {
-          "type": "boolean",
-          "default": false
+          "type": "boolean"
         }
       }
     },

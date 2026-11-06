@@ -125,14 +125,7 @@ async fn execute_query(
         )
         .await
     {
-        Ok(response) => {
-            if options.await_durable == Some(true)
-                && let Err(error) = state.flush_writer().await
-            {
-                return service_error_response(error.into());
-            }
-            query_response(response)
-        }
+        Ok(response) => query_response(response),
         Err(error) => service_error_response(error),
     }
 }
@@ -265,19 +258,12 @@ async fn execute_compiled(
         )
         .await;
     match result {
-        Ok(response) => {
-            if options.await_durable == Some(true)
-                && let Err(error) = state.flush_writer().await
-            {
-                return service_error_response(error.into());
-            }
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
-                response.into_bytes(),
-            )
-                .into_response()
-        }
+        Ok(response) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            response.into_bytes(),
+        )
+            .into_response(),
         Err(error) => cypher_error_response(error),
     }
 }
@@ -398,11 +384,13 @@ impl RequestOptions {
         Ok(())
     }
 
+    /// An absent `x-helix-await-durable` waits, so only an explicit `false`
+    /// trades crash durability for latency.
     fn query_mode(&self) -> QueryMode {
-        if self.warm_only {
-            QueryMode::Warm
-        } else {
-            QueryMode::Execute
+        match (self.warm_only, self.await_durable) {
+            (true, _) => QueryMode::Warm,
+            (false, Some(false)) => QueryMode::ExecuteWithoutDurableWait,
+            (false, None | Some(true)) => QueryMode::Execute,
         }
     }
 }
