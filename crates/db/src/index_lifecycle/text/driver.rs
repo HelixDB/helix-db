@@ -61,8 +61,9 @@ use crate::index_lifecycle::{
     BuildOperationOutcome, IndexCursor, IndexElementKind, IndexEntityId, IndexOperationBlocker,
     IndexOperationExecutionState, IndexOperationFamily, IndexOperationOutcome,
     IndexOperationProgress, IndexOperationRecord, IndexRecordV2, OperationCounters,
-    PrefixScanProgress, SourceScanProgress, TextBuildProgress, TextBuildStage, TextLogicalVersion,
-    TextManifestValidationProgress, ValidatedDynamicIndexDefinition, ValidatedTextIndexDefinition,
+    PrefixScanProgress, SourceScanProgress, StepGate, TextBuildProgress, TextBuildStage,
+    TextLogicalVersion, TextManifestValidationProgress, ValidatedDynamicIndexDefinition,
+    ValidatedTextIndexDefinition,
 };
 use crate::transaction::Mutation;
 
@@ -637,17 +638,29 @@ impl IndexOperationDriver for TextIndexDriver {
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
-        let needs_exclusive = matches!(
-            operation.progress(),
-            IndexOperationProgress::TextBuild(
-                TextBuildProgress::Constructing(TextBuildStage::Activate(_))
-                    | TextBuildProgress::Aborting(_)
-            ) | IndexOperationProgress::TextCleanup(_)
-        );
-        if needs_exclusive {
-            return Ok(Box::new(self.scope_gates.lifecycle_permit(scope).await));
-        }
-        Ok(Box::new(()))
+        let gate = match operation.progress() {
+            IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(stage)) => {
+                match stage {
+                    TextBuildStage::ScanSource(_)
+                    | TextBuildStage::ScanPartitions(_)
+                    | TextBuildStage::CatchUp(_)
+                    | TextBuildStage::Compact(_)
+                    | TextBuildStage::PrepareManifests(_)
+                    | TextBuildStage::ValidateManifests(_) => StepGate::None,
+                    TextBuildStage::Activate(_) => StepGate::Lifecycle,
+                }
+            }
+            // Abort and cleanup delete rows of a generation that is not Active.
+            IndexOperationProgress::TextBuild(TextBuildProgress::Aborting(_))
+            | IndexOperationProgress::TextCleanup(_) => StepGate::WriteFence,
+            IndexOperationProgress::SecondaryBuild(_)
+            | IndexOperationProgress::VectorBuild(_)
+            | IndexOperationProgress::SecondaryCleanup(_)
+            | IndexOperationProgress::VectorCleanup(_) => {
+                return Err(corruption("text driver received another family progress"));
+            }
+        };
+        Ok(self.scope_gates.step_permit(scope, gate).await)
     }
 
     async fn prepare_step(

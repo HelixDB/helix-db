@@ -74,7 +74,7 @@ use crate::index_lifecycle::{
     ValidatedSecondaryIndexDefinition,
 };
 
-use super::IndexScopeGates;
+use super::{IndexScopeGates, StepGate};
 
 mod exact;
 pub(crate) use exact::lookup_active_unique_equality_batch_admitted;
@@ -151,8 +151,9 @@ enum PreparedSecondaryStep {
     /// delta keys selected without adding an SSI range read, reconciled
     /// while writes continue.
     ExactCatchUp { keys: Vec<IndexEntityStateKey> },
-    /// A catch-up, validation, or activation step holding the scope's
-    /// exclusive permit. Bounded drains committed under that permit left the
+    /// A catch-up, validation, or activation step that fences the scope's
+    /// writers: catch-up and validation hold the write fence, activation the
+    /// lifecycle permit. Bounded drains committed under that permit left the
     /// prefix empty, or headed by the entity one blocked on, so the step's
     /// own drain reaches the end of the prefix or blocks on that entity;
     /// `counters` include their work.
@@ -727,21 +728,32 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
-        // Constructing builds take their permit in `prepare_step`.
-        let needs_exclusive = matches!(
-            operation.progress(),
+        let gate = match operation.progress() {
+            // Constructing builds take their permit in `prepare_step`.
+            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(_)) => {
+                StepGate::None
+            }
+            // Abort and cleanup delete rows of a generation that is not
+            // Active: writers stay fenced, planning continues.
             IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(_))
-                | IndexOperationProgress::SecondaryCleanup(_)
-        );
-        if needs_exclusive {
-            return Ok(Box::new(self.scope_gates.lifecycle_permit(scope).await));
-        }
-        Ok(Box::new(()))
+            | IndexOperationProgress::SecondaryCleanup(_) => StepGate::WriteFence,
+            IndexOperationProgress::VectorBuild(_)
+            | IndexOperationProgress::TextBuild(_)
+            | IndexOperationProgress::VectorCleanup(_)
+            | IndexOperationProgress::TextCleanup(_) => {
+                return Err(corruption(
+                    "secondary driver received another family progress",
+                ));
+            }
+        };
+        Ok(self.scope_gates.step_permit(scope, gate).await)
     }
 
-    /// Takes the scope's exclusive permit for every step that must end with
-    /// the delta prefix empty, and drains the backlog the writes it waited
-    /// for left behind before the step's own transaction opens.
+    /// Fences the scope's writers for every step that must end with the delta
+    /// prefix empty, and drains the backlog the writes it waited for left
+    /// behind before the step's own transaction opens. Only activation also
+    /// takes the catalog gate: catch-up and validation leave the Active index
+    /// set unchanged, so planning and reads continue through them.
     ///
     /// A catch-up backlog beyond [`GATED_BACKLOG_BATCHES`] is instead
     /// reconciled by exact keys while writes continue. It is observed before
@@ -771,7 +783,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
                 },
             )
         };
-        let (counters, disposition) = match stage {
+        let (counters, disposition, gate) = match stage {
             SecondaryBuildStage::Scan(_) => {
                 return Ok(PreparedIndexOperationStep::driver_owned(
                     self.family(),
@@ -781,17 +793,25 @@ impl IndexOperationDriver for SecondaryIndexDriver {
             SecondaryBuildStage::CatchUp(progress) => {
                 match observe_backlog(db, scope, operation, limits).await? {
                     Some(keys) => return Ok(exact_catch_up(keys)),
-                    None => (progress.counters, AppliedStateDisposition::Retain),
+                    None => (
+                        progress.counters,
+                        AppliedStateDisposition::Retain,
+                        StepGate::WriteFence,
+                    ),
                 }
             }
-            SecondaryBuildStage::Validate(progress) => {
-                (progress.counters, AppliedStateDisposition::Release)
-            }
-            SecondaryBuildStage::Activate(progress) => {
-                (progress.counters, AppliedStateDisposition::Release)
-            }
+            SecondaryBuildStage::Validate(progress) => (
+                progress.counters,
+                AppliedStateDisposition::Release,
+                StepGate::WriteFence,
+            ),
+            SecondaryBuildStage::Activate(progress) => (
+                progress.counters,
+                AppliedStateDisposition::Release,
+                StepGate::Lifecycle,
+            ),
         };
-        let permit = self.scope_gates.lifecycle_permit(scope).await;
+        let permit = self.scope_gates.step_permit(scope, gate).await;
         // Writes that committed while the permit was awaited may have taken
         // the backlog past the gated reach. Validation and activation drain
         // it regardless: returning to catch-up would restart validation.
@@ -813,7 +833,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
                     drain_backlog_under_gate(db, scope, operation, counters, limits, disposition)
                         .await?;
                 PreparedIndexOperationStep::secondary(
-                    Box::new(permit),
+                    permit,
                     PreparedSecondaryOperationStep {
                         step: PreparedSecondaryStep::Gated { counters },
                     },
@@ -959,7 +979,7 @@ async fn observe_backlog(
 }
 
 /// Drains every pending delta in bounded transactions of their own while the
-/// caller holds the scope's exclusive lifecycle permit.
+/// caller fences the scope's writers (the write fence or lifecycle permit).
 ///
 /// No writer records a delta while that permit is held, so the backlog only
 /// shrinks, and each transaction runs until its prefix scan ends or a budget
@@ -1085,7 +1105,7 @@ async fn step_build(
 /// Drains the remaining deltas and activates the generation in the same
 /// transaction.
 ///
-/// Activation holds the exclusive gate, so a drain that reaches the end of
+/// Activation holds the lifecycle permit, which fences writers, so a drain that reaches the end of
 /// the prefix proves the generation equal to its source at commit. A drain
 /// one batch cannot finish stays in activation for the next gated step.
 async fn activate(
@@ -1502,7 +1522,7 @@ async fn scan_source(
 
 /// Drains the delta prefix inside a gated step transaction.
 ///
-/// The caller holds the scope's exclusive permit, so a drain that reaches the
+/// The caller fences the scope's writers, so a drain that reaches the
 /// end of the prefix proves it empty at commit and the build moves on to
 /// validation, while a drain a budget stops stays in catch-up. Every applied
 /// value is retained for validation to check.
@@ -1978,7 +1998,7 @@ async fn catch_up_exact(
     )))
 }
 
-/// Releases one batch of applied-state rows under the exclusive gate.
+/// Releases one batch of applied-state rows while the scope's writers are fenced.
 ///
 /// A row may be released only while its entity has no pending delta: the
 /// row is then the only proof of what the generation holds (see
@@ -9192,6 +9212,76 @@ mod tests {
                 .is_empty(),
             "the gated step drains the prefix before its own transaction opens"
         );
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Catch-up and validation fence the scope's writers but leave planning
+    /// alone: the write fence neither excludes shared catalog permits nor
+    /// advances the catalog version. Only activation, which changes the Active
+    /// index set, takes the lifecycle permit, excluding planning and advancing
+    /// the version as it is released.
+    #[tokio::test]
+    async fn only_activation_gates_planning_and_advances_the_catalog_version() {
+        let db = test_db("secondary-step-gates").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        let entities = 4_u64;
+        for entity_id in 0..entities {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+        }
+        let (operation_id, _, _) = create_build(&db, scope, &definition, entities - 1).await;
+        let gates = Arc::new(IndexScopeGates::default());
+        let driver = SecondaryIndexDriver::new(Arc::clone(&gates));
+        let mut claim_sequence = 1;
+        let limits = SearchIndexBackfillLimits::default().batch();
+        type StageCase = (&'static str, bool, fn(&SecondaryBuildStage) -> bool);
+        let stages: [StageCase; 3] = [
+            ("catch-up", true, |stage| {
+                matches!(stage, SecondaryBuildStage::CatchUp(_))
+            }),
+            ("validation", true, |stage| {
+                matches!(stage, SecondaryBuildStage::Validate(_))
+            }),
+            ("activation", false, |stage| {
+                matches!(stage, SecondaryBuildStage::Activate(_))
+            }),
+        ];
+        for (stage, planning_continues, reached) in stages {
+            drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, reached).await;
+            let operation = read_operation(&db, scope, operation_id)
+                .await
+                .expect("secondary operation is readable")
+                .expect("secondary operation exists");
+            let before = gates.catalog_permit(scope).await.version();
+            let prepared = driver
+                .prepare_step(&db, scope, &operation, limits)
+                .await
+                .expect("the gated step prepares");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), gates.mutation_permit(scope))
+                    .await
+                    .is_err(),
+                "{stage} fences the scope's writers"
+            );
+            let planning =
+                tokio::time::timeout(Duration::from_millis(50), gates.catalog_permit(scope)).await;
+            assert_eq!(
+                planning.is_ok(),
+                planning_continues,
+                "{stage}: only activation excludes planning"
+            );
+            drop(planning);
+            drop(prepared);
+            assert_eq!(
+                gates.catalog_permit(scope).await.version() == before,
+                planning_continues,
+                "{stage}: only activation advances the catalog version"
+            );
+        }
         db.close().await.expect("secondary test database closes");
     }
 
