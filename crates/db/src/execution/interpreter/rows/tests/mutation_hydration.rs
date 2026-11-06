@@ -108,9 +108,9 @@ async fn create_hydrates_only_its_property_expressions_before_staging() {
             .await
             .unwrap();
         let after = ctx.row_budget().reads();
-        // One selected expression read and one canonical observation per edit.
-        assert_eq!(after.multi_get_keys - before.multi_get_keys, 3);
-        assert_eq!(after.multi_get_batches - before.multi_get_batches, 3);
+        // One selected expression read and one canonical observation for both edits.
+        assert_eq!(after.multi_get_keys - before.multi_get_keys, 2);
+        assert_eq!(after.multi_get_batches - before.multi_get_batches, 2);
         drop(rows);
         ctx.commit_request_write_scope().await.unwrap();
         assert_eq!(ctx.row_budget().available(), limit);

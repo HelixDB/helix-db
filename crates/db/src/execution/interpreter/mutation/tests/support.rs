@@ -302,3 +302,41 @@ pub(super) fn access_param_value_plan(
         2,
     )
 }
+
+/// One prepared edit applied as a one-entity batch.
+impl crate::execution::interpreter::ExecutionContext<'_> {
+    pub(super) async fn row_edit_map(
+        &mut self,
+        entity: helix_planner::relational::Entity,
+        edit: crate::index_lifecycle::graph_mutation::map::Edit,
+    ) -> crate::cypher::Result<()> {
+        use crate::execution::interpreter::mutation::EntityEdits;
+        let budget = self
+            .row_memory
+            .clone()
+            .unwrap_or_else(|| crate::query_resources::Budget::new(1 << 40));
+        let mut edits = EntityEdits::prepared(&budget, entity, edit, false)?;
+        self.row_apply_edits(&mut edits).await
+    }
+
+    /// `None` removes `key`, skipping a missing row.
+    pub(super) async fn row_edit_property(
+        &mut self,
+        entity: helix_planner::relational::Entity,
+        key: &str,
+        value: Option<crate::encoding::v2::values::property::property_value::PropertyValue>,
+    ) -> crate::cypher::Result<()> {
+        use crate::execution::interpreter::mutation::EntityEdits;
+        use crate::index_lifecycle::graph_mutation::map;
+        let budget = self
+            .row_memory
+            .clone()
+            .unwrap_or_else(|| crate::query_resources::Budget::new(1 << 40));
+        let skips_missing_row = value.is_none();
+        let mut edit = map::Edit::new(map::Mode::Extend);
+        edit.insert(key.to_owned(), value)
+            .expect("test keys are valid");
+        let mut edits = EntityEdits::prepared(&budget, entity, edit, skips_missing_row)?;
+        self.row_apply_edits(&mut edits).await
+    }
+}

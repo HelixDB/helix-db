@@ -2,13 +2,13 @@
 //! Keys are validated on insertion; native null storage and removal remain
 //! distinct operations. Replacement preserves the storage metadata namespace.
 //!
-//! Successive key edits fold into one transition. New keys keep their
+//! Edits to distinct keys fold into one transition. New keys keep their
 //! insertion order, so a folded edit stores the same bytes as applying each
 //! key alone. [`Edit::folds`] names the sequences that could not.
 use super::*;
 use crate::encoding::v2::values::property::property_value::PropertyValue;
 use helix_planner::relational::PropertyRequirement;
-use std::collections::{btree_map, BTreeMap};
+use std::collections::BTreeMap;
 
 #[cfg(test)]
 mod tests;
@@ -60,30 +60,24 @@ impl Edit {
             return Err(NameError::Reserved);
         }
         let rank = self.entries.len();
-        match self.entries.entry(name) {
-            btree_map::Entry::Occupied(mut slot) => slot.get_mut().value = value,
-            btree_map::Entry::Vacant(slot) => {
-                slot.insert(Entry {
-                    value,
-                    matched: false,
-                    rank,
-                });
-            }
-        }
+        self.entries.insert(
+            name,
+            Entry {
+                value,
+                matched: false,
+                rank,
+            },
+        );
         Ok(())
     }
 
-    /// Whether inserting `names` here stores the same row as applying this
-    /// edit first. A replacement must be whole, because keys it dropped would
-    /// otherwise keep their stored position. A key this edit removes would
-    /// return at the end of the row, which a stored position cannot express.
+    /// Whether `names` can join this edit so that applying it once matches
+    /// applying each change alone. A replacement must stay whole, because keys
+    /// it dropped would otherwise keep their stored position. A repeated key
+    /// must apply first: its overwritten value would escape validation, and a
+    /// removed key returns at the end of the row, not at its stored position.
     pub(crate) fn folds<'a>(&self, mut names: impl Iterator<Item = &'a str>) -> bool {
-        self.mode == Mode::Extend
-            && names.all(|name| {
-                self.entries
-                    .get(name)
-                    .is_none_or(|entry| entry.value.is_some())
-            })
+        self.mode == Mode::Extend && names.all(|name| !self.entries.contains_key(name))
     }
 
     /// Whether a read of `requirement` must see this edit applied first.
@@ -166,11 +160,11 @@ impl Edit {
         }
         let _order_memory = budget
             .map(|budget| {
-                budget.reserve(
-                    self.entries
-                        .len()
-                        .saturating_mul(size_of::<(usize, String, PropertyValue)>()),
-                )
+                budget.reserve(self.entries.len().saturating_mul(size_of::<(
+                    usize,
+                    String,
+                    PropertyValue,
+                )>()))
             })
             .transpose()?;
         let mut additions = self

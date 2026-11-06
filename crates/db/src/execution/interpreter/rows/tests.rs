@@ -33,6 +33,7 @@ mod selection;
 mod unwind;
 mod values;
 mod where_windows;
+mod write_batching;
 
 #[tokio::test]
 async fn cancellation_at_execution_checkpoints_rolls_back_rows() {
