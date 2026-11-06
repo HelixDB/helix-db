@@ -15,6 +15,9 @@ pub(super) enum AccessFilterIndexRejection {
     Predicate(AccessFilterIndexPlanRejection),
     MissingIndex(MissingAccessIndex),
     SourceUnchanged,
+    /// The source is a unique-key lookup, whose at most one candidate
+    /// evaluates the filter itself.
+    KeyedSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +30,9 @@ pub(super) enum MissingAccessIndex {
 pub(super) enum IndexedSourceCombination<T> {
     Rewritten(T),
     Unchanged,
+    /// The source is a unique-key lookup: reading another index set would
+    /// cost more than evaluating the filter on its at most one candidate.
+    Keyed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +50,11 @@ pub(super) enum PartialIndexFilterRejection {
     NotConjunction,
     NoIndexedConjunct,
     SourceUnchanged,
+    /// The source is a unique-key lookup, whose at most one candidate
+    /// evaluates the filter itself.
+    KeyedSource,
+    /// The source is not broad, or no conjunct is a unique key.
+    NoUniqueKey,
     /// Several branches keep residuals but cannot form a branch-residual
     /// union: the filtered source is already narrow, or a branch set is not
     /// index-only.

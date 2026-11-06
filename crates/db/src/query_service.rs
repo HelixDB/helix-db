@@ -851,6 +851,8 @@ mod index_membership_tests;
 mod index_served_sources_tests;
 #[cfg(test)]
 mod selective_equality_tests;
+#[cfg(test)]
+mod unique_key_claims_tests;
 
 #[cfg(test)]
 mod tests {

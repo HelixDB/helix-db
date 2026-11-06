@@ -12,9 +12,15 @@ pub(super) fn pipeline_has_local_simplification_candidate(pipeline: &AccessPipel
         || has_distinct_simplification_candidate(pipeline.ops())
 }
 
+/// A distinct that only filters precede, or two adjacent distincts.
 fn has_distinct_simplification_candidate(ops: &[StreamPipelineOp]) -> bool {
-    matches!(ops.first(), Some(StreamPipelineOp::Distinct))
-        || has_adjacent_ops(ops, StreamPipelineOpKind::Distinct)
+    matches!(
+        ops.iter().find(|op| !matches!(
+            op.kind(),
+            StreamPipelineOpKind::Filter | StreamPipelineOpKind::IndexMembership
+        )),
+        Some(StreamPipelineOp::Distinct)
+    ) || has_adjacent_ops(ops, StreamPipelineOpKind::Distinct)
 }
 
 fn has_adjacent_ops(ops: &[StreamPipelineOp], kind: StreamPipelineOpKind) -> bool {
@@ -68,9 +74,29 @@ mod tests {
         )
         .unwrap();
 
+        let filter = || StreamPipelineOp::Filter {
+            predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("active", true))
+                .unwrap(),
+        };
+        let filtered_distinct = AccessPipeline::new(
+            access(ir::NodeAccessPlan::AllScan),
+            ir::AtLeast::<_, 1>::from_one_and_rest(filter(), vec![StreamPipelineOp::Distinct]),
+        )
+        .unwrap();
+        let limited_distinct = AccessPipeline::new(
+            access(ir::NodeAccessPlan::AllScan),
+            ir::AtLeast::<_, 1>::from_one_and_rest(
+                filter(),
+                vec![limit_op(), StreamPipelineOp::Distinct],
+            ),
+        )
+        .unwrap();
+
         assert!(empty.has_local_simplification_candidate());
         assert!(leading_distinct.has_local_simplification_candidate());
         assert!(adjacent_distinct.has_local_simplification_candidate());
+        assert!(filtered_distinct.has_local_simplification_candidate());
+        assert!(!limited_distinct.has_local_simplification_candidate());
         assert!(!ordinary.has_local_simplification_candidate());
     }
 }

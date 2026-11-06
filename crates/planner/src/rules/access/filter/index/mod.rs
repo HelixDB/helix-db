@@ -56,13 +56,22 @@ pub(in crate::rules) fn index_access_filter(
 /// index-served conjuncts and keeps only the rest as its own residual. Only a
 /// disjunction with a branch no index narrows stays a per-row filter.
 ///
+/// A unique key comes first. Over a broad source, a top-level conjunct that
+/// equates a unique-indexed property with non-null values (a literal, a
+/// parameter, or a list of them through `IN` or `OR`) becomes the source, a
+/// single value before a list, and every other conjunct its residual, even
+/// one an index serves: the key reads at most one candidate per value,
+/// whereas another index set may read every matching record of the label (a
+/// range scan verifies each record in range). For the same reason a filter
+/// over a unique-key source is never intersected with more index sets.
+///
 /// A filter the source already answers exactly, such as `a == 1` over the
 /// `a == 1` equality lookup, is dropped: the result is the unchanged source,
 /// never a per-row filter. The label-domain fallback is not part of this
 /// contract, because the `$label` bitmaps are no property index.
 ///
 /// The rewrite is idempotent: its residual holds only conjuncts no index
-/// answers, so rewriting the output again yields
+/// answers, or sits over a unique key, so rewriting the output again yields
 /// [`AccessFilterRewrite::NotApplicable`].
 ///
 /// A source that may repeat elements is never rewritten, since intersecting
@@ -96,7 +105,22 @@ fn derive_required_index_access_filter(
     let analysis::PrunedPredicate::Feasible { predicate, label } = pruned else {
         return AccessFilterRewrite::NotApplicable;
     };
-    let full = match filter.access() {
+    let keyed = || match filter.access() {
+        logical::AccessPath::Node(path) => partial_index_application_rewrite(
+            shared::unique_key_filter::<node::NodeIndexFamily>(
+                path,
+                &predicate,
+                &label,
+                indexes,
+                planner_limits,
+            ),
+            |source| logical::AccessPath::Node(logical::NodeAccessPath::new(source)),
+            filter.access(),
+        ),
+        // Edge equality indexes are never unique.
+        logical::AccessPath::Edge(_) => AccessFilterRewrite::NotApplicable,
+    };
+    let full = || match filter.access() {
         logical::AccessPath::Node(path) => index_application_rewrite(
             node::index_filter(path, &predicate, &label, indexes, planner_limits),
             logical::AccessPath::Node,
@@ -108,7 +132,7 @@ fn derive_required_index_access_filter(
             filter.access(),
         ),
     };
-    full.or_else(|| match filter.access() {
+    let partial = || match filter.access() {
         logical::AccessPath::Node(path) => partial_index_application_rewrite(
             translate::translated_index_filter::<node::NodeIndexFamily>(
                 path,
@@ -131,7 +155,8 @@ fn derive_required_index_access_filter(
             |source| logical::AccessPath::Edge(logical::EdgeAccessPath::new(source)),
             filter.access(),
         ),
-    })
+    };
+    keyed().or_else(full).or_else(partial)
 }
 
 /// `unchanged` is the filtered source, kept as the whole result when the
@@ -151,7 +176,8 @@ fn index_application_rewrite<T>(
         AccessFilterIndexApplication::NotApplicable(
             AccessFilterIndexRejection::NoLabel
             | AccessFilterIndexRejection::Predicate(_)
-            | AccessFilterIndexRejection::MissingIndex(_),
+            | AccessFilterIndexRejection::MissingIndex(_)
+            | AccessFilterIndexRejection::KeyedSource,
         ) => AccessFilterRewrite::NotApplicable,
     }
 }
@@ -186,6 +212,8 @@ fn partial_index_application_rewrite<T>(
             PartialIndexFilterRejection::NoLabel
             | PartialIndexFilterRejection::NotConjunction
             | PartialIndexFilterRejection::NoIndexedConjunct
+            | PartialIndexFilterRejection::KeyedSource
+            | PartialIndexFilterRejection::NoUniqueKey
             | PartialIndexFilterRejection::ResidualBranchesUnrepresentable,
         ) => AccessFilterRewrite::NotApplicable,
     }
