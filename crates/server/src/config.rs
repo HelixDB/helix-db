@@ -53,6 +53,9 @@ const DEFAULT_S3_CACHE_DIR: &str = "/var/cache/helix";
 /// enough here: the cache lock keeps other servers off the tier, and this
 /// server's own open splits hold leases that eviction already skips.
 const FTS_EVICTION_GRACE_SECS: u64 = 1;
+/// Longest `HELIX_WAL_FLUSH_INTERVAL_MS`. A durable commit waits for the next
+/// upload, so anything longer than a minute only stalls every write.
+const MAX_WAL_FLUSH_INTERVAL_MS: u64 = 60_000;
 
 /// Runtime configuration for the standalone server.
 #[derive(Debug, Clone)]
@@ -69,6 +72,9 @@ pub struct ServerConfig {
     /// bounds from `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` and
     /// `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES`.
     pub index_operation_queue: db::config::IndexOperationQueueTuning,
+    /// Milliseconds between WAL uploads from `HELIX_WAL_FLUSH_INTERVAL_MS`, or
+    /// `None` for SlateDB's default of 100 ms.
+    pub wal_flush_interval_ms: Option<NonZeroU64>,
 }
 
 impl ServerConfig {
@@ -86,6 +92,8 @@ impl ServerConfig {
     /// count, replace the strong vector and text search bounds
     /// ([`db::config::IndexOperationQueueTuning::strong_vector_search_max_pending_bytes`],
     /// [`db::config::IndexOperationQueueTuning::strong_text_search_max_analysis_bytes`]).
+    /// `HELIX_WAL_FLUSH_INTERVAL_MS`, from 1 to 60000, replaces the default of
+    /// 100 ms between WAL uploads ([`db::DbConfig::with_wal_flush_interval_ms`]).
     pub fn from_env() -> Result<Self, ServerConfigError> {
         Self::from_lookup(|name| env::var_os(name))
     }
@@ -114,6 +122,18 @@ impl ServerConfig {
                 .map_or(tuning, |bytes| {
                     tuning.with_strong_text_search_max_analysis_bytes(bytes)
                 });
+        let wal_flush_interval_ms = text(&mut lookup, &["HELIX_WAL_FLUSH_INTERVAL_MS"])?
+            .map(|(_, value)| {
+                value
+                    .parse()
+                    .ok()
+                    .filter(|interval: &NonZeroU64| interval.get() <= MAX_WAL_FLUSH_INTERVAL_MS)
+                    .ok_or(ServerConfigError::WalFlushInterval {
+                        value,
+                        maximum: MAX_WAL_FLUSH_INTERVAL_MS,
+                    })
+            })
+            .transpose()?;
         // Last, so every other variable is valid before a cache directory is
         // created.
         let storage = StorageConfig::from_lookup(&mut lookup)?;
@@ -124,6 +144,7 @@ impl ServerConfig {
             db_path,
             storage,
             index_operation_queue,
+            wal_flush_interval_ms,
         })
     }
 
@@ -181,6 +202,7 @@ impl ServerConfig {
     ///         grpc_addr: "127.0.0.1:0".parse().unwrap(),
     ///         db_path: "db/".to_string(),
     ///         storage,
+    ///         wal_flush_interval_ms: None,
     ///         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     ///     };
     ///     let db::config::CacheMode::Hybrid { object_store, .. } =
@@ -205,7 +227,7 @@ impl ServerConfig {
     /// }));
     /// ```
     pub fn db_config(&self) -> db::DbConfig {
-        match &self.storage {
+        let config = match &self.storage {
             StorageConfig::Memory
             | StorageConfig::Disk {
                 cache: CacheConfig::Memory,
@@ -220,7 +242,11 @@ impl ServerConfig {
             } => cache.db_config(false),
             StorageConfig::S3 { cache, .. } => cache.db_config(true),
         }
-        .with_index_operation_queue_tuning(self.index_operation_queue)
+        .with_index_operation_queue_tuning(self.index_operation_queue);
+        match self.wal_flush_interval_ms {
+            Some(interval) => config.with_wal_flush_interval_ms(interval),
+            None => config,
+        }
     }
 
     /// Minimum open files the hard limit must allow before storage opens, or
@@ -236,6 +262,7 @@ impl ServerConfig {
     ///     grpc_addr: "127.0.0.1:0".parse().unwrap(),
     ///     db_path: "db/".to_string(),
     ///     storage: StorageConfig::Memory,
+    ///     wal_flush_interval_ms: None,
     ///     index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     /// };
     /// assert_eq!(config.required_open_files(), None);
@@ -890,6 +917,17 @@ pub enum ServerConfigError {
         /// Parse error.
         source: ParseIntError,
     },
+    /// `HELIX_WAL_FLUSH_INTERVAL_MS` was not a whole number of milliseconds in
+    /// range.
+    #[error(
+        "invalid HELIX_WAL_FLUSH_INTERVAL_MS `{value}`: expected milliseconds from 1 to {maximum}"
+    )]
+    WalFlushInterval {
+        /// Raw value.
+        value: String,
+        /// Largest accepted interval, in milliseconds.
+        maximum: u64,
+    },
     /// A cache size was not a positive integer byte count.
     #[error("invalid {variable} `{value}`: expected a positive byte count")]
     CacheBytes {
@@ -1028,6 +1066,111 @@ mod tests {
             db::config::IndexOperationQueueTuning::default()
         );
         assert_eq!(config.required_open_files(), None);
+    }
+
+    /// The interval is whole milliseconds from 1 to a minute, parsed before
+    /// storage creates a cache directory, and unset keeps SlateDB's 100 ms.
+    #[test]
+    fn the_wal_flush_interval_is_a_bounded_millisecond_count() {
+        const VARIABLE: &str = "HELIX_WAL_FLUSH_INTERVAL_MS";
+        let uploads_every = |config: &ServerConfig| {
+            config
+                .db_config()
+                .slate()
+                .to_writer_settings(None)
+                .flush_interval
+        };
+
+        let unset = ServerConfig::from_lookup(|_| None).unwrap();
+        assert_eq!(unset.wal_flush_interval_ms, None);
+        assert_eq!(
+            uploads_every(&unset),
+            Some(std::time::Duration::from_millis(100))
+        );
+
+        for millis in [1, 20, MAX_WAL_FLUSH_INTERVAL_MS] {
+            let config = ServerConfig::from_lookup(|name| {
+                (name == VARIABLE).then(|| OsString::from(millis.to_string()))
+            })
+            .unwrap();
+            assert_eq!(config.wal_flush_interval_ms, NonZeroU64::new(millis));
+            assert_eq!(
+                uploads_every(&config),
+                Some(std::time::Duration::from_millis(millis))
+            );
+        }
+
+        for value in ["0", "-1", "", "20ms", "60001", "18446744073709551616"] {
+            let cache_root = tempfile::tempdir().unwrap().path().join("never-created");
+            let error = ServerConfig::from_lookup(|name| match name {
+                VARIABLE => Some(OsString::from(value)),
+                "S3_BUCKET" => Some(OsString::from("bucket")),
+                "HELIX_DISK_CACHE_DIR" => Some(cache_root.clone().into_os_string()),
+                _ => None,
+            })
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    ServerConfigError::WalFlushInterval { value: raw, maximum }
+                        if raw == value && *maximum == MAX_WAL_FLUSH_INTERVAL_MS
+                ),
+                "{VARIABLE}={value:?} produced {error:?}"
+            );
+            assert!(!cache_root.exists(), "{value:?} created a cache directory");
+        }
+    }
+
+    /// Every storage kind takes the interval and keeps its own cache.
+    #[test]
+    fn the_wal_flush_interval_applies_to_every_storage_kind() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = HybridCache::try_new(
+            directory.path().join("cache"),
+            DEFAULT_CACHE_MEMORY_BYTES,
+            NonZeroUsize::new(MIN_CACHE_DISK_BYTES).unwrap(),
+        )
+        .unwrap();
+        let root = directory.path().join("data");
+        for storage in [
+            StorageConfig::Memory,
+            StorageConfig::Disk {
+                root: root.clone(),
+                cache: CacheConfig::Memory,
+            },
+            StorageConfig::Disk {
+                root,
+                cache: CacheConfig::Hybrid(Box::new(cache.clone())),
+            },
+            StorageConfig::S3 {
+                bucket: "bucket".to_string(),
+                region: "us-east-1".to_string(),
+                endpoint: None,
+                allow_http: false,
+                cache: Box::new(cache),
+            },
+        ] {
+            let mut config = ServerConfig {
+                http_addr: "127.0.0.1:0".parse().unwrap(),
+                grpc_addr: "127.0.0.1:0".parse().unwrap(),
+                db_path: "db/".to_string(),
+                storage,
+                index_operation_queue: db::config::IndexOperationQueueTuning::default(),
+                wal_flush_interval_ms: None,
+            };
+            let default_cache = config.db_config().cache().clone();
+
+            config.wal_flush_interval_ms = NonZeroU64::new(20);
+
+            let db_config = config.db_config();
+            assert_eq!(
+                db_config.slate().to_writer_settings(None).flush_interval,
+                Some(std::time::Duration::from_millis(20)),
+                "{:?}",
+                config.storage
+            );
+            assert_eq!(db_config.cache(), &default_cache);
+        }
     }
 
     /// Each strong search bound is a positive byte count, parsed before

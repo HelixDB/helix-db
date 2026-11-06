@@ -494,6 +494,12 @@ impl SlateRuntimeConfig {
         }
     }
 
+    /// Replace the interval between WAL uploads.
+    pub fn with_wal_flush_interval_ms(mut self, interval: NonZeroU64) -> Self {
+        self.runtime_settings.flush_interval = Some(Duration::from_millis(interval.get()));
+        self
+    }
+
     /// Replace SlateDB runtime settings.
     pub fn with_runtime_settings(mut self, settings: slatedb::Settings) -> Self {
         self.runtime_settings = settings;

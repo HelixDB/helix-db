@@ -86,6 +86,11 @@ tenant partition before it fails with the retryable `index_backpressure`
 also caps the analyses the server keeps for reuse. Startup fails naming it when it is not
 a positive integer.
 
+`HELIX_WAL_FLUSH_INTERVAL_MS` sets the milliseconds between WAL uploads, from 1 to 60000,
+and defaults to 100. A durable write waits for the next upload, so a lower value cuts
+write latency, and each interval with new writes costs one object-store PUT. Startup
+fails naming it when it is out of range.
+
 ### Benchmark images
 
 `docker-image/build.sh --async-index-benchmark` builds a separate benchmark

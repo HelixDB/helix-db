@@ -192,6 +192,7 @@ mod tests {
             grpc_addr: "127.0.0.1:0".parse().unwrap(),
             db_path: "benchmark-sample".to_string(),
             storage: StorageConfig::Memory,
+            wal_flush_interval_ms: None,
             index_operation_queue: db::config::IndexOperationQueueTuning::default()
                 .with_strong_vector_search_max_pending_bytes(
                     std::num::NonZeroU64::new(1 << 20).unwrap(),
@@ -304,6 +305,7 @@ mod tests {
                 root: root.path().to_path_buf(),
                 cache: crate::config::CacheConfig::Memory,
             },
+            wal_flush_interval_ms: None,
             index_operation_queue: db::config::IndexOperationQueueTuning::default(),
         };
         let writer = open_database(Role::Writer, QueueLayout::Map, &config)
