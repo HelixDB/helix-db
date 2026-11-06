@@ -968,7 +968,9 @@ struct HelixDBInner {
     strong_text_search_rejections: std::sync::atomic::AtomicU64,
     /// When such a refusal was last logged.
     strong_text_search_warned: parking_lot::Mutex<Option<Instant>>,
-    secondary_lifecycle_step: Mutex<()>,
+    /// Serializes manual secondary steps. Shared so a step that outlives its
+    /// cancelled caller keeps holding it until its commit resolves.
+    secondary_lifecycle_step: Arc<Mutex<()>>,
     #[cfg(feature = "index-lifecycle-testing")]
     lifecycle_test_scheduling: IndexLifecycleScheduling,
     #[cfg(feature = "index-lifecycle-testing")]
@@ -1972,7 +1974,7 @@ impl HelixDB {
                 pending_text_analyses,
                 strong_text_search_rejections: std::sync::atomic::AtomicU64::new(0),
                 strong_text_search_warned: parking_lot::Mutex::new(None),
-                secondary_lifecycle_step: Mutex::new(()),
+                secondary_lifecycle_step: Arc::new(Mutex::new(())),
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_test_scheduling: index_scheduling,
                 #[cfg(feature = "index-lifecycle-testing")]
@@ -2124,6 +2126,10 @@ impl HelixDB {
     /// scheduling is Disabled. It returns `true` after one durable queue or
     /// operation transition and `false` only after a complete queue scan finds
     /// no immediately eligible secondary work.
+    ///
+    /// Cancelling the call while it waits behind another manual step runs
+    /// nothing. Once the step starts, cancelling only stops the wait: the step
+    /// finishes in the background and [`HelixDB::close`] waits for it.
     pub async fn process_secondary_index_lifecycle_once(&self) -> Result<bool> {
         let HelixStorage::Writer(writer) = self.storage() else {
             return Err(HelixDbError::WriterModeRequired {
@@ -2136,7 +2142,9 @@ impl HelixDB {
             return Err(HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode);
         }
 
-        let _step = self.inner.secondary_lifecycle_step.lock().await;
+        let step = Arc::clone(&self.inner.secondary_lifecycle_step)
+            .lock_owned()
+            .await;
         if !matches!(*self.inner.close_state.lock().await, CloseState::Open) {
             return Err(HelixDbError::DatabaseClosed);
         }
@@ -2148,13 +2156,26 @@ impl HelixDB {
             .as_ref()
             .map(index_lifecycle::worker::IndexWorkerSupervisor::writer_epoch)
             .ok_or(HelixDbError::DatabaseClosed)?;
-        index_lifecycle::worker::process_secondary_once(
-            writer.db(),
-            &self.inner.index_capabilities,
-            writer_epoch,
-            &self.inner.index_claim_sequences,
-        )
-        .await
+        // A step can hold the scope's exclusive lifecycle permit through its
+        // commit. If the caller is cancelled mid-commit, SlateDB still applies
+        // the batch; releasing the permit first would let a planner cache the
+        // pre-commit catalog under the version this release advances.
+        // `commit_completions` runs the step in this task and, if the caller
+        // stops waiting, finishes it as a spawned task that close() drains.
+        // Waiting for the step mutex above stays cancellable.
+        let inner = Arc::clone(&self.inner);
+        let writer = Arc::clone(writer);
+        let run_step = async move {
+            let _step = step;
+            index_lifecycle::worker::process_secondary_once(
+                writer.db(),
+                &inner.index_capabilities,
+                writer_epoch,
+                &inner.index_claim_sequences,
+            )
+            .await
+        };
+        self.inner.commit_completions.run(run_step)?.await
     }
 
     /// Validates and atomically enqueues one public CREATE against the current source cut.
@@ -6941,6 +6962,263 @@ mod tests {
         .await
         .expect("the detached drop wakes the worker, which finishes cleanup");
         close_shared(db).await;
+    }
+
+    fn manual_secondary_lifecycle_config() -> DbConfig {
+        DbConfig::new().with_secondary_index_lifecycle_tuning(
+            config::SecondaryIndexLifecycleTuning::default()
+                .with_worker_mode(config::SecondaryIndexLifecycleWorkerMode::Disabled),
+        )
+    }
+
+    fn is_pending_secondary_activation(operation: &index_lifecycle::IndexOperationRecord) -> bool {
+        matches!(
+            operation.progress(),
+            index_lifecycle::IndexOperationProgress::SecondaryBuild(
+                index_lifecycle::SecondaryBuildProgress::Constructing(
+                    index_lifecycle::SecondaryBuildStage::Activate(_)
+                )
+            )
+        )
+    }
+
+    async fn read_manual_operation(
+        db: &HelixDB,
+        operation_id: index_lifecycle::IndexOperationId,
+    ) -> index_lifecycle::IndexOperationRecord {
+        let HelixStorage::Writer(writer) = db.storage() else {
+            panic!("the test database is a writer");
+        };
+        let (_, operation) =
+            index_lifecycle::outbox::read_queued_operation(writer.db(), operation_id)
+                .await
+                .expect("operation reads")
+                .expect("the build stays queued until it succeeds");
+        operation
+    }
+
+    /// Opens a manual-stepping writer whose `User.email` build is one step from
+    /// activation, with the pre-activation catalog already cached.
+    async fn open_with_pending_manual_activation(
+        token: &ProcessLocalDatabaseToken,
+    ) -> (HelixDB, index_lifecycle::IndexOperationId) {
+        let db = HelixDB::open_with_config(
+            HelixDbSource::InMemoryToken {
+                token: token.clone(),
+            },
+            manual_secondary_lifecycle_config(),
+        )
+        .await
+        .expect("manual-stepping writer opens");
+        db.wait_for_startup_cache_warm().await;
+        let scope = DataScope::LegacyUnscoped;
+        let operation_id = accepted_operation(
+            db.enqueue_index_create(
+                scope,
+                &ir::IndexDdlCreateSpec::NodeEquality {
+                    key: helix_planner::catalog::ScopedPropertyKey::try_new("User", "email")
+                        .expect("valid index key"),
+                    uniqueness: helix_planner::catalog::IndexUniqueness::NonUnique,
+                },
+                ir::IndexCreateMode::ErrorIfExists,
+            )
+            .await
+            .expect("create is enqueued"),
+        );
+        for step in 0.. {
+            if is_pending_secondary_activation(&read_manual_operation(&db, operation_id).await) {
+                break;
+            }
+            assert!(step < 32, "an empty build reaches activation");
+            assert!(db
+                .process_secondary_index_lifecycle_once()
+                .await
+                .expect("build step succeeds"));
+        }
+        let prepared = db
+            .planner_context_scoped_prepared(ParamBindings::default(), scope)
+            .await
+            .expect("planning before activation");
+        assert!(
+            !plans_user_email_index(&prepared),
+            "a building index is not planned"
+        );
+        (db, operation_id)
+    }
+
+    /// Polls a manual step until it holds the scope's exclusive lifecycle
+    /// permit, then `extra_polls` more times. Returns its result if it finished
+    /// in place first.
+    async fn poll_manual_step_past_its_permit(
+        db: &HelixDB,
+        step: &mut std::pin::Pin<Box<impl std::future::Future<Output = Result<bool>>>>,
+        extra_polls: usize,
+    ) -> Option<Result<bool>> {
+        let scope = DataScope::LegacyUnscoped;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut polls_holding_permit = 0;
+        loop {
+            match futures::poll!(step.as_mut()) {
+                std::task::Poll::Ready(result) => return Some(result),
+                std::task::Poll::Pending => {}
+            }
+            if db.inner.index_scope_gates.catalog_permit_holders(scope) == 1 {
+                if polls_holding_permit == extra_polls {
+                    return None;
+                }
+                polls_holding_permit += 1;
+            }
+            assert!(Instant::now() < deadline, "activation takes its permit");
+            // The step's claim commits wait for storage tasks and the WAL
+            // flush timer, which only run while this test sleeps. The step
+            // itself advances only when polled here.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn finish_manual_build(db: &HelixDB, operation_id: index_lifecycle::IndexOperationId) {
+        for step in 0.. {
+            match db
+                .get_index_operation(DataScope::LegacyUnscoped, operation_id)
+                .await
+                .expect("operation status loads")
+            {
+                index_lifecycle::IndexOperationStatus::Succeeded { .. } => return,
+                index_lifecycle::IndexOperationStatus::Blocked { .. }
+                | index_lifecycle::IndexOperationStatus::Aborted { .. } => {
+                    panic!("an empty build succeeds")
+                }
+                index_lifecycle::IndexOperationStatus::Queued { .. }
+                | index_lifecycle::IndexOperationStatus::Running { .. } => {
+                    assert!(step < 16, "an activated build finishes");
+                    assert!(db
+                        .process_secondary_index_lifecycle_once()
+                        .await
+                        .expect("remaining build step succeeds"));
+                }
+            }
+        }
+    }
+
+    /// A manual activation cancelled at any point after it takes the lifecycle
+    /// permit still commits. Planning waits for it instead of caching the
+    /// pre-activation catalog under the version the permit's release advances.
+    #[tokio::test]
+    async fn manual_activation_cancelled_after_taking_its_permit_still_publishes() {
+        let scope = DataScope::LegacyUnscoped;
+        for extra_polls in 0..8 {
+            let token =
+                ProcessLocalDatabaseToken::new(format!("manual-activation-cancel-{extra_polls}"))
+                    .expect("token is valid");
+            let (db, operation_id) = open_with_pending_manual_activation(&token).await;
+            let mut caller = Box::pin(db.process_secondary_index_lifecycle_once());
+            let finished_in_place =
+                poll_manual_step_past_its_permit(&db, &mut caller, extra_polls).await;
+            drop(caller);
+            assert!(
+                finished_in_place
+                    .unwrap_or(Ok(true))
+                    .expect("an activation that finished in place succeeds"),
+                "the activation step made progress"
+            );
+
+            let plan = || db.planner_context_scoped_prepared(ParamBindings::default(), scope);
+            let prepared = tokio::time::timeout(Duration::from_secs(10), plan())
+                .await
+                .expect("planning waits only for the detached activation")
+                .expect("planning after the cancelled activation");
+            assert!(
+                plans_user_email_index(&prepared),
+                "the cancelled activation committed before planning read the catalog \
+                 (extra polls: {extra_polls})"
+            );
+            drop(prepared);
+            // A cache hit re-checks the cached catalog against storage in tests.
+            assert!(plans_user_email_index(
+                &plan().await.expect("planning from the cached catalog")
+            ));
+            finish_manual_build(&db, operation_id).await;
+            db.close().await.expect("writer closes");
+        }
+    }
+
+    /// A manual step cancelled while it waits behind another runs nothing.
+    #[tokio::test]
+    async fn manual_step_cancelled_while_queued_runs_nothing() {
+        let token = ProcessLocalDatabaseToken::new("manual-step-cancel-queued").unwrap();
+        let (db, operation_id) = open_with_pending_manual_activation(&token).await;
+        let db = Arc::new(db);
+        let scope = DataScope::LegacyUnscoped;
+        let running = Arc::clone(&db.inner.secondary_lifecycle_step)
+            .lock_owned()
+            .await;
+        let caller = {
+            let db = Arc::clone(&db);
+            tokio::spawn(async move { db.process_secondary_index_lifecycle_once().await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while Arc::strong_count(&db.inner.secondary_lifecycle_step) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the step queues behind the running one");
+        caller.abort();
+        assert!(caller
+            .await
+            .expect_err("the caller was cancelled")
+            .is_cancelled());
+        drop(running);
+
+        assert!(
+            is_pending_secondary_activation(&read_manual_operation(&db, operation_id).await),
+            "the cancelled step did not run"
+        );
+        assert!(!plans_user_email_index(
+            &db.planner_context_scoped_prepared(ParamBindings::default(), scope)
+                .await
+                .expect("planning after the cancelled step")
+        ));
+        close_shared(db).await;
+    }
+
+    /// close() waits for a manual step its cancelled caller left running, then
+    /// rejects further manual steps; the step's commit survives a reopen.
+    #[tokio::test]
+    async fn close_finishes_a_manual_step_its_caller_cancelled() {
+        let token = ProcessLocalDatabaseToken::new("manual-step-cancel-close").unwrap();
+        let scope = DataScope::LegacyUnscoped;
+        let (db, _) = open_with_pending_manual_activation(&token).await;
+        let mut caller = Box::pin(db.process_secondary_index_lifecycle_once());
+        let finished_in_place = poll_manual_step_past_its_permit(&db, &mut caller, 0).await;
+        assert!(
+            finished_in_place.is_none(),
+            "activation waits on storage after taking its permit"
+        );
+        drop(caller);
+
+        db.close().await.expect("close waits for the detached step");
+        assert!(matches!(
+            db.process_secondary_index_lifecycle_once().await,
+            Err(HelixDbError::DatabaseClosed)
+        ));
+
+        let reopened = HelixDB::open_with_config(
+            HelixDbSource::InMemoryToken { token },
+            manual_secondary_lifecycle_config(),
+        )
+        .await
+        .expect("writer reopens");
+        assert!(
+            plans_user_email_index(
+                &reopened
+                    .planner_context_scoped_prepared(ParamBindings::default(), scope)
+                    .await
+                    .expect("planning after reopen")
+            ),
+            "the detached activation committed before close returned"
+        );
+        reopened.close().await.expect("reopened writer closes");
     }
 
     /// Search execution resolves index definitions from the catalog its plan
