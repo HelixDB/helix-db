@@ -1,7 +1,7 @@
 //! A unique key drives its source filter.
 //!
-//! A single-valued equality on a unique index reads at most one candidate,
-//! so every other conjunct is evaluated on that candidate instead of reading
+//! An equality on a unique index reads at most one candidate per value, so
+//! every other conjunct is evaluated on those candidates instead of reading
 //! an index set across the label. The claim shape below once intersected the
 //! key with a status union and an expiry range scan, which verified every
 //! record in range on each request.
@@ -40,6 +40,7 @@ fn contexts(unique: bool) -> Vec<PlannerContext> {
                 NonEmptyString::new("id").unwrap(),
                 PropertyValue::from("j1"),
             )
+            .with_value(NonEmptyString::new("ids").unwrap(), job_ids(5))
             .into(),
         ..ctx(indexes(unique))
     };
@@ -61,6 +62,10 @@ fn contexts(unique: bool) -> Vec<PlannerContext> {
     let mut late = base.clone();
     late.late_bound_params = [NonEmptyString::new("id").unwrap()].into_iter().collect();
     vec![base, stats, exhausted, late]
+}
+
+fn job_ids(count: usize) -> PropertyValue {
+    PropertyValue::StringArray((0..count).map(|n| format!("j{n}")).collect())
 }
 
 fn claim_guard() -> Predicate {
@@ -104,15 +109,25 @@ fn filter_predicates(plan: &ExecutablePlan) -> Vec<&Predicate> {
         .collect()
 }
 
-/// One unique lookup, no other index read, and `residual` as the only
-/// per-row filter.
-fn assert_key_driven(plan: &ExecutablePlan, context: &PlannerContext, residual: &Predicate) {
+/// `lookups` unique lookups, no other index read, and `residual` as the
+/// only per-row filter.
+fn assert_key_driven(
+    plan: &ExecutablePlan,
+    context: &PlannerContext,
+    lookups: usize,
+    residual: &Predicate,
+) {
     let accesses = crate::diagnostics::analyze(plan, context)
         .statistics
         .node_accesses;
     assert_eq!(accesses.range_index_scans, 0, "{:#?}", plan.steps());
     assert_eq!(accesses.label_scans, 0, "{:#?}", plan.steps());
-    assert_eq!(accesses.equality_index_lookups, 1, "{:#?}", plan.steps());
+    assert_eq!(
+        accesses.equality_index_lookups,
+        lookups,
+        "{:#?}",
+        plan.steps()
+    );
     assert_eq!(filter_predicates(plan), [residual], "{:#?}", plan.steps());
 }
 
@@ -128,7 +143,7 @@ fn unique_key_drives_conditional_claims() {
                 &context,
             )
             .unwrap();
-            assert_key_driven(output.plan(), &context, &claim_guard());
+            assert_key_driven(output.plan(), &context, 1, &claim_guard());
             // Every guarded property is indexed and the key bounds the
             // rows, so nothing suggests an index or reports a scan.
             assert!(
@@ -151,7 +166,7 @@ fn unique_key_drives_reads_counts_and_label_scoped_predicates() {
             .values(vec!["job_id"]),
             context.clone(),
         );
-        assert_key_driven(&label_scoped, &context, &claim_guard());
+        assert_key_driven(&label_scoped, &context, 1, &claim_guard());
 
         let count = executable_traversal(
             g().n_with_label_where("Job", claim(Predicate::eq("job_id", "j1")))
@@ -188,7 +203,7 @@ fn filters_over_a_unique_key_stay_per_candidate() {
                 .values(vec!["job_id"]),
             context.clone(),
         );
-        assert_key_driven(&chained, &context, &claim_guard());
+        assert_key_driven(&chained, &context, 1, &claim_guard());
 
         let two_keys = Predicate::and(vec![
             Predicate::eq("job_id", "j1"),
@@ -203,6 +218,7 @@ fn filters_over_a_unique_key_stay_per_candidate() {
         assert_key_driven(
             &plan,
             &context,
+            1,
             &Predicate::and(vec![
                 Predicate::eq("token", "t1"),
                 Predicate::eq("owner", "o1"),
@@ -212,21 +228,75 @@ fn filters_over_a_unique_key_stay_per_candidate() {
 }
 
 #[test]
-fn only_a_single_non_null_unique_value_is_a_key() {
-    let context = contexts(true).remove(0);
+fn unique_key_lists_drive_claims() {
+    for context in contexts(true) {
+        for (key, lookups) in [
+            (Predicate::is_in("job_id", job_ids(2)), 2),
+            // As many values as one index union holds, and more.
+            (Predicate::is_in("job_id", job_ids(64)), 64),
+            (Predicate::is_in("job_id", job_ids(65)), 65),
+            // A bound list is literal; a late-bound one reads unions of at
+            // most the union limit.
+            (
+                Predicate::is_in_param("job_id", "ids"),
+                if context.late_bound_params.is_empty() {
+                    5
+                } else {
+                    64
+                },
+            ),
+            // Keys of two unique indexes.
+            (
+                Predicate::or(vec![
+                    Predicate::eq("job_id", "j1"),
+                    Predicate::eq("token", "t1"),
+                ]),
+                2,
+            ),
+        ] {
+            let plan =
+                crate::planning::plan_write_batch(&claim_batch(claim(key)), &context).unwrap();
+            assert_key_driven(&plan, &context, lookups, &claim_guard());
+        }
+    }
+}
+
+#[test]
+fn a_single_key_drives_before_a_list() {
+    for context in contexts(true) {
+        let list = Predicate::is_in("job_id", job_ids(64));
+        let plan = crate::planning::plan_write_batch(
+            &claim_batch(Predicate::and(vec![
+                list.clone(),
+                Predicate::eq("token", "t1"),
+                claim_guard(),
+            ])),
+            &context,
+        )
+        .unwrap();
+        assert_key_driven(&plan, &context, 1, &claim(list));
+    }
+}
+
+#[test]
+fn null_or_mixed_unique_values_are_no_keys() {
     for key in [
         // Null matches every record missing the property.
         Predicate::eq("job_id", PropertyValue::Null),
-        // A list reads one candidate per value.
         Predicate::is_in(
             "job_id",
-            PropertyValue::StringArray(vec!["j1".to_owned(), "j2".to_owned()]),
+            PropertyValue::Array(vec![PropertyValue::from("j1"), PropertyValue::Null]),
         ),
+        // A branch that is no key may match any number of jobs.
+        Predicate::or(vec![
+            Predicate::eq("job_id", "j1"),
+            Predicate::eq("status", "done"),
+        ]),
     ] {
         let plan = executable_traversal(
             g().n_with_label_where("Job", claim(key.clone()))
                 .values(vec!["job_id"]),
-            context.clone(),
+            contexts(true).remove(0),
         );
         assert!(
             filter_predicates(&plan)
@@ -265,6 +335,6 @@ fn a_key_after_another_filter_still_drives() {
                 .values(vec!["job_id"]),
             context.clone(),
         );
-        assert_key_driven(&plan, &context, &Predicate::lt("claimed_at", 100_i64));
+        assert_key_driven(&plan, &context, 1, &Predicate::lt("claimed_at", 100_i64));
     }
 }

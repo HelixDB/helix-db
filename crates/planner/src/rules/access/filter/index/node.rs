@@ -107,18 +107,25 @@ impl shared::AccessFilterIndexFamily for NodeIndexFamily {
         )
     }
 
-    fn is_unique_key_source(source: &Self::Source) -> bool {
-        let ir::NodeAccessPlan::EqualityIndex { index, value, .. } = source.as_ref() else {
-            return false;
-        };
-        index.uniqueness == catalog::IndexUniqueness::Unique
-            && match value {
-                ir::IndexValue::Literal(literal) => {
-                    literal.semantics() != ir::LiteralEqualityIndexValueSemantics::AuthoritativeNull
-                }
-                ir::IndexValue::Param(_) => true,
-                ir::IndexValue::LiteralSet(_) | ir::IndexValue::ParamSet(_) => false,
+    fn unique_key(source: &Self::Source) -> Option<shared::UniqueKey> {
+        match source.as_ref() {
+            ir::NodeAccessPlan::EqualityIndex { index, value, .. }
+                if index.uniqueness == catalog::IndexUniqueness::Unique
+                    && value.semantics() != ir::EqualityIndexValueSemantics::AuthoritativeNull =>
+            {
+                Some(match value {
+                    ir::IndexValue::Literal(_) | ir::IndexValue::Param(_) => shared::UniqueKey::One,
+                    ir::IndexValue::LiteralSet(_) | ir::IndexValue::ParamSet(_) => {
+                        shared::UniqueKey::Many
+                    }
+                })
             }
+            ir::NodeAccessPlan::Union(sources) => sources
+                .iter()
+                .all(|source| Self::unique_key(source).is_some())
+                .then_some(shared::UniqueKey::Many),
+            _ => None,
+        }
     }
 
     fn branch_residual_union(
@@ -291,36 +298,48 @@ mod tests {
         })
     }
 
+    fn union(
+        left: ir::NodeAccessSourcePlan,
+        right: ir::NodeAccessSourcePlan,
+    ) -> ir::NodeAccessSourcePlan {
+        source(ir::NodeAccessPlan::Union(ir::AtLeast::<_, 2>::from_pair(
+            left, right,
+        )))
+    }
+
     fn literal(value: helix_ast::value::PropertyValue) -> ir::SecondaryIndexLiteral {
         ir::SecondaryIndexLiteral::new(value).unwrap()
     }
 
     #[test]
-    fn unique_keys_are_single_non_null_unique_lookups() {
+    fn unique_keys_are_non_null_unique_lookups_and_unions_of_them() {
         use helix_ast::value::PropertyValue;
         use shared::AccessFilterIndexFamily;
 
         let param = || ir::NonEmptyString::new("email").unwrap();
-        for (source, keyed) in [
+        for (source, key) in [
             (
                 equality("email", ir::IndexValue::Literal(literal("a".into()))),
-                true,
+                Some(shared::UniqueKey::One),
             ),
-            (equality("email", ir::IndexValue::Param(param())), true),
+            (
+                equality("email", ir::IndexValue::Param(param())),
+                Some(shared::UniqueKey::One),
+            ),
             // NaN equals nothing: still at most one candidate.
             (
                 equality(
                     "email",
                     ir::IndexValue::Literal(literal(PropertyValue::F64(f64::NAN))),
                 ),
-                true,
+                Some(shared::UniqueKey::One),
             ),
             (
                 equality(
                     "email",
                     ir::IndexValue::Literal(literal(PropertyValue::Null)),
                 ),
-                false,
+                None,
             ),
             (
                 equality(
@@ -330,7 +349,18 @@ mod tests {
                         literal("b".into()),
                     )),
                 ),
-                false,
+                Some(shared::UniqueKey::Many),
+            ),
+            // A list holding null matches every record missing the property.
+            (
+                equality(
+                    "email",
+                    ir::IndexValue::LiteralSet(ir::AtLeast::<_, 2>::from_pair(
+                        literal("a".into()),
+                        literal(PropertyValue::Null),
+                    )),
+                ),
+                None,
             ),
             (
                 equality(
@@ -340,24 +370,45 @@ mod tests {
                         std::num::NonZeroUsize::MIN,
                     )),
                 ),
-                false,
+                Some(shared::UniqueKey::Many),
             ),
             (
                 equality("team", ir::IndexValue::Literal(literal("a".into()))),
-                false,
+                None,
+            ),
+            // An `IN` list or `OR` of keys, but not one mixed with another set.
+            (
+                union(
+                    equality("email", ir::IndexValue::Literal(literal("a".into()))),
+                    equality("handle", ir::IndexValue::Param(param())),
+                ),
+                Some(shared::UniqueKey::Many),
+            ),
+            (
+                union(
+                    equality("email", ir::IndexValue::Literal(literal("a".into()))),
+                    equality("team", ir::IndexValue::Literal(literal("a".into()))),
+                ),
+                None,
+            ),
+            (
+                union(
+                    equality("email", ir::IndexValue::Literal(literal("a".into()))),
+                    equality(
+                        "email",
+                        ir::IndexValue::Literal(literal(PropertyValue::Null)),
+                    ),
+                ),
+                None,
             ),
             (
                 source(ir::NodeAccessPlan::PointIds {
                     ids: ir::ElementIds::new(ir::AtLeast::<_, 1>::from_one(7)).unwrap(),
                 }),
-                false,
+                None,
             ),
         ] {
-            assert_eq!(
-                NodeIndexFamily::is_unique_key_source(&source),
-                keyed,
-                "{source:?}"
-            );
+            assert_eq!(NodeIndexFamily::unique_key(&source), key, "{source:?}");
         }
     }
 
@@ -416,6 +467,59 @@ mod tests {
                 ]),
             }
         );
+        // A list of keys drives as one union of lookups.
+        let listed = keyed(
+            &users,
+            Predicate::and(vec![
+                Predicate::is_in(
+                    "email",
+                    helix_ast::value::PropertyValue::StringArray(vec![
+                        "a".to_owned(),
+                        "b".to_owned(),
+                    ]),
+                ),
+                Predicate::eq("team", "core"),
+            ]),
+        );
+        assert!(
+            matches!(
+                &listed,
+                PartialIndexFilterApplication::Rewritten { source, residual }
+                    if matches!(source.as_ref(), ir::NodeAccessPlan::Union(keys) if keys.len() == 2)
+                        && <NodeIndexFamily as shared::AccessFilterIndexFamily>::unique_key(source)
+                            == Some(shared::UniqueKey::Many)
+                        && residual == &shared::conjunction_plan(vec![Predicate::eq("team", "core")])
+            ),
+            "{listed:?}"
+        );
+
+        // A single-value key drives before a list that comes first.
+        assert_eq!(
+            keyed(
+                &users,
+                Predicate::and(vec![
+                    Predicate::is_in(
+                        "email",
+                        helix_ast::value::PropertyValue::StringArray(vec![
+                            "a".to_owned(),
+                            "b".to_owned(),
+                        ]),
+                    ),
+                    Predicate::eq("handle", "h"),
+                ]),
+            ),
+            PartialIndexFilterApplication::Rewritten {
+                source: equality("handle", ir::IndexValue::Literal(literal("h".into())),),
+                residual: shared::conjunction_plan(vec![Predicate::is_in(
+                    "email",
+                    helix_ast::value::PropertyValue::StringArray(vec![
+                        "a".to_owned(),
+                        "b".to_owned(),
+                    ]),
+                )]),
+            }
+        );
+
         // Repeats of the key are decided by its lookup too.
         for predicate in [
             Predicate::eq("email", "a"),
@@ -434,24 +538,13 @@ mod tests {
         }
 
         for (path, predicate, rejection) in [
-            // A key inside a disjunction or a list is not one candidate.
+            // A key in a disjunction with another set may match any row.
             (
                 users.clone(),
                 Predicate::or(vec![
                     Predicate::eq("email", "a"),
                     Predicate::eq("team", "x"),
                 ]),
-                PartialIndexFilterRejection::NoUniqueKey,
-            ),
-            (
-                users.clone(),
-                Predicate::is_in(
-                    "email",
-                    helix_ast::value::PropertyValue::StringArray(vec![
-                        "a".to_owned(),
-                        "b".to_owned(),
-                    ]),
-                ),
                 PartialIndexFilterRejection::NoUniqueKey,
             ),
             (

@@ -2,7 +2,8 @@
 """Compare unique-key claims on two disposable localhost images.
 
 Each request claims five jobs by a unique `job_id`, guarded by status and an
-expiry cutoff over indexed properties. Creates only synthetic records, and
+expiry cutoff over indexed properties: as five entries keyed by one id each
+(`single`), and as one entry keyed by `job_id IN $ids` (`list`). Creates only synthetic records, and
 checks every response and the final state of both images against a local
 model of the jobs. `select` reads the five guarded jobs without writing, so
 `claim` minus `select` is mutation and commit time. Run after both images are
@@ -32,10 +33,10 @@ def claimable(state):
         state["status"] == "claimed" and state["claimed_at"] < CUTOFF)
 
 
-def guarded(position):
+def guarded(key):
     return {"nodes_where": {"predicate": {"and": {"predicates": [
         {"eq": {"left": {"property": "$label"}, "right": {"constant": {"string": "Job"}}}},
-        {"eq": {"left": {"property": "job_id"}, "right": {"param": f"id{position}"}}},
+        key,
         {"is_in": {"value": {"property": "status"},
                    "values": {"constant": {"string_array": ["available", "claimed"]}}}},
         {"or": {"predicates": [
@@ -45,17 +46,21 @@ def guarded(position):
     ]}}}}
 
 
-def claims(ids, at, write):
+def claims(ids, at, write, listed):
+    keys = [{"is_in": {"value": {"property": "job_id"}, "values": {"param": "ids"}}}] if listed else [
+        {"eq": {"left": {"property": "job_id"}, "right": {"param": f"id{i}"}}}
+        for i in range(len(ids))]
     roots = []
-    for position in range(len(ids)):
-        source = guarded(position)
+    for key in keys:
+        source = guarded(key)
         if write:
             for name, value in [("status", {"string": "claimed"}), ("claimed_at", {"i64": at}),
                                 ("attempt", {"i64": at})]:
                 source = {"set_property": {"input": source, "name": name, "value": {"value": value}}}
         roots.append({"values": {"input": source, "properties": ["job_id"]}})
     request = bench.batch("write" if write else "read", roots)
-    request["parameters"] = {"cutoff": CUTOFF, **{f"id{i}": f"j{n}" for i, n in enumerate(ids)}}
+    keyed = {"ids": [f"j{n}" for n in ids]} if listed else {f"id{i}": f"j{n}" for i, n in enumerate(ids)}
+    request["parameters"] = {"cutoff": CUTOFF, **keyed}
     return request
 
 
@@ -120,20 +125,25 @@ def run(args):
             prepare(port, args.size)
     model = {n: job(n) for n in range(args.size)}
     rng = random.Random(7)
-    timings = {(mode, port): [] for mode in ["select", "claim"] for port in ports}
+    cases = [(shape, mode) for shape in ["single", "list"] for mode in ["select", "claim"]]
+    timings = {(case, port): [] for case in cases for port in ports}
     for sample in range(args.samples + 1):
-        # Mix claimable jobs with unexpired, done and missing ones.
-        ids = rng.sample(range(args.size), 4) + [args.size + sample]
-        expected = [[{"job_id": f"j{n}"}] if n in model and claimable(model[n]) else [] for n in ids]
-        at = CLAIMED_UNTIL + sample
-        for mode, write in [("select", False), ("claim", True)]:
-            for port in ports if sample % 2 == 0 else ports[::-1]:
-                result, elapsed = bench.request(port, claims(ids, at, write))
-                assert [result[f"q{i}"] for i in range(len(ids))] == expected, (port, mode, ids, result)
-                if sample > 0:
-                    timings[(mode, port)].append(elapsed * 1000)
-        for n, rows in zip(ids, expected):
-            if rows:
+        for shape in ["single", "list"]:
+            # Mix claimable jobs with unexpired, done and missing ones.
+            ids = rng.sample(range(args.size), 4) + [args.size + sample]
+            claimable_ids = [n for n in ids if n in model and claimable(model[n])]
+            expected = [[{"job_id": f"j{n}"} for n in claimable_ids]] if shape == "list" else [
+                [{"job_id": f"j{n}"}] if n in claimable_ids else [] for n in ids]
+            at = CLAIMED_UNTIL + 2 * sample + (shape == "list")
+            for mode in ["select", "claim"]:
+                for port in ports if sample % 2 == 0 else ports[::-1]:
+                    result, elapsed = bench.request(port, claims(ids, at, mode == "claim", shape == "list"))
+                    rows = [sorted(result[f"q{i}"], key=lambda row: row["job_id"]) for i in range(len(expected))]
+                    assert rows == [sorted(e, key=lambda row: row["job_id"]) for e in expected], (
+                        port, shape, mode, ids, result)
+                    if sample > 0:
+                        timings[((shape, mode), port)].append(elapsed * 1000)
+            for n in claimable_ids:
                 model[n] = {"status": "claimed", "claimed_at": at}
     for port in ports:
         claimed, _ = bench.request(port, bench.batch("read", [{"count": {"input": {"nodes_where": {"predicate": {
@@ -144,8 +154,8 @@ def run(args):
         assert claimed["q0"] == sum(state["claimed_at"] is not None and state["claimed_at"] >= CLAIMED_UNTIL
                                     for state in model.values()), (port, claimed)
     print(json.dumps({"rows": args.size, "samples": args.samples, **{
-        f"{mode}_{name}_p50_ms": round(statistics.median(timings[(mode, port)]), 1)
-        for mode in ["select", "claim"] for name, port in [("baseline", args.baseline), ("candidate", args.candidate)]
+        f"{shape}_{mode}_{name}_p50_ms": round(statistics.median(timings[((shape, mode), port)]), 1)
+        for shape, mode in cases for name, port in [("baseline", args.baseline), ("candidate", args.candidate)]
     }}), flush=True)
 
 

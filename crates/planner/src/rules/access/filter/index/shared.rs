@@ -11,6 +11,16 @@ use super::contracts::{
 };
 use crate::{analysis, catalog, context, ir};
 
+/// How many values a unique key looks up. A single value is the cheaper
+/// driver, so it orders first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum UniqueKey {
+    /// One literal or parameter.
+    One,
+    /// A list or a union of keys.
+    Many,
+}
+
 pub(super) trait AccessFilterIndexFamily {
     type Path;
     type Source: Clone + PartialEq;
@@ -48,10 +58,12 @@ pub(super) trait AccessFilterIndexFamily {
     fn union_source(sources: Vec<Self::Source>) -> Self::Source;
     fn intersection_source(sources: Vec<Self::Source>) -> Self::Source;
     fn is_broad_source(source: &Self::Source) -> bool;
-    /// Whether `source` is one unique-index lookup of a single value that is
-    /// not null: it reads at most one candidate (a parameter bound to null
-    /// at runtime reads every record missing the property, still exactly).
-    fn is_unique_key_source(source: &Self::Source) -> bool;
+    /// The unique key `source` is, if any: a unique-index lookup of values
+    /// that are not null (a literal, a parameter, or a list of them), or a
+    /// union of keys, as an `OR` builds. It reads at most one candidate per
+    /// value, which the lookup verifies anyway (a parameter bound to null at
+    /// runtime reads every record missing the property, still exactly).
+    fn unique_key(source: &Self::Source) -> Option<UniqueKey>;
     /// Union of index-only branch sets, each filtered by its own residual,
     /// or `None` when the branches do not satisfy that contract.
     fn branch_residual_union(
@@ -95,10 +107,11 @@ where
 
 /// Drive a conjunction over a broad source by its unique key.
 ///
-/// The first top-level conjunct that is a single-valued equality on a
-/// unique index (see [`AccessFilterIndexFamily::is_unique_key_source`])
-/// becomes the source, and every other conjunct its residual. That lookup
-/// reads at most one candidate, while an index set for another conjunct may
+/// The first top-level conjunct whose index source is a single-value unique
+/// key, or else the first that is any unique key (see
+/// [`AccessFilterIndexFamily::unique_key`]), becomes the source, and every
+/// other conjunct its residual. That lookup reads at most one candidate per
+/// value, while an index set for another conjunct may
 /// read every matching record of the label, as a range scan does when it
 /// verifies each record in range. Conjuncts every label row satisfies are
 /// dropped.
@@ -135,13 +148,14 @@ where
     };
     let mut terms = Vec::new();
     conjuncts(predicate, &mut terms);
-    let Some((driver, key)) = terms.iter().find_map(|term| {
-        let atom = super::super::atoms::access_filter_index_atom(term, planner_limits).ok()?;
-        index_source_for_atom::<F>(&label, &atom, indexes)
-            .ok()
-            .filter(F::is_unique_key_source)
-            .map(|key| (*term, key))
-    }) else {
+    let Some((_, driver, key)) = terms
+        .iter()
+        .filter_map(|term| {
+            let key = predicate_index_source::<F>(term, &label, indexes, planner_limits).ok()?;
+            F::unique_key(&key).map(|width| (width, *term, key))
+        })
+        .min_by_key(|(width, _, _)| *width)
+    else {
         return PartialIndexFilterApplication::NotApplicable(
             PartialIndexFilterRejection::NoUniqueKey,
         );
@@ -432,7 +446,7 @@ where
     if source == &indexed {
         return IndexedSourceCombination::Unchanged;
     }
-    if F::is_unique_key_source(source) {
+    if F::unique_key(source).is_some() {
         return IndexedSourceCombination::Keyed;
     }
     if F::is_broad_source(source) {

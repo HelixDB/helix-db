@@ -8,11 +8,25 @@ pub(super) fn simplify_pipeline_distinct(
     pipeline: &logical::AccessPipeline,
 ) -> contracts::PipelineDistinctSimplification {
     let ops = pipeline.ops();
-    if matches!(ops.first(), Some(logical::StreamPipelineOp::Distinct))
+    // Filters only drop rows, so a distinct after them is a no-op whenever
+    // it would be one directly over the access.
+    let filters = ops
+        .iter()
+        .take_while(|op| {
+            matches!(
+                op,
+                logical::StreamPipelineOp::Filter { .. }
+                    | logical::StreamPipelineOp::IndexMembership { .. }
+            )
+        })
+        .count();
+    if matches!(ops.get(filters), Some(logical::StreamPipelineOp::Distinct))
         && access_distinct_is_noop(&logical::AccessDistinct::new(pipeline.access().clone()))
     {
+        let mut ops = ops.to_vec();
+        ops.remove(filters);
         return contracts::PipelineDistinctSimplification::Rewritten(
-            super::access_pipeline_result(pipeline.access().clone(), ops[1..].to_vec()),
+            super::access_pipeline_result(pipeline.access().clone(), ops),
         );
     }
 
@@ -58,6 +72,37 @@ mod tests {
         logical::StreamPipelineOp::Limit {
             count: ir::StreamBoundPlan::Literal(10),
         }
+    }
+
+    #[test]
+    fn a_distinct_after_filters_over_a_duplicate_free_access_is_dropped() {
+        let filter = || logical::StreamPipelineOp::Filter {
+            predicate: ir::PredicatePlan::new(helix_ast::expr::Predicate::eq("active", true))
+                .unwrap(),
+        };
+        let pipeline = |source| {
+            logical::AccessPipeline::new(
+                logical::AccessPath::Node(logical::NodeAccessPath::new(
+                    ir::NodeAccessSourcePlan::from_unfiltered(source),
+                )),
+                ir::AtLeast::<_, 1>::from_one_and_rest(
+                    filter(),
+                    vec![filter(), logical::StreamPipelineOp::Distinct, limit_op()],
+                ),
+            )
+            .unwrap()
+        };
+        let ids = ir::NodeAccessPlan::PointIds {
+            ids: ir::ElementIds::new(ir::AtLeast::<_, 1>::from_one_and_rest(1, vec![2])).unwrap(),
+        };
+        assert!(matches!(
+            simplify_pipeline_distinct(&pipeline(ids)),
+            contracts::PipelineDistinctSimplification::Rewritten(_)
+        ));
+        assert!(matches!(
+            simplify_pipeline_distinct(&pipeline(ir::NodeAccessPlan::AllScan)),
+            contracts::PipelineDistinctSimplification::NotApplicable(_)
+        ));
     }
 
     #[test]
