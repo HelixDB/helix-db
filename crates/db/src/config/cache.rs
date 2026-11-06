@@ -447,6 +447,13 @@ impl SlateObjectStoreCacheSettings {
     }
 }
 
+/// Block codec of every SST HelixDB writes, WAL SSTs included, in the default
+/// and the embedded profiles. Each SST records its own codec, so databases
+/// written without compression stay readable; a caller can choose another codec
+/// or none through `DbConfig::with_slate_settings`.
+pub(crate) const DEFAULT_COMPRESSION_CODEC: slatedb::config::CompressionCodec =
+    slatedb::config::CompressionCodec::Zstd;
+
 /// SlateDB runtime settings.
 #[derive(Debug, Clone)]
 pub struct SlateRuntimeConfig {
@@ -457,7 +464,10 @@ impl SlateRuntimeConfig {
     /// Build default SlateDB runtime settings.
     pub fn new() -> Self {
         Self {
-            runtime_settings: slatedb::Settings::default(),
+            runtime_settings: slatedb::Settings {
+                compression_codec: Some(DEFAULT_COMPRESSION_CODEC),
+                ..slatedb::Settings::default()
+            },
         }
     }
 

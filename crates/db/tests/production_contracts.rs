@@ -12203,7 +12203,7 @@ mod vector_object_store_warm {
     /// object-store tier up as the server does for S3: it caches the SSTs
     /// the writer puts and warms vector search rows at startup.
     fn hybrid(root: &std::path::Path, remote: bool) -> config::DbConfig {
-        config::DbConfig::new().with_cache(config::CacheConfig::new(
+        uncompressed().with_cache(config::CacheConfig::new(
             config::VectorMemorySettings::default(),
             config::CacheMode::Hybrid {
                 slate_db: config::SlateHybridCacheConfig::try_new(
@@ -12233,6 +12233,18 @@ mod vector_object_store_warm {
         ))
     }
 
+    /// The default configuration without block compression. The 400-row
+    /// fixture is sized for uncompressed SSTs: zstd packs it into so few
+    /// blocks that a cold search reads about as many SST objects as a warmed
+    /// one, and the comparison would test the codec instead of the warming.
+    fn uncompressed() -> config::DbConfig {
+        let settings = slatedb::Settings {
+            compression_codec: None,
+            ..config::DbConfig::new().slate().to_writer_settings(None)
+        };
+        config::DbConfig::new().with_slate_settings(settings)
+    }
+
     /// A deterministic unit-ish vector for node `seed`.
     fn embedding(seed: usize) -> Vec<f32> {
         (0..DIMENSION)
@@ -12242,7 +12254,7 @@ mod vector_object_store_warm {
 
     /// Writes 400 embedded documents under an Active vector index.
     async fn load(store: Arc<CountingStore>) {
-        let db = HelixDB::open_with_object_store(DATABASE, store)
+        let db = HelixDB::open_with_object_store_and_config(DATABASE, store, uncompressed())
             .await
             .expect("loading writer opens");
         let receipt = db

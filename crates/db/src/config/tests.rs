@@ -1455,3 +1455,34 @@ fn vector_index_definition_rejects_invalid_params() {
 fn secondary_index_lifecycle_batch_rows_reject_zero() {
     assert_eq!(SecondaryIndexLifecycleBatchRows::new(0), None);
 }
+
+#[test]
+fn default_and_embedded_profiles_compress_sst_blocks_with_zstd() {
+    use super::db::EmbeddedStorageProfile;
+
+    let codecs = [
+        DbConfig::new(),
+        DbConfig::embedded_default(EmbeddedStorageProfile::InMemory),
+        DbConfig::embedded_default(EmbeddedStorageProfile::Disk),
+    ]
+    .map(|config| config.slate().to_writer_settings(None).compression_codec);
+    assert!(
+        codecs
+            .iter()
+            .all(|codec| matches!(codec, Some(slatedb::config::CompressionCodec::Zstd))),
+        "every profile writes zstd SST blocks: {codecs:?}"
+    );
+    let uncompressed = slatedb::Settings {
+        compression_codec: None,
+        ..DbConfig::new().slate().to_writer_settings(None)
+    };
+    assert!(
+        DbConfig::new()
+            .with_slate_settings(uncompressed)
+            .slate()
+            .to_writer_settings(None)
+            .compression_codec
+            .is_none(),
+        "a caller can still turn compression off"
+    );
+}
