@@ -217,6 +217,11 @@ impl TopologyMutationRuntime {
         Ok(values)
     }
 
+    /// Whether a flushed delta has staged a merge on `key`.
+    pub(in crate::execution::interpreter) fn staged(&self, key: &Bytes) -> bool {
+        self.staged_keys.contains(key)
+    }
+
     /// Adds one node-label membership through the canonical typed key.
     pub(in crate::execution::interpreter) fn add_node_label(
         &mut self,

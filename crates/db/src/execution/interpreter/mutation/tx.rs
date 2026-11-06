@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::transaction::CommitDurability;
+use crate::transaction::{CommitDurability, Mutation as _};
 
 use super::super::runtime_context::{
     ActiveWriteTx, PendingCatalogFreshness, RequestWriteScopeState,
@@ -189,6 +189,29 @@ impl<'db> ExecutionContext<'db> {
         .await
     }
 
+    /// Which of `node_ids` exist in the request transaction, for a step that
+    /// uses nothing else of their rows. See `ExistenceReads` for why this
+    /// takes no read dependency.
+    pub(in crate::execution::interpreter) async fn write_nodes_exist(
+        &self,
+        active: &ActiveWriteTx,
+        node_ids: &[u64],
+    ) -> Result<Vec<bool>> {
+        active.index_context.admit_existence_reads(node_ids.len())?;
+        let existing = self
+            .observe_node_existence(&active.txn, node_ids.iter().copied())
+            .await?;
+        active.index_context.record_existence_reads(
+            node_ids
+                .iter()
+                .map(|node_id| (*node_id, existing.contains(*node_id))),
+        );
+        Ok(node_ids
+            .iter()
+            .map(|node_id| existing.contains(*node_id))
+            .collect())
+    }
+
     /// Flushes only deferred families consumed by the next operation. Every
     /// executed step checks this, so a step needing no flush gets a ready
     /// future and the flush's large state is boxed only when it runs. Never
@@ -243,6 +266,15 @@ impl<'db> ExecutionContext<'db> {
     /// and inside the request's deadline.
     pub(super) async fn commit_write_tx(&self, mut active: ActiveWriteTx) -> Result<()> {
         active.index_context.prepare_topology(&active.txn)?;
+        let uncovered = super::observations::RowKeys::new(
+            active
+                .index_context
+                .take_uncovered_existence_reads(self.tenant_scope),
+            super::observations::Kind::Nodes,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+        )?;
+        active.txn.mark_read(&uncovered.keys)?;
         active.index_context.prepare_secondary(&active.txn).await?;
         let staged_queue = active.index_context.finalize_queued(
             self.db.index_operand_limit(),
