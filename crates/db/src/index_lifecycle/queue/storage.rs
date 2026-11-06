@@ -366,7 +366,7 @@ impl PendingQueueBytes {
 /// # Contract
 ///
 /// Only publication acknowledges a queue and only one attempt per target
-/// runs at a time, so a retained queue is always a subset of the durable
+/// runs at a time, so a retained queue is always a subset of the stored
 /// queue in its storage order: every operation it holds is still
 /// outstanding, and anything enqueued since committed after the read, so it
 /// follows every retained operation of its entity. An attempt therefore

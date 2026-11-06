@@ -219,7 +219,7 @@ async fn rejected_read_does_not_reach_backend_or_hide_its_memory_error() {
     // dependency. Our unrelated write can still commit under serializable mode.
     db.inner_db().put(&key, row.encoded()).await.unwrap();
     transaction.put(&next, row.encoded()).unwrap();
-    transaction.commit().await.unwrap();
+    transaction.commit(CommitDurability::Durable).await.unwrap();
     assert_eq!(budget.available(), 1024 * 1024);
     assert_eq!(
         db.inner_db().get(next).await.unwrap().as_ref(),
@@ -256,7 +256,11 @@ async fn admitted_point_and_empty_range_reads_keep_serializable_conflicts() {
         db.inner_db().put(&key, row.encoded()).await.unwrap();
         transaction.put(&own, row.encoded()).unwrap();
         assert_eq!(
-            transaction.commit().await.unwrap_err().kind(),
+            transaction
+                .commit(CommitDurability::Durable)
+                .await
+                .unwrap_err()
+                .kind(),
             slatedb::ErrorKind::Transaction
         );
         assert!(db.inner_db().get(own).await.unwrap().is_none());
@@ -347,7 +351,7 @@ async fn detached_completion_retains_read_admission_and_abort_releases_it() {
                 .commit_completions
                 .run(async move {
                     wait.await.unwrap();
-                    transaction.commit().await.unwrap();
+                    transaction.commit(CommitDurability::Durable).await.unwrap();
                 })
                 .unwrap();
             drop(task);

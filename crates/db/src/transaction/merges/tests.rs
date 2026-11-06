@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     allocation_testing,
     encoding::v2::keys::{scope::DataScope, AdjacencyKey, DataKeyKind, EdgePairIndexKey},
-    transaction::{Mutation, Owned},
+    transaction::{CommitDurability, Mutation, Owned},
 };
 
 fn bitmap_key(id: u64) -> DataKey<'static> {
@@ -342,7 +342,7 @@ async fn canonical_bitmap_and_adjacency_batches_preserve_values_and_epoch_histor
             }
             previous = budget.available();
         }
-        transaction.commit().await.unwrap();
+        transaction.commit(CommitDurability::Durable).await.unwrap();
         assert_eq!(budget.available(), 16 * 1024 * 1024);
         assert!(db.inner_db().get(&key).await.unwrap().is_some());
     }
@@ -606,7 +606,7 @@ async fn staged_entries_apply_in_push_order_across_epochs() {
             );
             batch.stage().unwrap();
         }
-        transaction.commit().await.unwrap();
+        transaction.commit(CommitDurability::Durable).await.unwrap();
         let bitmap = db.inner_db().get(bitmap_key(row).to_bytes()).await.unwrap();
         let adjacency = db
             .inner_db()
@@ -735,8 +735,12 @@ async fn adjacency_conflicts_follow_member_and_direction() {
             );
             batch.stage().unwrap();
         }
-        left.commit().await.unwrap();
-        assert_eq!(right.commit().await.is_err(), conflicts, "row {row}");
+        left.commit(CommitDurability::Durable).await.unwrap();
+        assert_eq!(
+            right.commit(CommitDurability::Durable).await.is_err(),
+            conflicts,
+            "row {row}"
+        );
         let stored = adjacency::decode_edges(
             &db.inner_db()
                 .get(adjacency_key(row).to_bytes())
@@ -791,7 +795,7 @@ async fn abandoned_batches_and_cancelled_transactions_release_all_merge_owners()
                 .commit_completions
                 .run(async move {
                     wait.await.unwrap();
-                    transaction.commit().await.unwrap();
+                    transaction.commit(CommitDurability::Durable).await.unwrap();
                 })
                 .unwrap();
             drop(task);
@@ -885,8 +889,11 @@ async fn admitted_batches_preserve_disjoint_conflicts_and_concurrent_view_accoun
                 });
             }
         });
-        left.commit().await.unwrap();
-        assert_eq!(right.commit().await.is_err(), overlap);
+        left.commit(CommitDurability::Durable).await.unwrap();
+        assert_eq!(
+            right.commit(CommitDurability::Durable).await.is_err(),
+            overlap
+        );
         assert_eq!(budget.available(), 1024 * 1024);
     }
     const THREADS: u64 = 8;
@@ -921,7 +928,7 @@ async fn admitted_batches_preserve_disjoint_conflicts_and_concurrent_view_accoun
         initial - budget.available(),
         history.history_bytes() - size_of::<Tracker>()
     );
-    owner.commit().await.unwrap();
+    owner.commit(CommitDurability::Durable).await.unwrap();
     assert_eq!(budget.available(), 16 * 1024 * 1024);
     db.close().await.unwrap();
 }
@@ -1040,8 +1047,8 @@ async fn staging_matches_the_previous_checked_backend_staging() {
                     batch.stage().unwrap();
                 }
             }
-            left.commit().await.unwrap();
-            outcomes.push(right.commit().await.is_ok());
+            left.commit(CommitDurability::Durable).await.unwrap();
+            outcomes.push(right.commit(CommitDurability::Durable).await.is_ok());
         }
         db.inner_db()
             .flush_with_options(slatedb::config::FlushOptions {

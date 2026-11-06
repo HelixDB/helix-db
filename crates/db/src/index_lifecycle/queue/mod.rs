@@ -114,8 +114,8 @@ pub struct IndexOperationQueueStats {
     /// fetches on a cache miss), the map layout's read-time merge resolution
     /// (also in [`crate::OperationQueueMergeStats::resolved`]), and decoding.
     pub queue_read_micros: u64,
-    /// Enqueue commits this handle observed succeed (durable foreground
-    /// operation commits).
+    /// Enqueue commits this handle observed succeed (foreground operation
+    /// commits, applied and possibly not yet durable).
     pub committed_operations: u64,
     /// Durable operations whose enqueue commit this handle did not observe
     /// succeed: found in storage at startup or by reconciliation, or proven

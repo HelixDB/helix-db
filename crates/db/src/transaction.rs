@@ -19,6 +19,43 @@ mod reads;
 #[cfg(test)]
 mod tests;
 
+/// When a request's commit returns to its caller.
+///
+/// SlateDB's WAL uploads in sequence order, so a crash loses only a suffix of
+/// applied commits: a durable commit makes every lower sequence durable too.
+/// That is what lets internal commits, which are always [`Self::Durable`],
+/// build on an [`Self::Applied`] request commit: index publication reads a
+/// queued operation and acknowledges it at a higher sequence, so the
+/// acknowledgement can never outlive the enqueue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitDurability {
+    /// Return once the commit is durable in object storage.
+    Durable,
+    /// Return once the commit is applied and visible on the writer. A crash
+    /// before its WAL upload loses it, atomically and with every later commit.
+    Applied,
+}
+
+/// Waits until every commit at or below `sequence` is durable, without forcing
+/// a WAL upload. A closing database ends the wait with its close reason.
+pub(crate) async fn await_durable_through(
+    db: &slatedb::Db,
+    sequence: u64,
+) -> std::result::Result<(), slatedb::Error> {
+    let mut subscription = db.subscribe();
+    let status = subscription
+        .wait_for(|status| status.durable_seq >= sequence || status.close_reason.is_some())
+        .await
+        .map_err(|error| slatedb::Error::internal(format!("database status ended: {error}")))?;
+    match status.close_reason {
+        Some(reason) if status.durable_seq < sequence => Err(slatedb::Error::closed(
+            format!("database closed before sequence {sequence} became durable"),
+            reason,
+        )),
+        Some(_) | None => Ok(()),
+    }
+}
+
 /// An owned request transaction. Only its owner has lifecycle authority.
 pub(crate) struct Owned {
     raw: DbTransaction,
@@ -49,18 +86,29 @@ impl Owned {
         })
     }
 
+    /// The sequence of the snapshot this transaction reads.
+    pub(crate) fn snapshot_sequence(&self) -> u64 {
+        self.raw.seqnum()
+    }
+
     /// Commit the request's writes. Called only inside the finite commit
     /// owner, which survives cancellation, so the ledgers stay admitted until
     /// the backend outcome is known.
     pub(crate) async fn commit(
         self,
+        durability: CommitDurability,
     ) -> std::result::Result<Option<slatedb::WriteHandle>, slatedb::Error> {
         let Self {
             raw,
             tracking,
             merges,
         } = self;
-        let result = raw.commit().await;
+        let result = raw
+            .commit_with_options(&slatedb::config::WriteOptions {
+                await_durable: durability == CommitDurability::Durable,
+                ..slatedb::config::WriteOptions::default()
+            })
+            .await;
         drop(merges);
         drop(tracking);
         result

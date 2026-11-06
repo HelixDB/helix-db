@@ -2069,6 +2069,20 @@ impl HelixDB {
         Ok(DatabaseSequence(writer.db().snapshot().await?.seq()))
     }
 
+    /// Waits until every write visible now is durable, without forcing a WAL
+    /// upload as [`Self::flush_writer`] does.
+    pub(crate) async fn await_visible_writes_durable(&self) -> Result<()> {
+        let HelixStorage::Writer(writer) = self.storage() else {
+            return Err(HelixDbError::WriterModeRequired {
+                actual: self.mode().as_str(),
+            });
+        };
+        let sequence = writer.db().snapshot().await?.seq();
+        transaction::await_durable_through(writer.db(), sequence)
+            .await
+            .map_err(HelixDbError::from_storage_commit)
+    }
+
     /// Borrow the database configuration used to open this handle.
     pub fn config(&self) -> &HelixConfig {
         &self.inner.config
@@ -2641,6 +2655,7 @@ impl HelixDB {
     }
 
     /// Execute a plan with the non-forgeable catalog observation used to plan it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_prepared_scoped_controlled(
         &self,
         plan: &exec::ExecutablePlan,
@@ -2649,6 +2664,7 @@ impl HelixDB {
         execution_control: execution_control::ExecutionControl,
         proof: CatalogRefreshProof,
         search_consistency: helix_ast::query::SearchConsistency,
+        commit_durability: transaction::CommitDurability,
     ) -> Result<ExecutionResult> {
         Interpreter::new_scoped_controlled_prepared(
             self,
@@ -2658,6 +2674,7 @@ impl HelixDB {
             proof,
         )
         .with_search_consistency(search_consistency)
+        .with_commit_durability(commit_durability)
         .execute(plan)
         .await
     }
@@ -6996,6 +7013,7 @@ mod tests {
                 execution_control::ExecutionControl::unlimited(),
                 proof,
                 helix_ast::query::SearchConsistency::Strong,
+                crate::transaction::CommitDurability::Durable,
             )
             .await
             .expect("the planned catalog still holds the text index");
