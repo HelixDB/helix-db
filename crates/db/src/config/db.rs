@@ -288,7 +288,7 @@ impl DbConfig {
             flush_interval: Some(profile.flush_interval()),
             l0_sst_size_bytes: EMBEDDED_L0_SST_BYTES,
             max_unflushed_bytes: EMBEDDED_MAX_UNFLUSHED_BYTES,
-            compression_codec: Some(super::cache::DEFAULT_COMPRESSION_CODEC),
+            compression_codec: super::SstCompression::default().into(),
             ..slatedb::Settings::default()
         };
 
@@ -521,6 +521,24 @@ impl DbConfig {
     /// ```
     pub fn with_wal_flush_interval_ms(mut self, interval: NonZeroU64) -> Self {
         self.slate = self.slate.with_wal_flush_interval_ms(interval);
+        self
+    }
+
+    /// Set the block codec of the SSTs a writer opened with this config
+    /// produces, WAL SSTs included. A later [`Self::with_slate_settings`]
+    /// replaces it with the codec of the settings it is given.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use db::config::{DbConfig, SstCompression};
+    ///
+    /// let codec = |config: DbConfig| config.slate().to_writer_settings(None).compression_codec;
+    /// assert!(codec(DbConfig::new()).is_some());
+    /// assert!(codec(DbConfig::new().with_sst_compression(SstCompression::None)).is_none());
+    /// ```
+    pub fn with_sst_compression(mut self, compression: super::SstCompression) -> Self {
+        self.slate = self.slate.with_sst_compression(compression);
         self
     }
 

@@ -104,11 +104,7 @@ async fn run() -> Result<()> {
     let bucket = std::env::var("STORAGE_SIZE_S3_BUCKET").ok();
     let mut samples = Vec::new();
     for name in codecs {
-        let codec = match name.as_str() {
-            "none" => None,
-            "zstd" => Some(slatedb::config::CompressionCodec::Zstd),
-            other => return Err(format!("unknown codec {other}").into()),
-        };
+        let compression = name.parse::<db::config::SstCompression>()?;
         let directory = tempfile::tempdir()?;
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -147,10 +143,10 @@ async fn run() -> Result<()> {
                 )
             }
         };
-        let defaults = defaults.with_query_telemetry(db::config::QueryTelemetry::Disabled);
-        let mut settings = defaults.slate().to_writer_settings(None);
-        settings.compression_codec = codec;
-        let config = defaults.with_slate_settings(settings.clone());
+        let config = defaults
+            .with_query_telemetry(db::config::QueryTelemetry::Disabled)
+            .with_sst_compression(compression);
+        let settings = config.slate().to_writer_settings(None);
         let open = |config: db::DbConfig| {
             let source = source.clone();
             let store = Arc::clone(&store);
@@ -217,7 +213,7 @@ async fn run() -> Result<()> {
                 min_age: Duration::from_secs(1),
                 dry_run: false,
             };
-            let mut collecting = settings.clone();
+            let mut collecting = settings;
             collecting.garbage_collector_options = Some(slatedb::config::GarbageCollectorOptions {
                 manifest_options: Some(age),
                 wal_options: Some(age),

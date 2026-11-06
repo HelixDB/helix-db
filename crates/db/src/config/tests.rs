@@ -8,9 +8,9 @@ use super::{
     NonEmptyPathBuf, ObjectStoreWarmLevel, RangeIndexDirection, RuntimeIndexCatalog,
     SecondaryIndexDefinition, SecondaryIndexElementType, SecondaryIndexKind,
     SecondaryIndexLifecycleBatchRows, SimHasherCacheSettings, SlateHybridCacheConfig,
-    SlateMemoryCacheConfig, SlateObjectStoreCacheSettings, SlateWarmConfig, TextAnalyzerKind,
-    TextElementType, TextIndexDefinition, VectorElementType, VectorIndexDefinition,
-    VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings,
+    SlateMemoryCacheConfig, SlateObjectStoreCacheSettings, SlateWarmConfig, SstCompression,
+    TextAnalyzerKind, TextElementType, TextIndexDefinition, VectorElementType,
+    VectorIndexDefinition, VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings,
 };
 use crate::index_lifecycle::{
     IndexElementKind, IndexIdentityFamily, ValidatedDynamicIndexDefinition,
@@ -1457,32 +1457,77 @@ fn secondary_index_lifecycle_batch_rows_reject_zero() {
 }
 
 #[test]
-fn default_and_embedded_profiles_compress_sst_blocks_with_zstd() {
+fn every_profile_compresses_sst_blocks_with_zstd_until_told_otherwise() {
     use super::db::EmbeddedStorageProfile;
+    use slatedb::config::CompressionCodec;
 
-    let codecs = [
+    let codec = |config: &DbConfig| config.slate().to_writer_settings(None).compression_codec;
+    for config in [
         DbConfig::new(),
         DbConfig::embedded_default(EmbeddedStorageProfile::InMemory),
         DbConfig::embedded_default(EmbeddedStorageProfile::Disk),
-    ]
-    .map(|config| config.slate().to_writer_settings(None).compression_codec);
-    assert!(
-        codecs
-            .iter()
-            .all(|codec| matches!(codec, Some(slatedb::config::CompressionCodec::Zstd))),
-        "every profile writes zstd SST blocks: {codecs:?}"
-    );
-    let uncompressed = slatedb::Settings {
+    ] {
+        assert_eq!(codec(&config), Some(CompressionCodec::Zstd));
+        let before = config.slate().to_writer_settings(None);
+        let uncompressed = config.with_sst_compression(SstCompression::None);
+        let after = uncompressed.slate().to_writer_settings(None);
+        assert_eq!(after.compression_codec, None);
+        // Only the codec changes; the profile's other settings stay.
+        assert_eq!(after.flush_interval, before.flush_interval);
+        assert_eq!(after.l0_sst_size_bytes, before.l0_sst_size_bytes);
+        assert_eq!(after.max_unflushed_bytes, before.max_unflushed_bytes);
+        assert_eq!(
+            codec(&uncompressed.with_sst_compression(SstCompression::Zstd)),
+            Some(CompressionCodec::Zstd)
+        );
+    }
+
+    // Whichever of the two setters runs last decides the codec.
+    let plain = slatedb::Settings {
         compression_codec: None,
         ..DbConfig::new().slate().to_writer_settings(None)
     };
-    assert!(
-        DbConfig::new()
-            .with_slate_settings(uncompressed)
-            .slate()
-            .to_writer_settings(None)
-            .compression_codec
-            .is_none(),
-        "a caller can still turn compression off"
+    assert_eq!(
+        codec(&DbConfig::new().with_slate_settings(plain.clone())),
+        None
     );
+    assert_eq!(
+        codec(
+            &DbConfig::new()
+                .with_slate_settings(plain.clone())
+                .with_sst_compression(SstCompression::Zstd)
+        ),
+        Some(CompressionCodec::Zstd)
+    );
+    assert_eq!(
+        codec(
+            &DbConfig::new()
+                .with_sst_compression(SstCompression::Zstd)
+                .with_slate_settings(plain)
+        ),
+        None
+    );
+}
+
+#[test]
+fn sst_compression_parses_only_none_and_zstd() {
+    for (text, expected) in [
+        ("none", SstCompression::None),
+        ("NONE", SstCompression::None),
+        (" zstd\n", SstCompression::Zstd),
+        ("Zstd", SstCompression::Zstd),
+    ] {
+        assert_eq!(
+            text.parse::<SstCompression>().unwrap(),
+            expected,
+            "{text:?}"
+        );
+    }
+    for text in ["", "off", "lz4", "snappy", "zstd3", "zst d"] {
+        let error = text.parse::<SstCompression>().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("invalid SST compression `{text}`: expected none or zstd")
+        );
+    }
 }

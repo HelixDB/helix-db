@@ -835,14 +835,11 @@ async fn uncompressed_disk_database_reopens_under_the_compressed_embedded_defaul
         root: root.path().to_path_buf(),
         database: "uncompressed".to_string(),
     };
-    let defaults = source.embedded_default_config();
-    let mut uncompressed = defaults.slate().to_writer_settings(None);
-    uncompressed.compression_codec = None;
     let db = HelixDB::open_with_config(
         source.clone(),
         source
             .embedded_default_config()
-            .with_slate_settings(uncompressed),
+            .with_sst_compression(db::config::SstCompression::None),
     )
     .await
     .unwrap();

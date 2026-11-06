@@ -193,6 +193,7 @@ mod tests {
             db_path: "benchmark-sample".to_string(),
             storage: StorageConfig::Memory,
             wal_flush_interval_ms: None,
+            sst_compression: db::config::SstCompression::default(),
             index_operation_queue: db::config::IndexOperationQueueTuning::default()
                 .with_strong_vector_search_max_pending_bytes(
                     std::num::NonZeroU64::new(1 << 20).unwrap(),
@@ -306,6 +307,7 @@ mod tests {
                 cache: crate::config::CacheConfig::Memory,
             },
             wal_flush_interval_ms: None,
+            sst_compression: db::config::SstCompression::default(),
             index_operation_queue: db::config::IndexOperationQueueTuning::default(),
         };
         let writer = open_database(Role::Writer, QueueLayout::Map, &config)
