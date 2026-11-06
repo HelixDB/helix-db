@@ -18,6 +18,9 @@ impl<'db> ExecutionContext<'db> {
         match read {
             exec::KvReadPlan::Get { key } => {
                 let (element, id, physical_key) = physical_element_key(self.tenant_scope, key);
+                if element == exec::ElementKeyspace::NodeProperty && self.has_active_write_tx() {
+                    return self.node_rows(vec![id]).await;
+                }
                 let value = self.get_raw(&physical_key).await?;
                 Ok(ExecutionValue::Stream(
                     value
@@ -36,6 +39,20 @@ impl<'db> ExecutionContext<'db> {
                         (original_position, element, id, physical_key)
                     })
                     .collect::<Vec<_>>();
+                if self.has_active_write_tx()
+                    && keyed
+                        .iter()
+                        .all(|(_, element, ..)| *element == exec::ElementKeyspace::NodeProperty)
+                {
+                    let mut nodes = keyed
+                        .iter()
+                        .map(|(original_position, _, id, _)| (*original_position, *id))
+                        .collect::<Vec<_>>();
+                    nodes.sort_unstable();
+                    return self
+                        .node_rows(nodes.into_iter().map(|(_, id)| id).collect())
+                        .await;
+                }
                 let physical_keys = keyed
                     .iter()
                     .map(|(_, _, _, physical_key)| physical_key)
