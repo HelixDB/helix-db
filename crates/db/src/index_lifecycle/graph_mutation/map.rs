@@ -1,9 +1,14 @@
 //! One evaluated property map becomes one canonical graph transition.
 //! Keys are validated on insertion; native null storage and removal remain
 //! distinct operations. Replacement preserves the storage metadata namespace.
+//!
+//! Successive key edits fold into one transition. New keys keep their
+//! insertion order, so a folded edit stores the same bytes as applying each
+//! key alone. [`Edit::folds`] names the sequences that could not.
 use super::*;
 use crate::encoding::v2::values::property::property_value::PropertyValue;
-use std::collections::BTreeMap;
+use helix_planner::relational::PropertyRequirement;
+use std::collections::{btree_map, BTreeMap};
 
 #[cfg(test)]
 mod tests;
@@ -32,6 +37,8 @@ pub(crate) struct Edit {
 struct Entry {
     value: Option<PropertyValue>,
     matched: bool,
+    /// Insertion position. A key absent from the stored row is added here.
+    rank: usize,
 }
 impl Edit {
     pub(crate) fn new(mode: Mode) -> Self {
@@ -52,14 +59,42 @@ impl Edit {
         if name.starts_with('$') {
             return Err(NameError::Reserved);
         }
-        self.entries.insert(
-            name,
-            Entry {
-                value,
-                matched: false,
-            },
-        );
+        let rank = self.entries.len();
+        match self.entries.entry(name) {
+            btree_map::Entry::Occupied(mut slot) => slot.get_mut().value = value,
+            btree_map::Entry::Vacant(slot) => {
+                slot.insert(Entry {
+                    value,
+                    matched: false,
+                    rank,
+                });
+            }
+        }
         Ok(())
+    }
+
+    /// Whether inserting `names` here stores the same row as applying this
+    /// edit first. A replacement must be whole, because keys it dropped would
+    /// otherwise keep their stored position. A key this edit removes would
+    /// return at the end of the row, which a stored position cannot express.
+    pub(crate) fn folds<'a>(&self, mut names: impl Iterator<Item = &'a str>) -> bool {
+        self.mode == Mode::Extend
+            && names.all(|name| {
+                self.entries
+                    .get(name)
+                    .is_none_or(|entry| entry.value.is_some())
+            })
+    }
+
+    /// Whether a read of `requirement` must see this edit applied first.
+    pub(crate) fn changes(&self, requirement: PropertyRequirement<'_>) -> bool {
+        match requirement {
+            PropertyRequirement::Metadata => false,
+            PropertyRequirement::Key(key) => {
+                self.mode == Mode::ReplaceUserProperties || self.entries.contains_key(key)
+            }
+            PropertyRequirement::All => true,
+        }
     }
 
     pub(crate) fn apply(
@@ -129,12 +164,24 @@ impl Edit {
                 None => {}
             }
         }
-        for (name, entry) in self.entries {
-            let Some(value) = entry.value else {
-                continue;
-            };
-            output.push_owned(Property::new(name, value))?;
-        }
+        let _order_memory = budget
+            .map(|budget| {
+                budget.reserve(
+                    self.entries
+                        .len()
+                        .saturating_mul(size_of::<(usize, String, PropertyValue)>()),
+                )
+            })
+            .transpose()?;
+        let mut additions = self
+            .entries
+            .into_iter()
+            .filter_map(|(name, entry)| entry.value.map(|value| (entry.rank, name, value)))
+            .collect::<Vec<_>>();
+        additions.sort_unstable_by_key(|(rank, ..)| *rank);
+        additions
+            .into_iter()
+            .try_for_each(|(_, name, value)| output.push_owned(Property::new(name, value)))?;
         let after = CanonicalPropertyRow::from_decoded(output.finish())?;
         Ok(PropertyEditOutcome::Changed(
             GraphMutationTransition::Replace {

@@ -281,3 +281,62 @@ fn map_rewrite_allocation_work_grows_linearly_with_updated_property_count() {
         assert_eq!(budget.available(), 16 * 1024 * 1024);
     }
 }
+
+/// New keys land in insertion order, whatever their names, so a folded edit
+/// stores what applying each key alone stores.
+#[test]
+fn additions_keep_insertion_order_and_repeats_keep_their_first_position() {
+    let mut edit = Edit::new(Mode::Extend);
+    for (name, value) in [("z", 1), ("a", 2), ("m", 3), ("z", 4)] {
+        edit.insert(name.into(), Some(V::I64(value))).unwrap();
+    }
+    edit.insert("gone".into(), Some(V::I64(5))).unwrap();
+    edit.insert("gone".into(), None).unwrap();
+    let PropertyEditOutcome::Changed(transition) = edit
+        .apply(
+            DataScope::LegacyUnscoped,
+            GraphEntity::edge(7),
+            CanonicalPropertyRow::new(vec![Property::i64("keep", 0)]),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("the edit changes the row");
+    };
+    assert_eq!(
+        transition.after().unwrap().encoded(),
+        &property::encode_properties(&[
+            Property::i64("keep", 0),
+            Property::i64("z", 4),
+            Property::i64("a", 2),
+            Property::i64("m", 3),
+        ])
+    );
+}
+
+/// A pending extension takes new keys and repeats. A replacement and a removed
+/// key must apply first: either fold would keep a stale stored position.
+#[test]
+fn only_order_preserving_changes_fold() {
+    let mut extend = Edit::new(Mode::Extend);
+    extend.insert("set".into(), Some(V::I64(1))).unwrap();
+    extend.insert("removed".into(), None).unwrap();
+    assert!(extend.folds(["set", "new"].into_iter()));
+    assert!(!extend.folds(["new", "removed"].into_iter()));
+    assert!(!Edit::new(Mode::ReplaceUserProperties).folds(["new"].into_iter()));
+}
+
+/// Metadata never changes. A replacement changes every user property.
+#[test]
+fn reads_need_a_pending_edit_applied_only_when_it_changes_them() {
+    let mut extend = Edit::new(Mode::Extend);
+    extend.insert("set".into(), Some(V::I64(1))).unwrap();
+    assert!(extend.changes(PropertyRequirement::Key("set")));
+    assert!(!extend.changes(PropertyRequirement::Key("other")));
+    assert!(extend.changes(PropertyRequirement::All));
+    assert!(!extend.changes(PropertyRequirement::Metadata));
+    let replace = Edit::new(Mode::ReplaceUserProperties);
+    assert!(replace.changes(PropertyRequirement::Key("other")));
+    assert!(replace.changes(PropertyRequirement::All));
+    assert!(!replace.changes(PropertyRequirement::Metadata));
+}
