@@ -6,6 +6,11 @@
 //! until commit or abort. Active lifecycle publication takes both gates
 //! exclusively, while DROP takes only catalog exclusivity and relies on the
 //! graph transaction's canonical reads for serializable conflict detection.
+//! Build steps that must see no concurrent graph write but leave the Active
+//! index set unchanged take only mutation exclusivity
+//! ([`IndexScopeWriteFencePermit`]), so planning and reads continue. Each
+//! family names the gate of every step through one exhaustive [`StepGate`]
+//! mapping.
 //! The mutation, refresh, and publication registries store weak references
 //! so one-off tenant scopes do not accumulate forever.
 //!
@@ -95,6 +100,40 @@ pub(crate) struct IndexScopeLifecyclePermit {
     _mutation_guard: OwnedRwLockWriteGuard<()>,
 }
 
+/// Exclusive mutation authority for a build step that leaves the Active index
+/// set unchanged.
+///
+/// It excludes every graph transaction in the scope, so a step that drains or
+/// validates a generation observes no new build delta. It does not exclude
+/// planning: the planner-visible catalog holds only Active indexes, and graph
+/// transactions read Building and Dropping records through their own
+/// serializable transaction, so the step neither takes the catalog gate nor
+/// advances the catalog version.
+///
+/// Lock order is catalog, then mutation. A holder must never wait for a
+/// catalog permit: a graph transaction holding a shared catalog permit can be
+/// queued for the mutation gate this permit holds, and an exclusive catalog
+/// waiter queued behind that transaction blocks every later shared one.
+#[derive(Debug)]
+pub(crate) struct IndexScopeWriteFencePermit {
+    _mutation_guard: OwnedRwLockWriteGuard<()>,
+}
+
+/// The scope coordination one index operation step holds through its commit.
+///
+/// Every family maps each of its steps to exactly one gate in an exhaustive
+/// match, so a new stage cannot inherit a gate by omission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepGate {
+    /// The step coordinates through its own transaction alone.
+    None,
+    /// The step must observe no concurrent graph write but leaves the Active
+    /// index set unchanged.
+    WriteFence,
+    /// The step changes the scope's Active index set.
+    Lifecycle,
+}
+
 /// Exclusive process-local ownership of one generation's physical publication.
 ///
 /// Queued publication into an Active generation, build steps, activation,
@@ -180,6 +219,28 @@ impl IndexScopeGates {
             _advance: CatalogVersionAdvance(catalog.version),
             _catalog_guard: catalog_guard,
             _mutation_guard: mutation_guard,
+        }
+    }
+
+    /// Acquires mutation exclusivity only, for a step that leaves the Active
+    /// index set unchanged. See [`IndexScopeWriteFencePermit`] for the lock
+    /// order its holders must keep.
+    pub(crate) async fn write_fence_permit(&self, scope: DataScope) -> IndexScopeWriteFencePermit {
+        IndexScopeWriteFencePermit {
+            _mutation_guard: self.mutation_gate(scope).write_owned().await,
+        }
+    }
+
+    /// Acquires the permit `gate` names for one operation step.
+    pub(crate) async fn step_permit(
+        &self,
+        scope: DataScope,
+        gate: StepGate,
+    ) -> Box<dyn super::outbox::IndexOperationStepPermit> {
+        match gate {
+            StepGate::None => Box::new(()),
+            StepGate::WriteFence => Box::new(self.write_fence_permit(scope).await),
+            StepGate::Lifecycle => Box::new(self.lifecycle_permit(scope).await),
         }
     }
 
@@ -278,6 +339,7 @@ impl IndexScopeGates {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
 
@@ -323,6 +385,87 @@ mod tests {
         drop(catalog);
         drop(waiting.await.expect("catalog-change waiter joins"));
         drop(mutation);
+    }
+
+    /// Each step gate excludes exactly what its holder needs: none nothing,
+    /// the write fence only graph transactions, and the lifecycle permit
+    /// planning too. Only the lifecycle permit advances the catalog version.
+    #[tokio::test]
+    async fn step_gates_exclude_only_what_their_step_needs() {
+        let gates = Arc::new(IndexScopeGates::default());
+        let scope = DataScope::LegacyUnscoped;
+        let wait = Duration::from_millis(50);
+        for (gate, fences_writers, gates_planning) in [
+            (StepGate::None, false, false),
+            (StepGate::WriteFence, true, false),
+            (StepGate::Lifecycle, true, true),
+        ] {
+            let before = gates.catalog_permit(scope).await.version();
+            let held = gates.step_permit(scope, gate).await;
+            let mutation = tokio::time::timeout(wait, gates.mutation_permit(scope)).await;
+            assert_eq!(
+                mutation.is_err(),
+                fences_writers,
+                "{gate:?} and graph writes"
+            );
+            drop(mutation);
+            let planning = tokio::time::timeout(wait, gates.catalog_permit(scope)).await;
+            assert_eq!(planning.is_err(), gates_planning, "{gate:?} and planning");
+            drop(planning);
+            drop(held);
+            assert_eq!(
+                gates.catalog_permit(scope).await.version() != before,
+                gates_planning,
+                "{gate:?}: only a gate that excludes planning advances the version"
+            );
+        }
+    }
+
+    /// A write fence never waits for a catalog permit, so the chain a fenced
+    /// step can sit at the head of always drains: a graph transaction holding
+    /// shared catalog authority queues for the fenced mutation gate, an
+    /// activation queues for exclusive catalog authority behind it, and later
+    /// planning queues behind the activation.
+    #[tokio::test]
+    async fn a_fenced_step_never_deadlocks_writers_activation_or_planning() {
+        let gates = Arc::new(IndexScopeGates::default());
+        let scope = DataScope::LegacyUnscoped;
+        let fence = gates.write_fence_permit(scope).await;
+        let writer = {
+            let gates = Arc::clone(&gates);
+            tokio::spawn(async move {
+                let catalog = gates.catalog_permit(scope).await;
+                let mutation = gates.mutation_permit(scope).await;
+                drop((catalog, mutation));
+            })
+        };
+        while gates.catalog_permit_holders(scope) < 1 {
+            tokio::task::yield_now().await;
+        }
+        let activation = {
+            let gates = Arc::clone(&gates);
+            tokio::spawn(async move { drop(gates.lifecycle_permit(scope).await) })
+        };
+        while gates.catalog_permit_holders(scope) < 2 {
+            tokio::task::yield_now().await;
+        }
+        let planning = {
+            let gates = Arc::clone(&gates);
+            tokio::spawn(async move { gates.catalog_permit(scope).await.version() })
+        };
+        tokio::task::yield_now().await;
+        assert!(!writer.is_finished(), "the writer waits for the fence");
+        assert!(!activation.is_finished(), "activation waits for the writer");
+        assert!(!planning.is_finished(), "planning queues behind activation");
+
+        drop(fence);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            writer.await.expect("writer joins");
+            activation.await.expect("activation joins");
+            planning.await.expect("planning joins")
+        })
+        .await
+        .expect("the chain drains once the fence is released");
     }
 
     #[tokio::test]

@@ -75,10 +75,10 @@ use crate::index_lifecycle::{
     IndexOperationRecord, IndexRecordV2, IndexV2MetadataValue,
     LegacyVectorDirectoryValidationProgress, LegacyVectorPhysicalReservation,
     LegacyVectorValidationLane, LegacyVectorValidationProgress, NoCursorProgress,
-    OperationCounters, PhysicalGeneration, PrefixScanProgress, SourceScanProgress, TextPartition,
-    ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition, VectorBuildProgress,
-    VectorBuildStage, VectorCleanupProgress, VectorPhysicalIdWatermark, VectorPhysicalIndexId,
-    VectorPhysicalLayout, VectorRoutingLayoutV2,
+    OperationCounters, PhysicalGeneration, PrefixScanProgress, SourceScanProgress, StepGate,
+    TextPartition, ValidatedDynamicIndexDefinition, ValidatedVectorIndexDefinition,
+    VectorBuildProgress, VectorBuildStage, VectorCleanupProgress, VectorPhysicalIdWatermark,
+    VectorPhysicalIndexId, VectorPhysicalLayout, VectorRoutingLayoutV2,
 };
 use crate::transaction::Mutation;
 
@@ -1065,20 +1065,29 @@ impl IndexOperationDriver for VectorIndexDriver {
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
-        let needs_exclusive = matches!(
-            operation.progress(),
-            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
-                VectorBuildStage::AdoptLegacy(_)
+        let gate = match operation.progress() {
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(stage)) => {
+                match stage {
+                    VectorBuildStage::Scan(_) | VectorBuildStage::CatchUp(_) => StepGate::None,
+                    // Adoption and validation keep the generation Building, so
+                    // they fence writers without blocking planning.
+                    VectorBuildStage::AdoptLegacy(_)
                     | VectorBuildStage::ValidateAdoptedDirectory(_)
-                    | VectorBuildStage::ValidateDescriptor(_)
-                    | VectorBuildStage::Activate(_)
-            )) | IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(_))
-                | IndexOperationProgress::VectorCleanup(_)
-        );
-        if needs_exclusive {
-            return Ok(Box::new(self.scope_gates.lifecycle_permit(scope).await));
-        }
-        Ok(Box::new(()))
+                    | VectorBuildStage::ValidateDescriptor(_) => StepGate::WriteFence,
+                    VectorBuildStage::Activate(_) => StepGate::Lifecycle,
+                }
+            }
+            // Abort and cleanup delete rows of a generation that is not Active.
+            IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(_))
+            | IndexOperationProgress::VectorCleanup(_) => StepGate::WriteFence,
+            IndexOperationProgress::SecondaryBuild(_)
+            | IndexOperationProgress::TextBuild(_)
+            | IndexOperationProgress::SecondaryCleanup(_)
+            | IndexOperationProgress::TextCleanup(_) => {
+                return Err(corruption("vector driver received another family progress"));
+            }
+        };
+        Ok(self.scope_gates.step_permit(scope, gate).await)
     }
 
     async fn prepare_step(
