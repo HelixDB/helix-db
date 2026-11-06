@@ -123,9 +123,19 @@ fn unique_key_drives_conditional_claims() {
             Predicate::eq("job_id", "j1"),
             Predicate::eq_param("job_id", "id"),
         ] {
-            let plan =
-                crate::planning::plan_write_batch(&claim_batch(claim(key)), &context).unwrap();
-            assert_key_driven(&plan, &context, &claim_guard());
+            let output = crate::planning::plan_write_batch_with_diagnostics(
+                &claim_batch(claim(key)),
+                &context,
+            )
+            .unwrap();
+            assert_key_driven(output.plan(), &context, &claim_guard());
+            // Every guarded property is indexed and the key bounds the
+            // rows, so nothing suggests an index or reports a scan.
+            assert!(
+                output.diagnostics().insights.is_empty(),
+                "{:#?}",
+                output.diagnostics()
+            );
         }
     }
 }

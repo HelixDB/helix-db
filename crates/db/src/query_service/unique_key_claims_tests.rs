@@ -196,8 +196,44 @@ async fn unique_key_claims_match_the_per_row_filter() {
             2,
         ),
     ];
-    for (keys, ranges) in batches {
-        let request = claims(keys);
+    // Frame fields stay runtime parameters, so each frame's key is resolved
+    // only when the body runs, a null one included.
+    let frames = query::QueryValue::Array(
+        [Some("j15"), None, Some("j15"), Some("j16"), Some("absent")]
+            .into_iter()
+            .map(|id| {
+                query::QueryValue::Object(
+                    [(
+                        "id".to_owned(),
+                        id.map_or(query::QueryValue::Null, |id| {
+                            query::QueryValue::String(id.to_owned())
+                        }),
+                    )]
+                    .into_iter()
+                    .collect(),
+                )
+            })
+            .collect(),
+    );
+    let foreach = query::QueryRequest::write(
+        batch::write_batch()
+            .for_each_param(
+                "frames",
+                batch::write_batch().var_as(
+                    "claim",
+                    claim(expr::Predicate::eq_param("job_id", "id"), 300),
+                ),
+            )
+            .var_as("jobs", traversal::g().n_with_label("Job").count())
+            .returning(["jobs"]),
+    )
+    .with_parameter_value("frames", frames)
+    .with_parameter_value("cutoff", query::QueryValue::I64(CUTOFF));
+    let requests = batches
+        .into_iter()
+        .map(|(keys, ranges)| (claims(keys), ranges))
+        .chain(core::iter::once((foreach, 0)));
+    for (request, ranges) in requests {
         let (batch::BatchQuery::Write(write), parameters) = request.clone().into_query() else {
             unreachable!("claims are a write batch");
         };
@@ -278,4 +314,46 @@ async fn concurrent_unique_key_claims_let_exactly_one_through() {
         .close()
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn cypher_unique_key_claims_match_the_per_row_filter() {
+    let indexed = seeded("unique-key-claims-cypher-indexed", true).await;
+    let unindexed = seeded("unique-key-claims-cypher-unindexed", false).await;
+    let request = |id: &str| {
+        let mut request = crate::cypher::Request::new(
+            "MATCH (j:Job) WHERE j.job_id = $id AND j.status IN ['available', 'claimed'] \
+             AND (j.status = 'available' OR j.claimed_at < $cutoff) \
+             SET j.status = 'claimed', j.claimed_at = 500, j.attempt = 500 \
+             RETURN j.job_id AS job_id",
+        );
+        request
+            .parameters
+            .insert("id".to_owned(), query::QueryValue::String(id.to_owned()));
+        request
+            .parameters
+            .insert("cutoff".to_owned(), query::QueryValue::I64(CUTOFF));
+        request
+    };
+    let explained =
+        serde_json::to_string(&indexed.explain_cypher(request("j3")).await.unwrap()).unwrap();
+    // The key is the only index read: neither the status bitmaps nor the
+    // expiry range.
+    assert!(explained.contains("node_eq:Job:job_id"), "{explained}");
+    assert!(!explained.contains("node_eq:Job:status"), "{explained}");
+    assert!(
+        !explained.contains("node_range:Job:claimed_at"),
+        "{explained}"
+    );
+    for id in ["j3", "j3", "j4", "j31", "j5", "absent"] {
+        let expected = unindexed.cypher(request(id)).await.unwrap();
+        let actual = indexed.cypher(request(id)).await.unwrap();
+        assert_eq!(actual.rows, expected.rows, "{id}");
+    }
+    assert_eq!(
+        sorted(indexed.query(state()).await.unwrap()),
+        sorted(unindexed.query(state()).await.unwrap())
+    );
+    indexed.close().await.unwrap();
+    unindexed.close().await.unwrap();
 }
