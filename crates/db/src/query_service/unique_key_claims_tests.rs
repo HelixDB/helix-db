@@ -134,6 +134,14 @@ fn claims(keys: [expr::Predicate; 5]) -> query::QueryRequest {
         .with_parameter_value("cutoff", query::QueryValue::I64(CUTOFF))
         .with_parameter_value("a", query::QueryValue::String("j2".to_owned()))
         .with_parameter_value("none", query::QueryValue::Null)
+        .with_parameter_value(
+            "list",
+            query::QueryValue::Array(
+                ["j33", "j34", "j35", "absent"]
+                    .map(|id| query::QueryValue::String(id.to_owned()))
+                    .to_vec(),
+            ),
+        )
 }
 
 fn state() -> query::QueryRequest {
@@ -194,6 +202,31 @@ async fn unique_key_claims_match_the_per_row_filter() {
                 key("j12"),
             ],
             2,
+        ),
+        // Lists of keys: literal, bound parameter and `OR`, each claiming
+        // only its claimable jobs; a job an earlier list claimed is not
+        // claimable again.
+        (
+            [
+                expr::Predicate::is_in(
+                    "job_id",
+                    value::PropertyValue::StringArray(
+                        ["j18", "j19", "j23", "j18", "absent"]
+                            .map(str::to_owned)
+                            .to_vec(),
+                    ),
+                ),
+                expr::Predicate::is_in_param("job_id", "list"),
+                expr::Predicate::or(vec![key("j24"), key("j25")]),
+                key("j19"),
+                expr::Predicate::is_in(
+                    "job_id",
+                    value::PropertyValue::StringArray(
+                        ["j33", "j36", "j37"].map(str::to_owned).to_vec(),
+                    ),
+                ),
+            ],
+            0,
         ),
     ];
     // Frame fields stay runtime parameters, so each frame's key is resolved

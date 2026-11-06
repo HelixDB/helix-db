@@ -48,9 +48,11 @@ pub(super) trait AccessFilterIndexFamily {
     fn union_source(sources: Vec<Self::Source>) -> Self::Source;
     fn intersection_source(sources: Vec<Self::Source>) -> Self::Source;
     fn is_broad_source(source: &Self::Source) -> bool;
-    /// Whether `source` is one unique-index lookup of a single value that is
-    /// not null: it reads at most one candidate (a parameter bound to null
-    /// at runtime reads every record missing the property, still exactly).
+    /// Whether `source` is a unique key: one unique-index lookup of a single
+    /// value that is not null, or a union of keys, as an `IN` list or an `OR`
+    /// within the index union limit builds. It reads at most one candidate
+    /// per value (a parameter bound to null at runtime reads every record
+    /// missing the property, still exactly).
     fn is_unique_key_source(source: &Self::Source) -> bool;
     /// Union of index-only branch sets, each filtered by its own residual,
     /// or `None` when the branches do not satisfy that contract.
@@ -95,10 +97,10 @@ where
 
 /// Drive a conjunction over a broad source by its unique key.
 ///
-/// The first top-level conjunct that is a single-valued equality on a
-/// unique index (see [`AccessFilterIndexFamily::is_unique_key_source`])
-/// becomes the source, and every other conjunct its residual. That lookup
-/// reads at most one candidate, while an index set for another conjunct may
+/// The first top-level conjunct whose index source is a unique key (see
+/// [`AccessFilterIndexFamily::is_unique_key_source`]) becomes the source, and
+/// every other conjunct its residual. That lookup reads at most one
+/// candidate per value, while an index set for another conjunct may
 /// read every matching record of the label, as a range scan does when it
 /// verifies each record in range. Conjuncts every label row satisfies are
 /// dropped.
@@ -136,8 +138,7 @@ where
     let mut terms = Vec::new();
     conjuncts(predicate, &mut terms);
     let Some((driver, key)) = terms.iter().find_map(|term| {
-        let atom = super::super::atoms::access_filter_index_atom(term, planner_limits).ok()?;
-        index_source_for_atom::<F>(&label, &atom, indexes)
+        predicate_index_source::<F>(term, &label, indexes, planner_limits)
             .ok()
             .filter(F::is_unique_key_source)
             .map(|key| (*term, key))
