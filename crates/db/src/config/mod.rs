@@ -18,8 +18,8 @@ pub use cache::{
     CacheConfig, CacheMode, CacheWarmMode, FtsHybridCacheConfig, FtsMemoryCacheConfig,
     FtsWarmConfig, ObjectStoreWarmLevel, SimHasherCacheSettings, SlateHybridCacheConfig,
     SlateMemoryCacheConfig, SlateObjectStoreCacheSettings, SlateRuntimeConfig, SlateWarmConfig,
-    VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings, VectorPartWarm,
-    DEFAULT_VECTOR_MEMORY_BUDGET_BYTES,
+    SstCompression, VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings,
+    VectorPartWarm, DEFAULT_VECTOR_MEMORY_BUDGET_BYTES,
 };
 pub use db::{
     DbConfig, EdgeEncoding, EdgeUpdatePolicy, HelixConfig, OpenAttribution, QueryTelemetry,

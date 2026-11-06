@@ -12238,11 +12238,7 @@ mod vector_object_store_warm {
     /// blocks that a cold search reads about as many SST objects as a warmed
     /// one, and the comparison would test the codec instead of the warming.
     fn uncompressed() -> config::DbConfig {
-        let settings = slatedb::Settings {
-            compression_codec: None,
-            ..config::DbConfig::new().slate().to_writer_settings(None)
-        };
-        config::DbConfig::new().with_slate_settings(settings)
+        config::DbConfig::new().with_sst_compression(config::SstCompression::None)
     }
 
     /// A deterministic unit-ish vector for node `seed`.

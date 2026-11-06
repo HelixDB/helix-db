@@ -447,12 +447,56 @@ impl SlateObjectStoreCacheSettings {
     }
 }
 
-/// Block codec of every SST HelixDB writes, WAL SSTs included, in the default
-/// and the embedded profiles. Each SST records its own codec, so databases
-/// written without compression stay readable; a caller can choose another codec
-/// or none through `DbConfig::with_slate_settings`.
-pub(crate) const DEFAULT_COMPRESSION_CODEC: slatedb::config::CompressionCodec =
-    slatedb::config::CompressionCodec::Zstd;
+/// Block codec of the SSTs a writer produces, WAL SSTs included.
+///
+/// Every SST records its own codec, so a database can mix SSTs written under
+/// either variant and stays readable after the setting changes; compaction
+/// rewrites older SSTs with the current codec. A binary built without zstd
+/// cannot read zstd SSTs.
+///
+/// Parses from `none` or `zstd`, in any case and ignoring surrounding
+/// whitespace.
+///
+/// # Examples
+///
+/// ```
+/// use db::config::SstCompression;
+///
+/// assert_eq!(SstCompression::default(), SstCompression::Zstd);
+/// assert_eq!(" NONE ".parse::<SstCompression>().unwrap(), SstCompression::None);
+/// assert!("lz4".parse::<SstCompression>().is_err());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SstCompression {
+    /// Blocks are stored as encoded.
+    None,
+    /// Zstandard at level 3; the default for every profile.
+    #[default]
+    Zstd,
+}
+
+impl std::str::FromStr for SstCompression {
+    type Err = super::ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "zstd" => Ok(Self::Zstd),
+            _ => Err(super::ConfigError::new(format!(
+                "invalid SST compression `{value}`: expected none or zstd"
+            ))),
+        }
+    }
+}
+
+impl From<SstCompression> for Option<slatedb::config::CompressionCodec> {
+    fn from(compression: SstCompression) -> Self {
+        match compression {
+            SstCompression::None => None,
+            SstCompression::Zstd => Some(slatedb::config::CompressionCodec::Zstd),
+        }
+    }
+}
 
 /// SlateDB runtime settings.
 #[derive(Debug, Clone)]
@@ -465,7 +509,7 @@ impl SlateRuntimeConfig {
     pub fn new() -> Self {
         Self {
             runtime_settings: slatedb::Settings {
-                compression_codec: Some(DEFAULT_COMPRESSION_CODEC),
+                compression_codec: SstCompression::default().into(),
                 ..slatedb::Settings::default()
             },
         }
@@ -513,6 +557,13 @@ impl SlateRuntimeConfig {
     /// Replace SlateDB runtime settings.
     pub fn with_runtime_settings(mut self, settings: slatedb::Settings) -> Self {
         self.runtime_settings = settings;
+        self
+    }
+
+    /// Set the block codec of the SSTs the writer produces, leaving every other
+    /// runtime setting as it is.
+    pub fn with_sst_compression(mut self, compression: SstCompression) -> Self {
+        self.runtime_settings.compression_codec = compression.into();
         self
     }
 }
