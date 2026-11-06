@@ -254,6 +254,7 @@ pub(crate) async fn execute_with<O: output::Format>(
     let mut response = crate::execution::interpreter::Interpreter::new_scoped_controlled_prepared(
         db, params, scope, control, proof,
     )
+    .with_commit_durability(mode.commit_durability())
     .execute_rows_with::<O>(
         &plan,
         &values,

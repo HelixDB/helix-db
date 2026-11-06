@@ -194,7 +194,7 @@ async fn cypher_routing_checks_effects_before_parameter_validation() {
             .execute_cypher(tonic::Request::new(grpc::pb::QueryJsonRequest {
                 body: body.into_bytes().into(),
                 warm_only: warm,
-                await_durable: durable,
+                await_durable: durable.then_some(true),
                 ..Default::default()
             }))
             .await
@@ -300,7 +300,7 @@ async fn native_and_cypher_share_one_state() {
         .unwrap();
     assert_eq!(durable.status(), StatusCode::OK);
     grpc.execute_cypher(tonic::Request::new(grpc::pb::QueryJsonRequest {
-        await_durable: true,
+        await_durable: Some(true),
         ..grpc_body("CREATE (:Shared {source:'cypher-grpc'})")
     }))
     .await
@@ -375,7 +375,7 @@ async fn grpc_cypher_rejections_use_native_codes_and_read_explain_options() {
             body: body.into(),
             warm_only: false,
             require_writer,
-            await_durable,
+            await_durable: await_durable.then_some(true),
         })
     };
     let error_code = |status: &tonic::Status| {
@@ -786,12 +786,12 @@ async fn sql_explain_and_grpc_share_the_cypher_paths() {
             )
         }
     };
-    let request = |body: serde_json::Value, warm_only, await_durable| {
+    let request = |body: serde_json::Value, warm_only, await_durable: bool| {
         tonic::Request::new(grpc::pb::QueryJsonRequest {
             body: body.to_string().into_bytes().into(),
             warm_only,
             require_writer: false,
-            await_durable,
+            await_durable: await_durable.then_some(true),
         })
     };
     let insert = json!({
@@ -930,6 +930,113 @@ async fn sql_explain_and_grpc_share_the_cypher_paths() {
         vec![vec![json!(1)]]
     );
     drop(grpc);
+    drop(router);
+    db.close().await.unwrap();
+}
+
+/// Sends one write over HTTP, or over gRPC when given a service, setting
+/// `await_durable` only when `flag` is present.
+async fn write_route(
+    router: axum::Router,
+    grpc: Option<&grpc::GrpcService>,
+    path: &str,
+    body: Vec<u8>,
+    flag: Option<bool>,
+) {
+    let Some(grpc) = grpc else {
+        let mut request = Request::post(path).header("content-type", "application/json");
+        if let Some(flag) = flag {
+            request = request.header("x-helix-await-durable", flag.to_string());
+        }
+        let response = router
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        return;
+    };
+    let request = tonic::Request::new(grpc::pb::QueryJsonRequest {
+        body: body.into(),
+        await_durable: flag,
+        ..Default::default()
+    });
+    match path {
+        "/v2/query" => grpc.execute_query(request).await,
+        helix_cypher::api::HTTP_PATH => grpc.execute_cypher(request).await,
+        _ => grpc.execute_sql(request).await,
+    }
+    .unwrap();
+}
+
+/// Every write route on both transports waits for the WAL upload unless the
+/// client explicitly passes `false`. A client that never heard of the option,
+/// including a gRPC client whose field stays unset, keeps a durable write.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_explicit_false_skips_the_durable_wait() {
+    let store = Arc::new(helix_db_testkit::gated_wal::GatedWalStore::default());
+    let db = Arc::new(
+        db::HelixDB::open_with_object_store("await-durable-routes", Arc::clone(&store) as _)
+            .await
+            .unwrap(),
+    );
+    let state = state::ServerState::new(Arc::clone(&db), None, crate::StorageConfig::Memory);
+    let router = http::router(state.clone());
+    let service = grpc::GrpcService::new(state);
+    let native = serde_json::to_vec(&helix_ast::query::QueryRequest::write(
+        helix_ast::batch::write_batch().var_as(
+            "created",
+            helix_ast::traversal::g().add_n(
+                "Durable",
+                vec![("source", helix_ast::value::PropertyInput::from("native"))],
+            ),
+        ),
+    ))
+    .unwrap();
+    let cypher = json!({"query": "CREATE (:Durable)"})
+        .to_string()
+        .into_bytes();
+    let sql = json!({
+        "query": "INSERT INTO durable (name) VALUES (?)",
+        "parameters": ["Ada"],
+        "mappings": {"tables": {"durable": "Durable"}},
+    })
+    .to_string()
+    .into_bytes();
+    let bounded = std::time::Duration::from_secs(30);
+    // Past SlateDB's 100 ms flush interval, so a pending write is held.
+    let pending = std::time::Duration::from_millis(400);
+
+    // A writer's first insert persists its ID lease durably in any mode.
+    write_route(router.clone(), None, "/v2/query", native.clone(), None).await;
+
+    for (path, body) in [
+        ("/v2/query", native),
+        (helix_cypher::api::HTTP_PATH, cypher),
+        ("/v2/sql", sql),
+    ] {
+        for grpc in [None, Some(&service)] {
+            store.hold();
+            tokio::time::timeout(
+                bounded,
+                write_route(router.clone(), grpc, path, body.clone(), Some(false)),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{path} must not wait when told not to"));
+            for flag in [None, Some(true)] {
+                let mut write =
+                    Box::pin(write_route(router.clone(), grpc, path, body.clone(), flag));
+                assert!(
+                    tokio::time::timeout(pending, &mut write).await.is_err(),
+                    "{path} {flag:?} must wait for its upload"
+                );
+                store.release();
+                tokio::time::timeout(bounded, write).await.unwrap();
+                store.hold();
+            }
+            store.release();
+        }
+    }
+    drop(service);
     drop(router);
     db.close().await.unwrap();
 }

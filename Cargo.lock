@@ -2216,6 +2216,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "db",
+ "futures",
  "helix-ast",
  "helix-planner",
  "object_store 0.14.2",

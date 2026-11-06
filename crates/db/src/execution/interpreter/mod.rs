@@ -198,6 +198,17 @@ impl<'db> Interpreter<'db> {
         self
     }
 
+    /// Selects when this request's graph commits return.
+    ///
+    /// Reads never commit, and index DDL always commits durably.
+    pub(crate) const fn with_commit_durability(
+        mut self,
+        durability: crate::transaction::CommitDurability,
+    ) -> Self {
+        self.ctx.commit_durability = durability;
+        self
+    }
+
     /// Execute a validated executable plan.
     pub async fn execute(mut self, plan: &exec::ExecutablePlan) -> Result<ExecutionResult> {
         self.ctx.check_execution_deadline()?;

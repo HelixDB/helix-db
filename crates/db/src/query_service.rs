@@ -259,7 +259,7 @@ pub(crate) async fn execute_query_on_scoped_observed(
     let result = match execution_control.check() {
         Ok(()) => match ValidatedQuery::from_request(request) {
             Ok(query) => match query.validate_mode(mode) {
-                Ok(()) => execute_validated(db, query, tenant_scope, execution_control).await,
+                Ok(()) => execute_validated(db, query, tenant_scope, execution_control, mode).await,
                 Err(error) => Err(error),
             },
             Err(error) => Err(error),
@@ -421,6 +421,7 @@ async fn execute_validated(
     query: ValidatedQuery,
     tenant_scope: DataScope,
     execution_control: ExecutionControl,
+    mode: QueryMode,
 ) -> std::result::Result<QueryResponse, QueryServiceError> {
     execution_control.check()?;
     let (batch, params, search_consistency) = match query {
@@ -466,6 +467,7 @@ async fn execute_validated(
             execution_control,
             proof,
             search_consistency,
+            mode.commit_durability(),
         )
         .await?;
     let (_, diagnostics) = planning.into_parts();
@@ -501,7 +503,8 @@ impl ValidatedQuery {
 
     fn validate_mode(&self, mode: QueryMode) -> std::result::Result<(), QueryServiceError> {
         match (mode, self) {
-            (QueryMode::Execute, _) | (QueryMode::Warm, Self::Read { .. }) => Ok(()),
+            (QueryMode::Execute | QueryMode::ExecuteWithoutDurableWait, _)
+            | (QueryMode::Warm, Self::Read { .. }) => Ok(()),
             (QueryMode::Warm, Self::Write { .. }) => Err(QueryServiceError::InvalidRequest(
                 "warm queries must be read requests".to_string(),
             )),
@@ -512,10 +515,26 @@ impl ValidatedQuery {
 /// Execution behavior for query requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryMode {
-    /// Execute the query and return its results.
+    /// Execute the query and return its results. A write returns once it, and
+    /// every write it observed, is durable in object storage.
     Execute,
+    /// As [`Self::Execute`], but a write returns once it is applied and visible
+    /// on the writer, before its WAL upload. A crash before that upload loses
+    /// the acknowledged write, and reader replicas see it only after it. Index
+    /// DDL stays durable, and a read is unaffected. Extending an ID lease stays
+    /// durable too, so the writer's first insert still waits for one upload.
+    ExecuteWithoutDurableWait,
     /// Execute a read query through the normal path so caches are populated.
     Warm,
+}
+
+impl QueryMode {
+    pub(crate) const fn commit_durability(self) -> crate::transaction::CommitDurability {
+        match self {
+            Self::ExecuteWithoutDurableWait => crate::transaction::CommitDurability::Applied,
+            Self::Execute | Self::Warm => crate::transaction::CommitDurability::Durable,
+        }
+    }
 }
 
 fn query_param_bindings(
@@ -1053,6 +1072,7 @@ mod tests {
                     ExecutionControl::unlimited(),
                     prepared.into_catalog_proof(),
                     helix_ast::query::SearchConsistency::Strong,
+                    crate::transaction::CommitDurability::Durable,
                 )
                 .await
                 .expect("the exact prepared read view survives a newer catalog publication");
@@ -1194,6 +1214,7 @@ mod tests {
                     ExecutionControl::unlimited(),
                     prepared.into_catalog_proof(),
                     helix_ast::query::SearchConsistency::Strong,
+                    crate::transaction::CommitDurability::Durable,
                 )
                 .await
                 .expect("graph write opens under its prepared authority");
@@ -1246,6 +1267,7 @@ mod tests {
                 ExecutionControl::unlimited(),
                 prepared.into_catalog_proof(),
                 helix_ast::query::SearchConsistency::Strong,
+                crate::transaction::CommitDurability::Durable,
             )
             .await
             .expect("foreign proof safely falls back");
@@ -1300,6 +1322,7 @@ mod tests {
                 ExecutionControl::unlimited(),
                 prepared.into_catalog_proof(),
                 helix_ast::query::SearchConsistency::Strong,
+                crate::transaction::CommitDurability::Durable,
             )
             .await
             .expect_err("foreign catalog authority must be discarded");
@@ -1361,6 +1384,7 @@ mod tests {
                 ExecutionControl::unlimited(),
                 proof,
                 helix_ast::query::SearchConsistency::Strong,
+                crate::transaction::CommitDurability::Durable,
             )
             .await
             .expect("expired proof safely falls back");
@@ -1401,6 +1425,7 @@ mod tests {
             ExecutionControl::unlimited(),
             prepared.into_catalog_proof(),
             helix_ast::query::SearchConsistency::Strong,
+            crate::transaction::CommitDurability::Durable,
         )
         .await
         .expect("cross-scope proof safely falls back");

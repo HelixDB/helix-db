@@ -91,9 +91,4 @@ impl ServerState {
     pub fn blocked_index_entity_count(&self) -> u64 {
         self.db.blocked_index_entity_count()
     }
-
-    /// Flush an acknowledged write before a transport acknowledges durability.
-    pub async fn flush_writer(&self) -> Result<db::DatabaseSequence, db::error::HelixDbError> {
-        self.db.flush_writer().await
-    }
 }

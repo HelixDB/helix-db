@@ -26,6 +26,7 @@ use helix_ast::{
     traversal,
     value::{PropertyInput, PropertyValue},
 };
+use helix_db_testkit::gated_wal::GatedWalStore;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::{
     path::Path, CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
@@ -53,6 +54,9 @@ use crate::HelixDB;
 
 /// Scope of every fixture index.
 const SCOPE: DataScope = DataScope::LegacyUnscoped;
+/// Past SlateDB's 100 ms flush interval, so a commit still pending after this
+/// long is waiting on a held upload and not on the timer.
+const UPLOAD_ATTEMPTED: std::time::Duration = std::time::Duration::from_millis(400);
 /// Default transaction byte ceilings of the fixture batch limits.
 const EIGHT_MIB: u64 = 8 * 1024 * 1024;
 
@@ -1267,6 +1271,196 @@ async fn uncertain_commits_keep_their_charges() {
             "{name}"
         );
     }
+}
+
+/// Inserts a node outside every fixture index. A writer's first insert persists
+/// its ID lease durably, which would fail once WAL uploads do.
+async fn lease_node_ids(db: &HelixDB) {
+    db.query(QueryRequest::write(batch::write_batch().var_as(
+        "lease",
+        traversal::g().add_n("Lease", vec![("held", PropertyInput::from("no"))]),
+    )))
+    .await
+    .expect("lease write commits");
+}
+
+/// Writes `properties` as a request that returns before its WAL upload.
+async fn add_applied(db: &HelixDB, properties: Vec<(&'static str, PropertyInput)>) {
+    crate::query_service::execute_query_on_scoped(
+        db,
+        QueryRequest::write(
+            batch::write_batch().var_as("created", traversal::g().add_n("Doc", properties)),
+        ),
+        crate::query_service::QueryMode::ExecuteWithoutDurableWait,
+        SCOPE,
+    )
+    .await
+    .expect("document write applies");
+}
+
+async fn document_count(db: &HelixDB) -> u64 {
+    db.query(QueryRequest::read(
+        batch::read_batch()
+            .var_as("count", traversal::g().n_with_label("Doc").count())
+            .returning(["count"]),
+    ))
+    .await
+    .expect("documents count")["count"]
+        .as_u64()
+        .expect("count is a number")
+}
+
+/// Proves an acknowledgement cannot outlive the enqueue it acknowledges.
+///
+/// With WAL uploads held, publication reads the applied enqueue and then waits
+/// on the upload for its own durable commit. That commit lands at a higher
+/// sequence and WAL uploads are sequential, so returning from it proves the
+/// enqueue is durable too. Recovery then finds the document, and only the other
+/// family's operation still queued.
+#[tokio::test]
+async fn durable_publication_carries_its_applied_enqueue() {
+    for (name, family) in [("vector", QueueFamily::Vector), ("text", QueueFamily::Text)] {
+        let store = Arc::new(GatedWalStore::default());
+        let database = format!("queue-publication-applied-{name}");
+        let db = open_explicit(
+            &database,
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            &[vector_definition(), text_definition()],
+        )
+        .await;
+        lease_node_ids(&db).await;
+        store.hold();
+        add_applied(&db, document([0.0, 0.0], "alpha")).await;
+        let target = target(&db, family).await;
+
+        let publisher = writer_publisher(&db);
+        let (reads, uploads) = (load(&publisher.metrics().queue_reads), store.uploads());
+        let mut publish = Box::pin(publisher.publish_once(target));
+        tokio::time::timeout(UPLOAD_ATTEMPTED, &mut publish)
+            .await
+            .expect_err("publication's durable commit waits on the held upload");
+        assert!(load(&publisher.metrics().queue_reads) > reads, "{name}");
+        assert_eq!(store.uploads(), uploads, "{name}");
+
+        store.release();
+        assert_eq!(
+            publish.await.expect("an applied enqueue publishes"),
+            PublicationOutcome::Published {
+                operations: 1,
+                entities: 1
+            },
+            "{name}"
+        );
+        // Not closed: only what reached storage survives into the next writer.
+        let recovered = HelixDB::open_with_object_store_for_index_lifecycle_testing(
+            database.as_str(),
+            store as Arc<dyn ObjectStore>,
+            DbConfig::new(),
+            LifecycleTestScheduling::Explicit,
+        )
+        .await
+        .expect("a newer writer recovers");
+        assert_eq!(document_count(&recovered).await, 1, "{name}");
+        assert_eq!(
+            recovered.index_operation_queue_stats().pending_operations,
+            1,
+            "{name}"
+        );
+        recovered.close().await.expect("recovered writer closes");
+    }
+}
+
+/// Proves an applied enqueue whose WAL upload never lands vanishes whole: the
+/// document and every queued operation go together, so recovery charges
+/// nothing and has nothing to publish.
+#[tokio::test]
+async fn crash_before_upload_drops_the_write_and_its_enqueue_together() {
+    let store = Arc::new(FailingWalStore::default());
+    let database = "queue-publication-applied-lost";
+    let db = open_explicit(
+        database,
+        Arc::clone(&store) as Arc<dyn ObjectStore>,
+        &[vector_definition(), text_definition()],
+    )
+    .await;
+    lease_node_ids(&db).await;
+    store.failing.store(true, Ordering::SeqCst);
+    add_applied(&db, document([0.0, 0.0], "alpha")).await;
+    assert_eq!(db.index_operation_queue_stats().pending_operations, 2);
+
+    let mut status = db.inner_db().subscribe();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        status.wait_for(|status| status.close_reason.is_some()),
+    )
+    .await
+    .expect("the failed upload closes the writer")
+    .expect("the writer's status stays subscribed");
+    store.failing.store(false, Ordering::SeqCst);
+
+    let recovered = HelixDB::open_with_object_store_for_index_lifecycle_testing(
+        database,
+        store,
+        DbConfig::new(),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await
+    .expect("a newer writer recovers");
+    assert_eq!(document_count(&recovered).await, 0);
+    let stats = recovered.index_operation_queue_stats();
+    assert_eq!(
+        (stats.pending_operations, stats.uncertain_operations),
+        (0, 0)
+    );
+    assert!(recovered
+        .index_operation_backlog()
+        .outstanding_targets()
+        .is_empty());
+    recovered.close().await.expect("recovered writer closes");
+}
+
+/// Proves the index worker picks up an enqueue that is applied but not yet
+/// durable, since the producer now wakes it before any upload lands, and that
+/// it acknowledges nothing until its own commit is durable.
+#[tokio::test]
+async fn automatic_worker_publishes_an_applied_enqueue() {
+    let store = Arc::new(GatedWalStore::default());
+    let db = HelixDB::open_with_object_store_for_index_lifecycle_testing(
+        "queue-publication-applied-worker",
+        Arc::clone(&store) as Arc<dyn ObjectStore>,
+        DbConfig::new(),
+        LifecycleTestScheduling::Automatic,
+    )
+    .await
+    .expect("automatic writer opens");
+    for definition in [vector_definition(), text_definition()] {
+        db.install_index_for_tests(definition)
+            .await
+            .expect("fixture index builds");
+    }
+    lease_node_ids(&db).await;
+
+    store.hold();
+    let reads = load(&writer_publisher(&db).metrics().queue_reads);
+    add_applied(&db, document([0.0, 0.0], "alpha")).await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while load(&writer_publisher(&db).metrics().queue_reads) == reads {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the worker reads the applied enqueue");
+    assert_eq!(db.index_operation_queue_stats().pending_operations, 2);
+
+    store.release();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while db.index_operation_queue_stats().pending_operations > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the worker drains the queue");
+    db.close().await.expect("automatic writer closes");
 }
 
 /// Proves a writer that a newer writer fenced stops publishing: a

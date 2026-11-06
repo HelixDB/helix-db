@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use crate::transaction::CommitDurability;
+
 use super::super::runtime_context::{
     ActiveWriteTx, PendingCatalogFreshness, RequestWriteScopeState,
 };
@@ -227,11 +229,18 @@ impl<'db> ExecutionContext<'db> {
     }
 
     /// Commits graph rows, staged index rows, and queued vector/text
-    /// operations in one durable transaction.
+    /// operations in one atomic transaction, returning as the request's
+    /// [`CommitDurability`] asks.
     ///
     /// Queued capacity is reserved for every touched index before commit and
-    /// finalized only from the commit outcome; the index worker is woken after
-    /// a durable enqueue.
+    /// finalized only from the commit outcome; the index worker is woken once
+    /// the enqueue is visible, durable or not.
+    ///
+    /// A durable commit with nothing to write has no WAL entry to wait on, yet
+    /// its response may rest on an applied write it observed. It waits for the
+    /// durable sequence to pass its snapshot, without forcing a WAL upload. That
+    /// wait commits nothing, so it stays outside the finite commit completion
+    /// and inside the request's deadline.
     pub(super) async fn commit_write_tx(&self, mut active: ActiveWriteTx) -> Result<()> {
         active.index_context.prepare_topology(&active.txn)?;
         active.index_context.prepare_secondary(&active.txn).await?;
@@ -261,6 +270,8 @@ impl<'db> ExecutionContext<'db> {
             }
             Some(reservation)
         };
+        let durability = self.commit_durability;
+        let snapshot_sequence = txn.snapshot_sequence();
         // Commit runs in this request's task but may outlive it: a request
         // dropped mid-commit hands the rest to a spawned task, so the queue
         // reservation is always settled from the commit outcome. The
@@ -277,32 +288,50 @@ impl<'db> ExecutionContext<'db> {
             if let Some(reservation) = reservation.as_mut() {
                 reservation.begin_commit();
             }
-            if let Err(error) = txn.commit().await {
-                // Only a definite conflict proves nothing committed; any other
-                // failure keeps the capacity charged until reconciliation.
-                if let Some(reservation) = reservation {
-                    if error.kind() == slatedb::ErrorKind::Transaction {
-                        reservation.aborted();
-                    } else {
-                        reservation.uncertain();
+            let committed = match txn.commit(durability).await {
+                Ok(committed) => committed,
+                Err(error) => {
+                    // Only a definite conflict proves nothing committed; any
+                    // other failure keeps the capacity charged until
+                    // reconciliation.
+                    if let Some(reservation) = reservation {
+                        if error.kind() == slatedb::ErrorKind::Transaction {
+                            reservation.aborted();
+                        } else {
+                            reservation.uncertain();
+                        }
                     }
+                    return Err(prepared_index_context
+                        .classify_commit_error(writer.db(), error)
+                        .await);
                 }
-                return Err(prepared_index_context
-                    .classify_commit_error(writer.db(), error)
-                    .await);
-            }
+            };
+            let wrote = committed.is_some();
             let Some(reservation) = reservation else {
-                return Ok(());
+                return Ok(wrote);
             };
             reservation.committed();
             db.wake_index_worker().await;
-            Ok(())
+            Ok(wrote)
         };
         let complete = match self.row_memory.as_ref() {
             Some(budget) => futures::future::Either::Left(budget.admitted_future(complete)?),
             None => futures::future::Either::Right(complete),
         };
-        self.db.inner.commit_completions.run(complete)?.await
+        let wrote = self.db.inner.commit_completions.run(complete)?.await?;
+        if wrote || durability == CommitDurability::Applied {
+            return Ok(());
+        }
+        let crate::HelixStorage::Writer(writer) = self.db.storage() else {
+            unreachable!("a prepared write retains its original writer runtime");
+        };
+        self.execution_control
+            .run(async {
+                crate::transaction::await_durable_through(writer.db(), snapshot_sequence)
+                    .await
+                    .map_err(HelixDbError::from_storage_commit)
+            })
+            .await
     }
 }
 

@@ -181,6 +181,13 @@ impl<'db> ExecutionContext<'db> {
                 self.check_execution_deadline()?;
                 self.commit_request_write_scope().await?;
                 let result = self.execute_index_ddl(input, plan).await;
+                if result.is_ok() {
+                    // A DDL that changed nothing commits nothing, and its
+                    // receipt may rest on a racing DDL's applied record.
+                    self.execution_control
+                        .run(self.db.await_visible_writes_durable())
+                        .await?;
+                }
                 if resume_request_scope && result.is_ok() {
                     self.enable_request_write_scope().await?;
                 }

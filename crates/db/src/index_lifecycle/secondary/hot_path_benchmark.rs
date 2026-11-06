@@ -593,6 +593,7 @@ async fn lookup_node_ids(db: &HelixDB, plan: &exec::ExecutablePlan) -> Result<Ve
             crate::execution_control::ExecutionControl::unlimited(),
             prepared.into_catalog_proof(),
             helix_ast::query::SearchConsistency::Strong,
+            crate::transaction::CommitDurability::Durable,
         )
         .await?;
     let Some(ExecutionValue::Scalars(values)) = result.last else {

@@ -1090,7 +1090,7 @@ pub(crate) struct BacklogReservation {
 }
 
 impl BacklogReservation {
-    /// Marks the durable commit as submitted.
+    /// Marks the commit as submitted.
     pub(crate) fn begin_commit(&mut self) {
         assert_eq!(
             self.phase,
@@ -1100,7 +1100,9 @@ impl BacklogReservation {
         self.phase = ReservationPhase::Committing;
     }
 
-    /// Records a durable commit.
+    /// Records a commit that was applied, and durable unless the request chose
+    /// not to wait. A crash before its upload loses the enqueue and this charge
+    /// together, since recovery rebuilds the ledger from storage.
     pub(crate) fn committed(mut self) {
         self.finish(ReservationOutcome::Committed);
     }

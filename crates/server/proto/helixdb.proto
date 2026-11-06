@@ -22,7 +22,11 @@ message QueryJsonRequest {
   bytes body = 1;
   bool warm_only = 2;
   bool require_writer = 3;
-  bool await_durable = 4;
+  // Unset or true returns a write once it is durable. False returns once it is
+  // applied on the writer, so a crash before its WAL upload loses it. Presence
+  // matters: a plain bool could not tell a client that never set this from one
+  // that chose to skip the wait.
+  optional bool await_durable = 4;
 }
 
 message QueryJsonResponse {

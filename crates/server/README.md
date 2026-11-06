@@ -21,7 +21,8 @@ HTTP endpoints:
 
 The `x-helix-warm`, `x-helix-require-writer`, and
 `x-helix-await-durable` headers select the corresponding request contract.
-The gRPC `QueryJsonRequest` fields have the same behavior.
+The gRPC `QueryJsonRequest` fields have the same behavior. A write waits for
+durability unless `x-helix-await-durable` is explicitly `false`.
 
 Memory-backed standalone servers receive one non-forgeable process-local
 database token. Disk and object-storage deployments open readers and writers

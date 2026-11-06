@@ -193,7 +193,7 @@ impl QueryCorpusAdapter for GrpcAdapter {
                 body: body.into(),
                 warm_only: false,
                 require_writer: false,
-                await_durable: is_write,
+                await_durable: Some(is_write),
             })
             .await
             .map_err(|error| TestkitError::Adapter(error.to_string()))?;
@@ -930,7 +930,7 @@ async fn missing_text_index_preserves_the_public_error_code() {
             body: simd_json::to_vec(&request()).unwrap().into(),
             warm_only: false,
             require_writer: false,
-            await_durable: false,
+            await_durable: None,
         })
         .await
         .unwrap_err();
@@ -954,7 +954,7 @@ async fn grpc_routes_native_and_cypher_rpcs_on_one_service() {
             .into(),
         warm_only: false,
         require_writer: false,
-        await_durable: false,
+        await_durable: None,
     };
     let body = |response: QueryJsonResponse| {
         serde_json::from_slice::<serde_json::Value>(&response.body).expect("response body is JSON")
@@ -984,7 +984,7 @@ async fn grpc_routes_native_and_cypher_rpcs_on_one_service() {
             body: simd_json::to_vec(&count).unwrap().into(),
             warm_only: false,
             require_writer: false,
-            await_durable: false,
+            await_durable: None,
         })
         .await
         .unwrap();
@@ -1002,7 +1002,7 @@ async fn grpc_rejects_malformed_and_oversized_queries_then_shuts_down_cleanly() 
             body: b"{".to_vec().into(),
             warm_only: false,
             require_writer: false,
-            await_durable: false,
+            await_durable: None,
         })
         .await
         .unwrap_err();
@@ -1023,7 +1023,7 @@ async fn grpc_rejects_malformed_and_oversized_queries_then_shuts_down_cleanly() 
             body: vec![b' '; MAX_QUERY_BODY_BYTES + 1].into(),
             warm_only: false,
             require_writer: false,
-            await_durable: false,
+            await_durable: None,
         })
         .await
         .unwrap_err();
@@ -1219,7 +1219,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
         body: vec![b' '; MAX_QUERY_BODY_BYTES / 2].into(),
         warm_only: false,
         require_writer: false,
-        await_durable: false,
+        await_durable: None,
     });
     expired.set_timeout(Duration::from_millis(1));
     let deadline = grpc.client.execute_query(expired).await.unwrap_err();
@@ -1282,7 +1282,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
             body: body.into(),
             warm_only: false,
             require_writer: true,
-            await_durable: false,
+            await_durable: None,
         })
         .await
         .unwrap_err();
@@ -1304,7 +1304,7 @@ async fn grpc_enforces_writer_routing_deadlines_connection_churn_and_restart() {
                 .into(),
             warm_only: false,
             require_writer: false,
-            await_durable: false,
+            await_durable: None,
         })
         .await
         .unwrap_err();
@@ -1655,7 +1655,7 @@ async fn duplicate_unique_values_are_definitive_conflicts_on_every_transport() {
             body: simd_json::to_vec(&add_user("grpc")).unwrap().into(),
             warm_only: false,
             require_writer: false,
-            await_durable: true,
+            await_durable: Some(true),
         })
         .await
         .unwrap_err();

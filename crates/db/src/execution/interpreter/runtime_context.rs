@@ -294,6 +294,8 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     /// Visibility of unpublished vector/text work for read-request searches.
     /// Write transactions always search strongly regardless of this value.
     pub(in crate::execution::interpreter) search_consistency: helix_ast::query::SearchConsistency,
+    /// When this request's graph commits return.
+    pub(in crate::execution::interpreter) commit_durability: crate::transaction::CommitDurability,
     /// Concurrent secondary-set child reads shared by every step context of
     /// the request.
     pub(in crate::execution::interpreter) shared_index_reads: Arc<super::access::SharedIndexReads>,
@@ -379,6 +381,7 @@ impl<'db> ExecutionContext<'db> {
             execution_control,
             prepared_memberships: super::stream::PreparedMemberships::default(),
             search_consistency: helix_ast::query::SearchConsistency::Strong,
+            commit_durability: crate::transaction::CommitDurability::Durable,
             shared_index_reads: Arc::default(),
             pending_sets: Arc::default(),
             #[cfg(test)]
