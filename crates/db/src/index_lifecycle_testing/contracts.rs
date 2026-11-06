@@ -1431,14 +1431,17 @@ async fn wait_for_automatic_terminal(
 /// Runs data-bearing backfill/mutation and uniqueness contracts.
 pub(super) async fn run_mutations() {
     run_secondary_mutation_interleaving().await;
-    run_unique_activation_conflict_repair().await;
+    run_unique_activation_conflict_rejection().await;
     run_secondary_edge_mutation_interleaving().await;
     run_every_family_public_mutation_interleaving().await;
     run_partitioned_search_edge_tenant_moves().await;
 }
 
-/// Proves an activation-boundary unique conflict blocks, repairs, and retries.
-async fn run_unique_activation_conflict_repair() {
+/// Proves a duplicate written at the activation boundary of a unique build
+/// fails at write time, leaving no delta, and the build still activates.
+/// A duplicate already in the source blocks, repairs, and retries in
+/// `run_secondary_mutation_interleaving`.
+async fn run_unique_activation_conflict_rejection() {
     let db = HelixDB::open_for_index_lifecycle_testing(
         HelixDbSource::InMemory {
             database: "index-lifecycle-unique-activation-conflict".to_string(),
@@ -1492,45 +1495,14 @@ async fn run_unique_activation_conflict_repair() {
         Property::string("$label", "ActivationUnique"),
         Property::string("value", duplicate),
     ];
-    mutate_source(&db, scope, entity_ids.start + 1, &second, &conflicting)
-        .await
-        .expect("activation-boundary duplicate records one build delta");
-    let evidence = controller
-        .advance(
-            &db,
-            LifecycleWorkTarget::Operation {
-                scope,
-                operation_id,
-            },
-        )
-        .await
-        .expect("activation drains the duplicate's delta");
-    assert_monotonic_step(&evidence);
-    assert_eq!(evidence.outcome, LifecycleStepOutcome::Blocked);
-    let blocked = db
-        .get_index_operation(scope, operation_id)
-        .await
-        .expect("activation unique operation remains readable");
-    assert!(matches!(blocked, IndexOperationStatus::Blocked { .. }));
-    assert_eq!(
-        blocked.common().stage,
-        IndexOperationStage::Activate,
-        "the gated activation drain blocks the duplicate before activating"
+    assert!(
+        matches!(
+            mutate_source(&db, scope, entity_ids.start + 1, &second, &conflicting).await,
+            Err(HelixDbError::UniqueConstraintViolation { .. })
+        ),
+        "an activation-boundary duplicate fails at write time"
     );
-    assert_identity_hidden(&db, scope, &definition).await;
-
-    let repaired = vec![
-        Property::string("$label", "ActivationUnique"),
-        Property::string("value", "activation-repaired"),
-    ];
-    mutate_source(&db, scope, entity_ids.start + 1, &conflicting, &repaired)
-        .await
-        .expect("blocked activation unique source repairs");
-    let retried = db
-        .retry_index_operation(scope, operation_id)
-        .await
-        .expect("activation unique operation retries");
-    assert_eq!(retried.common().stage, blocked.common().stage);
+    assert_build_deltas_empty(&db, scope, &definition).await;
     assert!(matches!(
         drive_to_terminal(&db, &controller, scope, operation_id).await,
         IndexOperationStatus::Succeeded { .. }
@@ -1540,7 +1512,7 @@ async fn run_unique_activation_conflict_repair() {
         &db,
         scope,
         &definition,
-        "activation-repaired",
+        "activation-distinct",
         [entity_ids.start + 1],
     )
     .await;
@@ -1863,19 +1835,16 @@ async fn run_secondary_mutation_interleaving() {
     .await;
     assert_build_deltas_empty(&db, scope, &alias_definition).await;
 
+    // Both rows already hold the duplicate when the build starts, so the
+    // scan blocks on it; a write cannot add one while the build runs.
     let unique_ids = allocate_node_ids(&db, 2).await;
     let duplicate = "duplicate-while-building";
     for entity_id in unique_ids.clone() {
-        let unique = if entity_id == unique_ids.start {
-            duplicate.to_string()
-        } else {
-            format!("initial-unique-{entity_id}")
-        };
         let properties = document_with_values(
             "IndexedUser",
             format!("unique-source-{entity_id}@example.com"),
             format!("unique-source-alias-{entity_id}"),
-            unique,
+            duplicate,
         );
         mutate_source(&db, scope, entity_id, &[], &properties)
             .await
@@ -1901,36 +1870,6 @@ async fn run_secondary_mutation_interleaving() {
     else {
         panic!("fresh unique definition must enqueue");
     };
-    drive_until_stage(
-        &db,
-        &controller,
-        scope,
-        unique_operation_id,
-        IndexOperationStage::Validate,
-    )
-    .await;
-    let conflicting_id = unique_ids.end - 1;
-    let conflicting_before = document_with_values(
-        "IndexedUser",
-        format!("unique-source-{conflicting_id}@example.com"),
-        format!("unique-source-alias-{conflicting_id}"),
-        format!("initial-unique-{conflicting_id}"),
-    );
-    let conflicting_after = document_with_values(
-        "IndexedUser",
-        format!("unique-source-{conflicting_id}@example.com"),
-        format!("unique-source-alias-{conflicting_id}"),
-        duplicate,
-    );
-    mutate_source(
-        &db,
-        scope,
-        conflicting_id,
-        &conflicting_before,
-        &conflicting_after,
-    )
-    .await
-    .expect("duplicate introduced during validation commits as build delta");
     let blocked = drive_to_terminal(&db, &controller, scope, unique_operation_id).await;
     assert!(matches!(blocked, IndexOperationStatus::Blocked { .. }));
 
@@ -1955,6 +1894,27 @@ async fn run_secondary_mutation_interleaving() {
         .await
         .expect("unique build retries from its exact checkpoint");
     assert_eq!(retried.common().stage, blocked.common().stage);
+    drive_until_stage(
+        &db,
+        &controller,
+        scope,
+        unique_operation_id,
+        IndexOperationStage::Validate,
+    )
+    .await;
+    let duplicate_again = document_with_values(
+        "IndexedUser",
+        format!("unique-source-{repaired_id}@example.com"),
+        format!("unique-source-alias-{repaired_id}"),
+        duplicate,
+    );
+    assert!(
+        matches!(
+            mutate_source(&db, scope, repaired_id, &repaired_after, &duplicate_again).await,
+            Err(HelixDbError::UniqueConstraintViolation { .. })
+        ),
+        "a duplicate written during validation fails at write time"
+    );
     assert!(matches!(
         drive_to_terminal(&db, &controller, scope, unique_operation_id).await,
         IndexOperationStatus::Succeeded { .. }

@@ -3215,8 +3215,13 @@ for the conditions that keep an index in use.
 
 ## Unique indexes
 
-A unique equality backfill becomes blocked if existing data contains duplicates. Fix
-the source data, then retry the same operation instead of creating a new definition.
+A unique index checks writes from the moment its build starts: a write that would
+duplicate a value the index already holds fails with `unique_constraint_violation`,
+before and after the index activates. A duplicate of a row the backfill has not reached
+yet is not visible to that check, so the backfill becomes blocked when it reaches the
+pair, as it does if existing data contains duplicates. Writes stay checked while it is
+blocked; fix the source data, then retry the same operation instead of creating a new
+definition.
 
 ## Next steps
 
