@@ -43,6 +43,21 @@ pub(super) struct ObservedEdgeRows {
     _memory: Option<crate::query_resources::Reservation>,
 }
 
+/// Edge IDs of directed node pairs, read from the pair index. A pair with no
+/// stored row has no entry.
+#[derive(Default)]
+pub(super) struct PairMembers {
+    pairs: BTreeMap<(u64, u64), roaring::RoaringTreemap>,
+    memory: Option<crate::query_resources::Reservation>,
+}
+
+impl PairMembers {
+    /// Every edge of every read pair.
+    pub(super) fn edge_ids(&self) -> impl Iterator<Item = u64> + Send + '_ {
+        self.pairs.values().flat_map(|members| members.iter())
+    }
+}
+
 struct ObservedPairState {
     edge_ids: roaring::RoaringTreemap,
     label_counts: BTreeMap<String, usize>,
@@ -59,6 +74,7 @@ pub(super) struct ObservedEdgeDeletion {
 pub(super) struct ObservedEdgeDeletions {
     rows: ObservedEdgeRows,
     pairs: BTreeMap<(u64, u64), ObservedPairState>,
+    _pair_memory: Option<crate::query_resources::Reservation>,
 }
 
 impl ObservedEdgeRows {
@@ -82,6 +98,11 @@ impl ObservedEdgeRows {
 }
 
 impl ObservedEdgeDeletions {
+    /// Every observed edge, in ID order.
+    pub(super) fn edge_ids(&self) -> Vec<u64> {
+        self.rows.rows.keys().copied().collect()
+    }
+
     pub(super) fn matches_label(
         &self,
         edge_id: u64,
@@ -336,6 +357,14 @@ impl<'db> ExecutionContext<'db> {
             self.tenant_scope,
             self.row_memory.as_ref(),
         )?;
+        self.observe_requested_edge_rows(txn, requested).await
+    }
+
+    async fn observe_requested_edge_rows(
+        &self,
+        txn: &impl crate::transaction::Mutation,
+        requested: super::observations::RowKeys,
+    ) -> Result<ObservedEdgeRows> {
         if requested.ids.is_empty() {
             return Ok(ObservedEdgeRows {
                 rows: BTreeMap::new(),
@@ -398,55 +427,85 @@ impl<'db> ExecutionContext<'db> {
         })
     }
 
-    pub(super) async fn observe_edge_deletions(
+    /// Reads the pair rows of `pairs` into `members`.
+    pub(super) async fn observe_pair_members(
         &self,
         txn: &impl crate::transaction::Mutation,
-        edge_ids: impl IntoIterator<Item = u64>,
+        pairs: impl Iterator<Item = (u64, u64)> + Clone + Send,
+        members: &mut PairMembers,
         index_context: &MutationIndexContext,
-    ) -> Result<ObservedEdgeDeletions> {
-        let rows = self.observe_edge_rows(txn, edge_ids).await?;
-        let pairs = rows
-            .rows
-            .values()
-            .filter_map(|row| row.endpoints)
-            .collect::<BTreeSet<_>>();
-        let pair_keys = pairs
-            .iter()
+    ) -> Result<()> {
+        let keys = pairs
+            .clone()
             .map(|(from, to)| {
                 keys::DataKey::Data {
                     scope: self.tenant_scope,
-                    kind: keys::DataKeyKind::EdgePairIndex(keys::EdgePairIndexKey::new(*from, *to)),
+                    kind: keys::DataKeyKind::EdgePairIndex(keys::EdgePairIndexKey::new(from, to)),
                 }
                 .to_bytes()
             })
             .collect::<Vec<_>>();
-        let pair_values = index_context.observe_topology(txn, &pair_keys).await?;
-        let mut pair_states = pairs
-            .into_iter()
-            .zip(pair_values)
-            .map(|(pair, value)| {
-                let edge_ids = value
-                    .map(|value| {
-                        values::indexes::SecondaryEqualityValue::decode(&value)
-                            .map(|value| value.into_ids())
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
-                Ok((
-                    pair,
-                    ObservedPairState {
-                        edge_ids,
-                        label_counts: BTreeMap::new(),
-                    },
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
+        for (pair, value) in pairs.zip(index_context.observe_topology(txn, &keys).await?) {
+            self.check_execution_deadline()?;
+            let Some(value) = value else {
+                continue;
+            };
+            if let Some(budget) = &self.row_memory {
+                let memory = match &mut members.memory {
+                    Some(memory) => memory,
+                    slot @ None => slot.insert(budget.reserve(0)?),
+                };
+                memory.resize(
+                    memory
+                        .bytes()
+                        .saturating_add(value.len())
+                        .saturating_add(2 * size_of::<((u64, u64), roaring::RoaringTreemap)>()),
+                )?;
+            }
+            members.pairs.insert(
+                pair,
+                values::indexes::SecondaryEqualityValue::decode(&value)?.into_ids(),
+            );
+        }
+        Ok(())
+    }
 
-        let pair_edge_ids = pair_states
+    /// Observes `edge_ids`, every edge of `pairs`, and the pair state their
+    /// deletion advances. Only pairs `pairs` lacks and labels of parallel
+    /// edges outside the deletion cost another read.
+    pub(super) async fn observe_edge_deletions(
+        &self,
+        txn: &impl crate::transaction::Mutation,
+        edge_ids: impl IntoIterator<Item = u64>,
+        mut pairs: PairMembers,
+        index_context: &MutationIndexContext,
+    ) -> Result<ObservedEdgeDeletions> {
+        let requested = super::observations::RowKeys::new(
+            edge_ids.into_iter().chain(pairs.edge_ids()),
+            super::observations::Kind::Edges,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+        )?;
+        let rows = self.observe_requested_edge_rows(txn, requested).await?;
+        let unread = rows
+            .rows
             .values()
-            .flat_map(|pair| pair.edge_ids.iter())
+            .filter_map(|row| row.endpoints)
+            .filter(|pair| !pairs.pairs.contains_key(pair))
             .collect::<BTreeSet<_>>();
-        let property_keys = pair_edge_ids
+        self.observe_pair_members(txn, unread.iter().copied(), &mut pairs, index_context)
+            .await?;
+        let PairMembers {
+            pairs,
+            memory: pair_memory,
+        } = pairs;
+
+        let parallel_edges = pairs
+            .values()
+            .flat_map(|members| members.iter())
+            .filter(|edge_id| !rows.rows.contains_key(edge_id))
+            .collect::<BTreeSet<_>>();
+        let property_keys = parallel_edges
             .iter()
             .map(|edge_id| {
                 keys::DataKey::Data {
@@ -463,34 +522,44 @@ impl<'db> ExecutionContext<'db> {
         } else {
             txn.multi_get(&property_keys).await?
         };
-        let mut labels = BTreeMap::new();
-        for ((edge_id, key), value) in pair_edge_ids
-            .into_iter()
-            .zip(property_keys)
-            .zip(property_values)
-        {
-            let value = match value {
-                Some(value) => Some(value),
-                None => txn.get(&key).await?,
-            };
+        let mut parallel_labels = BTreeMap::new();
+        for (edge_id, value) in parallel_edges.into_iter().zip(property_values) {
             let label = value
                 .map(|value| decode_properties(&value))
                 .transpose()?
                 .and_then(|properties| label_of(&properties).map(str::to_owned));
-            labels.insert(edge_id, label);
+            parallel_labels.insert(edge_id, label);
         }
-        for pair in pair_states.values_mut() {
-            for label in pair
-                .edge_ids
-                .iter()
-                .filter_map(|edge_id| labels.get(&edge_id).and_then(Option::as_deref))
-            {
-                *pair.label_counts.entry(label.to_owned()).or_default() += 1;
-            }
-        }
+        let pair_states = pairs
+            .into_iter()
+            .map(|(pair, edge_ids)| {
+                let mut label_counts = BTreeMap::<String, usize>::new();
+                for edge_id in edge_ids.iter() {
+                    let label = match rows.rows.get(&edge_id) {
+                        Some(row) => row
+                            .properties
+                            .as_ref()
+                            .and_then(|properties| label_of(properties.properties())),
+                        None => parallel_labels.get(&edge_id).and_then(Option::as_deref),
+                    };
+                    let Some(label) = label else {
+                        continue;
+                    };
+                    *label_counts.entry(label.to_owned()).or_default() += 1;
+                }
+                (
+                    pair,
+                    ObservedPairState {
+                        edge_ids,
+                        label_counts,
+                    },
+                )
+            })
+            .collect();
         Ok(ObservedEdgeDeletions {
             rows,
             pairs: pair_states,
+            _pair_memory: pair_memory,
         })
     }
 
@@ -503,7 +572,12 @@ impl<'db> ExecutionContext<'db> {
     ) -> Result<()> {
         index_context.flush_topology(txn)?;
         let mut observed = self
-            .observe_edge_deletions(txn, std::iter::once(edge_id), index_context)
+            .observe_edge_deletions(
+                txn,
+                std::iter::once(edge_id),
+                PairMembers::default(),
+                index_context,
+            )
             .await?;
         self.delete_edge_observed(txn, edge_id, observed.take(edge_id)?, index_context)
             .await?;

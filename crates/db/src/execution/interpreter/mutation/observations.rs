@@ -6,6 +6,8 @@ use std::collections::BTreeSet;
 #[derive(Clone, Copy)]
 pub(super) enum Kind {
     Nodes,
+    /// A node row followed by its adjacency row.
+    NodeDeletions,
     Edges,
 }
 impl Kind {
@@ -18,6 +20,10 @@ impl Kind {
             Self::Nodes => (
                 keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
                 None,
+            ),
+            Self::NodeDeletions => (
+                keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(id)),
+                Some(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(id))),
             ),
             Self::Edges => (
                 keys::DataKeyKind::EdgeEndpoints(keys::EdgeEndpointsKey::new(id)),
@@ -110,7 +116,7 @@ mod tests {
             keys::scope::DataScope::LegacyUnscoped,
             keys::scope::DataScope::Tenant(tenant),
         ] {
-            for kind in [Kind::Nodes, Kind::Edges] {
+            for kind in [Kind::Nodes, Kind::NodeDeletions, Kind::Edges] {
                 let budget = query_resources::Budget::new(512 * 1024);
                 let (rows, allocations) = crate::allocation_testing::observe(|| {
                     RowKeys::new(

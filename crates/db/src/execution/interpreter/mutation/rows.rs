@@ -267,8 +267,9 @@ impl ExecutionContext<'_> {
         Ok(())
     }
 
-    /// Delete all explicitly selected relationships before checking node attachment.
-    /// A failed check drops the statement's transaction, including prior clauses.
+    /// Delete the selected entities. Without `detach`, a node may only have
+    /// selected relationships. A refusal drops the statement's transaction,
+    /// including prior clauses and any batch already staged.
     pub(in crate::execution::interpreter) async fn row_delete_entities(
         &mut self,
         targets: DeletionTargets,
@@ -279,51 +280,42 @@ impl ExecutionContext<'_> {
             memory: _targets_memory,
         } = targets;
         let mut scope = self.take_or_begin_write_scope().await?;
-        // Prior CREATE clauses may still own coalesced pair/adjacency changes.
-        // Deletion observations must include them, just like native deletion.
-        scope.index_context.flush_topology(&scope.txn)?;
         let edge_count = entities
             .iter()
             .filter(|e| matches!(e, r::Entity::Relationship(_)))
             .count();
-        let _edges_memory = self
+        let _ids_memory = self
             .row_budget()
-            .reserve(edge_count.saturating_mul(size_of::<u64>()))?;
+            .reserve(entities.len().saturating_mul(size_of::<u64>()))?;
         let mut edges = Vec::with_capacity(edge_count);
-        edges.extend(entities.iter().filter_map(|e| match e {
-            r::Entity::Relationship(id) => Some(*id),
-            r::Entity::Node(_) => None,
-        }));
-        let mut observed = self
-            .observe_edge_deletions(&scope.txn, edges.iter().copied(), &scope.index_context)
-            .await?;
-        for id in edges {
-            self.check_execution_deadline()?;
-            self.delete_edge_observed(&scope.txn, id, observed.take(id)?, &mut scope.index_context)
-                .await?;
-        }
-        scope.index_context.flush_topology(&scope.txn)?;
+        let mut nodes = Vec::with_capacity(entities.len() - edge_count);
         for entity in entities {
-            let r::Entity::Node(id) = entity else {
-                continue;
-            };
-            self.check_execution_deadline()?;
-            if !detach
-                && !self
-                    .incident_edge_ids(&scope.txn, id, &scope.index_context)
-                    .await?
-                    .is_empty()
-            {
-                return Err(r::QueryError::runtime(
+            match entity {
+                r::Entity::Relationship(id) => edges.push(id),
+                r::Entity::Node(id) => nodes.push(id),
+            }
+        }
+        self.delete_elements(
+            &scope.txn,
+            &edges,
+            &nodes,
+            |members: &super::edge::PairMembers| {
+                if detach
+                    || members
+                        .edge_ids()
+                        .all(|id| edges.binary_search(&id).is_ok())
+                {
+                    return Ok(());
+                }
+                Err(cypher::Error::from(r::QueryError::runtime(
                     category::CONSTRAINT_VERIFICATION_FAILED,
                     detail::DELETE_CONNECTED_NODE,
                     "cannot delete a node with relationships; use DETACH DELETE",
-                )
-                .into());
-            }
-            self.delete_node(&scope.txn, id, &mut scope.index_context)
-                .await?;
-        }
+                )))
+            },
+            &mut scope.index_context,
+        )
+        .await?;
         self.finish_write_scope(scope).await?;
         Ok(())
     }

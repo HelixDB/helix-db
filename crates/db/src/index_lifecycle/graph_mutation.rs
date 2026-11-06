@@ -137,6 +137,7 @@ impl CanonicalPropertyRow {
     /// Admit the entire transaction-visible snapshot, retaining original bytes
     /// and all native property types. Both raw and decoded owners share their
     /// reservations across index consumers without duplicating payloads.
+    #[cfg(test)]
     pub(crate) fn decode_with_budget(
         encoded: Bytes,
         budget: Option<&query_resources::Budget>,
