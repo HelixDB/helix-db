@@ -162,6 +162,9 @@ pub(in crate::execution::interpreter) struct TopologyMutationRuntime {
     staged_keys: BTreeSet<Bytes>,
     staged_memory: Option<query_resources::Reservation>,
     budget: Option<query_resources::Budget>,
+    /// Flushes that staged at least one row.
+    #[cfg(test)]
+    pub(super) staging_flushes: usize,
 }
 impl std::fmt::Debug for TopologyMutationRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -545,6 +548,10 @@ impl TopologyMutationRuntime {
         }
 
         merges.stage()?;
+        #[cfg(test)]
+        {
+            self.staging_flushes += 1;
+        }
         self.staged_keys.extend(staged_keys);
         drop(key_vector_memory);
         let Some(memory) = self.staged_memory.as_mut() else {

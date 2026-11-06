@@ -4,6 +4,7 @@
 //! mutation identity separate from the high-level executable mutation dispatch.
 
 use super::*;
+#[cfg(test)]
 use bytes::Bytes;
 
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +20,7 @@ impl EdgeMutationTarget {
     }
 }
 
+#[cfg(test)]
 pub(super) fn decode_stored_edges(value: Option<Bytes>) -> Result<values::adjacency::Edges> {
     match value {
         Some(value) => Ok(values::adjacency::decode_edges(&value)?),
