@@ -108,8 +108,8 @@ impl shared::AccessFilterIndexFamily for EdgeIndexFamily {
     }
 
     /// Edge equality indexes are never unique.
-    fn is_unique_key_source(_source: &Self::Source) -> bool {
-        false
+    fn unique_key(_source: &Self::Source) -> Option<shared::UniqueKey> {
+        None
     }
 
     fn branch_residual_union(

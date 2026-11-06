@@ -8,7 +8,7 @@
 //! the conjuncts no index answers stay behind as a residual filter over that
 //! narrowed source. A filter the source already answers exactly is dropped.
 //! The one exception is a unique key: a conjunct that equates a unique-indexed
-//! property with one value, or a short list of values, becomes the source on
+//! property with one value, or a list of values, becomes the source on
 //! its own, and every other conjunct is evaluated on its candidates (see
 //! [`required_index_access_filter`]).
 //! Root wrappers inline their streams, so the rule also rewrites the leading

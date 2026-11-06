@@ -57,9 +57,9 @@ pub(in crate::rules) fn index_access_filter(
 /// disjunction with a branch no index narrows stays a per-row filter.
 ///
 /// A unique key comes first. Over a broad source, a top-level conjunct that
-/// equates a unique-indexed property with one non-null value (a literal or a
-/// parameter), or with a list of them within the index union limit (`IN` or
-/// `OR`), becomes the source, and every other conjunct its residual, even
+/// equates a unique-indexed property with non-null values (a literal, a
+/// parameter, or a list of them through `IN` or `OR`) becomes the source, a
+/// single value before a list, and every other conjunct its residual, even
 /// one an index serves: the key reads at most one candidate per value,
 /// whereas another index set may read every matching record of the label (a
 /// range scan verifies each record in range). For the same reason a filter

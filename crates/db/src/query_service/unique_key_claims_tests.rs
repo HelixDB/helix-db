@@ -1,8 +1,8 @@
 //! Conditional claims keyed by a unique property through `HelixDB::query`.
 //!
-//! A claim reads its job by a unique key and evaluates the status and expiry
-//! guard on that one candidate, so no request reads the status or expiry
-//! index across the label. The indexed database must return the same
+//! A claim reads its jobs by a unique key, or a list of keys, and evaluates
+//! the status and expiry guard on those candidates, so no request reads the
+//! status or expiry index across the label. The indexed database must return the same
 //! responses and end in the same state as one that scans and filters per
 //! row, including claims of one job earlier in the same batch, and
 //! concurrent claims of one job must let exactly one through.
@@ -135,6 +135,13 @@ fn claims(keys: [expr::Predicate; 5]) -> query::QueryRequest {
         .with_parameter_value("a", query::QueryValue::String("j2".to_owned()))
         .with_parameter_value("none", query::QueryValue::Null)
         .with_parameter_value(
+            "nulls",
+            query::QueryValue::Array(vec![
+                query::QueryValue::String("j41".to_owned()),
+                query::QueryValue::Null,
+            ]),
+        )
+        .with_parameter_value(
             "list",
             query::QueryValue::Array(
                 ["j33", "j34", "j35", "absent"]
@@ -160,10 +167,16 @@ fn state() -> query::QueryRequest {
     )
 }
 
+/// The response with the rows of every entry sorted: a list of keys returns
+/// its rows in no promised order.
 fn sorted(mut response: serde_json::Value) -> serde_json::Value {
-    if let Some(jobs) = response["jobs"].as_array_mut() {
-        jobs.sort_by_key(|job| job.to_string());
-    }
+    let Some(entries) = response.as_object_mut() else {
+        return response;
+    };
+    entries
+        .values_mut()
+        .filter_map(serde_json::Value::as_array_mut)
+        .for_each(|rows| rows.sort_by_key(|row| row.to_string()));
     response
 }
 
@@ -227,6 +240,26 @@ async fn unique_key_claims_match_the_per_row_filter() {
                 ),
             ],
             0,
+        ),
+        // A list wider than one index union is a key too, a list parameter
+        // holding null is not, and a descending list returns its rows.
+        (
+            [
+                expr::Predicate::is_in(
+                    "job_id",
+                    value::PropertyValue::StringArray((40..105).map(|n| format!("j{n}")).collect()),
+                ),
+                expr::Predicate::is_in_param("job_id", "nulls"),
+                key("j42"),
+                expr::Predicate::is_in(
+                    "job_id",
+                    value::PropertyValue::StringArray(
+                        ["j28", "j27", "j22", "j21"].map(str::to_owned).to_vec(),
+                    ),
+                ),
+                key("absent"),
+            ],
+            1,
         ),
     ];
     // Frame fields stay runtime parameters, so each frame's key is resolved
@@ -300,7 +333,7 @@ async fn unique_key_claims_match_the_per_row_filter() {
 
         let expected = unindexed.query(request.clone()).await.unwrap();
         let actual = indexed.query(request).await.unwrap();
-        assert_eq!(actual, expected);
+        assert_eq!(sorted(actual), sorted(expected));
         assert_eq!(
             sorted(indexed.query(state()).await.unwrap()),
             sorted(unindexed.query(state()).await.unwrap())

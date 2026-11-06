@@ -1,7 +1,7 @@
 //! A unique key drives its source filter.
 //!
-//! A single-valued equality on a unique index reads at most one candidate,
-//! so every other conjunct is evaluated on that candidate instead of reading
+//! An equality on a unique index reads at most one candidate per value, so
+//! every other conjunct is evaluated on those candidates instead of reading
 //! an index set across the label. The claim shape below once intersected the
 //! key with a status union and an expiry range scan, which verified every
 //! record in range on each request.
@@ -232,10 +232,19 @@ fn unique_key_lists_drive_claims() {
     for context in contexts(true) {
         for (key, lookups) in [
             (Predicate::is_in("job_id", job_ids(2)), 2),
-            // As many values as one index union holds.
+            // As many values as one index union holds, and more.
             (Predicate::is_in("job_id", job_ids(64)), 64),
-            // Bound before planning; a late-bound list stays runtime (below).
-            (Predicate::is_in_param("job_id", "ids"), 5),
+            (Predicate::is_in("job_id", job_ids(65)), 65),
+            // A bound list is literal; a late-bound one reads unions of at
+            // most the union limit.
+            (
+                Predicate::is_in_param("job_id", "ids"),
+                if context.late_bound_params.is_empty() {
+                    5
+                } else {
+                    64
+                },
+            ),
             // Keys of two unique indexes.
             (
                 Predicate::or(vec![
@@ -244,11 +253,7 @@ fn unique_key_lists_drive_claims() {
                 ]),
                 2,
             ),
-        ]
-        .into_iter()
-        .filter(|(key, _)| {
-            context.late_bound_params.is_empty() || *key != Predicate::is_in_param("job_id", "ids")
-        }) {
+        ] {
             let plan =
                 crate::planning::plan_write_batch(&claim_batch(claim(key)), &context).unwrap();
             assert_key_driven(&plan, &context, lookups, &claim_guard());
@@ -257,42 +262,41 @@ fn unique_key_lists_drive_claims() {
 }
 
 #[test]
-fn only_bounded_non_null_unique_values_are_keys() {
-    let mut late_list = contexts(true).remove(0);
-    late_list.late_bound_params = [NonEmptyString::new("ids").unwrap()].into_iter().collect();
-    for (key, context) in [
+fn a_single_key_drives_before_a_list() {
+    for context in contexts(true) {
+        let list = Predicate::is_in("job_id", job_ids(64));
+        let plan = crate::planning::plan_write_batch(
+            &claim_batch(Predicate::and(vec![
+                list.clone(),
+                Predicate::eq("token", "t1"),
+                claim_guard(),
+            ])),
+            &context,
+        )
+        .unwrap();
+        assert_key_driven(&plan, &context, 1, &claim(list));
+    }
+}
+
+#[test]
+fn null_or_mixed_unique_values_are_no_keys() {
+    for key in [
         // Null matches every record missing the property.
-        (
-            Predicate::eq("job_id", PropertyValue::Null),
-            contexts(true).remove(0),
+        Predicate::eq("job_id", PropertyValue::Null),
+        Predicate::is_in(
+            "job_id",
+            PropertyValue::Array(vec![PropertyValue::from("j1"), PropertyValue::Null]),
         ),
-        (
-            Predicate::is_in(
-                "job_id",
-                PropertyValue::Array(vec![PropertyValue::from("j1"), PropertyValue::Null]),
-            ),
-            contexts(true).remove(0),
-        ),
-        // Wider than one index union.
-        (
-            Predicate::is_in("job_id", job_ids(65)),
-            contexts(true).remove(0),
-        ),
-        // A late-bound list has no size until it runs.
-        (Predicate::is_in_param("job_id", "ids"), late_list),
         // A branch that is no key may match any number of jobs.
-        (
-            Predicate::or(vec![
-                Predicate::eq("job_id", "j1"),
-                Predicate::eq("status", "done"),
-            ]),
-            contexts(true).remove(0),
-        ),
+        Predicate::or(vec![
+            Predicate::eq("job_id", "j1"),
+            Predicate::eq("status", "done"),
+        ]),
     ] {
         let plan = executable_traversal(
             g().n_with_label_where("Job", claim(key.clone()))
                 .values(vec!["job_id"]),
-            context.clone(),
+            contexts(true).remove(0),
         );
         assert!(
             filter_predicates(&plan)
