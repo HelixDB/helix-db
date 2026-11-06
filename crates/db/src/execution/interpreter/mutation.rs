@@ -21,7 +21,7 @@ pub(super) use footprint::{LabelWrites, NodeIndexWrites};
 pub(super) use index_context::MutationIndexContext;
 #[cfg(test)]
 pub(super) use node::DELETE_FLUSH_ROWS;
-pub(super) use rows::DeletionTargets;
+pub(super) use rows::{DeletionTargets, EditKind, EntityEdits};
 
 #[cfg(test)]
 mod tests;

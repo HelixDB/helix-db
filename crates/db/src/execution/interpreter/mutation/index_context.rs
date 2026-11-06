@@ -66,6 +66,9 @@ pub(crate) struct MutationIndexContext {
     /// membership cache.
     node_index_writes: super::NodeIndexWrites,
     existence_reads: parking_lot::Mutex<ExistenceReads>,
+    /// Graph transitions routed in this transaction.
+    #[cfg(test)]
+    pub(crate) transitions: usize,
 }
 
 /// Commit-owned index state after every transaction-local runtime is sealed.
@@ -104,6 +107,8 @@ impl MutationIndexContext {
                 budget: budget.cloned(),
                 ..ExistenceReads::default()
             }),
+            #[cfg(test)]
+            transitions: 0,
         }
     }
 
@@ -126,6 +131,7 @@ impl MutationIndexContext {
             ),
             node_index_writes: super::NodeIndexWrites::default(),
             existence_reads: parking_lot::Mutex::default(),
+            transitions: 0,
         }
     }
 
@@ -156,6 +162,10 @@ impl MutationIndexContext {
         budget: Option<&crate::query_resources::Budget>,
     ) -> Result<(), crate::HelixDbError> {
         self.node_index_writes.record(&graph);
+        #[cfg(test)]
+        {
+            self.transitions += 1;
+        }
         let routes = self.routes.targets_for_with_budget(&graph, budget)?;
         self.secondary_runtime
             .collect(graph.scope(), &self.secondary, &routes, &graph)?;
@@ -321,6 +331,8 @@ impl MutationIndexContext {
             queued: _,
             node_index_writes: _,
             existence_reads: _,
+            #[cfg(test)]
+                transitions: _,
         } = self;
         topology_runtime.consume_prepared()?;
         secondary_runtime.consume_prepared()?;
