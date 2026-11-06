@@ -1,0 +1,281 @@
+//! Conditional claims keyed by a unique property through `HelixDB::query`.
+//!
+//! A claim reads its job by a unique key and evaluates the status and expiry
+//! guard on that one candidate, so no request reads the status or expiry
+//! index across the label. The indexed database must return the same
+//! responses and end in the same state as one that scans and filters per
+//! row, including claims of one job earlier in the same batch, and
+//! concurrent claims of one job must let exactly one through.
+
+use helix_ast::{batch, expr, index, query, traversal, value};
+use helix_planner::{context, planning};
+
+use crate::encoding::keys::scope::DataScope;
+use crate::error::HelixDbError;
+use crate::{HelixDB, HelixDbSource};
+
+const JOBS: i64 = 60;
+const CUTOFF: i64 = 30;
+
+async fn open(name: &str) -> HelixDB {
+    HelixDB::open(HelixDbSource::InMemory {
+        database: name.into(),
+    })
+    .await
+    .unwrap()
+}
+
+async fn create_index(db: &HelixDB, spec: index::IndexSpec) {
+    let receipt = db
+        .query(query::QueryRequest::write(
+            batch::write_batch()
+                .var_as("index", traversal::g().create_index_if_not_exists(spec))
+                .returning(["index"]),
+        ))
+        .await
+        .unwrap();
+    let operation = receipt["index"]["operation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let status = db
+                .query(query::QueryRequest::read(
+                    batch::read_batch()
+                        .var_as("status", traversal::g().get_index_operation(&operation))
+                        .returning(["status"]),
+                ))
+                .await
+                .unwrap();
+            match status["status"]["status"].as_str().unwrap() {
+                "succeeded" => break,
+                "queued" | "running" => tokio::task::yield_now().await,
+                other => panic!("index failed: {other}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Job `j{n}` is available, claimed at `n`, or done, by `n % 3`; every
+/// tenth job has no `job_id`, so a null key has rows to match.
+fn seed() -> batch::WriteBatch {
+    (0..JOBS).fold(batch::write_batch(), |write, n| {
+        let mut properties = vec![(
+            "status",
+            value::PropertyInput::from(["available", "claimed", "done"][(n % 3) as usize]),
+        )];
+        if n % 3 == 1 {
+            properties.push(("claimed_at", value::PropertyInput::from(n)));
+        }
+        if n % 10 != 0 {
+            properties.push(("job_id", value::PropertyInput::from(format!("j{n}"))));
+        }
+        write.var_as(&format!("j{n}"), traversal::g().add_n("Job", properties))
+    })
+}
+
+async fn seeded(name: &str, indexed: bool) -> HelixDB {
+    let db = open(name).await;
+    if indexed {
+        create_index(&db, index::IndexSpec::node_unique_equality("Job", "job_id")).await;
+        create_index(&db, index::IndexSpec::node_equality("Job", "status")).await;
+        create_index(&db, index::IndexSpec::node_range("Job", "claimed_at")).await;
+    }
+    db.query(query::QueryRequest::write(seed())).await.unwrap();
+    db
+}
+
+/// The claim guard of one job: available, or claimed before the cutoff.
+fn claim(
+    key: expr::Predicate,
+    at: i64,
+) -> traversal::Traversal<traversal::Terminal, traversal::WriteEnabled> {
+    traversal::g()
+        .n_with_label_where(
+            "Job",
+            expr::Predicate::and(vec![
+                key,
+                expr::Predicate::is_in(
+                    "status",
+                    value::PropertyValue::StringArray(vec![
+                        "available".to_owned(),
+                        "claimed".to_owned(),
+                    ]),
+                ),
+                expr::Predicate::or(vec![
+                    expr::Predicate::eq("status", "available"),
+                    expr::Predicate::lt_param("claimed_at", "cutoff"),
+                ]),
+            ]),
+        )
+        .set_property("status", "claimed")
+        .set_property("claimed_at", at)
+        .set_property("attempt", at)
+        .values(vec!["job_id", "status", "claimed_at", "attempt"])
+}
+
+/// Five claims in one batch, as one request sends them.
+fn claims(keys: [expr::Predicate; 5]) -> query::QueryRequest {
+    let (write, names) = keys.into_iter().enumerate().fold(
+        (batch::write_batch(), Vec::new()),
+        |(write, mut names), (position, key)| {
+            let name = format!("c{position}");
+            names.push(name.clone());
+            (
+                write.var_as(&name, claim(key, 100 + position as i64)),
+                names,
+            )
+        },
+    );
+    query::QueryRequest::write(write.returning(names))
+        .with_parameter_value("cutoff", query::QueryValue::I64(CUTOFF))
+        .with_parameter_value("a", query::QueryValue::String("j2".to_owned()))
+        .with_parameter_value("none", query::QueryValue::Null)
+}
+
+fn state() -> query::QueryRequest {
+    query::QueryRequest::read(
+        batch::read_batch()
+            .var_as(
+                "jobs",
+                traversal::g().n_with_label("Job").values(vec![
+                    "job_id",
+                    "status",
+                    "claimed_at",
+                    "attempt",
+                ]),
+            )
+            .returning(["jobs"]),
+    )
+}
+
+fn sorted(mut response: serde_json::Value) -> serde_json::Value {
+    if let Some(jobs) = response["jobs"].as_array_mut() {
+        jobs.sort_by_key(|job| job.to_string());
+    }
+    response
+}
+
+#[tokio::test]
+async fn unique_key_claims_match_the_per_row_filter() {
+    let indexed = seeded("unique-key-claims-indexed", true).await;
+    let unindexed = seeded("unique-key-claims-unindexed", false).await;
+    let key = |id: &str| expr::Predicate::eq("job_id", id);
+    // Each batch with the range scans its plan may read: only a null key,
+    // which matches every job without one, is no unique key.
+    let batches = [
+        // Available, expired, unexpired, done, and missing jobs.
+        (
+            [key("j3"), key("j4"), key("j31"), key("j5"), key("absent")],
+            0,
+        ),
+        // A job claimed earlier in the batch is no longer claimable, and a
+        // parameter key behaves like its literal.
+        (
+            [
+                key("j6"),
+                key("j6"),
+                expr::Predicate::eq_param("job_id", "a"),
+                key("j2"),
+                key("j7"),
+            ],
+            0,
+        ),
+        // A null key matches only jobs without one.
+        (
+            [
+                expr::Predicate::eq("job_id", value::PropertyValue::Null),
+                expr::Predicate::eq_param("job_id", "none"),
+                key("j9"),
+                key("j9"),
+                key("j12"),
+            ],
+            2,
+        ),
+    ];
+    for (keys, ranges) in batches {
+        let request = claims(keys);
+        let (batch::BatchQuery::Write(write), parameters) = request.clone().into_query() else {
+            unreachable!("claims are a write batch");
+        };
+        let prepared = indexed
+            .planner_context_scoped_prepared(
+                parameters.into_iter().fold(
+                    context::ParamBindings::default(),
+                    |bindings, (name, value)| {
+                        bindings.with_query_value(
+                            helix_planner::ir::NonEmptyString::new(name).unwrap(),
+                            value,
+                        )
+                    },
+                ),
+                DataScope::LegacyUnscoped,
+            )
+            .await
+            .unwrap();
+        let planned =
+            planning::plan_write_batch_with_diagnostics(&write, prepared.context()).unwrap();
+        assert_eq!(
+            planned
+                .diagnostics()
+                .statistics
+                .node_accesses
+                .range_index_scans,
+            ranges,
+            "{:#?}",
+            planned.plan().steps()
+        );
+
+        let expected = unindexed.query(request.clone()).await.unwrap();
+        let actual = indexed.query(request).await.unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            sorted(indexed.query(state()).await.unwrap()),
+            sorted(unindexed.query(state()).await.unwrap())
+        );
+    }
+    indexed.close().await.unwrap();
+    unindexed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_unique_key_claims_let_exactly_one_through() {
+    let db = std::sync::Arc::new(seeded("unique-key-claims-concurrent", true).await);
+    for job in ["j3", "j4"] {
+        let claimed = futures::future::join_all((0..8).map(|attempt| {
+            let db = db.clone();
+            let job = job.to_owned();
+            async move {
+                loop {
+                    let request = query::QueryRequest::write(
+                        batch::write_batch()
+                            // Claimed past the cutoff, so a claim holds.
+                            .var_as(
+                                "claim",
+                                claim(expr::Predicate::eq("job_id", job.as_str()), 1_000 + attempt),
+                            )
+                            .returning(["claim"]),
+                    )
+                    .with_parameter_value("cutoff", query::QueryValue::I64(CUTOFF));
+                    match db.query(request).await {
+                        Ok(response) => {
+                            break response["claim"].as_array().unwrap().len();
+                        }
+                        Err(HelixDbError::TransactionConflict(_)) => tokio::task::yield_now().await,
+                        Err(error) => panic!("claim failed: {error}"),
+                    }
+                }
+            }
+        }))
+        .await;
+        assert_eq!(claimed.iter().sum::<usize>(), 1, "{job}: {claimed:?}");
+    }
+    std::sync::Arc::into_inner(db)
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+}

@@ -281,6 +281,9 @@ where
                 source: source.clone(),
                 residual: shared::conjunction_plan(residual),
             },
+            IndexedSourceCombination::Keyed => PartialIndexFilterApplication::NotApplicable(
+                PartialIndexFilterRejection::KeyedSource,
+            ),
         }
     };
     match branches.as_slice() {

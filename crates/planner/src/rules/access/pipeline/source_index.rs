@@ -7,6 +7,10 @@
 //! source becomes the intersection of every index-served conjunct, and only
 //! the conjuncts no index answers stay behind as a residual filter over that
 //! narrowed source. A filter the source already answers exactly is dropped.
+//! The one exception is a unique key: a conjunct that equates a unique-indexed
+//! property with one value becomes the source on its own, and every other
+//! conjunct is evaluated on its at most one candidate (see
+//! [`required_index_access_filter`]).
 //! Root wrappers inline their streams, so the rule also rewrites the leading
 //! filters inside them. A source that may repeat elements (parameter or
 //! variable IDs) is left alone: an intersection would emit each element

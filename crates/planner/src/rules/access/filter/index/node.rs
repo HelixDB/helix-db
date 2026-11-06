@@ -107,6 +107,20 @@ impl shared::AccessFilterIndexFamily for NodeIndexFamily {
         )
     }
 
+    fn is_unique_key_source(source: &Self::Source) -> bool {
+        let ir::NodeAccessPlan::EqualityIndex { index, value, .. } = source.as_ref() else {
+            return false;
+        };
+        index.uniqueness == catalog::IndexUniqueness::Unique
+            && match value {
+                ir::IndexValue::Literal(literal) => {
+                    literal.semantics() != ir::LiteralEqualityIndexValueSemantics::AuthoritativeNull
+                }
+                ir::IndexValue::Param(_) => true,
+                ir::IndexValue::LiteralSet(_) | ir::IndexValue::ParamSet(_) => false,
+            }
+    }
+
     fn branch_residual_union(
         branches: Vec<(Self::Source, Option<ir::PredicatePlan>)>,
     ) -> Option<Self::Source> {
@@ -131,6 +145,7 @@ mod tests {
     use super::super::super::atoms::{AccessFilterIndexAtom, AccessFilterIndexPlanRejection};
     use super::super::contracts::{
         AccessFilterIndexRejection, IndexedSourceCombination, MissingAccessIndex,
+        PartialIndexFilterApplication, PartialIndexFilterRejection,
     };
     use super::*;
 
@@ -250,5 +265,214 @@ mod tests {
                 AccessFilterIndexRejection::SourceUnchanged
             )
         );
+    }
+
+    fn unique_indexes() -> catalog::IndexCatalogSnapshot {
+        let mut indexes = catalog::IndexCatalogSnapshot::default()
+            .with_node_eq(catalog::ScopedPropertyKey::try_new("User", "team").unwrap());
+        for (property, index_id) in [("email", "user-email"), ("handle", "user-handle")] {
+            indexes.node_eq.insert(
+                catalog::ScopedPropertyKey::try_new("User", property).unwrap(),
+                catalog::NodeEqualityIndexMeta::try_new(index_id)
+                    .unwrap()
+                    .with_uniqueness(catalog::IndexUniqueness::Unique),
+            );
+        }
+        indexes
+    }
+
+    fn equality(property: &str, value: ir::IndexValue) -> ir::NodeAccessSourcePlan {
+        let indexes = unique_indexes();
+        let key = catalog::ScopedPropertyKey::try_new("User", property).unwrap();
+        source(ir::NodeAccessPlan::EqualityIndex {
+            index: indexes.node_eq[&key].clone(),
+            key,
+            value,
+        })
+    }
+
+    fn literal(value: helix_ast::value::PropertyValue) -> ir::SecondaryIndexLiteral {
+        ir::SecondaryIndexLiteral::new(value).unwrap()
+    }
+
+    #[test]
+    fn unique_keys_are_single_non_null_unique_lookups() {
+        use helix_ast::value::PropertyValue;
+        use shared::AccessFilterIndexFamily;
+
+        let param = || ir::NonEmptyString::new("email").unwrap();
+        for (source, keyed) in [
+            (
+                equality("email", ir::IndexValue::Literal(literal("a".into()))),
+                true,
+            ),
+            (equality("email", ir::IndexValue::Param(param())), true),
+            // NaN equals nothing: still at most one candidate.
+            (
+                equality(
+                    "email",
+                    ir::IndexValue::Literal(literal(PropertyValue::F64(f64::NAN))),
+                ),
+                true,
+            ),
+            (
+                equality(
+                    "email",
+                    ir::IndexValue::Literal(literal(PropertyValue::Null)),
+                ),
+                false,
+            ),
+            (
+                equality(
+                    "email",
+                    ir::IndexValue::LiteralSet(ir::AtLeast::<_, 2>::from_pair(
+                        literal("a".into()),
+                        literal("b".into()),
+                    )),
+                ),
+                false,
+            ),
+            (
+                equality(
+                    "email",
+                    ir::IndexValue::ParamSet(ir::RuntimeEqualitySet::new(
+                        param(),
+                        std::num::NonZeroUsize::MIN,
+                    )),
+                ),
+                false,
+            ),
+            (
+                equality("team", ir::IndexValue::Literal(literal("a".into()))),
+                false,
+            ),
+            (
+                source(ir::NodeAccessPlan::PointIds {
+                    ids: ir::ElementIds::new(ir::AtLeast::<_, 1>::from_one(7)).unwrap(),
+                }),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                NodeIndexFamily::is_unique_key_source(&source),
+                keyed,
+                "{source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn combine_leaves_unique_keys_to_their_filter() {
+        let key = equality("email", ir::IndexValue::Literal(literal("a".into())));
+        let other = equality("team", ir::IndexValue::Literal(literal("core".into())));
+        assert_eq!(
+            shared::combine_indexed_filter_source::<NodeIndexFamily>(&key, other),
+            IndexedSourceCombination::Keyed
+        );
+        assert_eq!(
+            shared::combine_indexed_filter_source::<NodeIndexFamily>(&key, key.clone()),
+            IndexedSourceCombination::Unchanged
+        );
+    }
+
+    #[test]
+    fn unique_key_filter_drives_conjunctions_over_broad_sources() {
+        use helix_ast::expr::Predicate;
+
+        let users = logical::NodeAccessPath::new(source(ir::NodeAccessPlan::LabelScan {
+            label: ir::NonEmptyString::new("User").unwrap(),
+        }));
+        let keyed = |path: &logical::NodeAccessPath, predicate: Predicate| {
+            shared::unique_key_filter::<NodeIndexFamily>(
+                path,
+                &predicate,
+                &analysis::FeasibleLabelScope::Unscoped,
+                &unique_indexes(),
+                &context::PlannerLimits::default(),
+            )
+        };
+        let email = || equality("email", ir::IndexValue::Literal(literal("a".into())));
+
+        // The first key drives through nested conjunctions; the second key
+        // and the label conjunct, which every row satisfies, are not
+        // residual twice.
+        assert_eq!(
+            keyed(
+                &users,
+                Predicate::and(vec![
+                    Predicate::eq("team", "core"),
+                    Predicate::and(vec![
+                        Predicate::eq("$label", "User"),
+                        Predicate::eq("email", "a"),
+                    ]),
+                    Predicate::eq("handle", "h"),
+                ]),
+            ),
+            PartialIndexFilterApplication::Rewritten {
+                source: email(),
+                residual: shared::conjunction_plan(vec![
+                    Predicate::eq("team", "core"),
+                    Predicate::eq("handle", "h"),
+                ]),
+            }
+        );
+        assert_eq!(
+            keyed(&users, Predicate::eq("email", "a")),
+            PartialIndexFilterApplication::Rewritten {
+                source: email(),
+                residual: None,
+            }
+        );
+
+        for (path, predicate, rejection) in [
+            // A key inside a disjunction or a list is not one candidate.
+            (
+                users.clone(),
+                Predicate::or(vec![
+                    Predicate::eq("email", "a"),
+                    Predicate::eq("team", "x"),
+                ]),
+                PartialIndexFilterRejection::NoUniqueKey,
+            ),
+            (
+                users.clone(),
+                Predicate::is_in(
+                    "email",
+                    helix_ast::value::PropertyValue::StringArray(vec![
+                        "a".to_owned(),
+                        "b".to_owned(),
+                    ]),
+                ),
+                PartialIndexFilterRejection::NoUniqueKey,
+            ),
+            (
+                users.clone(),
+                Predicate::and(vec![
+                    Predicate::eq("email", helix_ast::value::PropertyValue::Null),
+                    Predicate::eq("team", "x"),
+                ]),
+                PartialIndexFilterRejection::NoUniqueKey,
+            ),
+            // A narrow source keeps its own narrowing.
+            (
+                logical::NodeAccessPath::new(email()),
+                Predicate::and(vec![
+                    Predicate::eq("handle", "h"),
+                    Predicate::eq("team", "x"),
+                ]),
+                PartialIndexFilterRejection::NoUniqueKey,
+            ),
+            (
+                logical::NodeAccessPath::new(source(ir::NodeAccessPlan::AllScan)),
+                Predicate::eq("email", "a"),
+                PartialIndexFilterRejection::NoLabel,
+            ),
+        ] {
+            assert_eq!(
+                keyed(&path, predicate.clone()),
+                PartialIndexFilterApplication::NotApplicable(rejection),
+                "{predicate:?}"
+            );
+        }
     }
 }

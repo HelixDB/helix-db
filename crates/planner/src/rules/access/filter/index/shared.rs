@@ -7,7 +7,7 @@ use super::super::atoms::{
 use super::super::labels::access_filter_label;
 use super::contracts::{
     AccessFilterIndexApplication, AccessFilterIndexRejection, IndexedSourceCombination,
-    MissingAccessIndex, PartialIndexFilterRejection,
+    MissingAccessIndex, PartialIndexFilterApplication, PartialIndexFilterRejection,
 };
 use crate::{analysis, catalog, context, ir};
 
@@ -48,6 +48,10 @@ pub(super) trait AccessFilterIndexFamily {
     fn union_source(sources: Vec<Self::Source>) -> Self::Source;
     fn intersection_source(sources: Vec<Self::Source>) -> Self::Source;
     fn is_broad_source(source: &Self::Source) -> bool;
+    /// Whether `source` is one unique-index lookup of a single value that is
+    /// not null: it reads at most one candidate (a parameter bound to null
+    /// at runtime reads every record missing the property, still exactly).
+    fn is_unique_key_source(source: &Self::Source) -> bool;
     /// Union of index-only branch sets, each filtered by its own residual,
     /// or `None` when the branches do not satisfy that contract.
     fn branch_residual_union(
@@ -83,6 +87,85 @@ where
         IndexedSourceCombination::Unchanged => {
             AccessFilterIndexApplication::NotApplicable(AccessFilterIndexRejection::SourceUnchanged)
         }
+        IndexedSourceCombination::Keyed => {
+            AccessFilterIndexApplication::NotApplicable(AccessFilterIndexRejection::KeyedSource)
+        }
+    }
+}
+
+/// Drive a conjunction over a broad source by its unique key.
+///
+/// The first top-level conjunct that is a single-valued equality on a
+/// unique index (see [`AccessFilterIndexFamily::is_unique_key_source`])
+/// becomes the source, and every other conjunct its residual. That lookup
+/// reads at most one candidate, while an index set for another conjunct may
+/// read every matching record of the label, as a range scan does when it
+/// verifies each record in range. Conjuncts every label row satisfies are
+/// dropped.
+pub(super) fn unique_key_filter<F>(
+    path: &F::Path,
+    predicate: &helix_ast::expr::Predicate,
+    predicate_label: &analysis::FeasibleLabelScope,
+    indexes: &catalog::IndexCatalogSnapshot,
+    planner_limits: &context::PlannerLimits,
+) -> PartialIndexFilterApplication<F::Source>
+where
+    F: AccessFilterIndexFamily,
+{
+    fn conjuncts<'a>(
+        predicate: &'a helix_ast::expr::Predicate,
+        terms: &mut Vec<&'a helix_ast::expr::Predicate>,
+    ) {
+        match predicate {
+            helix_ast::expr::Predicate::And { predicates } => predicates
+                .iter()
+                .for_each(|predicate| conjuncts(predicate, terms)),
+            predicate => terms.push(predicate),
+        }
+    }
+
+    let source = F::path_source(path);
+    if !F::is_broad_source(source) {
+        return PartialIndexFilterApplication::NotApplicable(
+            PartialIndexFilterRejection::NoUniqueKey,
+        );
+    }
+    let Some(label) = access_filter_label(F::source_common_label(source), predicate_label) else {
+        return PartialIndexFilterApplication::NotApplicable(PartialIndexFilterRejection::NoLabel);
+    };
+    let mut terms = Vec::new();
+    conjuncts(predicate, &mut terms);
+    let Some((driver, key)) = terms.iter().enumerate().find_map(|(position, term)| {
+        let Ok(AccessFilterIndexAtom::Equality {
+            property,
+            domain: AccessEqualityDomain::One(value),
+        }) = super::super::atoms::access_filter_index_atom(term, planner_limits)
+        else {
+            return None;
+        };
+        let index = F::equality_index(indexes, &label, &property)?;
+        let key = F::equality_source(
+            index,
+            catalog::ScopedPropertyKey::new(label.clone(), property),
+            value,
+        );
+        F::is_unique_key_source(&key).then_some((position, key))
+    }) else {
+        return PartialIndexFilterApplication::NotApplicable(
+            PartialIndexFilterRejection::NoUniqueKey,
+        );
+    };
+    let residual = terms
+        .into_iter()
+        .enumerate()
+        .filter(|(position, term)| {
+            *position != driver && !analysis::predicate_is_tautological_for_label(term, &label)
+        })
+        .map(|(_, term)| term.clone())
+        .collect();
+    PartialIndexFilterApplication::Rewritten {
+        source: key,
+        residual: conjunction_plan(residual),
     }
 }
 
@@ -345,6 +428,8 @@ where
     })
 }
 
+/// Narrow `source` by `indexed`: replace a broad source, intersect a narrow
+/// one, and leave a unique-key source to evaluate the filter per candidate.
 pub(super) fn combine_indexed_filter_source<F>(
     source: &F::Source,
     indexed: F::Source,
@@ -354,6 +439,9 @@ where
 {
     if source == &indexed {
         return IndexedSourceCombination::Unchanged;
+    }
+    if F::is_unique_key_source(source) {
+        return IndexedSourceCombination::Keyed;
     }
     if F::is_broad_source(source) {
         IndexedSourceCombination::Rewritten(indexed)
