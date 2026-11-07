@@ -242,6 +242,7 @@ async fn other_family_targets_fail_closed() {
         planning_cache: Arc::new(VectorBuildCache::new(
             NonZeroU64::new(1 << 20).expect("positive"),
         )),
+        presearch_workers: None,
     };
     assert!(matches!(
         stage_active_effects(

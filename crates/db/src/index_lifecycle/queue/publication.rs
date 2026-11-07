@@ -351,6 +351,8 @@ pub(crate) struct VectorPublicationResources {
     pub(crate) simhasher_registry: Arc<SimHasherRegistry>,
     pub(crate) batch_reads: crate::batch_reads::BatchReads,
     pub(crate) planning_cache: Arc<VectorBuildCache>,
+    /// Workers scoring upcoming inserts beside the planner; none plans alone.
+    pub(crate) presearch_workers: Option<std::num::NonZeroUsize>,
 }
 
 /// Object storage and limits for immutable text split publication.

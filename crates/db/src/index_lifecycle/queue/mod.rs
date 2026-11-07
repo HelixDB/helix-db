@@ -293,6 +293,8 @@ mod overlay_tests;
 #[cfg(test)]
 mod planning_session_tests;
 #[cfg(test)]
+mod presearch_tests;
+#[cfg(test)]
 mod publication_tests;
 #[cfg(test)]
 mod recovery_tests;

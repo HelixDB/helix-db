@@ -172,6 +172,21 @@ pub(super) fn publisher_with_limits(
     limits: SearchIndexBatchLimits,
     text: ActiveTextMutationLimits,
 ) -> Arc<QueuePublisher> {
+    publisher_with_presearch(
+        db,
+        limits,
+        text,
+        crate::search::vector::default_presearch_workers(),
+    )
+}
+
+/// A [`publisher_with_limits`] publisher with exactly `presearch_workers`.
+pub(super) fn publisher_with_presearch(
+    db: &HelixDB,
+    limits: SearchIndexBatchLimits,
+    text: ActiveTextMutationLimits,
+    presearch_workers: Option<std::num::NonZeroUsize>,
+) -> Arc<QueuePublisher> {
     QueuePublisher::new(
         db.inner_db(),
         Arc::clone(db.index_operation_backlog()),
@@ -186,6 +201,7 @@ pub(super) fn publisher_with_limits(
                     .expect("the writer runs a publisher")
                     .planning_cache(),
             ),
+            presearch_workers,
         },
         limits,
         super::publication::TextPublicationResources {
