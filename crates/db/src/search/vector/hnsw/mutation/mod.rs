@@ -1360,18 +1360,9 @@ impl<D: Distance> VectorIndex<D> {
         mutation_cache: &'cache mut MutationOpCache<D>,
     ) -> Result<&'cache [NodeId], HelixDbError> {
         let row = MutationOpCache::<D>::node_row_id(layer, node_id);
-        if !mutation_cache.neighbor_rows.contains_key(&row) {
-            match mutation_cache.shared_neighbor_age(row) {
-                Some(GraphAge::Young) => {
-                    return Ok(mutation_cache.shared_neighbors(row));
-                }
-                Some(GraphAge::Old) => {
-                    let value = mutation_cache.shared_neighbor(row).clone();
-                    mutation_cache.install_loaded_neighbor(row, value);
-                    return Ok(mutation_cache.current_neighbors(row));
-                }
-                None => {}
-            }
+        if !mutation_cache.neighbor_rows.contains_key(&row) && mutation_cache.shares_neighbors(row)
+        {
+            return Ok(mutation_cache.shared_neighbors(row));
         }
         if mutation_cache.contains_neighbor(row) {
             mutation_cache
@@ -3136,33 +3127,26 @@ impl<D: Distance> MutationOpCache<D> {
 
     /// Returns whether a row is loaded, independently of whether it exists.
     pub(in crate::search::vector) fn contains_neighbor(&self, row: NeighborRowId) -> bool {
-        self.neighbor_rows.contains_key(&row) || self.shared_neighbor_age(row).is_some()
+        self.neighbor_rows.contains_key(&row) || self.shares_neighbors(row)
     }
 
-    /// Returns where a worker finds `row` in the shared graph.
-    fn shared_neighbor_age(&self, row: NeighborRowId) -> Option<GraphAge> {
+    /// Returns whether a worker finds `row` in the shared graph.
+    fn shares_neighbors(&self, row: NeighborRowId) -> bool {
         let SharedGraphAccess::ItemsAndNeighbors(graph) = &self.shared else {
-            return None;
+            return false;
         };
-        graph.neighbors(row).map(|(_, age)| age)
+        graph.holds_neighbors(row)
     }
 
-    /// Returns a row [`Self::shared_neighbor_age`] found.
-    fn shared_neighbor(&self, row: NeighborRowId) -> &NeighborRowValue {
+    /// Returns the neighbors of a row [`Self::shares_neighbors`] found.
+    fn shared_neighbors(&self, row: NeighborRowId) -> &[NodeId] {
         let SharedGraphAccess::ItemsAndNeighbors(graph) = &self.shared else {
             unreachable!("only a worker finds a shared neighbor row");
         };
-        let (value, _) = graph
-            .neighbors(row)
-            .expect("the shared graph is immutable during an attempt");
-        value
-    }
-
-    /// Returns the neighbors of a row [`Self::shared_neighbor_age`] found.
-    fn shared_neighbors(&self, row: NeighborRowId) -> &[NodeId] {
-        match self.shared_neighbor(row) {
-            NeighborRowValue::KnownAbsent => &[],
-            NeighborRowValue::Present(neighbors) => neighbors.as_slice(),
+        match graph.neighbors(row) {
+            Some(NeighborRowValue::Present(neighbors)) => neighbors.as_slice(),
+            Some(NeighborRowValue::KnownAbsent) => &[],
+            None => unreachable!("the shared graph is immutable during an attempt"),
         }
     }
 
@@ -3429,20 +3413,13 @@ impl<D: Distance> MutationOpCache<D> {
             .map(|cached| cached.value.clone())
     }
 
-    /// Returns one item of the shared graph. A worker keeps what the next
-    /// rotation would drop, so its reads refresh the graph.
-    fn shared_item(&mut self, layer: u16, node_id: NodeId) -> Option<Arc<Item<'static, D>>> {
-        let (graph, worker) = match &self.shared {
+    /// Returns one item of the shared graph.
+    fn shared_item(&self, layer: u16, node_id: NodeId) -> Option<Arc<Item<'static, D>>> {
+        let graph = match &self.shared {
             SharedGraphAccess::None => return None,
-            SharedGraphAccess::Items(graph) => (graph, false),
-            SharedGraphAccess::ItemsAndNeighbors(graph) => (graph, true),
+            SharedGraphAccess::Items(graph) | SharedGraphAccess::ItemsAndNeighbors(graph) => graph,
         };
-        let (item, age) = graph.item(layer, node_id)?;
-        let (value, payload_bytes) = (Arc::clone(&item.value), item.payload_bytes);
-        if worker && age == GraphAge::Old {
-            self.put_item(layer, node_id, Some(Arc::clone(&value)), payload_bytes);
-        }
-        Some(value)
+        graph.item(layer, node_id).map(|item| Arc::clone(&item.value))
     }
 
     /// Installs or replaces one decoded item state.
@@ -4152,12 +4129,15 @@ impl<D: Distance> VectorBuildSession<D> {
             }
         };
         graph.forget(changed, &rows);
-        let budget = generation_budget(self.max_payload_bytes);
-        if let Some(retired) = graph.absorb(overlays, changed, &rows, budget) {
-            free_in_background(retired, budget);
+        for overlay in overlays {
+            graph.absorb(overlay, changed, &rows);
         }
         if let Some(planned) = self.caches.get(&identity) {
             graph.refresh(planned, changed, &rows);
+        }
+        let budget = shared_graph_budget(self.max_payload_bytes);
+        if let Some(retired) = graph.make_room(budget) {
+            free_in_background(retired, budget / 8);
         }
         self.graph = SessionGraph::Resting { identity, graph };
     }
@@ -4300,7 +4280,7 @@ impl<D: Distance> VectorBuildSession<D> {
         max_bytes: usize,
         txn: Option<&MeasuredVectorTransaction<'_>>,
     ) -> Result<(), HelixDbError> {
-        if self.graph.charged_bytes() > shared_graph_budget(max_bytes) {
+        if self.graph.charged_bytes() > shared_graph_limit(max_bytes) {
             self.retire_graph();
         }
         loop {
@@ -4606,7 +4586,7 @@ mod presearch;
 pub(crate) use presearch::{AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS};
 pub(crate) use presearch::{default_presearch_workers, DistanceMemo, PresearchJob, PresearchRun};
 use presearch::{
-    generation_budget, overlay_budget, shared_graph_budget, BeamDistances, GraphAge, SharedGraph,
+    overlay_budget, shared_graph_budget, shared_graph_limit, BeamDistances, SharedGraph,
     SharedGraphAccess,
 };
 

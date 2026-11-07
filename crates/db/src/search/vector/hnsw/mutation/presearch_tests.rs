@@ -138,15 +138,9 @@ fn absorbing_keeps_only_unchanged_positive_state() {
     read.install_loaded_neighbor(row(0, 5), NeighborRowValue::KnownAbsent);
 
     let mut graph = Graph::default();
-    let retired = graph.absorb(
-        &[read],
-        &nodes(&[2]),
-        &BTreeSet::from([row(0, 5)]),
-        usize::MAX,
-    );
-    assert!(retired.is_none());
+    graph.absorb(&read, &nodes(&[2]), &BTreeSet::from([row(0, 5)]));
 
-    assert_eq!(graph.item(0, 1).map(|(_, age)| age), Some(GraphAge::Young));
+    assert!(graph.item(0, 1).is_some());
     assert!(graph.item(0, 2).is_none(), "a changed node stays out");
     assert!(
         graph.item(0, 3).is_none(),
@@ -160,19 +154,13 @@ fn absorbing_keeps_only_unchanged_positive_state() {
 }
 
 #[test]
-fn forgetting_reaches_every_layer_of_both_generations() {
+fn forgetting_reaches_every_layer() {
     let mut read = overlay();
     read.put_item(0, 1, Some(item(1.0)), 16);
     read.put_item(2, 1, Some(item(1.0)), 16);
     read.install_loaded_neighbor(row(2, 1), NeighborRowValue::KnownAbsent);
     let mut graph = Graph::default();
-    let _ = graph.absorb(&[read], &nodes(&[]), &BTreeSet::new(), usize::MAX);
-    // Age it, then read the same node again.
-    let mut read = overlay();
-    read.put_item(1, 1, Some(item(1.0)), 16);
-    let _ = graph.absorb(&[read], &nodes(&[]), &BTreeSet::new(), 0);
-    assert_eq!(graph.item(0, 1).map(|(_, age)| age), Some(GraphAge::Old));
-    assert_eq!(graph.item(1, 1).map(|(_, age)| age), Some(GraphAge::Young));
+    graph.absorb(&read, &nodes(&[]), &BTreeSet::new());
 
     graph.forget(&nodes(&[1]), &BTreeSet::new());
 
@@ -181,55 +169,112 @@ fn forgetting_reaches_every_layer_of_both_generations() {
     assert!(graph.neighbors(row(2, 1)).is_none());
 }
 
-#[test]
-fn a_full_generation_ages_and_the_next_rotation_retires_it() {
-    let budget = 2 * (16 + VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES);
-    let absorb_one = |graph: &mut Graph, node_id| {
-        let mut read = overlay();
+/// A graph of `count` single-layer items, every one unread.
+fn graph_of(count: u64) -> Graph {
+    let mut read = overlay();
+    for node_id in 0..count {
         read.put_item(0, node_id, Some(item(1.0)), 16);
-        graph
-            .absorb(&[read], &nodes(&[]), &BTreeSet::new(), budget)
-            .is_some()
-    };
+    }
     let mut graph = Graph::default();
-    assert!(!absorb_one(&mut graph, 1));
-    assert!(!absorb_one(&mut graph, 2));
-    assert!(absorb_one(&mut graph, 3), "the third read would overflow");
+    graph.absorb(&read, &nodes(&[]), &BTreeSet::new());
+    graph
+}
+
+#[test]
+fn eviction_waits_for_the_budget_and_overshoots_it() {
+    let one = item_charge(16);
+    let mut graph = graph_of(8);
+    assert!(graph.make_room(8 * one).is_none(), "the budget still holds");
+
+    assert!(graph.make_room(7 * one).is_some());
+    assert_eq!(graph.charged_bytes(), 6 * one, "an eighth below the budget");
+}
+
+#[test]
+fn eviction_spares_what_workers_read_since_the_last_one() {
+    let one = item_charge(16);
+    let mut graph = graph_of(8);
+    let read = [1, 3, 5, 7];
+    for node_id in read {
+        assert!(graph.item(0, node_id).is_some());
+    }
+
+    assert!(graph.make_room(5 * one).is_some());
+
+    for node_id in read {
+        assert!(
+            graph.items.contains_key(&(0, node_id)),
+            "{node_id} was read"
+        );
+    }
+    assert_eq!(graph.items.len(), 4);
+}
+
+#[test]
+fn a_second_sweep_evicts_even_what_was_read() {
+    let one = item_charge(16);
+    let mut graph = graph_of(8);
+    for node_id in 0..8 {
+        assert!(graph.item(0, node_id).is_some());
+    }
+
+    assert!(graph.make_room(4 * one).is_some());
+
+    assert!(graph.charged_bytes() <= 4 * one - one / 2);
+}
+
+#[test]
+fn eviction_counts_neighbor_rows_too() {
+    let mut read = overlay();
+    for node_id in 0..8 {
+        read.install_loaded_neighbor(row(0, node_id), NeighborRowValue::KnownAbsent);
+    }
+    let mut graph = Graph::default();
+    graph.absorb(&read, &nodes(&[]), &BTreeSet::new());
+    let one = neighbor_charge(&NeighborRowValue::KnownAbsent);
+
+    assert!(graph.make_room(4 * one).is_some());
+
+    assert!(graph.charged_bytes() <= 4 * one - one / 2);
     assert_eq!(
-        graph.item(1 - 1, 1).map(|(_, age)| age),
-        Some(GraphAge::Old)
+        graph.charged_bytes(),
+        graph.neighbors.len() * one,
+        "charges follow what left"
     );
-    assert_eq!(graph.item(0, 3).map(|(_, age)| age), Some(GraphAge::Young));
-    assert!(graph.charged_bytes() <= shared_graph_budget(budget * 8 / 3));
 }
 
 proptest! {
-    /// Charges stay exact through any mix of reads, ages, and forgets, because
-    /// session eviction trusts them.
+    /// Charges stay exact through any mix of reads, forgets, and evictions,
+    /// because session eviction trusts them.
     #[test]
     fn charges_always_equal_what_the_graph_holds(
-        steps in proptest::collection::vec((0_u64..6, 0_u16..3, any::<bool>(), any::<bool>()), 1..64),
+        steps in proptest::collection::vec((0_u64..6, 0_u16..3, 0_u8..4), 1..64),
         budget in 300_usize..4_000,
     ) {
         let mut graph = Graph::default();
-        for (node_id, layer, is_read, with_row) in steps {
-            if is_read {
-                let mut read = overlay();
-                read.put_item(layer, node_id, Some(item(1.0)), 16);
-                if with_row {
+        for (node_id, layer, step) in steps {
+            match step {
+                0 => {
+                    let mut read = overlay();
+                    read.put_item(layer, node_id, Some(item(1.0)), 16);
                     read.install_loaded_neighbor(row(layer, node_id), NeighborRowValue::KnownAbsent);
+                    graph.absorb(&read, &nodes(&[]), &BTreeSet::new());
                 }
-                let _ = graph.absorb(&[read], &nodes(&[]), &BTreeSet::new(), budget);
-            } else {
-                graph.forget(&nodes(&[node_id]), &BTreeSet::new());
+                1 => graph.forget(&nodes(&[node_id]), &BTreeSet::new()),
+                2 => {
+                    let _ = graph.item(layer, node_id);
+                }
+                _ => {
+                    let _ = graph.make_room(budget);
+                    prop_assert!(graph.charged_bytes() <= budget);
+                }
             }
-            let charged = [&graph.young, &graph.old]
-                .into_iter()
-                .map(|generation| {
-                    generation.items.len() * (16 + VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES)
-                        + generation.neighbors.values().map(neighbor_charge).sum::<usize>()
-                })
-                .sum::<usize>();
+            let charged = graph.items.len() * item_charge(16)
+                + graph
+                    .neighbors
+                    .values()
+                    .map(|shared| neighbor_charge(&shared.value))
+                    .sum::<usize>();
             prop_assert_eq!(graph.charged_bytes(), charged);
         }
     }
@@ -360,14 +405,13 @@ fn an_overlay_stays_within_its_payload_budget() {
 }
 
 #[test]
-fn a_worker_reads_rows_and_keeps_only_what_the_next_rotation_drops() {
+fn a_worker_reads_the_graph_without_copying_it() {
     let mut read = overlay();
     read.put_item(0, 1, Some(item(1.0)), 16);
     read.install_loaded_neighbor(row(0, 1), NeighborRowValue::KnownAbsent);
     let mut graph = Graph::default();
-    let _ = graph.absorb(&[read], &nodes(&[]), &BTreeSet::new(), usize::MAX);
+    graph.absorb(&read, &nodes(&[]), &BTreeSet::new());
 
-    let graph = Arc::new(graph);
     let upper = Connections::try_new(4).unwrap();
     let layer0 = Layer0Connections::try_new(8, upper).unwrap();
     let limits = MutationDegreeLimits {
@@ -375,25 +419,13 @@ fn a_worker_reads_rows_and_keeps_only_what_the_next_rotation_drops() {
         conventional_layer0: layer0,
         layer0,
     };
-    let mut worker = Overlay::shared_overlay(limits, Arc::clone(&graph));
+    let mut worker = Overlay::shared_overlay(limits, Arc::new(graph));
     assert!(worker.item(0, 1).flatten().is_some());
     assert!(worker.contains_neighbor(row(0, 1)));
-    assert_eq!(worker.item_count(), 0, "a young entry needs no copy");
+    assert_eq!(worker.item_count(), 0);
+    assert_eq!(worker.neighbor_count(), 0);
     worker.release_shared_graph();
     assert!(!worker.contains_neighbor(row(0, 1)));
-
-    let mut aged = Graph::default();
-    let mut read = overlay();
-    read.put_item(0, 1, Some(item(1.0)), 16);
-    let _ = aged.absorb(&[read], &nodes(&[]), &BTreeSet::new(), usize::MAX);
-    let _ = aged.absorb(&[overlay()], &nodes(&[]), &BTreeSet::new(), 0);
-    let mut worker = Overlay::shared_overlay(limits, Arc::new(aged));
-    assert!(worker.item(0, 1).flatten().is_some());
-    assert_eq!(
-        worker.item_count(),
-        1,
-        "an old entry stays for another round"
-    );
 }
 
 #[test]
@@ -402,7 +434,7 @@ fn the_planner_reads_items_but_never_shared_rows() {
     read.put_item(0, 1, Some(item(1.0)), 16);
     read.install_loaded_neighbor(row(0, 1), NeighborRowValue::KnownAbsent);
     let mut graph = Graph::default();
-    let _ = graph.absorb(&[read], &nodes(&[]), &BTreeSet::new(), usize::MAX);
+    graph.absorb(&read, &nodes(&[]), &BTreeSet::new());
 
     let mut planner = overlay();
     planner.shared = SharedGraphAccess::Items(Arc::new(graph));
@@ -596,7 +628,7 @@ fn settling_refreshes_the_graph_from_what_the_attempt_planned() {
     assert_eq!(graph.max_layer, 2);
     assert!(graph.neighbors(row(0, 1)).is_some(), "with its own row");
     assert_eq!(
-        graph.neighbors(row(0, 2)).map(|(value, _)| value),
+        graph.neighbors(row(0, 2)),
         Some(&NeighborRowValue::Present(present)),
         "a changed row comes back current"
     );

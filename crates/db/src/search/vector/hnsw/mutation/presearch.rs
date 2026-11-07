@@ -30,7 +30,7 @@
 //! holds what it reads beyond that in a private overlay. Between attempts the
 //! graph folds in those reads and everything the attempt changed, so workers
 //! rarely touch storage. It is charged to the session's byte budget and evicts
-//! by whole generations, so reads never write recency.
+//! by second chance, so a read costs one relaxed atomic at most.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -68,10 +68,11 @@ const PRESEARCH_MAX_WORKERS: usize = 2;
 const PRESEARCH_WINDOW_PER_WORKER: usize = 6;
 /// Beam distances a memo holds without growing, for the default `ef`.
 const MEMO_INITIAL_CAPACITY: usize = 4_096;
-/// Eighths of a session's budget one [`SharedGraph`] generation may charge.
-const GENERATION_BUDGET_EIGHTHS: usize = 3;
+/// Eighths of a session's budget a settled [`SharedGraph`] may charge. Most of
+/// it: the planner reads items from the graph, so its own cache needs far less.
+const SHARED_GRAPH_BUDGET_EIGHTHS: usize = 6;
 /// Eighths of a session's budget past which a [`SharedGraph`] is dropped.
-const SHARED_GRAPH_BUDGET_EIGHTHS: usize = 7;
+const SHARED_GRAPH_LIMIT_EIGHTHS: usize = 7;
 /// Eighths of a session's budget that all overlays of one attempt may hold.
 const OVERLAY_BUDGET_EIGHTHS: usize = 1;
 
@@ -170,38 +171,26 @@ impl BeamDistances {
     }
 }
 
-/// Whether a [`SharedGraph`] entry survives the next rotation untouched.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GraphAge {
-    /// In the generation entries enter.
-    Young,
-    /// In the generation the next rotation drops.
-    Old,
-}
-
 /// One decoded item a [`SharedGraph`] retains.
 #[derive(Debug)]
 pub(super) struct SharedItem<D: Distance> {
     pub(super) value: Arc<Item<'static, D>>,
     pub(super) payload_bytes: usize,
+    /// Read since the last eviction.
+    referenced: AtomicBool,
 }
 
-/// One generation of retained graph state.
+/// One neighbor row a [`SharedGraph`] retains.
 #[derive(Debug)]
-struct GraphGeneration<D: Distance> {
-    items: foldhash::HashMap<(u16, NodeId), SharedItem<D>>,
-    neighbors: foldhash::HashMap<NeighborRowId, NeighborRowValue>,
-    charged_bytes: usize,
+struct SharedNeighbors {
+    value: NeighborRowValue,
+    /// Read since the last eviction.
+    referenced: AtomicBool,
 }
 
-impl<D: Distance> Default for GraphGeneration<D> {
-    fn default() -> Self {
-        Self {
-            items: foldhash::HashMap::default(),
-            neighbors: foldhash::HashMap::default(),
-            charged_bytes: 0,
-        }
-    }
+/// Bytes charged for one retained item.
+const fn item_charge(payload_bytes: usize) -> usize {
+    payload_bytes + VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES
 }
 
 /// Bytes charged for one retained neighbor row.
@@ -213,45 +202,26 @@ fn neighbor_charge(value: &NeighborRowValue) -> usize {
     links * size_of::<NodeId>() + VECTOR_BUILD_SESSION_NEIGHBOR_OVERHEAD_BYTES
 }
 
-impl<D: Distance> GraphGeneration<D> {
-    fn forget_item(&mut self, key: (u16, NodeId)) {
-        let Some(item) = self.items.remove(&key) else {
-            return;
-        };
-        self.charged_bytes -= item.payload_bytes + VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES;
-    }
-
-    fn forget_neighbors(&mut self, row: NeighborRowId) {
-        let Some(value) = self.neighbors.remove(&row) else {
-            return;
-        };
-        self.charged_bytes -= neighbor_charge(&value);
-    }
-
-    fn keep_item(&mut self, key: (u16, NodeId), item: SharedItem<D>) {
-        self.charged_bytes += item.payload_bytes + VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES;
-        if let Some(previous) = self.items.insert(key, item) {
-            self.charged_bytes -= previous.payload_bytes + VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES;
-        }
-    }
-
-    fn keep_neighbors(&mut self, row: NeighborRowId, value: NeighborRowValue) {
-        self.charged_bytes += neighbor_charge(&value);
-        if let Some(previous) = self.neighbors.insert(row, value) {
-            self.charged_bytes -= neighbor_charge(&previous);
-        }
+/// Marks an entry read. Most reads find it marked, so they write nothing and
+/// workers do not fight over its cache line.
+#[inline]
+fn mark_referenced(referenced: &AtomicBool) {
+    if !referenced.load(Ordering::Relaxed) {
+        referenced.store(true, Ordering::Relaxed);
     }
 }
 
 /// Decoded graph state workers read without locks.
 ///
-/// Immutable while an attempt runs. Entries hold the state committed at the
-/// session's checkpoint, so everything an attempt changes is forgotten as it
-/// settles, and the graph lives and dies with its session's reuse.
+/// Immutable while an attempt runs, apart from its second-chance bits. Entries
+/// hold the state at the session's checkpoint, so settling an attempt updates
+/// everything it changed, and the graph lives and dies with its session's
+/// reuse.
 #[derive(Debug)]
 pub(in crate::search::vector) struct SharedGraph<D: Distance> {
-    young: GraphGeneration<D>,
-    old: GraphGeneration<D>,
+    items: foldhash::HashMap<(u16, NodeId), SharedItem<D>>,
+    neighbors: foldhash::HashMap<NeighborRowId, SharedNeighbors>,
+    charged_bytes: usize,
     /// Highest layer retained, bounding what forgetting one node visits.
     max_layer: u16,
 }
@@ -259,111 +229,125 @@ pub(in crate::search::vector) struct SharedGraph<D: Distance> {
 impl<D: Distance> Default for SharedGraph<D> {
     fn default() -> Self {
         Self {
-            young: GraphGeneration::default(),
-            old: GraphGeneration::default(),
+            items: foldhash::HashMap::default(),
+            neighbors: foldhash::HashMap::default(),
+            charged_bytes: 0,
             max_layer: 0,
         }
     }
 }
 
 impl<D: Distance> SharedGraph<D> {
-    /// Returns one retained item and its generation.
-    pub(super) fn item(&self, layer: u16, node_id: NodeId) -> Option<(&SharedItem<D>, GraphAge)> {
-        let key = (layer, node_id);
-        self.young
-            .items
-            .get(&key)
-            .map(|item| (item, GraphAge::Young))
-            .or_else(|| self.old.items.get(&key).map(|item| (item, GraphAge::Old)))
+    /// Returns one retained item.
+    pub(super) fn item(&self, layer: u16, node_id: NodeId) -> Option<&SharedItem<D>> {
+        let item = self.items.get(&(layer, node_id))?;
+        mark_referenced(&item.referenced);
+        Some(item)
     }
 
-    /// Returns one retained neighbor row and its generation.
-    pub(super) fn neighbors(&self, row: NeighborRowId) -> Option<(&NeighborRowValue, GraphAge)> {
-        self.young
-            .neighbors
-            .get(&row)
-            .map(|value| (value, GraphAge::Young))
-            .or_else(|| {
-                self.old
-                    .neighbors
-                    .get(&row)
-                    .map(|value| (value, GraphAge::Old))
-            })
+    /// Returns whether a neighbor row is retained.
+    pub(super) fn holds_neighbors(&self, row: NeighborRowId) -> bool {
+        self.neighbors.contains_key(&row)
+    }
+
+    /// Returns one retained neighbor row.
+    pub(super) fn neighbors(&self, row: NeighborRowId) -> Option<&NeighborRowValue> {
+        let shared = self.neighbors.get(&row)?;
+        mark_referenced(&shared.referenced);
+        Some(&shared.value)
     }
 
     /// Returns the bytes charged to the session budget.
     pub(super) const fn charged_bytes(&self) -> usize {
-        self.young.charged_bytes + self.old.charged_bytes
+        self.charged_bytes
     }
 
-    /// Drops every state of `nodes`, and `rows`, in both generations.
+    fn forget_item(&mut self, key: (u16, NodeId)) {
+        let Some(item) = self.items.remove(&key) else {
+            return;
+        };
+        self.charged_bytes -= item_charge(item.payload_bytes);
+    }
+
+    fn forget_neighbors(&mut self, row: NeighborRowId) {
+        let Some(shared) = self.neighbors.remove(&row) else {
+            return;
+        };
+        self.charged_bytes -= neighbor_charge(&shared.value);
+    }
+
+    /// Keeps one item unread, so it must be read to survive an eviction.
+    fn keep_item(
+        &mut self,
+        key: (u16, NodeId),
+        value: Arc<Item<'static, D>>,
+        payload_bytes: usize,
+    ) {
+        self.max_layer = self.max_layer.max(key.0);
+        let item = SharedItem {
+            value,
+            payload_bytes,
+            referenced: AtomicBool::new(false),
+        };
+        self.charged_bytes += item_charge(payload_bytes);
+        if let Some(previous) = self.items.insert(key, item) {
+            self.charged_bytes -= item_charge(previous.payload_bytes);
+        }
+    }
+
+    /// Keeps one neighbor row unread.
+    fn keep_neighbors(&mut self, row: NeighborRowId, value: NeighborRowValue) {
+        self.max_layer = self.max_layer.max(row.storage_parts().0);
+        self.charged_bytes += neighbor_charge(&value);
+        let shared = SharedNeighbors {
+            value,
+            referenced: AtomicBool::new(false),
+        };
+        if let Some(previous) = self.neighbors.insert(row, shared) {
+            self.charged_bytes -= neighbor_charge(&previous.value);
+        }
+    }
+
+    /// Drops every state of `nodes`, and `rows`.
     pub(super) fn forget(
         &mut self,
         nodes: &foldhash::HashSet<NodeId>,
         rows: &BTreeSet<NeighborRowId>,
     ) {
-        for generation in [&mut self.young, &mut self.old] {
-            for &node_id in nodes {
-                for layer in 0..=self.max_layer {
-                    generation.forget_item((layer, node_id));
-                    generation.forget_neighbors(MutationOpCache::<D>::node_row_id(layer, node_id));
-                }
+        for &node_id in nodes {
+            for layer in 0..=self.max_layer {
+                self.forget_item((layer, node_id));
+                self.forget_neighbors(MutationOpCache::<D>::node_row_id(layer, node_id));
             }
-            for &row in rows {
-                generation.forget_neighbors(row);
-            }
+        }
+        for &row in rows {
+            self.forget_neighbors(row);
         }
     }
 
-    /// Folds what `overlays` read into the young generation, except what the
-    /// attempt changed.
-    ///
-    /// A generation that would pass `generation_budget` first ages, returning
-    /// the oldest entries for the caller to drop off the executor.
+    /// Keeps what `overlay` read, except what the attempt changed.
     pub(super) fn absorb(
         &mut self,
-        overlays: &[MutationOpCache<D>],
+        overlay: &MutationOpCache<D>,
         changed: &foldhash::HashSet<NodeId>,
         rows: &BTreeSet<NeighborRowId>,
-        generation_budget: usize,
-    ) -> Option<impl Send + use<D>> {
-        let incoming = overlays
-            .iter()
-            .map(|overlay| overlay.retained_payload_bytes)
-            .sum::<usize>();
-        let retired = (self.young.charged_bytes + incoming > generation_budget)
-            .then(|| core::mem::replace(&mut self.old, core::mem::take(&mut self.young)));
-        for overlay in overlays {
-            for (&(layer, node_id), cached) in overlay.items.iter() {
-                let Some(value) = cached.value.clone() else {
-                    continue;
-                };
-                if changed.contains(&node_id) {
-                    continue;
-                }
-                self.max_layer = self.max_layer.max(layer);
-                self.young.keep_item(
-                    (layer, node_id),
-                    SharedItem {
-                        value,
-                        payload_bytes: cached.payload_bytes,
-                    },
-                );
-            }
-            for (&row, cached) in overlay.neighbor_rows.iter() {
-                let (layer, entity) = row.storage_parts();
-                if changed.contains(&entity) || rows.contains(&row) {
-                    continue;
-                }
-                self.max_layer = self.max_layer.max(layer);
-                self.young.keep_neighbors(row, cached.current().clone());
+    ) {
+        for (&(layer, node_id), cached) in overlay.items.iter() {
+            let Some(value) = cached.value.clone() else {
+                continue;
+            };
+            if !changed.contains(&node_id) {
+                self.keep_item((layer, node_id), value, cached.payload_bytes);
             }
         }
-        retired
+        for (&row, cached) in overlay.neighbor_rows.iter() {
+            let (_, entity) = row.storage_parts();
+            if !changed.contains(&entity) && !rows.contains(&row) {
+                self.keep_neighbors(row, cached.current().clone());
+            }
+        }
     }
-}
 
-impl<D: Distance> SharedGraph<D> {
     /// Brings what an attempt changed up to date from `planned`, the cache it
     /// planned through, so workers need not read it back.
     ///
@@ -384,14 +368,7 @@ impl<D: Distance> SharedGraph<D> {
                 let Some(value) = cached.value.clone() else {
                     continue;
                 };
-                self.max_layer = self.max_layer.max(layer);
-                self.young.keep_item(
-                    (layer, node_id),
-                    SharedItem {
-                        value,
-                        payload_bytes: cached.payload_bytes,
-                    },
-                );
+                self.keep_item((layer, node_id), value, cached.payload_bytes);
             }
         }
         let node_rows = changed.iter().flat_map(|&node_id| {
@@ -402,22 +379,85 @@ impl<D: Distance> SharedGraph<D> {
             let Some(cached) = planned.neighbor_rows.get(&row) else {
                 continue;
             };
-            let (layer, _) = row.storage_parts();
-            self.max_layer = self.max_layer.max(layer);
-            self.young.keep_neighbors(row, cached.current().clone());
+            self.keep_neighbors(row, cached.current().clone());
         }
+    }
+
+    /// Evicts down from `budget` once it is exceeded, returning what left for
+    /// the caller to free off the executor.
+    ///
+    /// Second chance: an entry read since the last eviction loses its mark and
+    /// stays, an unread one goes. A second sweep, in which nothing is marked,
+    /// takes whatever is still needed. Eviction overshoots by an eighth, so
+    /// its `O(entries)` sweep runs only after that many bytes more arrive.
+    pub(super) fn make_room(&mut self, budget: usize) -> Option<RetiredGraphState<D>> {
+        if self.charged_bytes <= budget {
+            return None;
+        }
+        let mut excess = self.charged_bytes - (budget - budget / 8);
+        let mut retired = RetiredGraphState {
+            items: Vec::new(),
+            neighbors: Vec::new(),
+        };
+        for _sweep in 0..2 {
+            retired.items.extend(
+                self.items
+                    .extract_if(|_, item| {
+                        let evict = excess > 0 && !item.referenced.swap(false, Ordering::Relaxed);
+                        excess = excess.saturating_sub(if evict {
+                            item_charge(item.payload_bytes)
+                        } else {
+                            0
+                        });
+                        evict
+                    })
+                    .map(|(_, item)| item),
+            );
+            retired.neighbors.extend(
+                self.neighbors
+                    .extract_if(|_, shared| {
+                        let evict = excess > 0 && !shared.referenced.swap(false, Ordering::Relaxed);
+                        excess = excess.saturating_sub(if evict {
+                            neighbor_charge(&shared.value)
+                        } else {
+                            0
+                        });
+                        evict
+                    })
+                    .map(|(_, shared)| shared),
+            );
+        }
+        self.charged_bytes -= retired
+            .items
+            .iter()
+            .map(|item| item_charge(item.payload_bytes))
+            .chain(
+                retired
+                    .neighbors
+                    .iter()
+                    .map(|shared| neighbor_charge(&shared.value)),
+            )
+            .sum::<usize>();
+        Some(retired)
     }
 }
 
-/// Bytes one generation may charge under a session's budget.
-pub(super) const fn generation_budget(max_payload_bytes: usize) -> usize {
-    max_payload_bytes / 8 * GENERATION_BUDGET_EIGHTHS
+/// What one eviction took out of a [`SharedGraph`].
+#[derive(Debug)]
+pub(super) struct RetiredGraphState<D: Distance> {
+    items: Vec<SharedItem<D>>,
+    neighbors: Vec<SharedNeighbors>,
 }
 
-/// Bytes a [`SharedGraph`] may charge at all under a session's budget: two
-/// generations, and the last attempt's changes on top of the young one.
+/// Bytes a settled [`SharedGraph`] may charge under a session's budget.
 pub(super) const fn shared_graph_budget(max_payload_bytes: usize) -> usize {
     max_payload_bytes / 8 * SHARED_GRAPH_BUDGET_EIGHTHS
+}
+
+/// Bytes past which a session drops its [`SharedGraph`]: more than settling
+/// leaves, so only a budget that shrank since then reaches it.
+pub(super) const fn shared_graph_limit(max_payload_bytes: usize) -> usize {
+    max_payload_bytes / 8 * SHARED_GRAPH_LIMIT_EIGHTHS
 }
 
 /// Bytes all overlays of one attempt may hold under a session's budget.
