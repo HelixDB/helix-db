@@ -61,6 +61,10 @@ pub(crate) struct Owned {
     raw: DbTransaction,
     tracking: Option<Box<read_tracking::Tracker>>,
     merges: Option<Box<merges::Tracker>>,
+    /// Read calls on this transaction, for round-trip contracts. The backend
+    /// resolves a key with staged merges in a multi-get by its own point get.
+    #[cfg(test)]
+    reads: std::sync::atomic::AtomicUsize,
 }
 
 impl Owned {
@@ -83,12 +87,20 @@ impl Owned {
             raw,
             tracking,
             merges,
+            #[cfg(test)]
+            reads: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     /// The sequence of the snapshot this transaction reads.
     pub(crate) fn snapshot_sequence(&self) -> u64 {
         self.raw.seqnum()
+    }
+
+    /// Read calls made on this transaction.
+    #[cfg(test)]
+    pub(crate) fn storage_reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Commit the request's writes. Called only inside the finite commit
@@ -102,6 +114,8 @@ impl Owned {
             raw,
             tracking,
             merges,
+            #[cfg(test)]
+                reads: _,
         } = self;
         let result = raw
             .commit_with_options(&slatedb::config::WriteOptions {
@@ -156,6 +170,13 @@ pub(crate) trait ReadSource: Send + Sync + sealed::Sealed {
 impl ReadSource for Owned {
     fn read_context(&self) -> ReadContext<'_> {
         ReadContext(self.mutation_view())
+    }
+
+    #[cfg(test)]
+    fn before_read(&self, _: ReadKind) -> std::result::Result<(), slatedb::Error> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 }
 

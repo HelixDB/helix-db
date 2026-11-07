@@ -123,7 +123,14 @@ async fn storage_helpers_fail_cleanly_across_admission_shortfalls() {
                         .await
                     }
                     (relational::Entity::Node(id), Operation::Delete) => {
-                        ctx.delete_node(&txn, id, &mut indexes).await
+                        ctx.delete_elements::<crate::HelixDbError>(
+                            &txn,
+                            &[],
+                            &[id],
+                            |_| Ok(()),
+                            &mut indexes,
+                        )
+                        .await
                     }
                     (relational::Entity::Relationship(_), Operation::Store) => {
                         ctx.store_edge(
