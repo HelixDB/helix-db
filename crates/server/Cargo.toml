@@ -21,7 +21,7 @@ prost = "0.14.3"
 reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "62758d48b47bef239d8b7af2e02bcd44ae96791e" }
+slatedb = { git = "https://github.com/HelixDB/slatedb.git", rev = "d4416622052f0593c2a5cd5fdac4f6381adaad87" }
 simd-json = { version = "0.18.1", default-features = false, features = [
     "runtime-detection",
     "serde_impl",

@@ -199,7 +199,28 @@ pub(crate) trait Mutation: DbReadOps + Send + Sync + sealed::Sealed {
         self.mutation_view().raw.delete(key)
     }
 
-    #[cfg(test)]
+    /// Reads distinct `keys` from this transaction's view, its own writes
+    /// included, without adding a conflict dependency on them. A caller must
+    /// show a concurrent change to these rows cannot invalidate its decision,
+    /// or register the dependency later through [`Self::mark_read`]. This is
+    /// a graph existence read, so vector measurement hooks do not see it.
+    fn read_without_dependency<'a>(
+        &'a self,
+        keys: &'a [Bytes],
+    ) -> call::Read<'a, Vec<Option<Bytes>>> {
+        let view = self.mutation_view();
+        call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+            let _memory = view
+                .tracking
+                .map(|tracker| tracker.reserve(keys.len().saturating_mul(size_of::<Bytes>())))
+                .transpose()
+                .map_err(storage_error)?;
+            view.raw.multi_get_untracked(keys).await
+        })
+    }
+
+    /// Adds `keys` to the conflict dependencies, exactly as reading them at
+    /// the transaction's snapshot would have.
     fn mark_read<K: AsRef<[u8]>, I: IntoIterator<Item = K>>(
         &self,
         keys: I,

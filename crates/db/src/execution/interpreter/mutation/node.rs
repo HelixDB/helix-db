@@ -27,6 +27,10 @@ pub(super) struct ObservedNodeExistence {
 }
 
 impl ObservedNodeExistence {
+    pub(super) fn contains(&self, node_id: u64) -> bool {
+        self.present.contains(&node_id)
+    }
+
     pub(super) fn require(&self, node_id: u64) -> Result<()> {
         if self.present.contains(&node_id) {
             Ok(())
@@ -347,32 +351,47 @@ impl<'db> ExecutionContext<'db> {
         })
     }
 
+    /// One read of which `node_ids` exist in the transaction's view, its own
+    /// writes included, taking no read dependency on their rows. The caller
+    /// must stage an adjacency merge on each node it relies on, or record the
+    /// read so commit restores the dependency: see `ExistenceReads`.
     pub(super) async fn observe_node_existence(
         &self,
         txn: &impl crate::transaction::Mutation,
         node_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedNodeExistence> {
-        let node_ids = node_ids.into_iter().collect::<BTreeSet<_>>();
-        let keys = node_ids
-            .iter()
-            .map(|node_id| {
-                self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-                    *node_id,
-                )))
-            })
-            .collect::<Vec<_>>();
-        let values = if keys.is_empty() {
-            Vec::new()
-        } else {
-            txn.multi_get(&keys).await?
-        };
-        let mut present = BTreeSet::new();
-        for ((node_id, key), value) in node_ids.into_iter().zip(keys).zip(values) {
-            if value.is_some() || txn.get(&key).await?.is_some() {
-                present.insert(node_id);
-            }
+        let requested = super::observations::RowKeys::new(
+            node_ids,
+            super::observations::Kind::Nodes,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+        )?;
+        if requested.ids.is_empty() {
+            return Ok(ObservedNodeExistence {
+                present: BTreeSet::new(),
+            });
         }
-        Ok(ObservedNodeExistence { present })
+        let request = crate::query_resources::properties::ReadRequest::new(
+            requested.keys.len(),
+            self.row_memory.as_ref(),
+        )?;
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: requested.keys.len(),
+                ..Default::default()
+            })
+        });
+        let values = request.attach(txn.read_without_dependency(&requested.keys).await?)?;
+        Ok(ObservedNodeExistence {
+            present: requested
+                .ids
+                .iter()
+                .copied()
+                .zip(values)
+                .filter_map(|(id, value)| value.map(|_| id))
+                .collect(),
+        })
     }
 
     pub(super) async fn delete_node(
