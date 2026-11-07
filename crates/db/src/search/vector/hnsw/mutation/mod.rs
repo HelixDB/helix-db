@@ -316,7 +316,7 @@ pub(in crate::search::vector) fn select_layer0_neighbor_prefetch_targets<D: Dist
 
     for &(node_id, _) in ranked.iter() {
         let row = MutationOpCache::<D>::node_row_id(0, node_id);
-        if targets.contains(&node_id) || mutation_cache.contains_neighbor(row) {
+        if targets.contains(&node_id) || mutation_cache.serves_neighbor(row) {
             continue;
         }
         targets.push(node_id);
@@ -1360,9 +1360,29 @@ impl<D: Distance> VectorIndex<D> {
         mutation_cache: &'cache mut MutationOpCache<D>,
     ) -> Result<&'cache [NodeId], HelixDbError> {
         let row = MutationOpCache::<D>::node_row_id(layer, node_id);
-        if !mutation_cache.neighbor_rows.contains_key(&row) && mutation_cache.shares_neighbors(row)
-        {
-            return Ok(mutation_cache.shared_neighbors(row));
+        if !mutation_cache.contains_neighbor(row) {
+            // Decided before borrowing for the return, which the planner's
+            // install must not overlap.
+            let load = match mutation_cache.shared_row(row) {
+                SharedRow::Absent => None,
+                SharedRow::Borrowed(_) => Some(None),
+                SharedRow::Loaded(value) => Some(Some(value)),
+            };
+            match load {
+                None => {}
+                Some(None) => {
+                    let SharedRow::Borrowed(value) = mutation_cache.shared_row(row) else {
+                        unreachable!("the shared graph is fixed during an attempt");
+                    };
+                    return Ok(match value {
+                        NeighborRowValue::KnownAbsent => &[],
+                        NeighborRowValue::Present(neighbors) => neighbors.as_slice(),
+                    });
+                }
+                Some(Some(value)) => {
+                    mutation_cache.install_loaded_neighbor(row, value);
+                }
+            }
         }
         if mutation_cache.contains_neighbor(row) {
             mutation_cache
@@ -3127,26 +3147,37 @@ impl<D: Distance> MutationOpCache<D> {
 
     /// Returns whether a row is loaded, independently of whether it exists.
     pub(in crate::search::vector) fn contains_neighbor(&self, row: NeighborRowId) -> bool {
-        self.neighbor_rows.contains_key(&row) || self.shares_neighbors(row)
+        self.neighbor_rows.contains_key(&row)
     }
 
-    /// Returns whether a worker finds `row` in the shared graph.
-    fn shares_neighbors(&self, row: NeighborRowId) -> bool {
-        let SharedGraphAccess::ItemsAndNeighbors(graph) = &self.shared else {
-            return false;
-        };
-        graph.holds_neighbors(row)
+    /// Returns whether a read of `row` needs no storage: it is loaded, or the
+    /// shared graph serves it.
+    pub(in crate::search::vector) fn serves_neighbor(&self, row: NeighborRowId) -> bool {
+        self.contains_neighbor(row)
+            || match &self.shared {
+                SharedGraphAccess::None => false,
+                SharedGraphAccess::Worker(graph) => graph.holds_neighbors(row),
+                SharedGraphAccess::Planner {
+                    graph,
+                    changed_rows,
+                } => !changed_rows.contains(&row) && graph.holds_neighbors(row),
+            }
     }
 
-    /// Returns the neighbors of a row [`Self::shares_neighbors`] found.
-    fn shared_neighbors(&self, row: NeighborRowId) -> &[NodeId] {
-        let SharedGraphAccess::ItemsAndNeighbors(graph) = &self.shared else {
-            unreachable!("only a worker finds a shared neighbor row");
-        };
-        match graph.neighbors(row) {
-            Some(NeighborRowValue::Present(neighbors)) => neighbors.as_slice(),
-            Some(NeighborRowValue::KnownAbsent) => &[],
-            None => unreachable!("the shared graph is immutable during an attempt"),
+    /// Returns where the shared graph serves an unloaded `row`.
+    fn shared_row(&self, row: NeighborRowId) -> SharedRow<'_> {
+        match &self.shared {
+            SharedGraphAccess::None => SharedRow::Absent,
+            SharedGraphAccess::Worker(graph) => graph
+                .neighbors(row)
+                .map_or(SharedRow::Absent, SharedRow::Borrowed),
+            SharedGraphAccess::Planner {
+                graph,
+                changed_rows,
+            } => match graph.neighbors(row) {
+                Some(value) if !changed_rows.contains(&row) => SharedRow::Loaded(value.clone()),
+                Some(_) | None => SharedRow::Absent,
+            },
         }
     }
 
@@ -3155,7 +3186,7 @@ impl<D: Distance> MutationOpCache<D> {
         let mut overlay = Self::with_degree_limits(limits.layer0.get(), limits.upper.get())
             .expect("validated degree limits build a cache")
             .into_build_session_cache();
-        overlay.shared = SharedGraphAccess::ItemsAndNeighbors(graph);
+        overlay.shared = SharedGraphAccess::Worker(graph);
         overlay
     }
 
@@ -3417,9 +3448,11 @@ impl<D: Distance> MutationOpCache<D> {
     fn shared_item(&self, layer: u16, node_id: NodeId) -> Option<Arc<Item<'static, D>>> {
         let graph = match &self.shared {
             SharedGraphAccess::None => return None,
-            SharedGraphAccess::Items(graph) | SharedGraphAccess::ItemsAndNeighbors(graph) => graph,
+            SharedGraphAccess::Planner { graph, .. } | SharedGraphAccess::Worker(graph) => graph,
         };
-        graph.item(layer, node_id).map(|item| Arc::clone(&item.value))
+        graph
+            .item(layer, node_id)
+            .map(|item| Arc::clone(&item.value))
     }
 
     /// Installs or replaces one decoded item state.
@@ -3705,7 +3738,8 @@ enum SessionGraph<D: Distance> {
     Attempting {
         identity: VectorGenerationIdentity,
         graph: Arc<SharedGraph<D>>,
-        /// Neighbor rows the attempt changed, forgotten as it settles.
+        /// Neighbor rows the attempt changed, forgotten as it settles. Lent
+        /// to the planner's cache while it plans an entity.
         rows: BTreeSet<NeighborRowId>,
     },
 }
@@ -4006,11 +4040,14 @@ impl<D: Distance> VectorBuildSession<D> {
         if let SessionGraph::Attempting {
             identity: shared,
             graph,
-            ..
-        } = &self.graph
+            rows,
+        } = &mut self.graph
             && shared == identity
         {
-            cache.shared = SharedGraphAccess::Items(Arc::clone(graph));
+            cache.shared = SharedGraphAccess::Planner {
+                graph: Arc::clone(graph),
+                changed_rows: core::mem::take(rows),
+            };
         }
         Ok(cache)
     }
@@ -4029,7 +4066,11 @@ impl<D: Distance> VectorBuildSession<D> {
         self.next_touch = cache.next_touch;
         self.scratch = core::mem::take(&mut cache.scratch);
         self.scratch.settle();
-        cache.shared = SharedGraphAccess::None;
+        if let SharedGraphAccess::Planner { changed_rows, .. } = core::mem::take(&mut cache.shared)
+            && let SessionGraph::Attempting { rows, .. } = &mut self.graph
+        {
+            *rows = changed_rows;
+        }
         assert!(
             !self.caches.contains_key(&identity),
             "a vector build session cannot restore one identity twice"
@@ -4582,13 +4623,13 @@ const fn simhash_payload_bytes(value: Option<crate::search::vector::SimHash>) ->
 
 mod presearch;
 
-#[cfg(test)]
-pub(crate) use presearch::{AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS};
 pub(crate) use presearch::{default_presearch_workers, DistanceMemo, PresearchJob, PresearchRun};
 use presearch::{
     overlay_budget, shared_graph_budget, shared_graph_limit, BeamDistances, SharedGraph,
-    SharedGraphAccess,
+    SharedGraphAccess, SharedRow,
 };
+#[cfg(test)]
+pub(crate) use presearch::{AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS};
 
 #[cfg(test)]
 #[path = "../../../../../tests/unit/vector/mutation.rs"]

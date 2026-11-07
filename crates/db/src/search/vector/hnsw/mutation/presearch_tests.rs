@@ -421,26 +421,74 @@ fn a_worker_reads_the_graph_without_copying_it() {
     };
     let mut worker = Overlay::shared_overlay(limits, Arc::new(graph));
     assert!(worker.item(0, 1).flatten().is_some());
-    assert!(worker.contains_neighbor(row(0, 1)));
+    assert!(worker.serves_neighbor(row(0, 1)));
+    assert!(!worker.contains_neighbor(row(0, 1)), "nothing is loaded");
     assert_eq!(worker.item_count(), 0);
     assert_eq!(worker.neighbor_count(), 0);
     worker.release_shared_graph();
-    assert!(!worker.contains_neighbor(row(0, 1)));
+    assert!(!worker.serves_neighbor(row(0, 1)));
 }
 
 #[test]
-fn the_planner_reads_items_but_never_shared_rows() {
+fn the_planner_loads_only_rows_its_attempt_has_not_changed() {
     let mut read = overlay();
     read.put_item(0, 1, Some(item(1.0)), 16);
     read.install_loaded_neighbor(row(0, 1), NeighborRowValue::KnownAbsent);
+    read.install_loaded_neighbor(row(0, 2), NeighborRowValue::KnownAbsent);
     let mut graph = Graph::default();
     graph.absorb(&read, &nodes(&[]), &BTreeSet::new());
 
     let mut planner = overlay();
-    planner.shared = SharedGraphAccess::Items(Arc::new(graph));
+    planner.shared = SharedGraphAccess::Planner {
+        graph: Arc::new(graph),
+        changed_rows: BTreeSet::from([row(0, 2)]),
+    };
     assert!(planner.item(0, 1).flatten().is_some());
-    assert_eq!(planner.item_count(), 0);
-    assert!(!planner.contains_neighbor(row(0, 1)));
+    assert_eq!(
+        planner.item_count(),
+        0,
+        "items are immutable, so none is copied"
+    );
+
+    assert!(planner.serves_neighbor(row(0, 1)));
+    assert!(matches!(
+        planner.shared_row(row(0, 1)),
+        SharedRow::Loaded(NeighborRowValue::KnownAbsent)
+    ));
+    assert!(
+        !planner.serves_neighbor(row(0, 2)),
+        "a changed row must come from storage"
+    );
+    assert!(matches!(planner.shared_row(row(0, 2)), SharedRow::Absent));
+    assert!(
+        !planner.contains_neighbor(row(0, 1)),
+        "serving is not loading"
+    );
+}
+
+#[test]
+fn the_session_lends_the_planner_its_changed_rows() {
+    let name = identity("presearch-lend");
+    let mut session = VectorBuildSession::<Euclidean>::new(NonZeroU64::new(1 << 20).unwrap());
+    let (graph, _) = session.begin_presearch(name.clone(), &nodes(&[]));
+    drop(graph);
+    session.record_entity_changes(&name, 9, [row(0, 1)]);
+
+    let mut cache = session.take_cache(&name, 8, 4).unwrap();
+    let SharedGraphAccess::Planner { changed_rows, .. } = &cache.shared else {
+        panic!("an attempting session lends the planner its graph");
+    };
+    assert_eq!(changed_rows, &BTreeSet::from([row(0, 1)]));
+    cache.put_item(0, 1, Some(item(1.0)), 16);
+    session.restore_cache(name.clone(), cache);
+    session.record_entity_changes(&name, 9, [row(0, 2)]);
+
+    let cache = session.take_cache(&name, 8, 4).unwrap();
+    let SharedGraphAccess::Planner { changed_rows, .. } = &cache.shared else {
+        panic!("an attempting session lends the planner its graph");
+    };
+    assert_eq!(changed_rows, &BTreeSet::from([row(0, 1), row(0, 2)]));
+    session.restore_cache(name, cache);
 }
 
 #[test]
@@ -545,7 +593,7 @@ fn the_planner_lets_go_of_the_graph_so_it_survives_settling() {
     drop(graph);
 
     let mut cache = session.take_cache(&name, 8, 4).unwrap();
-    assert!(matches!(cache.shared, SharedGraphAccess::Items(_)));
+    assert!(matches!(cache.shared, SharedGraphAccess::Planner { .. }));
     // An entry keeps the cache attached, and so whatever it still holds.
     cache.put_item(0, 1, Some(item(1.0)), 16);
     session.restore_cache(name, cache);
@@ -679,4 +727,26 @@ fn settling_keeps_the_graph_within_its_budget() {
     let limit = shared_graph_budget(usize::try_from(budget).unwrap());
     assert!(graph.charged_bytes() <= limit);
     assert!(graph.charged_bytes() > 0);
+}
+
+#[test]
+fn prefetch_skips_rows_the_graph_serves() {
+    let mut read = overlay();
+    read.install_loaded_neighbor(row(0, 1), NeighborRowValue::KnownAbsent);
+    let mut graph = Graph::default();
+    graph.absorb(&read, &nodes(&[]), &BTreeSet::new());
+    let mut planner = overlay();
+    planner.shared = SharedGraphAccess::Planner {
+        graph: Arc::new(graph),
+        changed_rows: BTreeSet::new(),
+    };
+    let (mut ranked, mut targets) = (Vec::new(), Vec::new());
+    super::super::select_layer0_neighbor_prefetch_targets(
+        &[(1, 0.1), (2, 0.2), (3, 0.3)],
+        &planner,
+        8,
+        &mut ranked,
+        &mut targets,
+    );
+    assert_eq!(targets, vec![2, 3], "node 1's row is served without a read");
 }

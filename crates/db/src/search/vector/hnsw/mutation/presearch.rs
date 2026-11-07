@@ -474,11 +474,29 @@ pub(super) enum SharedGraphAccess<D: Distance> {
     /// The cache stands alone.
     #[default]
     None,
-    /// The planner, which reads items no batch entity holds. Its neighbor rows
-    /// must be current, so it never reads the graph's.
-    Items(Arc<SharedGraph<D>>),
+    /// The planner, for which the graph stands in for storage reads.
+    ///
+    /// The graph holds the batch's start, without any state of its entities,
+    /// and stays fixed while the attempt runs. Storage differs from it only in
+    /// rows the attempt changed: the current entity's are in the cache, which
+    /// a session never evicts mid-entity, and earlier entities' are named here.
+    Planner {
+        graph: Arc<SharedGraph<D>>,
+        /// Rows earlier entities of the attempt changed, lent by the session.
+        changed_rows: BTreeSet<NeighborRowId>,
+    },
     /// A worker, which reads the graph as the batch began.
-    ItemsAndNeighbors(Arc<SharedGraph<D>>),
+    Worker(Arc<SharedGraph<D>>),
+}
+
+/// Where a cache finds a neighbor row it has not loaded.
+pub(super) enum SharedRow<'graph> {
+    /// Nowhere: storage must be read.
+    Absent,
+    /// A worker borrows the row: it never stages.
+    Borrowed(&'graph NeighborRowValue),
+    /// The planner loads it as storage would return it.
+    Loaded(NeighborRowValue),
 }
 
 /// Where one job stands.

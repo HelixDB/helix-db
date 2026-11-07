@@ -5,6 +5,8 @@
 //! split the queue into attempts: one plans alone, the others beside workers.
 //! Every database must then hold byte-identical vector rows. Layers are
 //! deterministic, so any wrong distance surfaces as a different neighbor row.
+//! Planning budgets small enough to evict between entities make the planner
+//! reload rows its attempt changed, which it must never take from the graph.
 
 use std::cell::Cell;
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -18,7 +20,9 @@ use super::publication::{PublicationOutcome, QueuePublisher};
 use super::publication_tests::{batch_limits, install_vector, unpartitioned_vector_rows};
 use super::soak_tests::Rng;
 use super::tests::{open, publisher_with_presearch, queued, target};
-use crate::config::{DbConfig, IndexOperationQueueTuning, VectorIndexDefinition};
+use crate::config::{
+    DbConfig, IndexOperationQueueTuning, SearchIndexBackfillLimits, VectorIndexDefinition,
+};
 use crate::encoding::v2::values::indexes::operation_queue::QueueFamily;
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
 use crate::search::vector::{
@@ -63,6 +67,14 @@ impl Planning {
         }
     }
 }
+
+/// Every way a run plans beside workers.
+const ALL: [Planning; 4] = [
+    Planning::Racing(2),
+    Planning::Replaying(1),
+    Planning::Replaying(2),
+    Planning::Flaky(2),
+];
 
 /// One round of writes and the output budget that publishes it.
 #[derive(Debug, Clone)]
@@ -141,13 +153,17 @@ async fn run(
     rounds: &[Round],
     metric: VectorDistanceMetric,
     planning: Planning,
+    planning_budget: Option<NonZeroU64>,
 ) -> Vec<Vec<(bytes::Bytes, bytes::Bytes)>> {
-    let db = open(
-        name,
-        Arc::new(InMemory::new()),
-        queued(IndexOperationQueueTuning::default()).with_wal_flush_interval_ms(NonZeroU64::MIN),
-    )
-    .await;
+    let config =
+        queued(IndexOperationQueueTuning::default()).with_wal_flush_interval_ms(NonZeroU64::MIN);
+    let config = match planning_budget {
+        Some(bytes) => config.with_search_index_backfill_limits(
+            SearchIndexBackfillLimits::default().with_vector_build_cache_bytes(bytes),
+        ),
+        None => config,
+    };
+    let db = open(name, Arc::new(InMemory::new()), config).await;
     match metric {
         VectorDistanceMetric::Euclidean => install_vector(&db, None).await,
         metric @ (VectorDistanceMetric::Cosine | VectorDistanceMetric::Manhattan) => {
@@ -198,7 +214,12 @@ async fn run(
     rows
 }
 
-async fn assert_identical(metric: VectorDistanceMetric, label: &str) {
+async fn assert_identical(
+    metric: VectorDistanceMetric,
+    label: &str,
+    plannings: &[Planning],
+    planning_budget: Option<NonZeroU64>,
+) {
     for seed in 0..SEEDS {
         let rounds = script(seed.wrapping_mul(0x9E37) ^ 0x5EED);
         let alone = run(
@@ -206,17 +227,13 @@ async fn assert_identical(metric: VectorDistanceMetric, label: &str) {
             &rounds,
             metric,
             Planning::Alone,
+            None,
         )
         .await;
         assert!(alone.iter().any(|rows| !rows.is_empty()));
-        for planning in [
-            Planning::Racing(2),
-            Planning::Replaying(1),
-            Planning::Replaying(2),
-            Planning::Flaky(2),
-        ] {
+        for &planning in plannings {
             let name = format!("{label}-{planning:?}-{seed}");
-            let beside = run(&name, &rounds, metric, planning).await;
+            let beside = run(&name, &rounds, metric, planning, planning_budget).await;
             for (round, (expected, actual)) in alone.iter().zip(&beside).enumerate() {
                 assert!(
                     expected == actual,
@@ -230,7 +247,7 @@ async fn assert_identical(metric: VectorDistanceMetric, label: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn euclidean_graphs_are_identical_with_and_without_workers() {
     let replayed = MEMOIZED_LOOKUPS.load(Ordering::Relaxed);
-    assert_identical(VectorDistanceMetric::Euclidean, "euclidean").await;
+    assert_identical(VectorDistanceMetric::Euclidean, "euclidean", &ALL, None).await;
     assert!(
         MEMOIZED_LOOKUPS.load(Ordering::Relaxed) > replayed,
         "no planner replayed a distance"
@@ -239,7 +256,21 @@ async fn euclidean_graphs_are_identical_with_and_without_workers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cosine_graphs_are_identical_with_and_without_workers() {
-    assert_identical(VectorDistanceMetric::Cosine, "cosine").await;
+    assert_identical(VectorDistanceMetric::Cosine, "cosine", &ALL, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graphs_are_identical_when_planning_evicts_between_entities() {
+    for kib in [16, 64, 256] {
+        let budget = NonZeroU64::new(kib * 1024).unwrap();
+        assert_identical(
+            VectorDistanceMetric::Euclidean,
+            &format!("evicting-{kib}"),
+            &[Planning::Replaying(2), Planning::Flaky(2)],
+            Some(budget),
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -250,6 +281,7 @@ async fn a_single_threaded_runtime_runs_workers_too() {
         &rounds,
         VectorDistanceMetric::Euclidean,
         Planning::Alone,
+        None,
     )
     .await;
     let beside = run(
@@ -257,6 +289,7 @@ async fn a_single_threaded_runtime_runs_workers_too() {
         &rounds,
         VectorDistanceMetric::Euclidean,
         Planning::Replaying(2),
+        None,
     )
     .await;
     assert!(alone == beside, "rows differ on a current-thread runtime");
