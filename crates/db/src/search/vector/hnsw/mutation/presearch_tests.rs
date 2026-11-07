@@ -3,6 +3,8 @@ use std::num::NonZeroU64;
 
 use proptest::prelude::*;
 
+use super::super::NeighborSet;
+use super::super::{free_in_background, SessionGraph, VECTOR_BUILD_SESSION_BACKGROUND_DROP_BYTES};
 use super::*;
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::index_lifecycle::IndexElementKind;
@@ -426,7 +428,7 @@ fn the_session_charges_its_graph_and_drops_one_that_no_longer_fits() {
 
     session.shrink_to(1).unwrap();
     assert_eq!(session.retained_bytes().unwrap(), empty);
-    assert!(session.shared_graph.is_none());
+    assert!(matches!(session.graph, SessionGraph::None));
 }
 
 #[test]
@@ -476,7 +478,9 @@ fn settling_forgets_rows_the_attempt_changed_and_any_unused_memo() {
     session.settle_presearch(&[], &nodes(&[]), true);
 
     assert!(session.next_memo.is_none());
-    let (_, graph) = session.shared_graph.as_ref().unwrap();
+    let SessionGraph::Resting { graph, .. } = &session.graph else {
+        panic!("the settled graph rests");
+    };
     assert!(graph.neighbors(row(0, 1)).is_none());
     assert!(graph.neighbors(row(0, 2)).is_some());
 }
@@ -488,7 +492,7 @@ fn a_worker_panic_costs_the_graph_but_not_the_session() {
     let (graph, _) = session.begin_presearch(name, &nodes(&[]));
     drop(graph);
     session.settle_presearch(&[], &nodes(&[]), false);
-    assert!(session.shared_graph.is_none());
+    assert!(matches!(session.graph, SessionGraph::None));
 }
 
 #[test]
@@ -497,7 +501,7 @@ fn a_graph_still_shared_is_dropped_rather_than_mutated() {
     let mut session = VectorBuildSession::<Euclidean>::new(NonZeroU64::new(1 << 20).unwrap());
     let (graph, _) = session.begin_presearch(name, &nodes(&[]));
     session.settle_presearch(&[], &nodes(&[]), true);
-    assert!(session.shared_graph.is_none());
+    assert!(matches!(session.graph, SessionGraph::None));
     assert_eq!(Arc::strong_count(&graph), 1);
 }
 
@@ -515,5 +519,89 @@ fn the_planner_lets_go_of_the_graph_so_it_survives_settling() {
     session.restore_cache(name, cache);
 
     session.settle_presearch(&[], &nodes(&[]), true);
-    assert!(session.shared_graph.is_some());
+    assert!(matches!(session.graph, SessionGraph::Resting { .. }));
+}
+
+#[test]
+fn a_change_outside_an_attempt_drops_the_resting_graph() {
+    let name = identity("presearch-unsettled");
+    let mut session = VectorBuildSession::<Euclidean>::new(NonZeroU64::new(1 << 20).unwrap());
+    let (graph, _) = session.begin_presearch(name.clone(), &nodes(&[]));
+    drop(graph);
+    session.settle_presearch(&[], &nodes(&[]), true);
+    assert!(matches!(session.graph, SessionGraph::Resting { .. }));
+
+    let cache = session.take_cache(&name, 8, 4).unwrap();
+    assert!(
+        matches!(cache.shared, SharedGraphAccess::None),
+        "nothing plans against a resting graph"
+    );
+    session.restore_cache(name.clone(), cache);
+
+    session.record_entity_changes(&name, 1, []);
+    assert!(matches!(session.graph, SessionGraph::None));
+}
+
+#[test]
+fn a_session_with_no_attempt_journals_no_rows() {
+    let name = identity("presearch-build");
+    let mut session = VectorBuildSession::<Euclidean>::new(NonZeroU64::new(1 << 20).unwrap());
+    session.record_entity_changes(&name, 1, [row(0, 1)]);
+    assert!(matches!(session.graph, SessionGraph::None));
+}
+
+#[test]
+fn a_large_retired_graph_frees_off_the_caller() {
+    let held = Arc::new(());
+    let weak = Arc::downgrade(&held);
+    free_in_background(held, VECTOR_BUILD_SESSION_BACKGROUND_DROP_BYTES);
+    let freed = std::time::Instant::now();
+    while weak.strong_count() > 0 {
+        assert!(freed.elapsed() < std::time::Duration::from_secs(10));
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn settling_refreshes_the_graph_from_what_the_attempt_planned() {
+    let name = identity("presearch-refresh");
+    let mut session = VectorBuildSession::<Euclidean>::new(NonZeroU64::new(1 << 20).unwrap());
+    let (graph, _) = session.begin_presearch(name.clone(), &nodes(&[]));
+    drop(graph);
+    let mut read = overlay();
+    read.install_loaded_neighbor(row(0, 2), NeighborRowValue::KnownAbsent);
+    read.install_loaded_neighbor(row(0, 3), NeighborRowValue::KnownAbsent);
+    session.settle_presearch(&[read], &nodes(&[]), true);
+
+    let (graph, _) = session.begin_presearch(name.clone(), &nodes(&[1]));
+    drop(graph);
+    let mut planned = session.take_cache(&name, 8, 4).unwrap();
+    planned.put_item(0, 1, Some(item(5.0)), 16);
+    planned.put_item(2, 1, Some(item(5.0)), 16);
+    let present = NeighborSet::try_from_deployed(2, planned.degree_limit(0), vec![1]).unwrap();
+    planned.install_loaded_neighbor(row(0, 1), NeighborRowValue::KnownAbsent);
+    planned.install_loaded_neighbor(row(0, 2), NeighborRowValue::Present(present.clone()));
+    session.restore_cache(name.clone(), planned);
+    session.record_entity_changes(&name, 1, [row(0, 2), row(0, 3)]);
+    session.settle_presearch(&[], &nodes(&[1]), true);
+
+    let SessionGraph::Resting { graph, .. } = &session.graph else {
+        panic!("the settled graph rests");
+    };
+    assert!(
+        graph.item(0, 1).is_some(),
+        "a changed node comes back current"
+    );
+    assert!(graph.item(2, 1).is_some(), "at every layer it holds");
+    assert_eq!(graph.max_layer, 2);
+    assert!(graph.neighbors(row(0, 1)).is_some(), "with its own row");
+    assert_eq!(
+        graph.neighbors(row(0, 2)).map(|(value, _)| value),
+        Some(&NeighborRowValue::Present(present)),
+        "a changed row comes back current"
+    );
+    assert!(
+        graph.neighbors(row(0, 3)).is_none(),
+        "a row the planner no longer holds stays forgotten"
+    );
 }

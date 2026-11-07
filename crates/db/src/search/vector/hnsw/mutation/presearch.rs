@@ -27,9 +27,10 @@
 //!
 //! Workers read a [`SharedGraph`] that is immutable during an attempt, so they
 //! take no locks and the planner's cache keeps its exact semantics. Each worker
-//! holds what it reads beyond that in a private overlay, folded in between
-//! attempts. The graph is charged to the session's byte budget and evicts by
-//! whole generations, so reads never write recency.
+//! holds what it reads beyond that in a private overlay. Between attempts the
+//! graph folds in those reads and everything the attempt changed, so workers
+//! rarely touch storage. It is charged to the session's byte budget and evicts
+//! by whole generations, so reads never write recency.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
@@ -69,6 +70,8 @@ const PRESEARCH_WINDOW_PER_WORKER: usize = 6;
 const MEMO_INITIAL_CAPACITY: usize = 4_096;
 /// Eighths of a session's budget one [`SharedGraph`] generation may charge.
 const GENERATION_BUDGET_EIGHTHS: usize = 3;
+/// Eighths of a session's budget past which a [`SharedGraph`] is dropped.
+const SHARED_GRAPH_BUDGET_EIGHTHS: usize = 7;
 /// Eighths of a session's budget that all overlays of one attempt may hold.
 const OVERLAY_BUDGET_EIGHTHS: usize = 1;
 
@@ -360,14 +363,61 @@ impl<D: Distance> SharedGraph<D> {
     }
 }
 
+impl<D: Distance> SharedGraph<D> {
+    /// Brings what an attempt changed up to date from `planned`, the cache it
+    /// planned through, so workers need not read it back.
+    ///
+    /// `planned` mirrors the attempt's commit: an entity it did not admit left
+    /// no state there. What `planned` no longer holds stays forgotten. Should
+    /// the commit fail, the session and this graph are dropped together.
+    pub(super) fn refresh(
+        &mut self,
+        planned: &MutationOpCache<D>,
+        changed: &foldhash::HashSet<NodeId>,
+        rows: &BTreeSet<NeighborRowId>,
+    ) {
+        for &node_id in changed {
+            for layer in 0..=planned.max_item_layer {
+                let Some(cached) = planned.items.get(&(layer, node_id)) else {
+                    continue;
+                };
+                let Some(value) = cached.value.clone() else {
+                    continue;
+                };
+                self.max_layer = self.max_layer.max(layer);
+                self.young.keep_item(
+                    (layer, node_id),
+                    SharedItem {
+                        value,
+                        payload_bytes: cached.payload_bytes,
+                    },
+                );
+            }
+        }
+        let node_rows = changed.iter().flat_map(|&node_id| {
+            (0..=planned.max_neighbor_layer)
+                .map(move |layer| MutationOpCache::<D>::node_row_id(layer, node_id))
+        });
+        for row in rows.iter().copied().chain(node_rows) {
+            let Some(cached) = planned.neighbor_rows.get(&row) else {
+                continue;
+            };
+            let (layer, _) = row.storage_parts();
+            self.max_layer = self.max_layer.max(layer);
+            self.young.keep_neighbors(row, cached.current().clone());
+        }
+    }
+}
+
 /// Bytes one generation may charge under a session's budget.
 pub(super) const fn generation_budget(max_payload_bytes: usize) -> usize {
     max_payload_bytes / 8 * GENERATION_BUDGET_EIGHTHS
 }
 
-/// Bytes a [`SharedGraph`] may charge at all under a session's budget.
+/// Bytes a [`SharedGraph`] may charge at all under a session's budget: two
+/// generations, and the last attempt's changes on top of the young one.
 pub(super) const fn shared_graph_budget(max_payload_bytes: usize) -> usize {
-    generation_budget(max_payload_bytes) * 2
+    max_payload_bytes / 8 * SHARED_GRAPH_BUDGET_EIGHTHS
 }
 
 /// Bytes all overlays of one attempt may hold under a session's budget.
@@ -466,6 +516,8 @@ tokio::task_local! {
     /// Makes the planner wait for every job in scope, so each insert replays a
     /// complete memo, however a run happens to interleave.
     pub(crate) static AWAIT_WORKERS: ();
+    /// Fails every other attempt in scope before its workers start.
+    pub(crate) static PRESEARCH_START_FAILS: std::cell::Cell<bool>;
 }
 
 /// Whether the planner may score a job no worker has started.

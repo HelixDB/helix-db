@@ -194,7 +194,7 @@ pub(crate) use hnsw::mutation::{
 };
 #[cfg(test)]
 pub(crate) use hnsw::mutation::{
-    AWAIT_WORKERS, DISCARDED_ENTITIES, MEMOIZED_LOOKUPS, REPLACE_REPLAYS,
+    AWAIT_WORKERS, DISCARDED_ENTITIES, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS, REPLACE_REPLAYS,
 };
 #[cfg(any(test, feature = "production-scale"))]
 pub(crate) use hnsw::restricted::observe_restricted_search;

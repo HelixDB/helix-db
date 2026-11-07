@@ -3704,12 +3704,54 @@ pub(crate) struct VectorBuildSession<D: Distance> {
     dirty: BTreeSet<VectorGenerationIdentity>,
     /// Traversal buffers lent to whichever namespace cache is taken.
     scratch: MutationScratch<D>,
-    /// Graph state retained for pre-search workers, in one namespace.
-    shared_graph: Option<(VectorGenerationIdentity, Arc<SharedGraph<D>>)>,
-    /// Neighbor rows changed since the current pre-search began.
-    attempt_rows: BTreeSet<NeighborRowId>,
+    /// Graph state retained for pre-search workers.
+    graph: SessionGraph<D>,
     /// A worker's distances for the entity planned next.
     next_memo: Option<DistanceMemo>,
+}
+
+/// Graph state a session retains for pre-search workers, in one namespace.
+#[derive(Debug, Default)]
+enum SessionGraph<D: Distance> {
+    /// Nothing retained: no attempt pre-searched, or one left the graph behind.
+    #[default]
+    None,
+    /// Between attempts, equal to the state at the session's checkpoint.
+    ///
+    /// Nothing may be planned against it: a change made now would never be
+    /// forgotten, so any change drops it.
+    Resting {
+        identity: VectorGenerationIdentity,
+        graph: SharedGraph<D>,
+    },
+    /// Shared with an attempt's workers and planner.
+    Attempting {
+        identity: VectorGenerationIdentity,
+        graph: Arc<SharedGraph<D>>,
+        /// Neighbor rows the attempt changed, forgotten as it settles.
+        rows: BTreeSet<NeighborRowId>,
+    },
+}
+
+impl<D: Distance> SessionGraph<D> {
+    fn charged_bytes(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Resting { graph, .. } => graph.charged_bytes(),
+            Self::Attempting { graph, .. } => graph.charged_bytes(),
+        }
+    }
+}
+
+/// Frees `state` off the calling thread when `bytes` make that worthwhile.
+fn free_in_background(state: impl Send + 'static, bytes: usize) {
+    if bytes < VECTOR_BUILD_SESSION_BACKGROUND_DROP_BYTES {
+        return;
+    }
+    // A failed spawn drops the closure, and the state with it, right here.
+    let _ = std::thread::Builder::new()
+        .name("vector-build-session-drop".to_string())
+        .spawn(move || drop(state));
 }
 
 /// Cache state one planned entity changed inside one generation namespace.
@@ -3774,8 +3816,7 @@ impl<D: Distance> VectorBuildSession<D> {
             victims: SessionVictims::default(),
             dirty: BTreeSet::new(),
             scratch: MutationScratch::default(),
-            shared_graph: None,
-            attempt_rows: BTreeSet::new(),
+            graph: SessionGraph::None,
             next_memo: None,
         };
         session.set_max_retained_bytes(max_retained_bytes);
@@ -3985,7 +4026,11 @@ impl<D: Distance> VectorBuildSession<D> {
         };
         cache.next_touch = self.next_touch;
         cache.scratch = core::mem::take(&mut self.scratch);
-        if let Some((shared, graph)) = &self.shared_graph
+        if let SessionGraph::Attempting {
+            identity: shared,
+            graph,
+            ..
+        } = &self.graph
             && shared == identity
         {
             cache.shared = SharedGraphAccess::Items(Arc::clone(graph));
@@ -4023,7 +4068,13 @@ impl<D: Distance> VectorBuildSession<D> {
         rows: impl IntoIterator<Item = NeighborRowId>,
     ) {
         let rows = rows.into_iter().collect::<BTreeSet<_>>();
-        self.attempt_rows.extend(rows.iter().copied());
+        match &mut self.graph {
+            SessionGraph::None => {}
+            SessionGraph::Resting { .. } => self.retire_graph(),
+            SessionGraph::Attempting { rows: attempt, .. } => {
+                attempt.extend(rows.iter().copied());
+            }
+        }
         let changes = self.entity_changes.entry(identity.clone()).or_default();
         changes.nodes.insert(node_id);
         changes.rows.extend(rows);
@@ -4035,23 +4086,39 @@ impl<D: Distance> VectorBuildSession<D> {
         self.next_memo = memo;
     }
 
-    /// Readies the shared graph of `identity` for workers, forgetting every
-    /// node of `changed`, and returns it with the bytes their overlays may hold.
+    /// Drops the retained graph, off the executor if it is large.
+    fn retire_graph(&mut self) {
+        let bytes = self.graph.charged_bytes();
+        free_in_background(core::mem::take(&mut self.graph), bytes);
+    }
+
+    /// Readies the graph of `identity` for workers, forgetting every node of
+    /// `changed`, and returns it with the bytes their overlays may hold.
     fn begin_presearch(
         &mut self,
         identity: VectorGenerationIdentity,
         changed: &foldhash::HashSet<NodeId>,
     ) -> (Arc<SharedGraph<D>>, usize) {
-        let reusable = self
-            .shared_graph
-            .take()
-            .filter(|(shared, _)| *shared == identity);
-        let mut graph = reusable.map_or_else(Arc::default, |(_, graph)| graph);
-        Arc::get_mut(&mut graph)
-            .expect("no pre-search outlives the attempt that started it")
-            .forget(changed, &BTreeSet::new());
-        self.attempt_rows.clear();
-        self.shared_graph = Some((identity, Arc::clone(&graph)));
+        let mut graph = match core::mem::take(&mut self.graph) {
+            SessionGraph::Resting {
+                identity: resting,
+                graph,
+            } if resting == identity => graph,
+            other @ (SessionGraph::None
+            | SessionGraph::Resting { .. }
+            | SessionGraph::Attempting { .. }) => {
+                let bytes = other.charged_bytes();
+                free_in_background(other, bytes);
+                SharedGraph::default()
+            }
+        };
+        graph.forget(changed, &BTreeSet::new());
+        let graph = Arc::new(graph);
+        self.graph = SessionGraph::Attempting {
+            identity,
+            graph: Arc::clone(&graph),
+            rows: BTreeSet::new(),
+        };
         (graph, overlay_budget(self.max_payload_bytes))
     }
 
@@ -4064,24 +4131,35 @@ impl<D: Distance> VectorBuildSession<D> {
         intact: bool,
     ) {
         self.next_memo = None;
-        let rows = core::mem::take(&mut self.attempt_rows);
-        let budget = generation_budget(self.max_payload_bytes);
-        let settled = self
-            .shared_graph
-            .as_mut()
-            .filter(|_| intact)
-            .and_then(|(_, graph)| {
-                let graph = Arc::get_mut(graph)?;
-                graph.forget(changed, &rows);
-                Some(graph.absorb(overlays, changed, &rows, budget))
-            });
-        let Some(retired) = settled else {
-            self.shared_graph = None;
+        let SessionGraph::Attempting {
+            identity,
+            graph,
+            rows,
+        } = core::mem::take(&mut self.graph)
+        else {
             return;
         };
-        if let Some(retired) = retired {
-            tokio::task::spawn_blocking(move || drop(retired));
+        let bytes = graph.charged_bytes();
+        if !intact {
+            free_in_background(graph, bytes);
+            return;
         }
+        let mut graph = match Arc::try_unwrap(graph) {
+            Ok(graph) => graph,
+            Err(shared) => {
+                free_in_background(shared, bytes);
+                return;
+            }
+        };
+        graph.forget(changed, &rows);
+        let budget = generation_budget(self.max_payload_bytes);
+        if let Some(retired) = graph.absorb(overlays, changed, &rows, budget) {
+            free_in_background(retired, budget);
+        }
+        if let Some(planned) = self.caches.get(&identity) {
+            graph.refresh(planned, changed, &rows);
+        }
+        self.graph = SessionGraph::Resting { identity, graph };
     }
 
     /// Accepts every change journaled since the previous entity boundary.
@@ -4222,12 +4300,8 @@ impl<D: Distance> VectorBuildSession<D> {
         max_bytes: usize,
         txn: Option<&MeasuredVectorTransaction<'_>>,
     ) -> Result<(), HelixDbError> {
-        if self
-            .shared_graph
-            .as_ref()
-            .is_some_and(|(_, graph)| graph.charged_bytes() > shared_graph_budget(max_bytes))
-        {
-            self.shared_graph = None;
+        if self.graph.charged_bytes() > shared_graph_budget(max_bytes) {
+            self.retire_graph();
         }
         loop {
             let pressure = self.pressure(max_bytes)?;
@@ -4360,12 +4434,7 @@ impl<D: Distance> VectorBuildSession<D> {
                 self.caches.len(),
                 VECTOR_BUILD_SESSION_NAMESPACE_OVERHEAD_BYTES,
             ),
-            (
-                1,
-                self.shared_graph
-                    .as_ref()
-                    .map_or(0, |(_, graph)| graph.charged_bytes()),
-            ),
+            (1, self.graph.charged_bytes()),
         ]
         .into_iter()
         .try_fold(self.retained_payload_bytes()?, |total, (count, charge)| {
@@ -4419,6 +4488,7 @@ impl<D: Distance> VectorBuildSession<D> {
             core::mem::take(&mut self.victims),
             core::mem::take(&mut self.dirty),
             core::mem::take(&mut self.entity_changes),
+            core::mem::take(&mut self.graph),
         );
         self.footprint = SessionFootprint::default();
         // A failed spawn drops the closure, and the state with it, right here.
@@ -4533,7 +4603,7 @@ const fn simhash_payload_bytes(value: Option<crate::search::vector::SimHash>) ->
 mod presearch;
 
 #[cfg(test)]
-pub(crate) use presearch::{AWAIT_WORKERS, MEMOIZED_LOOKUPS};
+pub(crate) use presearch::{AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS};
 pub(crate) use presearch::{default_presearch_workers, DistanceMemo, PresearchJob, PresearchRun};
 use presearch::{
     generation_budget, overlay_budget, shared_graph_budget, BeamDistances, GraphAge, SharedGraph,

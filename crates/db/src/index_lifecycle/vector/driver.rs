@@ -3105,6 +3105,15 @@ async fn try_start_presearch<D: Distance + 'static>(
     else {
         return Ok(None);
     };
+    #[cfg(test)]
+    if vector::PRESEARCH_START_FAILS
+        .try_with(|fails| fails.replace(!fails.get()))
+        .unwrap_or(false)
+    {
+        return Err(crate::error::HelixDbError::InvariantViolation(
+            "injected pre-search start failure".to_string(),
+        ));
+    }
     let handle = target.physical::<D>(physical_index_id)?;
     let index = VectorIndex::<D>::from_generation(&handle)
         .with_simhasher_registry(Arc::clone(&resources.simhasher_registry))
@@ -3137,9 +3146,9 @@ async fn try_start_presearch<D: Distance + 'static>(
         .map(|effect| effect.entity_id.get())
         .collect::<foldhash::HashSet<_>>();
     let snapshot = db.begin(slatedb::IsolationLevel::Snapshot).await?;
-    Ok(index
+    index
         .start_presearch(snapshot, jobs, changed, workers, session)
-        .await?)
+        .await
 }
 
 /// Plans one entity's transition and applies it to `transaction` if it fits.

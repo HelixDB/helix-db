@@ -6,6 +6,7 @@
 //! Every database must then hold byte-identical vector rows. Layers are
 //! deterministic, so any wrong distance surfaces as a different neighbor row.
 
+use std::cell::Cell;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -20,7 +21,9 @@ use super::tests::{open, publisher_with_presearch, queued, target};
 use crate::config::{DbConfig, IndexOperationQueueTuning, VectorIndexDefinition};
 use crate::encoding::v2::values::indexes::operation_queue::QueueFamily;
 use crate::index_lifecycle::ValidatedDynamicIndexDefinition;
-use crate::search::vector::{VectorDistanceMetric, AWAIT_WORKERS, MEMOIZED_LOOKUPS};
+use crate::search::vector::{
+    VectorDistanceMetric, AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS,
+};
 use crate::HelixDB;
 
 const SEEDS: u64 = 4;
@@ -45,13 +48,18 @@ enum Planning {
     Racing(usize),
     /// Replaying a complete memo for every insert.
     Replaying(usize),
+    /// Replaying, while every other attempt fails to start its workers and
+    /// plans alone.
+    Flaky(usize),
 }
 
 impl Planning {
     fn workers(self) -> Option<NonZeroUsize> {
         match self {
             Self::Alone => None,
-            Self::Racing(workers) | Self::Replaying(workers) => NonZeroUsize::new(workers),
+            Self::Racing(workers) | Self::Replaying(workers) | Self::Flaky(workers) => {
+                NonZeroUsize::new(workers)
+            }
         }
     }
 }
@@ -175,6 +183,14 @@ async fn run(
         match planning {
             Planning::Alone | Planning::Racing(_) => drain(&publisher, &db).await,
             Planning::Replaying(_) => AWAIT_WORKERS.scope((), drain(&publisher, &db)).await,
+            Planning::Flaky(_) => {
+                PRESEARCH_START_FAILS
+                    .scope(
+                        Cell::new(false),
+                        AWAIT_WORKERS.scope((), drain(&publisher, &db)),
+                    )
+                    .await;
+            }
         }
         rows.push(unpartitioned_vector_rows(&db).await);
     }
@@ -197,6 +213,7 @@ async fn assert_identical(metric: VectorDistanceMetric, label: &str) {
             Planning::Racing(2),
             Planning::Replaying(1),
             Planning::Replaying(2),
+            Planning::Flaky(2),
         ] {
             let name = format!("{label}-{planning:?}-{seed}");
             let beside = run(&name, &rounds, metric, planning).await;
