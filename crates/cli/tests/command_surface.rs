@@ -137,6 +137,22 @@ fn login_flags_only_exist_where_they_apply() {
     assert!(stderr(
         fixture
             .command()
+            .args(["auth", "login", "--provider", "carrier-pigeon"])
+            .assert()
+            .failure()
+    )
+    .contains("invalid value"));
+    assert!(stderr(
+        fixture
+            .command()
+            .args(["auth", "login", "--provider", "google", "github"])
+            .assert()
+            .failure()
+    )
+    .contains("cannot use --provider"));
+    assert!(stderr(
+        fixture
+            .command()
             .args(["auth", "login", "carrier-pigeon"])
             .assert()
             .failure()
@@ -149,6 +165,11 @@ fn login_needs_a_terminal_for_every_method() {
     let fixture = CliFixture::new();
     for args in [
         &["auth", "login", "--json"][..],
+        &["auth", "login", "--provider", "google", "--json"][..],
+        &["auth", "login", "--provider", "github", "--json"][..],
+        &["auth", "login", "--provider", "microsoft", "--json"][..],
+        &["auth", "login", "--provider", "sso", "--json"][..],
+        &["auth", "login", "--provider", "Google", "--json"][..],
         &["auth", "login", "github", "--json"][..],
         &["auth", "login", "google", "--json"][..],
         &["auth", "login", "microsoft", "--json"][..],

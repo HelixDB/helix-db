@@ -25,6 +25,9 @@ pub enum AuthAction {
     /// Login to Helix Cloud; asks how when no method is given
     #[command(subcommand_value_name = "METHOD", subcommand_help_heading = "Methods")]
     Login {
+        /// Identity provider for browser sign-in (github, google, microsoft, sso)
+        #[arg(long, value_name = "PROVIDER", value_enum, ignore_case = true)]
+        provider: Option<AuthProvider>,
         #[command(subcommand)]
         method: Option<LoginAction>,
     },
@@ -32,6 +35,31 @@ pub enum AuthAction {
     Status,
     /// Logout from Helix Cloud
     Logout,
+}
+
+/// Identity providers supported for browser sign-in.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum AuthProvider {
+    /// Continue with GitHub in the browser
+    Github,
+    /// Continue with Google in the browser
+    Google,
+    /// Continue with Microsoft in the browser
+    Microsoft,
+    /// Single sign-on through your company's identity provider
+    Sso,
+}
+
+impl From<AuthProvider> for LoginAction {
+    fn from(provider: AuthProvider) -> Self {
+        match provider {
+            AuthProvider::Github => Self::Github,
+            AuthProvider::Google => Self::Google,
+            AuthProvider::Microsoft => Self::Microsoft,
+            AuthProvider::Sso => Self::Sso { email: None },
+        }
+    }
 }
 
 /// How `helix auth login` signs in. Only the methods that use an email take
@@ -57,6 +85,18 @@ pub enum LoginAction {
         #[arg(long, value_parser = parse_email)]
         email: Option<String>,
     },
+}
+
+impl LoginAction {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Google => "google",
+            Self::Microsoft => "microsoft",
+            Self::Sso { .. } => "sso",
+            Self::Password { .. } => "password",
+        }
+    }
 }
 
 /// Refuses an `--email` that cannot name an account, so a typo or an unset shell

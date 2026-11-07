@@ -193,7 +193,17 @@ async fn bind_callback(port: u16) -> Result<TcpListener> {
 
 pub async fn run(action: AuthAction) -> Result<()> {
     match action {
-        AuthAction::Login { method } => login(method).await,
+        AuthAction::Login { provider, method } => {
+            if let (Some(_), Some(method)) = (provider, &method) {
+                return Err(CliError::new(format!(
+                    "cannot use --provider with the '{}' subcommand",
+                    method.name()
+                ))
+                .into());
+            }
+            let action = method.or_else(|| provider.map(Into::into));
+            login(action).await
+        }
         AuthAction::Status => status().await,
         AuthAction::Logout => logout().await,
     }
@@ -1075,6 +1085,21 @@ Zeta Labs    ws-1
         assert!(error.to_string().contains("unencrypted"), "{error}");
         // Browser methods send no password, so they stay available.
         assert!(login_method(LoginAction::Github, &client, &mut host).is_ok());
+    }
+
+    #[test]
+    fn auth_provider_converts_to_expected_login_action() {
+        use crate::AuthProvider;
+        assert_eq!(LoginAction::from(AuthProvider::Github), LoginAction::Github);
+        assert_eq!(LoginAction::from(AuthProvider::Google), LoginAction::Google);
+        assert_eq!(
+            LoginAction::from(AuthProvider::Microsoft),
+            LoginAction::Microsoft
+        );
+        assert_eq!(
+            LoginAction::from(AuthProvider::Sso),
+            LoginAction::Sso { email: None }
+        );
     }
 
     #[tokio::test]
