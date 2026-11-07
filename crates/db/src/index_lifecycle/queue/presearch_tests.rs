@@ -150,7 +150,7 @@ async fn run(
     .await;
     match metric {
         VectorDistanceMetric::Euclidean => install_vector(&db, None).await,
-        metric => {
+        metric @ (VectorDistanceMetric::Cosine | VectorDistanceMetric::Manhattan) => {
             let definition =
                 VectorIndexDefinition::new_node("Doc", "embedding", 2, metric).unwrap();
             db.install_index_for_tests(

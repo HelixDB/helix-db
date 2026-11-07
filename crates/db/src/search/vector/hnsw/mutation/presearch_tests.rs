@@ -605,3 +605,25 @@ fn settling_refreshes_the_graph_from_what_the_attempt_planned() {
         "a row the planner no longer holds stays forgotten"
     );
 }
+
+#[test]
+fn a_dropped_session_frees_its_graph_with_its_other_state() {
+    let name = identity("presearch-drop");
+    let mut session = VectorBuildSession::<Euclidean>::new(NonZeroU64::new(1 << 30).unwrap());
+    let (graph, _) = session.begin_presearch(name, &nodes(&[]));
+    drop(graph);
+    let mut read = overlay();
+    read.put_item(
+        0,
+        1,
+        Some(item(1.0)),
+        VECTOR_BUILD_SESSION_BACKGROUND_DROP_BYTES,
+    );
+    session.settle_presearch(&[read], &nodes(&[]), true);
+
+    let freeing = session
+        .free_state_in_background()
+        .expect("a large session frees on its own thread");
+    freeing.join().unwrap();
+    assert!(matches!(session.graph, SessionGraph::None));
+}
