@@ -3073,7 +3073,26 @@ impl<'a> VectorPlanTarget<'a> {
 /// transaction. Nothing has committed to the generation since the session's
 /// checkpoint, since publication is its sole writer. Tenant-partitioned
 /// generations plan alone: each entity would need its own partition's graph.
+///
+/// Workers only save the planner work, so a failure here leaves it to plan
+/// alone and report whatever is wrong, per entity.
 pub(super) async fn start_presearch<D: Distance + 'static>(
+    db: &Db,
+    target: &VectorPlanTarget<'_>,
+    definition: &ValidatedVectorIndexDefinition,
+    effects: &[super::publication::QueuedVectorEffect],
+    resources: &super::super::queue::publication::VectorPublicationResources,
+    session: &mut CheckedOutSession<D>,
+) -> Option<vector::PresearchRun<D>> {
+    try_start_presearch(db, target, definition, effects, resources, session)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "vector publication plans without workers");
+            None
+        })
+}
+
+async fn try_start_presearch<D: Distance + 'static>(
     db: &Db,
     target: &VectorPlanTarget<'_>,
     definition: &ValidatedVectorIndexDefinition,

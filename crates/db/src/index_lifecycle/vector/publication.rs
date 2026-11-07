@@ -244,7 +244,7 @@ async fn stage_with_distance<D: Distance + 'static>(
         resources,
         &mut session,
     )
-    .await?;
+    .await;
     let mut staged = 0_usize;
     for (position, effect) in effects.iter().enumerate() {
         if let Some(presearch) = &presearch {

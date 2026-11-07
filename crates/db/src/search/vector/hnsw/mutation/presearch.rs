@@ -577,7 +577,8 @@ impl<D: Distance> Drop for PresearchRun<D> {
 
 impl<D: Distance + 'static> VectorIndex<D> {
     /// Starts workers pre-searching `jobs` against `snapshot`, or returns
-    /// `None` for an empty graph, where no insert searches.
+    /// `None` when there is no populated graph to search: an empty graph, or
+    /// one whose failure the planner reports where it can act on it.
     ///
     /// `changed` must name every node the planner may change while the run is
     /// alive, including jobs it never reaches. `snapshot` must see exactly the
@@ -596,7 +597,7 @@ impl<D: Distance + 'static> VectorIndex<D> {
             self.get_metadata(&txn).await?
         };
         let Some(metadata) = metadata else {
-            return Err(HelixDbError::IndexNotFound(self.name().to_string()));
+            return Ok(None);
         };
         if !matches!(
             metadata.validated_state()?,

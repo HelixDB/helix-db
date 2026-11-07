@@ -309,6 +309,21 @@ async fn a_panicking_worker_never_strands_the_planner() {
     assert!(run.take(0).await.is_none());
 }
 
+#[tokio::test]
+async fn a_failed_job_leaves_the_planner_to_score() {
+    let run = run(state(1, 1));
+    assert_eq!(run.run.claim(), Some(0));
+    run.run.finish(0, None);
+    assert!(run.take(0).await.is_none());
+}
+
+#[tokio::test]
+async fn a_position_without_a_job_takes_nothing() {
+    let run = run(state(1, 1));
+    run.run.progress.lock().slots[0] = JobSlot::Planned;
+    assert!(run.take(0).await.is_none());
+}
+
 #[test]
 fn a_finished_guard_keeps_its_memo() {
     let state = state(1, 1);
@@ -493,8 +508,10 @@ fn the_planner_lets_go_of_the_graph_so_it_survives_settling() {
     let (graph, _) = session.begin_presearch(name.clone(), &nodes(&[]));
     drop(graph);
 
-    let cache = session.take_cache(&name, 8, 4).unwrap();
+    let mut cache = session.take_cache(&name, 8, 4).unwrap();
     assert!(matches!(cache.shared, SharedGraphAccess::Items(_)));
+    // An entry keeps the cache attached, and so whatever it still holds.
+    cache.put_item(0, 1, Some(item(1.0)), 16);
     session.restore_cache(name, cache);
 
     session.settle_presearch(&[], &nodes(&[]), true);
