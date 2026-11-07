@@ -399,7 +399,10 @@ impl ExecutionContext<'_> {
 /// Visit graph references without allocating an intermediate set. The admitted
 /// destination demand map owns deduplication; repeated references may expand its
 /// property demand but never create duplicate storage requests.
-fn visit_entities(value: &r::Value, visit: &mut impl FnMut(r::Entity) -> Result<()>) -> Result<()> {
+pub(super) fn visit_entities(
+    value: &r::Value,
+    visit: &mut impl FnMut(r::Entity) -> Result<()>,
+) -> Result<()> {
     match value {
         r::Value::Entity(entity) => visit(*entity)?,
         r::Value::Path(path) => {

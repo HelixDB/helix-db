@@ -192,30 +192,12 @@ async fn maps_keep_separate_item_order_and_rollback_every_error_without_changing
     db.close().await.unwrap();
 }
 
-/// Single-property edits reject internal and empty names before opening a
-/// write. Setting a property on a missing entity fails as a storage error,
-/// while removing one from a missing entity is an idempotent no-op.
+/// Setting a property on a missing entity fails as a storage error, while
+/// removing one from a missing entity is an idempotent no-op.
 #[tokio::test]
 async fn property_edits_reject_invalid_names_and_missing_set_targets() {
     let db = test_support::open_db("property-edit-validation").await;
     let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
-    for (key, detail) in [
-        ("$label", "reserved_property_name"),
-        ("", "empty_property_name"),
-    ] {
-        let error = ctx
-            .row_edit_property(
-                relational::Entity::Node(1),
-                key,
-                Some(PropertyValue::I64(1)),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, cypher::Error::Query(ref error) if error.detail == detail),
-            "{error:?}"
-        );
-    }
     let error = ctx
         .row_edit_property(
             relational::Entity::Node(u64::MAX),

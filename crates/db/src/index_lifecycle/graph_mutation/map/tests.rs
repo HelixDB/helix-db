@@ -59,8 +59,8 @@ fn map_edits_preserve_metadata_and_native_representations_and_route_exact_change
             expected.extend([
                 Property::new("zero", V::F64(0.0)),
                 original[5].clone(),
-                Property::i64("new", 4),
                 Property::new("stored_null", V::Null),
+                Property::i64("new", 4),
             ]);
             assert_eq!(after.encoded(), &property::encode_properties(&expected));
             let expected_names = if mode == Mode::Extend {
@@ -280,4 +280,63 @@ fn map_rewrite_allocation_work_grows_linearly_with_updated_property_count() {
         drop(transition);
         assert_eq!(budget.available(), 16 * 1024 * 1024);
     }
+}
+
+/// New keys land in insertion order, whatever their names, so a folded edit
+/// stores what applying each key alone stores.
+#[test]
+fn additions_keep_insertion_order() {
+    let mut edit = Edit::new(Mode::Extend);
+    for (name, value) in [("z", 1), ("a", 2), ("m", 3)] {
+        edit.insert(name.into(), Some(V::I64(value))).unwrap();
+    }
+    edit.insert("gone".into(), None).unwrap();
+    let PropertyEditOutcome::Changed(transition) = edit
+        .apply(
+            DataScope::LegacyUnscoped,
+            GraphEntity::edge(7),
+            CanonicalPropertyRow::new(vec![Property::i64("keep", 0)]),
+            None,
+        )
+        .unwrap()
+    else {
+        panic!("the edit changes the row");
+    };
+    assert_eq!(
+        transition.after().unwrap().encoded(),
+        &property::encode_properties(&[
+            Property::i64("keep", 0),
+            Property::i64("z", 1),
+            Property::i64("a", 2),
+            Property::i64("m", 3),
+        ])
+    );
+}
+
+/// A pending extension takes new keys only. A replacement and a repeated key
+/// must apply first.
+#[test]
+fn only_new_keys_fold() {
+    let mut extend = Edit::new(Mode::Extend);
+    extend.insert("set".into(), Some(V::I64(1))).unwrap();
+    extend.insert("removed".into(), None).unwrap();
+    assert!(extend.folds(["new", "other"].into_iter()));
+    assert!(!extend.folds(["new", "set"].into_iter()));
+    assert!(!extend.folds(["removed"].into_iter()));
+    assert!(!Edit::new(Mode::ReplaceUserProperties).folds(["new"].into_iter()));
+}
+
+/// Metadata never changes. A replacement changes every user property.
+#[test]
+fn reads_need_a_pending_edit_applied_only_when_it_changes_them() {
+    let mut extend = Edit::new(Mode::Extend);
+    extend.insert("set".into(), Some(V::I64(1))).unwrap();
+    assert!(extend.changes(PropertyRequirement::Key("set")));
+    assert!(!extend.changes(PropertyRequirement::Key("other")));
+    assert!(extend.changes(PropertyRequirement::All));
+    assert!(!extend.changes(PropertyRequirement::Metadata));
+    let replace = Edit::new(Mode::ReplaceUserProperties);
+    assert!(replace.changes(PropertyRequirement::Key("other")));
+    assert!(replace.changes(PropertyRequirement::All));
+    assert!(!replace.changes(PropertyRequirement::Metadata));
 }
