@@ -68,11 +68,10 @@ const PRESEARCH_MAX_WORKERS: usize = 2;
 const PRESEARCH_WINDOW_PER_WORKER: usize = 6;
 /// Beam distances a memo holds without growing, for the default `ef`.
 const MEMO_INITIAL_CAPACITY: usize = 4_096;
-/// Eighths of a session's budget a settled [`SharedGraph`] may charge. Most of
-/// it: the planner reads items from the graph, so its own cache needs far less.
-const SHARED_GRAPH_BUDGET_EIGHTHS: usize = 6;
-/// Eighths of a session's budget past which a [`SharedGraph`] is dropped.
-const SHARED_GRAPH_LIMIT_EIGHTHS: usize = 7;
+/// Eighths of a session's budget a settled [`SharedGraph`] may charge. Nearly
+/// all of it: the planner reads items and unchanged rows from the graph, so its
+/// own cache holds little beyond what the current attempt changed.
+const SHARED_GRAPH_BUDGET_EIGHTHS: usize = 7;
 /// Eighths of a session's budget that all overlays of one attempt may hold.
 const OVERLAY_BUDGET_EIGHTHS: usize = 1;
 
@@ -454,10 +453,11 @@ pub(super) const fn shared_graph_budget(max_payload_bytes: usize) -> usize {
     max_payload_bytes / 8 * SHARED_GRAPH_BUDGET_EIGHTHS
 }
 
-/// Bytes past which a session drops its [`SharedGraph`]: more than settling
-/// leaves, so only a budget that shrank since then reaches it.
+/// Bytes past which a session drops its [`SharedGraph`]: the whole budget,
+/// which settling never leaves it holding, so only a budget that shrank since
+/// then reaches it.
 pub(super) const fn shared_graph_limit(max_payload_bytes: usize) -> usize {
-    max_payload_bytes / 8 * SHARED_GRAPH_LIMIT_EIGHTHS
+    max_payload_bytes
 }
 
 /// Bytes all overlays of one attempt may hold under a session's budget.
