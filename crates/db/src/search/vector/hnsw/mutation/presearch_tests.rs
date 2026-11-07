@@ -659,3 +659,24 @@ fn a_dropped_session_frees_its_graph_with_its_other_state() {
     freeing.join().unwrap();
     assert!(matches!(session.graph, SessionGraph::None));
 }
+
+#[test]
+fn settling_keeps_the_graph_within_its_budget() {
+    let name = identity("presearch-eviction");
+    let budget = 64 * 1024;
+    let mut session = VectorBuildSession::<Euclidean>::new(NonZeroU64::new(budget).unwrap());
+    let (graph, _) = session.begin_presearch(name, &nodes(&[]));
+    drop(graph);
+    let mut read = overlay();
+    for node_id in 0..64 {
+        read.put_item(0, node_id, Some(item(1.0)), 1024);
+    }
+    session.settle_presearch(&[read], &nodes(&[]), true);
+
+    let SessionGraph::Resting { graph, .. } = &session.graph else {
+        panic!("the settled graph rests");
+    };
+    let limit = shared_graph_budget(usize::try_from(budget).unwrap());
+    assert!(graph.charged_bytes() <= limit);
+    assert!(graph.charged_bytes() > 0);
+}
