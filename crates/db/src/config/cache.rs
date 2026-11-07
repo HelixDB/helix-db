@@ -454,6 +454,11 @@ impl SlateObjectStoreCacheSettings {
 /// rewrites older SSTs with the current codec. A binary built without zstd
 /// cannot read zstd SSTs.
 ///
+/// Uncompressed is the default because every read of a block decompresses all
+/// of it. A merged index operation queue is one row, so its block can reach
+/// hundreds of megabytes, and scans do not cache blocks: concurrent readers
+/// each hold their own copy, which can exhaust memory.
+///
 /// Parses from `none` or `zstd`, in any case and ignoring surrounding
 /// whitespace.
 ///
@@ -462,16 +467,16 @@ impl SlateObjectStoreCacheSettings {
 /// ```
 /// use db::config::SstCompression;
 ///
-/// assert_eq!(SstCompression::default(), SstCompression::Zstd);
+/// assert_eq!(SstCompression::default(), SstCompression::None);
 /// assert_eq!(" NONE ".parse::<SstCompression>().unwrap(), SstCompression::None);
 /// assert!("lz4".parse::<SstCompression>().is_err());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SstCompression {
-    /// Blocks are stored as encoded.
-    None,
-    /// Zstandard at level 3; the default for every profile.
+    /// Blocks are stored as encoded; the default for every profile.
     #[default]
+    None,
+    /// Zstandard at level 3.
     Zstd,
 }
 

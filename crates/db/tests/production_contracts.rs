@@ -12233,8 +12233,8 @@ mod vector_object_store_warm {
         ))
     }
 
-    /// The default configuration without block compression. The 400-row
-    /// fixture is sized for uncompressed SSTs: zstd packs it into so few
+    /// Uncompressed SSTs, pinned whatever the default codec is. The 400-row
+    /// fixture is sized for them: zstd packs it into so few
     /// blocks that a cold search reads about as many SST objects as a warmed
     /// one, and the comparison would test the codec instead of the warming.
     fn uncompressed() -> config::DbConfig {

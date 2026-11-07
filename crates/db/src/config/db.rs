@@ -534,8 +534,8 @@ impl DbConfig {
     /// use db::config::{DbConfig, SstCompression};
     ///
     /// let codec = |config: DbConfig| config.slate().to_writer_settings(None).compression_codec;
-    /// assert!(codec(DbConfig::new()).is_some());
-    /// assert!(codec(DbConfig::new().with_sst_compression(SstCompression::None)).is_none());
+    /// assert!(codec(DbConfig::new()).is_none());
+    /// assert!(codec(DbConfig::new().with_sst_compression(SstCompression::Zstd)).is_some());
     /// ```
     pub fn with_sst_compression(mut self, compression: super::SstCompression) -> Self {
         self.slate = self.slate.with_sst_compression(compression);
