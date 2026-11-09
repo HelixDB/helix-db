@@ -3195,11 +3195,16 @@ impl<D: Distance> MutationOpCache<D> {
         self.shared = SharedGraphAccess::None;
     }
 
-    /// Evicts until at most `max_bytes` of payload remain.
+    /// Evicts until payload and per-entry bookkeeping fit in `max_bytes`, as
+    /// the session charges them, so entries without payload count too.
     ///
-    /// Only for an overlay, which holds no dirty row.
-    fn bound_payload(&mut self, max_bytes: usize) {
-        while self.retained_payload_bytes > max_bytes {
+    /// Only for an overlay, which holds no dirty row and no SimHash.
+    fn bound_retained(&mut self, max_bytes: usize) {
+        while self.retained_payload_bytes
+            + self.item_count() * VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES
+            + self.neighbor_count() * VECTOR_BUILD_SESSION_NEIGHBOR_OVERHEAD_BYTES
+            > max_bytes
+        {
             if self.evict_oldest_item() {
                 continue;
             }

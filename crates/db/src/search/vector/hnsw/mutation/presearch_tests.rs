@@ -391,17 +391,22 @@ fn dropping_a_run_cancels_it() {
 }
 
 #[test]
-fn an_overlay_stays_within_its_payload_budget() {
+fn an_overlay_charges_every_entry_against_its_budget() {
     let mut read = overlay();
     for node_id in 0..8 {
         read.put_item(0, node_id, Some(item(1.0)), 16);
     }
-    read.bound_payload(32);
-    assert!(read.retained_payload_bytes <= 32);
+    read.bound_retained(2 * (16 + VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES));
     assert_eq!(read.item_count(), 2);
-    read.install_loaded_neighbor(row(0, 1), NeighborRowValue::KnownAbsent);
-    read.bound_payload(0);
-    assert_eq!(read.item_count(), 0);
+    read.bound_retained(0);
+    for node_id in 0..8 {
+        read.put_item(0, node_id, None, 0);
+        read.install_loaded_neighbor(row(0, node_id), NeighborRowValue::KnownAbsent);
+    }
+    read.bound_retained(3 * VECTOR_BUILD_SESSION_NEIGHBOR_OVERHEAD_BYTES);
+    assert_eq!((read.item_count(), read.neighbor_count()), (0, 3));
+    read.bound_retained(0);
+    assert_eq!(read.neighbor_count(), 0);
 }
 
 #[test]

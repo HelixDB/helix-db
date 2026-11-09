@@ -804,7 +804,7 @@ impl<D: Distance> WorkerContext<D> {
                 .await
                 .ok();
             guard.finish(memo);
-            overlay.bound_payload(self.overlay_budget);
+            overlay.bound_retained(self.overlay_budget);
         }
         overlay.release_shared_graph();
         overlay
