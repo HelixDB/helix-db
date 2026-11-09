@@ -340,7 +340,7 @@ const DIFFERENTIAL_SEEDS: u64 = 32;
 /// match it in outcome and in every stored byte.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn batched_deletes_store_the_same_bytes_as_deleting_each_element_alone() {
-    // A graph of 600 nodes crosses a batch boundary.
+    // A graph of 600 nodes, nearly all selected, crosses a batch boundary.
     let seeds = (0..DIFFERENTIAL_SEEDS)
         .map(|seed| tokio::spawn(delete_differential(seed, 6)))
         .chain((0..4).map(|seed| tokio::spawn(delete_differential(seed, 600))))
@@ -356,18 +356,26 @@ async fn delete_differential(seed: u64, count: usize) {
     let (alone_db, ..) =
         differential_graph(&format!("delete-alone-{seed}-{count}"), seed, count).await;
     let mut rng = StdRng::seed_from_u64(seed ^ 0x5eed);
+    // A large graph selects nearly every node, so the delete spans batches.
+    let share = if count > 512 { 0.95 } else { 0.5 };
     let mut selected = nodes
         .iter()
-        .filter(|_| rng.random_bool(0.5))
+        .filter(|_| rng.random_bool(share))
         .map(|id| r::Entity::Node(*id))
         .collect::<Vec<_>>();
+    assert!(
+        count <= 512 || selected.len() > 512,
+        "seed {seed} selects {} of {count} nodes, inside one batch",
+        selected.len()
+    );
     selected.extend(
         edges
             .iter()
             .filter(|_| rng.random_bool(0.5))
             .map(|id| r::Entity::Relationship(*id)),
     );
-    let detach = rng.random_bool(0.5);
+    // Without DETACH a large selection is almost surely refused at once.
+    let detach = count > 512 || rng.random_bool(0.5);
 
     let mut batched_ctx = ExecutionContext::new(&batched_db, context::ParamBindings::default());
     batched_ctx.row_memory = Some(memory::Budget::new(256 * 1024 * 1024));

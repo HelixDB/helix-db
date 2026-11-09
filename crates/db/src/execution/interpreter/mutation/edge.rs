@@ -119,8 +119,14 @@ impl ObservedEdgeDeletions {
             == Some(expected.as_ref())
     }
 
+    /// Moves `edge_id`'s row out, so its memory goes as the edge is staged,
+    /// and advances its pair state.
     pub(super) fn take(&mut self, edge_id: u64) -> Result<ObservedEdgeDeletion> {
-        let row = self.rows.observed(edge_id);
+        let row = self
+            .rows
+            .rows
+            .remove(&edge_id)
+            .expect("an edge observation exists for every requested entity");
         let Some((from, to)) = row.endpoints else {
             return Ok(ObservedEdgeDeletion {
                 row,
