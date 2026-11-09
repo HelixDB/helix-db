@@ -202,10 +202,12 @@ jobs:
           --manifest-path bindings/uniffi-bindgen/Cargo.toml
           --no-default-features --features node
           --bin helixdb-uniffi-bindgen-node
+      # The job runs on arm64, so the generator reads (and the smoke test
+      # loads) the arm64 library; every prebuild is still bundled.
       - name: Generate embedded Node package
         run: |
           bindings/uniffi-bindgen/target/release/helixdb-uniffi-bindgen-node generate \
-            native-libraries/linux-x64-gnu/libhelixdb_uniffi.so \
+            native-libraries/linux-arm64-gnu/libhelixdb_uniffi.so \
             --manifest-path bindings/uniffi/Cargo.toml \
             --out-dir node-embedded \
             --package-name @helix-db/helix-db-embedded \
