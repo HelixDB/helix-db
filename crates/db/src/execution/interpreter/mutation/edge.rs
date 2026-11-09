@@ -85,6 +85,13 @@ impl ObservedEdgeRows {
             .expect("an edge observation exists for every requested entity")
     }
 
+    /// Moves the row out, releasing the observation's hold on it.
+    pub(super) fn take(&mut self, edge_id: u64) -> ObservedEdgeRow {
+        self.rows
+            .remove(&edge_id)
+            .expect("an edge observation exists for every requested entity")
+    }
+
     pub(super) fn replace_properties(
         &mut self,
         edge_id: u64,

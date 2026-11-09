@@ -240,6 +240,66 @@ async fn pending_edits_yield_to_the_memory_budget() {
     db.close().await.unwrap();
 }
 
+/// Updates on large rows hold one chunk of old rows at a time, so they fit
+/// the budget applying each row alone needs. 64 rows of 256 KiB are 16 MiB.
+#[tokio::test]
+async fn large_row_updates_fit_the_budget_one_row_at_a_time_needs() {
+    for statement in [
+        "MATCH (n:Doc) REMOVE n.payload",
+        "MATCH (n:Doc) SET n.flag=1",
+    ] {
+        let db = test_support::open_db("set-large-rows").await;
+        let mut seed = ExecutionContext::new(&db, context::ParamBindings::default());
+        seed.row_memory = Some(memory::Budget::new(1 << 32));
+        seed.enable_request_write_scope().await.unwrap();
+        for k in 0..64 {
+            let properties = vec![
+                property::Property::bytes("payload", vec![7; 256 * 1024]),
+                property::Property::i64("k", k),
+            ];
+            seed.row_create_node("Doc", properties).await.unwrap();
+        }
+        seed.commit_request_write_scope().await.unwrap();
+        drop(seed);
+        crate::cypher::execute(
+            &db,
+            crate::cypher::Request::new(statement),
+            crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+            crate::query_service::QueryMode::Execute,
+            crate::execution_control::ExecutionControl::unlimited(),
+            Limits {
+                memory_bytes: 24 * 1024 * 1024,
+                ..Limits::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{statement}: {error:?}"));
+        db.close().await.unwrap();
+    }
+}
+
+/// A folded edit is checked once, against its final row. With a tenant
+/// partitioned text index, text set alone is still refused, while text set
+/// with its tenant in one clause is accepted in either order.
+#[tokio::test]
+async fn folded_edits_check_indexes_against_the_final_row() {
+    for (statement, succeeds) in [
+        ("MATCH (n:Doc) SET n.body='hello'", false),
+        ("MATCH (n:Doc) SET n.body='hello', n.tenant='acme'", true),
+        ("MATCH (n:Doc) SET n.tenant='acme', n.body='hello'", true),
+    ] {
+        let config = test_support::in_memory_config("set-tenant-text")
+            .with_tenant_text_index("Doc", "body", "tenant");
+        let db = test_support::open_db_with_config(config).await;
+        db.cypher(crate::cypher::Request::new("CREATE (:Doc {k:1})"))
+            .await
+            .unwrap();
+        let result = db.cypher(crate::cypher::Request::new(statement)).await;
+        assert_eq!(result.is_ok(), succeeds, "{statement}: {result:?}");
+        db.close().await.unwrap();
+    }
+}
+
 /// `a` and `b` swap through the row, so each read must see the prior write.
 #[tokio::test]
 async fn set_map_source_applies_pending_edits_to_that_source_first() {

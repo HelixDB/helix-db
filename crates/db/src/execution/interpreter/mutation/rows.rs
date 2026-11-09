@@ -71,9 +71,11 @@ struct EntityEdit {
 /// Evaluated edits folded per entity. Applying them costs one read and one
 /// write however many keys reached each entity.
 ///
-/// Folding must match applying each update alone. Callers apply pending edits
-/// first when a read needs them ([`Self::changes`]) or a change cannot join
-/// them ([`Self::blocks`]). Transitions keep first-edit order, and an entity
+/// Folding stores what applying each update alone stores. Callers apply
+/// pending edits first when a read needs them ([`Self::changes`]) or a change
+/// cannot join them ([`Self::blocks`]). Index checks see only the folded row,
+/// so a clause that sets an indexed value and the property its index needs
+/// alongside it is accepted in either order. Transitions keep first-edit order, and an entity
 /// only extends the most recent edit, because a unique index claims values in
 /// transition order: a value one entity releases can only be claimed after.
 pub(in crate::execution::interpreter) struct EntityEdits {
@@ -190,72 +192,94 @@ impl ExecutionContext<'_> {
             return Ok(());
         }
         let mut scope = self.take_or_begin_write_scope().await?;
-        let nodes = self
-            .observe_node_rows(
-                &scope.txn,
-                edits.entities.keys().filter_map(|entity| match entity {
-                    r::Entity::Node(id) => Some(*id),
-                    r::Entity::Relationship(_) => None,
-                }),
-            )
-            .await?;
-        let relationships = self
-            .observe_edge_rows(
-                &scope.txn,
-                edits.entities.keys().filter_map(|entity| match entity {
-                    r::Entity::Relationship(id) => Some(*id),
-                    r::Entity::Node(_) => None,
-                }),
-            )
-            .await?;
-        for entity in std::mem::take(&mut edits.order) {
-            self.check_execution_deadline()?;
-            let EntityEdit {
-                edit,
-                skips_missing_row,
-            } = edits
-                .entities
-                .remove(&entity)
-                .expect("every ordered entity has one pending edit");
-            let (entity, before) = match entity {
-                r::Entity::Node(id) => (
-                    graph_mutation::GraphEntity::node(id),
-                    nodes.observed(id).ok_or_else(|| {
-                        crate::HelixDbError::InvariantViolation(
-                            "Active text graph source disagrees with its supplied before state"
-                                .to_string(),
-                        )
-                    }),
-                ),
-                r::Entity::Relationship(id) => (
-                    graph_mutation::GraphEntity::edge(id),
-                    relationships.observed(id).require_properties(id),
-                ),
+        let order = std::mem::take(&mut edits.order);
+        let mut remaining = &order[..];
+        // A chunk's old rows are read together and each is released once its
+        // edit is staged, so a statement holds one chunk of old rows, not all
+        // of them. Nothing of a chunk is staged before its read, so a read the
+        // budget refuses repeats with half the entities.
+        let mut chunk = remaining.len();
+        while !remaining.is_empty() {
+            let batch = &remaining[..chunk.min(remaining.len())];
+            let observed = async {
+                let nodes = self
+                    .observe_node_rows(
+                        &scope.txn,
+                        batch.iter().filter_map(|entity| match entity {
+                            r::Entity::Node(id) => Some(*id),
+                            r::Entity::Relationship(_) => None,
+                        }),
+                    )
+                    .await?;
+                let relationships = self
+                    .observe_edge_rows(
+                        &scope.txn,
+                        batch.iter().filter_map(|entity| match entity {
+                            r::Entity::Relationship(id) => Some(*id),
+                            r::Entity::Node(_) => None,
+                        }),
+                    )
+                    .await?;
+                Ok::<_, crate::HelixDbError>((nodes, relationships))
+            }
+            .await;
+            let (mut nodes, mut relationships) = match observed {
+                Err(crate::HelixDbError::QueryMemoryLimitExceeded) if batch.len() > 1 => {
+                    chunk = batch.len() / 2;
+                    continue;
+                }
+                observed => observed?,
             };
-            let before = match before {
-                Ok(before) => before,
-                Err(_) if skips_missing_row => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let graph_mutation::PropertyEditOutcome::Changed(transition) =
-                edit.apply(self.tenant_scope, entity, before, self.row_memory.as_ref())?
-            else {
-                continue;
-            };
-            let encoded = transition
-                .after()
-                .expect("a map replacement has an after row")
-                .write_payload();
-            scope
-                .index_context
-                .maintain_graph_indexes(transition, self.row_memory.as_ref())?;
-            scope.index_context.property_writes.stage(
-                &scope.txn,
-                self.tenant_scope,
-                entity,
-                Some(encoded),
-                self.row_memory.as_ref(),
-            )?;
+            for entity in batch.iter().copied() {
+                self.check_execution_deadline()?;
+                let EntityEdit {
+                    edit,
+                    skips_missing_row,
+                } = edits
+                    .entities
+                    .remove(&entity)
+                    .expect("every ordered entity has one pending edit");
+                let (entity, before) = match entity {
+                    r::Entity::Node(id) => (
+                        graph_mutation::GraphEntity::node(id),
+                        nodes.take(id).ok_or_else(|| {
+                            crate::HelixDbError::InvariantViolation(
+                                "Active text graph source disagrees with its supplied before state"
+                                    .to_string(),
+                            )
+                        }),
+                    ),
+                    r::Entity::Relationship(id) => (
+                        graph_mutation::GraphEntity::edge(id),
+                        relationships.take(id).require_properties(id),
+                    ),
+                };
+                let before = match before {
+                    Ok(before) => before,
+                    Err(_) if skips_missing_row => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let graph_mutation::PropertyEditOutcome::Changed(transition) =
+                    edit.apply(self.tenant_scope, entity, before, self.row_memory.as_ref())?
+                else {
+                    continue;
+                };
+                let encoded = transition
+                    .after()
+                    .expect("a map replacement has an after row")
+                    .write_payload();
+                scope
+                    .index_context
+                    .maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+                scope.index_context.property_writes.stage(
+                    &scope.txn,
+                    self.tenant_scope,
+                    entity,
+                    Some(encoded),
+                    self.row_memory.as_ref(),
+                )?;
+            }
+            remaining = &remaining[batch.len()..];
         }
         edits.structure.shrink_to(0);
         edits.changes.shrink_to(0);
