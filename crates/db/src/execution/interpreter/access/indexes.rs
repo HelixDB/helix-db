@@ -53,11 +53,26 @@ impl<'db> ExecutionContext<'db> {
             })
             .transpose()?;
         if let Some(active) = self.active_write_tx() {
-            return lookup_equality_in_view(self, &active.txn, identity.as_ref(), property, value)
-                .await;
+            return lookup_equality_in_view(
+                self,
+                &active.txn,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+                identity.as_ref(),
+                property,
+                value,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
-            return lookup_equality_in_view(self, view, identity.as_ref(), property, value).await;
+            return lookup_equality_in_view(
+                self,
+                view,
+                view.storage_compatibility(),
+                identity.as_ref(),
+                property,
+                value,
+            )
+            .await;
         }
         outside_request_view!(
             relaxed: {
@@ -66,6 +81,7 @@ impl<'db> ExecutionContext<'db> {
                         lookup_equality_in_view(
                             self,
                             reader.as_ref(),
+                            self.db.reader_storage_compatibility_for_tests(),
                             identity.as_ref(),
                             property,
                             value,
@@ -73,8 +89,15 @@ impl<'db> ExecutionContext<'db> {
                         .await
                     }
                     HelixStorage::Writer(writer) => {
-                        lookup_equality_in_view(self, writer.db(), identity.as_ref(), property, value)
-                            .await
+                        lookup_equality_in_view(
+                            self,
+                            writer.db(),
+                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+                            identity.as_ref(),
+                            property,
+                            value,
+                        )
+                        .await
                     }
                 }
             },
@@ -442,6 +465,7 @@ impl<'db> ExecutionContext<'db> {
                 &active.txn,
                 label,
                 self.tenant_scope,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                 self.row_memory.as_ref(),
             )
             .await;
@@ -451,6 +475,7 @@ impl<'db> ExecutionContext<'db> {
                 view,
                 label,
                 self.tenant_scope,
+                view.storage_compatibility(),
                 self.row_memory.as_ref(),
             )
             .await;
@@ -463,6 +488,7 @@ impl<'db> ExecutionContext<'db> {
                             reader.as_ref(),
                             label,
                             self.tenant_scope,
+                            self.db.reader_storage_compatibility_for_tests(),
                             self.row_memory.as_ref(),
                         )
                         .await
@@ -472,6 +498,7 @@ impl<'db> ExecutionContext<'db> {
                             writer.db(),
                             label,
                             self.tenant_scope,
+                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                             self.row_memory.as_ref(),
                         )
                         .await
@@ -501,11 +528,26 @@ impl<'db> ExecutionContext<'db> {
             })
             .transpose()?;
         if let Some(active) = self.active_write_tx() {
-            return lookup_equality_in_view(self, &active.txn, identity.as_ref(), property, value)
-                .await;
+            return lookup_equality_in_view(
+                self,
+                &active.txn,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+                identity.as_ref(),
+                property,
+                value,
+            )
+            .await;
         }
         if let Some(view) = self.request_read_view() {
-            return lookup_equality_in_view(self, view, identity.as_ref(), property, value).await;
+            return lookup_equality_in_view(
+                self,
+                view,
+                view.storage_compatibility(),
+                identity.as_ref(),
+                property,
+                value,
+            )
+            .await;
         }
         outside_request_view!(
             relaxed: {
@@ -514,6 +556,7 @@ impl<'db> ExecutionContext<'db> {
                         lookup_equality_in_view(
                             self,
                             reader.as_ref(),
+                            self.db.reader_storage_compatibility_for_tests(),
                             identity.as_ref(),
                             property,
                             value,
@@ -521,8 +564,15 @@ impl<'db> ExecutionContext<'db> {
                         .await
                     }
                     HelixStorage::Writer(writer) => {
-                        lookup_equality_in_view(self, writer.db(), identity.as_ref(), property, value)
-                            .await
+                        lookup_equality_in_view(
+                            self,
+                            writer.db(),
+                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+                            identity.as_ref(),
+                            property,
+                            value,
+                        )
+                        .await
                     }
                 }
             },
@@ -538,21 +588,25 @@ impl<'db> ExecutionContext<'db> {
         label: &str,
     ) -> Result<bitmap::Bitmap> {
         if let Some(active) = self.active_write_tx() {
-            return crate::search::lookup_out_neighbors_by_label_admitted(
+            return crate::search::lookup_neighbors_by_label_admitted(
                 &active.txn,
+                crate::encoding::indexes::EdgeDirection::Out,
                 node_id,
                 label,
                 self.tenant_scope,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                 self.row_memory.as_ref(),
             )
             .await;
         }
         if let Some(view) = self.request_read_view() {
-            return crate::search::lookup_out_neighbors_by_label_admitted(
+            return crate::search::lookup_neighbors_by_label_admitted(
                 view,
+                crate::encoding::indexes::EdgeDirection::Out,
                 node_id,
                 label,
                 self.tenant_scope,
+                view.storage_compatibility(),
                 self.row_memory.as_ref(),
             )
             .await;
@@ -561,21 +615,25 @@ impl<'db> ExecutionContext<'db> {
             relaxed: {
                 match self.db.storage() {
                     HelixStorage::Reader(reader) => {
-                        crate::search::lookup_out_neighbors_by_label_admitted(
+                        crate::search::lookup_neighbors_by_label_admitted(
                             reader.as_ref(),
+                            crate::encoding::indexes::EdgeDirection::Out,
                             node_id,
                             label,
                             self.tenant_scope,
+                            self.db.reader_storage_compatibility_for_tests(),
                             self.row_memory.as_ref(),
                         )
                         .await
                     }
                     HelixStorage::Writer(writer) => {
-                        crate::search::lookup_out_neighbors_by_label_admitted(
+                        crate::search::lookup_neighbors_by_label_admitted(
                             writer.db(),
+                            crate::encoding::indexes::EdgeDirection::Out,
                             node_id,
                             label,
                             self.tenant_scope,
+                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                             self.row_memory.as_ref(),
                         )
                         .await
@@ -594,21 +652,25 @@ impl<'db> ExecutionContext<'db> {
         label: &str,
     ) -> Result<bitmap::Bitmap> {
         if let Some(active) = self.active_write_tx() {
-            return crate::search::lookup_in_neighbors_by_label_admitted(
+            return crate::search::lookup_neighbors_by_label_admitted(
                 &active.txn,
+                crate::encoding::indexes::EdgeDirection::In,
                 node_id,
                 label,
                 self.tenant_scope,
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                 self.row_memory.as_ref(),
             )
             .await;
         }
         if let Some(view) = self.request_read_view() {
-            return crate::search::lookup_in_neighbors_by_label_admitted(
+            return crate::search::lookup_neighbors_by_label_admitted(
                 view,
+                crate::encoding::indexes::EdgeDirection::In,
                 node_id,
                 label,
                 self.tenant_scope,
+                view.storage_compatibility(),
                 self.row_memory.as_ref(),
             )
             .await;
@@ -617,21 +679,25 @@ impl<'db> ExecutionContext<'db> {
             relaxed: {
                 match self.db.storage() {
                     HelixStorage::Reader(reader) => {
-                        crate::search::lookup_in_neighbors_by_label_admitted(
+                        crate::search::lookup_neighbors_by_label_admitted(
                             reader.as_ref(),
+                            crate::encoding::indexes::EdgeDirection::In,
                             node_id,
                             label,
                             self.tenant_scope,
+                            self.db.reader_storage_compatibility_for_tests(),
                             self.row_memory.as_ref(),
                         )
                         .await
                     }
                     HelixStorage::Writer(writer) => {
-                        crate::search::lookup_in_neighbors_by_label_admitted(
+                        crate::search::lookup_neighbors_by_label_admitted(
                             writer.db(),
+                            crate::encoding::indexes::EdgeDirection::In,
                             node_id,
                             label,
                             self.tenant_scope,
+                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                             self.row_memory.as_ref(),
                         )
                         .await
@@ -769,6 +835,7 @@ fn secondary_identity(
 async fn lookup_equality_in_view(
     context: &ExecutionContext<'_>,
     reader: &(impl DbReadOps + Send + Sync),
+    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
     identity: Option<&crate::index_lifecycle::IndexIdentity>,
     property: &str,
     value: &DbPropertyValue,
@@ -785,11 +852,11 @@ async fn lookup_equality_in_view(
     let Some(value) = value.as_str() else {
         return bitmap::Bitmap::empty(context.row_memory.as_ref());
     };
-    crate::search::lookup_equality_index_set_admitted(
+    crate::search::lookup_node_label_index_admitted(
         reader,
-        property,
         value,
         context.tenant_scope,
+        compatibility,
         context.row_memory.as_ref(),
     )
     .await
@@ -922,7 +989,8 @@ async fn unindexed_label_rows_in_view(
     let candidates = crate::index_lifecycle::secondary::unindexed_label_rows(
         reader,
         label,
-        handle.map(|handle| (handle, compatibility)),
+        compatibility,
+        handle,
         within,
         match extra.taken {
             0 => crate::index_lifecycle::secondary::LabelLaneReads::Sequential,

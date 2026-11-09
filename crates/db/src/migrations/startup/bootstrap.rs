@@ -14,17 +14,23 @@ use crate::index_lifecycle::{
 use crate::transaction::Mutation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Every plan leaves the marker at most at
+/// [`IndexStorageVersion::OPERATION_QUEUES`]; the label identity migration,
+/// which runs after the blocking startup migrations, publishes the current
+/// version itself.
 enum WriterBootstrapPlan {
     Initialize,
     /// Versions before equality bitmaps: the equality-bitmap migration
-    /// publishes the current version itself.
-    MigrateToCurrent,
-    /// Equality-bitmap layouts older than current: rewrite only the marker.
-    PublishCurrentVersion(CurrentBootstrap),
+    /// publishes the operation-queue version itself.
+    MigrateToOperationQueues,
+    /// Equality-bitmap layouts older than operation queues: rewrite only the marker.
+    PublishOperationQueueVersion(CurrentBootstrap),
     Current(CurrentBootstrap),
 }
 
-/// What a store at the current layout still needs after its marker is current.
+/// What a store at the current equality layout still needs after its marker
+/// reaches operation queues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CurrentBootstrap {
     Cleanup,
@@ -38,11 +44,11 @@ pub(crate) async fn bootstrap_writer(db: &Db) -> Result<()> {
 
     let current = match plan {
         WriterBootstrapPlan::Initialize => return initialize_writer_bootstrap(db).await,
-        WriterBootstrapPlan::MigrateToCurrent => {
+        WriterBootstrapPlan::MigrateToOperationQueues => {
             return super::super::indexes::equality_bitmap::migrate_v3_to_v4(db).await;
         }
-        WriterBootstrapPlan::PublishCurrentVersion(current) => {
-            publish_current_version(db).await?;
+        WriterBootstrapPlan::PublishOperationQueueVersion(current) => {
+            publish_operation_queue_version(db).await?;
             current
         }
         WriterBootstrapPlan::Current(current) => current,
@@ -55,13 +61,14 @@ pub(crate) async fn bootstrap_writer(db: &Db) -> Result<()> {
     }
 }
 
-/// Moves an equality-bitmap store's marker to the current version.
+/// Moves an equality-bitmap store's marker to the operation-queue version.
 ///
 /// Nothing else is rewritten: every version from
-/// [`IndexStorageVersion::EQUALITY_BITMAPS`] shares one physical layout. A
+/// [`IndexStorageVersion::EQUALITY_BITMAPS`] through
+/// [`IndexStorageVersion::OPERATION_QUEUES`] shares one physical layout. A
 /// crash before the commit leaves the older marker, which the next open
-/// publishes again; a store already at the current version is left alone.
-async fn publish_current_version(db: &Db) -> Result<()> {
+/// publishes again; a store already at or past operation queues is left alone.
+async fn publish_operation_queue_version(db: &Db) -> Result<()> {
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     let marker_key = global_key(GlobalKey::StorageVersion);
     let marker =
@@ -78,11 +85,13 @@ async fn publish_current_version(db: &Db) -> Result<()> {
             reason: "V2 storage marker contains the wrong value kind".to_string(),
         });
     };
-    if version == IndexStorageVersion::CURRENT {
+    if version >= IndexStorageVersion::OPERATION_QUEUES {
         transaction.rollback();
         return Ok(());
     }
-    if !(IndexStorageVersion::EQUALITY_BITMAPS..IndexStorageVersion::CURRENT).contains(&version) {
+    if !(IndexStorageVersion::EQUALITY_BITMAPS..IndexStorageVersion::OPERATION_QUEUES)
+        .contains(&version)
+    {
         transaction.rollback();
         return Err(HelixDbError::MigrationRequired {
             reason: format!(
@@ -95,7 +104,7 @@ async fn publish_current_version(db: &Db) -> Result<()> {
         &transaction,
         marker_key,
         encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-            IndexStorageVersion::CURRENT,
+            IndexStorageVersion::OPERATION_QUEUES,
         )),
     )?;
     transaction.commit().await?;
@@ -112,7 +121,8 @@ pub(crate) async fn bootstrap_managed_writer(db: &Db) -> Result<()> {
             requirement: WriterMigrationRequirement::IncompleteStorageSchema,
         });
     }
-    stage_writer_bootstrap_initialization(&transaction)?;
+    // A pristine store has no label rows to move, so it starts current.
+    stage_writer_bootstrap_initialization(&transaction, IndexStorageVersion::CURRENT)?;
     super::super::stage_current_storage_schema_ready(&transaction)?;
     transaction.commit().await?;
     Ok(())
@@ -244,15 +254,15 @@ async fn preflight_writer_bootstrap(db: &Db) -> Result<WriterBootstrapPlan> {
     transaction.rollback();
 
     if version < IndexStorageVersion::EQUALITY_BITMAPS {
-        return Ok(WriterBootstrapPlan::MigrateToCurrent);
+        return Ok(WriterBootstrapPlan::MigrateToOperationQueues);
     }
     let current = if cleanup_ready && tenant_envelope_ready {
         CurrentBootstrap::Ready
     } else {
         CurrentBootstrap::Cleanup
     };
-    Ok(if version < IndexStorageVersion::CURRENT {
-        WriterBootstrapPlan::PublishCurrentVersion(current)
+    Ok(if version < IndexStorageVersion::OPERATION_QUEUES {
+        WriterBootstrapPlan::PublishOperationQueueVersion(current)
     } else {
         WriterBootstrapPlan::Current(current)
     })
@@ -272,21 +282,24 @@ async fn initialize_writer_bootstrap(db: &Db) -> Result<()> {
             reason: "V2 storage bootstrap changed after writer preflight".to_string(),
         });
     }
-    stage_writer_bootstrap_initialization(&transaction)?;
+    // The store may hold legacy graph rows, so the label identity migration
+    // publishes the current version once it has moved their label rows.
+    stage_writer_bootstrap_initialization(&transaction, IndexStorageVersion::OPERATION_QUEUES)?;
     transaction.commit().await?;
     Ok(())
 }
 
-fn stage_writer_bootstrap_initialization(transaction: &DbTransaction) -> Result<()> {
+fn stage_writer_bootstrap_initialization(
+    transaction: &DbTransaction,
+    version: IndexStorageVersion,
+) -> Result<()> {
     let marker_key = global_key(GlobalKey::StorageVersion);
     let logical_key = global_key(GlobalKey::LogicalIndexIdWatermark);
     let vector_key = global_key(GlobalKey::VectorPhysicalIdWatermark);
     Mutation::put(
         transaction,
         marker_key,
-        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-            IndexStorageVersion::CURRENT,
-        )),
+        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(version)),
     )?;
     Mutation::put(
         transaction,

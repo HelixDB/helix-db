@@ -4396,7 +4396,8 @@ pub(crate) enum LabelLaneReads {
 pub(crate) async fn unindexed_label_rows(
     reader: &(impl DbReadOps + Send + Sync),
     label: UnindexedLabel<'_>,
-    lane: Option<(&ActiveIndexHandle, ReaderStorageCompatibility)>,
+    compatibility: ReaderStorageCompatibility,
+    lane: Option<&ActiveIndexHandle>,
     within: Option<&roaring::RoaringTreemap>,
     reads: LabelLaneReads,
     deadline: &(impl Fn() -> Result<()> + Sync),
@@ -4409,26 +4410,30 @@ pub(crate) async fn unindexed_label_rows(
         record_equality_point_read();
         match label.kind {
             IndexElementKind::Node => {
-                crate::search::lookup_equality_index_set_scoped(
+                crate::search::lookup_node_label_index_admitted(
                     reader,
-                    "$label",
                     label.label,
                     label.scope,
+                    compatibility,
+                    None,
                 )
                 .await
             }
             IndexElementKind::Edge => {
-                crate::search::lookup_global_edge_label_index_scoped(
+                crate::search::lookup_global_edge_label_index_admitted(
                     reader,
                     label.label,
                     label.scope,
+                    compatibility,
+                    None,
                 )
                 .await
             }
         }
+        .map(crate::query_resources::bitmap::Bitmap::into_unbudgeted)
     };
     let held = async {
-        let Some((handle, compatibility)) = lane else {
+        let Some(handle) = lane else {
             return Ok(roaring::RoaringTreemap::new());
         };
         equality_lane_rows(reader, handle, compatibility, deadline).await

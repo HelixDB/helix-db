@@ -156,8 +156,11 @@ impl<'a> EdgeRangeIndexKey<'a> {
             IndexPrefix::Equality
             | IndexPrefix::Range(_)
             | IndexPrefix::EdgeEquality
+            | IndexPrefix::NodeLabel
             | IndexPrefix::EdgeLabel
             | IndexPrefix::EdgeLabelNeighbor(_)
+            | IndexPrefix::LegacyEdgeLabel
+            | IndexPrefix::LegacyEdgeLabelNeighbor(_)
             | IndexPrefix::GlobalEdgeEquality
             | IndexPrefix::GlobalEdgeRange(_) => {
                 return Err(EncodingError::InvalidIndexKey(
@@ -360,8 +363,11 @@ impl<'a> GlobalEdgeRangeIndexKey<'a> {
             IndexPrefix::Equality
             | IndexPrefix::Range(_)
             | IndexPrefix::EdgeEquality
+            | IndexPrefix::NodeLabel
             | IndexPrefix::EdgeLabel
             | IndexPrefix::EdgeLabelNeighbor(_)
+            | IndexPrefix::LegacyEdgeLabel
+            | IndexPrefix::LegacyEdgeLabelNeighbor(_)
             | IndexPrefix::EdgeRange(..)
             | IndexPrefix::GlobalEdgeEquality => {
                 return Err(EncodingError::InvalidIndexKey(

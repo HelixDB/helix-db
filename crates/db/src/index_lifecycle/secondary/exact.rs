@@ -982,10 +982,10 @@ mod tests {
                     DataKey::Data {
                         scope: handle.scope(),
                         kind: DataKeyKind::PropertyIndex(
-                            crate::encoding::indexes::PropertyIndexKey::Equality(
-                                crate::encoding::indexes::equality::EqualityIndexKey::new(
-                                    crate::encoding::indexes::hash_property_name("$label"),
-                                    crate::encoding::indexes::hash_property_value("User"),
+                            crate::encoding::indexes::PropertyIndexKey::NodeLabel(
+                                crate::encoding::indexes::label::NodeLabelKey::new(
+                                    crate::encoding::indexes::label::LabelIdentity::new("User")
+                                        .unwrap(),
                                 ),
                             ),
                         ),
@@ -1010,7 +1010,8 @@ mod tests {
                         unindexed_label_rows(
                             &db,
                             label,
-                            Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                            ReaderStorageCompatibility::LegacyEqualityUnion,
+                            Some(&handle),
                             None,
                             reads,
                             &|| Ok(()),
@@ -1026,7 +1027,8 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
-                        Some((&handle, ReaderStorageCompatibility::Current)),
+                        ReaderStorageCompatibility::Current,
+                        Some(&handle),
                         None,
                         LabelLaneReads::Concurrent,
                         &|| Ok(()),
@@ -1042,7 +1044,8 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
-                        Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                        ReaderStorageCompatibility::LegacyEqualityUnion,
+                        Some(&handle),
                         Some(&wide),
                         LabelLaneReads::Concurrent,
                         &|| Ok(()),
@@ -1059,7 +1062,8 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
-                        Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                        ReaderStorageCompatibility::LegacyEqualityUnion,
+                        Some(&handle),
                         Some(&small),
                         LabelLaneReads::Concurrent,
                         &|| Ok(()),
@@ -1076,6 +1080,7 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
+                        ReaderStorageCompatibility::Current,
                         None,
                         None,
                         LabelLaneReads::Concurrent,
@@ -1093,7 +1098,8 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
-                        Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                        ReaderStorageCompatibility::LegacyEqualityUnion,
+                        Some(&handle),
                         None,
                         LabelLaneReads::Sequential,
                         &expired,

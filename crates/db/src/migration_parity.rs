@@ -1588,7 +1588,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(state.storage_version, Some(5));
+        assert_eq!(
+            state.storage_version,
+            Some(crate::index_lifecycle::IndexStorageVersion::CURRENT.get())
+        );
         assert!(serde_json::to_value(&state)
             .unwrap()
             .get("membership_delta_write_mode")

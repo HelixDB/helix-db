@@ -24,6 +24,7 @@ pub(crate) async fn prepare_writer(db: Arc<Db>, config: &DbConfig) -> Result<Hel
     );
     let prepare_result: Result<()> = async {
         super::super::run_blocking_startup_migration(&writer, config.migrations()).await?;
+        super::super::migrate_label_identity(writer.db()).await?;
         crate::index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
             writer.db(),
             DataScope::LegacyUnscoped,

@@ -135,7 +135,7 @@ async fn scans_skip_unconfirmed_edges_and_surface_corrupt_records() {
             ctx.storage_key(keys::DataKeyKind::PropertyIndex(
                 crate::encoding::indexes::PropertyIndexKey::EdgeLabel(
                     crate::encoding::indexes::label::EdgeLabelKey::new(
-                        crate::encoding::indexes::hash_property_value("R"),
+                        crate::encoding::indexes::label::LabelIdentity::new("R").unwrap(),
                     ),
                 ),
             )),
