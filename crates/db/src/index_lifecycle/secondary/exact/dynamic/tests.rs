@@ -12,15 +12,14 @@ async fn put_label_rows(
     let definition = handle.secondary_definition().unwrap();
     let label = definition.label().as_str();
     let index = match definition.element_kind() {
-        IndexElementKind::Node => crate::encoding::indexes::PropertyIndexKey::Equality(
-            crate::encoding::indexes::equality::EqualityIndexKey::new(
-                crate::encoding::indexes::hash_property_name("$label"),
-                crate::encoding::indexes::hash_property_value(label),
+        IndexElementKind::Node => crate::encoding::indexes::PropertyIndexKey::NodeLabel(
+            crate::encoding::indexes::label::NodeLabelKey::new(
+                crate::encoding::indexes::label::LabelIdentity::new(label).unwrap(),
             ),
         ),
         IndexElementKind::Edge => crate::encoding::indexes::PropertyIndexKey::EdgeLabel(
             crate::encoding::indexes::label::EdgeLabelKey::new(
-                crate::encoding::indexes::hash_property_value(label),
+                crate::encoding::indexes::label::LabelIdentity::new(label).unwrap(),
             ),
         ),
     };

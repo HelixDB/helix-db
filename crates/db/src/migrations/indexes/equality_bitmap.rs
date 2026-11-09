@@ -181,6 +181,8 @@ pub(crate) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
 
     trip(EqualityBitmapMigrationFailpoint::PublicationBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    // The label identity migration publishes the current version later in the
+    // writer open, once it has moved this store's hash-keyed label rows.
     Mutation::put(
         &transaction,
         ManagedIndexKey::Global {
@@ -188,7 +190,7 @@ pub(crate) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
         }
         .to_bytes(),
         encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-            IndexStorageVersion::CURRENT,
+            IndexStorageVersion::OPERATION_QUEUES,
         )),
     )?;
     transaction.commit().await?;
@@ -232,9 +234,9 @@ pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Resul
         ));
     };
     let target_version = IndexStorageVersion::new(version)?;
-    if source_version != IndexStorageVersion::CURRENT && source_version != target_version {
+    if source_version < IndexStorageVersion::OPERATION_QUEUES && source_version != target_version {
         return Err(corruption(
-            "legacy fixture source must be current or already at the requested version",
+            "legacy fixture source must have equality bitmaps or already be at the requested version",
         ));
     }
 
@@ -1290,7 +1292,7 @@ mod tests {
                 loop {
                     assert_reader_queries(&reader).await;
                     if reader.reader_storage_compatibility_for_tests()
-                        == ReaderStorageCompatibility::Current
+                        == ReaderStorageCompatibility::LegacyLabelHash
                     {
                         break;
                     }
@@ -1355,7 +1357,7 @@ mod tests {
             loop {
                 assert_reader_queries(&reader).await;
                 if reader.reader_storage_compatibility_for_tests()
-                    == ReaderStorageCompatibility::Current
+                    == ReaderStorageCompatibility::LegacyLabelHash
                 {
                     break;
                 }
@@ -1363,7 +1365,7 @@ mod tests {
             }
         })
         .await
-        .expect("the open reader switches monotonically to current storage");
+        .expect("the open reader switches monotonically to equality bitmaps");
 
         cleanup_v3_nonunique_equality_rows(&db).await.unwrap();
         db.flush().await.unwrap();
@@ -1386,7 +1388,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             decode_metadata_value(&marker).unwrap(),
-            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
+            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::OPERATION_QUEUES)
         );
         assert!(crate::migrations::index_storage_v4_cleanup_ready(db)
             .await

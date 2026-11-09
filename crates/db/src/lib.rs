@@ -1505,6 +1505,9 @@ impl HelixDB {
             );
             if migration_authorized {
                 migrations::run_blocking_startup_migration(&writer, config.migrations()).await?;
+                // After graph-format rewrites, so every edge has its by-ID
+                // record, and before any graph write, so no write races a move.
+                migrations::migrate_label_identity(&db).await?;
                 index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
                     &db,
                     DataScope::LegacyUnscoped,
@@ -5328,8 +5331,8 @@ mod tests {
                     matches!(
                         error,
                         HelixDbError::UnsupportedIndexStorageVersion {
-                            found: 6,
-                            supported: 5,
+                            found: 7,
+                            supported: 6,
                         }
                     ),
                     "{role}: {error}"
@@ -5414,7 +5417,7 @@ mod tests {
                 HelixDbError::WriterMigrationRequired {
                     requirement: crate::error::WriterMigrationRequirement::StorageVersion {
                         found: 4,
-                        target: 5,
+                        target: 6,
                     },
                 }
             ),
@@ -5690,7 +5693,7 @@ mod tests {
             HelixDbError::WriterMigrationRequired {
                 requirement: crate::error::WriterMigrationRequirement::StorageVersion {
                     found: 2,
-                    target: 5,
+                    target: 6,
                 },
             }
         ));

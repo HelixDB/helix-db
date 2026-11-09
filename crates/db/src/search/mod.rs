@@ -25,7 +25,9 @@ use crate::encoding::indexes::equality::{
     scans::{EdgeEqualityScanPrefix, EqualityScanPrefix, GlobalEdgeEqualityScanPrefix},
     EdgeDirection as EdgeEqualityDirection, EdgeEqualityIndexKey, EqualityIndexKey,
 };
-use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey, EdgeLabelScanPrefix};
+use crate::encoding::indexes::label::{
+    EdgeLabelKey, EdgeLabelNeighborKey, LabelIdentity, LabelScanPrefix, NodeLabelKey,
+};
 use crate::encoding::indexes::prefix::exclusive_prefix_end_bound;
 use crate::encoding::indexes::range::{
     scans::{
@@ -45,6 +47,9 @@ use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{decode_properties, encode_properties};
 use crate::encoding::v2::keys::indexes::PropertyIndexKey;
 use crate::encoding::v2::keys::{DataKey, DataKeyKind};
+use crate::encoding::v2::legacy::label_hash::{
+    LegacyEdgeLabelKey, LegacyEdgeLabelNeighborKey, LegacyNodeLabelKey,
+};
 use crate::encoding::v2::legacy::text::storage_keys::{
     self as key_metadata, LegacyTextMetadataElement as TextMetadataElement,
 };
@@ -52,6 +57,7 @@ use crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue;
 use crate::encoding::v2::values::indexes::{BitmapMembershipDelta, SecondaryEqualityValue};
 use crate::encoding::{EdgeId, NodeId};
 use crate::error::HelixDbError;
+use crate::index_lifecycle::repository::ReaderStorageCompatibility;
 use crate::query_resources::{self, bitmap};
 use crate::transaction::Mutation;
 use slatedb::DbReadOps;
@@ -1387,13 +1393,13 @@ pub fn add_to_edge_label_index_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let label_hash = hash_property_value(label);
+    let identity = LabelIdentity::new(label)?;
 
     // Update outgoing index: from + label -> to
     let out_key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, from, label_hash),
+            EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, from, identity.clone()),
         )),
     }
     .to_bytes();
@@ -1403,7 +1409,7 @@ pub fn add_to_edge_label_index_scoped(
     let in_key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::In, to, label_hash),
+            EdgeLabelNeighborKey::new(EdgeRangeDirection::In, to, identity),
         )),
     }
     .to_bytes();
@@ -1427,13 +1433,13 @@ pub fn remove_from_edge_label_index_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let label_hash = hash_property_value(label);
+    let identity = LabelIdentity::new(label)?;
 
     // Update outgoing index
     let out_key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, from, label_hash),
+            EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, from, identity.clone()),
         )),
     }
     .to_bytes();
@@ -1443,7 +1449,7 @@ pub fn remove_from_edge_label_index_scoped(
     let in_key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::In, to, label_hash),
+            EdgeLabelNeighborKey::new(EdgeRangeDirection::In, to, identity),
         )),
     }
     .to_bytes();
@@ -1467,26 +1473,17 @@ pub async fn lookup_out_neighbors_by_label_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    lookup_out_neighbors_by_label_admitted(txn, source, label, tenant_scope, None)
-        .await
-        .map(bitmap::Bitmap::into_unbudgeted)
-}
-
-pub(crate) async fn lookup_out_neighbors_by_label_admitted(
-    txn: &(impl DbReadOps + Send + Sync),
-    source: NodeId,
-    label: &str,
-    tenant_scope: DataScope,
-    budget: Option<&query_resources::Budget>,
-) -> Result<bitmap::Bitmap, HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, source, hash_property_value(label)),
-        )),
-    }
-    .to_bytes();
-    bitmap::Bitmap::read(txn, &key, budget).await
+    lookup_neighbors_by_label_admitted(
+        txn,
+        EdgeRangeDirection::Out,
+        source,
+        label,
+        tenant_scope,
+        ReaderStorageCompatibility::Current,
+        None,
+    )
+    .await
+    .map(bitmap::Bitmap::into_unbudgeted)
 }
 
 /// Look up incoming neighbors by edge label
@@ -1506,26 +1503,82 @@ pub async fn lookup_in_neighbors_by_label_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    lookup_in_neighbors_by_label_admitted(txn, target, label, tenant_scope, None)
-        .await
-        .map(bitmap::Bitmap::into_unbudgeted)
+    lookup_neighbors_by_label_admitted(
+        txn,
+        EdgeRangeDirection::In,
+        target,
+        label,
+        tenant_scope,
+        ReaderStorageCompatibility::Current,
+        None,
+    )
+    .await
+    .map(bitmap::Bitmap::into_unbudgeted)
 }
 
-pub(crate) async fn lookup_in_neighbors_by_label_admitted(
+/// Opposite endpoints of `node`'s `label` edges in `direction`.
+///
+/// `compatibility` is the request snapshot's storage layout: a store whose
+/// writer has not published the label identity migration may still file the
+/// row under its retired hash key.
+pub(crate) async fn lookup_neighbors_by_label_admitted(
     txn: &(impl DbReadOps + Send + Sync),
-    target: NodeId,
+    direction: EdgeRangeDirection,
+    node: NodeId,
     label: &str,
     tenant_scope: DataScope,
+    compatibility: ReaderStorageCompatibility,
     budget: Option<&query_resources::Budget>,
 ) -> Result<bitmap::Bitmap, HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(EdgeRangeDirection::In, target, hash_property_value(label)),
-        )),
+    let exact = LabelIdentity::new(label).ok().map(|identity| {
+        DataKey::Data {
+            scope: tenant_scope,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
+                EdgeLabelNeighborKey::new(direction, node, identity),
+            )),
+        }
+        .to_bytes()
+    });
+    read_label_row(txn, exact, compatibility, budget, || {
+        DataKey::Data {
+            scope: tenant_scope,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::LegacyEdgeLabelNeighbor(
+                LegacyEdgeLabelNeighborKey::for_label(direction, node, label),
+            )),
+        }
+        .to_bytes()
+    })
+    .await
+}
+
+/// Reads one label row by its exact key.
+///
+/// A label too long for any exact key (`exact` is `None`) has no exact row.
+/// While `compatibility` predates the label identity migration, an empty exact
+/// row falls back to the retired hash-keyed row: the migration moves each row
+/// in one commit, so any snapshot files a label's members under exactly one of
+/// the two keys.
+async fn read_label_row(
+    txn: &(impl DbReadOps + Send + Sync),
+    exact: Option<Bytes>,
+    compatibility: ReaderStorageCompatibility,
+    budget: Option<&query_resources::Budget>,
+    legacy: impl FnOnce() -> Bytes,
+) -> Result<bitmap::Bitmap, HelixDbError> {
+    let rows = match &exact {
+        Some(key) => bitmap::Bitmap::read(txn, key, budget).await?,
+        None => bitmap::Bitmap::empty(budget)?,
+    };
+    match compatibility {
+        ReaderStorageCompatibility::Current => return Ok(rows),
+        ReaderStorageCompatibility::LegacyLabelHash
+        | ReaderStorageCompatibility::LegacyEqualityUnion => {}
     }
-    .to_bytes();
-    bitmap::Bitmap::read(txn, &key, budget).await
+    if !rows.is_empty() {
+        return Ok(rows);
+    }
+    drop(rows);
+    bitmap::Bitmap::read(txn, &legacy(), budget).await
 }
 
 // =============================================================================
@@ -1784,7 +1837,7 @@ pub fn add_to_global_edge_label_index_scoped(
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
+            LabelIdentity::new(label)?,
         ))),
     }
     .to_bytes();
@@ -1809,7 +1862,7 @@ pub fn remove_from_global_edge_label_index_scoped(
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
+            LabelIdentity::new(label)?,
         ))),
     }
     .to_bytes();
@@ -1829,25 +1882,92 @@ pub async fn lookup_global_edge_label_index_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    lookup_global_edge_label_index_admitted(txn, label, tenant_scope, None)
-        .await
-        .map(bitmap::Bitmap::into_unbudgeted)
+    lookup_global_edge_label_index_admitted(
+        txn,
+        label,
+        tenant_scope,
+        ReaderStorageCompatibility::Current,
+        None,
+    )
+    .await
+    .map(bitmap::Bitmap::into_unbudgeted)
 }
 
+/// Every edge of `label`; see [`lookup_neighbors_by_label_admitted`] for
+/// `compatibility`.
 pub(crate) async fn lookup_global_edge_label_index_admitted(
     txn: &(impl DbReadOps + Send + Sync),
     label: &str,
     tenant_scope: DataScope,
+    compatibility: ReaderStorageCompatibility,
     budget: Option<&query_resources::Budget>,
 ) -> Result<bitmap::Bitmap, HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
-        ))),
-    }
-    .to_bytes();
-    bitmap::Bitmap::read(txn, &key, budget).await
+    let exact = LabelIdentity::new(label).ok().map(|identity| {
+        DataKey::Data {
+            scope: tenant_scope,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
+                identity,
+            ))),
+        }
+        .to_bytes()
+    });
+    read_label_row(txn, exact, compatibility, budget, || {
+        DataKey::Data {
+            scope: tenant_scope,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::LegacyEdgeLabel(
+                LegacyEdgeLabelKey::for_label(label),
+            )),
+        }
+        .to_bytes()
+    })
+    .await
+}
+
+/// Look up all node IDs carrying `label` from the node label index.
+pub async fn lookup_node_label_index_scoped(
+    txn: &(impl DbReadOps + Send + Sync),
+    label: &str,
+    tenant_scope: DataScope,
+) -> Result<RoaringTreemap, HelixDbError> {
+    lookup_node_label_index_admitted(
+        txn,
+        label,
+        tenant_scope,
+        ReaderStorageCompatibility::Current,
+        None,
+    )
+    .await
+    .map(bitmap::Bitmap::into_unbudgeted)
+}
+
+/// Every node of `label`; see [`lookup_neighbors_by_label_admitted`] for
+/// `compatibility`.
+pub(crate) async fn lookup_node_label_index_admitted(
+    txn: &(impl DbReadOps + Send + Sync),
+    label: &str,
+    tenant_scope: DataScope,
+    compatibility: ReaderStorageCompatibility,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap, HelixDbError> {
+    let exact = LabelIdentity::new(label).ok().map(|identity| {
+        DataKey::Data {
+            scope: tenant_scope,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(NodeLabelKey::new(
+                identity,
+            ))),
+        }
+        .to_bytes()
+    });
+    read_label_row(txn, exact, compatibility, budget, || {
+        DataKey::Data {
+            scope: tenant_scope,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
+                LegacyNodeLabelKey::for_label(label),
+            )),
+        }
+        .to_bytes()
+    })
+    .await
 }
 
 /// Look up all edge IDs for a globally indexed edge property/value pair.
@@ -1966,12 +2086,9 @@ pub fn remove_from_edge_pair_index_scoped(
     stage_shared_bitmap_membership(txn, &key, edge_id, false)
 }
 
-/// Delete all node `$label` equality-index entries before a full rebuild.
+/// Delete all node label index entries before a full rebuild.
 pub async fn clear_node_label_indexes(txn: &DbTransaction) -> Result<(), HelixDbError> {
-    let prefix = EqualityScanPrefix::Property {
-        property_hash: hash_property_name("$label"),
-    }
-    .to_bytes();
+    let prefix = LabelScanPrefix::NodeLabels.to_bytes();
     let mut iter = txn.scan_prefix(prefix, ..).await?;
     let mut keys = Vec::new();
     while let Some(kv) = iter.next().await? {
@@ -1992,7 +2109,7 @@ pub async fn clear_global_edge_label_indexes_scoped(
     txn: &DbTransaction,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let prefix = DataKey::data_prefix(tenant_scope, EdgeLabelScanPrefix::Index.to_bytes());
+    let prefix = DataKey::data_prefix(tenant_scope, LabelScanPrefix::EdgeLabels.to_bytes());
     let mut iter = txn.scan_prefix(prefix, ..).await?;
     let mut keys = Vec::new();
     while let Some(kv) = iter.next().await? {
@@ -4580,12 +4697,21 @@ mod tests {
             vec![21]
         );
 
-        add_to_equality_index(&txn, "$label", "User", 1).unwrap();
+        let user = DataKey::Data {
+            scope: DataScope::LegacyUnscoped,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(NodeLabelKey::new(
+                LabelIdentity::new("User").unwrap(),
+            ))),
+        }
+        .to_bytes();
+        stage_shared_bitmap_membership(&txn, &user, 1, true).unwrap();
         clear_node_label_indexes(&txn).await.unwrap();
-        assert!(lookup_equality_index(&txn, "$label", "User")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            lookup_node_label_index_scoped(&txn, "User", DataScope::LegacyUnscoped)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             lookup_equality_index(&txn, "other", "active")
                 .await
@@ -4617,7 +4743,7 @@ mod tests {
             .begin(IsolationLevel::Snapshot)
             .await
             .expect("transaction starts");
-        let label_hash = hash_property_value("FOLLOWS");
+        let label = LabelIdentity::new("FOLLOWS").unwrap();
 
         add_to_edge_label_index(&txn, 1, 2, "FOLLOWS").expect("neighbor index write succeeds");
         add_to_global_edge_label_index(&txn, "FOLLOWS", 99)
@@ -4626,33 +4752,33 @@ mod tests {
         let out_key = DataKey::Data {
             scope: DataScope::LegacyUnscoped,
             kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-                EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, 1, label_hash),
+                EdgeLabelNeighborKey::new(EdgeRangeDirection::Out, 1, label.clone()),
             )),
         }
         .to_bytes();
         let in_key = DataKey::Data {
             scope: DataScope::LegacyUnscoped,
             kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-                EdgeLabelNeighborKey::new(EdgeRangeDirection::In, 2, label_hash),
+                EdgeLabelNeighborKey::new(EdgeRangeDirection::In, 2, label.clone()),
             )),
         }
         .to_bytes();
         let global_key = DataKey::Data {
             scope: DataScope::LegacyUnscoped,
             kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-                label_hash,
+                label.clone(),
             ))),
         }
         .to_bytes();
 
-        let mut expected_out_key = vec![0x03, 0x10, 0x00];
+        let mut expected_out_key = vec![0x03, 0x13, 0x00];
         expected_out_key.extend_from_slice(&1u64.to_be_bytes());
-        expected_out_key.extend_from_slice(&label_hash);
-        let mut expected_in_key = vec![0x03, 0x10, 0x01];
+        label.encode_into(&mut expected_out_key);
+        let mut expected_in_key = vec![0x03, 0x13, 0x01];
         expected_in_key.extend_from_slice(&2u64.to_be_bytes());
-        expected_in_key.extend_from_slice(&label_hash);
-        let mut expected_global_key = vec![0x03, 0x04];
-        expected_global_key.extend_from_slice(&label_hash);
+        label.encode_into(&mut expected_in_key);
+        let mut expected_global_key = vec![0x03, 0x12];
+        label.encode_into(&mut expected_global_key);
 
         assert_eq!(out_key.as_ref(), expected_out_key.as_slice());
         assert_eq!(in_key.as_ref(), expected_in_key.as_slice());

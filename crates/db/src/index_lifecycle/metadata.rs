@@ -12,19 +12,29 @@ use super::{
 /// (`0x14`). It re-encodes nothing: a version-4 store is upgraded by rewriting
 /// only this marker, which fences binaries that support at most version 4 out
 /// of stores whose queued index work they would ignore.
-pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0005;
+///
+/// Version 6 marks stores whose label index rows are keyed by the exact label
+/// rather than its 64-bit hash. The startup label identity migration moves
+/// every row and publishes it last, which fences binaries that support at most
+/// version 5 out of stores whose label rows they could no longer find.
+pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0006;
 
 /// Decoded non-zero index storage format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct IndexStorageVersion(u16);
 
 impl IndexStorageVersion {
-    pub(crate) const CURRENT: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
+    pub(crate) const CURRENT: Self = Self::LABEL_IDENTITY;
     pub(crate) const MAX_SUPPORTED: Self = Self::CURRENT;
     /// First version with equality bitmaps and the V4 cleanup marker. Older
     /// stores need the equality-bitmap migration; this and later versions
-    /// share one physical layout.
+    /// share one equality layout.
     pub(crate) const EQUALITY_BITMAPS: Self = Self(0x0004);
+    /// First version that may hold asynchronous index-operation queues, and
+    /// the last whose label rows are keyed by label hash.
+    pub(crate) const OPERATION_QUEUES: Self = Self(0x0005);
+    /// First version whose label index rows are keyed by the exact label.
+    pub(crate) const LABEL_IDENTITY: Self = Self(CURRENT_INDEX_STORAGE_VERSION);
 
     pub(crate) fn new(value: u16) -> Result<Self, crate::encoding::error::EncodingError> {
         if value == 0 {

@@ -1337,12 +1337,27 @@ mod tests {
                 property,
                 value,
             )),
-            PropertyIndexKey::EdgeLabel(label::EdgeLabelKey::new(value)),
+            PropertyIndexKey::NodeLabel(label::NodeLabelKey::new(
+                label::LabelIdentity::new("shared").unwrap(),
+            )),
+            PropertyIndexKey::EdgeLabel(label::EdgeLabelKey::new(
+                label::LabelIdentity::new("shared").unwrap(),
+            )),
             PropertyIndexKey::EdgeLabelNeighbor(label::EdgeLabelNeighborKey::new(
                 crate::encoding::indexes::EdgeDirection::In,
                 1,
-                value,
+                label::LabelIdentity::new("shared").unwrap(),
             )),
+            PropertyIndexKey::LegacyEdgeLabel(
+                crate::encoding::v2::legacy::label_hash::LegacyEdgeLabelKey::for_label("shared"),
+            ),
+            PropertyIndexKey::LegacyEdgeLabelNeighbor(
+                crate::encoding::v2::legacy::label_hash::LegacyEdgeLabelNeighborKey::for_label(
+                    crate::encoding::indexes::EdgeDirection::In,
+                    1,
+                    "shared",
+                ),
+            ),
             PropertyIndexKey::GlobalEdgeEquality(equality::GlobalEdgeEqualityIndexKey::new(
                 property, value,
             )),

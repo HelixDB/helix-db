@@ -1,29 +1,263 @@
+//! Exact label identities and the label index keys that carry them.
+//!
+//! Every label index row is keyed by the label itself: an 8-byte digest
+//! followed by the length-delimited UTF-8 label. The digest is only a
+//! fixed-width scan accelerator; identity is always the exact label bytes, so
+//! two labels are always two keys. A key is constructed from the label string,
+//! and parsing fails closed when the persisted digest does not match the label.
+//!
+//! ```text
+//! Node label:          [0x03][0x11][digest:8][len:4][label]               -> RoaringTreemap<NodeId>
+//! Edge label:          [0x03][0x12][digest:8][len:4][label]               -> RoaringTreemap<EdgeId>
+//! Edge label neighbor: [0x03][0x13][dir:1][node:8][digest:8][len:4][label] -> RoaringTreemap<NodeId>
+//! ```
+//!
+//! Retired hash-keyed rows live in [`crate::encoding::v2::legacy::label_hash`].
+
+use std::sync::Arc;
+
+use bytes::{BufMut, Bytes};
+use sha2::{Digest, Sha256};
+
 use crate::encoding::{
     error::EncodingError,
-    indexes::{
-        EdgeDirection, IndexPrefix, ValueHash, INDEX_PREFIX_LEN, NODE_ID_MAX_LEN,
-        VALUE_HASH_MAX_LEN,
-    },
-    keys::{KeyPrefix, PREFIX_LEN},
-    v2::keys::codec::read_u64,
+    indexes::{EdgeDirection, IndexPrefix, INDEX_PREFIX_LEN, NODE_ID_MAX_LEN},
+    keys::{scope::TENANT_ENVELOPE_LEN, KeyPrefix, PREFIX_LEN},
+    v2::keys::{codec::read_u64, STORAGE_KEY_MAX_LEN},
     NodeId,
 };
-use bytes::{BufMut, Bytes};
 
-/// Edge label index: label -> set of EdgeIds.
+/// Bytes of the digest that leads every persisted label identity.
+pub(crate) const LABEL_DIGEST_LEN: usize = core::mem::size_of::<u64>();
+/// Bytes of the big-endian label length that follows the digest.
+pub(crate) const LABEL_LEN_PREFIX_LEN: usize = core::mem::size_of::<u32>();
+/// Longest label any label index key can hold.
+///
+/// The longest label key, an edge-label neighbor row in a tenant scope, must
+/// fit the storage engine's physical key bound.
+pub(crate) const MAX_LABEL_LEN: usize = STORAGE_KEY_MAX_LEN
+    - TENANT_ENVELOPE_LEN
+    - PREFIX_LEN
+    - INDEX_PREFIX_LEN
+    - core::mem::size_of::<EdgeDirection>()
+    - NODE_ID_MAX_LEN
+    - LABEL_DIGEST_LEN
+    - LABEL_LEN_PREFIX_LEN;
+
+/// One exact label and its scan digest.
+///
+/// Only [`LabelIdentity::new`] and [`LabelIdentity::decode`] construct it, so
+/// the digest always matches the label and the label always fits a key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct LabelIdentity {
+    digest: [u8; LABEL_DIGEST_LEN],
+    label: Arc<str>,
+}
+
+impl LabelIdentity {
+    /// Identity of `label`, or [`EncodingError::LabelTooLong`] for a label no
+    /// label index key can hold.
+    pub(crate) fn new(label: &str) -> Result<Self, EncodingError> {
+        if label.len() > MAX_LABEL_LEN {
+            return Err(EncodingError::LabelTooLong {
+                len: label.len(),
+                maximum: MAX_LABEL_LEN,
+            });
+        }
+        Ok(Self {
+            digest: label_digest(label),
+            label: Arc::from(label),
+        })
+    }
+
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The label's shared allocation, so a caller can index identities by
+    /// label without copying it.
+    pub(crate) fn shared_label(&self) -> Arc<str> {
+        Arc::clone(&self.label)
+    }
+
+    /// Heap bytes [`Self::new`] allocates for `label`: one `Arc<str>` with its
+    /// two reference counts.
+    pub(crate) const fn allocation_bytes(label: &str) -> usize {
+        2 * core::mem::size_of::<usize>() + label.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn digest(&self) -> &[u8; LABEL_DIGEST_LEN] {
+        &self.digest
+    }
+
+    pub(crate) fn encoded_len(&self) -> usize {
+        LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN + self.label.len()
+    }
+
+    pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
+        buf.put_slice(&self.digest);
+        buf.put_u32(u32::try_from(self.label.len()).expect("label length is bounded by keys"));
+        buf.put_slice(self.label.as_bytes());
+    }
+
+    /// Decodes the identity that fills `slice` exactly, failing closed with
+    /// [`EncodingError::LabelDigestMismatch`] when the persisted digest does
+    /// not match the persisted label.
+    pub(crate) fn decode(slice: &[u8]) -> Result<Self, EncodingError> {
+        if slice.len() < LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN {
+            return Err(EncodingError::BufferTooShort {
+                expected: LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN,
+                actual: slice.len(),
+            });
+        }
+        let digest: [u8; LABEL_DIGEST_LEN] = slice[..LABEL_DIGEST_LEN]
+            .try_into()
+            .expect("label digest slice is 8 bytes");
+        let len = u32::from_be_bytes(
+            slice[LABEL_DIGEST_LEN..LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN]
+                .try_into()
+                .expect("label length slice is 4 bytes"),
+        ) as usize;
+        let expected = LABEL_DIGEST_LEN
+            .saturating_add(LABEL_LEN_PREFIX_LEN)
+            .saturating_add(len);
+        match slice.len().cmp(&expected) {
+            core::cmp::Ordering::Less => {
+                return Err(EncodingError::BufferTooShort {
+                    expected,
+                    actual: slice.len(),
+                });
+            }
+            core::cmp::Ordering::Equal => {}
+            core::cmp::Ordering::Greater => {
+                return Err(EncodingError::InvalidIndexKey(format!(
+                    "label identity expected {expected} bytes, got {}",
+                    slice.len()
+                )));
+            }
+        }
+        let label = std::str::from_utf8(
+            &slice[LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN
+                ..LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN + len],
+        )?;
+        let identity = Self::new(label)?;
+        if identity.digest != digest {
+            return Err(EncodingError::LabelDigestMismatch);
+        }
+        Ok(identity)
+    }
+}
+
+/// SHA-256 prefix of the label's length-delimited UTF-8 frame.
+fn label_digest(label: &str) -> [u8; LABEL_DIGEST_LEN] {
+    let len = u32::try_from(label.len()).expect("label length is bounded by keys");
+    let hash = Sha256::new()
+        .chain_update(len.to_be_bytes())
+        .chain_update(label.as_bytes())
+        .finalize();
+    hash[..LABEL_DIGEST_LEN]
+        .try_into()
+        .expect("SHA-256 contains an eight-byte digest prefix")
+}
+
+/// Validates the `[0x03][index prefix]` header of a label key and returns the
+/// bytes after `header_len`.
+fn label_key_body(
+    slice: &[u8],
+    expected: impl FnOnce(&IndexPrefix) -> bool,
+    header_len: usize,
+) -> Result<&[u8], EncodingError> {
+    if slice.len() < header_len {
+        return Err(EncodingError::BufferTooShort {
+            expected: header_len,
+            actual: slice.len(),
+        });
+    }
+    let key_prefix = KeyPrefix::from_u8(slice[0])?;
+    if key_prefix != KeyPrefix::PropertyIndex {
+        return Err(EncodingError::Custom(format!(
+            "expected PropertyIndex key prefix, got {key_prefix:?}"
+        )));
+    }
+    let index_prefix = IndexPrefix::from_slice(slice)?;
+    if !expected(&index_prefix) {
+        return Err(EncodingError::Custom(format!(
+            "unexpected label index prefix {index_prefix:?}"
+        )));
+    }
+    Ok(&slice[header_len..])
+}
+
+/// Node label index: label -> set of NodeIds.
 ///
 /// ```text
-/// Key: [0x03][0x04][label_hash:8]
+/// Key: [0x03][0x11][digest:8][len:4][label]
+/// Value: RoaringTreemap<NodeId>
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeLabelKey {
+    identity: LabelIdentity,
+}
+
+impl NodeLabelKey {
+    pub(crate) const fn new(identity: LabelIdentity) -> Self {
+        Self { identity }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn identity(&self) -> &LabelIdentity {
+        &self.identity
+    }
+
+    #[inline]
+    pub(crate) const fn key_prefix() -> KeyPrefix {
+        KeyPrefix::PropertyIndex
+    }
+
+    #[inline]
+    pub(crate) const fn index_prefix() -> IndexPrefix {
+        IndexPrefix::NodeLabel
+    }
+
+    pub(crate) fn encoded_len(&self) -> usize {
+        PREFIX_LEN + INDEX_PREFIX_LEN + self.identity.encoded_len()
+    }
+
+    pub(crate) fn parse_from_slice(slice: &[u8]) -> Result<Self, EncodingError> {
+        let body = label_key_body(
+            slice,
+            |prefix| *prefix == Self::index_prefix(),
+            PREFIX_LEN + INDEX_PREFIX_LEN,
+        )?;
+        Ok(Self::new(LabelIdentity::decode(body)?))
+    }
+
+    pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
+        buf.put_u8(Self::key_prefix().as_u8());
+        buf.put_slice(Self::index_prefix().as_slice());
+        self.identity.encode_into(buf);
+    }
+}
+
+/// Global edge label index: label -> set of EdgeIds.
+///
+/// ```text
+/// Key: [0x03][0x12][digest:8][len:4][label]
 /// Value: RoaringTreemap<EdgeId>
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeLabelKey {
-    label_hash: ValueHash,
+    identity: LabelIdentity,
 }
 
 impl EdgeLabelKey {
-    pub(crate) const fn new(label_hash: ValueHash) -> Self {
-        Self { label_hash }
+    pub(crate) const fn new(identity: LabelIdentity) -> Self {
+        Self { identity }
+    }
+
+    pub(crate) const fn identity(&self) -> &LabelIdentity {
+        &self.identity
     }
 
     #[inline]
@@ -36,92 +270,66 @@ impl EdgeLabelKey {
         IndexPrefix::EdgeLabel
     }
 
+    pub(crate) fn encoded_len(&self) -> usize {
+        PREFIX_LEN + INDEX_PREFIX_LEN + self.identity.encoded_len()
+    }
+
     pub(crate) fn parse_from_slice(slice: &[u8]) -> Result<Self, EncodingError> {
-        let expected = PREFIX_LEN + INDEX_PREFIX_LEN + VALUE_HASH_MAX_LEN;
-        match slice.len().cmp(&expected) {
-            core::cmp::Ordering::Less => {
-                return Err(EncodingError::BufferTooShort {
-                    expected,
-                    actual: slice.len(),
-                });
-            }
-            core::cmp::Ordering::Equal => {}
-            core::cmp::Ordering::Greater => {
-                return Err(EncodingError::InvalidIndexKey(format!(
-                    "expected {expected} bytes, got {}",
-                    slice.len()
-                )));
-            }
-        }
-
-        let key_prefix = KeyPrefix::from_u8(slice[0])?;
-        if key_prefix != Self::key_prefix() {
-            return Err(EncodingError::Custom(format!(
-                "expected PropertyIndex key prefix, got {:?}",
-                key_prefix
-            )));
-        }
-
-        let index_prefix = IndexPrefix::from_slice(slice)?;
-        if index_prefix != Self::index_prefix() {
-            return Err(EncodingError::Custom(format!(
-                "expected EdgeLabel index prefix, got {:?}",
-                index_prefix
-            )));
-        }
-
-        let label_hash = slice
-            [PREFIX_LEN + INDEX_PREFIX_LEN..PREFIX_LEN + INDEX_PREFIX_LEN + VALUE_HASH_MAX_LEN]
-            .try_into()
-            .expect("label hash slice is 8 bytes");
-
-        Ok(Self::new(label_hash))
+        let body = label_key_body(
+            slice,
+            |prefix| *prefix == Self::index_prefix(),
+            PREFIX_LEN + INDEX_PREFIX_LEN,
+        )?;
+        Ok(Self::new(LabelIdentity::decode(body)?))
     }
 
     pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
-        buf.put_u8(KeyPrefix::from(self).as_u8());
-        buf.put_slice(IndexPrefix::from(self).as_slice());
-        buf.put_slice(&self.label_hash);
-    }
-}
-
-impl From<&EdgeLabelKey> for KeyPrefix {
-    fn from(_: &EdgeLabelKey) -> KeyPrefix {
-        EdgeLabelKey::key_prefix()
-    }
-}
-
-impl From<&EdgeLabelKey> for IndexPrefix {
-    fn from(_: &EdgeLabelKey) -> IndexPrefix {
-        EdgeLabelKey::index_prefix()
+        buf.put_u8(Self::key_prefix().as_u8());
+        buf.put_slice(Self::index_prefix().as_slice());
+        self.identity.encode_into(buf);
     }
 }
 
 /// Edge-label neighbor index: endpoint+label -> set of opposite NodeIds.
 ///
 /// ```text
-/// Out: [0x03][0x10][0x00][source:8][label_hash:8]
-/// In:  [0x03][0x10][0x01][target:8][label_hash:8]
+/// Out: [0x03][0x13][0x00][source:8][digest:8][len:4][label]
+/// In:  [0x03][0x13][0x01][target:8][digest:8][len:4][label]
 /// Value: RoaringTreemap<NodeId>
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeLabelNeighborKey {
     direction: EdgeDirection,
     node_id: NodeId,
-    label_hash: ValueHash,
+    identity: LabelIdentity,
 }
 
 impl EdgeLabelNeighborKey {
     pub(crate) const fn new(
         direction: EdgeDirection,
         node_id: NodeId,
-        label_hash: ValueHash,
+        identity: LabelIdentity,
     ) -> Self {
         Self {
             direction,
             node_id,
-            label_hash,
+            identity,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn direction(&self) -> EdgeDirection {
+        self.direction
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn node_id(&self) -> NodeId {
+        self.node_id
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn identity(&self) -> &LabelIdentity {
+        &self.identity
     }
 
     #[inline]
@@ -139,78 +347,74 @@ impl EdgeLabelNeighborKey {
         Self::index_prefix(self.direction)
     }
 
-    pub(crate) fn parse_from_slice(slice: &[u8]) -> Result<Self, EncodingError> {
-        let expected = PREFIX_LEN
+    pub(crate) fn encoded_len(&self) -> usize {
+        PREFIX_LEN
             + INDEX_PREFIX_LEN
-            + size_of::<EdgeDirection>()
-            + size_of::<NodeId>()
-            + VALUE_HASH_MAX_LEN;
-        match slice.len().cmp(&expected) {
-            core::cmp::Ordering::Less => {
-                return Err(EncodingError::BufferTooShort {
-                    expected,
-                    actual: slice.len(),
-                });
-            }
-            core::cmp::Ordering::Equal => {}
-            core::cmp::Ordering::Greater => {
-                return Err(EncodingError::InvalidIndexKey(format!(
-                    "expected {expected} bytes, got {}",
-                    slice.len()
-                )));
-            }
-        }
+            + core::mem::size_of::<EdgeDirection>()
+            + NODE_ID_MAX_LEN
+            + self.identity.encoded_len()
+    }
 
-        let key_prefix = KeyPrefix::from_u8(slice[0])?;
-        if key_prefix != Self::key_prefix() {
-            return Err(EncodingError::Custom(format!(
-                "expected PropertyIndex key prefix, got {:?}",
-                key_prefix
-            )));
-        }
-
-        let index_prefix = IndexPrefix::from_slice(slice)?;
-        let IndexPrefix::EdgeLabelNeighbor(direction) = index_prefix else {
-            return Err(EncodingError::Custom(format!(
-                "expected EdgeLabelNeighbor index prefix, got {:?}",
-                index_prefix
-            )));
-        };
-
+    pub(crate) fn parse_from_slice(slice: &[u8]) -> Result<Self, EncodingError> {
+        let mut direction = None;
+        label_key_body(
+            slice,
+            |prefix| {
+                let IndexPrefix::EdgeLabelNeighbor(parsed) = prefix else {
+                    return false;
+                };
+                direction = Some(*parsed);
+                true
+            },
+            PREFIX_LEN + INDEX_PREFIX_LEN + core::mem::size_of::<EdgeDirection>() + NODE_ID_MAX_LEN,
+        )?;
+        let direction = direction.expect("an accepted neighbor prefix records its direction");
         let node_id = read_u64(
             slice,
-            PREFIX_LEN + INDEX_PREFIX_LEN + size_of::<EdgeDirection>(),
+            PREFIX_LEN + INDEX_PREFIX_LEN + core::mem::size_of::<EdgeDirection>(),
         )?;
-        let label_hash =
-            slice[PREFIX_LEN + INDEX_PREFIX_LEN + size_of::<EdgeDirection>() + size_of::<NodeId>()
-                ..PREFIX_LEN
-                    + INDEX_PREFIX_LEN
-                    + size_of::<EdgeDirection>()
-                    + size_of::<NodeId>()
-                    + VALUE_HASH_MAX_LEN]
-                .try_into()
-                .expect("label hash slice is 8 bytes");
-
-        Ok(Self::new(direction, node_id, label_hash))
+        let identity = LabelIdentity::decode(
+            &slice[PREFIX_LEN
+                + INDEX_PREFIX_LEN
+                + core::mem::size_of::<EdgeDirection>()
+                + NODE_ID_MAX_LEN..],
+        )?;
+        Ok(Self::new(direction, node_id, identity))
     }
 
     pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
-        buf.put_u8(KeyPrefix::from(self).as_u8());
-        buf.put_slice(IndexPrefix::from(self).as_slice());
+        buf.put_u8(Self::key_prefix().as_u8());
+        buf.put_slice(self.index_prefix_for_key().as_slice());
         buf.put_u64(self.node_id);
-        buf.put_slice(&self.label_hash);
+        self.identity.encode_into(buf);
     }
 }
 
-impl From<&EdgeLabelNeighborKey> for KeyPrefix {
-    fn from(_: &EdgeLabelNeighborKey) -> KeyPrefix {
-        EdgeLabelNeighborKey::key_prefix()
-    }
+/// Logical prefixes of the exact label index keyspaces in one scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelScanPrefix {
+    /// Every node label row.
+    NodeLabels,
+    /// Every global edge label row.
+    EdgeLabels,
+    /// Every edge-label neighbor row, both directions.
+    #[cfg(test)]
+    EdgeLabelNeighbors,
 }
 
-impl From<&EdgeLabelNeighborKey> for IndexPrefix {
-    fn from(key: &EdgeLabelNeighborKey) -> IndexPrefix {
-        key.index_prefix_for_key()
+impl LabelScanPrefix {
+    pub(crate) fn to_bytes(self) -> Bytes {
+        let mut buf = Vec::with_capacity(PREFIX_LEN + INDEX_PREFIX_LEN);
+        buf.put_u8(KeyPrefix::PropertyIndex.as_u8());
+        match self {
+            Self::NodeLabels => buf.put_slice(IndexPrefix::NodeLabel.as_slice()),
+            Self::EdgeLabels => buf.put_slice(IndexPrefix::EdgeLabel.as_slice()),
+            #[cfg(test)]
+            Self::EdgeLabelNeighbors => {
+                buf.put_u8(crate::encoding::indexes::prefix::EDGE_LABEL_NEIGHBOR_INDEX_PREFIX)
+            }
+        }
+        Bytes::from(buf)
     }
 }
 
@@ -219,241 +423,258 @@ mod tests {
     use super::*;
     use crate::encoding::indexes::PropertyIndexKey;
 
-    const LABEL_HASH: ValueHash = [5, 6, 7, 8, 9, 10, 11, 12];
+    fn identity(label: &str) -> LabelIdentity {
+        LabelIdentity::new(label).expect("fixture label fits a key")
+    }
+
+    fn encoded(key: &PropertyIndexKey<'_>) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(key.encoded_len());
+        key.encode_into(&mut bytes);
+        assert_eq!(bytes.len(), key.encoded_len());
+        bytes
+    }
+
+    #[test]
+    fn identity_frames_digest_length_and_utf8_label() {
+        let identity = identity("Person");
+        let mut bytes = Vec::new();
+        identity.encode_into(&mut bytes);
+
+        let mut expected = identity.digest().to_vec();
+        expected.extend_from_slice(&6u32.to_be_bytes());
+        expected.extend_from_slice(b"Person");
+        assert_eq!(bytes, expected);
+        assert_eq!(bytes.len(), identity.encoded_len());
+        assert_eq!(identity.label(), "Person");
+        assert_eq!(LabelIdentity::decode(&bytes).unwrap(), identity);
+    }
+
+    #[test]
+    fn identity_digest_is_a_stable_sha256_prefix_of_the_length_delimited_label() {
+        let mut frame = 6u32.to_be_bytes().to_vec();
+        frame.extend_from_slice(b"Person");
+        let hash = Sha256::digest(&frame);
+        assert_eq!(identity("Person").digest(), &hash[..LABEL_DIGEST_LEN]);
+        assert_ne!(identity("Person").digest(), identity("person").digest());
+    }
+
+    #[test]
+    fn distinct_labels_are_distinct_identities_even_under_one_digest() {
+        // Identity compares the exact label, so even a forced digest collision
+        // keeps two labels apart.
+        let mut forced = identity("b");
+        forced.digest = *identity("a").digest();
+        assert_ne!(forced, identity("a"));
+    }
+
+    #[test]
+    fn identity_decode_fails_closed_on_a_mismatched_digest() {
+        let mut bytes = Vec::new();
+        identity("Person").encode_into(&mut bytes);
+        bytes[0] ^= 0xFF;
+        assert!(matches!(
+            LabelIdentity::decode(&bytes),
+            Err(EncodingError::LabelDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn identity_decode_rejects_short_trailing_and_non_utf8_frames() {
+        assert!(matches!(
+            LabelIdentity::decode(&[0; LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN - 1]),
+            Err(EncodingError::BufferTooShort { .. })
+        ));
+
+        let mut bytes = Vec::new();
+        identity("Person").encode_into(&mut bytes);
+        assert!(matches!(
+            LabelIdentity::decode(&bytes[..bytes.len() - 1]),
+            Err(EncodingError::BufferTooShort { .. })
+        ));
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(matches!(
+            LabelIdentity::decode(&trailing),
+            Err(EncodingError::InvalidIndexKey(_))
+        ));
+
+        let mut non_utf8 = vec![0; LABEL_DIGEST_LEN];
+        non_utf8.extend_from_slice(&1u32.to_be_bytes());
+        non_utf8.push(0xFF);
+        assert!(matches!(
+            LabelIdentity::decode(&non_utf8),
+            Err(EncodingError::InvalidUtf8(_))
+        ));
+    }
+
+    #[test]
+    fn identity_rejects_labels_longer_than_any_label_key_holds() {
+        let longest = "a".repeat(MAX_LABEL_LEN);
+        assert_eq!(
+            identity(&longest).encoded_len(),
+            LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN + MAX_LABEL_LEN
+        );
+        assert!(matches!(
+            LabelIdentity::new(&"a".repeat(MAX_LABEL_LEN + 1)),
+            Err(EncodingError::LabelTooLong { len, maximum })
+                if len == MAX_LABEL_LEN + 1 && maximum == MAX_LABEL_LEN
+        ));
+
+        let key = crate::encoding::v2::keys::DataKey::Data {
+            scope: crate::encoding::keys::scope::DataScope::Tenant(
+                crate::encoding::keys::scope::TenantId::from_u128(u128::MAX),
+            ),
+            kind: crate::encoding::v2::keys::DataKeyKind::PropertyIndex(
+                PropertyIndexKey::EdgeLabelNeighbor(EdgeLabelNeighborKey::new(
+                    EdgeDirection::In,
+                    NodeId::MAX,
+                    identity(&longest),
+                )),
+            ),
+        };
+        assert_eq!(key.to_bytes().len(), STORAGE_KEY_MAX_LEN);
+    }
+
+    #[test]
+    fn node_label_key_has_exact_layout_and_round_trips() {
+        let key = PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity("Person")));
+        let bytes = encoded(&key);
+
+        let mut expected = vec![0x03, 0x11];
+        identity("Person").encode_into(&mut expected);
+        assert_eq!(bytes, expected);
+        assert_eq!(PropertyIndexKey::parse_from_slice(&bytes).unwrap(), key);
+        assert_eq!(
+            NodeLabelKey::parse_from_slice(&bytes)
+                .unwrap()
+                .identity()
+                .label(),
+            "Person"
+        );
+    }
 
     #[test]
     fn edge_label_key_has_exact_layout_and_round_trips() {
-        let key = PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(LABEL_HASH));
-        let mut encoded = Vec::with_capacity(key.encoded_len());
-        key.encode_into(&mut encoded);
+        let key = PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(identity("FOLLOWS")));
+        let bytes = encoded(&key);
 
-        assert_eq!(encoded.as_slice(), &[0x03, 0x04, 5, 6, 7, 8, 9, 10, 11, 12]);
-        assert_eq!(PropertyIndexKey::parse_from_slice(&encoded).unwrap(), key);
+        let mut expected = vec![0x03, 0x12];
+        identity("FOLLOWS").encode_into(&mut expected);
+        assert_eq!(bytes, expected);
+        assert_eq!(PropertyIndexKey::parse_from_slice(&bytes).unwrap(), key);
+        assert_eq!(
+            EdgeLabelKey::parse_from_slice(&bytes)
+                .unwrap()
+                .identity()
+                .label(),
+            "FOLLOWS"
+        );
     }
 
     #[test]
     fn edge_label_neighbor_key_has_exact_layout_and_round_trips() {
         let node_id = 0x0102_0304_0506_0708u64;
-        let key = PropertyIndexKey::EdgeLabelNeighbor(EdgeLabelNeighborKey::new(
-            EdgeDirection::Out,
-            node_id,
-            LABEL_HASH,
-        ));
-        let mut encoded = Vec::with_capacity(key.encoded_len());
-        key.encode_into(&mut encoded);
+        for (direction, byte) in [(EdgeDirection::Out, 0x00), (EdgeDirection::In, 0x01)] {
+            let key = PropertyIndexKey::EdgeLabelNeighbor(EdgeLabelNeighborKey::new(
+                direction,
+                node_id,
+                identity("FOLLOWS"),
+            ));
+            let bytes = encoded(&key);
 
-        let mut expected = vec![0x03, 0x10, 0x00];
-        expected.extend_from_slice(&node_id.to_be_bytes());
-        expected.extend_from_slice(&LABEL_HASH);
-
-        assert_eq!(encoded, expected);
-        assert_eq!(PropertyIndexKey::parse_from_slice(&encoded).unwrap(), key);
+            let mut expected = vec![0x03, 0x13, byte];
+            expected.extend_from_slice(&node_id.to_be_bytes());
+            identity("FOLLOWS").encode_into(&mut expected);
+            assert_eq!(bytes, expected);
+            assert_eq!(PropertyIndexKey::parse_from_slice(&bytes).unwrap(), key);
+            let parsed = EdgeLabelNeighborKey::parse_from_slice(&bytes).unwrap();
+            assert_eq!(parsed.direction(), direction);
+            assert_eq!(parsed.node_id(), node_id);
+            assert_eq!(parsed.identity().label(), "FOLLOWS");
+            assert_eq!(
+                parsed.index_prefix_for_key(),
+                IndexPrefix::EdgeLabelNeighbor(direction)
+            );
+        }
     }
 
     #[test]
-    fn edge_label_key_prefix_contracts_cover_all_shapes() {
-        let label = EdgeLabelKey::new(LABEL_HASH);
+    fn label_key_prefix_contracts_cover_all_shapes() {
+        assert_eq!(NodeLabelKey::key_prefix(), KeyPrefix::PropertyIndex);
+        assert_eq!(NodeLabelKey::index_prefix(), IndexPrefix::NodeLabel);
         assert_eq!(EdgeLabelKey::key_prefix(), KeyPrefix::PropertyIndex);
         assert_eq!(EdgeLabelKey::index_prefix(), IndexPrefix::EdgeLabel);
-        assert_eq!(KeyPrefix::from(&label), KeyPrefix::PropertyIndex);
-        assert_eq!(IndexPrefix::from(&label), IndexPrefix::EdgeLabel);
-
-        let neighbor = EdgeLabelNeighborKey::new(EdgeDirection::In, 99, LABEL_HASH);
         assert_eq!(EdgeLabelNeighborKey::key_prefix(), KeyPrefix::PropertyIndex);
         assert_eq!(
             EdgeLabelNeighborKey::index_prefix(EdgeDirection::In),
             IndexPrefix::EdgeLabelNeighbor(EdgeDirection::In)
         );
         assert_eq!(
-            neighbor.index_prefix_for_key(),
-            IndexPrefix::EdgeLabelNeighbor(EdgeDirection::In)
+            LabelScanPrefix::NodeLabels.to_bytes().as_ref(),
+            &[0x03, 0x11]
         );
-        assert_eq!(KeyPrefix::from(&neighbor), KeyPrefix::PropertyIndex);
         assert_eq!(
-            IndexPrefix::from(&neighbor),
-            IndexPrefix::EdgeLabelNeighbor(EdgeDirection::In)
+            LabelScanPrefix::EdgeLabels.to_bytes().as_ref(),
+            &[0x03, 0x12]
+        );
+        assert_eq!(
+            LabelScanPrefix::EdgeLabelNeighbors.to_bytes().as_ref(),
+            &[0x03, 0x13]
         );
     }
 
     #[test]
-    fn edge_label_neighbor_rejects_invalid_direction() {
-        let mut key = vec![0x03, 0x10, 0x02];
-        key.extend_from_slice(&1u64.to_be_bytes());
-        key.extend_from_slice(&LABEL_HASH);
+    fn label_key_parsers_reject_wrong_prefixes_short_keys_and_bad_digests() {
+        let node = encoded(&PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity(
+            "Person",
+        ))));
+        let edge = encoded(&PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(identity(
+            "Person",
+        ))));
+        let neighbor = encoded(&PropertyIndexKey::EdgeLabelNeighbor(
+            EdgeLabelNeighborKey::new(EdgeDirection::Out, 7, identity("Person")),
+        ));
 
         assert!(matches!(
-            EdgeLabelNeighborKey::parse_from_slice(&key),
+            NodeLabelKey::parse_from_slice(&edge),
+            Err(EncodingError::Custom(_))
+        ));
+        assert!(matches!(
+            EdgeLabelKey::parse_from_slice(&node),
+            Err(EncodingError::Custom(_))
+        ));
+        assert!(matches!(
+            EdgeLabelNeighborKey::parse_from_slice(&edge),
+            Err(EncodingError::Custom(_))
+        ));
+        let mut wrong_key_prefix = node.clone();
+        wrong_key_prefix[0] = KeyPrefix::NodeProperty.as_u8();
+        assert!(matches!(
+            NodeLabelKey::parse_from_slice(&wrong_key_prefix),
+            Err(EncodingError::Custom(_))
+        ));
+        assert!(matches!(
+            NodeLabelKey::parse_from_slice(&[0x03]),
+            Err(EncodingError::BufferTooShort { .. })
+        ));
+        assert!(matches!(
+            EdgeLabelNeighborKey::parse_from_slice(&neighbor[..PREFIX_LEN + INDEX_PREFIX_LEN + 1]),
+            Err(EncodingError::BufferTooShort { .. })
+        ));
+        let mut bad_direction = neighbor.clone();
+        bad_direction[PREFIX_LEN + INDEX_PREFIX_LEN] = 0x02;
+        assert!(matches!(
+            EdgeLabelNeighborKey::parse_from_slice(&bad_direction),
             Err(EncodingError::InvalidEdgeIndexDirection(0x02))
         ));
-    }
-
-    #[test]
-    fn edge_label_parsers_reject_short_and_trailing_inputs() {
+        let mut bad_digest = neighbor;
+        bad_digest[PREFIX_LEN
+            + INDEX_PREFIX_LEN
+            + core::mem::size_of::<EdgeDirection>()
+            + NODE_ID_MAX_LEN] ^= 0xFF;
         assert!(matches!(
-            EdgeLabelKey::parse_from_slice(&[0x03, 0x04, 1]),
-            Err(EncodingError::BufferTooShort { .. })
+            PropertyIndexKey::parse_from_slice(&bad_digest),
+            Err(EncodingError::LabelDigestMismatch)
         ));
-
-        let mut key = vec![0x03, 0x04];
-        key.extend_from_slice(&LABEL_HASH);
-        key.push(0);
-        assert!(matches!(
-            EdgeLabelKey::parse_from_slice(&key),
-            Err(EncodingError::InvalidIndexKey(_))
-        ));
-
-        assert!(matches!(
-            EdgeLabelNeighborKey::parse_from_slice(&[0x03, 0x10, 0x00, 1]),
-            Err(EncodingError::BufferTooShort { .. })
-        ));
-
-        let mut neighbor = vec![0x03, 0x10, 0x00];
-        neighbor.extend_from_slice(&1u64.to_be_bytes());
-        neighbor.extend_from_slice(&LABEL_HASH);
-        neighbor.push(0);
-        assert!(matches!(
-            EdgeLabelNeighborKey::parse_from_slice(&neighbor),
-            Err(EncodingError::InvalidIndexKey(_))
-        ));
-    }
-
-    #[test]
-    fn edge_label_parsers_reject_wrong_prefixes_and_index_kinds() {
-        let mut wrong_label_key_prefix = vec![0x02, 0x04];
-        wrong_label_key_prefix.extend_from_slice(&LABEL_HASH);
-        assert!(matches!(
-            EdgeLabelKey::parse_from_slice(&wrong_label_key_prefix),
-            Err(EncodingError::Custom(_))
-        ));
-
-        let mut wrong_label_index_prefix = vec![0x03, 0x00];
-        wrong_label_index_prefix.extend_from_slice(&LABEL_HASH);
-        assert!(matches!(
-            EdgeLabelKey::parse_from_slice(&wrong_label_index_prefix),
-            Err(EncodingError::Custom(_))
-        ));
-
-        let mut wrong_neighbor_key_prefix = vec![0x02, 0x10, 0x00];
-        wrong_neighbor_key_prefix.extend_from_slice(&1u64.to_be_bytes());
-        wrong_neighbor_key_prefix.extend_from_slice(&LABEL_HASH);
-        assert!(matches!(
-            EdgeLabelNeighborKey::parse_from_slice(&wrong_neighbor_key_prefix),
-            Err(EncodingError::Custom(_))
-        ));
-
-        let mut wrong_neighbor_index_prefix = vec![0x03, 0x04, 0x00];
-        wrong_neighbor_index_prefix.extend_from_slice(&1u64.to_be_bytes());
-        wrong_neighbor_index_prefix.extend_from_slice(&LABEL_HASH);
-        assert!(matches!(
-            EdgeLabelNeighborKey::parse_from_slice(&wrong_neighbor_index_prefix),
-            Err(EncodingError::Custom(_))
-        ));
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum EdgeLabelScanPrefix {
-    Index,
-    Label { label_hash: ValueHash },
-}
-
-#[allow(dead_code)]
-impl EdgeLabelScanPrefix {
-    pub(crate) fn to_bytes(self) -> Bytes {
-        let mut buf = Vec::with_capacity(self.encoded_len());
-        self.encode_into(&mut buf);
-        Bytes::from(buf)
-    }
-
-    pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
-        buf.put_u8(KeyPrefix::PropertyIndex.as_u8());
-        buf.put_slice(IndexPrefix::EdgeLabel.as_slice());
-
-        let EdgeLabelScanPrefix::Label { label_hash } = self else {
-            return;
-        };
-        buf.put_slice(label_hash);
-    }
-
-    const fn encoded_len(&self) -> usize {
-        match self {
-            EdgeLabelScanPrefix::Index => PREFIX_LEN + INDEX_PREFIX_LEN,
-            EdgeLabelScanPrefix::Label { .. } => PREFIX_LEN + INDEX_PREFIX_LEN + VALUE_HASH_MAX_LEN,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum EdgeLabelNeighborScanPrefix {
-    Index,
-    Direction {
-        direction: EdgeDirection,
-    },
-    Endpoint {
-        direction: EdgeDirection,
-        node_id: NodeId,
-    },
-    Label {
-        direction: EdgeDirection,
-        node_id: NodeId,
-        label_hash: ValueHash,
-    },
-}
-
-#[allow(dead_code)]
-impl EdgeLabelNeighborScanPrefix {
-    pub(crate) fn to_bytes(self) -> Bytes {
-        let mut buf = Vec::with_capacity(self.encoded_len());
-        self.encode_into(&mut buf);
-        Bytes::from(buf)
-    }
-
-    pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
-        buf.put_u8(KeyPrefix::PropertyIndex.as_u8());
-        match self {
-            EdgeLabelNeighborScanPrefix::Index => {
-                buf.put_u8(0x10);
-            }
-            EdgeLabelNeighborScanPrefix::Direction { direction } => {
-                buf.put_slice(IndexPrefix::EdgeLabelNeighbor(*direction).as_slice());
-            }
-            EdgeLabelNeighborScanPrefix::Endpoint { direction, node_id } => {
-                buf.put_slice(IndexPrefix::EdgeLabelNeighbor(*direction).as_slice());
-                buf.put_u64(*node_id);
-            }
-            EdgeLabelNeighborScanPrefix::Label {
-                direction,
-                node_id,
-                label_hash,
-            } => {
-                buf.put_slice(IndexPrefix::EdgeLabelNeighbor(*direction).as_slice());
-                buf.put_u64(*node_id);
-                buf.put_slice(label_hash);
-            }
-        }
-    }
-
-    const fn encoded_len(&self) -> usize {
-        match self {
-            EdgeLabelNeighborScanPrefix::Index => PREFIX_LEN + INDEX_PREFIX_LEN,
-            EdgeLabelNeighborScanPrefix::Direction { .. } => {
-                PREFIX_LEN + INDEX_PREFIX_LEN + core::mem::size_of::<EdgeDirection>()
-            }
-            EdgeLabelNeighborScanPrefix::Endpoint { .. } => {
-                PREFIX_LEN
-                    + INDEX_PREFIX_LEN
-                    + core::mem::size_of::<EdgeDirection>()
-                    + NODE_ID_MAX_LEN
-            }
-            EdgeLabelNeighborScanPrefix::Label { .. } => {
-                PREFIX_LEN
-                    + INDEX_PREFIX_LEN
-                    + core::mem::size_of::<EdgeDirection>()
-                    + NODE_ID_MAX_LEN
-                    + VALUE_HASH_MAX_LEN
-            }
-        }
     }
 }

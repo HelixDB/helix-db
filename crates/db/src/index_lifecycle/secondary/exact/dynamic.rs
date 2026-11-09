@@ -52,7 +52,8 @@ pub(crate) async fn lookup_active_equality_generation_admitted(
             let candidates = unindexed_label_rows(
                 reader,
                 label,
-                Some((handle, compatibility)),
+                compatibility,
+                Some(handle),
                 None,
                 LabelLaneReads::Sequential,
                 deadline,

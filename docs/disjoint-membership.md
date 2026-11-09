@@ -39,7 +39,7 @@ passes a busy node when it addresses that node by ID.
 
 ## Storage contract
 
-The current and maximum supported index storage version is **5**. Canonical
+The current and maximum supported index storage version is **6**. Canonical
 values and the existing `HLXRBM2` / `HLXADJ2` membership-delta codecs are unchanged.
 WAL replay, partial merging, and compaction must retain support for those operands.
 The membership deltas themselves need no index rebuild or storage migration.
@@ -57,13 +57,26 @@ writer. Recovery-only managed failover reports `WriterMigrationRequired` for a
 version-4 store instead of upgrading it. Binaries that support at most version 4
 refuse an upgraded store, so a rollback needs a backup taken before the upgrade.
 
-New databases initialize at version 5. Versions after 5 return the existing
+Version 6 marks stores whose label index rows are keyed by the exact label
+(an 8-byte digest followed by the length-delimited UTF-8 label) instead of the
+label's 64-bit hash. An embedded or controlled-migration writer moves a version-5
+store's node label, edge label, and edge-label neighbor rows to their exact keys
+during open, after the blocking startup migrations and before it serves any graph
+write, then publishes version 6. Each row moves in one commit, and readers of a
+version-4 or version-5 store read the exact row first and fall back to the hash
+row, so a reader stays correct while the writer migrates. Upgrade readers before
+the writer. Recovery-only managed failover reports `WriterMigrationRequired` for
+a version-5 store. Binaries that support at most version 5 refuse a version-6
+store, so a rollback needs a backup taken before the upgrade.
+
+New databases initialize at version 6. Versions after 6 return the existing
 unsupported-version error on reader, embedded-writer, and managed-failover open;
 startup must not lower or remove their marker. Managed bootstrap still refuses
 any nonempty store before version dispatch. The
 retired activation key tag `0x0C` and value tag `0x08` are not reused. Malformed
 metadata checks, managed-writer fencing, and existing version-2/3 equality
-migrations (which now publish version 5 directly) remain in place.
+migrations (which publish version 5, after which the same open runs the label
+identity migration to version 6) remain in place.
 
 The change does not alter cascade ordering, intermediate topology flushes,
 `drop_nodes`, token containers, or SlateDB.

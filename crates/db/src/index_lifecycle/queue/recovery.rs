@@ -56,7 +56,6 @@ pub(crate) async fn read_queue(
 }
 
 /// Discovers every data scope with at least one stored row.
-#[cfg(any(test, feature = "async-index-benchmark"))]
 pub(crate) async fn discover_scopes(reader: &(impl DbReadOps + Sync)) -> Result<Vec<DataScope>> {
     use std::ops::Bound;
 

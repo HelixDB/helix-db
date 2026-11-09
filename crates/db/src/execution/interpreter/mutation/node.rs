@@ -1021,16 +1021,24 @@ mod tests {
             "an empty text catalog queues no operation"
         );
 
-        assert!(
-            crate::search::lookup_equality_index(&txn, "$label", "User",)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(crate::search::lookup_node_label_index_scoped(
+            &txn,
+            "User",
+            crate::encoding::keys::scope::DataScope::LegacyUnscoped,
+        )
+        .await
+        .unwrap()
+        .is_empty());
         assert_eq!(
-            crate::search::lookup_equality_index(&txn, "$label", "Admin",)
-                .await
-                .unwrap(),
+            crate::search::lookup_node_label_index_scoped(
+                &txn,
+                "Admin",
+                crate::encoding::keys::scope::DataScope::LegacyUnscoped,
+            )
+            .await
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
             vec![node_id]
         );
 

@@ -9,6 +9,7 @@
 
 pub(crate) mod background;
 mod indexes;
+pub(crate) use indexes::label_identity::migrate_label_identity;
 pub(crate) mod startup;
 mod tenant;
 mod vector_properties;
