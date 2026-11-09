@@ -49,11 +49,28 @@ impl<'db> ExecutionContext<'db> {
         &self,
         ids: Vec<u64>,
     ) -> Result<Vec<ExecutionRow>> {
-        Ok(self
-            .retain_existing(ids, |id| {
-                keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id))
-            })
-            .await?
+        let retained = match self.active_write_tx() {
+            Some(active) => {
+                let mut exists = Vec::with_capacity(ids.len());
+                for batch in ids.chunks(EXISTENCE_BATCH_ROWS) {
+                    batch
+                        .iter()
+                        .try_for_each(|_| self.check_execution_deadline())?;
+                    exists.extend(self.write_nodes_exist(active, batch).await?);
+                }
+                ids.into_iter()
+                    .zip(exists)
+                    .filter_map(|(id, exists)| exists.then_some(id))
+                    .collect()
+            }
+            None => {
+                self.retain_existing(ids, |id| {
+                    keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(*id))
+                })
+                .await?
+            }
+        };
+        Ok(retained
             .into_iter()
             .map(|id| ExecutionRow::current(ElementRef::Node(id)))
             .collect())

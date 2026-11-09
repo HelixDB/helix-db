@@ -7,7 +7,46 @@
 //! crossing the mutation commit boundary. Vector and text maintenance never
 //! touches physical index rows here; the publication worker applies it later.
 
+use std::collections::BTreeSet;
+
+use crate::encoding::v2::keys;
 use crate::index_lifecycle::queue::producer::{QueuedMutationCollector, StagedQueueWrites};
+
+/// Node rows read to learn only whether they exist, with no read dependency.
+///
+/// An edge insert needs its endpoints to exist, not to stay unchanged. Only a
+/// node delete ends a node's existence, and it always tombstones the node's
+/// adjacency row in the same transaction. A tombstone is an exclusive write,
+/// which conflicts with any disjoint merge on that row whatever its members.
+/// So once this transaction stages a merge on `adjacency(n)`, it and any
+/// delete of `n` cannot both commit, and a dependency on `n`'s row would only
+/// abort it for a property change it never looked at.
+///
+/// A row left without such a merge takes the dependency at commit, so every
+/// other read of this kind keeps its serializable meaning. An absent row
+/// always does: no delete protects the claim that it does not exist.
+#[derive(Default)]
+struct ExistenceReads {
+    present: BTreeSet<u64>,
+    absent: BTreeSet<u64>,
+    budget: Option<crate::query_resources::Budget>,
+    /// Holds room for the dependency each read may take at commit.
+    memory: Option<crate::query_resources::Reservation>,
+}
+impl std::fmt::Debug for ExistenceReads {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExistenceReads")
+            .field("present", &self.present)
+            .field("absent", &self.absent)
+            .finish_non_exhaustive()
+    }
+}
+impl ExistenceReads {
+    /// A set entry and its key in the transaction's dependency tables.
+    const fn bytes(entries: usize) -> usize {
+        entries.saturating_mul(size_of::<[usize; 24]>())
+    }
+}
 
 /// Index state that is valid for exactly one graph mutation transaction.
 #[derive(Debug)]
@@ -26,6 +65,7 @@ pub(crate) struct MutationIndexContext {
     /// Node index footprint of transitions not yet reported to the request's
     /// membership cache.
     node_index_writes: super::NodeIndexWrites,
+    existence_reads: parking_lot::Mutex<ExistenceReads>,
 }
 
 /// Commit-owned index state after every transaction-local runtime is sealed.
@@ -60,6 +100,10 @@ impl MutationIndexContext {
             topology_runtime: super::topology::TopologyMutationRuntime::new(budget),
             queued: QueuedMutationCollector::new(scope),
             node_index_writes: super::NodeIndexWrites::default(),
+            existence_reads: parking_lot::Mutex::new(ExistenceReads {
+                budget: budget.cloned(),
+                ..ExistenceReads::default()
+            }),
         }
     }
 
@@ -81,6 +125,7 @@ impl MutationIndexContext {
                 crate::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             ),
             node_index_writes: super::NodeIndexWrites::default(),
+            existence_reads: parking_lot::Mutex::default(),
         }
     }
 
@@ -135,6 +180,61 @@ impl MutationIndexContext {
     /// Takes the node index footprint recorded since the last call.
     pub(super) fn take_node_index_writes(&mut self) -> super::NodeIndexWrites {
         core::mem::take(&mut self.node_index_writes)
+    }
+
+    /// Records what `observed` says about nodes read with no dependency.
+    /// Admission precedes the read that needs it, so a request refused for
+    /// these dependencies fails before it stages work on their result.
+    pub(super) fn admit_existence_reads(&self, count: usize) -> Result<(), crate::HelixDbError> {
+        let mut reads = self.existence_reads.lock();
+        let ExistenceReads {
+            present,
+            absent,
+            budget,
+            memory,
+        } = &mut *reads;
+        let Some(budget) = budget else {
+            return Ok(());
+        };
+        let bytes = ExistenceReads::bytes(present.len() + absent.len() + count);
+        match memory {
+            Some(memory) => memory.resize(bytes),
+            None => {
+                *memory = Some(budget.reserve(bytes)?);
+                Ok(())
+            }
+        }
+    }
+
+    /// Records the outcome of reads [`Self::admit_existence_reads`] admitted.
+    pub(super) fn record_existence_reads(&self, observed: impl Iterator<Item = (u64, bool)>) {
+        let mut reads = self.existence_reads.lock();
+        observed.for_each(|(node_id, exists)| {
+            if exists {
+                reads.present.insert(node_id);
+            } else {
+                reads.absent.insert(node_id);
+            }
+        });
+    }
+
+    /// Takes the nodes whose existence reads no adjacency merge protects,
+    /// releasing the room held for them. Call after the final topology flush.
+    pub(super) fn take_uncovered_existence_reads(
+        &mut self,
+        scope: keys::scope::DataScope,
+    ) -> Vec<u64> {
+        let reads = std::mem::take(self.existence_reads.get_mut());
+        let covered = reads.present.into_iter().filter(|node_id| {
+            !self.topology_runtime.staged(
+                &keys::DataKey::Data {
+                    scope,
+                    kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(*node_id)),
+                }
+                .to_bytes(),
+            )
+        });
+        covered.chain(reads.absent).collect()
     }
 
     /// Borrows the transaction-local topology collector.
@@ -220,6 +320,7 @@ impl MutationIndexContext {
             topology_runtime,
             queued: _,
             node_index_writes: _,
+            existence_reads: _,
         } = self;
         topology_runtime.consume_prepared()?;
         secondary_runtime.consume_prepared()?;

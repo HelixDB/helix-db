@@ -12,6 +12,31 @@ not turn those validation reads into ordinary row observations. Explicit query
 reads and ranges still conflict, as do overlapping tokens, entity-record writes,
 unique ownership checks, and real graph dependencies.
 
+## Edge endpoints
+
+An edge insert needs its endpoints to exist, not to stay unchanged, so a
+concurrent property write must not abort it. A read that only learns whether a
+node row exists takes no conflict dependency on that row. This is serializable
+for four reasons:
+
+1. The insert's outcome depends on existence alone. It uses no byte of the row.
+2. Node IDs are never reused, so a row that exists at the snapshot can only stop
+   existing through a node delete.
+3. A node delete always tombstones the node's adjacency row in the same
+   transaction. A tombstone is an exclusive write.
+4. The insert stages a disjoint merge on both endpoints' adjacency rows, and an
+   exclusive write conflicts with a disjoint merge whatever its members.
+
+So an insert and a delete of either endpoint cannot both commit, in either order.
+A property write leaves existence alone, so the insert serializes after it.
+
+The argument needs the merge. At commit, an existence read whose node has no
+staged adjacency merge becomes an ordinary dependency, and so does any read that
+found no node. A read of a row's content always conflicts, because changing that
+row can change what the statement selected. So does a scan. This means a Cypher
+`MATCH` keeps conflicting with a `SET` on the nodes it read: the insert only
+passes a busy node when it addresses that node by ID.
+
 ## Storage contract
 
 The current and maximum supported index storage version is **5**. Canonical
