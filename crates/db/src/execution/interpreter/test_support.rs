@@ -41,6 +41,23 @@ impl TestDbConfig {
         self
     }
 
+    pub(crate) fn with_tenant_text_index(
+        mut self,
+        label: impl Into<String>,
+        property: impl Into<String>,
+        tenant: impl Into<String>,
+    ) -> Self {
+        self.indexes.push(
+            config::TextIndexDefinition::new_node(label, property)
+                .expect("valid text index")
+                .with_tenant_property(tenant)
+                .expect("valid tenant property")
+                .try_into()
+                .expect("valid v2 text index"),
+        );
+        self
+    }
+
     pub(crate) fn with_unique_equality_index(
         mut self,
         label: impl Into<String>,

@@ -2,12 +2,12 @@
 use super::{super::ExecutionContext, contracts::EdgeMutationTarget};
 use crate::{
     cypher,
-    encoding::v2::values::property::{property_value::PropertyValue, Property},
+    encoding::v2::values::property::Property,
     index_lifecycle::graph_mutation::{self, CanonicalPropertyRow},
 };
 use helix_planner::relational::{category, detail};
 use helix_planner::{ir, relational as r};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Deduplicated mutation targets and their construction reservation move
 /// together into the write barrier. No insertion can bypass admission.
@@ -42,39 +42,228 @@ impl DeletionTargets {
     }
 }
 
-impl ExecutionContext<'_> {
-    /// An evaluated map observes, rewrites and stages its target exactly once.
-    /// The map contract preserves labels, so topology routes remain valid.
-    pub(in crate::execution::interpreter) async fn row_edit_map(
+/// What one update asks of its target.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::execution::interpreter) enum EditKind {
+    /// Only removals, which have nothing to do on a target whose row is gone.
+    Removal,
+    /// Sets keys, leaving others alone.
+    Extension,
+    /// Replaces every user property.
+    Replacement,
+}
+
+impl EditKind {
+    const fn mode(self) -> graph_mutation::map::Mode {
+        match self {
+            Self::Removal | Self::Extension => graph_mutation::map::Mode::Extend,
+            Self::Replacement => graph_mutation::map::Mode::ReplaceUserProperties,
+        }
+    }
+}
+
+struct EntityEdit {
+    edit: graph_mutation::map::Edit,
+    /// Whether every folded change was a removal.
+    skips_missing_row: bool,
+}
+
+/// Evaluated edits folded per entity. Applying them costs one read and one
+/// write however many keys reached each entity.
+///
+/// Folding stores what applying each update alone stores. Callers apply
+/// pending edits first when a read needs them ([`Self::changes`]) or a change
+/// cannot join them ([`Self::blocks`]). Index checks see only the folded row,
+/// so a clause that sets an indexed value and the property its index needs
+/// alongside it is accepted in either order. Transitions keep first-edit order, and an entity
+/// only extends the most recent edit, because a unique index claims values in
+/// transition order: a value one entity releases can only be claimed after.
+pub(in crate::execution::interpreter) struct EntityEdits {
+    entities: BTreeMap<r::Entity, EntityEdit>,
+    order: Vec<r::Entity>,
+    structure: crate::query_resources::Reservation,
+    changes: crate::query_resources::Reservation,
+}
+
+impl EntityEdits {
+    pub(in crate::execution::interpreter) fn new(
+        budget: &crate::query_resources::Budget,
+    ) -> cypher::Result<Self> {
+        Ok(Self {
+            entities: BTreeMap::new(),
+            order: Vec::new(),
+            structure: budget.reserve(0)?,
+            changes: budget.reserve(0)?,
+        })
+    }
+
+    /// Whether a read of `requirement` on `entity` needs a pending edit applied.
+    pub(in crate::execution::interpreter) fn changes(
+        &self,
+        entity: r::Entity,
+        requirement: r::PropertyRequirement<'_>,
+    ) -> bool {
+        self.entities
+            .get(&entity)
+            .is_some_and(|pending| pending.edit.changes(requirement))
+    }
+
+    /// Whether a change to `names` must wait for this entity's pending edit.
+    pub(in crate::execution::interpreter) fn blocks<'a>(
+        &self,
+        entity: r::Entity,
+        kind: EditKind,
+        names: impl Iterator<Item = &'a str>,
+    ) -> bool {
+        self.entities.get(&entity).is_some_and(|pending| {
+            kind == EditKind::Replacement
+                || self.order.last() != Some(&entity)
+                || !pending.edit.folds(names)
+        })
+    }
+
+    /// Bytes pending edits hold.
+    pub(in crate::execution::interpreter) const fn pending_bytes(&self) -> usize {
+        self.changes.bytes()
+    }
+
+    /// The edit that collects `entity`'s next change, keeping `memory` until
+    /// it is applied. The caller has applied anything [`Self::blocks`] names.
+    pub(in crate::execution::interpreter) fn edit(
         &mut self,
         entity: r::Entity,
+        kind: EditKind,
+        memory: crate::query_resources::Reservation,
+    ) -> cypher::Result<&mut graph_mutation::map::Edit> {
+        self.changes.absorb(memory);
+        if self.order.last() != Some(&entity) {
+            assert!(
+                !self.entities.contains_key(&entity),
+                "a pending edit only extends the most recent entity"
+            );
+            let count = self.entities.len().saturating_add(1);
+            // Doubling growth briefly holds the old and the new vector.
+            self.structure.resize(
+                r::allocation::btree_bytes::<r::Entity, EntityEdit>(count)
+                    .saturating_add(count.saturating_mul(3 * size_of::<r::Entity>())),
+            )?;
+            self.order.push(entity);
+        }
+        let pending = self.entities.entry(entity).or_insert(EntityEdit {
+            edit: graph_mutation::map::Edit::new(kind.mode()),
+            skips_missing_row: true,
+        });
+        pending.skips_missing_row &= kind == EditKind::Removal;
+        Ok(&mut pending.edit)
+    }
+}
+
+#[cfg(test)]
+impl EntityEdits {
+    /// Installs one prepared edit for tests of the apply contract.
+    pub(in crate::execution::interpreter) fn prepared(
+        budget: &crate::query_resources::Budget,
+        entity: r::Entity,
         edit: graph_mutation::map::Edit,
+        skips_missing_row: bool,
+    ) -> cypher::Result<Self> {
+        let mut edits = Self::new(budget)?;
+        edits.entities.insert(
+            entity,
+            EntityEdit {
+                edit,
+                skips_missing_row,
+            },
+        );
+        edits.order.push(entity);
+        Ok(edits)
+    }
+}
+
+impl ExecutionContext<'_> {
+    /// Apply every pending edit with one observation per entity kind and one
+    /// transition per entity. Edits preserve labels, so topology routes stay
+    /// valid. A rejected edit drops the statement's transaction.
+    pub(in crate::execution::interpreter) async fn row_apply_edits(
+        &mut self,
+        edits: &mut EntityEdits,
     ) -> cypher::Result<()> {
+        if edits.entities.is_empty() {
+            return Ok(());
+        }
         let mut scope = self.take_or_begin_write_scope().await?;
-        let (entity, before) = match entity {
-            r::Entity::Node(id) => (
-                graph_mutation::GraphEntity::node(id),
-                self.observe_node_rows(&scope.txn, [id])
-                    .await?
-                    .observed(id)
-                    .ok_or_else(|| {
-                        crate::HelixDbError::InvariantViolation(
-                            "Active text graph source disagrees with its supplied before state"
-                                .to_string(),
-                        )
-                    })?,
-            ),
-            r::Entity::Relationship(id) => (
-                graph_mutation::GraphEntity::edge(id),
-                self.observe_edge_rows(&scope.txn, [id])
-                    .await?
-                    .observed(id)
-                    .require_properties(id)?,
-            ),
-        };
-        match edit.apply(self.tenant_scope, entity, before, self.row_memory.as_ref())? {
-            graph_mutation::PropertyEditOutcome::Unchanged(_) => {}
-            graph_mutation::PropertyEditOutcome::Changed(transition) => {
+        let order = std::mem::take(&mut edits.order);
+        let mut remaining = &order[..];
+        // A chunk's old rows are read together and each is released once its
+        // edit is staged, so a statement holds one chunk of old rows, not all
+        // of them. Nothing of a chunk is staged before its read, so a read the
+        // budget refuses repeats with half the entities.
+        let mut chunk = remaining.len();
+        while !remaining.is_empty() {
+            let batch = &remaining[..chunk.min(remaining.len())];
+            let observed = async {
+                let nodes = self
+                    .observe_node_rows(
+                        &scope.txn,
+                        batch.iter().filter_map(|entity| match entity {
+                            r::Entity::Node(id) => Some(*id),
+                            r::Entity::Relationship(_) => None,
+                        }),
+                    )
+                    .await?;
+                let relationships = self
+                    .observe_edge_rows(
+                        &scope.txn,
+                        batch.iter().filter_map(|entity| match entity {
+                            r::Entity::Relationship(id) => Some(*id),
+                            r::Entity::Node(_) => None,
+                        }),
+                    )
+                    .await?;
+                Ok::<_, crate::HelixDbError>((nodes, relationships))
+            }
+            .await;
+            let (mut nodes, mut relationships) = match observed {
+                Err(crate::HelixDbError::QueryMemoryLimitExceeded) if batch.len() > 1 => {
+                    chunk = batch.len() / 2;
+                    continue;
+                }
+                observed => observed?,
+            };
+            for entity in batch.iter().copied() {
+                self.check_execution_deadline()?;
+                let EntityEdit {
+                    edit,
+                    skips_missing_row,
+                } = edits
+                    .entities
+                    .remove(&entity)
+                    .expect("every ordered entity has one pending edit");
+                let (entity, before) = match entity {
+                    r::Entity::Node(id) => (
+                        graph_mutation::GraphEntity::node(id),
+                        nodes.take(id).ok_or_else(|| {
+                            crate::HelixDbError::InvariantViolation(
+                                "Active text graph source disagrees with its supplied before state"
+                                    .to_string(),
+                            )
+                        }),
+                    ),
+                    r::Entity::Relationship(id) => (
+                        graph_mutation::GraphEntity::edge(id),
+                        relationships.take(id).require_properties(id),
+                    ),
+                };
+                let before = match before {
+                    Ok(before) => before,
+                    Err(_) if skips_missing_row => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let graph_mutation::PropertyEditOutcome::Changed(transition) =
+                    edit.apply(self.tenant_scope, entity, before, self.row_memory.as_ref())?
+                else {
+                    continue;
+                };
                 let encoded = transition
                     .after()
                     .expect("a map replacement has an after row")
@@ -90,7 +279,10 @@ impl ExecutionContext<'_> {
                     self.row_memory.as_ref(),
                 )?;
             }
+            remaining = &remaining[batch.len()..];
         }
+        edits.structure.shrink_to(0);
+        edits.changes.shrink_to(0);
         self.finish_write_scope(scope).await?;
         Ok(())
     }
@@ -132,6 +324,8 @@ impl ExecutionContext<'_> {
         Ok(id)
     }
 
+    /// Stages one relationship. The caller proves both endpoints exist with
+    /// [`Self::row_require_nodes`] before the request commits.
     pub(in crate::execution::interpreter) async fn row_create_edge(
         &mut self,
         from: u64,
@@ -173,9 +367,6 @@ impl ExecutionContext<'_> {
         let id = self.writer()?.edge_ids().allocate().await?;
         properties.push(Property::string("$label", label.as_ref()));
         let mut scope = self.take_or_begin_write_scope().await?;
-        let endpoints = self.observe_node_existence(&scope.txn, [from, to]).await?;
-        endpoints.require(from)?;
-        endpoints.require(to)?;
         self.store_edge(
             &scope.txn,
             EdgeMutationTarget::new(id, from, to),
@@ -188,81 +379,20 @@ impl ExecutionContext<'_> {
         Ok(id)
     }
 
-    /// `None` removes a property; native DSL null storage remains unchanged.
-    pub(in crate::execution::interpreter) async fn row_edit_property(
+    /// Reject the first of `ids` absent from the transaction's view, with one
+    /// read however many relationships share them.
+    pub(in crate::execution::interpreter) async fn row_require_nodes(
         &mut self,
-        entity: r::Entity,
-        key: &str,
-        value: Option<PropertyValue>,
+        ids: &[u64],
     ) -> cypher::Result<()> {
-        if key.starts_with('$') {
-            return Err(r::QueryError::runtime(
-                category::UNSUPPORTED_FEATURE,
-                detail::RESERVED_PROPERTY_NAME,
-                "internal metadata cannot be assigned",
-            )
-            .into());
+        if ids.is_empty() {
+            return Ok(());
         }
-        let name = ir::NonEmptyString::new(key.to_owned()).ok_or_else(|| {
-            r::QueryError::runtime(
-                category::UNSUPPORTED_FEATURE,
-                detail::EMPTY_PROPERTY_NAME,
-                "storage requires nonempty property names",
-            )
-        })?;
-        let mut scope = self.take_or_begin_write_scope().await?;
-        match entity {
-            r::Entity::Node(id) => {
-                let observed = self.observe_node_rows(&scope.txn, [id]).await?.observed(id);
-                match value {
-                    Some(value) => {
-                        self.set_node_property_observed(
-                            &scope.txn,
-                            id,
-                            Property::new(key, value),
-                            observed,
-                            &mut scope.index_context,
-                        )
-                        .await?;
-                    }
-                    None => {
-                        self.remove_node_property_observed(
-                            &scope.txn,
-                            id,
-                            &name,
-                            observed,
-                            &mut scope.index_context,
-                        )
-                        .await?;
-                    }
-                }
-            }
-            r::Entity::Relationship(id) => {
-                let observed = self.observe_edge_rows(&scope.txn, [id]).await?.observed(id);
-                match value {
-                    Some(value) => {
-                        self.set_edge_property_observed(
-                            &scope.txn,
-                            id,
-                            Property::new(key, value),
-                            observed,
-                            &mut scope.index_context,
-                        )
-                        .await?;
-                    }
-                    None => {
-                        self.remove_edge_property_observed(
-                            &scope.txn,
-                            id,
-                            &name,
-                            observed,
-                            &mut scope.index_context,
-                        )
-                        .await?;
-                    }
-                }
-            }
-        }
+        let scope = self.take_or_begin_write_scope().await?;
+        let existing = self
+            .observe_node_existence(&scope.txn, ids.iter().copied())
+            .await?;
+        ids.iter().try_for_each(|id| existing.require(*id))?;
         self.finish_write_scope(scope).await?;
         Ok(())
     }

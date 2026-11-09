@@ -70,6 +70,11 @@ impl ObservedNodeRows {
         self.rows.get(&node_id).cloned().flatten()
     }
 
+    /// Moves the row out, releasing the observation's hold on it.
+    pub(super) fn take(&mut self, node_id: u64) -> Option<CanonicalPropertyRow> {
+        self.rows.remove(&node_id).flatten()
+    }
+
     pub(super) fn replace(&mut self, node_id: u64, row: Option<CanonicalPropertyRow>) {
         assert!(
             self.rows.insert(node_id, row).is_some(),
