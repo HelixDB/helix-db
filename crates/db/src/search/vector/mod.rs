@@ -188,9 +188,14 @@ pub(crate) use generation::{ValidatedVectorBuildGenerationHandle, VectorGenerati
 pub(crate) use generation::{ValidatedVectorGenerationHandle, VectorGenerationValidationError};
 pub(crate) use hnsw::index::VectorIndex;
 pub(crate) use hnsw::model::Candidate;
-pub(crate) use hnsw::mutation::{VectorBuildSession, VectorBuildSessionStats};
+pub(crate) use hnsw::mutation::{
+    default_presearch_workers, PresearchJob, PresearchRun, VectorBuildSession,
+    VectorBuildSessionStats,
+};
 #[cfg(test)]
-pub(crate) use hnsw::mutation::{DISCARDED_ENTITIES, REPLACE_REPLAYS};
+pub(crate) use hnsw::mutation::{
+    AWAIT_WORKERS, DISCARDED_ENTITIES, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS, REPLACE_REPLAYS,
+};
 #[cfg(any(test, feature = "production-scale"))]
 pub(crate) use hnsw::restricted::observe_restricted_search;
 #[cfg(any(test, feature = "production-scale"))]

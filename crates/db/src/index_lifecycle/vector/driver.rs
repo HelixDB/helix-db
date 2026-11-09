@@ -3067,6 +3067,90 @@ impl<'a> VectorPlanTarget<'a> {
     }
 }
 
+/// Starts workers scoring `effects`' upcoming inserts beside the planner.
+///
+/// Workers read a snapshot of their own, because planning writes through its
+/// transaction. Nothing has committed to the generation since the session's
+/// checkpoint, since publication is its sole writer. Tenant-partitioned
+/// generations plan alone: each entity would need its own partition's graph.
+///
+/// Workers only save the planner work, so a failure here leaves it to plan
+/// alone and report whatever is wrong, per entity.
+pub(super) async fn start_presearch<D: Distance + 'static>(
+    db: &Db,
+    target: &VectorPlanTarget<'_>,
+    definition: &ValidatedVectorIndexDefinition,
+    effects: &[super::publication::QueuedVectorEffect],
+    resources: &super::super::queue::publication::VectorPublicationResources,
+    session: &mut CheckedOutSession<D>,
+) -> Option<vector::PresearchRun<D>> {
+    try_start_presearch(db, target, definition, effects, resources, session)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "vector publication plans without workers");
+            None
+        })
+}
+
+async fn try_start_presearch<D: Distance + 'static>(
+    db: &Db,
+    target: &VectorPlanTarget<'_>,
+    definition: &ValidatedVectorIndexDefinition,
+    effects: &[super::publication::QueuedVectorEffect],
+    resources: &super::super::queue::publication::VectorPublicationResources,
+    session: &mut CheckedOutSession<D>,
+) -> Result<Option<vector::PresearchRun<D>>> {
+    let (Some(workers), VectorPhysicalLayout::Unpartitioned { physical_index_id }) =
+        (resources.presearch_workers, target.layout)
+    else {
+        return Ok(None);
+    };
+    #[cfg(test)]
+    if vector::PRESEARCH_START_FAILS
+        .try_with(|fails| fails.replace(!fails.get()))
+        .unwrap_or(false)
+    {
+        return Err(crate::error::HelixDbError::InvariantViolation(
+            "injected pre-search start failure".to_string(),
+        ));
+    }
+    let handle = target.physical::<D>(physical_index_id)?;
+    let index = VectorIndex::<D>::from_generation(&handle)
+        .with_simhasher_registry(Arc::clone(&resources.simhasher_registry))
+        .with_batch_reads(resources.batch_reads);
+    let jobs = effects
+        .iter()
+        .map(|effect| {
+            effect.replacement.as_ref().map(|replacement| {
+                let document = VectorIndexedDocument {
+                    partition: replacement.partition().clone(),
+                    vector: replacement.vector().to_vec(),
+                };
+                let layer = deterministic_layer(
+                    target.index_id,
+                    target.generation,
+                    definition,
+                    effect.entity_id,
+                    &document,
+                );
+                vector::PresearchJob {
+                    node_id: effect.entity_id.get(),
+                    vector: document.vector,
+                    layer,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let changed = effects
+        .iter()
+        .map(|effect| effect.entity_id.get())
+        .collect::<foldhash::HashSet<_>>();
+    let snapshot = db.begin(slatedb::IsolationLevel::Snapshot).await?;
+    index
+        .start_presearch(snapshot, jobs, changed, workers, session)
+        .await
+}
+
 /// Plans one entity's transition and applies it to `transaction` if it fits.
 ///
 /// The entity is removed from every `previous` partition other than its next

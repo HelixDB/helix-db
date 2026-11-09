@@ -663,6 +663,7 @@ async fn queued_writes_to_a_building_generation_leave_the_retained_session_sound
             simhasher_registry: Arc::clone(&driver.simhasher_registry),
             batch_reads: driver.batch_reads,
             planning_cache: driver.build_cache(),
+            presearch_workers: None,
         },
         limits_with_output_operations(2_048),
         publication::TextPublicationResources {
@@ -2373,6 +2374,7 @@ async fn publication_shares_the_planning_budget_with_a_retained_build() {
             simhasher_registry: Arc::clone(&driver.simhasher_registry),
             batch_reads: driver.batch_reads,
             planning_cache: driver.build_cache(),
+            presearch_workers: None,
         },
         limits_with_output_operations(2_048),
         publication::TextPublicationResources {

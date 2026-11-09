@@ -437,6 +437,7 @@ mod tests {
             planning_cache: Arc::new(VectorBuildCache::new(
                 SearchIndexBackfillLimits::default().vector_build_cache_bytes(),
             )),
+            presearch_workers: None,
         };
         for target in &mutations.targets {
             let VectorMutationMode::Active(handle) = &target.mode else {

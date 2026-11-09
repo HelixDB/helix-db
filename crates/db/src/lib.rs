@@ -1903,6 +1903,7 @@ impl HelixDB {
                             slate_db_cache.as_ref(),
                         ),
                         planning_cache: vector_planning_cache,
+                        presearch_workers: search::vector::default_presearch_workers(),
                     },
                     config.db().search_index_backfill().batch(),
                     index_lifecycle::queue::publication::TextPublicationResources {

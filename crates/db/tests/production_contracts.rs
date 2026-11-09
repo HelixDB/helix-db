@@ -12311,6 +12311,15 @@ mod vector_object_store_warm {
                 .await
                 .expect("documents are written");
         }
+        // Published before closing, so no publication after a reopen reads
+        // SSTs alongside the search being counted.
+        tokio::time::timeout(Duration::from_secs(120), async {
+            while db.index_operation_queue_stats().pending_operations > 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the documents are published");
         db.flush_writer().await.expect("documents are flushed");
         db.close().await.expect("loading writer closes");
     }

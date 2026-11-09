@@ -240,6 +240,15 @@ struct MutationDegreeLimits {
 }
 
 impl MutationDegreeLimits {
+    /// Returns the beam width of a mutation search at `layer`.
+    fn search_width(self, layer: u16, ef_construction: usize) -> usize {
+        ef_construction.max(if layer == 0 {
+            self.layer0.get()
+        } else {
+            self.conventional_layer0.get()
+        })
+    }
+
     /// Validates persisted degree settings and retains the conventional doubled floor.
     fn try_from_metadata(metadata: &VectorIndexMetadata) -> Result<Self, HelixDbError> {
         let upper = Connections::try_new(metadata.config.m)
@@ -307,7 +316,7 @@ pub(in crate::search::vector) fn select_layer0_neighbor_prefetch_targets<D: Dist
 
     for &(node_id, _) in ranked.iter() {
         let row = MutationOpCache::<D>::node_row_id(0, node_id);
-        if targets.contains(&node_id) || mutation_cache.contains_neighbor(row) {
+        if targets.contains(&node_id) || mutation_cache.serves_neighbor(row) {
             continue;
         }
         targets.push(node_id);
@@ -692,6 +701,14 @@ impl<D: Distance> VectorIndex<D> {
         let mut mutation_cache =
             session.take_cache(&identity, layer0_connections, upper_connections)?;
         mutation_cache.begin_entity();
+        if let Some(memo) = session.next_memo.take() {
+            assert_eq!(
+                memo.node_id(),
+                node_id,
+                "a distance memo serves only the insert it was searched for"
+            );
+            mutation_cache.scratch.beam_distances = BeamDistances::Replay(memo);
+        }
         let result = self
             .insert_with_mutation_cache(
                 txn,
@@ -888,9 +905,7 @@ impl<D: Distance> VectorIndex<D> {
         let old_max_layer = metadata.max_layer;
         let degree_limits = MutationDegreeLimits::try_from_metadata(metadata)?;
         let maximum_upper_connections = degree_limits.upper.get();
-        let doubled_upper_connections = degree_limits.conventional_layer0.get();
         let maximum_layer0_connections = degree_limits.layer0.get();
-        let ef_construction = metadata.config.ef_construction;
         let mut current_entry_point = entry_point;
         if node_layer < old_max_layer {
             for layer in (node_layer + 1..=old_max_layer).rev() {
@@ -910,11 +925,7 @@ impl<D: Distance> VectorIndex<D> {
 
         let insertion_top_layer = old_max_layer.min(node_layer);
         for layer in (0..=insertion_top_layer).rev() {
-            let ef = if layer == 0 {
-                ef_construction.max(maximum_layer0_connections)
-            } else {
-                ef_construction.max(doubled_upper_connections)
-            };
+            let ef = degree_limits.search_width(layer, metadata.config.ef_construction);
             let candidates = self
                 .search_layer_beam(
                     txn,
@@ -1009,6 +1020,8 @@ impl<D: Distance> VectorIndex<D> {
             prefetch_ranked,
             prefetch: prefetch_targets,
             items: neighbor_items,
+            unscored,
+            beam_distances,
             ..
         } = scratch;
         visited.clear();
@@ -1043,7 +1056,9 @@ impl<D: Distance> VectorIndex<D> {
 
         while let Some(Reverse(current)) = candidates.pop() {
             let current_distance = current.score();
-            if w.len() >= ef && current_distance > w.peek().unwrap().score() {
+            if (w.len() >= ef && current_distance > w.peek().unwrap().score())
+                || beam_distances.cancelled()
+            {
                 break;
             }
 
@@ -1055,20 +1070,35 @@ impl<D: Distance> VectorIndex<D> {
                     .copied()
                     .filter(|neighbor_id| visited.insert(*neighbor_id)),
             );
+            unscored.clear();
+            unscored.extend(
+                frontier
+                    .iter()
+                    .copied()
+                    .filter(|neighbor_id| beam_distances.memoized(layer, *neighbor_id).is_none()),
+            );
             self.get_items_for_layer_cached_batch(
                 txn,
                 layer,
-                frontier,
+                unscored,
                 mutation_cache,
                 neighbor_items,
             )
             .await?;
             newly_admitted_neighbors.clear();
             for &neighbor_id in frontier.iter() {
-                let Some(neighbor_item) = neighbor_items.get(neighbor_id) else {
-                    continue;
+                let score = match beam_distances.memoized(layer, neighbor_id) {
+                    Some(score) => score,
+                    None => {
+                        let Some(neighbor_item) = neighbor_items.get(neighbor_id) else {
+                            continue;
+                        };
+                        let score = D::distance(query, neighbor_item);
+                        beam_distances.record(layer, neighbor_id, score);
+                        score
+                    }
                 };
-                let candidate = Candidate::try_new(neighbor_id, D::distance(query, neighbor_item))?;
+                let candidate = Candidate::try_new(neighbor_id, score)?;
                 let distance = candidate.score();
                 if w.len() < ef || distance < w.peek().unwrap().score() {
                     candidates.push(Reverse(candidate));
@@ -1330,6 +1360,30 @@ impl<D: Distance> VectorIndex<D> {
         mutation_cache: &'cache mut MutationOpCache<D>,
     ) -> Result<&'cache [NodeId], HelixDbError> {
         let row = MutationOpCache::<D>::node_row_id(layer, node_id);
+        if !mutation_cache.contains_neighbor(row) {
+            // Decided before borrowing for the return, which the planner's
+            // install must not overlap.
+            let load = match mutation_cache.shared_row(row) {
+                SharedRow::Absent => None,
+                SharedRow::Borrowed(_) => Some(None),
+                SharedRow::Loaded(value) => Some(Some(value)),
+            };
+            match load {
+                None => {}
+                Some(None) => {
+                    let SharedRow::Borrowed(value) = mutation_cache.shared_row(row) else {
+                        unreachable!("the shared graph is fixed during an attempt");
+                    };
+                    return Ok(match value {
+                        NeighborRowValue::KnownAbsent => &[],
+                        NeighborRowValue::Present(neighbors) => neighbors.as_slice(),
+                    });
+                }
+                Some(Some(value)) => {
+                    mutation_cache.install_loaded_neighbor(row, value);
+                }
+            }
+        }
         if mutation_cache.contains_neighbor(row) {
             mutation_cache
                 .touched_neighbor(row)
@@ -2364,6 +2418,10 @@ pub(in crate::search::vector) struct MutationScratch<D: Distance> {
     rejected: Vec<NodeId>,
     /// Items one relink selection scores.
     scored: foldhash::HashMap<NodeId, Arc<Item<'static, D>>>,
+    /// Frontier nodes one expansion must score itself.
+    unscored: Vec<NodeId>,
+    /// What this mutation's beams do with their distances.
+    beam_distances: BeamDistances,
 }
 
 impl<D: Distance> Default for MutationScratch<D> {
@@ -2382,6 +2440,8 @@ impl<D: Distance> Default for MutationScratch<D> {
             ranked: Vec::new(),
             rejected: Vec::new(),
             scored: foldhash::HashMap::default(),
+            unscored: Vec::new(),
+            beam_distances: BeamDistances::Compute,
         }
     }
 }
@@ -2423,7 +2483,10 @@ impl<D: Distance> MutationScratch<D> {
             ranked,
             rejected,
             scored,
+            unscored,
+            beam_distances,
         } = self;
+        *beam_distances = BeamDistances::Compute;
         settle!(
             visited,
             beam,
@@ -2440,6 +2503,7 @@ impl<D: Distance> MutationScratch<D> {
             ranked,
             rejected,
             scored,
+            unscored,
         );
     }
 }
@@ -2917,6 +2981,8 @@ pub(in crate::search::vector) struct MutationOpCache<D: Distance> {
     /// one scratch set into the cache it lends out, so caches at rest in a
     /// session hold none.
     scratch: MutationScratch<D>,
+    /// Graph state beyond this cache while an attempt pre-searches.
+    shared: SharedGraphAccess<D>,
 }
 
 impl<D: Distance> Default for MutationOpCache<D> {
@@ -2949,6 +3015,7 @@ impl<D: Distance> MutationOpCache<D> {
             max_item_layer: 0,
             max_neighbor_layer: 0,
             scratch: MutationScratch::default(),
+            shared: SharedGraphAccess::None,
         })
     }
 
@@ -3081,6 +3148,71 @@ impl<D: Distance> MutationOpCache<D> {
     /// Returns whether a row is loaded, independently of whether it exists.
     pub(in crate::search::vector) fn contains_neighbor(&self, row: NeighborRowId) -> bool {
         self.neighbor_rows.contains_key(&row)
+    }
+
+    /// Returns whether a read of `row` needs no storage: it is loaded, or the
+    /// shared graph serves it.
+    pub(in crate::search::vector) fn serves_neighbor(&self, row: NeighborRowId) -> bool {
+        self.contains_neighbor(row)
+            || match &self.shared {
+                SharedGraphAccess::None => false,
+                SharedGraphAccess::Worker(graph) => graph.holds_neighbors(row),
+                SharedGraphAccess::Planner {
+                    graph,
+                    changed_rows,
+                } => !changed_rows.contains(&row) && graph.holds_neighbors(row),
+            }
+    }
+
+    /// Returns where the shared graph serves an unloaded `row`.
+    fn shared_row(&self, row: NeighborRowId) -> SharedRow<'_> {
+        match &self.shared {
+            SharedGraphAccess::None => SharedRow::Absent,
+            SharedGraphAccess::Worker(graph) => graph
+                .neighbors(row)
+                .map_or(SharedRow::Absent, SharedRow::Borrowed),
+            SharedGraphAccess::Planner {
+                graph,
+                changed_rows,
+            } => match graph.neighbors(row) {
+                Some(value) if !changed_rows.contains(&row) => SharedRow::Loaded(value.clone()),
+                Some(_) | None => SharedRow::Absent,
+            },
+        }
+    }
+
+    /// Creates a worker's private overlay of `graph`.
+    fn shared_overlay(limits: MutationDegreeLimits, graph: Arc<SharedGraph<D>>) -> Self {
+        let mut overlay = Self::with_degree_limits(limits.layer0.get(), limits.upper.get())
+            .expect("validated degree limits build a cache")
+            .into_build_session_cache();
+        overlay.shared = SharedGraphAccess::Worker(graph);
+        overlay
+    }
+
+    /// Lets go of the shared graph, so its session can settle it.
+    fn release_shared_graph(&mut self) {
+        self.shared = SharedGraphAccess::None;
+    }
+
+    /// Evicts until payload and per-entry bookkeeping fit in `max_bytes`, as
+    /// the session charges them, so entries without payload count too.
+    ///
+    /// Only for an overlay, which holds no dirty row and no SimHash.
+    fn bound_retained(&mut self, max_bytes: usize) {
+        while self.retained_payload_bytes
+            + self.item_count() * VECTOR_BUILD_SESSION_ITEM_OVERHEAD_BYTES
+            + self.neighbor_count() * VECTOR_BUILD_SESSION_NEIGHBOR_OVERHEAD_BYTES
+            > max_bytes
+        {
+            if self.evict_oldest_item() {
+                continue;
+            }
+            let Some((_, row)) = self.neighbor_rows.oldest() else {
+                return;
+            };
+            self.remove_neighbor(row);
+        }
     }
 
     /// Returns the current neighbors of a loaded row, none when it is absent.
@@ -3304,6 +3436,9 @@ impl<D: Distance> MutationOpCache<D> {
     ) -> Option<Option<Arc<Item<'static, D>>>> {
         let key = (layer, node_id);
         if !self.items.contains_key(&key) {
+            if let Some(shared) = self.shared_item(layer, node_id) {
+                return Some(Some(shared));
+            }
             self.stats.item_misses = self.stats.item_misses.saturating_add(1);
             return None;
         }
@@ -3312,6 +3447,17 @@ impl<D: Distance> MutationOpCache<D> {
         self.items
             .touch(key, touch)
             .map(|cached| cached.value.clone())
+    }
+
+    /// Returns one item of the shared graph.
+    fn shared_item(&self, layer: u16, node_id: NodeId) -> Option<Arc<Item<'static, D>>> {
+        let graph = match &self.shared {
+            SharedGraphAccess::None => return None,
+            SharedGraphAccess::Planner { graph, .. } | SharedGraphAccess::Worker(graph) => graph,
+        };
+        graph
+            .item(layer, node_id)
+            .map(|item| Arc::clone(&item.value))
     }
 
     /// Installs or replaces one decoded item state.
@@ -3573,6 +3719,55 @@ pub(crate) struct VectorBuildSession<D: Distance> {
     dirty: BTreeSet<VectorGenerationIdentity>,
     /// Traversal buffers lent to whichever namespace cache is taken.
     scratch: MutationScratch<D>,
+    /// Graph state retained for pre-search workers.
+    graph: SessionGraph<D>,
+    /// A worker's distances for the entity planned next.
+    next_memo: Option<DistanceMemo>,
+}
+
+/// Graph state a session retains for pre-search workers, in one namespace.
+#[derive(Debug, Default)]
+enum SessionGraph<D: Distance> {
+    /// Nothing retained: no attempt pre-searched, or one left the graph behind.
+    #[default]
+    None,
+    /// Between attempts, equal to the state at the session's checkpoint.
+    ///
+    /// Nothing may be planned against it: a change made now would never be
+    /// forgotten, so any change drops it.
+    Resting {
+        identity: VectorGenerationIdentity,
+        graph: SharedGraph<D>,
+    },
+    /// Shared with an attempt's workers and planner.
+    Attempting {
+        identity: VectorGenerationIdentity,
+        graph: Arc<SharedGraph<D>>,
+        /// Neighbor rows the attempt changed, forgotten as it settles. Lent
+        /// to the planner's cache while it plans an entity.
+        rows: BTreeSet<NeighborRowId>,
+    },
+}
+
+impl<D: Distance> SessionGraph<D> {
+    fn charged_bytes(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Resting { graph, .. } => graph.charged_bytes(),
+            Self::Attempting { graph, .. } => graph.charged_bytes(),
+        }
+    }
+}
+
+/// Frees `state` off the calling thread when `bytes` make that worthwhile.
+fn free_in_background(state: impl Send + 'static, bytes: usize) {
+    if bytes < VECTOR_BUILD_SESSION_BACKGROUND_DROP_BYTES {
+        return;
+    }
+    // A failed spawn drops the closure, and the state with it, right here.
+    let _ = std::thread::Builder::new()
+        .name("vector-build-session-drop".to_string())
+        .spawn(move || drop(state));
 }
 
 /// Cache state one planned entity changed inside one generation namespace.
@@ -3637,6 +3832,8 @@ impl<D: Distance> VectorBuildSession<D> {
             victims: SessionVictims::default(),
             dirty: BTreeSet::new(),
             scratch: MutationScratch::default(),
+            graph: SessionGraph::None,
+            next_memo: None,
         };
         session.set_max_retained_bytes(max_retained_bytes);
         session
@@ -3845,6 +4042,18 @@ impl<D: Distance> VectorBuildSession<D> {
         };
         cache.next_touch = self.next_touch;
         cache.scratch = core::mem::take(&mut self.scratch);
+        if let SessionGraph::Attempting {
+            identity: shared,
+            graph,
+            rows,
+        } = &mut self.graph
+            && shared == identity
+        {
+            cache.shared = SharedGraphAccess::Planner {
+                graph: Arc::clone(graph),
+                changed_rows: core::mem::take(rows),
+            };
+        }
         Ok(cache)
     }
 
@@ -3862,6 +4071,11 @@ impl<D: Distance> VectorBuildSession<D> {
         self.next_touch = cache.next_touch;
         self.scratch = core::mem::take(&mut cache.scratch);
         self.scratch.settle();
+        if let SharedGraphAccess::Planner { changed_rows, .. } = core::mem::take(&mut cache.shared)
+            && let SessionGraph::Attempting { rows, .. } = &mut self.graph
+        {
+            *rows = changed_rows;
+        }
         assert!(
             !self.caches.contains_key(&identity),
             "a vector build session cannot restore one identity twice"
@@ -3876,9 +4090,102 @@ impl<D: Distance> VectorBuildSession<D> {
         node_id: NodeId,
         rows: impl IntoIterator<Item = NeighborRowId>,
     ) {
+        let rows = rows.into_iter().collect::<BTreeSet<_>>();
+        match &mut self.graph {
+            SessionGraph::None => {}
+            SessionGraph::Resting { .. } => self.retire_graph(),
+            SessionGraph::Attempting { rows: attempt, .. } => {
+                attempt.extend(rows.iter().copied());
+            }
+        }
         let changes = self.entity_changes.entry(identity.clone()).or_default();
         changes.nodes.insert(node_id);
         changes.rows.extend(rows);
+    }
+
+    /// Sets the distances the next planned insert replays, replacing any an
+    /// entity that never searched left behind.
+    pub(crate) fn offer_distance_memo(&mut self, memo: Option<DistanceMemo>) {
+        self.next_memo = memo;
+    }
+
+    /// Drops the retained graph, off the executor if it is large.
+    fn retire_graph(&mut self) {
+        let bytes = self.graph.charged_bytes();
+        free_in_background(core::mem::take(&mut self.graph), bytes);
+    }
+
+    /// Readies the graph of `identity` for workers, forgetting every node of
+    /// `changed`, and returns it with the bytes their overlays may hold.
+    fn begin_presearch(
+        &mut self,
+        identity: VectorGenerationIdentity,
+        changed: &foldhash::HashSet<NodeId>,
+    ) -> (Arc<SharedGraph<D>>, usize) {
+        let mut graph = match core::mem::take(&mut self.graph) {
+            SessionGraph::Resting {
+                identity: resting,
+                graph,
+            } if resting == identity => graph,
+            other @ (SessionGraph::None
+            | SessionGraph::Resting { .. }
+            | SessionGraph::Attempting { .. }) => {
+                let bytes = other.charged_bytes();
+                free_in_background(other, bytes);
+                SharedGraph::default()
+            }
+        };
+        graph.forget(changed, &BTreeSet::new());
+        let graph = Arc::new(graph);
+        self.graph = SessionGraph::Attempting {
+            identity,
+            graph: Arc::clone(&graph),
+            rows: BTreeSet::new(),
+        };
+        (graph, overlay_budget(self.max_payload_bytes))
+    }
+
+    /// Forgets what the attempt changed and folds in what its workers read,
+    /// or drops the graph unless `intact`.
+    fn settle_presearch(
+        &mut self,
+        overlays: &[MutationOpCache<D>],
+        changed: &foldhash::HashSet<NodeId>,
+        intact: bool,
+    ) {
+        self.next_memo = None;
+        let SessionGraph::Attempting {
+            identity,
+            graph,
+            rows,
+        } = core::mem::take(&mut self.graph)
+        else {
+            return;
+        };
+        let bytes = graph.charged_bytes();
+        if !intact {
+            free_in_background(graph, bytes);
+            return;
+        }
+        let mut graph = match Arc::try_unwrap(graph) {
+            Ok(graph) => graph,
+            Err(shared) => {
+                free_in_background(shared, bytes);
+                return;
+            }
+        };
+        graph.forget(changed, &rows);
+        for overlay in overlays {
+            graph.absorb(overlay, changed, &rows);
+        }
+        if let Some(planned) = self.caches.get(&identity) {
+            graph.refresh(planned, changed, &rows);
+        }
+        let budget = shared_graph_budget(self.max_payload_bytes);
+        if let Some(retired) = graph.make_room(budget) {
+            free_in_background(retired, budget / 8);
+        }
+        self.graph = SessionGraph::Resting { identity, graph };
     }
 
     /// Accepts every change journaled since the previous entity boundary.
@@ -4019,6 +4326,9 @@ impl<D: Distance> VectorBuildSession<D> {
         max_bytes: usize,
         txn: Option<&MeasuredVectorTransaction<'_>>,
     ) -> Result<(), HelixDbError> {
+        if self.graph.charged_bytes() > shared_graph_limit(max_bytes) {
+            self.retire_graph();
+        }
         loop {
             let pressure = self.pressure(max_bytes)?;
             if !pressure.contains(&true) {
@@ -4150,6 +4460,7 @@ impl<D: Distance> VectorBuildSession<D> {
                 self.caches.len(),
                 VECTOR_BUILD_SESSION_NAMESPACE_OVERHEAD_BYTES,
             ),
+            (1, self.graph.charged_bytes()),
         ]
         .into_iter()
         .try_fold(self.retained_payload_bytes()?, |total, (count, charge)| {
@@ -4203,6 +4514,7 @@ impl<D: Distance> VectorBuildSession<D> {
             core::mem::take(&mut self.victims),
             core::mem::take(&mut self.dirty),
             core::mem::take(&mut self.entity_changes),
+            core::mem::take(&mut self.graph),
         );
         self.footprint = SessionFootprint::default();
         // A failed spawn drops the closure, and the state with it, right here.
@@ -4313,6 +4625,16 @@ const fn simhash_payload_bytes(value: Option<crate::search::vector::SimHash>) ->
         0
     }
 }
+
+mod presearch;
+
+pub(crate) use presearch::{default_presearch_workers, DistanceMemo, PresearchJob, PresearchRun};
+use presearch::{
+    overlay_budget, shared_graph_budget, shared_graph_limit, BeamDistances, SharedGraph,
+    SharedGraphAccess, SharedRow,
+};
+#[cfg(test)]
+pub(crate) use presearch::{AWAIT_WORKERS, MEMOIZED_LOOKUPS, PRESEARCH_START_FAILS};
 
 #[cfg(test)]
 #[path = "../../../../../tests/unit/vector/mutation.rs"]
