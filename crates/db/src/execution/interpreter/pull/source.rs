@@ -570,24 +570,31 @@ impl<'a> Source<'a> {
                                 self.state = State::Done;
                                 continue;
                             }
-                            let keys = batch
-                                .iter()
-                                .map(|id| {
-                                    kv::physical_element_key(
-                                        ctx.tenant_scope,
-                                        &exec::KvKey::from_id(*keyspace, *id),
-                                    )
-                                    .2
-                                })
-                                .collect::<Vec<_>>();
-                            pending.extend(
-                                batch.into_iter().zip(
+                            // A write takes no dependency on a node it only
+                            // proves exists; see `write_nodes_exist`.
+                            let exists = match (*keyspace, ctx.active_write_tx()) {
+                                (exec::ElementKeyspace::NodeProperty, Some(active)) => {
+                                    Box::pin(ctx.write_nodes_exist(active, &batch)).await?
+                                }
+                                _ => {
+                                    let keys = batch
+                                        .iter()
+                                        .map(|id| {
+                                            kv::physical_element_key(
+                                                ctx.tenant_scope,
+                                                &exec::KvKey::from_id(*keyspace, *id),
+                                            )
+                                            .2
+                                        })
+                                        .collect::<Vec<_>>();
                                     Box::pin(ctx.multi_get_raw(&keys))
                                         .await?
                                         .into_iter()
-                                        .map(|record| record.is_some()),
-                                ),
-                            );
+                                        .map(|record| record.is_some())
+                                        .collect()
+                                }
+                            };
+                            pending.extend(batch.into_iter().zip(exists));
                             continue;
                         }
                     };

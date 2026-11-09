@@ -18,8 +18,8 @@ enum Source {
     KvRead,
     /// `g().n(ids).add_e(..)`: a KV batch yields the source rows.
     KvMultiGet,
-    /// `g().n(param).add_e(..)`: an access step yields the source rows.
-    Access,
+    /// `g().n(param).add_e(..)`: the pull source checks the parameter's IDs.
+    Param,
     /// The input row already names the source.
     Bound,
 }
@@ -28,7 +28,7 @@ const SOURCES: [Source; 4] = [
     Source::Bound,
     Source::KvRead,
     Source::KvMultiGet,
-    Source::Access,
+    Source::Param,
 ];
 
 fn is_conflict(error: &HelixDbError) -> bool {
@@ -44,6 +44,17 @@ fn user(id: u64) -> exec::KvReadPlan {
 /// A budgeted request, as every Cypher and query-service write is.
 fn request(db: &HelixDB) -> ExecutionContext<'_> {
     let mut ctx = ExecutionContext::new(db, context::ParamBindings::default());
+    ctx.row_memory = Some(Budget::new(16 * 1024 * 1024));
+    ctx
+}
+
+/// A budgeted request whose `ids` parameter names `from`.
+fn request_from(db: &HelixDB, from: u64) -> ExecutionContext<'_> {
+    let parameters = context::ParamBindings::default().with_value(
+        name("ids"),
+        PropertyValue::I64Array(vec![i64::try_from(from).expect("test ids fit i64")]),
+    );
+    let mut ctx = ExecutionContext::new(db, parameters);
     ctx.row_memory = Some(Budget::new(16 * 1024 * 1024));
     ctx
 }
@@ -74,7 +85,12 @@ async fn stage_edge_in(ctx: &mut ExecutionContext<'_>, from: u64, to: u64, sourc
                 rows
             })
             .unwrap(),
-        Source::Access => ctx.node_rows(vec![from]).await.unwrap(),
+        Source::Param => ctx
+            .execute_access(&exec::ExecAccessPlan::Node(
+                exec::ExecNodeAccessPlan::FromParam { param: name("ids") },
+            ))
+            .await
+            .unwrap(),
         Source::Bound => {
             ExecutionValue::Stream(vec![ExecutionRow::current(ElementRef::Node(from))])
         }
@@ -100,7 +116,7 @@ async fn stage_edge<'a>(
     to: u64,
     source: Source,
 ) -> ExecutionContext<'a> {
-    let mut ctx = request(db);
+    let mut ctx = request_from(db, from);
     stage_edge_in(&mut ctx, from, to, source).await;
     ctx
 }
