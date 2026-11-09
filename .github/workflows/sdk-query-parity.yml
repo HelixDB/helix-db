@@ -123,9 +123,13 @@ jobs:
 
   embedded-go-generator:
     name: Go embedded binding generator (Linux ARM)
-    runs-on: ubuntu-24.04-arm
+    runs-on: >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+      || (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository))
+      && 'ubuntu-24.04-arm' || 'crucible-8vcpu-arm' }}
+    timeout-minutes: 30
     env:
-      CARGO_BUILD_JOBS: "1"
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v6
@@ -136,9 +140,17 @@ jobs:
             . -> target
             bindings/uniffi-bindgen -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # On a 16 GiB GitHub runner the generator builds with one job and swap.
+      # Crucible's 8-vCPU class has 32 GiB: four jobs and no swap
+      # (`crucible-volume` exists only on Crucible).
       - name: Add Linux compiler swap
         if: runner.os == 'Linux'
         run: |
+          if command -v crucible-volume >/dev/null; then
+            echo "CARGO_BUILD_JOBS=4" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
           swap_file="$RUNNER_TEMP/helix-uniffi-bindgen.swap"
           sudo fallocate -l 4G "$swap_file"
           sudo chmod 600 "$swap_file"
@@ -156,6 +168,9 @@ jobs:
       - name: Remove Linux compiler swap
         if: always() && runner.os == 'Linux'
         run: |
+          if command -v crucible-volume >/dev/null; then
+            exit 0
+          fi
           swap_file="$RUNNER_TEMP/helix-uniffi-bindgen.swap"
           if sudo swapon --show=NAME --noheadings | grep -Fxq "$swap_file"; then
             sudo swapoff "$swap_file"
