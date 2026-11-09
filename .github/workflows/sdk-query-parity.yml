@@ -32,9 +32,10 @@ on:
 permissions:
   contents: read
 
+# Pull requests cancel superseded runs; main runs finish and save caches.
 concurrency:
   group: sdk-query-parity-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   contracts:
