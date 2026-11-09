@@ -8,12 +8,37 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::contracts::{decode_stored_edges, label_of};
+use super::contracts::label_of;
+use super::edge::PairMembers;
 use super::MutationIndexContext;
 use super::*;
 use crate::index_lifecycle::graph_mutation::{
     CanonicalPropertyRow, GraphEntity, GraphMutationTransition, PropertyEdit, PropertyEditOutcome,
 };
+
+/// Nodes read and staged together. Each batch ends with a topology flush,
+/// because the next batch's reads must see it. A delete's peak memory follows its largest
+/// batch, so a batch also ends at the node reaching [`DELETE_BATCH_PAIRS`], and
+/// shrinks when the request's budget refuses it.
+const NODE_DELETE_BATCH: usize = 512;
+
+/// Neighbor pairs that end a batch. Each pair loads a pair row and its edges.
+const DELETE_BATCH_PAIRS: usize = 4096;
+
+/// Topology rows a delete collects before flushing them. A flush builds one
+/// merge per row, so this bounds its working memory, and the deltas waiting
+/// for it, at what deleting a few nodes needs. Staging uses the batch's
+/// observations, so a flush in mid-batch changes no result.
+pub(in crate::execution::interpreter) const DELETE_FLUSH_ROWS: usize = 512;
+
+/// One batch's node rows and the neighbor pairs attached to them.
+struct ObservedNodeDeletions {
+    rows: BTreeMap<u64, CanonicalPropertyRow>,
+    pairs: BTreeSet<(u64, u64)>,
+    /// Requested nodes covered, in ID order. The rest wait for a later batch.
+    covered: usize,
+    _memory: Option<crate::query_resources::Reservation>,
+}
 
 /// Sorted, deduplicated node-row observations with an ordered mutation overlay.
 pub(super) struct ObservedNodeRows {
@@ -375,93 +400,231 @@ impl<'db> ExecutionContext<'db> {
         Ok(ObservedNodeExistence { present })
     }
 
-    pub(super) async fn delete_node(
+    /// One read of each node's row and adjacency row, stopping at the node
+    /// that reaches [`DELETE_BATCH_PAIRS`].
+    async fn observe_node_deletions(
         &self,
         txn: &impl crate::transaction::Mutation,
-        node_id: u64,
-        index_context: &mut MutationIndexContext,
-    ) -> Result<()> {
-        let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-            node_id,
-        )));
-        let Some(stored) = txn.get(&key).await? else {
-            return Ok(());
-        };
-        let transition = GraphMutationTransition::delete(
+        node_ids: &[u64],
+    ) -> Result<ObservedNodeDeletions> {
+        let requested = super::observations::RowKeys::new(
+            node_ids.iter().copied(),
+            super::observations::Kind::NodeDeletions,
             self.tenant_scope,
-            GraphEntity::node(node_id),
-            CanonicalPropertyRow::decode_with_budget(stored, self.row_memory.as_ref())?,
-        );
-        let properties = transition
-            .before()
-            .expect("a delete transition has a before row")
-            .properties();
-        index_context.flush_topology(txn)?;
-        let incident_edges = self.incident_edge_ids(txn, node_id, index_context).await?;
-        let mut observed_edges = self
-            .observe_edge_deletions(txn, incident_edges.iter().copied(), index_context)
-            .await?;
-        for edge_id in incident_edges {
-            self.check_execution_deadline()?;
-            self.delete_edge_observed(txn, edge_id, observed_edges.take(edge_id)?, index_context)
-                .await?;
-        }
-        index_context.flush_topology(txn)?;
-        if let Some(label) = label_of(properties) {
-            index_context.topology_mutations().remove_node_label(
-                self.tenant_scope,
-                label,
-                node_id,
-            )?;
-        }
-        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
-        index_context.property_writes.stage(
-            txn,
-            self.tenant_scope,
-            GraphEntity::node(node_id),
-            None,
             self.row_memory.as_ref(),
         )?;
-        txn.delete(
-            self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
-                node_id,
-            ))),
+        if requested.ids.is_empty() {
+            return Ok(ObservedNodeDeletions {
+                rows: BTreeMap::new(),
+                pairs: BTreeSet::new(),
+                covered: 0,
+                _memory: None,
+            });
+        }
+        let row_bytes = helix_planner::relational::allocation::btree_bytes::<
+            u64,
+            CanonicalPropertyRow,
+        >(requested.ids.len());
+        let mut memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| budget.reserve(row_bytes))
+            .transpose()?;
+        let request = crate::query_resources::properties::ReadRequest::new(
+            requested.keys.len(),
+            self.row_memory.as_ref(),
         )?;
-        Ok(())
-    }
-
-    pub(super) async fn incident_edge_ids(
-        &self,
-        txn: &impl crate::transaction::Mutation,
-        node_id: u64,
-        index_context: &MutationIndexContext,
-    ) -> Result<BTreeSet<u64>> {
-        let key = self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
-            node_id,
-        )));
-        let edges = decode_stored_edges(txn.get(&key).await?)?;
-        let pairs = edges
-            .iter_out()
-            .map(|to| (node_id, to))
-            .chain(edges.iter_in().map(|from| (from, node_id)))
-            .collect::<BTreeSet<_>>();
-        let keys = pairs
-            .into_iter()
-            .map(|(from, to)| {
-                self.storage_key(keys::DataKeyKind::EdgePairIndex(
-                    keys::EdgePairIndexKey::new(from, to),
-                ))
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: requested.keys.len(),
+                ..Default::default()
             })
-            .collect::<Vec<_>>();
-        let mut edge_ids = BTreeSet::new();
-        for value in index_context.observe_topology(txn, &keys).await? {
+        });
+        let mut values = request.attach(txn.multi_get(&requested.keys).await?)?;
+        let mut rows = BTreeMap::new();
+        let mut pairs = BTreeSet::new();
+        let mut covered = 0;
+        for node_id in requested.ids.iter().copied() {
             self.check_execution_deadline()?;
-            let Some(value) = value else {
+            let row = values.next().expect("each node has one row result");
+            let adjacency = values.next().expect("each node has one adjacency result");
+            covered += 1;
+            let Some(row) = row else {
                 continue;
             };
-            edge_ids.extend(values::indexes::SecondaryEqualityValue::decode(&value)?.into_ids());
+            rows.insert(node_id, CanonicalPropertyRow::decode_read(row)?);
+            let Some(adjacency) = adjacency else {
+                continue;
+            };
+            let edges = values::adjacency::decode_edges(adjacency.bytes())?;
+            let added = usize::try_from(edges.nxts_out.len().saturating_add(edges.nxts_in.len()))
+                .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)?;
+            memory
+                .as_mut()
+                .map(|memory| {
+                    memory.resize(row_bytes.saturating_add(
+                        helix_planner::relational::allocation::btree_bytes::<(u64, u64), ()>(
+                            pairs.len().saturating_add(added),
+                        ),
+                    ))
+                })
+                .transpose()?;
+            pairs.extend(
+                edges
+                    .iter_out()
+                    .map(|to| (node_id, to))
+                    .chain(edges.iter_in().map(|from| (from, node_id))),
+            );
+            if pairs.len() >= DELETE_BATCH_PAIRS {
+                break;
+            }
         }
-        Ok(edge_ids)
+        Ok(ObservedNodeDeletions {
+            rows,
+            pairs,
+            covered,
+            _memory: memory,
+        })
+    }
+
+    /// Deletes `edges`, then `nodes`, both strictly ascending. A node without
+    /// a row is skipped. Each batch makes one multi-get per dependency level,
+    /// however many nodes it holds: node and adjacency rows, then pair rows,
+    /// then edge rows, with no row read twice. It flushes topology once per
+    /// [`DELETE_FLUSH_ROWS`] collected rows and once at its end.
+    ///
+    /// `check_attached` sees each batch's pairs before anything of that batch
+    /// is staged. Edges of `edges` count as pair members until their batch
+    /// deletes them. A refusal may follow staged earlier batches, so the
+    /// caller must drop the transaction.
+    ///
+    /// Observation only reads, so a batch the memory budget refuses retries
+    /// with half its nodes. One node may need all the memory it ever did.
+    pub(super) async fn delete_elements<E: From<HelixDbError>>(
+        &self,
+        txn: &impl crate::transaction::Mutation,
+        edges: &[u64],
+        nodes: &[u64],
+        check_attached: impl Fn(&PairMembers) -> std::result::Result<(), E>,
+        index_context: &mut MutationIndexContext,
+    ) -> std::result::Result<(), E> {
+        assert!(
+            edges.is_sorted_by(|a, b| a < b) && nodes.is_sorted_by(|a, b| a < b),
+            "deletion targets are strictly ascending"
+        );
+        // Prior clauses may still own coalesced pair or adjacency changes,
+        // and every observation below must include them.
+        index_context.flush_topology(txn)?;
+        let mut selected = edges;
+        let mut remaining = nodes;
+        let mut batch_size = NODE_DELETE_BATCH;
+        loop {
+            let batch = &remaining[..batch_size.min(remaining.len())];
+            let refused = |error: &HelixDbError| {
+                matches!(error, HelixDbError::QueryMemoryLimitExceeded) && batch.len() > 1
+            };
+            let observed = async {
+                let ObservedNodeDeletions {
+                    rows,
+                    pairs,
+                    covered,
+                    _memory,
+                } = self.observe_node_deletions(txn, batch).await?;
+                let mut members = PairMembers::default();
+                self.observe_pair_members(txn, pairs.iter().copied(), &mut members, index_context)
+                    .await?;
+                Ok::<_, HelixDbError>((rows, members, covered, _memory))
+            }
+            .await;
+            let (rows, members, covered, _memory) = match observed {
+                Err(error) if refused(&error) => {
+                    batch_size = batch.len() / 2;
+                    continue;
+                }
+                observed => observed?,
+            };
+            check_attached(&members)?;
+            let mut observed_edges = match self
+                .observe_edge_deletions(txn, selected.iter().copied(), members, index_context)
+                .await
+            {
+                Err(error) if refused(&error) => {
+                    batch_size = batch.len() / 2;
+                    continue;
+                }
+                observed => observed?,
+            };
+            selected = &[];
+            for edge_id in observed_edges.edge_ids() {
+                self.check_execution_deadline()?;
+                self.delete_edge_observed(
+                    txn,
+                    edge_id,
+                    observed_edges.take(edge_id)?,
+                    index_context,
+                )
+                .await?;
+                if index_context.pending_topology_rows() >= DELETE_FLUSH_ROWS {
+                    index_context.flush_topology(txn)?;
+                }
+            }
+            let staged = rows.keys().copied().collect::<Vec<_>>();
+            for (node_id, row) in rows {
+                self.check_execution_deadline()?;
+                let transition = GraphMutationTransition::delete(
+                    self.tenant_scope,
+                    GraphEntity::node(node_id),
+                    row,
+                );
+                let properties = transition
+                    .before()
+                    .expect("a delete transition has a before row")
+                    .properties();
+                label_of(properties)
+                    .map(|label| {
+                        index_context.topology_mutations().remove_node_label(
+                            self.tenant_scope,
+                            label,
+                            node_id,
+                        )
+                    })
+                    .transpose()?;
+                index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+                index_context.property_writes.stage(
+                    txn,
+                    self.tenant_scope,
+                    GraphEntity::node(node_id),
+                    None,
+                    self.row_memory.as_ref(),
+                )?;
+                if index_context.pending_topology_rows() >= DELETE_FLUSH_ROWS {
+                    index_context.flush_topology(txn)?;
+                }
+            }
+            // The tombstone is the last write to each adjacency row, so it
+            // replaces this batch's deltas in the write batch.
+            index_context.flush_topology(txn)?;
+            staged
+                .into_iter()
+                .try_for_each(|node_id| {
+                    txn.delete(self.storage_key(keys::DataKeyKind::Adjacency(
+                        keys::AdjacencyKey::new(node_id),
+                    )))
+                })
+                .map_err(HelixDbError::from)?;
+            remaining = &remaining[covered..];
+            if remaining.is_empty() {
+                return Ok(());
+            }
+            // A cut batch shows what these nodes cost: start the next one
+            // there instead of reading rows it would drop.
+            batch_size = if covered < batch.len() {
+                covered
+            } else {
+                batch_size.saturating_mul(2).min(NODE_DELETE_BATCH)
+            };
+        }
     }
 
     pub(super) async fn node_targets(&self, plan: &ir::NodeTargetPlan) -> Result<Vec<u64>> {
@@ -872,7 +1035,7 @@ mod tests {
             .await
             .expect("snapshot transaction begins");
         context
-            .delete_node(&txn, to, &mut index_context)
+            .delete_elements::<HelixDbError>(&txn, &[], &[to], |_| Ok(()), &mut index_context)
             .await
             .expect("target node and incoming edge are deleted");
         assert_eq!(
@@ -887,7 +1050,7 @@ mod tests {
         ));
 
         context
-            .delete_node(&txn, 99, &mut index_context)
+            .delete_elements::<HelixDbError>(&txn, &[], &[99], |_| Ok(()), &mut index_context)
             .await
             .expect("deleting a missing node is idempotent");
     }

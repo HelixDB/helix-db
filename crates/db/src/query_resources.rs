@@ -177,6 +177,11 @@ pub(crate) struct Reservation {
     bytes: usize,
 }
 impl Reservation {
+    /// The bytes this reservation currently admits.
+    pub(crate) const fn bytes(&self) -> usize {
+        self.bytes
+    }
+
     /// Split already-admitted ownership within the same query. The live total
     /// stays unchanged; callers keep the original guard for allocations that
     /// have not moved. Splitting past the proven bound is an invariant failure.

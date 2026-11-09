@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 
 use super::contracts::{reject_label_mutation, EdgeMutationTarget};
+use super::edge::PairMembers;
 use super::*;
 
 impl<'db> ExecutionContext<'db> {
@@ -360,27 +361,16 @@ impl<'db> ExecutionContext<'db> {
         }
 
         let mut scope = self.take_or_begin_write_scope().await?;
-        if !edge_ids.is_empty() {
-            scope.index_context.flush_topology(&scope.txn)?;
-            let mut observed_edges = self
-                .observe_edge_deletions(&scope.txn, edge_ids.iter().copied(), &scope.index_context)
-                .await?;
-            for edge_id in edge_ids {
-                self.check_execution_deadline()?;
-                self.delete_edge_observed(
-                    &scope.txn,
-                    edge_id,
-                    observed_edges.take(edge_id)?,
-                    &mut scope.index_context,
-                )
-                .await?;
-            }
-        }
-        for node_id in node_ids {
-            self.check_execution_deadline()?;
-            self.delete_node(&scope.txn, node_id, &mut scope.index_context)
-                .await?;
-        }
+        let edges = edge_ids.into_iter().collect::<Vec<_>>();
+        let nodes = node_ids.into_iter().collect::<Vec<_>>();
+        self.delete_elements::<HelixDbError>(
+            &scope.txn,
+            &edges,
+            &nodes,
+            |_| Ok(()),
+            &mut scope.index_context,
+        )
+        .await?;
         self.finish_write_scope(scope).await?;
         Ok(ExecutionValue::Stream(Vec::new()))
     }
@@ -410,42 +400,23 @@ impl<'db> ExecutionContext<'db> {
 
         let mut scope = self.take_or_begin_write_scope().await?;
         scope.index_context.flush_topology(&scope.txn)?;
-        let tenant_scope = self.tenant_scope;
-        let pair_keys = source_nodes
+        let pairs = source_nodes
             .iter()
-            .flat_map(|from| {
-                targets.iter().map(move |target| {
-                    keys::DataKey::Data {
-                        scope: tenant_scope,
-                        kind: keys::DataKeyKind::EdgePairIndex(keys::EdgePairIndexKey::new(
-                            *from, *target,
-                        )),
-                    }
-                    .to_bytes()
-                })
-            })
+            .flat_map(|from| targets.iter().map(|target| (*from, *target)))
             .collect::<Vec<_>>();
-        let mut candidate_edge_ids = BTreeSet::new();
-        for value in scope
-            .index_context
-            .observe_topology(&scope.txn, &pair_keys)
-            .await?
-        {
-            self.check_execution_deadline()?;
-            let Some(value) = value else {
-                continue;
-            };
-            candidate_edge_ids
-                .extend(values::indexes::SecondaryEqualityValue::decode(&value)?.into_ids());
-        }
+        let mut members = PairMembers::default();
+        self.observe_pair_members(
+            &scope.txn,
+            pairs.iter().copied(),
+            &mut members,
+            &scope.index_context,
+        )
+        .await?;
         let mut observed_edges = self
-            .observe_edge_deletions(
-                &scope.txn,
-                candidate_edge_ids.iter().copied(),
-                &scope.index_context,
-            )
+            .observe_edge_deletions(&scope.txn, [], members, &scope.index_context)
             .await?;
-        let edge_ids = candidate_edge_ids
+        let edge_ids = observed_edges
+            .edge_ids()
             .into_iter()
             .filter(|edge_id| observed_edges.matches_label(*edge_id, label))
             .collect::<Vec<_>>();
@@ -485,7 +456,12 @@ impl<'db> ExecutionContext<'db> {
         let mut scope = self.take_or_begin_write_scope().await?;
         scope.index_context.flush_topology(&scope.txn)?;
         let mut observed_edges = self
-            .observe_edge_deletions(&scope.txn, edge_ids.iter().copied(), &scope.index_context)
+            .observe_edge_deletions(
+                &scope.txn,
+                edge_ids.iter().copied(),
+                PairMembers::default(),
+                &scope.index_context,
+            )
             .await?;
         for edge_id in edge_ids {
             self.check_execution_deadline()?;

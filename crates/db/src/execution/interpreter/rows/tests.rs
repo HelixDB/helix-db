@@ -8,6 +8,7 @@ mod computed_depth;
 mod correlated;
 mod correlated_sources;
 mod cursors;
+mod delete_batching;
 mod deletion_hydration;
 mod direct_aggregation_ownership;
 mod direct_aggregation_transfer;
