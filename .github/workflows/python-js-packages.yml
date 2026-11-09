@@ -36,7 +36,14 @@ concurrency:
 jobs:
   python-sdk:
     name: Python SDK
-    runs-on: ubuntu-24.04
+    # Crucible's runners, but GitHub's when the CRUCIBLE_RUNNERS variable is
+    # `off`, outside HelixDB/helix-db, and for fork pull requests.
+    runs-on: >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+      || (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository))
+      && 'ubuntu-24.04-arm' || 'crucible-2vcpu-arm' }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -60,7 +67,7 @@ jobs:
     name: Python embedded (${{ matrix.name }})
     needs: python-sdk
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -70,7 +77,11 @@ jobs:
             target: x86_64-unknown-linux-gnu
             manylinux: "2_28"
           - name: manylinux-aarch64
-            runner: ubuntu-24.04-arm
+            runner: &crucible-4vcpu >-
+              ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+              || (github.event_name == 'pull_request'
+              && github.event.pull_request.head.repo.full_name != github.repository))
+              && 'ubuntu-24.04-arm' || 'crucible-4vcpu-arm' }}
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
     steps: &embedded-wheel-steps
@@ -140,8 +151,8 @@ jobs:
       !cancelled() && needs.python-embedded.result == 'success' &&
       (needs.python-embedded-other.result == 'success' ||
       (github.event_name == 'pull_request' && needs.python-embedded-other.result == 'skipped'))
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    runs-on: *crucible-4vcpu
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6

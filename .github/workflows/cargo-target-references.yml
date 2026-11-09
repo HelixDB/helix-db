@@ -28,9 +28,19 @@ env:
 jobs:
   validate:
     name: Validate exact test filters
-    runs-on: ubuntu-24.04-arm
+    # Crucible's runner, but GitHub's when the CRUCIBLE_RUNNERS variable is
+    # `off`, outside HelixDB/helix-db, and for fork pull requests.
+    runs-on: >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+      || (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository))
+      && 'ubuntu-24.04-arm' || 'crucible-4vcpu-arm' }}
     timeout-minutes: 45
     steps:
+      # A Crucible guest's /tmp is RAM-backed tmpfs: keep test files on the
+      # work disk (the runner context is not allowed in job-level env).
+      - name: Keep temporary files on the work disk
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2

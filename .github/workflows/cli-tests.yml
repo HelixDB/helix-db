@@ -65,9 +65,17 @@ jobs:
   registry-smoke:
     name: Published TypeScript SDK registry smoke
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04-arm
+    # Crucible's runner, but GitHub's when the CRUCIBLE_RUNNERS variable is
+    # `off` and outside HelixDB/helix-db.
+    runs-on: >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db')
+      && 'ubuntu-24.04-arm' || 'crucible-4vcpu-arm' }}
     timeout-minutes: 15
     steps:
+      # A Crucible guest's /tmp is RAM-backed tmpfs: keep test files on the
+      # work disk (the runner context is not allowed in job-level env).
+      - name: Keep temporary files on the work disk
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:

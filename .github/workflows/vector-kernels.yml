@@ -41,12 +41,18 @@ jobs:
             runner: ubuntu-24.04
             rustflags: -C target-cpu=x86-64 -C target-feature=+sse4.1,+avx,+avx2,+fma
             feature-args: ""
+          # Crucible's runners, but GitHub's when the CRUCIBLE_RUNNERS variable
+          # is `off`, outside HelixDB/helix-db, and for fork pull requests.
           - kernel: aarch64 scalar reference
-            runner: ubuntu-24.04-arm
+            runner: &crucible-4vcpu >-
+              ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+              || (github.event_name == 'pull_request'
+              && github.event.pull_request.head.repo.full_name != github.repository))
+              && 'ubuntu-24.04-arm' || 'crucible-4vcpu-arm' }}
             rustflags: ""
             feature-args: --features force-vector-scalar-kernel
           - kernel: aarch64 NEON
-            runner: ubuntu-24.04-arm
+            runner: *crucible-4vcpu
             rustflags: -C target-feature=+neon
             feature-args: ""
     runs-on: ${{ matrix.runner }}
@@ -56,6 +62,10 @@ jobs:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
+      # A Crucible guest's /tmp is RAM-backed tmpfs: keep test files on the
+      # work disk (the runner context is not allowed in job-level env).
+      - name: Keep temporary files on the work disk
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Exercise scalar and native kernels directly

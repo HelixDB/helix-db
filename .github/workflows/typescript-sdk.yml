@@ -22,7 +22,13 @@ concurrency:
 jobs:
   package:
     name: Package (Node ${{ matrix.node }})
-    runs-on: ubuntu-24.04
+    # Crucible's runners, but GitHub's when the CRUCIBLE_RUNNERS variable is
+    # `off`, outside HelixDB/helix-db, and for fork pull requests.
+    runs-on: &crucible-2vcpu >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+      || (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository))
+      && 'ubuntu-24.04-arm' || 'crucible-2vcpu-arm' }}
     timeout-minutes: 15
     strategy:
       matrix:
@@ -67,7 +73,7 @@ jobs:
           - architecture: amd64
             runner: ubuntu-24.04
           - architecture: arm64
-            runner: ubuntu-24.04-arm
+            runner: *crucible-2vcpu
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6

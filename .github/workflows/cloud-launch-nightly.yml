@@ -20,13 +20,22 @@ env:
 jobs:
   planner-matrix:
     name: Planner matrix shard ${{ matrix.shard }}
-    runs-on: ubuntu-24.04-arm
+    # Crucible's runners, but GitHub's when the CRUCIBLE_RUNNERS variable is
+    # `off` and outside HelixDB/helix-db.
+    runs-on: &crucible-4vcpu >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db')
+      && 'ubuntu-24.04-arm' || 'crucible-4vcpu-arm' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3]
     steps:
+      # A Crucible guest's /tmp is RAM-backed tmpfs: keep test files on the
+      # work disk (the runner context is not allowed in job-level env).
+      - &tmpdir-on-work-disk
+        name: Keep temporary files on the work disk
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
@@ -38,12 +47,15 @@ jobs:
 
   fuzz:
     name: Fuzz ${{ matrix.target }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: *crucible-4vcpu
     # A cold leg builds cargo-fuzz and the ASAN target before its five-minute
     # window; set from a cold estimate, tighten to the measured p95 + 5 min.
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # Two waves: the second restores the caches the first saved, and the
+      # nightly holds 10 Crucible units instead of 20.
+      max-parallel: 5
       matrix:
         include:
           - fuzz_dir: crates/db-testkit/fuzz
@@ -86,9 +98,10 @@ jobs:
 
   workload-matrix:
     name: Deterministic workload seeds
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    runs-on: *crucible-4vcpu
+    timeout-minutes: 50
     steps:
+      - *tmpdir-on-work-disk
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
@@ -104,9 +117,10 @@ jobs:
 
   queue-soak:
     name: Queued index publication soak
-    runs-on: ubuntu-24.04-arm
+    runs-on: *crucible-4vcpu
     timeout-minutes: 45
     steps:
+      - *tmpdir-on-work-disk
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
@@ -134,9 +148,10 @@ jobs:
 
   vector-lifecycle:
     name: Bounded 8k vector lifecycle
-    runs-on: ubuntu-24.04-arm
+    runs-on: *crucible-4vcpu
     timeout-minutes: 10
     steps:
+      - *tmpdir-on-work-disk
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2

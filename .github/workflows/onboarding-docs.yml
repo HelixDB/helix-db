@@ -44,7 +44,14 @@ concurrency:
 jobs:
   docs-contracts:
     name: Links and install commands
-    runs-on: ubuntu-latest
+    # Crucible's runner, but GitHub's when the CRUCIBLE_RUNNERS variable is
+    # `off`, outside HelixDB/helix-db, and for fork pull requests.
+    runs-on: >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+      || (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository))
+      && 'ubuntu-24.04-arm' || 'crucible-2vcpu-arm' }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
         with:

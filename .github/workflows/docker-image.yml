@@ -42,7 +42,15 @@ env:
 jobs:
   tooling:
     name: Image tooling
-    runs-on: ubuntu-24.04-arm
+    # Crucible's runner, but GitHub's when the CRUCIBLE_RUNNERS variable is
+    # `off`, outside HelixDB/helix-db, for fork pull requests, and for manual
+    # and release runs: a published image is built and gated on GitHub.
+    runs-on: >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository))
+      && 'ubuntu-24.04-arm' || 'crucible-2vcpu-arm' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -79,7 +87,13 @@ jobs:
             runner: ubuntu-24.04
           - architecture: arm64
             platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            # As for tooling: release builds stay on GitHub.
+            runner: >-
+              ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+              || github.event_name == 'workflow_dispatch'
+              || (github.event_name == 'pull_request'
+              && github.event.pull_request.head.repo.full_name != github.repository))
+              && 'ubuntu-24.04-arm' || 'crucible-4vcpu-arm' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:

@@ -63,7 +63,15 @@ env:
 jobs:
   lint:
     name: Format, Clippy, and target references
-    runs-on: ubuntu-24.04-arm
+    # Crucible's runners, but GitHub's when the CRUCIBLE_RUNNERS variable is
+    # `off`, outside HelixDB/helix-db, for fork pull requests, and for manual
+    # and release runs (workflow_dispatch, also through workflow_call).
+    runs-on: &crucible-4vcpu >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository))
+      && 'ubuntu-24.04-arm' || 'crucible-4vcpu-arm' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -92,13 +100,23 @@ jobs:
   # uploads ~1.4 GB per run.
   test:
     name: Tests (partition ${{ matrix.partition }}/2)
-    runs-on: ubuntu-24.04-arm
+    runs-on: >-
+      ${{ (vars.CRUCIBLE_RUNNERS == 'off' || github.repository != 'HelixDB/helix-db'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name != github.repository))
+      && 'ubuntu-24.04-arm' || 'crucible-8vcpu-arm' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         partition: [1, 2]
     steps:
+      # A Crucible guest's /tmp is RAM-backed tmpfs: keep test files on the
+      # work disk (the runner context is not allowed in job-level env).
+      - &tmpdir-on-work-disk
+        name: Keep temporary files on the work disk
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
@@ -122,21 +140,22 @@ jobs:
 
   feature-contracts:
     name: DB feature-gated contracts
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    runs-on: *crucible-4vcpu
+    timeout-minutes: 45
     steps:
+      - *tmpdir-on-work-disk
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
-      # The archive skips targets whose required features are off. List every
+      # The Tests partitions skip targets whose required features are off. List every
       # db test target that requires `index-lifecycle-testing` (but not
       # `production-scale`) here; the target-reference validator fails when
       # one is missing. Unit tests that need the feature live in
       # `lifecycle_testing_tests` modules; the filter runs only those from the
-      # library, so the archive's unit tests do not run twice. Nextest runs
+      # library, so the partitions' unit tests do not run twice. Nextest runs
       # each test in its own process, so suites that serialize on a
       # process-wide lock still run in parallel.
       - run: >-
@@ -151,9 +170,10 @@ jobs:
 
   doctests:
     name: Doctests and planner corpus
-    runs-on: ubuntu-24.04-arm
+    runs-on: *crucible-4vcpu
     timeout-minutes: 30
     steps:
+      - *tmpdir-on-work-disk
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
@@ -164,9 +184,10 @@ jobs:
 
   benches:
     name: Benches in test mode
-    runs-on: ubuntu-24.04-arm
+    runs-on: *crucible-4vcpu
     timeout-minutes: 30
     steps:
+      - *tmpdir-on-work-disk
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
@@ -204,9 +225,10 @@ jobs:
 
   benchmark-feature:
     name: Async index benchmark feature
-    runs-on: ubuntu-24.04-arm
+    runs-on: *crucible-4vcpu
     timeout-minutes: 30
     steps:
+      - *tmpdir-on-work-disk
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
