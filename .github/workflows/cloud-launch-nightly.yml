@@ -39,7 +39,9 @@ jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+    # A cold leg builds cargo-fuzz and the ASAN target before its five-minute
+    # window; set from a cold estimate, tighten to the measured p95 + 5 min.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -66,16 +68,20 @@ jobs:
             target: current_index_v2_bitmap
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@nightly
+      # A dated nightly: a new one each day breaks builds and cache keys.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-11-01
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ matrix.fuzz_dir }}
           workspaces: ${{ matrix.fuzz_dir }} -> target
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Run checked-in regression corpus and five-minute fuzz window
         working-directory: ${{ matrix.fuzz_dir }}
         # cargo-fuzz passes -Z flags, so override the stable rust-toolchain.toml pin.
         env:
-          RUSTUP_TOOLCHAIN: nightly
+          RUSTUP_TOOLCHAIN: nightly-2026-11-01
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300
 
   workload-matrix:
