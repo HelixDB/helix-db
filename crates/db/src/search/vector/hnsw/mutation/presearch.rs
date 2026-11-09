@@ -618,7 +618,8 @@ impl Drop for JobGuard<'_> {
 /// into the session.
 pub(crate) struct PresearchRun<D: Distance> {
     run: Arc<RunState>,
-    workers: Vec<tokio::task::JoinHandle<MutationOpCache<D>>>,
+    /// Each worker's overlay, which never arrives if the worker panicked.
+    workers: Vec<tokio::sync::oneshot::Receiver<MutationOpCache<D>>>,
     changed: Arc<foldhash::HashSet<NodeId>>,
 }
 
@@ -667,13 +668,12 @@ impl<D: Distance> PresearchRun<D> {
         let mut overlays = Vec::with_capacity(self.workers.len());
         let mut panicked = false;
         for worker in core::mem::take(&mut self.workers) {
-            match worker.await {
-                Ok(overlay) => overlays.push(overlay),
-                Err(error) => {
-                    panicked |= error.is_panic();
-                    tracing::error!(%error, "vector pre-search worker stopped");
-                }
-            }
+            let Ok(overlay) = worker.await else {
+                panicked = true;
+                tracing::error!("vector pre-search worker panicked");
+                continue;
+            };
+            overlays.push(overlay);
         }
         session.settle_presearch(&overlays, &self.changed, !panicked);
     }
@@ -752,19 +752,44 @@ impl<D: Distance + 'static> VectorIndex<D> {
             overlay_budget,
             run: Arc::clone(&run),
         });
-        let runtime = tokio::runtime::Handle::current();
-        let workers = (0..workers.get())
-            .map(|_| {
-                let (context, runtime) = (Arc::clone(&context), runtime.clone());
-                tokio::task::spawn_blocking(move || runtime.block_on(context.run_worker()))
-            })
-            .collect();
+        let workers = spawn_workers(workers, move || Arc::clone(&context).run_worker());
         Ok(Some(PresearchRun {
             run,
             workers,
             changed,
         }))
     }
+}
+
+/// Runs `work` on `count` threads of its own, sending each result back.
+///
+/// Not on the blocking pool: a worker holds its thread while it waits for the
+/// planner, and the planner may need the pool (to shrink its session, say), so
+/// a pool no larger than the workers would stop both. Stops at the first
+/// thread that fails to start, so fewer may run; the planner then scores what
+/// no worker claims.
+fn spawn_workers<W, F, T>(count: NonZeroUsize, work: W) -> Vec<tokio::sync::oneshot::Receiver<T>>
+where
+    W: Fn() -> F + Clone + Send + 'static,
+    F: Future<Output = T>,
+    T: Send + 'static,
+{
+    let runtime = tokio::runtime::Handle::current();
+    (0..count.get())
+        .map_while(|index| {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let (work, runtime) = (work.clone(), runtime.clone());
+            std::thread::Builder::new()
+                .name(format!("helix-vector-presearch-{index}"))
+                // A send fails only once the run is gone, and its result with it.
+                .spawn(move || drop(sender.send(runtime.block_on(work()))))
+                .inspect_err(|error| {
+                    tracing::warn!(%error, "vector pre-search worker could not start");
+                })
+                .ok()
+                .map(|_| receiver)
+        })
+        .collect()
 }
 
 /// Everything one attempt's workers share.

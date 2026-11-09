@@ -410,6 +410,57 @@ fn an_overlay_charges_every_entry_against_its_budget() {
 }
 
 #[test]
+fn workers_leave_the_blocking_pool_to_the_planner() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .expect("test runtime builds");
+    runtime.block_on(async {
+        let run = Arc::new(state(4, 1));
+        let workers = spawn_workers(NonZeroUsize::new(2).unwrap(), {
+            let run = Arc::clone(&run);
+            move || {
+                let run = Arc::clone(&run);
+                async move {
+                    while let Some(job) = run.claim() {
+                        run.finish(job, None);
+                    }
+                }
+            }
+        });
+        // Both workers wait at the window for the planner, which needs the pool.
+        let pooled = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::task::spawn_blocking(|| ()),
+        )
+        .await;
+        run.cancel();
+        for worker in workers {
+            worker.await.expect("a cancelled worker returns");
+        }
+        assert!(
+            pooled.is_ok(),
+            "a waiting worker must not hold a pool thread"
+        );
+    });
+}
+
+#[tokio::test]
+async fn a_panicking_worker_never_returns_its_overlay() {
+    let workers = spawn_workers(NonZeroUsize::MIN, || async {
+        if true {
+            panic!("injected worker failure");
+        }
+    });
+    assert_eq!(workers.len(), 1);
+    for worker in workers {
+        assert!(worker.await.is_err());
+    }
+}
+
+#[test]
 fn a_worker_reads_the_graph_without_copying_it() {
     let mut read = overlay();
     read.put_item(0, 1, Some(item(1.0)), 16);
