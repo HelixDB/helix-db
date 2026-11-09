@@ -240,21 +240,28 @@ async fn pending_edits_yield_to_the_memory_budget() {
     db.close().await.unwrap();
 }
 
-/// Updates on large rows hold one chunk of old rows at a time, so they fit
-/// the budget applying each row alone needs. 64 rows of 256 KiB are 16 MiB.
+/// Updates on large rows hold one chunk of old rows at a time, so each fits
+/// the smallest budget at which main passes. Each row carries 256 KiB.
 #[tokio::test]
 async fn large_row_updates_fit_the_budget_one_row_at_a_time_needs() {
-    for statement in [
-        "MATCH (n:Doc) REMOVE n.payload",
-        "MATCH (n:Doc) SET n.flag=1",
+    // Each budget is the smallest of 12, 24 and 36 MiB at which main passes.
+    // The last statement reads every payload before removing it.
+    for (statement, rows, mib) in [
+        ("MATCH (n:Doc) REMOVE n.payload", 64, 24),
+        ("MATCH (n:Doc) SET n.flag=1", 64, 24),
+        (
+            "MATCH (n:Doc) SET n.len=size(n.payload), n.payload=null",
+            128,
+            36,
+        ),
     ] {
         let db = test_support::open_db("set-large-rows").await;
         let mut seed = ExecutionContext::new(&db, context::ParamBindings::default());
         seed.row_memory = Some(memory::Budget::new(1 << 32));
         seed.enable_request_write_scope().await.unwrap();
-        for k in 0..64 {
+        for k in 0..rows {
             let properties = vec![
-                property::Property::bytes("payload", vec![7; 256 * 1024]),
+                property::Property::string("payload", "x".repeat(256 * 1024)),
                 property::Property::i64("k", k),
             ];
             seed.row_create_node("Doc", properties).await.unwrap();
@@ -268,7 +275,7 @@ async fn large_row_updates_fit_the_budget_one_row_at_a_time_needs() {
             crate::query_service::QueryMode::Execute,
             crate::execution_control::ExecutionControl::unlimited(),
             Limits {
-                memory_bytes: 24 * 1024 * 1024,
+                memory_bytes: mib * 1024 * 1024,
                 ..Limits::default()
             },
         )
