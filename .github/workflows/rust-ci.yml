@@ -88,39 +88,16 @@ jobs:
           cargo clippy --locked -p db -p server --lib --bins --profile test
           --features server/async-index-benchmark -- -D warnings
 
-  build-tests:
-    name: Build test archive
+  # Each partition builds the test targets itself: a shared nextest archive
+  # uploads ~1.4 GB per run.
+  test:
+    name: Tests (partition ${{ matrix.partition }}/2)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@nextest
-      # Bench targets have custom harnesses that nextest cannot list; the
-      # doctests job runs them in test mode instead.
-      - name: Build every workspace test target once
-        run: >-
-          cargo nextest archive --locked --workspace --lib --bins --tests --examples
-          --archive-file nextest-archive.tar.zst
-      - uses: actions/upload-artifact@v4
-        with:
-          name: nextest-archive
-          path: nextest-archive.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-
-  test:
-    name: Tests (partition ${{ matrix.partition }}/8)
-    needs: build-tests
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8]
+        partition: [1, 2]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -129,18 +106,19 @@ jobs:
           cache: npm
           cache-dependency-path: sdks/typescript/package-lock.json
       - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
       - run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: sdks/typescript
-      - uses: actions/download-artifact@v5
-        with:
-          name: nextest-archive
+      # Bench targets have custom harnesses that nextest cannot list; the
+      # doctests job runs them in test mode instead.
       - name: Run partition
         run: >-
-          cargo nextest run --profile ci
-          --archive-file nextest-archive.tar.zst
-          --workspace-remap . --extract-to . --extract-overwrite
-          --partition hash:${{ matrix.partition }}/8
+          cargo nextest run --profile ci --locked
+          --workspace --lib --bins --tests --examples
+          --partition hash:${{ matrix.partition }}/2
 
   feature-contracts:
     name: DB feature-gated contracts
