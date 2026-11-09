@@ -150,6 +150,17 @@ impl MutationIndexContext {
         self.topology_runtime.staging_flushes
     }
 
+    /// Rows topology flushes have staged.
+    #[cfg(test)]
+    pub(crate) const fn topology_staged_rows(&self) -> usize {
+        self.topology_runtime.staged_rows
+    }
+
+    /// Rows the next topology flush would stage.
+    pub(super) fn pending_topology_rows(&self) -> usize {
+        self.topology_runtime.pending_rows()
+    }
+
     /// Flushes one topology epoch before topology-dependent reads.
     pub(crate) fn flush_topology(
         &mut self,

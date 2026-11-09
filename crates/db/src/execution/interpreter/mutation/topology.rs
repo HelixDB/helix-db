@@ -165,6 +165,9 @@ pub(in crate::execution::interpreter) struct TopologyMutationRuntime {
     /// Flushes that staged at least one row.
     #[cfg(test)]
     pub(super) staging_flushes: usize,
+    /// Rows those flushes staged.
+    #[cfg(test)]
+    pub(super) staged_rows: usize,
 }
 impl std::fmt::Debug for TopologyMutationRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -465,6 +468,16 @@ impl TopologyMutationRuntime {
         }
     }
 
+    /// Rows the collecting epoch would stage on its next flush.
+    pub(in crate::execution::interpreter) fn pending_rows(&self) -> usize {
+        match &self.state {
+            TopologyMutationRuntimeState::Pending(batch) => {
+                batch.bitmaps.len().saturating_add(batch.adjacency.len())
+            }
+            TopologyMutationRuntimeState::Collecting | TopologyMutationRuntimeState::Prepared => 0,
+        }
+    }
+
     /// Flushes one coalesced epoch and returns to the collecting state.
     pub(in crate::execution::interpreter) fn flush(
         &mut self,
@@ -551,6 +564,7 @@ impl TopologyMutationRuntime {
         #[cfg(test)]
         {
             self.staging_flushes += 1;
+            self.staged_rows += count;
         }
         self.staged_keys.extend(staged_keys);
         drop(key_vector_memory);

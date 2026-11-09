@@ -16,14 +16,20 @@ use crate::index_lifecycle::graph_mutation::{
     CanonicalPropertyRow, GraphEntity, GraphMutationTransition, PropertyEdit, PropertyEditOutcome,
 };
 
-/// Nodes read and staged together. Each batch flushes topology, because the
-/// next batch's reads must see it. A delete's peak memory follows its largest
+/// Nodes read and staged together. Each batch ends with a topology flush,
+/// because the next batch's reads must see it. A delete's peak memory follows its largest
 /// batch, so a batch also ends at the node reaching [`DELETE_BATCH_PAIRS`], and
 /// shrinks when the request's budget refuses it.
 const NODE_DELETE_BATCH: usize = 512;
 
 /// Neighbor pairs that end a batch. Each pair loads a pair row and its edges.
 const DELETE_BATCH_PAIRS: usize = 4096;
+
+/// Topology rows a delete collects before flushing them. A flush builds one
+/// merge per row, so this bounds its working memory, and the deltas waiting
+/// for it, at what deleting a few nodes needs. Staging uses the batch's
+/// observations, so a flush in mid-batch changes no result.
+pub(in crate::execution::interpreter) const DELETE_FLUSH_ROWS: usize = 512;
 
 /// One batch's node rows and the neighbor pairs attached to them.
 struct ObservedNodeDeletions {
@@ -483,9 +489,10 @@ impl<'db> ExecutionContext<'db> {
     }
 
     /// Deletes `edges`, then `nodes`, both strictly ascending. A node without
-    /// a row is skipped. Each batch makes one multi-get per dependency level
-    /// and one topology flush, however many nodes it holds: node and adjacency
-    /// rows, then pair rows, then edge rows, with no row read twice.
+    /// a row is skipped. Each batch makes one multi-get per dependency level,
+    /// however many nodes it holds: node and adjacency rows, then pair rows,
+    /// then edge rows, with no row read twice. It flushes topology once per
+    /// [`DELETE_FLUSH_ROWS`] collected rows and once at its end.
     ///
     /// `check_attached` sees each batch's pairs before anything of that batch
     /// is staged. Edges of `edges` count as pair members until their batch
@@ -558,6 +565,9 @@ impl<'db> ExecutionContext<'db> {
                     index_context,
                 )
                 .await?;
+                if index_context.pending_topology_rows() >= DELETE_FLUSH_ROWS {
+                    index_context.flush_topology(txn)?;
+                }
             }
             let staged = rows.keys().copied().collect::<Vec<_>>();
             for (node_id, row) in rows {
@@ -588,6 +598,9 @@ impl<'db> ExecutionContext<'db> {
                     None,
                     self.row_memory.as_ref(),
                 )?;
+                if index_context.pending_topology_rows() >= DELETE_FLUSH_ROWS {
+                    index_context.flush_topology(txn)?;
+                }
             }
             // The tombstone is the last write to each adjacency row, so it
             // replaces this batch's deltas in the write batch.

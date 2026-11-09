@@ -1,5 +1,6 @@
-//! Deletes cost one multi-get per dependency level and one topology flush per
-//! batch, and store exactly what deleting each element alone stores.
+//! Deletes cost one multi-get per dependency level per batch, flush topology
+//! in bounded chunks, and store exactly what deleting each element alone
+//! stores.
 use super::super::*;
 use crate::encoding::v2::keys;
 use crate::execution::interpreter::{mutation::DeletionTargets, test_support};
@@ -45,7 +46,7 @@ async fn ring(ctx: &mut ExecutionContext<'_>, count: usize) -> Vec<r::Entity> {
 }
 
 #[tokio::test]
-async fn detach_delete_costs_one_read_per_level_and_one_flush_per_batch() {
+async fn detach_delete_costs_one_read_per_level_and_bounded_flushes() {
     // One level for rows, one for pairs, one for edges, whatever the node
     // count. A last batch whose edges went with earlier batches needs only
     // the first.
@@ -66,7 +67,16 @@ async fn detach_delete_costs_one_read_per_level_and_one_flush_per_batch() {
         ctx.row_delete_entities(selected, true).await.unwrap();
         let active = ctx.active_write_tx().unwrap();
         assert_eq!(active.txn.storage_reads() - before, reads, "{count}");
-        assert_eq!(active.index_context.topology_staging_flushes(), batches);
+        // A batch flushes at its end, and in between only once it holds a
+        // full flush's worth of rows.
+        let flushes = active.index_context.topology_staging_flushes();
+        let rows = active.index_context.topology_staged_rows();
+        let limit = crate::execution::interpreter::mutation::DELETE_FLUSH_ROWS;
+        assert!(flushes >= batches, "{count}: {flushes} flushes");
+        assert!(
+            flushes <= batches + rows / limit,
+            "{count}: {flushes} flushes, {rows} rows"
+        );
         ctx.commit_request_write_scope().await.unwrap();
         assert_eq!(ctx.row_budget().available(), 64 * 1024 * 1024);
         drop(ctx);
@@ -252,9 +262,12 @@ async fn batches_shrink_to_hub_size_and_to_the_memory_budget() {
     ctx.commit_request_write_scope().await.unwrap();
     ctx.enable_request_write_scope().await.unwrap();
     let selected = targets(&ctx, &hubs);
+    let before = ctx.active_write_tx().unwrap().txn.storage_reads();
     ctx.row_delete_entities(selected, true).await.unwrap();
+    // The second hub reaches the pair limit, so its batch holds two hubs and
+    // the third hub gets its own: three reads each.
     let active = ctx.active_write_tx().unwrap();
-    assert_eq!(active.index_context.topology_staging_flushes(), 2);
+    assert_eq!(active.txn.storage_reads() - before, 6);
     ctx.commit_request_write_scope().await.unwrap();
     drop(ctx);
     let response = db
@@ -294,6 +307,36 @@ async fn batches_shrink_to_hub_size_and_to_the_memory_budget() {
         .await
         .unwrap();
     assert_eq!(response.rows, vec![vec![json!(0)]]);
+    db.close().await.unwrap();
+}
+
+/// Topology flushes in bounded chunks, so a batch of 512 separately
+/// connected nodes fits the budget deleting each node alone needs (about
+/// 10 MiB here). One flush per batch needed about 17 MiB.
+#[tokio::test]
+async fn a_full_batch_needs_little_more_memory_than_deleting_each_node_alone() {
+    let db = test_support::open_db("delete-batch-memory").await;
+    let mut seed = ExecutionContext::new(&db, context::ParamBindings::default());
+    seed.row_memory = Some(memory::Budget::new(1 << 32));
+    seed.enable_request_write_scope().await.unwrap();
+    let mut nodes = Vec::new();
+    for _ in 0..512 {
+        let node = seed.row_create_node("N", vec![]).await.unwrap();
+        let neighbor = seed.row_create_node("M", vec![]).await.unwrap();
+        seed.row_create_edge(node, neighbor, "R", vec![])
+            .await
+            .unwrap();
+        nodes.push(r::Entity::Node(node));
+    }
+    seed.commit_request_write_scope().await.unwrap();
+    drop(seed);
+    let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+    ctx.row_memory = Some(memory::Budget::new(11 * 1024 * 1024));
+    ctx.enable_request_write_scope().await.unwrap();
+    let selected = targets(&ctx, &nodes);
+    ctx.row_delete_entities(selected, true).await.unwrap();
+    ctx.abort_request_write_scope();
+    drop(ctx);
     db.close().await.unwrap();
 }
 
