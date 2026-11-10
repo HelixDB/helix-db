@@ -363,11 +363,15 @@ class PropertyValue:
         return cls("I64Array", [_i64_to_json(value) for value in values])
 
     @classmethod
-    def f64_array(cls, values: Iterable[float]) -> "PropertyValue":
+    def f64_array(cls, values: Iterable[float] | None) -> "PropertyValue":
+        if values is None:
+            return cls.null()
         return cls("F64Array", [_finite_float(value, name="f64") for value in values])
 
     @classmethod
-    def f32_array(cls, values: Iterable[float]) -> "PropertyValue":
+    def f32_array(cls, values: Iterable[float] | None) -> "PropertyValue":
+        if values is None:
+            return cls.null()
         return cls("F32Array", [_finite_float(value, name="f32") for value in values])
 
     @classmethod
@@ -413,6 +417,8 @@ class PropertyValue:
         if isinstance(value, Mapping):
             return cls.object(value)
         if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return cls.array([])
             if all(isinstance(entry, str) for entry in value):
                 return cls.string_array(value)
             if all(isinstance(entry, int) and not isinstance(entry, bool) for entry in value):
@@ -1752,6 +1758,22 @@ def parse_index_operation_status(value: Any) -> IndexOperationStatus:
     return IndexOperationAborted(common=common)
 
 
+def _normalize_query_vector(
+    query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput | None,
+) -> PropertyInput:
+    if query_vector is None:
+        return PropertyInput.value(PropertyValue.null())
+    if isinstance(query_vector, PropertyInput):
+        return query_vector
+    if isinstance(query_vector, (Expr, ParamRef)):
+        return PropertyInput.expr(query_vector)
+    if isinstance(query_vector, PropertyValue):
+        return PropertyInput.value(query_vector)
+    if isinstance(query_vector, (list, tuple)) and len(query_vector) == 0:
+        return PropertyInput.value(PropertyValue.f32_array([]))
+    return PropertyInput.from_value(query_vector)
+
+
 @dataclass(frozen=True)
 class Step:
     variant: str
@@ -1816,7 +1838,7 @@ class Step:
         cls,
         label: str,
         property: str,
-        query_vector: PropertyInput,
+        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput | None,
         k: StreamBound,
         tenant_value: PropertyInput | None = None,
     ) -> "Step":
@@ -1826,7 +1848,7 @@ class Step:
                 "label": label,
                 "property": property,
                 "tenant_value": tenant_value if tenant_value is not None else _OMIT,
-                "query_vector": query_vector,
+                "query_vector": _normalize_query_vector(query_vector),
                 "k": k,
             },
         )
@@ -1856,7 +1878,7 @@ class Step:
         cls,
         label: str,
         property: str,
-        query_vector: PropertyInput,
+        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput | None,
         k: StreamBound,
         tenant_value: PropertyInput | None = None,
     ) -> "Step":
@@ -1866,7 +1888,7 @@ class Step:
                 "label": label,
                 "property": property,
                 "tenant_value": tenant_value if tenant_value is not None else _OMIT,
-                "query_vector": query_vector,
+                "query_vector": _normalize_query_vector(query_vector),
                 "k": k,
             },
         )
@@ -1876,7 +1898,7 @@ class Step:
         cls,
         label: str,
         property: str,
-        query_vector: PropertyInput,
+        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput | None,
         k: StreamBound,
         tenant_value: PropertyInput | None = None,
     ) -> "Step":
@@ -1886,7 +1908,7 @@ class Step:
                 "label": label,
                 "property": property,
                 "tenant_value": tenant_value if tenant_value is not None else _OMIT,
-                "query_vector": query_vector,
+                "query_vector": _normalize_query_vector(query_vector),
                 "k": k,
             },
         )
@@ -1896,7 +1918,7 @@ class Step:
         cls,
         label: str,
         property: str,
-        query_vector: PropertyInput,
+        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput | None,
         k: StreamBound,
         tenant_value: PropertyInput | None = None,
     ) -> "Step":
@@ -1906,7 +1928,7 @@ class Step:
                 "label": label,
                 "property": property,
                 "tenant_value": tenant_value if tenant_value is not None else _OMIT,
-                "query_vector": query_vector,
+                "query_vector": _normalize_query_vector(query_vector),
                 "k": k,
             },
         )
@@ -2610,14 +2632,16 @@ class Traversal:
         self,
         label: str,
         property: str,
-        query_vector: Sequence[float],
+        query_vector: Sequence[float] | None,
         k: int,
         tenant_value: PropertyValueInput | None = None,
     ) -> "Traversal":
         return self.vector_search_nodes_with(
             label,
             property,
-            PropertyInput.value(PropertyValue.f32_array(query_vector)),
+            PropertyInput.value(PropertyValue.null())
+            if query_vector is None
+            else PropertyInput.value(PropertyValue.f32_array(query_vector)),
             k,
             None if tenant_value is None else PropertyInput.value(tenant_value),
         )
@@ -2626,7 +2650,7 @@ class Traversal:
         self,
         label: str,
         property: str,
-        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput,
+        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput | None,
         k: StreamBound | Expr | ParamRef | int,
         tenant_value: PropertyInput | Expr | ParamRef | PropertyValueInput | None = None,
     ) -> "Traversal":
@@ -2634,7 +2658,7 @@ class Traversal:
             Step.vector_search_nodes(
                 label,
                 property,
-                PropertyInput.from_value(query_vector),
+                query_vector,
                 StreamBound.from_value(k),
                 None if tenant_value is None else PropertyInput.from_value(tenant_value),
             ),
@@ -2674,14 +2698,16 @@ class Traversal:
         self,
         label: str,
         property: str,
-        query_vector: Sequence[float],
+        query_vector: Sequence[float] | None,
         k: int,
         tenant_value: PropertyValueInput | None = None,
     ) -> "Traversal":
         return self.vector_search_edges_with(
             label,
             property,
-            PropertyInput.value(PropertyValue.f32_array(query_vector)),
+            PropertyInput.value(PropertyValue.null())
+            if query_vector is None
+            else PropertyInput.value(PropertyValue.f32_array(query_vector)),
             k,
             None if tenant_value is None else PropertyInput.value(tenant_value),
         )
@@ -2690,7 +2716,7 @@ class Traversal:
         self,
         label: str,
         property: str,
-        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput,
+        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput | None,
         k: StreamBound | Expr | ParamRef | int,
         tenant_value: PropertyInput | Expr | ParamRef | PropertyValueInput | None = None,
     ) -> "Traversal":
@@ -2698,7 +2724,7 @@ class Traversal:
             Step.vector_search_edges(
                 label,
                 property,
-                PropertyInput.from_value(query_vector),
+                query_vector,
                 StreamBound.from_value(k),
                 None if tenant_value is None else PropertyInput.from_value(tenant_value),
             ),
@@ -2709,14 +2735,16 @@ class Traversal:
         self,
         label: str,
         property: str,
-        query_vector: Sequence[float],
+        query_vector: Sequence[float] | None,
         k: int,
         tenant_value: PropertyValueInput | None = None,
     ) -> "Traversal":
         return self.vector_search_with(
             label,
             property,
-            PropertyInput.value(PropertyValue.f32_array(query_vector)),
+            PropertyInput.value(PropertyValue.null())
+            if query_vector is None
+            else PropertyInput.value(PropertyValue.f32_array(query_vector)),
             k,
             None if tenant_value is None else PropertyInput.value(tenant_value),
         )
@@ -2725,7 +2753,7 @@ class Traversal:
         self,
         label: str,
         property: str,
-        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput,
+        query_vector: PropertyInput | Expr | ParamRef | PropertyValueInput | None,
         k: StreamBound | Expr | ParamRef | int,
         tenant_value: PropertyInput | Expr | ParamRef | PropertyValueInput | None = None,
     ) -> "Traversal":
@@ -2739,7 +2767,7 @@ class Traversal:
             step(
                 label,
                 property,
-                PropertyInput.from_value(query_vector),
+                query_vector,
                 StreamBound.from_value(k),
                 None if tenant_value is None else PropertyInput.from_value(tenant_value),
             )
@@ -3769,6 +3797,8 @@ def _convert_param_value(schema: ParamSchema, value: Any, path: str) -> JsonValu
             key: _convert_param_value(inner, entry, f"{path}.{key}") for key, entry in value.items()
         }
     if schema.kind == "Array":
+        if value is None:
+            return None
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             raise TypeError(f"parameter '{path}' must be array")
         if schema.inner is None:
@@ -3917,6 +3947,8 @@ def _normalize_typed_query_value(
             raise TypeError(f"parameter '{path}' must be object")
         return _validate_json_value(value, path)
     if parameter_type.variant == "Array":
+        if value is None:
+            return None
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             raise TypeError(f"parameter '{path}' must be array")
         inner = parameter_type.inner

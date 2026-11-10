@@ -851,6 +851,116 @@ class DslAstTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             StreamBound.literal(-1)
 
+    def test_nullable_vector_parameter_serialization(self) -> None:
+        batch = read_batch()
+
+        # 1. Typed QueryRequest parameter serialization with None and empty vector
+        req_none = QueryRequest.read(batch).with_typed_parameter(
+            "vec", QueryParamType.array(QueryParamType.f32()), None
+        )
+        req_none_json = json.loads(req_none.to_json_string())
+        self.assertIn("parameters", req_none_json)
+        self.assertIsNone(req_none_json["parameters"]["vec"])
+        self.assertEqual(req_none_json["parameter_types"]["vec"], {"array": "f32"})
+
+        req_empty = QueryRequest.read(batch).with_typed_parameter(
+            "vec", QueryParamType.array(QueryParamType.f32()), []
+        )
+        req_empty_json = json.loads(req_empty.to_json_string())
+        self.assertEqual(req_empty_json["parameters"]["vec"], [])
+        self.assertEqual(req_empty_json["parameter_types"]["vec"], {"array": "f32"})
+
+        req_f64_none = QueryRequest.read(batch).with_typed_parameter(
+            "vec", QueryParamType.array(QueryParamType.f64()), None
+        )
+        self.assertIsNone(json.loads(req_f64_none.to_json_string())["parameters"]["vec"])
+
+        req_f64_empty = QueryRequest.read(batch).with_typed_parameter(
+            "vec", QueryParamType.array(QueryParamType.f64()), ()
+        )
+        self.assertEqual(json.loads(req_f64_empty.to_json_string())["parameters"]["vec"], [])
+
+        # 2. Schema-defined QueryRequest parameter serialization (to_query_request & to_query_json)
+        params = define_params({"query_vector": param.array(param.f32()), "k": param.i64()})
+        query = (
+            read_batch()
+            .var_as(
+                "hits",
+                g().vector_search_nodes_with("Doc", "embedding", params.query_vector, params.k),
+            )
+            .returning(["hits"])
+        )
+
+        req_from_schema_none = query.to_query_request(params, {"query_vector": None, "k": 5})
+        schema_none_json = json.loads(req_from_schema_none.to_json_string())
+        self.assertIsNone(schema_none_json["parameters"]["query_vector"])
+        self.assertEqual(schema_none_json["parameters"]["k"], 5)
+        self.assertEqual(schema_none_json["parameter_types"]["query_vector"], {"array": "f32"})
+
+        req_from_schema_empty = query.to_query_request(params, {"query_vector": [], "k": 5})
+        schema_empty_json = json.loads(req_from_schema_empty.to_json_string())
+        self.assertEqual(schema_empty_json["parameters"]["query_vector"], [])
+        self.assertEqual(schema_empty_json["parameters"]["k"], 5)
+
+        json_out = query.to_query_json(params, {"query_vector": None, "k": 5})
+        self.assertIn('"query_vector":null', json_out)
+
+        # 3. Untyped parameters with None and empty vector
+        untyped_none = QueryRequest.read(batch).with_untyped_parameter("vec", None)
+        self.assertIsNone(json.loads(untyped_none.to_json_string())["parameters"]["vec"])
+        untyped_empty = QueryRequest.read(batch).with_untyped_parameter("vec", [])
+        self.assertEqual(json.loads(untyped_empty.to_json_string())["parameters"]["vec"], [])
+
+        # 4. Traversal vector search methods with None and empty vectors
+        nodes_none = g().vector_search_nodes("Doc", "embedding", None, 5).to_json()
+        self.assertEqual(
+            nodes_none["root"]["vector_search_nodes"]["query_vector"], {"value": "null"}
+        )
+
+        nodes_empty = g().vector_search_nodes("Doc", "embedding", [], 5).to_json()
+        self.assertEqual(
+            nodes_empty["root"]["vector_search_nodes"]["query_vector"],
+            {"value": {"f32_array": []}},
+        )
+
+        nodes_with_none = g().vector_search_nodes_with("Doc", "embedding", None, 5).to_json()
+        self.assertEqual(
+            nodes_with_none["root"]["vector_search_nodes"]["query_vector"], {"value": "null"}
+        )
+
+        nodes_with_empty = g().vector_search_nodes_with("Doc", "embedding", [], 5).to_json()
+        self.assertEqual(
+            nodes_with_empty["root"]["vector_search_nodes"]["query_vector"],
+            {"value": {"f32_array": []}},
+        )
+
+        edges_none = g().vector_search_edges("FOLLOWS", "embedding", None, 5).to_json()
+        self.assertEqual(
+            edges_none["root"]["vector_search_edges"]["query_vector"], {"value": "null"}
+        )
+
+        edges_empty = g().vector_search_edges("FOLLOWS", "embedding", [], 5).to_json()
+        self.assertEqual(
+            edges_empty["root"]["vector_search_edges"]["query_vector"],
+            {"value": {"f32_array": []}},
+        )
+
+        scoped_none = g().n_with_label("Doc").vector_search("Doc", "embedding", None, 5).to_json()
+        self.assertEqual(
+            scoped_none["root"]["vector_search_nodes_within"]["query_vector"], {"value": "null"}
+        )
+
+        scoped_empty = g().n_with_label("Doc").vector_search("Doc", "embedding", [], 5).to_json()
+        self.assertEqual(
+            scoped_empty["root"]["vector_search_nodes_within"]["query_vector"],
+            {"value": {"f32_array": []}},
+        )
+
+        # 5. PropertyValue helpers with None and empty list
+        self.assertEqual(PropertyValue.f32_array(None).to_json(), "null")
+        self.assertEqual(PropertyValue.f64_array(None).to_json(), "null")
+        self.assertEqual(PropertyValue.from_value([]).to_json(), {"array": []})
+
 
 if __name__ == "__main__":
     unittest.main()
