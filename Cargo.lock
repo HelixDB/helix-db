@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "helix-cli"
-version = "3.6.1"
+version = "3.6.2"
 dependencies = [
  "assert_cmd",
  "base64 0.22.1",
