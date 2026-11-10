@@ -33,6 +33,7 @@ CODEC_OWNERS = {
     "legacy/tenant_envelope.rs": "struct LegacyTenantEnvelope",
     "legacy/edge_property_pair.rs": "struct LegacyEdgePropertyPairKey",
     "legacy/index_catalog.rs": "enum LegacyDynamicIndexCatalogEntry",
+    "legacy/label_hash.rs": "struct LegacyEdgeLabelKey",
     "legacy/text/storage_keys.rs": "enum LegacyTextMetadataElement",
     "legacy/text/manifest.rs": "enum LegacyTextManifestError",
     "legacy/text/live_state.rs": "struct LegacyTextLiveStateError",
@@ -57,6 +58,7 @@ V2_SOURCE_FILES = {
     "legacy/tenant_envelope.rs",
     "legacy/edge_property_pair.rs",
     "legacy/index_catalog.rs",
+    "legacy/label_hash.rs",
     "legacy/text/mod.rs",
     "legacy/text/storage_keys.rs",
     "legacy/text/manifest.rs",
@@ -830,6 +832,7 @@ def validate_codec_architecture(root: Path) -> list[str]:
             or relative_path.startswith("crates/db/src/encoding/v1/")
             or relative_path in {
                 "crates/db/src/encoding/v2/keys/data.rs",
+                "crates/db/src/encoding/v2/keys/indexes/property.rs",
                 "crates/db/src/encoding/v2/keys/indexes/vector/mod.rs",
                 "crates/db/src/encoding/v2/keys/indexes/vector/storage_prefixes.rs",
                 "crates/db/src/fuzzing.rs",

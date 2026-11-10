@@ -12,7 +12,7 @@
 //! Edge label neighbor: [0x03][0x13][dir:1][node:8][len:2][label] -> RoaringTreemap<NodeId>
 //! ```
 //!
-//! Retired hash-keyed rows live in [`crate::encoding::v2::legacy::label_hash`].
+//! Retired hash-keyed rows are decoded only by the legacy label-hash codec.
 
 use std::sync::Arc;
 

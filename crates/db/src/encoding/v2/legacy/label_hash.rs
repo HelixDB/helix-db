@@ -361,6 +361,21 @@ mod tests {
     }
 
     #[test]
+    fn scan_prefixes_cover_both_legacy_label_keyspaces() {
+        assert_eq!(legacy_edge_label_scan_prefix().as_ref(), &[0x03, 0x04]);
+        assert_eq!(
+            legacy_edge_label_neighbor_scan_prefix().as_ref(),
+            &[0x03, 0x10]
+        );
+        let mut node_labels = vec![0x03, 0x00];
+        node_labels.extend_from_slice(&hash_property_name(LABEL_PROPERTY));
+        assert_eq!(
+            LegacyNodeLabelKey::scan_prefix().as_ref(),
+            node_labels.as_slice()
+        );
+    }
+
+    #[test]
     fn edge_label_neighbor_rejects_invalid_direction() {
         let mut key = vec![0x03, 0x10, 0x02];
         key.extend_from_slice(&1u64.to_be_bytes());

@@ -170,9 +170,6 @@ mod tests {
     use super::super::range::scans::*;
     use super::*;
     use crate::encoding::indexes::{PropertyHash, ValueHash};
-    use crate::encoding::v2::legacy::label_hash::{
-        legacy_edge_label_neighbor_scan_prefix, legacy_edge_label_scan_prefix,
-    };
 
     const PROP: PropertyHash = [1, 2, 3, 4];
     const VALUE: ValueHash = [5, 6, 7, 8, 9, 10, 11, 12];
@@ -319,12 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn label_scan_prefixes_cover_exact_and_legacy_keyspaces() {
-        assert_eq!(legacy_edge_label_scan_prefix().as_ref(), &[0x03, 0x04]);
-        assert_eq!(
-            legacy_edge_label_neighbor_scan_prefix().as_ref(),
-            &[0x03, 0x10]
-        );
+    fn label_scan_prefixes_cover_exact_keyspaces() {
         assert_eq!(
             LabelScanPrefix::NodeLabels.to_bytes().as_ref(),
             &[0x03, 0x11]

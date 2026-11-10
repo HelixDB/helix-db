@@ -1341,6 +1341,11 @@ mod tests {
 
         let property = crate::encoding::indexes::hash_property_name("status");
         let value = crate::encoding::indexes::hash_property_value("shared");
+        // Retired hash-keyed label rows, parsed from their stored layout.
+        let legacy_edge_label = [0x03, 0x04, 1, 2, 3, 4, 5, 6, 7, 8];
+        let mut legacy_neighbor = vec![0x03, 0x10, 0x01];
+        legacy_neighbor.extend_from_slice(&1u64.to_be_bytes());
+        legacy_neighbor.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         let membership = [
             PropertyIndexKey::Equality(equality::EqualityIndexKey::new(property, value)),
             PropertyIndexKey::EdgeEquality(equality::EdgeEqualityIndexKey::new(
@@ -1360,16 +1365,8 @@ mod tests {
                 1,
                 label::LabelIdentity::new("shared").unwrap(),
             )),
-            PropertyIndexKey::LegacyEdgeLabel(
-                crate::encoding::v2::legacy::label_hash::LegacyEdgeLabelKey::for_label("shared"),
-            ),
-            PropertyIndexKey::LegacyEdgeLabelNeighbor(
-                crate::encoding::v2::legacy::label_hash::LegacyEdgeLabelNeighborKey::for_label(
-                    crate::encoding::indexes::EdgeDirection::In,
-                    1,
-                    "shared",
-                ),
-            ),
+            PropertyIndexKey::parse_from_slice(&legacy_edge_label).unwrap(),
+            PropertyIndexKey::parse_from_slice(&legacy_neighbor).unwrap(),
             PropertyIndexKey::GlobalEdgeEquality(equality::GlobalEdgeEqualityIndexKey::new(
                 property, value,
             )),

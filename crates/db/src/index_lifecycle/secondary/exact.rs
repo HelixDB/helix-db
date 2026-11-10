@@ -978,32 +978,39 @@ mod tests {
                 put_v3_equality_entry(&db, &handle, "shared", 1).await;
                 put_v3_equality_entry(&db, &handle, "other", 2).await;
                 put_v4_equality_bitmap(&db, &handle, "shared", [3]).await;
-                // The label row as a V2/V3 store and as a current store file it.
-                for label_row in [
-                    crate::encoding::indexes::PropertyIndexKey::Equality(
-                        crate::encoding::v2::legacy::label_hash::LegacyNodeLabelKey::for_label(
-                            "User",
+                // The label row as a current store files it, and as a V2/V3
+                // store does: the `$label` equality row.
+                db.put(
+                    DataKey::Data {
+                        scope: handle.scope(),
+                        kind: DataKeyKind::PropertyIndex(
+                            crate::encoding::indexes::PropertyIndexKey::NodeLabel(
+                                crate::encoding::indexes::label::NodeLabelKey::new(
+                                    crate::encoding::indexes::label::LabelIdentity::new("User")
+                                        .unwrap(),
+                                ),
+                            ),
                         ),
-                    ),
-                    crate::encoding::indexes::PropertyIndexKey::NodeLabel(
-                        crate::encoding::indexes::label::NodeLabelKey::new(
-                            crate::encoding::indexes::label::LabelIdentity::new("User").unwrap(),
-                        ),
-                    ),
-                ] {
-                    db.put(
-                        DataKey::Data {
-                            scope: handle.scope(),
-                            kind: DataKeyKind::PropertyIndex(label_row),
-                        }
-                        .to_bytes(),
-                        crate::search::encode_roaring_treemap(&roaring::RoaringTreemap::from_iter(
-                            1..=5,
-                        )),
+                    }
+                    .to_bytes(),
+                    crate::search::encode_roaring_treemap(&roaring::RoaringTreemap::from_iter(
+                        1..=5,
+                    )),
+                )
+                .await
+                .unwrap();
+                let transaction = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+                for id in 1..=5 {
+                    crate::search::add_to_equality_index_scoped(
+                        &transaction,
+                        "$label",
+                        "User",
+                        id,
+                        handle.scope(),
                     )
-                    .await
                     .unwrap();
                 }
+                transaction.commit().await.unwrap();
                 let label = UnindexedLabel {
                     scope: handle.scope(),
                     kind: IndexElementKind::Node,
