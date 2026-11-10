@@ -493,26 +493,32 @@ async fn post_query(router: axum::Router, request: &query::QueryRequest) -> serd
 #[cfg(unix)]
 static OPEN_FILE_LIMIT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Regular files below `path` and their sizes, recursing through subdirectories.
-fn files_below(path: &Path) -> BTreeMap<PathBuf, u64> {
-    std::fs::read_dir(path)
+/// Regular files below `root`, keyed by their path relative to `root`, and
+/// their sizes, recursing through subdirectories.
+fn files_below(root: &Path) -> BTreeMap<PathBuf, u64> {
+    std::fs::read_dir(root)
         .unwrap()
         .flat_map(|entry| {
             let entry = entry.unwrap();
-            let path = entry.path();
-            if path.is_dir() {
-                files_below(&path)
+            let name = PathBuf::from(entry.file_name());
+            if entry.path().is_dir() {
+                files_below(&entry.path())
+                    .into_iter()
+                    .map(|(path, size)| (name.join(path), size))
+                    .collect()
             } else {
-                BTreeMap::from([(path, entry.metadata().unwrap().len())])
+                BTreeMap::from([(name, entry.metadata().unwrap().len())])
             }
         })
         .collect()
 }
 
-/// Runs on the current thread so the final runner's transports only start
-/// after its immediate shutdown is sent. On worker threads they could start
-/// first or not, and which of their shutdown-wait lines run would vary
-/// between runs, breaking the exact server coverage fingerprint.
+/// A process keeps one block cache per cache root, so each server here opens
+/// its own root. On the writer's root, a later server would answer from the
+/// blocks the writer's flush left in that cache and never read through the
+/// object-store tier under test. The later servers also skip the startup
+/// warm: its background stats reads would race their queries to fill that
+/// tier, and `close()` aborts it.
 #[tokio::test]
 async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
     const MIB: usize = 1024 * 1024;
@@ -523,15 +529,16 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
     let directory = tempfile::tempdir().unwrap();
     let data_root = directory.path().join("data");
     std::fs::create_dir_all(&data_root).unwrap();
-    let cache_root = directory.path().join("cache");
     // The minimum budget keeps the block cache at 384 partition files.
-    let cache = HybridCache::try_new(
-        &cache_root,
-        NonZeroUsize::new(16 * MIB).unwrap(),
-        NonZeroUsize::new(64 * MIB).unwrap(),
-    )
-    .unwrap();
-    let config = ServerConfig {
+    let hybrid = |root: &Path| {
+        HybridCache::try_new(
+            root,
+            NonZeroUsize::new(16 * MIB).unwrap(),
+            NonZeroUsize::new(64 * MIB).unwrap(),
+        )
+        .unwrap()
+    };
+    let config = |cache: HybridCache| ServerConfig {
         http_addr: "127.0.0.1:0".parse().unwrap(),
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
         db_path: "server-hybrid-cache".to_string(),
@@ -560,7 +567,9 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
             .returning(["count"]),
     );
 
-    let ServerDatabase { db, cache_lock } = open_database(&config).await.unwrap();
+    let writer_root = directory.path().join("writer-cache");
+    let writer_config = config(hybrid(&writer_root));
+    let ServerDatabase { db, cache_lock } = open_database(&writer_config).await.unwrap();
     let stats = db.cache_stats();
     assert!(matches!(
         stats.foyer_hybrid_disk.state,
@@ -579,7 +588,7 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
     let router = http::router(ServerState::new(
         Arc::clone(&db),
         None,
-        config.storage.clone(),
+        writer_config.storage.clone(),
     ));
     post_query(router.clone(), &write).await;
     assert_eq!(post_query(router, &read).await["count"], 1);
@@ -588,56 +597,67 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
     drop(cache_lock);
 
     // 24 MiB of Foyer disk tier in its minimum 64 KiB partitions.
-    assert_eq!(files_below(&cache_root.join("slate")).len(), 384);
+    assert_eq!(files_below(&writer_root.join("slate")).len(), 384);
     assert_eq!(
-        files_below(&cache_root.join("object-store")),
+        files_below(&writer_root.join("object-store")),
         BTreeMap::new(),
         "the SST flushed to HELIX_DATA_DIR on close is not copied into the cache"
     );
-    assert!(cache_root.join("fts").is_dir());
+    assert!(writer_root.join("fts").is_dir());
 
-    // Reading the flushed SST back caches it on local disk.
+    // On a cold block cache, reading the flushed SST back caches it on local
+    // disk.
+    let reader_root = directory.path().join("reader-cache");
+    let reader_config = config(hybrid(&reader_root).without_startup_warm_for_tests());
     let ServerDatabase {
         db: reader,
         cache_lock,
-    } = open_database(&config).await.unwrap();
+    } = open_database(&reader_config).await.unwrap();
     let router = http::router(ServerState::new(
         Arc::clone(&reader),
         None,
-        config.storage.clone(),
+        reader_config.storage.clone(),
     ));
     assert_eq!(post_query(router, &read).await["count"], 1);
     reader.close().await.unwrap();
     drop(reader);
     drop(cache_lock);
-    let cached = files_below(&cache_root.join("object-store"));
+    let cached = files_below(&reader_root.join("object-store"));
     assert!(
         !cached.is_empty(),
         "the SST read back is cached on local disk"
     );
 
-    // With every SST gone from durable storage, the reopened server can
-    // only answer from the disk caches.
-    let durable_ssts = files_below(&data_root.join("server-hybrid-cache").join("compacted"));
+    // A restart keeps the disk tier but not the block cache in memory. With
+    // every SST also gone from durable storage, a server on a cold block
+    // cache can answer only from the files the reader cached.
+    let compacted = data_root.join("server-hybrid-cache").join("compacted");
+    let durable_ssts = files_below(&compacted);
     assert!(!durable_ssts.is_empty());
     durable_ssts
         .keys()
-        .for_each(|sst| std::fs::remove_file(sst).unwrap());
-
+        .for_each(|sst| std::fs::remove_file(compacted.join(sst)).unwrap());
+    let restart_root = directory.path().join("restart-cache");
+    let restart_config = config(hybrid(&restart_root).without_startup_warm_for_tests());
+    cached.keys().for_each(|file| {
+        let target = restart_root.join("object-store").join(file);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(reader_root.join("object-store").join(file), target).unwrap();
+    });
     let ServerDatabase {
-        db: reopened,
+        db: restarted,
         cache_lock,
-    } = open_database(&config).await.unwrap();
+    } = open_database(&restart_config).await.unwrap();
     let router = http::router(ServerState::new(
-        Arc::clone(&reopened),
+        Arc::clone(&restarted),
         None,
-        config.storage.clone(),
+        restart_config.storage.clone(),
     ));
     assert_eq!(post_query(router, &read).await["count"], 1);
-    reopened.close().await.unwrap();
-    drop(reopened);
+    restarted.close().await.unwrap();
+    drop(restarted);
     drop(cache_lock);
-    let after_restart = files_below(&cache_root.join("object-store"));
+    let after_restart = files_below(&restart_root.join("object-store"));
     assert!(
         cached
             .iter()
@@ -645,7 +665,7 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
         "cached files survive the restart unchanged"
     );
 
-    run_with_shutdown(config, async {}).await.unwrap();
+    run_with_shutdown(writer_config, async {}).await.unwrap();
     #[cfg(unix)]
     rustix::process::setrlimit(rustix::process::Resource::Nofile, original_limit).unwrap();
 }
