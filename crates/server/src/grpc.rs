@@ -216,10 +216,7 @@ impl HelixDbServer for GrpcService {
             )
             .await
             .map_err(status_from_service_error)?;
-        let body = response
-            .to_json_bytes()
-            .map_err(status_from_service_error)?
-            .into();
+        let body = response.into_json_bytes().into();
         Ok(Response::new(QueryJsonResponse { body }))
     }
 

@@ -2676,7 +2676,10 @@ impl HelixDB {
             .await
     }
 
-    /// Execute a plan with the non-forgeable catalog observation used to plan it.
+    /// Execute a plan with the non-forgeable catalog observation used to plan
+    /// it, keeping the whole interpreter result for test and benchmark
+    /// inspection.
+    #[cfg(any(test, feature = "bench-internals"))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_prepared_scoped_controlled(
         &self,
@@ -2701,10 +2704,37 @@ impl HelixDB {
         .await
     }
 
+    /// Execute a prepared plan, keeping only its requested returns moved out
+    /// of the interpreter without copies.
+    /// The query service encodes nothing else.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn execute_prepared_returns_scoped_controlled(
+        &self,
+        plan: &exec::ExecutablePlan,
+        params: ParamBindings,
+        tenant_scope: DataScope,
+        execution_control: execution_control::ExecutionControl,
+        proof: CatalogRefreshProof,
+        search_consistency: helix_ast::query::SearchConsistency,
+        commit_durability: transaction::CommitDurability,
+    ) -> Result<execution::interpreter::ReturnedValues> {
+        Interpreter::new_scoped_controlled_prepared(
+            self,
+            params,
+            tenant_scope,
+            execution_control,
+            proof,
+        )
+        .with_search_consistency(search_consistency)
+        .with_commit_durability(commit_durability)
+        .execute_returns(plan)
+        .await
+    }
+
     /// Execute an SDK-built query request.
     pub async fn query(&self, request: QueryRequest) -> Result<JsonValue> {
         let query_metrics = self.embedded_query_metrics();
-        query_service::execute_query_on_observed(
+        query_service::execute_query_on_observed::<JsonValue>(
             self,
             request,
             query_service::QueryMode::Execute,
@@ -2712,7 +2742,7 @@ impl HelixDB {
             query_metrics.as_ref(),
         )
         .await
-        .map(|response| JsonValue::Object(response.returns().clone().into_iter().collect()))
+        .map(query_service::QueryResponse::into_value)
         .map_err(HelixDbError::from)
     }
 
@@ -2723,7 +2753,7 @@ impl HelixDB {
         tenant_scope: DataScope,
     ) -> Result<JsonValue> {
         let query_metrics = self.embedded_query_metrics();
-        query_service::execute_query_on_scoped_observed(
+        query_service::execute_query_on_scoped_observed::<JsonValue>(
             self,
             request,
             query_service::QueryMode::Execute,
@@ -2733,7 +2763,7 @@ impl HelixDB {
             execution_control::ExecutionControl::unlimited(),
         )
         .await
-        .map(|response| JsonValue::Object(response.returns().clone().into_iter().collect()))
+        .map(query_service::QueryResponse::into_value)
         .map_err(HelixDbError::from)
     }
 
@@ -2752,7 +2782,7 @@ impl HelixDB {
         let request = QueryRequest::from_json_slice(request_json)
             .map_err(|error| HelixDbError::InvalidQueryJson(error.to_string()))?;
         let query_metrics = self.embedded_query_metrics();
-        query_service::execute_query_on_scoped_observed(
+        query_service::execute_query_on_scoped_observed::<Vec<u8>>(
             self,
             request,
             query_service::QueryMode::Execute,
@@ -2762,8 +2792,7 @@ impl HelixDB {
             execution_control::ExecutionControl::unlimited(),
         )
         .await
-        .map_err(HelixDbError::from)?
-        .to_json_bytes()
+        .map(query_service::QueryResponse::into_json_bytes)
         .map_err(HelixDbError::from)
     }
 
@@ -7296,13 +7325,14 @@ mod tests {
             )
             .await
             .expect("the planned catalog still holds the text index");
-        let response = query_service::QueryResponse::from_execution_result(result)
-            .expect("search response converts");
+        let response: serde_json::Value = serde_json::from_slice(
+            query_service::QueryResponse::from_execution_result(result)
+                .expect("search response converts")
+                .json_bytes(),
+        )
+        .expect("the response is JSON");
         assert_eq!(
-            response.returns()["hits"]
-                .as_array()
-                .expect("hits are a list")
-                .len(),
+            response["hits"].as_array().expect("hits are a list").len(),
             1
         );
         db.close().await.expect("writer closes");

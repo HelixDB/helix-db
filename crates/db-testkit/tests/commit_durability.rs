@@ -77,13 +77,18 @@ fn observe() -> QueryRequest {
 }
 
 async fn node_count(db: &Arc<HelixDB>) -> u64 {
-    HelixQueryService::new(Arc::clone(db))
+    let response = HelixQueryService::new(Arc::clone(db))
         .execute_query(count())
         .await
-        .expect("count reads")
-        .returns()["count"]
+        .expect("count reads");
+    returns(&response)["count"]
         .as_u64()
         .expect("count is a number")
+}
+
+/// The response's public JSON returns.
+fn returns(response: &QueryResponse) -> serde_json::Value {
+    serde_json::from_slice(response.json_bytes()).expect("the response is JSON")
 }
 
 async fn execute(db: &Arc<HelixDB>, request: QueryRequest, mode: QueryMode) {
@@ -221,7 +226,7 @@ async fn empty_durable_write_waits_for_the_writes_it_observed() {
     let observed = assert_pending(Box::pin(service.execute_query(observe()))).await;
     store.release();
     let response = observed.await.expect("empty write succeeds");
-    assert_eq!(response.returns()["count"].as_u64(), Some(1));
+    assert_eq!(returns(&response)["count"].as_u64(), Some(1));
 
     let reopened = crash_and_reopen(&store, db).await;
     assert_eq!(node_count(&reopened).await, 1);
@@ -408,7 +413,7 @@ async fn operation_status_reads_stay_reads() {
             .returning(["index"]),
     );
     let response = service.execute_query(create).await.expect("DDL commits");
-    let operation_id = response.returns()["index"]["operation_id"]
+    let operation_id = returns(&response)["index"]["operation_id"]
         .as_str()
         .expect("the receipt names its operation")
         .to_string();

@@ -100,6 +100,10 @@ name = "projection_materialization"
 harness = false
 
 [[bench]]
+name = "response_encoding"
+harness = false
+
+[[bench]]
 name = "property_row_reads"
 harness = false
 
