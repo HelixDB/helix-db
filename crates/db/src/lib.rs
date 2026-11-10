@@ -534,10 +534,6 @@ pub(crate) struct HelixWriter {
     db: Arc<Db>,
     node_ids: Arc<NodeIdAllocator>,
     edge_ids: Arc<EdgeIdAllocator>,
-    /// Runs the database's batch writer, so it stops only after the fields
-    /// above drop. `None` only for writers built by tests and migrations over a
-    /// database that writes on the caller's runtime.
-    write_runtime: Option<write_runtime::WriteRuntime>,
 }
 
 impl HelixWriter {
@@ -554,15 +550,7 @@ impl HelixWriter {
                 lease_size,
                 refill_threshold,
             )),
-            write_runtime: None,
         }
-    }
-
-    /// Keeps `runtime`, which runs the database's batch writer, until this
-    /// writer drops.
-    fn with_write_runtime(mut self, runtime: write_runtime::WriteRuntime) -> Self {
-        self.write_runtime = Some(runtime);
-        self
     }
 
     pub(crate) fn db(&self) -> &Db {
@@ -1416,6 +1404,8 @@ impl HelixDB {
         }
         let stage_started = Instant::now();
         let db = Arc::new(builder.build().await?);
+        // Detached: the thread ends once the database is gone.
+        drop(write_runtime.run_while_open(db.subscribe()));
         log_stage("slatedb_writer_open", stage_started);
         // Built before the storage checks so every failure below closes
         // storage: an unclosed Db keeps its tasks running, and polling the
@@ -1424,8 +1414,7 @@ impl HelixDB {
             Arc::clone(&db),
             config.id_lease_size(),
             config.id_lease_refill_threshold(),
-        )
-        .with_write_runtime(write_runtime);
+        );
         let runtime_inputs: Result<_> = async {
             let stage_started = Instant::now();
             match &open_mode {
@@ -4353,6 +4342,28 @@ mod tests {
 
     fn tenant_scope(value: &str) -> DataScope {
         DataScope::Tenant(TenantId::from_ulid_str(value).expect("valid tenant"))
+    }
+
+    /// A writer dropped without `close()` leaves its storage writing for
+    /// whoever still holds it, as background tasks do: the thread that applies
+    /// its commits runs until the database itself is gone.
+    #[tokio::test]
+    async fn storage_outliving_an_unclosed_writer_still_commits() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "unclosed-writer-storage-commits".to_string(),
+        })
+        .await
+        .expect("writer opens");
+        let storage = db.inner_db();
+        drop(db);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            storage.put(b"after-drop", b"applied"),
+        )
+        .await
+        .expect("the batch writer still applies commits")
+        .expect("the write commits");
+        storage.close().await.expect("storage closes");
     }
 
     /// The object-store warm runs only when the tier enables it, whether or

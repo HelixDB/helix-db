@@ -10,7 +10,7 @@
 use std::thread::JoinHandle;
 
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use crate::error::{HelixDbError, Result};
 
@@ -18,14 +18,18 @@ use crate::error::{HelixDbError, Result};
 /// writer's SlateDB batch writer.
 ///
 /// SlateDB needs the runtime driven for every write, flush, close and
-/// checkpoint, so it must outlive the database's close. Dropping it stops the
-/// thread and joins it; a database still open then can no longer write.
-#[derive(Debug)]
+/// checkpoint, and marks a database closed before its final flush, so the
+/// thread runs until the database itself is gone: until its status channel
+/// ends, which happens once every handle to it, the batch writer's included,
+/// has dropped. A database dropped without closing therefore keeps writing
+/// for whoever still holds it, as it would on the request runtime.
 pub(crate) struct WriteRuntime {
     handle: Handle,
-    /// Dropped to stop the thread.
-    shutdown: Option<oneshot::Sender<()>>,
-    thread: Option<JoinHandle<()>>,
+    /// Hands the thread what it runs until: the database's status channel
+    /// ending. Dropped unsent, as when the database fails to build, it stops
+    /// the thread.
+    open: oneshot::Sender<std::pin::Pin<Box<dyn Future<Output = ()> + Send>>>,
+    thread: JoinHandle<()>,
 }
 
 impl WriteRuntime {
@@ -46,14 +50,16 @@ impl WriteRuntime {
                 ))
             })?;
         let handle = runtime.handle().clone();
-        let (shutdown, stopped) = oneshot::channel::<()>();
+        let (open, opened) = oneshot::channel();
         let thread = std::thread::Builder::new()
             .name("helix-slatedb-writer".to_string())
             .spawn(move || {
-                // Ends once the sender drops; tasks left on the runtime drop
-                // with it.
+                // Tasks left on the runtime drop with it.
                 runtime.block_on(async {
-                    let _ = stopped.await;
+                    let Ok(closed) = opened.await else {
+                        return;
+                    };
+                    closed.await;
                 });
             })
             .map_err(|error| {
@@ -63,53 +69,78 @@ impl WriteRuntime {
             })?;
         Ok(Self {
             handle,
-            shutdown: Some(shutdown),
-            thread: Some(thread),
+            open,
+            thread,
         })
     }
 
     /// The runtime to hand SlateDB's builder.
-    #[must_use]
     pub(crate) fn handle(&self) -> Handle {
         self.handle.clone()
     }
-}
 
-impl Drop for WriteRuntime {
-    fn drop(&mut self) {
-        drop(self.shutdown.take());
-        let Some(thread) = self.thread.take() else {
-            return;
-        };
-        if thread.join().is_err() {
-            tracing::error!("the SlateDB write runtime thread panicked");
-        }
+    /// Keeps the thread running until `status`, the built database's status
+    /// channel, ends, and returns the thread, which callers may detach.
+    pub(crate) fn run_while_open<T: Send + Sync + 'static>(
+        self,
+        mut status: watch::Receiver<T>,
+    ) -> JoinHandle<()> {
+        // A send fails only if the thread already exited, which only a panic
+        // could cause; it then reports itself through the join handle.
+        let _ = self.open.send(Box::pin(
+            async move { while status.changed().await.is_ok() {} },
+        ));
+        self.thread
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[tokio::test]
-    async fn tasks_run_on_the_runtime_thread_until_it_drops() {
+    async fn the_thread_runs_tasks_until_its_status_channel_ends() {
         let runtime = WriteRuntime::start().expect("the runtime starts");
-        let thread = runtime
-            .handle()
+        let handle = runtime.handle();
+        let (status, watched) = watch::channel(());
+        let thread = runtime.run_while_open(watched);
+        let name = handle
             .spawn(async { std::thread::current().name().map(str::to_string) })
             .await
             .expect("the task runs");
-        assert_eq!(thread.as_deref(), Some("helix-slatedb-writer"));
-        let timer = runtime
-            .handle()
-            .spawn(async { tokio::time::sleep(std::time::Duration::from_millis(1)).await });
-        timer.await.expect("timers are enabled");
-        let handle = runtime.handle();
-        drop(runtime);
-        let stopped = handle.spawn(std::future::ready(()));
+        assert_eq!(name.as_deref(), Some("helix-slatedb-writer"));
+        handle
+            .spawn(tokio::time::sleep(Duration::from_millis(1)))
+            .await
+            .expect("timers are enabled");
+        status.send(()).expect("the thread still watches");
         assert!(
-            stopped.await.is_err(),
-            "a dropped runtime no longer runs tasks"
+            handle.spawn(std::future::ready(())).await.is_ok(),
+            "a status change keeps the thread running"
         );
+        drop(status);
+        tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .expect("the join runs")
+            .expect("the thread exits cleanly");
+        assert!(
+            handle.spawn(std::future::ready(())).await.is_err(),
+            "the runtime stops with its thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_runtime_never_given_a_database_stops() {
+        let runtime = WriteRuntime::start().expect("the runtime starts");
+        let handle = runtime.handle();
+        let WriteRuntime { open, thread, .. } = runtime;
+        drop(open);
+        tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .expect("the join runs")
+            .expect("the thread exits cleanly");
+        assert!(handle.spawn(std::future::ready(())).await.is_err());
     }
 }
