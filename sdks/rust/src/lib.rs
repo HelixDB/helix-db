@@ -130,8 +130,10 @@ pub use dsl::prelude;
 
 #[cfg(feature = "embedded")]
 pub use db::config::{
-    CacheConfig, CacheMode, DbConfig, DiskCacheConfig, SlateHybridCacheConfig,
-    SlateObjectStoreCacheSettings, VectorMemoryBudget, VectorMemorySettings,
+    CacheConfig, CacheMode, ConfigError, DbConfig, DiskCacheConfig, FtsHybridCacheConfig,
+    FtsMemoryCacheConfig, FtsWarmConfig, ObjectStoreWarmLevel, SimHasherCacheSettings,
+    SlateHybridCacheConfig, SlateMemoryCacheConfig, SlateObjectStoreCacheSettings, SlateWarmConfig,
+    VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings, VectorPartWarm,
 };
 #[cfg(feature = "embedded")]
 pub use db::{HelixDB, HelixDbMode, HelixDbSource};
@@ -852,6 +854,33 @@ impl Client {
     ///
     /// [`CacheMode::VectorMemoryOnly`] disables SlateDB and object-store
     /// caches; canonical data still uses the selected [`HelixDbSource`].
+    ///
+    /// [`HelixDbSource::embedded_default_config`] keeps SlateDB's in-memory
+    /// block and metadata caches small. Write-heavy loads whose working set
+    /// outgrows them should raise both:
+    ///
+    /// ```
+    /// use helix_db::{CacheMode, Client, HelixDbSource, SlateMemoryCacheConfig};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let source = HelixDbSource::InMemory {
+    ///     database: "bulk-load".to_string(),
+    /// };
+    /// let config = source.embedded_default_config();
+    /// let CacheMode::Memory { slate_warm, fts, .. } = config.cache().mode().clone() else {
+    ///     unreachable!("embedded in-memory and disk sources use CacheMode::Memory");
+    /// };
+    /// let cache = config.cache().clone().with_mode(CacheMode::Memory {
+    ///     slate_db: SlateMemoryCacheConfig::try_new(1 << 30, 256 << 20)?, // block, metadata
+    ///     slate_warm,
+    ///     fts,
+    /// });
+    /// let client = Client::open_with_config(source, config.with_cache(cache)).await?;
+    /// # drop(client);
+    /// # Ok(())
+    /// # }
+    /// ```
     #[cfg(feature = "embedded")]
     pub async fn open_with_config(
         source: HelixDbSource,
@@ -2412,6 +2441,42 @@ mod client_tests {
             .expect("embedded query should execute");
 
         assert_eq!(response.users, 0);
+    }
+
+    #[cfg(feature = "embedded")]
+    #[tokio::test]
+    async fn embedded_client_opens_with_resized_slate_memory_cache() {
+        let source = HelixDbSource::InMemory {
+            database: "rust-sdk-embedded-slate-cache".to_string(),
+        };
+        let config = source.embedded_default_config();
+        let CacheMode::Memory {
+            slate_db: default_slate_db,
+            slate_warm,
+            fts,
+        } = config.cache().mode().clone()
+        else {
+            panic!("embedded in-memory sources use CacheMode::Memory");
+        };
+        let slate_db = SlateMemoryCacheConfig::try_new(
+            default_slate_db.block_bytes() * 4,
+            default_slate_db.metadata_bytes() * 4,
+        )
+        .expect("cache capacities are nonzero");
+        let cache = config.cache().clone().with_mode(CacheMode::Memory {
+            slate_db,
+            slate_warm,
+            fts,
+        });
+
+        let client = Client::open_with_config(source, config.with_cache(cache.clone()))
+            .await
+            .expect("embedded client should open with a resized cache");
+
+        let ClientBackend::Embedded(db) = &client.backend else {
+            panic!("open_with_config should build an embedded client");
+        };
+        assert_eq!(db.config().db().cache(), &cache);
     }
 
     #[cfg(feature = "embedded")]
