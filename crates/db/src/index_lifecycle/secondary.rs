@@ -118,6 +118,9 @@ pub(crate) struct SecondaryIndexDriver {
     /// Consecutive preparations of each operation that found its build where
     /// the previous one left it, with that point.
     stalled_preparations: parking_lot::Mutex<HashMap<IndexOperationId, (StallPoint, u32)>>,
+    /// Each activating operation's exact drains so far: the backlog the last
+    /// one observed and how many ran.
+    activation_drains: parking_lot::Mutex<HashMap<IndexOperationId, (usize, u32)>>,
 }
 
 /// Where a preparation found its build, for counting preparations that made
@@ -127,13 +130,11 @@ pub(crate) struct SecondaryIndexDriver {
 enum StallPoint {
     Scan(Option<IndexCursor>),
     Validate(Option<IndexCursor>),
-    /// Activation has no cursor, so each of its preparations counts.
-    Activate,
 }
 
 /// Unfenced preparations without progress before a scan or validation step
-/// fences writers, and exact preparations before activation takes its permit
-/// regardless of the backlog left.
+/// fences writers, and the most exact drains activation runs before it takes
+/// its permit.
 ///
 /// A unique scan conflicts with every claiming write to an entity of its
 /// batch (see [`claim_while_building`]), and a validation batch with every
@@ -144,8 +145,6 @@ enum StallPoint {
 /// preparation handles one batch with writers excluded (validation first
 /// drains the whole backlog), so the build always advances, and its stall is
 /// bounded by one batch plus what this many preparations let accumulate.
-/// Activation has no cursor, so each of its preparations counts: an inflow
-/// faster than its exact drains cannot keep it from finishing.
 const PREPARATIONS_BEFORE_FENCE: u32 = 8;
 
 impl core::fmt::Debug for SecondaryIndexDriver {
@@ -163,6 +162,7 @@ impl SecondaryIndexDriver {
             scope_gates,
             scan_tuning: IndexLifecycleScanTuning::default(),
             stalled_preparations: parking_lot::Mutex::new(HashMap::new()),
+            activation_drains: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -187,6 +187,33 @@ impl SecondaryIndexDriver {
         self.stalled_preparations
             .lock()
             .remove(&operation.operation_id());
+        self.activation_drains
+            .lock()
+            .remove(&operation.operation_id());
+    }
+
+    /// Records an activation preparation that observed `backlog` entities,
+    /// `None` past the reach it counts to, and returns whether it should drain
+    /// by exact keys again: only while the backlog keeps shrinking, for at
+    /// most [`PREPARATIONS_BEFORE_FENCE`] drains. A backlog that writes regrow
+    /// as fast as exact drains remove it would otherwise leave the permit more
+    /// than it would have drained up front. An uncounted backlog shows no
+    /// trend, so only the bound stops it.
+    fn activation_drains_again(
+        &self,
+        operation: &IndexOperationRecord,
+        backlog: Option<usize>,
+    ) -> bool {
+        let mut drains = self.activation_drains.lock();
+        let entry = drains
+            .entry(operation.operation_id())
+            .or_insert((usize::MAX, 0));
+        if entry.1 >= PREPARATIONS_BEFORE_FENCE || backlog.is_some_and(|backlog| backlog >= entry.0)
+        {
+            return false;
+        }
+        *entry = (backlog.unwrap_or(usize::MAX), entry.1 + 1);
+        true
     }
 
     /// Applies runtime source-scan prefetching without admitting blocks to cache.
@@ -202,8 +229,9 @@ pub(crate) struct PreparedSecondaryOperationStep {
 }
 
 enum PreparedSecondaryStep {
-    /// A catch-up or validation backlog beyond [`GATED_BACKLOG_BATCHES`]:
-    /// exact durable delta keys selected without adding an SSI range read,
+    /// A catch-up or validation backlog beyond [`GATED_BACKLOG_BATCHES`], or
+    /// an activation backlog beyond [`ACTIVATION_BACKLOG_BATCHES`]: exact
+    /// durable delta keys selected without adding an SSI range read,
     /// reconciled while writes continue.
     Exact { keys: Vec<IndexEntityStateKey> },
     /// One validation batch whose applied-state keys were observed before its
@@ -1127,9 +1155,10 @@ impl IndexOperationDriver for SecondaryIndexDriver {
     /// Catch-up observes it before the gate and again once the gate is held,
     /// so a catch-up step never stalls writers for more than its reach.
     /// Activation's permit also stops planning, so it reconciles all but
-    /// [`ACTIVATION_BACKLOG_BATCHES`] by exact keys first, for at most
-    /// [`PREPARATIONS_BEFORE_FENCE`] preparations, and checks before it takes
-    /// the permit that every applied row left awaits a drain.
+    /// [`ACTIVATION_BACKLOG_BATCHES`] by exact keys first, while the backlog
+    /// keeps shrinking and for at most [`PREPARATIONS_BEFORE_FENCE`]
+    /// preparations, and checks before it takes the permit that every
+    /// applied row left awaits a drain.
     async fn prepare_step(
         &self,
         db: &slatedb::Db,
@@ -1155,10 +1184,14 @@ impl IndexOperationDriver for SecondaryIndexDriver {
                 },
             )
         };
-        // Scan and validation keep a stall count, and activation counts its
-        // preparations.
-        if matches!(stage, SecondaryBuildStage::CatchUp(_)) {
-            self.reset_stalled_preparations(operation);
+        // Only scan and validation keep a stall count.
+        if matches!(
+            stage,
+            SecondaryBuildStage::CatchUp(_) | SecondaryBuildStage::Activate(_)
+        ) {
+            self.stalled_preparations
+                .lock()
+                .remove(&operation.operation_id());
         }
         let (counters, disposition, gate) = match stage {
             SecondaryBuildStage::Scan(progress) => {
@@ -1220,23 +1253,24 @@ impl IndexOperationDriver for SecondaryIndexDriver {
                 }
             }
             SecondaryBuildStage::Activate(progress) => {
-                let backlog = if self.preparation_stalled(operation, StallPoint::Activate) {
-                    None
-                } else {
-                    observe_backlog(db, scope, operation, limits, ACTIVATION_BACKLOG_BATCHES)
-                        .await?
-                };
-                match backlog {
-                    Some(keys) => return Ok(exact(keys)),
-                    None => {
-                        ensure_applied_state_awaits_drains(db, scope, operation).await?;
-                        (
-                            progress.counters,
-                            AppliedStateDisposition::Release,
-                            StepGate::Lifecycle,
-                        )
-                    }
+                // Counted as far as the gated reach, so a shrinking backlog
+                // shows even while it is beyond activation's.
+                let backlog =
+                    scan_backlog(db, scope, operation, limits, GATED_BACKLOG_BATCHES).await?;
+                let counted =
+                    (!backlog.exceeds(limits, GATED_BACKLOG_BATCHES)).then_some(backlog.entities);
+                if backlog.exceeds(limits, ACTIVATION_BACKLOG_BATCHES)
+                    && self.activation_drains_again(operation, counted)
+                {
+                    return Ok(exact(backlog.first_batch));
                 }
+                self.reset_stalled_preparations(operation);
+                ensure_applied_state_awaits_drains(db, scope, operation).await?;
+                (
+                    progress.counters,
+                    AppliedStateDisposition::Release,
+                    StepGate::Lifecycle,
+                )
             }
         };
         let permit = self.scope_gates.step_permit(scope, gate).await;
@@ -1365,19 +1399,40 @@ const GATED_BACKLOG_BATCHES: usize = 8;
 /// waited for added.
 const ACTIVATION_BACKLOG_BATCHES: usize = 1;
 
-/// Observes the committed delta backlog outside any transaction.
-///
-/// Returns `None` when the whole prefix fits `reach_batches` batches of
-/// `limits`, or else the exact keys of its first batch. That batch always
-/// holds the first delta, even one larger than a whole batch, so exact
-/// catch-up reconciles it or reports it oversized.
-async fn observe_backlog(
+/// The committed delta backlog as one observation outside any transaction
+/// saw it, counted up to a reach.
+struct ObservedBacklog {
+    /// The keys of its first batch, which always holds the first delta, even
+    /// one larger than a whole batch, so exact catch-up reconciles it or
+    /// reports it oversized.
+    first_batch: Vec<IndexEntityStateKey>,
+    /// Entities and input bytes counted, up to just past the reach.
+    entities: usize,
+    input_bytes: u64,
+}
+
+impl ObservedBacklog {
+    /// Whether the backlog is beyond `batches` batches of `limits`; exact for
+    /// any `batches` up to the reach it was counted to.
+    fn exceeds(&self, limits: SearchIndexBatchLimits, batches: usize) -> bool {
+        self.entities > limits.max_entities().get().saturating_mul(batches)
+            || self.input_bytes
+                > limits
+                    .max_input_bytes()
+                    .get()
+                    .saturating_mul(u64::try_from(batches).unwrap_or(u64::MAX))
+    }
+}
+
+/// Observes the committed delta backlog outside any transaction, counting it
+/// until it is beyond `reach_batches` batches of `limits` or ends.
+async fn scan_backlog(
     db: &slatedb::Db,
     scope: DataScope,
     operation: &IndexOperationRecord,
     limits: SearchIndexBatchLimits,
     reach_batches: usize,
-) -> Result<Option<Vec<IndexEntityStateKey>>> {
+) -> Result<ObservedBacklog> {
     let prefix = generation_prefix(
         scope,
         RecordKind::BuildDelta,
@@ -1387,46 +1442,63 @@ async fn observe_backlog(
     let mut rows = db.scan_prefix(&prefix, ..).await?;
     let entity_limit = limits.max_entities().get();
     let byte_limit = limits.max_input_bytes().get();
-    let mut keys = Vec::with_capacity(entity_limit);
+    let mut backlog = ObservedBacklog {
+        first_batch: Vec::with_capacity(entity_limit),
+        entities: 0,
+        input_bytes: 0,
+    };
     let mut first_batch_full = false;
     let mut batch_input_bytes = 0_u64;
-    let mut entities = 0_usize;
-    let mut input_bytes = 0_u64;
-    let entity_reach = entity_limit.saturating_mul(reach_batches);
-    let byte_reach = byte_limit.saturating_mul(u64::try_from(reach_batches).unwrap_or(u64::MAX));
-    loop {
+    while !backlog.exceeds(limits, reach_batches) {
         let Some(row) = rows.next().await? else {
-            return Ok(None);
+            break;
         };
         let row_input_bytes =
             u64::try_from(row.key.len().saturating_add(row.value.len())).unwrap_or(u64::MAX);
-        entities = entities.saturating_add(1);
-        input_bytes = input_bytes.saturating_add(row_input_bytes);
-        if !first_batch_full {
-            if keys.is_empty() || batch_input_bytes.saturating_add(row_input_bytes) <= byte_limit {
-                let (entity, value) = decode_delta(scope, &row.key, &row.value)?;
-                if value.index_id != operation.index_id()
-                    || value.generation != operation.generation()
-                {
-                    return Err(corruption(
-                        "prepared secondary delta escaped its operation generation",
-                    ));
-                }
-                keys.push(IndexEntityStateKey {
-                    index_id: value.index_id,
-                    generation: value.generation,
-                    entity,
-                });
-                batch_input_bytes = batch_input_bytes.saturating_add(row_input_bytes);
-                first_batch_full = keys.len() == entity_limit;
-            } else {
-                first_batch_full = true;
-            }
+        backlog.entities = backlog.entities.saturating_add(1);
+        backlog.input_bytes = backlog.input_bytes.saturating_add(row_input_bytes);
+        if first_batch_full {
+            continue;
         }
-        if entities > entity_reach || input_bytes > byte_reach {
-            return Ok(Some(keys));
+        if backlog.first_batch.is_empty()
+            || batch_input_bytes.saturating_add(row_input_bytes) <= byte_limit
+        {
+            let (entity, value) = decode_delta(scope, &row.key, &row.value)?;
+            if value.index_id != operation.index_id() || value.generation != operation.generation()
+            {
+                return Err(corruption(
+                    "prepared secondary delta escaped its operation generation",
+                ));
+            }
+            backlog.first_batch.push(IndexEntityStateKey {
+                index_id: value.index_id,
+                generation: value.generation,
+                entity,
+            });
+            batch_input_bytes = batch_input_bytes.saturating_add(row_input_bytes);
+            first_batch_full = backlog.first_batch.len() == entity_limit;
+        } else {
+            first_batch_full = true;
         }
     }
+    Ok(backlog)
+}
+
+/// Observes the committed delta backlog outside any transaction.
+///
+/// Returns `None` when the whole prefix fits `reach_batches` batches of
+/// `limits`, or else the exact keys of its first batch.
+async fn observe_backlog(
+    db: &slatedb::Db,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    limits: SearchIndexBatchLimits,
+    reach_batches: usize,
+) -> Result<Option<Vec<IndexEntityStateKey>>> {
+    let backlog = scan_backlog(db, scope, operation, limits, reach_batches).await?;
+    Ok(backlog
+        .exceeds(limits, reach_batches)
+        .then_some(backlog.first_batch))
 }
 
 /// Drains every pending delta in bounded transactions of their own while the
@@ -1608,6 +1680,9 @@ async fn step_build(
             .await
         }
         SecondaryBuildStage::Activate(progress) => {
+            // Only tests step activation without preparing it; check what the
+            // preparation would.
+            ensure_applied_state_awaits_drains(db, scope, operation).await?;
             activate(
                 transaction,
                 scope,
@@ -2277,11 +2352,12 @@ struct ExactCatchUpRow {
     unique_entry_keys: Vec<Bytes>,
 }
 
-/// Reconciles one prepared batch of a backlog beyond the gated reach.
+/// Reconciles one prepared batch of a backlog beyond its stage's reach.
 ///
-/// The step stays in catch-up: the next preparation reconciles the rest the
-/// same way, or takes the exclusive gate once the remainder is within
-/// [`GATED_BACKLOG_BATCHES`].
+/// The step stays in its stage: the next preparation reconciles the rest the
+/// same way, or takes the stage's gate once the remainder is within reach
+/// ([`GATED_BACKLOG_BATCHES`], or [`ACTIVATION_BACKLOG_BATCHES`] for
+/// activation).
 #[allow(
     clippy::too_many_arguments,
     reason = "an exact drain binds its transaction, generation, definition, counters, stage, budgets, and prepared keys"
@@ -10795,6 +10871,109 @@ mod tests {
         assert_eq!(
             drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
             CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Writes that regrow the backlog as fast as activation's exact drains
+    /// remove it end those drains at once: the permit then takes over before
+    /// the backlog outgrows what it would have drained up front.
+    #[tokio::test]
+    async fn activation_takes_its_permit_once_its_backlog_stops_shrinking() {
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        let entities = 8_u64;
+        let (
+            db,
+            gates,
+            driver,
+            operation_id,
+            index_id,
+            generation,
+            mut claim_sequence,
+            mut sources,
+        ) = build_at_stage(
+            "secondary-activation-regrown",
+            &definition,
+            entities,
+            is_activation,
+        )
+        .await;
+        let scope = DataScope::LegacyUnscoped;
+        let mut moved = |entity_id: u64| {
+            let after = user_properties(&format!("moved-{entity_id}@example.com"));
+            let before = sources.insert(entity_id, after.clone()).expect("seeded");
+            (entity_id, before, after)
+        };
+        for (entity_id, before, after) in (0..4).map(&mut moved).collect::<Vec<_>>() {
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &before,
+                &after,
+            )
+            .await
+            .expect("the write records a delta");
+        }
+        let limits = one_entity_limits();
+        let deltas = || generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation);
+        let in_flight = gates.mutation_permit(scope).await;
+        let step = tokio::time::timeout(
+            Duration::from_secs(5),
+            drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits),
+        )
+        .await
+        .expect("the first exact drain takes no permit");
+        assert_eq!(step, CommittedOperationStep::Progressed);
+        drop(in_flight);
+        assert_eq!(deltas().await.len(), 3);
+        // Two more writes outpace the one delta the drain removed.
+        for (entity_id, before, after) in (4..6).map(&mut moved).collect::<Vec<_>>() {
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &before,
+                &after,
+            )
+            .await
+            .expect("the write records a delta");
+        }
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("operation reads")
+            .expect("operation exists");
+        let in_flight = gates.mutation_permit(scope).await;
+        let prepared = driver.prepare_step(&db, scope, &operation, limits);
+        tokio::pin!(prepared);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut prepared)
+                .await
+                .is_err(),
+            "a backlog that did not shrink takes the permit"
+        );
+        drop(in_flight);
+        let prepared = tokio::time::timeout(Duration::from_secs(2), prepared)
+            .await
+            .expect("activation takes the permit once the write commits")
+            .expect("activation prepares");
+        assert!(deltas().await.is_empty(), "the gated drain takes the rest");
+        drop(prepared);
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert!(
+            driver.stalled_preparations.lock().is_empty()
+                && driver.activation_drains.lock().is_empty(),
+            "a finished build leaves no preparation state behind"
         );
         assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
             .await;
