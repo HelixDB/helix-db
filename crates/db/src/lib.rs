@@ -51,6 +51,7 @@ mod runtime_dependencies;
 pub mod search;
 mod slate_cache;
 mod transaction;
+mod write_runtime;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
 
@@ -533,6 +534,10 @@ pub(crate) struct HelixWriter {
     db: Arc<Db>,
     node_ids: Arc<NodeIdAllocator>,
     edge_ids: Arc<EdgeIdAllocator>,
+    /// Runs the database's batch writer, so it stops only after the fields
+    /// above drop. `None` only for writers built by tests and migrations over a
+    /// database that writes on the caller's runtime.
+    write_runtime: Option<write_runtime::WriteRuntime>,
 }
 
 impl HelixWriter {
@@ -549,7 +554,15 @@ impl HelixWriter {
                 lease_size,
                 refill_threshold,
             )),
+            write_runtime: None,
         }
+    }
+
+    /// Keeps `runtime`, which runs the database's batch writer, until this
+    /// writer drops.
+    fn with_write_runtime(mut self, runtime: write_runtime::WriteRuntime) -> Self {
+        self.write_runtime = Some(runtime);
+        self
     }
 
     pub(crate) fn db(&self) -> &Db {
@@ -1374,9 +1387,11 @@ impl HelixDB {
         let stage_started = Instant::now();
         let slate_db_cache = build_slate_db_cache(config.cache().mode()).await?;
         log_stage("slatedb_cache_construction", stage_started);
+        let write_runtime = write_runtime::WriteRuntime::start()?;
         let mut builder = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
-            .with_settings(gc_boundary_files.writer_settings(&config));
+            .with_settings(gc_boundary_files.writer_settings(&config))
+            .with_write_runtime(write_runtime.handle());
         if let WriterOpenMode::Managed { writer_epoch, .. } = &open_mode {
             builder = builder.with_writer_epoch(*writer_epoch);
         }
@@ -1409,7 +1424,8 @@ impl HelixDB {
             Arc::clone(&db),
             config.id_lease_size(),
             config.id_lease_refill_threshold(),
-        );
+        )
+        .with_write_runtime(write_runtime);
         let runtime_inputs: Result<_> = async {
             let stage_started = Instant::now();
             match &open_mode {
