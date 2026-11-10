@@ -1100,9 +1100,9 @@ impl BacklogReservation {
         self.phase = ReservationPhase::Committing;
     }
 
-    /// Records a commit that was applied, and durable unless the request chose
-    /// not to wait. A crash before its upload loses the enqueue and this charge
-    /// together, since recovery rebuilds the ledger from storage.
+    /// Records a commit that was applied, which may not be durable yet. A crash
+    /// before its upload loses the enqueue and this charge together, since
+    /// recovery rebuilds the ledger from storage.
     pub(crate) fn committed(mut self) {
         self.finish(ReservationOutcome::Committed);
     }
