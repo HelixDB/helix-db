@@ -3,36 +3,44 @@ use crate::encoding::v2::values::property::encode_properties;
 use crate::index_lifecycle::secondary::tests as fixture;
 
 /// Writes the label bitmap of `handle`'s label holding `ids`, as graph writes
-/// maintain it; null and unencodable lookups read only these label rows.
+/// maintain it under both the current exact key and the hash key a store
+/// before label identity reads; null and unencodable lookups read only these
+/// label rows.
 async fn put_label_rows(
     db: &slatedb::Db,
     handle: &ActiveIndexHandle,
     ids: impl IntoIterator<Item = u64>,
 ) {
+    use crate::encoding::indexes::label::{EdgeLabelKey, LabelIdentity, NodeLabelKey};
+    use crate::encoding::indexes::PropertyIndexKey;
+    use crate::encoding::v2::legacy::label_hash::{LegacyEdgeLabelKey, LegacyNodeLabelKey};
+
     let definition = handle.secondary_definition().unwrap();
     let label = definition.label().as_str();
-    let index = match definition.element_kind() {
-        IndexElementKind::Node => crate::encoding::indexes::PropertyIndexKey::NodeLabel(
-            crate::encoding::indexes::label::NodeLabelKey::new(
-                crate::encoding::indexes::label::LabelIdentity::new(label).unwrap(),
-            ),
-        ),
-        IndexElementKind::Edge => crate::encoding::indexes::PropertyIndexKey::EdgeLabel(
-            crate::encoding::indexes::label::EdgeLabelKey::new(
-                crate::encoding::indexes::label::LabelIdentity::new(label).unwrap(),
-            ),
-        ),
+    let identity = LabelIdentity::new(label).unwrap();
+    let rows = match definition.element_kind() {
+        IndexElementKind::Node => [
+            PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity)),
+            PropertyIndexKey::Equality(LegacyNodeLabelKey::for_label(label)),
+        ],
+        IndexElementKind::Edge => [
+            PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(identity)),
+            PropertyIndexKey::LegacyEdgeLabel(LegacyEdgeLabelKey::for_label(label)),
+        ],
     };
-    db.put(
-        crate::encoding::v2::keys::DataKey::Data {
-            scope: handle.scope(),
-            kind: crate::encoding::v2::keys::DataKeyKind::PropertyIndex(index),
-        }
-        .to_bytes(),
-        crate::search::encode_roaring_treemap(&ids.into_iter().collect()),
-    )
-    .await
-    .unwrap();
+    let value = crate::search::encode_roaring_treemap(&ids.into_iter().collect());
+    for index in rows {
+        db.put(
+            crate::encoding::v2::keys::DataKey::Data {
+                scope: handle.scope(),
+                kind: crate::encoding::v2::keys::DataKeyKind::PropertyIndex(index),
+            }
+            .to_bytes(),
+            value.clone(),
+        )
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]

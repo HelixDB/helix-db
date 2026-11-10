@@ -76,6 +76,15 @@ async fn run(
     tuning: MigrationTuning,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    // Retired hash label rows go first: nothing reads them once the label
+    // identity migration is published, and a later open resumes the cleanup.
+    let _ = super::super::indexes::label_identity::delete_hash_label_rows(writer.db(), || {
+        *shutdown.borrow()
+    })
+    .await
+    .inspect_err(|error| {
+        tracing::warn!(%error, "label identity cleanup failed; the next writer open retries it");
+    });
     let mut failure_backoff =
         FailureBackoff::new(Duration::from_millis(tuning.idle_interval_millis().get()));
     loop {

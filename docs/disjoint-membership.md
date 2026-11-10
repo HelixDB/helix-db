@@ -57,17 +57,21 @@ writer. Recovery-only managed failover reports `WriterMigrationRequired` for a
 version-4 store instead of upgrading it. Binaries that support at most version 4
 refuse an upgraded store, so a rollback needs a backup taken before the upgrade.
 
-Version 6 marks stores whose label index rows are keyed by the exact label
-(an 8-byte digest followed by the length-delimited UTF-8 label) instead of the
-label's 64-bit hash. An embedded or controlled-migration writer moves a version-5
-store's node label, edge label, and edge-label neighbor rows to their exact keys
+Version 6 marks stores whose label index rows are keyed by the exact label (its
+big-endian `u16` byte length followed by its UTF-8 bytes) instead of the label's
+64-bit hash. An embedded or controlled-migration writer migrates a version-5 store
 during open, after the blocking startup migrations and before it serves any graph
-write, then publishes version 6. Each row moves in one commit, and readers of a
-version-4 or version-5 store read the exact row first and fall back to the hash
-row, so a reader stays correct while the writer migrates. Upgrade readers before
-the writer. Recovery-only managed failover reports `WriterMigrationRequired` for
-a version-5 store. Binaries that support at most version 5 refuse a version-6
-store, so a rollback needs a backup taken before the upgrade.
+write. It copies each node label, edge label, and edge-label neighbor row to its
+exact key, leaving every hash row in place, and publishes version 6 in one commit
+once every scope is copied. Until then readers of any version-5-capable binary
+keep reading complete hash rows, and a failed or interrupted copy leaves an
+ordinary version-5 store that older binaries still open; the next writer open
+clears the partial copy and copies again. After publication readers read only
+exact rows, and the background migration worker deletes the hash rows while the
+writer serves. Recovery-only managed failover reports `WriterMigrationRequired`
+for a version-5 store. Binaries that support at most version 5 refuse a version-6
+store, so a rollback after publication needs a backup taken before the upgrade.
+Labels longer than the label index bound are rejected as invalid queries.
 
 New databases initialize at version 6. Versions after 6 return the existing
 unsupported-version error on reader, embedded-writer, and managed-failover open;

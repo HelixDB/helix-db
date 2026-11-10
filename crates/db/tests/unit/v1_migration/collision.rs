@@ -158,7 +158,7 @@ async fn seed(
                 ]),
             )
             .expect("collision edge properties stage");
-        crate::search::add_to_global_edge_label_index_scoped(
+        crate::search::add_to_legacy_global_edge_label_index_scoped(
             &transaction,
             EDGE_LABEL,
             edge_id,

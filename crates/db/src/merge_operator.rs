@@ -13,7 +13,7 @@ use crate::encoding::keys::scope::DataScope;
 use crate::encoding::v2::keys::indexes::vector::{
     KEY_KIND_LAYER0_VEC_KS, VECTOR_HOT_KEYSPACE_PREFIX,
 };
-use crate::encoding::v2::keys::indexes::PropertyIndexKey;
+use crate::encoding::v2::keys::indexes::{IndexPrefix, PropertyIndexKey};
 use crate::encoding::v2::keys::{DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{ManagedIndexKey as V2Key, ScopedKey as V2ScopedKey};
 use crate::encoding::v2::values::indexes::operation_queue;
@@ -907,6 +907,18 @@ impl HelixMergeOperator {
                 MergeKeyType::Bitmap(BitmapBase::PortablePrefix)
             }
             Some(prefix) if prefix == KeyPrefix::PropertyIndex.as_u8() => {
+                // Every label row is a bitmap, so its prefix decides without
+                // validating the label it carries.
+                if matches!(
+                    IndexPrefix::from_slice(logical),
+                    Ok(IndexPrefix::NodeLabel
+                        | IndexPrefix::EdgeLabel
+                        | IndexPrefix::EdgeLabelNeighbor(_)
+                        | IndexPrefix::LegacyEdgeLabel
+                        | IndexPrefix::LegacyEdgeLabelNeighbor(_))
+                ) {
+                    return MergeKeyType::Bitmap(BitmapBase::PortablePrefix);
+                }
                 match DataKeyKind::parse_from_slice(logical) {
                     Ok(DataKeyKind::PropertyIndex(
                         PropertyIndexKey::Range(_)

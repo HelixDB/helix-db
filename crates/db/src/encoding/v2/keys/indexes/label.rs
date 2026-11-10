@@ -1,15 +1,15 @@
 //! Exact label identities and the label index keys that carry them.
 //!
-//! Every label index row is keyed by the label itself: an 8-byte digest
-//! followed by the length-delimited UTF-8 label. The digest is only a
-//! fixed-width scan accelerator; identity is always the exact label bytes, so
-//! two labels are always two keys. A key is constructed from the label string,
-//! and parsing fails closed when the persisted digest does not match the label.
+//! Every label index row is keyed by the label itself: its big-endian `u16`
+//! byte length followed by its UTF-8 bytes. Identity is the exact label, so two
+//! labels are always two keys, and the length frame keeps every label key
+//! prefix-free. Building or parsing a key validates the label's length and
+//! UTF-8 but neither hashes nor allocates.
 //!
 //! ```text
-//! Node label:          [0x03][0x11][digest:8][len:4][label]               -> RoaringTreemap<NodeId>
-//! Edge label:          [0x03][0x12][digest:8][len:4][label]               -> RoaringTreemap<EdgeId>
-//! Edge label neighbor: [0x03][0x13][dir:1][node:8][digest:8][len:4][label] -> RoaringTreemap<NodeId>
+//! Node label:          [0x03][0x11][len:2][label]               -> RoaringTreemap<NodeId>
+//! Edge label:          [0x03][0x12][len:2][label]               -> RoaringTreemap<EdgeId>
+//! Edge label neighbor: [0x03][0x13][dir:1][node:8][len:2][label] -> RoaringTreemap<NodeId>
 //! ```
 //!
 //! Retired hash-keyed rows live in [`crate::encoding::v2::legacy::label_hash`].
@@ -17,7 +17,6 @@
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
-use sha2::{Digest, Sha256};
 
 use crate::encoding::{
     error::EncodingError,
@@ -27,10 +26,8 @@ use crate::encoding::{
     NodeId,
 };
 
-/// Bytes of the digest that leads every persisted label identity.
-pub(crate) const LABEL_DIGEST_LEN: usize = core::mem::size_of::<u64>();
-/// Bytes of the big-endian label length that follows the digest.
-pub(crate) const LABEL_LEN_PREFIX_LEN: usize = core::mem::size_of::<u32>();
+/// Bytes of the big-endian label length that leads every persisted label.
+pub(crate) const LABEL_LEN_PREFIX_LEN: usize = core::mem::size_of::<u16>();
 /// Longest label any label index key can hold.
 ///
 /// The longest label key, an edge-label neighbor row in a tenant scope, must
@@ -41,173 +38,130 @@ pub(crate) const MAX_LABEL_LEN: usize = STORAGE_KEY_MAX_LEN
     - INDEX_PREFIX_LEN
     - core::mem::size_of::<EdgeDirection>()
     - NODE_ID_MAX_LEN
-    - LABEL_DIGEST_LEN
     - LABEL_LEN_PREFIX_LEN;
 
-/// One exact label and its scan digest.
+const _: () = assert!(
+    MAX_LABEL_LEN <= u16::MAX as usize,
+    "every keyable label length fits the u16 length frame"
+);
+
+/// One exact label that fits every label index key.
 ///
 /// Only [`LabelIdentity::new`] and [`LabelIdentity::decode`] construct it, so
-/// the digest always matches the label and the label always fits a key.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct LabelIdentity {
-    digest: [u8; LABEL_DIGEST_LEN],
-    label: Arc<str>,
+/// the label is always at most [`MAX_LABEL_LEN`] bytes. It borrows the label,
+/// so a per-node key costs neither a hash nor an allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct LabelIdentity<'a> {
+    label: &'a str,
 }
 
-impl LabelIdentity {
+impl<'a> LabelIdentity<'a> {
     /// Identity of `label`, or [`EncodingError::LabelTooLong`] for a label no
     /// label index key can hold.
-    pub(crate) fn new(label: &str) -> Result<Self, EncodingError> {
+    pub(crate) fn new(label: &'a str) -> Result<Self, EncodingError> {
         if label.len() > MAX_LABEL_LEN {
             return Err(EncodingError::LabelTooLong {
                 len: label.len(),
                 maximum: MAX_LABEL_LEN,
             });
         }
-        Ok(Self {
-            digest: label_digest(label),
-            label: Arc::from(label),
-        })
+        Ok(Self { label })
     }
 
-    pub(crate) fn label(&self) -> &str {
-        &self.label
+    pub(crate) const fn label(self) -> &'a str {
+        self.label
     }
 
-    /// The label's shared allocation, so a caller can index identities by
-    /// label without copying it.
-    pub(crate) fn shared_label(&self) -> Arc<str> {
-        Arc::clone(&self.label)
+    pub(crate) const fn encoded_len(self) -> usize {
+        LABEL_LEN_PREFIX_LEN + self.label.len()
     }
 
-    /// Heap bytes [`Self::new`] allocates for `label`: one `Arc<str>` with its
-    /// two reference counts.
-    pub(crate) const fn allocation_bytes(label: &str) -> usize {
-        2 * core::mem::size_of::<usize>() + label.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn digest(&self) -> &[u8; LABEL_DIGEST_LEN] {
-        &self.digest
-    }
-
-    pub(crate) fn encoded_len(&self) -> usize {
-        LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN + self.label.len()
-    }
-
-    pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
-        buf.put_slice(&self.digest);
-        buf.put_u32(u32::try_from(self.label.len()).expect("label length is bounded by keys"));
+    pub(crate) fn encode_into<B: BufMut>(self, buf: &mut B) {
+        buf.put_u16(u16::try_from(self.label.len()).expect("labels fit the u16 length frame"));
         buf.put_slice(self.label.as_bytes());
     }
 
-    /// Decodes the identity that fills `slice` exactly, failing closed with
-    /// [`EncodingError::LabelDigestMismatch`] when the persisted digest does
-    /// not match the persisted label.
-    pub(crate) fn decode(slice: &[u8]) -> Result<Self, EncodingError> {
-        if slice.len() < LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN {
+    /// Decodes the length-framed label that fills `slice` exactly.
+    pub(crate) fn decode(slice: &'a [u8]) -> Result<Self, EncodingError> {
+        let Some(len) = slice.get(..LABEL_LEN_PREFIX_LEN) else {
             return Err(EncodingError::BufferTooShort {
-                expected: LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN,
+                expected: LABEL_LEN_PREFIX_LEN,
                 actual: slice.len(),
             });
-        }
-        let digest: [u8; LABEL_DIGEST_LEN] = slice[..LABEL_DIGEST_LEN]
-            .try_into()
-            .expect("label digest slice is 8 bytes");
-        let len = u32::from_be_bytes(
-            slice[LABEL_DIGEST_LEN..LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN]
-                .try_into()
-                .expect("label length slice is 4 bytes"),
-        ) as usize;
-        let expected = LABEL_DIGEST_LEN
-            .saturating_add(LABEL_LEN_PREFIX_LEN)
-            .saturating_add(len);
-        match slice.len().cmp(&expected) {
+        };
+        let len = usize::from(u16::from_be_bytes(
+            len.try_into().expect("label length slice is 2 bytes"),
+        ));
+        match slice.len().cmp(&(LABEL_LEN_PREFIX_LEN + len)) {
             core::cmp::Ordering::Less => {
                 return Err(EncodingError::BufferTooShort {
-                    expected,
+                    expected: LABEL_LEN_PREFIX_LEN + len,
                     actual: slice.len(),
                 });
             }
             core::cmp::Ordering::Equal => {}
             core::cmp::Ordering::Greater => {
                 return Err(EncodingError::InvalidIndexKey(format!(
-                    "label identity expected {expected} bytes, got {}",
+                    "label expected {} bytes, got {}",
+                    LABEL_LEN_PREFIX_LEN + len,
                     slice.len()
                 )));
             }
         }
-        let label = std::str::from_utf8(
-            &slice[LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN
-                ..LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN + len],
-        )?;
-        let identity = Self::new(label)?;
-        if identity.digest != digest {
-            return Err(EncodingError::LabelDigestMismatch);
-        }
-        Ok(identity)
+        Self::new(std::str::from_utf8(
+            &slice[LABEL_LEN_PREFIX_LEN..LABEL_LEN_PREFIX_LEN + len],
+        )?)
     }
 }
 
-/// SHA-256 prefix of the label's length-delimited UTF-8 frame.
-fn label_digest(label: &str) -> [u8; LABEL_DIGEST_LEN] {
-    let len = u32::try_from(label.len()).expect("label length is bounded by keys");
-    let hash = Sha256::new()
-        .chain_update(len.to_be_bytes())
-        .chain_update(label.as_bytes())
-        .finalize();
-    hash[..LABEL_DIGEST_LEN]
-        .try_into()
-        .expect("SHA-256 contains an eight-byte digest prefix")
+/// An owned [`LabelIdentity`], reference counted so every row of one label
+/// shares a single allocation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SharedLabel(Arc<str>);
+
+impl SharedLabel {
+    pub(crate) fn new(identity: LabelIdentity<'_>) -> Self {
+        Self(Arc::from(identity.label))
+    }
+
+    pub(crate) fn identity(&self) -> LabelIdentity<'_> {
+        LabelIdentity { label: &self.0 }
+    }
+
+    /// Heap bytes [`Self::new`] allocates for `identity`: one `Arc<str>` with
+    /// its two reference counts.
+    pub(crate) const fn allocation_bytes(identity: LabelIdentity<'_>) -> usize {
+        2 * core::mem::size_of::<usize>() + identity.label.len()
+    }
 }
 
-/// Validates the `[0x03][index prefix]` header of a label key and returns the
-/// bytes after `header_len`.
-fn label_key_body(
-    slice: &[u8],
-    expected: impl FnOnce(&IndexPrefix) -> bool,
-    header_len: usize,
-) -> Result<&[u8], EncodingError> {
-    if slice.len() < header_len {
-        return Err(EncodingError::BufferTooShort {
-            expected: header_len,
-            actual: slice.len(),
-        });
+/// Lets a set of shared labels be searched by a borrowed label; both orders
+/// compare the label string.
+impl std::borrow::Borrow<str> for SharedLabel {
+    fn borrow(&self) -> &str {
+        &self.0
     }
-    let key_prefix = KeyPrefix::from_u8(slice[0])?;
-    if key_prefix != KeyPrefix::PropertyIndex {
-        return Err(EncodingError::Custom(format!(
-            "expected PropertyIndex key prefix, got {key_prefix:?}"
-        )));
-    }
-    let index_prefix = IndexPrefix::from_slice(slice)?;
-    if !expected(&index_prefix) {
-        return Err(EncodingError::Custom(format!(
-            "unexpected label index prefix {index_prefix:?}"
-        )));
-    }
-    Ok(&slice[header_len..])
 }
 
 /// Node label index: label -> set of NodeIds.
 ///
 /// ```text
-/// Key: [0x03][0x11][digest:8][len:4][label]
+/// Key: [0x03][0x11][len:2][label]
 /// Value: RoaringTreemap<NodeId>
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NodeLabelKey {
-    identity: LabelIdentity,
+pub(crate) struct NodeLabelKey<'a> {
+    identity: LabelIdentity<'a>,
 }
 
-impl NodeLabelKey {
-    pub(crate) const fn new(identity: LabelIdentity) -> Self {
+impl<'a> NodeLabelKey<'a> {
+    pub(crate) const fn new(identity: LabelIdentity<'a>) -> Self {
         Self { identity }
     }
 
     #[cfg(test)]
-    pub(crate) const fn identity(&self) -> &LabelIdentity {
-        &self.identity
+    pub(crate) const fn identity(&self) -> LabelIdentity<'a> {
+        self.identity
     }
 
     #[inline]
@@ -220,17 +174,21 @@ impl NodeLabelKey {
         IndexPrefix::NodeLabel
     }
 
-    pub(crate) fn encoded_len(&self) -> usize {
+    pub(crate) const fn encoded_len(&self) -> usize {
         PREFIX_LEN + INDEX_PREFIX_LEN + self.identity.encoded_len()
     }
 
-    pub(crate) fn parse_from_slice(slice: &[u8]) -> Result<Self, EncodingError> {
-        let body = label_key_body(
-            slice,
-            |prefix| *prefix == Self::index_prefix(),
-            PREFIX_LEN + INDEX_PREFIX_LEN,
-        )?;
-        Ok(Self::new(LabelIdentity::decode(body)?))
+    pub(crate) fn parse_from_slice(slice: &'a [u8]) -> Result<Self, EncodingError> {
+        // `from_slice` checks the key prefix and that the header bytes exist.
+        let index_prefix = IndexPrefix::from_slice(slice)?;
+        if index_prefix != Self::index_prefix() {
+            return Err(EncodingError::Custom(format!(
+                "expected NodeLabel index prefix, got {index_prefix:?}"
+            )));
+        }
+        Ok(Self::new(LabelIdentity::decode(
+            &slice[PREFIX_LEN + INDEX_PREFIX_LEN..],
+        )?))
     }
 
     pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
@@ -243,21 +201,22 @@ impl NodeLabelKey {
 /// Global edge label index: label -> set of EdgeIds.
 ///
 /// ```text
-/// Key: [0x03][0x12][digest:8][len:4][label]
+/// Key: [0x03][0x12][len:2][label]
 /// Value: RoaringTreemap<EdgeId>
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EdgeLabelKey {
-    identity: LabelIdentity,
+pub(crate) struct EdgeLabelKey<'a> {
+    identity: LabelIdentity<'a>,
 }
 
-impl EdgeLabelKey {
-    pub(crate) const fn new(identity: LabelIdentity) -> Self {
+impl<'a> EdgeLabelKey<'a> {
+    pub(crate) const fn new(identity: LabelIdentity<'a>) -> Self {
         Self { identity }
     }
 
-    pub(crate) const fn identity(&self) -> &LabelIdentity {
-        &self.identity
+    #[cfg(test)]
+    pub(crate) const fn identity(&self) -> LabelIdentity<'a> {
+        self.identity
     }
 
     #[inline]
@@ -270,17 +229,21 @@ impl EdgeLabelKey {
         IndexPrefix::EdgeLabel
     }
 
-    pub(crate) fn encoded_len(&self) -> usize {
+    pub(crate) const fn encoded_len(&self) -> usize {
         PREFIX_LEN + INDEX_PREFIX_LEN + self.identity.encoded_len()
     }
 
-    pub(crate) fn parse_from_slice(slice: &[u8]) -> Result<Self, EncodingError> {
-        let body = label_key_body(
-            slice,
-            |prefix| *prefix == Self::index_prefix(),
-            PREFIX_LEN + INDEX_PREFIX_LEN,
-        )?;
-        Ok(Self::new(LabelIdentity::decode(body)?))
+    pub(crate) fn parse_from_slice(slice: &'a [u8]) -> Result<Self, EncodingError> {
+        // `from_slice` checks the key prefix and that the header bytes exist.
+        let index_prefix = IndexPrefix::from_slice(slice)?;
+        if index_prefix != Self::index_prefix() {
+            return Err(EncodingError::Custom(format!(
+                "expected EdgeLabel index prefix, got {index_prefix:?}"
+            )));
+        }
+        Ok(Self::new(LabelIdentity::decode(
+            &slice[PREFIX_LEN + INDEX_PREFIX_LEN..],
+        )?))
     }
 
     pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
@@ -293,22 +256,22 @@ impl EdgeLabelKey {
 /// Edge-label neighbor index: endpoint+label -> set of opposite NodeIds.
 ///
 /// ```text
-/// Out: [0x03][0x13][0x00][source:8][digest:8][len:4][label]
-/// In:  [0x03][0x13][0x01][target:8][digest:8][len:4][label]
+/// Out: [0x03][0x13][0x00][source:8][len:2][label]
+/// In:  [0x03][0x13][0x01][target:8][len:2][label]
 /// Value: RoaringTreemap<NodeId>
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EdgeLabelNeighborKey {
+pub(crate) struct EdgeLabelNeighborKey<'a> {
     direction: EdgeDirection,
     node_id: NodeId,
-    identity: LabelIdentity,
+    identity: LabelIdentity<'a>,
 }
 
-impl EdgeLabelNeighborKey {
+impl<'a> EdgeLabelNeighborKey<'a> {
     pub(crate) const fn new(
         direction: EdgeDirection,
         node_id: NodeId,
-        identity: LabelIdentity,
+        identity: LabelIdentity<'a>,
     ) -> Self {
         Self {
             direction,
@@ -328,8 +291,8 @@ impl EdgeLabelNeighborKey {
     }
 
     #[cfg(test)]
-    pub(crate) const fn identity(&self) -> &LabelIdentity {
-        &self.identity
+    pub(crate) const fn identity(&self) -> LabelIdentity<'a> {
+        self.identity
     }
 
     #[inline]
@@ -347,7 +310,7 @@ impl EdgeLabelNeighborKey {
         Self::index_prefix(self.direction)
     }
 
-    pub(crate) fn encoded_len(&self) -> usize {
+    pub(crate) const fn encoded_len(&self) -> usize {
         PREFIX_LEN
             + INDEX_PREFIX_LEN
             + core::mem::size_of::<EdgeDirection>()
@@ -355,20 +318,15 @@ impl EdgeLabelNeighborKey {
             + self.identity.encoded_len()
     }
 
-    pub(crate) fn parse_from_slice(slice: &[u8]) -> Result<Self, EncodingError> {
-        let mut direction = None;
-        label_key_body(
-            slice,
-            |prefix| {
-                let IndexPrefix::EdgeLabelNeighbor(parsed) = prefix else {
-                    return false;
-                };
-                direction = Some(*parsed);
-                true
-            },
-            PREFIX_LEN + INDEX_PREFIX_LEN + core::mem::size_of::<EdgeDirection>() + NODE_ID_MAX_LEN,
-        )?;
-        let direction = direction.expect("an accepted neighbor prefix records its direction");
+    pub(crate) fn parse_from_slice(slice: &'a [u8]) -> Result<Self, EncodingError> {
+        // `from_slice` checks the key prefix and that the direction byte exists.
+        let index_prefix = IndexPrefix::from_slice(slice)?;
+        let IndexPrefix::EdgeLabelNeighbor(direction) = index_prefix else {
+            return Err(EncodingError::Custom(format!(
+                "expected EdgeLabelNeighbor index prefix, got {index_prefix:?}"
+            )));
+        };
+        // `read_u64` checks that the node ID, and so the label offset, exists.
         let node_id = read_u64(
             slice,
             PREFIX_LEN + INDEX_PREFIX_LEN + core::mem::size_of::<EdgeDirection>(),
@@ -398,7 +356,6 @@ pub(crate) enum LabelScanPrefix {
     /// Every global edge label row.
     EdgeLabels,
     /// Every edge-label neighbor row, both directions.
-    #[cfg(test)]
     EdgeLabelNeighbors,
 }
 
@@ -409,7 +366,6 @@ impl LabelScanPrefix {
         match self {
             Self::NodeLabels => buf.put_slice(IndexPrefix::NodeLabel.as_slice()),
             Self::EdgeLabels => buf.put_slice(IndexPrefix::EdgeLabel.as_slice()),
-            #[cfg(test)]
             Self::EdgeLabelNeighbors => {
                 buf.put_u8(crate::encoding::indexes::prefix::EDGE_LABEL_NEIGHBOR_INDEX_PREFIX)
             }
@@ -423,7 +379,7 @@ mod tests {
     use super::*;
     use crate::encoding::indexes::PropertyIndexKey;
 
-    fn identity(label: &str) -> LabelIdentity {
+    fn identity(label: &str) -> LabelIdentity<'_> {
         LabelIdentity::new(label).expect("fixture label fits a key")
     }
 
@@ -435,13 +391,12 @@ mod tests {
     }
 
     #[test]
-    fn identity_frames_digest_length_and_utf8_label() {
+    fn identity_frames_length_and_utf8_label() {
         let identity = identity("Person");
         let mut bytes = Vec::new();
         identity.encode_into(&mut bytes);
 
-        let mut expected = identity.digest().to_vec();
-        expected.extend_from_slice(&6u32.to_be_bytes());
+        let mut expected = 6u16.to_be_bytes().to_vec();
         expected.extend_from_slice(b"Person");
         assert_eq!(bytes, expected);
         assert_eq!(bytes.len(), identity.encoded_len());
@@ -450,38 +405,36 @@ mod tests {
     }
 
     #[test]
-    fn identity_digest_is_a_stable_sha256_prefix_of_the_length_delimited_label() {
-        let mut frame = 6u32.to_be_bytes().to_vec();
-        frame.extend_from_slice(b"Person");
-        let hash = Sha256::digest(&frame);
-        assert_eq!(identity("Person").digest(), &hash[..LABEL_DIGEST_LEN]);
-        assert_ne!(identity("Person").digest(), identity("person").digest());
+    fn distinct_labels_are_distinct_keys() {
+        let key = |label| {
+            encoded(&PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity(
+                label,
+            ))))
+        };
+        assert_ne!(key("Person"), key("person"));
+        // The length frame keeps one label's key from prefixing another's.
+        assert!(!key("PersonX").starts_with(&key("Person")));
+        assert_eq!(key(""), vec![0x03, 0x11, 0x00, 0x00]);
     }
 
     #[test]
-    fn distinct_labels_are_distinct_identities_even_under_one_digest() {
-        // Identity compares the exact label, so even a forced digest collision
-        // keeps two labels apart.
-        let mut forced = identity("b");
-        forced.digest = *identity("a").digest();
-        assert_ne!(forced, identity("a"));
-    }
-
-    #[test]
-    fn identity_decode_fails_closed_on_a_mismatched_digest() {
-        let mut bytes = Vec::new();
-        identity("Person").encode_into(&mut bytes);
-        bytes[0] ^= 0xFF;
-        assert!(matches!(
-            LabelIdentity::decode(&bytes),
-            Err(EncodingError::LabelDigestMismatch)
-        ));
+    fn shared_labels_view_and_compare_as_their_label() {
+        let shared = SharedLabel::new(identity("Person"));
+        assert_eq!(shared.identity(), identity("Person"));
+        assert_eq!(std::borrow::Borrow::<str>::borrow(&shared), "Person");
+        assert!(SharedLabel::new(identity("A")) < SharedLabel::new(identity("B")));
+        assert_eq!(
+            SharedLabel::allocation_bytes(identity("Person")),
+            2 * core::mem::size_of::<usize>() + 6
+        );
+        let set = std::collections::BTreeSet::from([shared.clone()]);
+        assert_eq!(set.get("Person"), Some(&shared));
     }
 
     #[test]
     fn identity_decode_rejects_short_trailing_and_non_utf8_frames() {
         assert!(matches!(
-            LabelIdentity::decode(&[0; LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN - 1]),
+            LabelIdentity::decode(&[0; LABEL_LEN_PREFIX_LEN - 1]),
             Err(EncodingError::BufferTooShort { .. })
         ));
 
@@ -498,8 +451,7 @@ mod tests {
             Err(EncodingError::InvalidIndexKey(_))
         ));
 
-        let mut non_utf8 = vec![0; LABEL_DIGEST_LEN];
-        non_utf8.extend_from_slice(&1u32.to_be_bytes());
+        let mut non_utf8 = 1u16.to_be_bytes().to_vec();
         non_utf8.push(0xFF);
         assert!(matches!(
             LabelIdentity::decode(&non_utf8),
@@ -512,12 +464,23 @@ mod tests {
         let longest = "a".repeat(MAX_LABEL_LEN);
         assert_eq!(
             identity(&longest).encoded_len(),
-            LABEL_DIGEST_LEN + LABEL_LEN_PREFIX_LEN + MAX_LABEL_LEN
+            LABEL_LEN_PREFIX_LEN + MAX_LABEL_LEN
         );
+        let too_long = "a".repeat(MAX_LABEL_LEN + 1);
         assert!(matches!(
-            LabelIdentity::new(&"a".repeat(MAX_LABEL_LEN + 1)),
+            LabelIdentity::new(&too_long),
             Err(EncodingError::LabelTooLong { len, maximum })
                 if len == MAX_LABEL_LEN + 1 && maximum == MAX_LABEL_LEN
+        ));
+        // A persisted frame longer than the bound fails closed too.
+        let mut frame = u16::try_from(MAX_LABEL_LEN + 1)
+            .unwrap()
+            .to_be_bytes()
+            .to_vec();
+        frame.extend_from_slice(too_long.as_bytes());
+        assert!(matches!(
+            LabelIdentity::decode(&frame),
+            Err(EncodingError::LabelTooLong { .. })
         ));
 
         let key = crate::encoding::v2::keys::DataKey::Data {
@@ -624,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn label_key_parsers_reject_wrong_prefixes_short_keys_and_bad_digests() {
+    fn label_key_parsers_reject_wrong_prefixes_short_keys_and_bad_frames() {
         let node = encoded(&PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity(
             "Person",
         ))));
@@ -651,14 +614,27 @@ mod tests {
         wrong_key_prefix[0] = KeyPrefix::NodeProperty.as_u8();
         assert!(matches!(
             NodeLabelKey::parse_from_slice(&wrong_key_prefix),
-            Err(EncodingError::Custom(_))
+            Err(EncodingError::InvalidKey(_))
         ));
         assert!(matches!(
             NodeLabelKey::parse_from_slice(&[0x03]),
             Err(EncodingError::BufferTooShort { .. })
         ));
         assert!(matches!(
+            NodeLabelKey::parse_from_slice(&node[..PREFIX_LEN + INDEX_PREFIX_LEN + 1]),
+            Err(EncodingError::BufferTooShort { .. })
+        ));
+        assert!(matches!(
             EdgeLabelNeighborKey::parse_from_slice(&neighbor[..PREFIX_LEN + INDEX_PREFIX_LEN + 1]),
+            Err(EncodingError::BufferTooShort { .. })
+        ));
+        assert!(matches!(
+            EdgeLabelNeighborKey::parse_from_slice(
+                &neighbor[..PREFIX_LEN
+                    + INDEX_PREFIX_LEN
+                    + core::mem::size_of::<EdgeDirection>()
+                    + NODE_ID_MAX_LEN]
+            ),
             Err(EncodingError::BufferTooShort { .. })
         ));
         let mut bad_direction = neighbor.clone();
@@ -667,14 +643,11 @@ mod tests {
             EdgeLabelNeighborKey::parse_from_slice(&bad_direction),
             Err(EncodingError::InvalidEdgeIndexDirection(0x02))
         ));
-        let mut bad_digest = neighbor;
-        bad_digest[PREFIX_LEN
-            + INDEX_PREFIX_LEN
-            + core::mem::size_of::<EdgeDirection>()
-            + NODE_ID_MAX_LEN] ^= 0xFF;
+        let mut trailing = neighbor;
+        trailing.push(0);
         assert!(matches!(
-            PropertyIndexKey::parse_from_slice(&bad_digest),
-            Err(EncodingError::LabelDigestMismatch)
+            PropertyIndexKey::parse_from_slice(&trailing),
+            Err(EncodingError::InvalidIndexKey(_))
         ));
     }
 }

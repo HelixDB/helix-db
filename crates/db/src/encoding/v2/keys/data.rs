@@ -914,9 +914,7 @@ mod tests {
         let label = crate::encoding::indexes::label::LabelIdentity::new("FOLLOWS").unwrap();
         let encoded = DataKey::Data {
             scope: DataScope::Tenant(tenant),
-            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-                label.clone(),
-            ))),
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(label))),
         }
         .to_bytes();
 

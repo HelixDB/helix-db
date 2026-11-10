@@ -4,7 +4,8 @@ mod bootstrap;
 mod pipeline;
 
 pub(crate) use bootstrap::{
-    bootstrap_managed_writer, bootstrap_writer, require_current_managed_writer,
+    advance_storage_version, bootstrap_managed_writer, bootstrap_writer,
+    require_current_managed_writer, storage_version,
 };
 pub(crate) use pipeline::finish_writer;
 #[cfg(test)]

@@ -1,11 +1,12 @@
-//! Retired hash-keyed label index rows, read only by the label identity migration.
+//! Retired hash-keyed label index rows.
 //!
 //! These rows file a label under the 8-byte SipHash-1-3 of its name, so two
 //! labels with one hash share a bitmap. Current rows key the exact label (see
-//! [`crate::encoding::indexes::label`]). Writers never stage these keys: the
-//! startup label identity migration moves every row to its exact key, and
-//! readers consult them only while a store's marker predates that migration.
-//! Each key is built from the label string, never from a bare hash.
+//! [`crate::encoding::indexes::label`]). Only the graph-format V1 rewrite still
+//! stages these keys, earlier in the same writer open as the startup label
+//! identity migration, which then moves every row to its exact key. Readers
+//! consult them only while a store's marker predates the migration's
+//! publication. Each key is built from the label string, never from a bare hash.
 
 use crate::encoding::{
     error::EncodingError,

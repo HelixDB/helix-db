@@ -1,7 +1,7 @@
 //! Blocking managed-index and tenant storage bootstrap.
 
 use bytes::Bytes;
-use slatedb::{Db, DbTransaction, IsolationLevel};
+use slatedb::{Db, DbReadOps, DbTransaction, IsolationLevel};
 
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{GlobalKey, ManagedIndexKey, ScopedKey, GLOBAL_SENTINEL};
@@ -13,12 +13,13 @@ use crate::index_lifecycle::{
 };
 use crate::transaction::Mutation;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What one writer open must do to converge the managed-index storage metadata.
 ///
 /// Every plan leaves the marker at most at
 /// [`IndexStorageVersion::OPERATION_QUEUES`]; the label identity migration,
-/// which runs after the blocking startup migrations, publishes the current
-/// version itself.
+/// which runs after the blocking startup migrations, publishes later versions
+/// itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriterBootstrapPlan {
     Initialize,
     /// Versions before equality bitmaps: the equality-bitmap migration
@@ -48,7 +49,15 @@ pub(crate) async fn bootstrap_writer(db: &Db) -> Result<()> {
             return super::super::indexes::equality_bitmap::migrate_v3_to_v4(db).await;
         }
         WriterBootstrapPlan::PublishOperationQueueVersion(current) => {
-            publish_operation_queue_version(db).await?;
+            // Nothing else is rewritten: every version from EQUALITY_BITMAPS
+            // through OPERATION_QUEUES shares one physical layout.
+            advance_storage_version(
+                db,
+                IndexStorageVersion::EQUALITY_BITMAPS..IndexStorageVersion::OPERATION_QUEUES,
+                IndexStorageVersion::OPERATION_QUEUES,
+                |_| Ok(()),
+            )
+            .await?;
             current
         }
         WriterBootstrapPlan::Current(current) => current,
@@ -61,23 +70,58 @@ pub(crate) async fn bootstrap_writer(db: &Db) -> Result<()> {
     }
 }
 
-/// Moves an equality-bitmap store's marker to the operation-queue version.
+/// Moves the storage marker from a version in `from` to `to` in one
+/// serializable commit, returning the version it found. `also` stages any
+/// other writes that must land in that same commit.
 ///
-/// Nothing else is rewritten: every version from
-/// [`IndexStorageVersion::EQUALITY_BITMAPS`] through
-/// [`IndexStorageVersion::OPERATION_QUEUES`] shares one physical layout. A
-/// crash before the commit leaves the older marker, which the next open
-/// publishes again; a store already at or past operation queues is left alone.
-async fn publish_operation_queue_version(db: &Db) -> Result<()> {
+/// A marker already at or past `to` is left alone, and `also` does not run.
+/// Any other marker outside `from` fails closed: the store is not at a layout
+/// the caller migrated. A crash before the commit leaves the older marker,
+/// which the caller's next run advances again.
+pub(crate) async fn advance_storage_version(
+    db: &Db,
+    from: std::ops::Range<IndexStorageVersion>,
+    to: IndexStorageVersion,
+    also: impl FnOnce(&DbTransaction) -> Result<()>,
+) -> Result<IndexStorageVersion> {
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
-    let marker_key = global_key(GlobalKey::StorageVersion);
-    let marker =
-        transaction
-            .get(&marker_key)
-            .await?
-            .ok_or_else(|| HelixDbError::MigrationRequired {
-                reason: "V2 storage marker disappeared after writer preflight".to_string(),
-            })?;
+    let observed = storage_version(&transaction).await.and_then(|version| {
+        if version >= to || from.contains(&version) {
+            return Ok(version);
+        }
+        Err(HelixDbError::MigrationRequired {
+            reason: format!(
+                "index storage version {} cannot advance to {}",
+                version.get(),
+                to.get()
+            ),
+        })
+    });
+    let version = match observed {
+        Ok(version) if version < to => version,
+        done_or_failed => {
+            transaction.rollback();
+            return done_or_failed;
+        }
+    };
+    Mutation::put(
+        &transaction,
+        global_key(GlobalKey::StorageVersion),
+        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(to)),
+    )?;
+    also(&transaction)?;
+    transaction.commit().await?;
+    Ok(version)
+}
+
+/// The version a store's V2 storage marker records.
+pub(crate) async fn storage_version(read: &(impl DbReadOps + Sync)) -> Result<IndexStorageVersion> {
+    let marker = read
+        .get(global_key(GlobalKey::StorageVersion))
+        .await?
+        .ok_or_else(|| HelixDbError::MigrationRequired {
+            reason: "V2 storage marker is missing".to_string(),
+        })?;
     let IndexV2MetadataValue::StorageVersion(version) =
         metadata_or_migration_required(&marker, "storage marker")?
     else {
@@ -85,30 +129,7 @@ async fn publish_operation_queue_version(db: &Db) -> Result<()> {
             reason: "V2 storage marker contains the wrong value kind".to_string(),
         });
     };
-    if version >= IndexStorageVersion::OPERATION_QUEUES {
-        transaction.rollback();
-        return Ok(());
-    }
-    if !(IndexStorageVersion::EQUALITY_BITMAPS..IndexStorageVersion::OPERATION_QUEUES)
-        .contains(&version)
-    {
-        transaction.rollback();
-        return Err(HelixDbError::MigrationRequired {
-            reason: format!(
-                "index storage version {} changed after writer preflight",
-                version.get()
-            ),
-        });
-    }
-    Mutation::put(
-        &transaction,
-        marker_key,
-        encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
-            IndexStorageVersion::OPERATION_QUEUES,
-        )),
-    )?;
-    transaction.commit().await?;
-    Ok(())
+    Ok(version)
 }
 
 /// Initializes a pristine managed database without entering a migration path.

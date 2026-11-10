@@ -681,6 +681,10 @@ impl HelixDbError {
                 error_code::QueryErrorCode::TransactionConflict
             }
             Self::Storage(_) | Self::ObjectStore(_) => error_code::QueryErrorCode::StorageError,
+            // The caller chose the label; nothing stored is malformed.
+            Self::Encoding(EncodingError::LabelTooLong { .. }) => {
+                error_code::QueryErrorCode::InvalidQuery
+            }
             Self::Encoding(_)
             | Self::InvalidVectorItem(_)
             | Self::IdentifierAllocationFailed { .. }
@@ -1018,6 +1022,13 @@ mod tests {
             (
                 HelixDbError::Encoding(EncodingError::Custom("encoding".to_string())),
                 Code::InternalError,
+            ),
+            (
+                HelixDbError::Encoding(EncodingError::LabelTooLong {
+                    len: 70_000,
+                    maximum: 65_000,
+                }),
+                Code::InvalidQuery,
             ),
             (
                 HelixDbError::TransactionConflict("retry".to_string()),
