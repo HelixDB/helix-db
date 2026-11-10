@@ -405,8 +405,9 @@ const DURABLE_WAIT_LIMIT: Duration = Duration::from_secs(30);
 /// waiting as long as storage is unreachable.
 ///
 /// Paused time skips the wait. The limit counts on the real clock, so the time
-/// paused tokio reports is the limit less what the test advanced before the
-/// request, which is why each test makes one such request.
+/// paused tokio reports is the limit less the paused time the test skipped
+/// before the request, plus the real time it took, which is why each test makes
+/// one such request and the bounds leave room for both.
 async fn assert_stops_at_the_durable_wait_limit(db: &Arc<HelixDB>, request: QueryRequest) {
     let started = tokio::time::Instant::now();
     let error = HelixQueryService::new(Arc::clone(db))
@@ -416,7 +417,7 @@ async fn assert_stops_at_the_durable_wait_limit(db: &Arc<HelixDB>, request: Quer
     assert!(error.is_deadline_exceeded(), "{error}");
     let waited = started.elapsed();
     assert!(
-        waited > PENDING && waited <= DURABLE_WAIT_LIMIT + PENDING,
+        waited >= DURABLE_WAIT_LIMIT / 2 && waited <= DURABLE_WAIT_LIMIT * 2,
         "waited {waited:?} on the held upload"
     );
 }
