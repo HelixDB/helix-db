@@ -311,6 +311,39 @@ authentication and resource commands, and the
 [architecture](https://docs.helix-db.com/database/helix-cloud/start-here/architecture) for how it
 scales.
 
+## FAQ
+
+### What is HelixDB used for?
+
+Memory and retrieval for AI applications: long-term agent memory, GraphRAG and hybrid RAG, and
+internal knowledge graphs that tie documents, people, tools and decisions together. One query can
+combine graph traversal, vector similarity and BM25 keyword search.
+
+### Do I still need a separate vector database next to my graph database?
+
+No. Vectors are properties on nodes and edges, indexed natively, so embeddings, relationships and
+text live in one transactional engine. Graph and vector writes commit or roll back together, and
+there is no second store to keep in sync.
+
+### Can vector search be limited to related data?
+
+Yes. A vector search can be prefiltered by a graph traversal, so similarity runs over the nodes
+connected to, say, one user or one project instead of the whole index. See the
+[prefiltering guide](https://docs.helix-db.com/database/helix-db/query-guides/prefiltering).
+
+### Is HelixDB open source, and can I self-host it?
+
+Yes. The engine is Apache 2.0. Run it embedded inside your own process, as a local or self-hosted
+server (in memory, on disk, or on S3-compatible object storage), or on Helix Cloud. All three use
+the same SDKs; server and Cloud clients send queries to `POST /v2/query`, while embedded clients
+run them inside your process.
+
+### Can I bring existing Cypher queries?
+
+Source builds run a supported openCypher profile for reads and CRUD through `POST /v2/cypher`,
+embedded clients and `helix cypher`. The [Cypher guide](https://docs.helix-db.com/database/helix-db/query-guides/cypher)
+lists what is covered; anything outside it is written with the SDKs.
+
 ## Docs and community
 
 - [Documentation](https://docs.helix-db.com) · [Query walkthrough](https://docs.helix-db.com/database/helix-db/core-concepts/overview) · [Learn center](https://docs.helix-db.com/learn)
