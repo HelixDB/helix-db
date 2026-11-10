@@ -51,6 +51,7 @@ mod runtime_dependencies;
 pub mod search;
 mod slate_cache;
 mod transaction;
+mod write_runtime;
 
 pub use runtime_dependencies::{IndexRuntimeReadiness, ProcessLocalDatabaseToken};
 
@@ -1374,9 +1375,11 @@ impl HelixDB {
         let stage_started = Instant::now();
         let slate_db_cache = build_slate_db_cache(config.cache().mode()).await?;
         log_stage("slatedb_cache_construction", stage_started);
+        let write_runtime = write_runtime::WriteRuntime::start()?;
         let mut builder = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_merge_operator(Arc::new(merge_operator::HelixMergeOperator::new()))
-            .with_settings(gc_boundary_files.writer_settings(&config));
+            .with_settings(gc_boundary_files.writer_settings(&config))
+            .with_write_runtime(write_runtime.handle());
         if let WriterOpenMode::Managed { writer_epoch, .. } = &open_mode {
             builder = builder.with_writer_epoch(*writer_epoch);
         }
@@ -1401,6 +1404,8 @@ impl HelixDB {
         }
         let stage_started = Instant::now();
         let db = Arc::new(builder.build().await?);
+        // Detached: the thread ends once the database is gone.
+        drop(write_runtime.run_while_open(db.subscribe()));
         log_stage("slatedb_writer_open", stage_started);
         // Built before the storage checks so every failure below closes
         // storage: an unclosed Db keeps its tasks running, and polling the
@@ -4366,6 +4371,28 @@ mod tests {
 
     fn tenant_scope(value: &str) -> DataScope {
         DataScope::Tenant(TenantId::from_ulid_str(value).expect("valid tenant"))
+    }
+
+    /// A writer dropped without `close()` leaves its storage writing for
+    /// whoever still holds it, as background tasks do: the thread that applies
+    /// its commits runs until the database itself is gone.
+    #[tokio::test]
+    async fn storage_outliving_an_unclosed_writer_still_commits() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "unclosed-writer-storage-commits".to_string(),
+        })
+        .await
+        .expect("writer opens");
+        let storage = db.inner_db();
+        drop(db);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            storage.put(b"after-drop", b"applied"),
+        )
+        .await
+        .expect("the batch writer still applies commits")
+        .expect("the write commits");
+        storage.close().await.expect("storage closes");
     }
 
     /// The object-store warm runs only when the tier enables it, whether or

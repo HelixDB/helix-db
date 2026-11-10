@@ -486,8 +486,21 @@ async fn moving_a_value_to_a_later_node_mid_build_does_not_block() {
         let high = add(&db, "z@x").await.unwrap();
         let operation = create_unique_index(&db).await;
         tokio::time::sleep(Duration::from_millis(round * 2)).await;
-        set_email(&db, low, "y@x").await.unwrap();
-        set_email(&db, high, "x@x").await.unwrap();
+        // A write racing one of the build's transactions may lose with a
+        // retryable conflict; the move only has to land.
+        for (id, email) in [(low, "y@x"), (high, "x@x")] {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    match set_email(&db, id, email).await {
+                        Ok(()) => break,
+                        Err(error) if error.is_transaction_conflict() => {}
+                        Err(error) => panic!("round {round}: {error}"),
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("round {round}: moving {email} kept conflicting"));
+        }
         let state = finished(&db, &operation).await;
         assert_unique(&emails(&db).await);
         assert_eq!(state, "succeeded", "round {round}");
