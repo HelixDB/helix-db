@@ -230,15 +230,24 @@ async function executeQuery(instance: Instance, json: string): Promise<unknown> 
   for (let attempt = 0; attempt < TRANSACTION_CONFLICT_ATTEMPTS; attempt += 1) {
     const response = await postQuery(instance, json);
     if (response.ok) return parseJson(response.body);
-    // The HTTP server reserves 409 for retryable transaction conflicts. The
-    // losing transaction did not commit, so replaying the fixture is safe.
-    if (response.status === 409 && attempt + 1 < TRANSACTION_CONFLICT_ATTEMPTS) {
+    // A transaction conflict did not commit, so replaying the fixture is safe.
+    // Other 409s, such as a duplicate unique value, fail again when resent.
+    if (isTransactionConflict(response) && attempt + 1 < TRANSACTION_CONFLICT_ATTEMPTS) {
       await delay(10 * 2 ** attempt);
       continue;
     }
     throw new Error(`${instance.label} query failed with HTTP ${response.status}: ${response.body}`);
   }
   throw new Error(`${instance.label} transaction conflict retry loop exhausted unexpectedly`);
+}
+
+function isTransactionConflict(response: { status: number; body: string }): boolean {
+  if (response.status !== 409) return false;
+  try {
+    return (JSON.parse(response.body) as { error?: unknown }).error === "transaction_conflict";
+  } catch {
+    return false;
+  }
 }
 
 async function postQuery(instance: Instance, json: string): Promise<{ ok: boolean; status: number; body: string }> {

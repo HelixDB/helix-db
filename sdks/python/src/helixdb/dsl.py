@@ -255,6 +255,23 @@ def _datetime_to_rfc3339(value: DateTime, path: str) -> str:
     return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _normalize_datetime_param_value(value: Any, path: str) -> str:
+    if isinstance(value, DateTime):
+        dt = value
+    elif isinstance(value, datetime):
+        dt = DateTime.from_datetime(value)
+    elif isinstance(value, str):
+        dt = DateTime.parse_rfc3339(value)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        dt = DateTime.from_millis(value)
+    else:
+        raise TypeError(
+            f"parameter '{path}' must be an RFC3339 string, DateTime, datetime, "
+            "or millisecond timestamp"
+        )
+    return _datetime_to_rfc3339(dt, path)
+
+
 @dataclass(frozen=True)
 class I64Literal:
     value: int
@@ -3748,15 +3765,7 @@ def _convert_param_value(schema: ParamSchema, value: Any, path: str) -> JsonValu
             raise TypeError(f"parameter '{path}' must be string")
         return value
     if schema.kind == "DateTime":
-        if isinstance(value, DateTime):
-            dt = value
-        elif isinstance(value, datetime):
-            dt = DateTime.from_datetime(value)
-        elif isinstance(value, str):
-            dt = DateTime.parse_rfc3339(value)
-        else:
-            dt = DateTime.from_millis(value)
-        return _datetime_to_rfc3339(dt, path)
+        return _normalize_datetime_param_value(value, path)
     if schema.kind == "Bytes":
         raise QueryError.unsupported_bytes(path)
     if schema.kind == "Value":
@@ -3905,9 +3914,7 @@ def _normalize_typed_query_value(
             raise TypeError(f"parameter '{path}' must be string")
         return value
     if parameter_type.variant == "DateTime":
-        if not isinstance(value, str):
-            raise TypeError(f"parameter '{path}' must be an RFC3339 string")
-        return DateTime.parse_rfc3339(value).to_rfc3339()
+        return _normalize_datetime_param_value(value, path)
     if parameter_type.variant == "Bytes":
         raise QueryError.unsupported_bytes(path)
     if parameter_type.variant == "Value":

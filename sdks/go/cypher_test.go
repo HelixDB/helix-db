@@ -192,6 +192,9 @@ func TestCypherConflictAndWarmNoContent(t *testing.T) {
 	status := http.StatusConflict
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
+		if status == http.StatusConflict {
+			_, _ = w.Write([]byte(`{"error":"transaction_conflict","msg":"retry","retryable":true}`))
+		}
 	}))
 	defer server.Close()
 	client, err := NewClient(server.URL)
@@ -392,12 +395,12 @@ func TestEmbeddedCypherPreservesNativeErrorCodeAndMessage(t *testing.T) {
 	}
 }
 
-func TestPostCypherRejectsUnknownRoute(t *testing.T) {
+func TestPostStatementRejectsUnknownRoute(t *testing.T) {
 	defer func() {
 		if recover() == nil {
 			t.Fatal("expected an unknown route to panic")
 		}
 	}()
 	client := &Client{embedded: &fakeCypherExplainDB{fakeCypherDB: fakeCypherDB{&fakeNativeDB{}}}}
-	_ = client.postCypher(context.Background(), cypherRoute("/v2/unknown"), CypherRequest{}, nil, nil)
+	_ = client.postStatement(context.Background(), statementRoute("/v2/unknown"), CypherRequest{}, nil, nil)
 }

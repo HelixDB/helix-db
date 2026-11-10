@@ -15,18 +15,21 @@ fn active_text_destination_concurrency(work_items: usize) -> NonZeroUsize {
 }
 
 pub(crate) mod active_batch;
+pub(crate) mod active_compaction;
 mod active_preflight;
-#[cfg(feature = "production-coverage")]
-pub(crate) use active_preflight::production_contracts::run as run_active_preflight_contracts;
 pub(crate) mod active_publication;
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 mod active_retirement;
-#[cfg(feature = "production-coverage")]
-pub(crate) use active_retirement::production_contracts::run as run_active_retirement_contracts;
 pub(crate) mod attachment;
 mod cleanup;
 mod compaction;
 pub(crate) mod driver;
+#[cfg(test)]
+#[path = "../../../tests/unit/text_lifecycle_rows.rs"]
+mod lifecycle_rows;
+#[cfg(test)]
+#[path = "../../../tests/unit/text_lifecycle.rs"]
+mod lifecycle_tests;
 mod manifest;
 pub(crate) mod mutation;
 mod projection;
@@ -34,7 +37,4 @@ pub(crate) mod serving;
 pub(crate) mod statistics;
 #[cfg(test)]
 mod test_support;
-#[cfg(feature = "production-coverage")]
-pub(crate) use serving::production_contracts::run as run_serving_contracts;
-pub(crate) mod active_compaction;
 mod validation;

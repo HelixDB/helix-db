@@ -211,11 +211,7 @@ async fn pending_property_admission_precedes_backend_writes_and_survives_prepara
         .unwrap();
     let storage_bytes = row.encoded().clone();
     drop(row);
-    scope
-        .index_context
-        .prepare_topology(&scope.txn)
-        .await
-        .unwrap();
+    scope.index_context.prepare_topology(&scope.txn).unwrap();
     scope
         .index_context
         .prepare_secondary(&scope.txn)
@@ -228,7 +224,11 @@ async fn pending_property_admission_precedes_backend_writes_and_survives_prepara
         before,
         "sealing runtimes retains pending property admission"
     );
-    scope.txn.commit().await.unwrap();
+    scope
+        .txn
+        .commit(crate::transaction::CommitDurability::Durable)
+        .await
+        .unwrap();
     assert!(
         budget.available() > before,
         "commit releases the completed read ledger"

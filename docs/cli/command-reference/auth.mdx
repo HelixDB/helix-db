@@ -13,7 +13,7 @@ never need it.
 ## Usage
 
 ```bash
-helix auth login
+helix auth login [github | google | microsoft | sso | password]
 helix auth status
 helix auth logout
 ```
@@ -22,9 +22,17 @@ helix auth logout
 
 | Subcommand | Description |
 | --- | --- |
-| `login` | Sign in through WorkOS in your browser and store the session. |
+| `login` | Sign in with any supported method and store the session. Asks which method when you do not name one. |
 | `status` | Verify the session and show the signed-in email and your workspaces by name. |
 | `logout` | Revoke the session when possible and delete the local credential file. |
+
+## Login methods
+
+| Method | How it signs in |
+| --- | --- |
+| `github`, `google`, `microsoft` | Continue with that provider in your browser. |
+| `sso [--email <email>]` | Single sign-on through the identity provider of your company's verified email domain, in your browser. Asks for the work email when omitted. |
+| `password [--email <email>]` | Email and password, in the terminal. Asks for the email when omitted, and always reads the password from a hidden prompt. |
 
 ## Options
 
@@ -37,8 +45,12 @@ helix auth logout
 ### Login
 
 - `login` requires an interactive terminal, so it fails with `--json`.
-- It starts WorkOS PKCE in a browser (and prints the URL in case the browser does not open), then shows a spinner while it waits for the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
-- If WorkOS requires email verification, the CLI prompts for the code.
+- Browser methods start WorkOS PKCE in a browser (and print the URL in case the browser does not open), then show a spinner while they wait for the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
+- `password` signs in with an existing account. To create an account or reset a password, use [the sign-in page](https://helix-db.com/login). It only runs when Helix Cloud is reached over HTTPS or on this machine, so a password never travels unencrypted; browser methods are not affected.
+- A login request that gets no answer fails after 60 seconds. During email verification, the CLI asks for the code again instead.
+- `--quiet` still prints what a login needs: the URL, why a code prompt repeats, and the notice before single sign-on opens a second tab.
+- If your company requires single sign-on, any method continues through its identity provider in the browser.
+- If WorkOS requires email verification, the CLI prompts for the code and accepts up to three attempts.
 - It hydrates all current workspace memberships and stores only the rotating WorkOS session in `~/.helix/credentials` (or `$HELIX_HOME/credentials`).
 
 ### Session handling
@@ -49,14 +61,19 @@ helix auth logout
 
 ### Status and logout
 
-- `status` verifies the session by listing your workspaces through the Helix Cloud API, then prints `Email` and `Workspaces` (by name).
+- `status` verifies the session by listing your workspaces through the Helix Cloud API, then prints `Email`, the number of `Workspaces`, and a table of their names and IDs, sorted by name.
 - `logout` asks the Helix Cloud API to revoke the session when possible and always deletes the local file.
 
 ## Examples
 
 ```bash
-# Sign in (opens a browser)
+# Choose how to sign in
 helix auth login
+
+# Sign in with a specific method
+helix auth login google
+helix auth login sso --email you@company.com
+helix auth login password --email you@company.com
 
 # Check who is signed in
 helix auth status

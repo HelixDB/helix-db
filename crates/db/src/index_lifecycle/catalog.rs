@@ -193,7 +193,7 @@ impl ActiveIndexHandle {
     }
 
     /// Returns the public family for production boundary contracts.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     pub(crate) const fn family(&self) -> crate::error::IndexFamily {
         match self {
             Self::Secondary { .. } => crate::error::IndexFamily::Secondary,
@@ -237,6 +237,12 @@ impl LoadedV2ScopeCatalog {
         self.runtime.insert_dynamic_index(record.definition());
         self.active.insert(record.identity().clone(), handle);
         Ok(())
+    }
+
+    /// Returns whether two loads project exactly the same Active handles.
+    #[cfg(test)]
+    pub(crate) fn same_active_handles(&self, other: &Self) -> bool {
+        self.scope == other.scope && self.active == other.active
     }
 
     /// Returns the one scope covered by this complete catalog load.

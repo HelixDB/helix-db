@@ -12,6 +12,7 @@ use slatedb::object_store::ObjectStore;
 use slatedb::{CloseReason, Db, ErrorKind, IsolationLevel};
 
 #[tokio::test]
+#[allow(clippy::disallowed_methods)] // Raw backend writes are the subject here.
 async fn newer_writer_open_fences_an_already_open_old_transaction() {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let database = "writer-fence-contract";

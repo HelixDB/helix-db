@@ -362,7 +362,8 @@ impl SlateObjectStoreCacheSettings {
             root_folder: Some(self.root.to_path_buf()),
             max_cache_size_bytes: self.max_cache_size_bytes.map(NonZeroUsize::get),
             part_size_bytes: self.part_size_bytes.get(),
-            cache_puts: self.cache_puts,
+            cache_on_flush: self.cache_puts,
+            cache_on_compaction: self.cache_puts,
             preload_disk_cache_on_startup: self.warm.to_slate_preload(),
             scan_interval: self.scan_interval,
             max_open_file_handles: self.max_open_file_handles.get(),
@@ -400,7 +401,8 @@ impl SlateObjectStoreCacheSettings {
     ///     8,
     /// )?;
     /// let reads_only = settings.clone().with_cache_puts(false);
-    /// assert!(!reads_only.to_slate_options().cache_puts);
+    /// assert!(!reads_only.to_slate_options().cache_on_flush);
+    /// assert!(!reads_only.to_slate_options().cache_on_compaction);
     /// assert_eq!(reads_only.with_cache_puts(true), settings);
     /// # Ok::<(), db::config::ConfigError>(())
     /// ```
@@ -445,6 +447,62 @@ impl SlateObjectStoreCacheSettings {
     }
 }
 
+/// Block codec of the SSTs a writer produces, WAL SSTs included.
+///
+/// Every SST records its own codec, so a database can mix SSTs written under
+/// either variant and stays readable after the setting changes; compaction
+/// rewrites older SSTs with the current codec. A binary built without zstd
+/// cannot read zstd SSTs.
+///
+/// Uncompressed is the default because every read of a block decompresses all
+/// of it. A merged index operation queue is one row, so its block can reach
+/// hundreds of megabytes, and scans do not cache blocks: concurrent readers
+/// each hold their own copy, which can exhaust memory.
+///
+/// Parses from `none` or `zstd`, in any case and ignoring surrounding
+/// whitespace.
+///
+/// # Examples
+///
+/// ```
+/// use db::config::SstCompression;
+///
+/// assert_eq!(SstCompression::default(), SstCompression::None);
+/// assert_eq!(" NONE ".parse::<SstCompression>().unwrap(), SstCompression::None);
+/// assert!("lz4".parse::<SstCompression>().is_err());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SstCompression {
+    /// Blocks are stored as encoded; the default for every profile.
+    #[default]
+    None,
+    /// Zstandard at level 3.
+    Zstd,
+}
+
+impl std::str::FromStr for SstCompression {
+    type Err = super::ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(Self::None),
+            "zstd" => Ok(Self::Zstd),
+            _ => Err(super::ConfigError::new(format!(
+                "invalid SST compression `{value}`: expected none or zstd"
+            ))),
+        }
+    }
+}
+
+impl From<SstCompression> for Option<slatedb::config::CompressionCodec> {
+    fn from(compression: SstCompression) -> Self {
+        match compression {
+            SstCompression::None => None,
+            SstCompression::Zstd => Some(slatedb::config::CompressionCodec::Zstd),
+        }
+    }
+}
+
 /// SlateDB runtime settings.
 #[derive(Debug, Clone)]
 pub struct SlateRuntimeConfig {
@@ -455,7 +513,10 @@ impl SlateRuntimeConfig {
     /// Build default SlateDB runtime settings.
     pub fn new() -> Self {
         Self {
-            runtime_settings: slatedb::Settings::default(),
+            runtime_settings: slatedb::Settings {
+                compression_codec: SstCompression::default().into(),
+                ..slatedb::Settings::default()
+            },
         }
     }
 
@@ -481,7 +542,6 @@ impl SlateRuntimeConfig {
         object_store_cache: Option<&SlateObjectStoreCacheSettings>,
     ) -> slatedb::config::DbReaderOptions {
         slatedb::config::DbReaderOptions {
-            wal_replay: self.runtime_settings.wal_replay,
             object_store_cache_options: match object_store_cache {
                 None => slatedb::config::ObjectStoreCacheOptions {
                     root_folder: None,
@@ -493,9 +553,22 @@ impl SlateRuntimeConfig {
         }
     }
 
+    /// Replace the interval between WAL uploads.
+    pub fn with_wal_flush_interval_ms(mut self, interval: NonZeroU64) -> Self {
+        self.runtime_settings.flush_interval = Some(Duration::from_millis(interval.get()));
+        self
+    }
+
     /// Replace SlateDB runtime settings.
     pub fn with_runtime_settings(mut self, settings: slatedb::Settings) -> Self {
         self.runtime_settings = settings;
+        self
+    }
+
+    /// Set the block codec of the SSTs the writer produces, leaving every other
+    /// runtime setting as it is.
+    pub fn with_sst_compression(mut self, compression: SstCompression) -> Self {
+        self.runtime_settings.compression_codec = compression.into();
         self
     }
 }

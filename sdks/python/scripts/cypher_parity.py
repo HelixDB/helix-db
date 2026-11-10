@@ -1,4 +1,4 @@
-"""Run unchanged shared Cypher fixtures through public SDK methods, without retries."""
+"""Run unchanged shared Cypher and SQL fixtures through public SDK methods, without retries."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def cases() -> list[dict]:
         )
     )
     corpus = json.loads(path.read_text(encoding="utf-8"))
-    if corpus.get("schema_version") != 1 or len(corpus["cases"]) != 16:
+    if corpus.get("schema_version") != 1 or len(corpus["cases"]) != 24:
         raise ValueError("unsupported or incomplete Cypher parity corpus")
     seen: set[str] = set()
     for case in corpus["cases"]:
@@ -31,13 +31,18 @@ def cases() -> list[dict]:
 
 def write_case(client: Client, case: dict, root: Path) -> None:
     try:
-        output = {
-            "result": client.cypher(
+        if case.get("language") == "sql":
+            result = client.sql(
                 case["query"],
-                case.get("parameters", {}),
+                case.get("parameters"),
+                mappings=case.get("mappings"),
                 query_name=case["name"],
             )
-        }
+        else:
+            result = client.cypher(
+                case["query"], case.get("parameters", {}), query_name=case["name"]
+            )
+        output = {"result": result}
     except HelixError as error:
         output = {"error": str(error), "code": error.code, "details": error.server_details}
     (root / f"{case['name']}.json").write_text(
@@ -48,13 +53,18 @@ def write_case(client: Client, case: dict, root: Path) -> None:
 
 async def write_case_async(client: AsyncClient, case: dict, root: Path) -> None:
     try:
-        output = {
-            "result": await client.cypher(
+        if case.get("language") == "sql":
+            result = await client.sql(
                 case["query"],
-                case.get("parameters", {}),
+                case.get("parameters"),
+                mappings=case.get("mappings"),
                 query_name=case["name"],
             )
-        }
+        else:
+            result = await client.cypher(
+                case["query"], case.get("parameters", {}), query_name=case["name"]
+            )
+        output = {"result": result}
     except HelixError as error:
         output = {"error": str(error), "code": error.code, "details": error.server_details}
     (root / f"{case['name']}.json").write_text(

@@ -65,6 +65,12 @@ Rust transports reuse this contract from `helix_cypher::api` (`ErrorClass`,
 `ErrorBody`, the `category` and `detail` code constants, and the route paths) and
 decode requests with `helix_cypher::request::Request`, which needs no database.
 
+## SQL translation
+
+`helix_cypher::sql` translates SQL into the same `syntax::Statement` the Cypher
+parser builds, so SQL shares binding, planning, execution and error reporting
+with Cypher. The [SQL implementation notes](sql.md) describe the translation.
+
 ## Index selection
 
 A label test in WHERE, such as `MATCH (n) WHERE n:User`, labels the node for

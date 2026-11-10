@@ -645,6 +645,8 @@ fn dedup_over_unique_lookups_adds_no_distinct_for_any_value() {
             Predicate::is_in("uid", uids(0..512)),
             Predicate::is_in("uid", uids(256..768)),
         ]),
+        // A residual over the lookup only drops rows.
+        Predicate::and(vec![Predicate::eq("uid", 7), Predicate::eq("name", "x")]),
     ] {
         let plan = executable_traversal(
             g().n_with_label_where("User", predicate.clone()).dedup(),

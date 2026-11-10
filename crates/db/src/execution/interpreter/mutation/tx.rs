@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use crate::transaction::{CommitDurability, Mutation as _};
+
 use super::super::runtime_context::{
     ActiveWriteTx, PendingCatalogFreshness, RequestWriteScopeState,
 };
@@ -98,7 +100,9 @@ impl<'db> ExecutionContext<'db> {
             None => {
                 let permit = self.db.index_catalog_scope_permit(self.tenant_scope).await;
                 self.check_execution_deadline()?;
-                self.db.refresh_runtime_catalog(self.tenant_scope).await?;
+                self.db
+                    .refresh_runtime_catalog_under(self.tenant_scope, &permit)
+                    .await?;
                 permit
             }
         };
@@ -185,6 +189,29 @@ impl<'db> ExecutionContext<'db> {
         .await
     }
 
+    /// Which of `node_ids` exist in the request transaction, for a step that
+    /// uses nothing else of their rows. See `ExistenceReads` for why this
+    /// takes no read dependency.
+    pub(in crate::execution::interpreter) async fn write_nodes_exist(
+        &self,
+        active: &ActiveWriteTx,
+        node_ids: &[u64],
+    ) -> Result<Vec<bool>> {
+        active.index_context.admit_existence_reads(node_ids.len())?;
+        let existing = self
+            .observe_node_existence(&active.txn, node_ids.iter().copied())
+            .await?;
+        active.index_context.record_existence_reads(
+            node_ids
+                .iter()
+                .map(|node_id| (*node_id, existing.contains(*node_id))),
+        );
+        Ok(node_ids
+            .iter()
+            .map(|node_id| existing.contains(*node_id))
+            .collect())
+    }
+
     /// Flushes only deferred families consumed by the next operation. Every
     /// executed step checks this, so a step needing no flush gets a ready
     /// future and the flush's large state is boxed only when it runs. Never
@@ -205,7 +232,7 @@ impl<'db> ExecutionContext<'db> {
                 return Ok(());
             };
             if required.contains(super::visibility::DeferredMutationFamily::Topology) {
-                active.index_context.flush_topology(&active.txn).await?;
+                active.index_context.flush_topology(&active.txn)?;
             }
             if required.contains(super::visibility::DeferredMutationFamily::Secondary) {
                 active.index_context.flush_secondary(&active.txn).await?;
@@ -216,7 +243,7 @@ impl<'db> ExecutionContext<'db> {
 
     /// Preserves the production-linked conservative barrier oracle.
     #[allow(dead_code)]
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(in crate::execution::interpreter) async fn flush_active_index_mutations(
         &mut self,
     ) -> Result<()> {
@@ -225,13 +252,29 @@ impl<'db> ExecutionContext<'db> {
     }
 
     /// Commits graph rows, staged index rows, and queued vector/text
-    /// operations in one durable transaction.
+    /// operations in one atomic transaction, returning as the request's
+    /// [`CommitDurability`] asks.
     ///
     /// Queued capacity is reserved for every touched index before commit and
-    /// finalized only from the commit outcome; the index worker is woken after
-    /// a durable enqueue.
+    /// finalized only from the commit outcome; the index worker is woken once
+    /// the enqueue is visible, durable or not.
+    ///
+    /// A durable commit with nothing to write has no WAL entry to wait on, yet
+    /// its response may rest on an applied write it observed. It waits for the
+    /// durable sequence to pass its snapshot, without forcing a WAL upload. That
+    /// wait commits nothing, so it stays outside the finite commit completion
+    /// and inside the request's deadline.
     pub(super) async fn commit_write_tx(&self, mut active: ActiveWriteTx) -> Result<()> {
-        active.index_context.prepare_topology(&active.txn).await?;
+        active.index_context.prepare_topology(&active.txn)?;
+        let uncovered = super::observations::RowKeys::new(
+            active
+                .index_context
+                .take_uncovered_existence_reads(self.tenant_scope),
+            super::observations::Kind::Nodes,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+        )?;
+        active.txn.mark_read(&uncovered.keys)?;
         active.index_context.prepare_secondary(&active.txn).await?;
         let staged_queue = active.index_context.finalize_queued(
             self.db.index_operand_limit(),
@@ -259,6 +302,8 @@ impl<'db> ExecutionContext<'db> {
             }
             Some(reservation)
         };
+        let durability = self.commit_durability;
+        let snapshot_sequence = txn.snapshot_sequence();
         // Commit runs in this request's task but may outlive it: a request
         // dropped mid-commit hands the rest to a spawned task, so the queue
         // reservation is always settled from the commit outcome. The
@@ -275,32 +320,50 @@ impl<'db> ExecutionContext<'db> {
             if let Some(reservation) = reservation.as_mut() {
                 reservation.begin_commit();
             }
-            if let Err(error) = txn.commit().await {
-                // Only a definite conflict proves nothing committed; any other
-                // failure keeps the capacity charged until reconciliation.
-                if let Some(reservation) = reservation {
-                    if error.kind() == slatedb::ErrorKind::Transaction {
-                        reservation.aborted();
-                    } else {
-                        reservation.uncertain();
+            let committed = match txn.commit(durability).await {
+                Ok(committed) => committed,
+                Err(error) => {
+                    // Only a definite conflict proves nothing committed; any
+                    // other failure keeps the capacity charged until
+                    // reconciliation.
+                    if let Some(reservation) = reservation {
+                        if error.kind() == slatedb::ErrorKind::Transaction {
+                            reservation.aborted();
+                        } else {
+                            reservation.uncertain();
+                        }
                     }
+                    return Err(prepared_index_context
+                        .classify_commit_error(writer.db(), error)
+                        .await);
                 }
-                return Err(prepared_index_context
-                    .classify_commit_error(writer.db(), error)
-                    .await);
-            }
+            };
+            let wrote = committed.is_some();
             let Some(reservation) = reservation else {
-                return Ok(());
+                return Ok(wrote);
             };
             reservation.committed();
             db.wake_index_worker().await;
-            Ok(())
+            Ok(wrote)
         };
         let complete = match self.row_memory.as_ref() {
             Some(budget) => futures::future::Either::Left(budget.admitted_future(complete)?),
             None => futures::future::Either::Right(complete),
         };
-        self.db.inner.commit_completions.run(complete)?.await
+        let wrote = self.db.inner.commit_completions.run(complete)?.await?;
+        if wrote || durability == CommitDurability::Applied {
+            return Ok(());
+        }
+        let crate::HelixStorage::Writer(writer) = self.db.storage() else {
+            unreachable!("a prepared write retains its original writer runtime");
+        };
+        self.execution_control
+            .run(async {
+                crate::transaction::await_durable_through(writer.db(), snapshot_sequence)
+                    .await
+                    .map_err(HelixDbError::from_storage_commit)
+            })
+            .await
     }
 }
 
@@ -700,6 +763,9 @@ mod additional_tests {
         .unwrap()
         .transition(IndexStateTransition::Activate)
         .unwrap();
+        // Publish like a real activation, under the scope's exclusive
+        // lifecycle permit, so cached planning catalogs observe it.
+        let publication = db.inner.index_scope_gates.lifecycle_permit(scope).await;
         db.inner_db()
             .put(
                 ManagedIndexKey::Data {
@@ -711,6 +777,7 @@ mod additional_tests {
             )
             .await
             .unwrap();
+        drop(publication);
 
         let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
         context.enable_request_write_scope().await.unwrap();

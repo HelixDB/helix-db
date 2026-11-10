@@ -4,8 +4,8 @@ This directory owns the build and test surface for the standalone HelixDB image.
 
 The canonical image repository is `ghcr.io/helixdb/helixdb`. The scripts require an explicit platform and image tag so local and CI runs exercise the same artifact.
 
-The next release is `ghcr.io/helixdb/helixdb:v0.0.12`, targeting Linux amd64
-and arm64. The published release remains v0.0.11 until the release workflow succeeds. See the [local server guide](../docs/database/helix-db/start-here/local-development/local-server.mdx)
+The next release is `ghcr.io/helixdb/helixdb:v0.0.15`, targeting Linux amd64
+and arm64. The published release remains v0.0.14 until the release workflow succeeds. See the [local server guide](../docs/database/helix-db/start-here/local-development/local-server.mdx)
 for release-image commands. The `local-amd64` and `local-arm64` tags below refer
 to images built from your checkout.
 
@@ -85,6 +85,17 @@ tenant partition before it fails with the retryable `index_backpressure`
 (`pending_text_analysis_bytes`). It defaults to 512 MiB (536870912) with any storage and
 also caps the analyses the server keeps for reuse. Startup fails naming it when it is not
 a positive integer.
+
+`HELIX_WAL_FLUSH_INTERVAL_MS` sets the milliseconds between WAL uploads, from 1 to 60000,
+and defaults to 100. A durable write waits for the next upload, so a lower value cuts
+write latency, and each interval with new writes costs one object-store PUT. Startup
+fails naming it when it is out of range.
+
+`HELIX_SST_COMPRESSION` sets the block codec of the SSTs the server writes, WAL SSTs
+included: `none` (the default) or `zstd`, in any case, with any storage. Every SST
+records its codec, so changing it needs no migration: existing SSTs stay readable and
+compaction rewrites them with the current codec. Images released before zstd support
+cannot read zstd SSTs. Startup fails naming it for any other value.
 
 ### Benchmark images
 

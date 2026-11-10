@@ -83,10 +83,7 @@ impl<'db> ExecutionContext<'db> {
             // shared cache rows can be observed safely.
             VectorReadVisibility::Unavailable
         } else if let Some(view) = self.request_read_view() {
-            view.comparable_sequence().map_or(
-                VectorReadVisibility::Unavailable,
-                VectorReadVisibility::Comparable,
-            )
+            VectorReadVisibility::Comparable(view.comparable_sequence())
         } else {
             VectorReadVisibility::Unavailable
         };
@@ -110,19 +107,17 @@ impl<'db> ExecutionContext<'db> {
         } else if let Some(view) = self.request_read_view() {
             index.get_metadata(&VectorReadView::snapshot(view)).await
         } else {
-            #[cfg(test)]
-            {
-                match self.db.storage() {
-                    HelixStorage::Reader(reader) => index.get_metadata(reader.as_ref()).await,
-                    HelixStorage::Writer(writer) => index.get_metadata(writer.db()).await,
-                }
-            }
-            #[cfg(not(test))]
-            {
-                Err(HelixDbError::InvariantViolation(
+            outside_request_view!(
+                relaxed: {
+                    match self.db.storage() {
+                        HelixStorage::Reader(reader) => index.get_metadata(reader.as_ref()).await,
+                        HelixStorage::Writer(writer) => index.get_metadata(writer.db()).await,
+                    }
+                },
+                closed: Err(HelixDbError::InvariantViolation(
                     "vector metadata read escaped its request read view".to_string(),
-                ))
-            }
+                )),
+            )
         }?;
         let Some(metadata) = metadata else {
             return Err(HelixDbError::InvariantViolation(
@@ -163,33 +158,31 @@ impl<'db> ExecutionContext<'db> {
                 None => index.search(&view, query, &params).await,
             }
         } else {
-            #[cfg(test)]
-            {
-                match self.db.storage() {
-                    HelixStorage::Reader(reader) => match candidates {
-                        Some(candidates) => {
-                            index
-                                .search_restricted(reader.as_ref(), query, &params, candidates)
-                                .await
-                        }
-                        None => index.search(reader.as_ref(), query, &params).await,
-                    },
-                    HelixStorage::Writer(writer) => match candidates {
-                        Some(candidates) => {
-                            index
-                                .search_restricted(writer.db(), query, &params, candidates)
-                                .await
-                        }
-                        None => index.search(writer.db(), query, &params).await,
-                    },
-                }
-            }
-            #[cfg(not(test))]
-            {
-                Err(HelixDbError::InvariantViolation(
+            outside_request_view!(
+                relaxed: {
+                    match self.db.storage() {
+                        HelixStorage::Reader(reader) => match candidates {
+                            Some(candidates) => {
+                                index
+                                    .search_restricted(reader.as_ref(), query, &params, candidates)
+                                    .await
+                            }
+                            None => index.search(reader.as_ref(), query, &params).await,
+                        },
+                        HelixStorage::Writer(writer) => match candidates {
+                            Some(candidates) => {
+                                index
+                                    .search_restricted(writer.db(), query, &params, candidates)
+                                    .await
+                            }
+                            None => index.search(writer.db(), query, &params).await,
+                        },
+                    }
+                },
+                closed: Err(HelixDbError::InvariantViolation(
                     "vector traversal escaped its request read view".to_string(),
-                ))
-            }
+                )),
+            )
         };
         let results = match results {
             Ok(results) => results,
@@ -224,21 +217,21 @@ impl<'db> ExecutionContext<'db> {
         if let Some(view) = self.request_read_view() {
             return load_text_root_in_view(view, generation).await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    load_text_root_in_view(reader.as_ref(), generation).await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        load_text_root_in_view(reader.as_ref(), generation).await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        load_text_root_in_view(writer.db(), generation).await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    load_text_root_in_view(writer.db(), generation).await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "text manifest root read escaped its request read view".to_string(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "text manifest root read escaped its request read view".to_string(),
+            )),
+        )
     }
 
     /// Loads bounded pages concurrently and searches their pruned splits.
@@ -295,41 +288,41 @@ impl<'db> ExecutionContext<'db> {
             )
             .await;
         }
-        #[cfg(test)]
-        {
-            match self.db.storage() {
-                HelixStorage::Reader(reader) => {
-                    search_text_manifest_in_view(
-                        self,
-                        reader.as_ref(),
-                        manifest,
-                        query,
-                        k,
-                        scope,
-                        statistics,
-                        demand,
-                    )
-                    .await
+        outside_request_view!(
+            relaxed: {
+                match self.db.storage() {
+                    HelixStorage::Reader(reader) => {
+                        search_text_manifest_in_view(
+                            self,
+                            reader.as_ref(),
+                            manifest,
+                            query,
+                            k,
+                            scope,
+                            statistics,
+                            demand,
+                        )
+                        .await
+                    }
+                    HelixStorage::Writer(writer) => {
+                        search_text_manifest_in_view(
+                            self,
+                            writer.db(),
+                            manifest,
+                            query,
+                            k,
+                            scope,
+                            statistics,
+                            demand,
+                        )
+                        .await
+                    }
                 }
-                HelixStorage::Writer(writer) => {
-                    search_text_manifest_in_view(
-                        self,
-                        writer.db(),
-                        manifest,
-                        query,
-                        k,
-                        scope,
-                        statistics,
-                        demand,
-                    )
-                    .await
-                }
-            }
-        }
-        #[cfg(not(test))]
-        Err(HelixDbError::InvariantViolation(
-            "text manifest search escaped its request read view".to_string(),
-        ))
+            },
+            closed: Err(HelixDbError::InvariantViolation(
+                "text manifest search escaped its request read view".to_string(),
+            )),
+        )
     }
 }
 

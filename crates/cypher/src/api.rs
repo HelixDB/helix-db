@@ -14,6 +14,12 @@ use serde::Serialize;
 pub const HTTP_PATH: &str = "/v2/cypher";
 /// Plans one statement without executing it. The body is a [`crate::request::Request`].
 pub const HTTP_EXPLAIN_PATH: &str = "/v2/cypher/explain";
+/// Translates one SQL statement to Cypher and executes it. The body is a
+/// [`crate::sql::request::Request`]; results and errors match [`HTTP_PATH`].
+pub const HTTP_SQL_PATH: &str = "/v2/sql";
+/// Translates one SQL statement and plans it without executing it, like
+/// [`HTTP_EXPLAIN_PATH`]. The body is a [`crate::sql::request::Request`].
+pub const HTTP_SQL_EXPLAIN_PATH: &str = "/v2/sql/explain";
 
 /// How a transport reports a [`QueryError`].
 ///

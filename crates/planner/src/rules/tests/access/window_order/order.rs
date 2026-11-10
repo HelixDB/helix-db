@@ -248,15 +248,61 @@ fn access_order_rule_flattens_nested_range_drivers() {
         desc_weight_order_keys(),
     );
 
-    for expr in [node_nested, edge_nested] {
+    // The nested intersection flattens into one, with the ordered range
+    // driver first and the other children in their original order.
+    let logical::AccessPath::Node(path) =
         ordered_logical_access_path(rule.apply(optimizer::RuleInput {
-            expr: &expr,
+            expr: &node_nested,
             storage: &storage,
             indexes: empty_indexes(),
             planner_limits: default_planner_limits(),
             stats: default_stats(),
-        }));
-    }
+        }))
+    else {
+        panic!("expected node access path");
+    };
+    let ir::NodeAccessPlan::Intersect(children) = path.source().as_ref() else {
+        panic!("expected node intersection");
+    };
+    assert_eq!(children.len(), 3);
+    assert!(matches!(
+        children[0].as_ref(),
+        ir::NodeAccessPlan::RangeIndex { key, .. } if key.property == "age"
+    ));
+    assert_eq!(
+        children[1..],
+        [
+            node_eq_source("User", "status", equality_literal(1)),
+            node_eq_source("User", "tenant", equality_literal(2)),
+        ]
+    );
+
+    let logical::AccessPath::Edge(path) =
+        ordered_logical_access_path(rule.apply(optimizer::RuleInput {
+            expr: &edge_nested,
+            storage: &storage,
+            indexes: empty_indexes(),
+            planner_limits: default_planner_limits(),
+            stats: default_stats(),
+        }))
+    else {
+        panic!("expected edge access path");
+    };
+    let ir::EdgeAccessPlan::Intersect(children) = path.source().as_ref() else {
+        panic!("expected edge intersection");
+    };
+    assert_eq!(children.len(), 3);
+    assert!(matches!(
+        children[0].as_ref(),
+        ir::EdgeAccessPlan::RangeIndex { key, .. } if key.property == "weight"
+    ));
+    assert_eq!(
+        children[1..],
+        [
+            edge_eq_source("FOLLOWS", "status", equality_literal(1)),
+            edge_eq_source("FOLLOWS", "tenant", equality_literal(2)),
+        ]
+    );
 }
 
 #[test]

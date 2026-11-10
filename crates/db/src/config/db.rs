@@ -288,6 +288,7 @@ impl DbConfig {
             flush_interval: Some(profile.flush_interval()),
             l0_sst_size_bytes: EMBEDDED_L0_SST_BYTES,
             max_unflushed_bytes: EMBEDDED_MAX_UNFLUSHED_BYTES,
+            compression_codec: super::SstCompression::default().into(),
             ..slatedb::Settings::default()
         };
 
@@ -496,6 +497,48 @@ impl DbConfig {
     /// Set custom SlateDB runtime settings.
     pub fn with_slate_settings(mut self, settings: slatedb::Settings) -> Self {
         self.slate = self.slate.with_runtime_settings(settings);
+        self
+    }
+
+    /// Set how often the WAL uploads, in place of SlateDB's default of 100 ms.
+    ///
+    /// A durable commit waits for the next upload, so a shorter interval lowers
+    /// write latency. Each interval with new writes costs one object-store PUT.
+    /// Later [`Self::with_slate_settings`] calls replace this.
+    ///
+    /// ```
+    /// use std::num::NonZeroU64;
+    /// use std::time::Duration;
+    ///
+    /// use db::DbConfig;
+    ///
+    /// let interval = |config: DbConfig| config.slate().to_writer_settings(None).flush_interval;
+    /// assert_eq!(interval(DbConfig::new()), Some(Duration::from_millis(100)));
+    ///
+    /// let twenty_ms = NonZeroU64::new(20).unwrap();
+    /// let config = DbConfig::new().with_wal_flush_interval_ms(twenty_ms);
+    /// assert_eq!(interval(config), Some(Duration::from_millis(20)));
+    /// ```
+    pub fn with_wal_flush_interval_ms(mut self, interval: NonZeroU64) -> Self {
+        self.slate = self.slate.with_wal_flush_interval_ms(interval);
+        self
+    }
+
+    /// Set the block codec of the SSTs a writer opened with this config
+    /// produces, WAL SSTs included. A later [`Self::with_slate_settings`]
+    /// replaces it with the codec of the settings it is given.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use db::config::{DbConfig, SstCompression};
+    ///
+    /// let codec = |config: DbConfig| config.slate().to_writer_settings(None).compression_codec;
+    /// assert!(codec(DbConfig::new()).is_none());
+    /// assert!(codec(DbConfig::new().with_sst_compression(SstCompression::Zstd)).is_some());
+    /// ```
+    pub fn with_sst_compression(mut self, compression: super::SstCompression) -> Self {
+        self.slate = self.slate.with_sst_compression(compression);
         self
     }
 

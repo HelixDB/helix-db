@@ -4,6 +4,61 @@
 //! It does not choose access paths, rewrite predicates, or infer dependencies;
 //! those are planner responsibilities encoded in the executable DAG.
 
+/// Selects how a read with no request view proceeds.
+///
+/// Every production read must run inside a request view, so non-test builds
+/// expand only `closed`, the fail-closed arm; `relaxed` is dropped unparsed by
+/// name resolution, exactly like `#[cfg(test)]` code. Unit tests may read live
+/// handles directly through `relaxed`, unless a [`StrictRequestViews`] guard is
+/// held, in which case they get the same `closed` arm production does.
+#[cfg(test)]
+macro_rules! outside_request_view {
+    (relaxed: $relaxed:block, closed: $closed:expr $(,)?) => {
+        if crate::execution::interpreter::request_views_required() {
+            $closed
+        } else {
+            $relaxed
+        }
+    };
+}
+#[cfg(not(test))]
+macro_rules! outside_request_view {
+    (relaxed: $relaxed:block, closed: $closed:expr $(,)?) => {
+        $closed
+    };
+}
+
+#[cfg(test)]
+thread_local! {
+    static STRICT_REQUEST_VIEWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Holds production's fail-closed reads outside request views on this thread.
+#[cfg(test)]
+pub(crate) struct StrictRequestViews;
+
+#[cfg(test)]
+impl StrictRequestViews {
+    /// Makes reads without a request view fail closed until the guard drops.
+    pub(crate) fn hold() -> Self {
+        STRICT_REQUEST_VIEWS.with(|strict| strict.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for StrictRequestViews {
+    fn drop(&mut self) {
+        STRICT_REQUEST_VIEWS.with(|strict| strict.set(false));
+    }
+}
+
+/// Whether reads without a request view fail closed on this thread.
+#[cfg(test)]
+pub(crate) fn request_views_required() -> bool {
+    STRICT_REQUEST_VIEWS.with(std::cell::Cell::get)
+}
+
 mod access;
 mod control;
 mod count;
@@ -25,14 +80,23 @@ mod state;
 mod storage;
 mod stream;
 mod subplan;
-#[cfg(any(test, feature = "production-coverage"))]
-#[cfg_attr(all(feature = "production-coverage", not(test)), allow(dead_code))]
+#[cfg(test)]
 mod test_support;
 mod types;
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../tests/production_support/interpreter_contracts.rs"]
-pub mod production_contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/interpreter_contracts.rs"]
+mod contract_tests;
+#[cfg(any(
+    test,
+    all(feature = "bench-internals", feature = "index-lifecycle-testing")
+))]
+mod text_fixtures;
+#[cfg(all(
+    feature = "index-lifecycle-testing",
+    any(test, feature = "bench-internals")
+))]
+pub(crate) mod text_transaction_benchmark;
 
 pub use types::{
     ElementRef, ExecutionResult, ExecutionRow, ExecutionScalar, ExecutionValue, FoldedStream,
@@ -53,12 +117,6 @@ use crate::encoding::property::Property;
 use crate::encoding::v2::values;
 use crate::error::{HelixDbError, Result};
 use crate::HelixDB;
-
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) async fn run_cardinality_production_contracts() {
-    access::run_production_contracts().await;
-    count::run_production_contracts().await;
-}
 
 /// Step-by-step executor for planner executable IR.
 pub struct Interpreter<'db> {
@@ -137,6 +195,17 @@ impl<'db> Interpreter<'db> {
         consistency: helix_ast::query::SearchConsistency,
     ) -> Self {
         self.ctx.search_consistency = consistency;
+        self
+    }
+
+    /// Selects when this request's graph commits return.
+    ///
+    /// Reads never commit, and index DDL always commits durably.
+    pub(crate) const fn with_commit_durability(
+        mut self,
+        durability: crate::transaction::CommitDurability,
+    ) -> Self {
+        self.ctx.commit_durability = durability;
         self
     }
 

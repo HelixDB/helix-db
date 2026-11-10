@@ -233,11 +233,13 @@ create a binding.
 
 ## Conflicts And Retries
 
-`Client.Exec` does not retry HTTP 409 conflicts automatically. Callers should
-retry only when the operation is safe to replay. Remote errors are returned as
-`*helix.HelixError` with `StatusCode` and the static `Code` populated. Use
-`helix.IsConflict(err)` or `errors.Is(err, helix.ErrConflict)` to detect HTTP
-409:
+`Client.Exec` does not retry transaction conflicts automatically. Callers
+should retry only when the operation is safe to replay. Remote errors are
+returned as `*helix.HelixError` with `StatusCode` and the static `Code`
+populated. Use `helix.IsConflict(err)` or `errors.Is(err, helix.ErrConflict)` to
+detect a `transaction_conflict`. HTTP 409 also reports conflicts with the
+database's state, such as `unique_constraint_violation` (`retryable: false`),
+which fail again when resent, so they do not match `ErrConflict`:
 
 The canonical [query error-code reference](../../docs/database/helix-db/query-guides/error-handling.mdx)
 documents the complete catalog and migration contract.
@@ -329,9 +331,29 @@ If a warm read returns `204 No Content`, `Cypher` returns an empty
 `*HelixError` with `Code` set to its lower snake case category, such as
 `syntax_error`, `Details` to its message, and `ServerDetails` to the raw
 `{"detail","phase","span"}` JSON. Embedded clients set `Code` to
-`category:phase:detail`, such as `syntax_error:compile:undefined_variable`. HTTP 409 matches
-`ErrConflict`, as it does for `Exec`.
+`category:phase:detail`, such as `syntax_error:compile:undefined_variable`. A
+`transaction_conflict` matches `ErrConflict`, as it does for `Exec`.
 
 Embedded clients reject options with `ErrorInvalidRequest`, as `Exec` does.
 `ExplainCypher` returns `ErrorEmbeddedUnavailable` when the linked native
 bindings predate Cypher explain support.
+
+## SQL
+
+`Client.SQL` translates one SQL statement to Cypher and posts it to `/v2/sql`;
+`Client.ExplainSQL` plans it through `/v2/sql/explain`. `Args` bind each `?` in
+order and `Parameters` bind `:name`, `$name` and `@name`; set at most one.
+`Mappings` renames tables and join columns. Results, options and errors are
+those of the Cypher methods. See the [SQL guide](https://docs.helix-db.com/database/helix-db/query-guides/sql).
+
+```go
+result, err := client.SQL(ctx, helix.SQLRequest{
+	Query:    "SELECT u.name AS name FROM people u WHERE u.age >= ?",
+	Args:     []any{30},
+	Mappings: helix.SQLMappings{Tables: map[string]string{"people": "User"}},
+})
+plan, err := client.ExplainSQL(ctx, helix.SQLRequest{
+	Query:      "INSERT INTO User (name) VALUES (:name)",
+	Parameters: map[string]any{"name": "Ada"},
+})
+```

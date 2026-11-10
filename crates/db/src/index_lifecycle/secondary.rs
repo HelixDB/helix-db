@@ -12,7 +12,8 @@
 //! admits each call as one bounded physical batch before these functions touch
 //! storage.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(test)]
 use std::num::NonZeroU64;
 use std::ops::Bound;
 use std::sync::Arc;
@@ -21,10 +22,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use slatedb::{DbReadOps, DbTransaction};
 
-use crate::config::{
-    IndexLifecycleScanTuning, RangeIndexDirection, SearchIndexBatchLimits,
-    SecondaryIndexLifecycleCatchUpTailDelayMillis,
-};
+use crate::config::{IndexLifecycleScanTuning, RangeIndexDirection, SearchIndexBatchLimits};
 use crate::encoding::indexes::range::RangeIndexDirection as StorageRangeIndexDirection;
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::Property;
@@ -65,27 +63,21 @@ use crate::index_lifecycle::work::{
     AppliedEntityStateValue, AppliedFamilyState, CoalescedBuildDeltaState,
     CoalescedBuildDeltaValue, SecondaryEntryValue,
 };
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 use crate::index_lifecycle::IndexStateV2;
 use crate::index_lifecycle::{
     ActiveIndexHandle, BuildOperationOutcome, IndexCursor, IndexElementKind, IndexEntityId,
-    IndexGenerationId, IndexId, IndexOperationBlocker, IndexOperationFamily, IndexOperationOutcome,
-    IndexOperationProgress, IndexOperationRecord, IndexRecordV2, NoCursorProgress,
-    OperationCounters, PrefixScanProgress, SecondaryBuildProgress, SecondaryBuildStage,
-    SecondaryCleanupProgress, SourceScanProgress, ValidatedDynamicIndexDefinition,
-    ValidatedSecondaryIndexDefinition,
+    IndexGenerationId, IndexId, IndexOperationBlocker, IndexOperationFamily, IndexOperationId,
+    IndexOperationOutcome, IndexOperationProgress, IndexOperationRecord, IndexRecordV2,
+    NoCursorProgress, OperationCounters, PrefixScanProgress, SecondaryBuildProgress,
+    SecondaryBuildStage, SecondaryCleanupProgress, SourceScanProgress,
+    ValidatedDynamicIndexDefinition, ValidatedSecondaryIndexDefinition,
 };
 
-use super::IndexScopeGates;
+use super::{IndexScopeGates, StepGate};
 
 mod exact;
 pub(crate) use exact::lookup_active_unique_equality_batch_admitted;
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) use exact::run_production_contracts as run_exact_production_contracts;
 #[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) use exact::scan_active_range_generation_with_membership;
 pub(crate) use exact::{
@@ -99,54 +91,92 @@ pub(crate) use exact::{
     lookup_active_equality_literal_batch, lookup_active_equality_point_literal,
 };
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) mod hot_path_benchmark;
+#[cfg(any(test, feature = "bench-internals"))]
 mod metrics;
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
+pub(crate) use metrics::SecondaryEqualityReadMetrics;
+#[cfg(any(test, feature = "bench-internals"))]
 pub(crate) use metrics::{
     equality_read_metrics, reset_equality_read_metrics, EqualityReadObserver,
-    SecondaryEqualityReadMetrics,
 };
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(any(test, feature = "bench-internals"))]
 use metrics::{record, ReadKind};
 
 /// Records one logical point read issued by the complete equality-serving path.
 #[inline]
 pub(crate) fn record_equality_point_read() {
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     record(ReadKind::Point);
 }
 
 /// Family driver sharing the lifecycle scope gate.
 pub(crate) struct SecondaryIndexDriver {
     scope_gates: Arc<IndexScopeGates>,
-    catch_up_tail_delay_millis: NonZeroU64,
     scan_tuning: IndexLifecycleScanTuning,
+    /// Consecutive preparations of each operation's scan or validation that
+    /// found its cursor where the previous one left it, with that cursor.
+    stalled_preparations: parking_lot::Mutex<HashMap<IndexOperationId, (Option<IndexCursor>, u32)>>,
 }
+
+/// Unfenced preparations without progress before a scan or validation step
+/// fences writers.
+///
+/// A unique scan conflicts with every claiming write to an entity of its
+/// batch (see [`claim_while_building`]), and a validation batch with every
+/// write to an entity it releases, so writes that keep hitting one batch,
+/// such as a hot row, could otherwise stop either forever. Validation also
+/// makes no progress while writes keep the backlog beyond
+/// [`GATED_BACKLOG_BATCHES`] faster than exact drains reduce it. The fenced
+/// preparation handles one batch with writers excluded (validation first
+/// drains the whole backlog), so the build always advances, and its stall is
+/// bounded by one batch plus what this many preparations let accumulate.
+const PREPARATIONS_BEFORE_FENCE: u32 = 8;
 
 impl core::fmt::Debug for SecondaryIndexDriver {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("SecondaryIndexDriver")
-            .field(
-                "catch_up_tail_delay_millis",
-                &self.catch_up_tail_delay_millis,
-            )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl SecondaryIndexDriver {
     /// Installs secondary lifecycle work against the mutation authority.
-    pub(crate) fn with_catch_up_delay(
-        scope_gates: Arc<IndexScopeGates>,
-        catch_up_tail_delay_millis: SecondaryIndexLifecycleCatchUpTailDelayMillis,
-    ) -> Self {
+    pub(crate) fn new(scope_gates: Arc<IndexScopeGates>) -> Self {
         Self {
             scope_gates,
-            catch_up_tail_delay_millis: NonZeroU64::new(catch_up_tail_delay_millis.get())
-                .expect("validated catch-up tail delay is positive"),
             scan_tuning: IndexLifecycleScanTuning::default(),
+            stalled_preparations: parking_lot::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Records one preparation at `cursor` and returns whether more than
+    /// [`PREPARATIONS_BEFORE_FENCE`] consecutive preparations found the cursor
+    /// unmoved, so this one must fence writers.
+    fn preparation_stalled(
+        &self,
+        operation: &IndexOperationRecord,
+        cursor: &Option<IndexCursor>,
+    ) -> bool {
+        let mut stalled = self.stalled_preparations.lock();
+        let entry = stalled
+            .entry(operation.operation_id())
+            .or_insert_with(|| (cursor.clone(), 0));
+        if entry.0 != *cursor {
+            *entry = (cursor.clone(), 0);
+        }
+        entry.1 = entry.1.saturating_add(1);
+        entry.1 > PREPARATIONS_BEFORE_FENCE
+    }
+
+    /// Forgets an operation's stall count once it leaves the stages that keep
+    /// one.
+    fn reset_stalled_preparations(&self, operation: &IndexOperationRecord) {
+        self.stalled_preparations
+            .lock()
+            .remove(&operation.operation_id());
     }
 
     /// Applies runtime source-scan prefetching without admitting blocks to cache.
@@ -154,36 +184,36 @@ impl SecondaryIndexDriver {
         self.scan_tuning = scan_tuning;
         self
     }
-
-    /// Creates an isolated family driver for unit tests.
-    #[cfg(test)]
-    fn new(scope_gates: Arc<IndexScopeGates>) -> Self {
-        Self::with_catch_up_delay(
-            scope_gates,
-            SecondaryIndexLifecycleCatchUpTailDelayMillis::new(1)
-                .expect("test catch-up delay is positive"),
-        )
-    }
 }
 
-/// Bounded advisory delta selection consumed by one repository transaction.
+/// Work prepared before one secondary step's repository transaction opens.
 pub(crate) struct PreparedSecondaryOperationStep {
-    catch_up: PreparedSecondaryCatchUp,
+    step: PreparedSecondaryStep,
 }
 
-enum PreparedSecondaryCatchUp {
-    /// Exact durable delta keys selected without adding an SSI range read.
-    Exact {
-        keys: Vec<IndexEntityStateKey>,
-        observed_prefix_exhausted: bool,
-        tail_delay_millis: NonZeroU64,
+enum PreparedSecondaryStep {
+    /// A catch-up or validation backlog beyond [`GATED_BACKLOG_BATCHES`]:
+    /// exact durable delta keys selected without adding an SSI range read,
+    /// reconciled while writes continue.
+    Exact { keys: Vec<IndexEntityStateKey> },
+    /// One validation batch whose applied-state keys were observed before its
+    /// transaction opened, with the counters it continues from. It fences
+    /// writers only once validation stalls (see [`PREPARATIONS_BEFORE_FENCE`]).
+    Validate {
+        counters: OperationCounters,
+        batch: ObservedValidationBatch,
     },
-    /// Empty advisory scan; the retained exclusive permit authorizes a final scan.
-    FinalBarrier,
+    /// A catch-up or activation step that fences the scope's writers:
+    /// catch-up holds the write fence, activation the lifecycle permit.
+    /// Bounded drains committed under that permit left the
+    /// prefix empty, or headed by the entity one blocked on, so the step's
+    /// own drain reaches the end of the prefix or blocks on that entity;
+    /// `counters` include their work.
+    Gated { counters: OperationCounters },
 }
 
 impl PreparedSecondaryOperationStep {
-    /// Stages the prepared exact-key batch or exclusive empty-prefix barrier.
+    /// Stages the prepared exact-key batch or gated step.
     pub(crate) async fn stage(
         &self,
         transaction: &impl crate::transaction::Mutation,
@@ -197,36 +227,82 @@ impl PreparedSecondaryOperationStep {
                 "prepared secondary operation loaded another family",
             ));
         };
-        let IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
-            SecondaryBuildStage::CatchUp(progress),
-        )) = operation.progress()
+        let IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(stage)) =
+            operation.progress()
         else {
             return Err(corruption(
-                "prepared secondary catch-up received another operation stage",
+                "prepared secondary step received another operation stage",
             ));
         };
-        let result = match &self.catch_up {
-            PreparedSecondaryCatchUp::Exact {
-                keys,
-                observed_prefix_exhausted,
-                tail_delay_millis,
-            } => {
+        let result = match (&self.step, stage) {
+            (PreparedSecondaryStep::Exact { keys }, SecondaryBuildStage::CatchUp(progress)) => {
                 catch_up_exact(
                     transaction,
                     scope,
                     operation,
                     definition,
-                    progress,
+                    progress.counters,
+                    ExactDrain::CatchUp,
                     limits,
                     keys,
-                    *observed_prefix_exhausted,
-                    *tail_delay_millis,
                 )
                 .await
             }
-            PreparedSecondaryCatchUp::FinalBarrier => {
-                catch_up(transaction, scope, operation, definition, progress, limits).await
+            (PreparedSecondaryStep::Exact { keys }, SecondaryBuildStage::Validate(progress)) => {
+                catch_up_exact(
+                    transaction,
+                    scope,
+                    operation,
+                    definition,
+                    progress.counters,
+                    ExactDrain::Validation(progress.cursor.as_ref()),
+                    limits,
+                    keys,
+                )
+                .await
             }
+            (PreparedSecondaryStep::Gated { counters }, SecondaryBuildStage::CatchUp(progress)) => {
+                let progress = PrefixScanProgress {
+                    cursor: progress.cursor.clone(),
+                    counters: *counters,
+                };
+                catch_up(transaction, scope, operation, definition, &progress, limits).await
+            }
+            (
+                PreparedSecondaryStep::Validate { counters, batch },
+                SecondaryBuildStage::Validate(progress),
+            ) => {
+                validate_observed_batch(
+                    transaction,
+                    scope,
+                    operation,
+                    definition,
+                    progress.cursor.clone(),
+                    *counters,
+                    limits,
+                    batch,
+                )
+                .await
+            }
+            (PreparedSecondaryStep::Gated { counters }, SecondaryBuildStage::Activate(_)) => {
+                activate(transaction, scope, operation, definition, *counters, limits).await
+            }
+            (
+                PreparedSecondaryStep::Exact { .. },
+                SecondaryBuildStage::Scan(_) | SecondaryBuildStage::Activate(_),
+            )
+            | (
+                PreparedSecondaryStep::Gated { .. },
+                SecondaryBuildStage::Scan(_) | SecondaryBuildStage::Validate(_),
+            )
+            | (
+                PreparedSecondaryStep::Validate { .. },
+                SecondaryBuildStage::Scan(_)
+                | SecondaryBuildStage::CatchUp(_)
+                | SecondaryBuildStage::Activate(_),
+            ) => Err(corruption(
+                "prepared secondary step received another build stage",
+            )),
         }?;
         Ok(IndexOperationStepExecution::new(result))
     }
@@ -377,23 +453,28 @@ impl SecondaryMutationRuntime {
                 .targets
                 .get(change.target)
                 .ok_or_else(|| corruption("pending secondary mutation lost its catalog target"))?;
-            if !matches!(target.mode, SecondaryMutationMode::MaintainActive)
-                || !target.definition.unique()
-            {
+            // Active unique generations and building ones both enforce
+            // uniqueness at write time; see `claim_while_building`.
+            if !target.definition.unique() {
                 continue;
             }
             for value in [change.old_value.as_ref(), change.new_value.as_ref()]
                 .into_iter()
                 .flatten()
             {
-                unique_keys.push(secondary_entry_key(
+                let key = secondary_entry_key(
                     change.scope,
                     target.index_id,
                     target.generation,
                     &target.definition,
                     value.clone(),
                     change.entity.id,
-                )?);
+                )?;
+                // A building generation's previous value may be one whose
+                // entry storage could never write; it holds no claim.
+                if key.len() <= STORAGE_KEY_MAX_LEN {
+                    unique_keys.push(key);
+                }
             }
         }
         unique_keys.sort_unstable();
@@ -415,6 +496,18 @@ impl SecondaryMutationRuntime {
                 .get(change.target)
                 .ok_or_else(|| corruption("pending secondary mutation lost its catalog target"))?;
             match target.mode {
+                SecondaryMutationMode::RecordBuildDelta if target.definition.unique() => {
+                    claim_while_building(
+                        transaction,
+                        change.scope,
+                        target,
+                        change.entity,
+                        change.old_value,
+                        change.new_value,
+                        &mut unique_overlay,
+                    )
+                    .await?;
+                }
                 SecondaryMutationMode::RecordBuildDelta => {
                     stage_secondary_build_delta(
                         transaction,
@@ -469,7 +562,7 @@ impl SecondaryMutationRuntime {
                 }
             }
         }
-        stage_bitmap_changes(transaction, &bitmap_changes).await?;
+        stage_bitmap_changes(transaction, &bitmap_changes)?;
         Ok(())
     }
 
@@ -550,11 +643,7 @@ impl SecondaryMutationSet {
 /// The scan belongs to the caller's serializable graph transaction. Canonical
 /// rows read here therefore conflict with a concurrent activate/drop revision,
 /// and `Aborting`/`Dropping` generations cannot accidentally receive new work.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn load_mutation_set(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
@@ -614,11 +703,7 @@ pub(crate) async fn load_mutation_set(
 /// `before` and `after` are complete authoritative property sets. Passing both
 /// makes label moves, property deletion, and entity deletion the same closed
 /// operation instead of separate optional flags.
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn maintain_entity(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
@@ -664,10 +749,234 @@ pub(crate) async fn maintain_entity(
                     kind: entity_kind,
                     id: entity_id,
                 };
-                stage_secondary_build_delta(transaction, scope, target, entity, old_value).await?;
+                if target.definition.unique() {
+                    let mut keys = Vec::new();
+                    for value in [old_value.as_ref(), new_value.as_ref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        let key = secondary_entry_key(
+                            scope,
+                            target.index_id,
+                            target.generation,
+                            &target.definition,
+                            value.clone(),
+                            entity_id,
+                        )?;
+                        if key.len() <= STORAGE_KEY_MAX_LEN {
+                            keys.push(key);
+                        }
+                    }
+                    keys.sort_unstable();
+                    keys.dedup();
+                    let values = transaction.multi_get(&keys).await?;
+                    let mut overlay = keys.into_iter().zip(values).collect();
+                    claim_while_building(
+                        transaction,
+                        scope,
+                        target,
+                        entity,
+                        old_value,
+                        new_value,
+                        &mut overlay,
+                    )
+                    .await?;
+                } else {
+                    stage_secondary_build_delta(transaction, scope, target, entity, old_value)
+                        .await?;
+                }
             }
         }
     }
+    Ok(())
+}
+
+/// Keeps a building unique generation's claims current for one write, so a
+/// duplicate fails when it is written rather than blocking the build later.
+///
+/// A claim is the generation's ordinary unique entry, so activation needs no
+/// conversion. The write leaves the generation holding exactly the entity's
+/// new value: it releases every entry the entity's lifecycle rows say it may
+/// hold (the old value, its delta's before-image, its applied-state row's
+/// value) where the entry names it, deletes that applied-state row, claims
+/// the new value, and records the new value as the delta's before-image.
+/// Catch-up then reconciles the entity from a before-image that is exactly
+/// what the generation holds, and so does a binary that predates claims,
+/// which never writes entries itself: rolling back cannot leave a claim no
+/// delta accounts for.
+///
+/// Another entity's entry on the new value rejects the write only while that
+/// entity's authoritative row, read through this transaction, still holds
+/// the value. An owner that moved away left a stale claim, which this write
+/// takes over, deleting the owner's applied-state row as a build step's
+/// takeover does; the owner's pending delta then reconciles it. Every row the
+/// write decides on is read through the transaction, and the entity's
+/// applied-state row, which every step that reconciles the entity reads, is
+/// always written, so a racing write or build step makes one of them retry. A value held only by
+/// an entity the build has not scanned yet has no entry to find; the build
+/// blocks on that duplicate when its scan reaches the entity.
+async fn claim_while_building(
+    transaction: &impl crate::transaction::Mutation,
+    scope: DataScope,
+    target: &SecondaryMutationTarget,
+    entity: IndexEntity,
+    old_value: Option<CanonicalSecondaryValue>,
+    new_value: Option<CanonicalSecondaryValue>,
+    unique_overlay: &mut BTreeMap<Bytes, Option<Bytes>>,
+) -> Result<()> {
+    assert!(
+        target.definition.unique(),
+        "only unique generations take claims while building"
+    );
+    let lane = definition_lane(&target.definition);
+    let state_key = |entity| IndexEntityStateKey {
+        index_id: target.index_id,
+        generation: target.generation,
+        entity,
+    };
+    let owner_of = |observed: &Option<Bytes>| {
+        observed
+            .as_ref()
+            .map(|value| {
+                decode_secondary_entry_value(target.index_id, target.generation, lane, value)
+            })
+            .transpose()
+    };
+    let delta_key = scoped_index_key(scope, ScopedKey::BuildDelta(state_key(entity)));
+    let recorded = match transaction.get(&delta_key).await? {
+        Some(existing) => match decode_delta(scope, &delta_key, &existing)?.1.state {
+            CoalescedBuildDeltaState::SecondaryBefore(before) => before,
+            CoalescedBuildDeltaState::Marker => None,
+            CoalescedBuildDeltaState::VectorBefore(_) => {
+                return Err(corruption(
+                    "secondary build delta contains vector recovery state",
+                ));
+            }
+        },
+        None => None,
+    };
+    let applied_key = scoped_index_key(scope, ScopedKey::AppliedState(state_key(entity)));
+    let applied = match transaction.get(&applied_key).await? {
+        Some(row) => {
+            let (_, applied) = decode_applied(scope, &applied_key, &row)?;
+            let AppliedFamilyState::Secondary(value) = applied.state else {
+                return Err(corruption(
+                    "secondary applied state contains another family's value",
+                ));
+            };
+            value
+        }
+        None => None,
+    };
+    // Deleted even when absent: every build step that gives the entity an
+    // entry reads this row through its transaction, so a step that read the
+    // entity's source before this write commits conflicts on the delete
+    // instead of recording a value this write already released.
+    transaction.delete(applied_key)?;
+    let mut released = Vec::with_capacity(3);
+    for value in [old_value, recorded, applied].into_iter().flatten() {
+        if released.contains(&value) {
+            continue;
+        }
+        let key = secondary_entry_key(
+            scope,
+            target.index_id,
+            target.generation,
+            &target.definition,
+            value.clone(),
+            entity.id,
+        )?;
+        released.push(value);
+        if key.len() > STORAGE_KEY_MAX_LEN {
+            continue;
+        }
+        let observed = match unique_overlay.get(&key) {
+            Some(observed) => observed.clone(),
+            None => transaction.get(&key).await?,
+        };
+        if owner_of(&observed)? == Some(entity.id) {
+            transaction.delete(key.clone())?;
+            unique_overlay.insert(key, None);
+        } else {
+            unique_overlay.insert(key, observed);
+        }
+    }
+    'claim: {
+        let Some(new_value) = new_value.as_ref() else {
+            break 'claim;
+        };
+        let key = secondary_entry_key(
+            scope,
+            target.index_id,
+            target.generation,
+            &target.definition,
+            new_value.clone(),
+            entity.id,
+        )?;
+        let owner = owner_of(unique_overlay.get(&key).ok_or_else(|| {
+            corruption("building unique claim was not included in its observation batch")
+        })?)?;
+        'verify_owner: {
+            let Some(owner) = owner.filter(|owner| *owner != entity.id) else {
+                break 'verify_owner;
+            };
+            let owner_entity = IndexEntity {
+                kind: entity.kind,
+                id: owner,
+            };
+            let owner_value =
+                read_authoritative_properties(transaction, scope, &target.definition, owner_entity)
+                    .await?
+                    .and_then(|properties| {
+                        canonical_value(&target.definition, &properties, owner)
+                            .ok()
+                            .flatten()
+                    });
+            if owner_value.as_ref() == Some(new_value) {
+                return Err(HelixDbError::UniqueConstraintViolation {
+                    label: target.definition.label().as_str().to_string(),
+                    property: target.definition.property().as_str().to_string(),
+                    value: "<hashed secondary value>".to_string(),
+                    existing_node_id: owner.get(),
+                    attempted_node_id: entity.id.get(),
+                });
+            }
+            // Every write that moves a claimed or reconciled entity records
+            // a delta, so a stale claim always has one pending.
+            if transaction
+                .get(scoped_index_key(
+                    scope,
+                    ScopedKey::BuildDelta(state_key(owner_entity)),
+                ))
+                .await?
+                .is_none()
+            {
+                return Err(corruption(
+                    "a unique secondary owner left its value without a pending delta",
+                ));
+            }
+            transaction.delete(scoped_index_key(
+                scope,
+                ScopedKey::AppliedState(state_key(owner_entity)),
+            ))?;
+        }
+        let value = encode_secondary_entry(&SecondaryEntryValue {
+            index_id: target.index_id,
+            generation: target.generation,
+            lane,
+            entity_id: entity.id,
+        });
+        transaction.put(key.clone(), value.clone())?;
+        unique_overlay.insert(key, Some(value));
+    }
+    let value = CoalescedBuildDeltaValue {
+        index_id: target.index_id,
+        generation: target.generation,
+        entity_kind: entity.kind,
+        entity_id: entity.id,
+        state: CoalescedBuildDeltaState::SecondaryBefore(new_value),
+    };
+    transaction.put(delta_key, encode_build_delta(&value))?;
     Ok(())
 }
 
@@ -728,19 +1037,44 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
-        let needs_exclusive = matches!(
-            operation.progress(),
-            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
-                SecondaryBuildStage::Validate(_) | SecondaryBuildStage::Activate(_)
-            )) | IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(_))
-                | IndexOperationProgress::SecondaryCleanup(_)
-        );
-        if needs_exclusive {
-            return Ok(Box::new(self.scope_gates.lifecycle_permit(scope).await));
-        }
-        Ok(Box::new(()))
+        let gate = match operation.progress() {
+            // Constructing builds take their permit in `prepare_step`.
+            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(_)) => {
+                StepGate::None
+            }
+            // Abort and cleanup delete rows of a generation that is not
+            // Active: writers stay fenced, planning continues.
+            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(_))
+            | IndexOperationProgress::SecondaryCleanup(_) => StepGate::WriteFence,
+            IndexOperationProgress::VectorBuild(_)
+            | IndexOperationProgress::TextBuild(_)
+            | IndexOperationProgress::VectorCleanup(_)
+            | IndexOperationProgress::TextCleanup(_) => {
+                return Err(corruption(
+                    "secondary driver received another family progress",
+                ));
+            }
+        };
+        Ok(self.scope_gates.step_permit(scope, gate).await)
     }
 
+    /// Prepares one build step with the narrowest coordination it needs.
+    ///
+    /// Scan coordinates through its own transaction. Catch-up and activation
+    /// must end with the delta prefix empty, so once the backlog is within
+    /// [`GATED_BACKLOG_BATCHES`] they fence writers and drain what the writes
+    /// they waited for left behind before the step's own transaction opens;
+    /// activation always does. Validation only keeps the backlog within that
+    /// reach while it releases rows without fencing anyone, and fences writers
+    /// for one batch once it stops making progress (see
+    /// [`PREPARATIONS_BEFORE_FENCE`]). Only activation takes the
+    /// catalog gate: no other step changes the Active index set, so planning
+    /// and reads continue through them.
+    ///
+    /// A larger catch-up or validation backlog is reconciled by exact keys
+    /// while writes continue. Catch-up observes it before the gate and again
+    /// once the gate is held, so a catch-up step never stalls writers for more
+    /// than that reach.
     async fn prepare_step(
         &self,
         db: &slatedb::Db,
@@ -748,38 +1082,133 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         operation: &IndexOperationRecord,
         limits: SearchIndexBatchLimits,
     ) -> Result<PreparedIndexOperationStep> {
-        if matches!(
-            operation.progress(),
-            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
-                SecondaryBuildStage::CatchUp(_)
-            ))
-        ) {
-            let prepared = prepare_secondary_catch_up(
-                db,
-                scope,
-                operation,
-                limits,
-                self.catch_up_tail_delay_millis,
+        let IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(stage)) =
+            operation.progress()
+        else {
+            self.reset_stalled_preparations(operation);
+            let permit = self.acquire_step_permit(scope, operation).await?;
+            return Ok(PreparedIndexOperationStep::driver_owned(
+                self.family(),
+                permit,
+            ));
+        };
+        let exact = |keys| {
+            PreparedIndexOperationStep::secondary(
+                Box::new(()),
+                PreparedSecondaryOperationStep {
+                    step: PreparedSecondaryStep::Exact { keys },
+                },
             )
-            .await?;
-            let permit: Box<dyn IndexOperationStepPermit> = match &prepared.catch_up {
-                PreparedSecondaryCatchUp::Exact { .. } => Box::new(()),
-                PreparedSecondaryCatchUp::FinalBarrier => {
-                    Box::new(self.scope_gates.lifecycle_permit(scope).await)
-                }
-            };
-            return Ok(PreparedIndexOperationStep::secondary(permit, prepared));
+        };
+        // Only scan and validation keep a stall count.
+        if matches!(
+            stage,
+            SecondaryBuildStage::CatchUp(_) | SecondaryBuildStage::Activate(_)
+        ) {
+            self.reset_stalled_preparations(operation);
         }
-        let permit = self.acquire_step_permit(scope, operation).await?;
-        Ok(PreparedIndexOperationStep::driver_owned(
-            self.family(),
-            permit,
-        ))
+        let (counters, disposition, gate) = match stage {
+            SecondaryBuildStage::Scan(progress) => {
+                let gate = if self.preparation_stalled(operation, &progress.cursor) {
+                    StepGate::WriteFence
+                } else {
+                    StepGate::None
+                };
+                return Ok(PreparedIndexOperationStep::driver_owned(
+                    self.family(),
+                    self.scope_gates.step_permit(scope, gate).await,
+                ));
+            }
+            SecondaryBuildStage::CatchUp(progress) => {
+                match observe_backlog(db, scope, operation, limits).await? {
+                    Some(keys) => return Ok(exact(keys)),
+                    None => (
+                        progress.counters,
+                        AppliedStateDisposition::Retain,
+                        StepGate::WriteFence,
+                    ),
+                }
+            }
+            SecondaryBuildStage::Validate(progress) => {
+                if self.preparation_stalled(operation, &progress.cursor) {
+                    (
+                        progress.counters,
+                        AppliedStateDisposition::Release,
+                        StepGate::WriteFence,
+                    )
+                } else {
+                    let Some(keys) = observe_backlog(db, scope, operation, limits).await? else {
+                        let batch = observe_validation_batch(
+                            db,
+                            scope,
+                            operation,
+                            progress.cursor.as_ref(),
+                            limits,
+                        )
+                        .await?;
+                        return Ok(PreparedIndexOperationStep::secondary(
+                            Box::new(()),
+                            PreparedSecondaryOperationStep {
+                                step: PreparedSecondaryStep::Validate {
+                                    counters: progress.counters,
+                                    batch,
+                                },
+                            },
+                        ));
+                    };
+                    return Ok(exact(keys));
+                }
+            }
+            SecondaryBuildStage::Activate(progress) => (
+                progress.counters,
+                AppliedStateDisposition::Release,
+                StepGate::Lifecycle,
+            ),
+        };
+        let permit = self.scope_gates.step_permit(scope, gate).await;
+        // Writes that committed while the permit was awaited may have taken
+        // a catch-up backlog past the gated reach. A stalled validation and
+        // activation drain it regardless: they fence writers to finish.
+        let regrown = match stage {
+            SecondaryBuildStage::CatchUp(_) => {
+                observe_backlog(db, scope, operation, limits).await?
+            }
+            SecondaryBuildStage::Scan(_)
+            | SecondaryBuildStage::Validate(_)
+            | SecondaryBuildStage::Activate(_) => None,
+        };
+        let Some(keys) = regrown else {
+            let counters =
+                drain_backlog_under_gate(db, scope, operation, counters, limits, disposition)
+                    .await?;
+            let step = match stage {
+                SecondaryBuildStage::Validate(progress) => PreparedSecondaryStep::Validate {
+                    counters,
+                    batch: observe_validation_batch(
+                        db,
+                        scope,
+                        operation,
+                        progress.cursor.as_ref(),
+                        limits,
+                    )
+                    .await?,
+                },
+                SecondaryBuildStage::Scan(_)
+                | SecondaryBuildStage::CatchUp(_)
+                | SecondaryBuildStage::Activate(_) => PreparedSecondaryStep::Gated { counters },
+            };
+            return Ok(PreparedIndexOperationStep::secondary(
+                permit,
+                PreparedSecondaryOperationStep { step },
+            ));
+        };
+        drop(permit);
+        Ok(exact(keys))
     }
 
     async fn step(
         &self,
-        _db: &slatedb::Db,
+        db: &slatedb::Db,
         transaction: &DbTransaction,
         scope: DataScope,
         operation: &IndexOperationRecord,
@@ -792,6 +1221,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         let result = match operation.progress() {
             IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(stage)) => {
                 step_build(
+                    db,
                     transaction,
                     scope,
                     operation,
@@ -837,13 +1267,32 @@ impl IndexOperationDriver for SecondaryIndexDriver {
     }
 }
 
-async fn prepare_secondary_catch_up(
+/// Catch-up backlogs of up to this many batches drain while the step fences
+/// writers; larger ones, and validation's, are reconciled by exact keys while
+/// writes continue.
+///
+/// A catch-up step therefore stalls the scope's writers for at most this
+/// many batches of deltas, measured by entity count and input bytes; output
+/// budgets may split them into more transactions. Validation keeps the
+/// backlog within this reach, so activation drains at most it plus what one
+/// step's wait let accumulate. An inflow faster than one exact batch per
+/// step, such as several builds sharing one write stream, still converges
+/// once its backlog falls within this reach, and validation fences writers
+/// once it stops progressing.
+const GATED_BACKLOG_BATCHES: usize = 8;
+
+/// Observes the committed delta backlog outside any transaction.
+///
+/// Returns `None` when the whole prefix fits [`GATED_BACKLOG_BATCHES`]
+/// batches of `limits`, or else the exact keys of its first batch. That batch
+/// always holds the first delta, even one larger than a whole batch, so exact
+/// catch-up reconciles it or reports it oversized.
+async fn observe_backlog(
     db: &slatedb::Db,
     scope: DataScope,
     operation: &IndexOperationRecord,
     limits: SearchIndexBatchLimits,
-    tail_delay_millis: NonZeroU64,
-) -> Result<PreparedSecondaryOperationStep> {
+) -> Result<Option<Vec<IndexEntityStateKey>>> {
     let prefix = generation_prefix(
         scope,
         RecordKind::BuildDelta,
@@ -851,50 +1300,125 @@ async fn prepare_secondary_catch_up(
         operation.generation(),
     );
     let mut rows = db.scan_prefix(&prefix, ..).await?;
-    let mut keys = Vec::with_capacity(limits.max_entities().get());
+    let entity_limit = limits.max_entities().get();
+    let byte_limit = limits.max_input_bytes().get();
+    let mut keys = Vec::with_capacity(entity_limit);
+    let mut first_batch_full = false;
+    let mut batch_input_bytes = 0_u64;
+    let mut entities = 0_usize;
     let mut input_bytes = 0_u64;
-    let mut observed_prefix_exhausted = true;
-    while keys.len() < limits.max_entities().get() {
+    let entity_reach = entity_limit.saturating_mul(GATED_BACKLOG_BATCHES);
+    let byte_reach =
+        byte_limit.saturating_mul(u64::try_from(GATED_BACKLOG_BATCHES).unwrap_or(u64::MAX));
+    loop {
         let Some(row) = rows.next().await? else {
-            break;
+            return Ok(None);
         };
         let row_input_bytes =
             u64::try_from(row.key.len().saturating_add(row.value.len())).unwrap_or(u64::MAX);
-        if !keys.is_empty()
-            && input_bytes.saturating_add(row_input_bytes) > limits.max_input_bytes().get()
-        {
-            observed_prefix_exhausted = false;
-            break;
-        }
-        let (entity, value) = decode_delta(scope, &row.key, &row.value)?;
-        if value.index_id != operation.index_id() || value.generation != operation.generation() {
-            return Err(corruption(
-                "prepared secondary delta escaped its operation generation",
-            ));
-        }
-        keys.push(IndexEntityStateKey {
-            index_id: value.index_id,
-            generation: value.generation,
-            entity,
-        });
+        entities = entities.saturating_add(1);
         input_bytes = input_bytes.saturating_add(row_input_bytes);
-    }
-    if keys.len() == limits.max_entities().get() {
-        observed_prefix_exhausted = false;
-    }
-    let catch_up = if keys.is_empty() {
-        PreparedSecondaryCatchUp::FinalBarrier
-    } else {
-        PreparedSecondaryCatchUp::Exact {
-            keys,
-            observed_prefix_exhausted,
-            tail_delay_millis,
+        if !first_batch_full {
+            if keys.is_empty() || batch_input_bytes.saturating_add(row_input_bytes) <= byte_limit {
+                let (entity, value) = decode_delta(scope, &row.key, &row.value)?;
+                if value.index_id != operation.index_id()
+                    || value.generation != operation.generation()
+                {
+                    return Err(corruption(
+                        "prepared secondary delta escaped its operation generation",
+                    ));
+                }
+                keys.push(IndexEntityStateKey {
+                    index_id: value.index_id,
+                    generation: value.generation,
+                    entity,
+                });
+                batch_input_bytes = batch_input_bytes.saturating_add(row_input_bytes);
+                first_batch_full = keys.len() == entity_limit;
+            } else {
+                first_batch_full = true;
+            }
         }
-    };
-    Ok(PreparedSecondaryOperationStep { catch_up })
+        if entities > entity_reach || input_bytes > byte_reach {
+            return Ok(Some(keys));
+        }
+    }
 }
 
+/// Drains every pending delta in bounded transactions of their own while the
+/// caller fences the scope's writers (the write fence or lifecycle permit).
+///
+/// No writer records a delta while that permit is held, so the backlog only
+/// shrinks, and each transaction runs until its prefix scan ends or a budget
+/// of `limits` stops it. Draining to the end, rather than estimating what
+/// the step's own transaction can finish, keeps every budget in charge: the
+/// step then finds the prefix empty and moves on. Each transaction re-reads
+/// the claimed operation, so an abort or a newer claim makes it fail instead
+/// of commit. A drain that blocks commits the reconciliations before the
+/// blocked entity, which leaves that entity first for the step to block on
+/// durably.
+///
+/// Returns the counters the step continues from. They are persisted only
+/// with the step's checkpoint, so a step that does not commit after these
+/// drains did (a lost conflict, a crash) leaves their committed work
+/// uncounted. Counters are progress telemetry; no lifecycle decision reads
+/// them.
+async fn drain_backlog_under_gate(
+    db: &slatedb::Db,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    mut counters: OperationCounters,
+    limits: SearchIndexBatchLimits,
+    disposition: AppliedStateDisposition,
+) -> Result<OperationCounters> {
+    loop {
+        let transaction = db
+            .begin(slatedb::IsolationLevel::SerializableSnapshot)
+            .await?;
+        let claimed =
+            super::outbox::load_exact_link(&transaction, scope, operation.operation_id()).await?;
+        if !claimed.is_some_and(|(_, claimed, _)| {
+            claimed.operation_revision() == operation.operation_revision()
+                && claimed.execution_state() == operation.execution_state()
+        }) {
+            return Err(HelixDbError::TransactionConflict(
+                "secondary operation claim changed before a gated drain".to_string(),
+            ));
+        }
+        let record = load_operation_index(&transaction, scope, operation).await?;
+        let ValidatedDynamicIndexDefinition::Secondary(definition) = record.definition() else {
+            return Err(corruption("gated secondary drain loaded another family"));
+        };
+        let mut accounting = BatchAccounting::new(counters, limits);
+        let drain = drain_build_deltas(
+            &transaction,
+            scope,
+            operation,
+            definition,
+            &mut accounting,
+            disposition,
+        )
+        .await?;
+        // An empty accounting staged nothing: the prefix was already empty,
+        // or its first entity blocks, which the step records durably.
+        if accounting.is_empty() {
+            return Ok(counters);
+        }
+        counters = accounting.finish()?;
+        transaction.commit().await?;
+        match drain {
+            DeltaDrain::BudgetExhausted => {}
+            DeltaDrain::Drained | DeltaDrain::Blocked(_) => return Ok(counters),
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one build step needs its storage, transaction, exact operation, definition, stage, batch limits, and scan tuning"
+)]
 async fn step_build(
+    db: &slatedb::Db,
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
@@ -906,6 +1430,7 @@ async fn step_build(
     match stage {
         SecondaryBuildStage::Scan(progress) => {
             scan_source(
+                db,
                 transaction,
                 scope,
                 operation,
@@ -931,43 +1456,72 @@ async fn step_build(
             .await
         }
         SecondaryBuildStage::Activate(progress) => {
-            if generation_has_rows(
+            activate(
                 transaction,
                 scope,
-                RecordKind::BuildDelta,
-                operation.index_id(),
-                operation.generation(),
+                operation,
+                definition,
+                progress.counters,
+                limits,
             )
-            .await?
-            {
-                return Ok(progressed_build(SecondaryBuildStage::CatchUp(
-                    PrefixScanProgress {
-                        cursor: None,
-                        counters: progress.counters,
-                    },
-                )));
-            }
-            if generation_has_rows(
-                transaction,
-                scope,
-                RecordKind::AppliedState,
-                operation.index_id(),
-                operation.generation(),
-            )
-            .await?
-            {
-                return Ok(progressed_build(SecondaryBuildStage::Validate(
-                    PrefixScanProgress {
-                        cursor: None,
-                        counters: progress.counters,
-                    },
-                )));
-            }
-            Ok(IndexOperationStepResult::Completed(
-                IndexOperationOutcome::Build(BuildOperationOutcome::Succeeded),
-            ))
+            .await
         }
     }
+}
+
+/// Drains the remaining deltas and activates the generation in the same
+/// transaction.
+///
+/// Activation holds the lifecycle permit, which fences writers, so a drain that reaches the end of
+/// the prefix proves the generation equal to its source at commit. A drain
+/// one batch cannot finish stays in activation for the next gated step.
+async fn activate(
+    transaction: &impl crate::transaction::Mutation,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    definition: &ValidatedSecondaryIndexDefinition,
+    counters: OperationCounters,
+    limits: SearchIndexBatchLimits,
+) -> Result<IndexOperationStepResult> {
+    let mut accounting = BatchAccounting::new(counters, limits);
+    match drain_build_deltas(
+        transaction,
+        scope,
+        operation,
+        definition,
+        &mut accounting,
+        AppliedStateDisposition::Release,
+    )
+    .await?
+    {
+        DeltaDrain::Drained => {}
+        DeltaDrain::BudgetExhausted => {
+            return Ok(progressed_build(SecondaryBuildStage::Activate(
+                NoCursorProgress {
+                    counters: accounting.finish()?,
+                },
+            )));
+        }
+        DeltaDrain::Blocked(blocker) => return Ok(IndexOperationStepResult::Blocked(blocker)),
+    }
+    // Validation released every applied row before activation, and a
+    // release drain writes none.
+    if generation_has_rows(
+        transaction,
+        scope,
+        RecordKind::AppliedState,
+        operation.index_id(),
+        operation.generation(),
+    )
+    .await?
+    {
+        return Err(corruption(
+            "secondary activation found applied state that validation released",
+        ));
+    }
+    Ok(IndexOperationStepResult::Completed(
+        IndexOperationOutcome::Build(BuildOperationOutcome::Succeeded),
+    ))
 }
 
 struct SourceScanCandidate {
@@ -995,13 +1549,33 @@ enum ObservedSourceScanCandidateKind {
     NonEntity,
     Entity {
         entity: IndexEntity,
-        previous_value: Option<CanonicalSecondaryValue>,
+        held: HeldValue,
         next_value: Option<CanonicalSecondaryValue>,
-        applied_key: Bytes,
     },
 }
 
+/// Reconciles one bounded batch of source rows at or below the build's
+/// source upper bound.
+///
+/// The batch is read from a snapshot outside the step's serializable
+/// transaction, so a write inside the scanned range does not abort the step.
+/// Every write that commits after the build was created records a delta for
+/// its entity (a write whose catalog read predates the creation conflicts
+/// with it), and catch-up reconciles that delta from what this step leaves
+/// the generation holding (see [`HeldValue`]), so the generation converges
+/// whichever snapshot the step read. Rows the build owns (canonical record,
+/// applied state, unique entries) stay in the transaction's read set. A
+/// blocker is durable, so a step that blocks on a source row first reads
+/// that row through the transaction: a write that repairs it before the step
+/// commits makes the step retry. A unique entry an earlier batch gave an
+/// entity that has since moved off the value is taken over rather than
+/// reported as a duplicate (see [`decide_reconciliation`]).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one source batch needs its storage, transaction, exact operation, definition, progress, limits, and scan tuning"
+)]
 async fn scan_source(
+    db: &slatedb::Db,
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
@@ -1032,7 +1606,8 @@ async fn scan_source(
     }
     let start = start.map_or(Bound::Unbounded, Bound::Excluded);
     let scan_options = scan_tuning.scan_options();
-    let mut rows = transaction
+    let source = db.begin(slatedb::IsolationLevel::Snapshot).await?;
+    let mut rows = source
         .scan_prefix_with_options(
             &source_prefix,
             (start, Bound::Included(upper)),
@@ -1052,6 +1627,7 @@ async fn scan_source(
             if candidates.is_empty() {
                 let entity_id = source_entity(scope, definition.element_kind(), &row.key)?
                     .unwrap_or(IndexEntityId::initial());
+                transaction.get(&row.key).await?;
                 return Ok(IndexOperationStepResult::Blocked(
                     IndexOperationBlocker::OversizedEntity {
                         entity_kind: definition.element_kind(),
@@ -1077,6 +1653,7 @@ async fn scan_source(
         let properties = match decode_indexed_source(definition, &row.value, &mut scratch) {
             Ok(properties) => properties,
             Err(_) => {
+                transaction.get(&row.key).await?;
                 return Ok(IndexOperationStepResult::Blocked(
                     IndexOperationBlocker::InvalidSourceData {
                         entity_kind: definition.element_kind(),
@@ -1095,6 +1672,7 @@ async fn scan_source(
         ) {
             Ok(value) => value,
             Err(_) => {
+                transaction.get(&row.key).await?;
                 return Ok(IndexOperationStepResult::Blocked(
                     IndexOperationBlocker::InvalidSourceData {
                         entity_kind: definition.element_kind(),
@@ -1156,36 +1734,34 @@ async fn scan_source(
                 let applied_value = applied_values
                     .next()
                     .expect("each secondary source entity has one applied-state observation");
-                let previous_value = decode_previous_applied(
+                // The scan reaches each entity once: without an applied row
+                // the generation holds nothing for it yet.
+                let held = match decode_previous_applied(
                     scope,
                     operation.index_id(),
                     operation.generation(),
                     entity,
                     &applied_key,
                     applied_value.as_deref(),
-                )?;
-                let mut unique_entry_keys = Vec::new();
-                if definition.unique() && previous_value != next_value {
-                    for value in [previous_value.as_ref(), next_value.as_ref()]
-                        .into_iter()
-                        .flatten()
-                    {
-                        unique_entry_keys.push(secondary_entry_key(
-                            scope,
-                            operation.index_id(),
-                            operation.generation(),
-                            definition,
-                            value.clone(),
-                            entity.id,
-                        )?);
-                    }
-                    unique_keys.extend(unique_entry_keys.iter().cloned());
+                )? {
+                    Some(value) => HeldValue::Applied(value),
+                    None => HeldValue::Unconfirmed(None),
+                };
+                if definition.unique() {
+                    unique_keys.extend(unique_observation_keys(
+                        scope,
+                        operation.index_id(),
+                        operation.generation(),
+                        definition,
+                        entity.id,
+                        held.candidate(),
+                        next_value.as_ref(),
+                    )?);
                 }
                 ObservedSourceScanCandidateKind::Entity {
                     entity,
-                    previous_value,
+                    held,
                     next_value,
-                    applied_key,
                 }
             }
         };
@@ -1206,7 +1782,7 @@ async fn scan_source(
     };
     let mut unique_entries = unique_keys
         .into_iter()
-        .zip(unique_values)
+        .zip(unique_values.into_iter().map(UniqueEntry::Observed))
         .collect::<BTreeMap<_, _>>();
     let mut accounting = BatchAccounting::new(progress.counters, limits);
     let mut cursor = progress.cursor.clone();
@@ -1217,28 +1793,52 @@ async fn scan_source(
             }
             ObservedSourceScanCandidateKind::Entity {
                 entity,
-                previous_value,
+                held,
                 next_value,
-                applied_key,
             } => {
-                let plan = match reconciliation_plan_from_observations(
+                let plan = match decide_reconciliation(
+                    transaction,
                     scope,
-                    operation.index_id(),
-                    operation.generation(),
+                    IndexEntityStateKey {
+                        index_id: operation.index_id(),
+                        generation: operation.generation(),
+                        entity,
+                    },
                     definition,
-                    entity,
-                    applied_key,
-                    previous_value,
-                    next_value,
-                    &unique_entries,
-                )? {
-                    ReconciliationPlan::Writes(plan) => plan,
-                    ReconciliationPlan::Blocked(blocker) => {
+                    &held,
+                    next_value.as_ref(),
+                    &mut unique_entries,
+                    AppliedStateDisposition::Retain,
+                )
+                .await?
+                {
+                    EntityReconciliation::Writes { plan, .. } => plan,
+                    EntityReconciliation::Blocked(blocker) => {
+                        transaction.get(candidate.cursor.as_bytes()).await?;
+                        // The duplicate's owner joins the read set too, so a
+                        // write that moves either entity before this step
+                        // commits makes it retry.
+                        let IndexOperationBlocker::UniquenessViolation {
+                            first_entity_id, ..
+                        } = blocker
+                        else {
+                            return Ok(IndexOperationStepResult::Blocked(blocker));
+                        };
+                        transaction
+                            .get(authoritative_property_key(
+                                scope,
+                                IndexEntity {
+                                    kind: entity.kind,
+                                    id: first_entity_id,
+                                },
+                            ))
+                            .await?;
                         return Ok(IndexOperationStepResult::Blocked(blocker));
                     }
                 };
                 if !accounting.can_admit_output(&plan) {
                     if accounting.is_empty() {
+                        transaction.get(candidate.cursor.as_bytes()).await?;
                         return Ok(IndexOperationStepResult::Blocked(
                             IndexOperationBlocker::OversizedEntity {
                                 entity_kind: entity.kind,
@@ -1251,14 +1851,15 @@ async fn scan_source(
                     exhausted = false;
                     break;
                 }
-                plan.stage(transaction).await?;
+                plan.stage(transaction)?;
                 for write in &plan.writes {
                     match write {
                         EntityWrite::Put { key, value } if unique_entries.contains_key(key) => {
-                            unique_entries.insert(key.clone(), Some(value.clone()));
+                            unique_entries
+                                .insert(key.clone(), UniqueEntry::Staged(Some(value.clone())));
                         }
                         EntityWrite::Delete(key) if unique_entries.contains_key(key) => {
-                            unique_entries.insert(key.clone(), None);
+                            unique_entries.insert(key.clone(), UniqueEntry::Staged(None));
                         }
                         EntityWrite::Put { .. }
                         | EntityWrite::Delete(_)
@@ -1286,6 +1887,12 @@ async fn scan_source(
     Ok(progressed_build(next))
 }
 
+/// Drains the delta prefix inside a gated step transaction.
+///
+/// The caller fences the scope's writers, so a drain that reaches the
+/// end of the prefix proves it empty at commit and the build moves on to
+/// validation, while a drain a budget stops stays in catch-up. Every applied
+/// value is retained for validation to check.
 async fn catch_up(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
@@ -1294,6 +1901,109 @@ async fn catch_up(
     progress: &PrefixScanProgress,
     limits: SearchIndexBatchLimits,
 ) -> Result<IndexOperationStepResult> {
+    let mut accounting = BatchAccounting::new(progress.counters, limits);
+    let drain = drain_build_deltas(
+        transaction,
+        scope,
+        operation,
+        definition,
+        &mut accounting,
+        AppliedStateDisposition::Retain,
+    )
+    .await?;
+    let progress = PrefixScanProgress {
+        cursor: None,
+        counters: accounting.finish()?,
+    };
+    Ok(match drain {
+        DeltaDrain::Drained => progressed_build(SecondaryBuildStage::Validate(progress)),
+        DeltaDrain::BudgetExhausted => progressed_build(SecondaryBuildStage::CatchUp(progress)),
+        DeltaDrain::Blocked(blocker) => IndexOperationStepResult::Blocked(blocker),
+    })
+}
+
+/// What one delta reconciliation leaves in an entity's applied-state row.
+#[derive(Debug, Clone, Copy)]
+enum AppliedStateDisposition {
+    /// Record the reconciled value: it is the value the generation holds for
+    /// the entity, which a later delta or validation compares against.
+    Retain,
+    /// Delete the row. Legal only while the same transaction deletes the
+    /// entity's delta: the generation then holds exactly the source value,
+    /// so the next delta a writer records carries that value as its
+    /// before-image (see [`HeldValue`]). A writer racing the transaction
+    /// conflicts on the delta or source key it reads.
+    Release,
+}
+
+/// What an entity's lifecycle rows prove its generation holds.
+///
+/// Scan and catch-up write an applied-state row with every entry they give
+/// an entity and delete it with the entity's last entry, so until validation
+/// releases the entity, or a writer to a unique generation moves it, its row
+/// mirrors the generation exactly. Such a writer (see
+/// [`claim_while_building`]) releases every entry the entity holds, deletes
+/// the row, claims the new value, and records that value as the delta's
+/// before-image, so the generation then holds exactly the before-image.
+/// Validation releases a row only while a point read its commit conflicts on
+/// proves no delta pending, and the drains release the rest together with
+/// their deltas. The generation then holds the source value, which the next
+/// delta records as its before-image. A missing row therefore means
+/// the generation holds that before-image or nothing, and the rows alone
+/// cannot tell which: a delta recorded before the scan reached the entity
+/// carries a value the generation never held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HeldValue {
+    /// The applied-state row: the generation holds exactly this value.
+    Applied(CanonicalSecondaryValue),
+    /// No applied-state row: the generation holds this value or nothing.
+    /// Reconciliation removes it only where an entry provably names the
+    /// entity, and writes the next value even when it is equal. `None`
+    /// proves the generation holds nothing.
+    Unconfirmed(Option<CanonicalSecondaryValue>),
+}
+
+impl HeldValue {
+    /// The value the generation may hold for the entity.
+    fn candidate(&self) -> Option<&CanonicalSecondaryValue> {
+        match self {
+            Self::Applied(value) => Some(value),
+            Self::Unconfirmed(value) => value.as_ref(),
+        }
+    }
+}
+
+/// Closed result of reconciling pending deltas inside one transaction.
+#[derive(Debug)]
+enum DeltaDrain {
+    /// The in-transaction scan reached the end of the delta prefix.
+    Drained,
+    /// A batch budget stopped the scan before the end of the prefix.
+    BudgetExhausted,
+    /// One entity cannot be reconciled until an operator intervenes.
+    Blocked(IndexOperationBlocker),
+}
+
+/// Reconciles and deletes pending deltas until the prefix ends or a budget
+/// of `accounting` is reached.
+///
+/// Each delta reconciles the generation from what the entity's lifecycle
+/// rows prove it holds (see [`HeldValue`]) to the current source value. A
+/// transaction scan sees only the writes staged before it opened, so a scan
+/// opened after this drain observes its deletes.
+///
+/// A `Blocked` result leaves the reconciliations staged before the blocked
+/// entity for the caller to commit. Each of them left its entity reconciled
+/// with no pending delta, so a retry from the unchanged checkpoint drains
+/// only what remains.
+async fn drain_build_deltas(
+    transaction: &impl crate::transaction::Mutation,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    definition: &ValidatedSecondaryIndexDefinition,
+    accounting: &mut BatchAccounting,
+    disposition: AppliedStateDisposition,
+) -> Result<DeltaDrain> {
     let prefix = generation_prefix(
         scope,
         RecordKind::BuildDelta,
@@ -1301,13 +2011,13 @@ async fn catch_up(
         operation.generation(),
     );
     let mut rows = transaction.scan_prefix(&prefix, ..).await?;
-    let mut accounting = BatchAccounting::new(progress.counters, limits);
-    let mut saw_row = false;
-    while accounting.can_read_another() {
+    loop {
         let Some(row) = rows.next().await? else {
-            break;
+            return Ok(DeltaDrain::Drained);
         };
-        saw_row = true;
+        if !accounting.can_read_another() {
+            return Ok(DeltaDrain::BudgetExhausted);
+        }
         let input_bytes = row.key.len().saturating_add(row.value.len()) as u64;
         let (entity, value) = decode_delta(scope, &row.key, &row.value)?;
         if value.index_id != operation.index_id()
@@ -1318,16 +2028,16 @@ async fn catch_up(
         }
         if !accounting.can_admit_input(input_bytes) {
             if accounting.is_empty() {
-                return Ok(IndexOperationStepResult::Blocked(
+                return Ok(DeltaDrain::Blocked(
                     IndexOperationBlocker::OversizedEntity {
                         entity_kind: entity.kind,
                         entity_id: entity.id,
                         observed: input_bytes,
-                        limit: limits.max_input_bytes().get(),
+                        limit: accounting.limits.max_input_bytes().get(),
                     },
                 ));
             }
-            break;
+            return Ok(DeltaDrain::BudgetExhausted);
         }
         let properties =
             read_authoritative_properties(transaction, scope, definition, entity).await?;
@@ -1342,7 +2052,7 @@ async fn catch_up(
             ) {
                 Ok(value) => value,
                 Err(_) => {
-                    return Ok(IndexOperationStepResult::Blocked(
+                    return Ok(DeltaDrain::Blocked(
                         IndexOperationBlocker::InvalidSourceData {
                             entity_kind: entity.kind,
                             entity_id: entity.id,
@@ -1352,7 +2062,7 @@ async fn catch_up(
             },
             None => None,
         };
-        let plan = match reconciliation_plan(
+        let mut plan = match reconciliation_plan(
             transaction,
             scope,
             IndexEntityStateKey {
@@ -1362,75 +2072,61 @@ async fn catch_up(
             },
             definition,
             &value.state,
-            next_value,
+            next_value.as_ref(),
+            disposition,
         )
         .await?
         {
-            ReconciliationPlan::Writes(mut plan) => {
-                plan.delete(row.key.clone());
-                plan
-            }
-            ReconciliationPlan::Blocked(blocker) => {
-                return Ok(IndexOperationStepResult::Blocked(blocker));
-            }
+            EntityReconciliation::Writes { plan, .. } => plan,
+            EntityReconciliation::Blocked(blocker) => return Ok(DeltaDrain::Blocked(blocker)),
         };
+        plan.delete(row.key.clone());
         if !accounting.can_admit_output(&plan) {
             if accounting.is_empty() {
-                return Ok(IndexOperationStepResult::Blocked(
+                return Ok(DeltaDrain::Blocked(
                     IndexOperationBlocker::OversizedEntity {
                         entity_kind: entity.kind,
                         entity_id: entity.id,
                         observed: plan.output_bytes,
-                        limit: limits.max_output_bytes().get(),
+                        limit: accounting.limits.max_output_bytes().get(),
                     },
                 ));
             }
-            break;
+            return Ok(DeltaDrain::BudgetExhausted);
         }
-        plan.stage(transaction).await?;
+        plan.stage(transaction)?;
         accounting.admit_scan(input_bytes, Some(&plan))?;
     }
-    let counters = accounting.finish()?;
-    if saw_row {
-        return Ok(progressed_build(SecondaryBuildStage::CatchUp(
-            PrefixScanProgress {
-                cursor: None,
-                counters,
-            },
-        )));
-    }
-    Ok(progressed_build(SecondaryBuildStage::Validate(
-        PrefixScanProgress {
-            cursor: None,
-            counters,
-        },
-    )))
 }
 
 struct ExactCatchUpRow {
     delta_key: Bytes,
     entity: IndexEntity,
     input_bytes: u64,
-    applied_key: Bytes,
-    previous_value: Option<CanonicalSecondaryValue>,
+    held: HeldValue,
+    delta_state: CoalescedBuildDeltaState,
     next_value: Option<CanonicalSecondaryValue>,
     unique_entry_keys: Vec<Bytes>,
 }
 
+/// Reconciles one prepared batch of a backlog beyond the gated reach.
+///
+/// The step stays in catch-up: the next preparation reconciles the rest the
+/// same way, or takes the exclusive gate once the remainder is within
+/// [`GATED_BACKLOG_BATCHES`].
 #[allow(
     clippy::too_many_arguments,
-    reason = "the prepared catch-up boundary requires exact operation, definition, limits, keys, and scheduling policy"
+    reason = "an exact drain binds its transaction, generation, definition, counters, stage, budgets, and prepared keys"
 )]
 async fn catch_up_exact(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     operation: &IndexOperationRecord,
     definition: &ValidatedSecondaryIndexDefinition,
-    progress: &PrefixScanProgress,
+    counters: OperationCounters,
+    drain: ExactDrain<'_>,
     limits: SearchIndexBatchLimits,
     prepared_keys: &[IndexEntityStateKey],
-    observed_prefix_exhausted: bool,
-    tail_delay_millis: NonZeroU64,
 ) -> Result<IndexOperationStepResult> {
     assert!(
         !prepared_keys.is_empty(),
@@ -1525,39 +2221,43 @@ async fn catch_up_exact(
             None => None,
         };
         let (applied_key, applied_value) = applied_pair;
-        let previous_value = reconciliation_previous_value(
-            scope,
-            operation.index_id(),
-            operation.generation(),
+        let state_key = IndexEntityStateKey {
+            index_id: operation.index_id(),
+            generation: operation.generation(),
             entity,
+        };
+        let held = held_value(
+            scope,
+            state_key,
             &applied_key,
             applied_value.as_deref(),
             &delta_state,
         )?;
-        let mut unique_entry_keys = Vec::new();
-        if definition.unique() && previous_value != next_value {
-            if let Some(previous) = previous_value.as_ref() {
-                unique_entry_keys.push(secondary_entry_key(
-                    scope,
-                    operation.index_id(),
-                    operation.generation(),
-                    definition,
-                    previous.clone(),
-                    entity.id,
-                )?);
-            }
-            if let Some(next) = next_value.as_ref() {
-                unique_entry_keys.push(secondary_entry_key(
-                    scope,
-                    operation.index_id(),
-                    operation.generation(),
-                    definition,
-                    next.clone(),
-                    entity.id,
-                )?);
-            }
-            unique_keys.extend(unique_entry_keys.iter().cloned());
-        }
+        let unique_entry_keys = if definition.unique() {
+            // A claim released earlier in this batch leaves the entity
+            // holding at most its before-image, so observe that entry too.
+            let before = match &delta_state {
+                CoalescedBuildDeltaState::SecondaryBefore(before) => before.as_ref(),
+                CoalescedBuildDeltaState::Marker | CoalescedBuildDeltaState::VectorBefore(_) => {
+                    None
+                }
+            };
+            let mut keys = unique_observation_keys(
+                scope,
+                operation.index_id(),
+                operation.generation(),
+                definition,
+                entity.id,
+                held.candidate().into_iter().chain(before),
+                next_value.as_ref(),
+            )?;
+            keys.sort_unstable();
+            keys.dedup();
+            unique_keys.extend(keys.iter().cloned());
+            keys
+        } else {
+            Vec::new()
+        };
         let input_bytes = u64::try_from(
             delta_key
                 .len()
@@ -1572,8 +2272,8 @@ async fn catch_up_exact(
             delta_key,
             entity,
             input_bytes,
-            applied_key,
-            previous_value,
+            held,
+            delta_state,
             next_value,
             unique_entry_keys,
         });
@@ -1584,10 +2284,11 @@ async fn catch_up_exact(
     let unique_values = transaction.multi_get(&unique_keys).await?;
     let mut unique_entries = unique_keys
         .into_iter()
-        .zip(unique_values)
+        .zip(unique_values.into_iter().map(UniqueEntry::Observed))
         .collect::<BTreeMap<_, _>>();
-    let mut accounting = BatchAccounting::new(progress.counters, limits);
-    let mut processed = 0_usize;
+    let mut accounting = BatchAccounting::new(counters, limits);
+    // Owners whose stale unique claim an earlier entity of this batch took.
+    let mut released = BTreeSet::new();
     for row in rows {
         let unique_input_bytes = row
             .unique_entry_keys
@@ -1596,7 +2297,7 @@ async fn catch_up_exact(
                 key.len().saturating_add(
                     unique_entries
                         .get(key)
-                        .and_then(Option::as_ref)
+                        .and_then(UniqueEntry::value)
                         .map_or(0, Bytes::len),
                 )
             })
@@ -1604,25 +2305,37 @@ async fn catch_up_exact(
         let input_bytes = row
             .input_bytes
             .saturating_add(u64::try_from(unique_input_bytes).unwrap_or(u64::MAX));
-        let plan = match reconciliation_plan_from_observations(
+        let state_key = IndexEntityStateKey {
+            index_id: operation.index_id(),
+            generation: operation.generation(),
+            entity: row.entity,
+        };
+        let held = if released.contains(&row.entity.id) {
+            held_value(scope, state_key, &[], None, &row.delta_state)?
+        } else {
+            row.held
+        };
+        let (mut plan, released_owner) = match decide_reconciliation(
+            transaction,
             scope,
-            operation.index_id(),
-            operation.generation(),
+            state_key,
             definition,
-            row.entity,
-            row.applied_key,
-            row.previous_value,
-            row.next_value,
-            &unique_entries,
-        )? {
-            ReconciliationPlan::Writes(mut plan) => {
-                plan.delete(row.delta_key);
-                plan
-            }
-            ReconciliationPlan::Blocked(blocker) => {
+            &held,
+            row.next_value.as_ref(),
+            &mut unique_entries,
+            drain.disposition(),
+        )
+        .await?
+        {
+            EntityReconciliation::Writes {
+                plan,
+                released_owner,
+            } => (plan, released_owner),
+            EntityReconciliation::Blocked(blocker) => {
                 return Ok(IndexOperationStepResult::Blocked(blocker));
             }
         };
+        plan.delete(row.delta_key);
         if !accounting.can_admit_input(input_bytes) || !accounting.can_admit_output(&plan) {
             if accounting.is_empty() {
                 return Ok(IndexOperationStepResult::Blocked(
@@ -1639,37 +2352,151 @@ async fn catch_up_exact(
             }
             break;
         }
-        plan.stage(transaction).await?;
+        plan.stage(transaction)?;
         for write in &plan.writes {
             match write {
                 EntityWrite::Put { key, value } if unique_entries.contains_key(key) => {
-                    unique_entries.insert(key.clone(), Some(value.clone()));
+                    unique_entries.insert(key.clone(), UniqueEntry::Staged(Some(value.clone())));
                 }
                 EntityWrite::Delete(key) if unique_entries.contains_key(key) => {
-                    unique_entries.insert(key.clone(), None);
+                    unique_entries.insert(key.clone(), UniqueEntry::Staged(None));
                 }
                 EntityWrite::Put { .. } | EntityWrite::Delete(_) | EntityWrite::Bitmap { .. } => {}
             }
         }
+        released.extend(released_owner);
         accounting.admit_scan(input_bytes, Some(&plan))?;
-        processed = processed.saturating_add(1);
     }
-    let counters = accounting.finish()?;
-    let progress = IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
-        SecondaryBuildStage::CatchUp(PrefixScanProgress {
-            cursor: None,
-            counters,
-        }),
-    ));
-    if processed < prepared_keys.len() || !observed_prefix_exhausted {
-        return Ok(IndexOperationStepResult::Progressed(progress));
-    }
-    Ok(IndexOperationStepResult::ProgressedAfter {
-        progress,
-        delay_millis: tail_delay_millis,
-    })
+    Ok(progressed_build(drain.stage(accounting.finish()?)))
 }
 
+/// The stage an exact-key drain runs in, which fixes what it leaves in
+/// applied-state rows and where the build stays.
+#[derive(Debug, Clone, Copy)]
+enum ExactDrain<'a> {
+    /// Catch-up retains each reconciled value for validation to check.
+    CatchUp,
+    /// Validation releases each row with its delta and keeps its cursor: a
+    /// release drain writes no applied row the cursor could have passed.
+    Validation(Option<&'a IndexCursor>),
+}
+
+impl ExactDrain<'_> {
+    const fn disposition(self) -> AppliedStateDisposition {
+        match self {
+            Self::CatchUp => AppliedStateDisposition::Retain,
+            Self::Validation(_) => AppliedStateDisposition::Release,
+        }
+    }
+
+    fn stage(self, counters: OperationCounters) -> SecondaryBuildStage {
+        match self {
+            Self::CatchUp => SecondaryBuildStage::CatchUp(PrefixScanProgress {
+                cursor: None,
+                counters,
+            }),
+            Self::Validation(cursor) => SecondaryBuildStage::Validate(PrefixScanProgress {
+                cursor: cursor.cloned(),
+                counters,
+            }),
+        }
+    }
+}
+
+/// Rows of a unique validation batch whose authoritative rows and entries
+/// are read in one call each.
+///
+/// Small enough that one group's source rows stay far below the batch's input
+/// budget, large enough that a batch takes few round trips.
+const UNIQUE_VALIDATION_READ_GROUP: usize = 32;
+
+/// One validation batch's applied-state keys, observed outside any
+/// transaction, and whether more rows follow them.
+///
+/// Only this operation's build steps create applied-state rows, and they run
+/// one at a time, so no row can appear among or between the observed keys
+/// before the batch's transaction reads them; a writer may only delete one.
+#[derive(Debug)]
+pub(crate) struct ObservedValidationBatch {
+    keys: Vec<Bytes>,
+    more: bool,
+}
+
+/// Observes the next validation batch's applied-state keys after `cursor`.
+async fn observe_validation_batch(
+    db: &slatedb::Db,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    cursor: Option<&IndexCursor>,
+    limits: SearchIndexBatchLimits,
+) -> Result<ObservedValidationBatch> {
+    let prefix = generation_prefix(
+        scope,
+        RecordKind::AppliedState,
+        operation.index_id(),
+        operation.generation(),
+    );
+    let start = cursor_suffix(&prefix, cursor)?.map_or(Bound::Unbounded, Bound::Excluded);
+    let mut rows = db
+        .scan_prefix(&prefix, (start, Bound::<Bytes>::Unbounded))
+        .await?;
+    let batch_entities = limits.max_entities().get();
+    let mut keys = Vec::with_capacity(batch_entities);
+    while keys.len() < batch_entities {
+        let Some(row) = rows.next().await? else {
+            return Ok(ObservedValidationBatch { keys, more: false });
+        };
+        keys.push(row.key);
+    }
+    let more = rows.next().await?.is_some();
+    Ok(ObservedValidationBatch { keys, more })
+}
+
+/// Releases one observed validation batch, reading its rows by key.
+///
+/// Point reads keep the batch's conflicts to writes on its own entities: a
+/// range read through the transaction would conflict with a write to any
+/// entity the validation has not reached yet. A row a writer deleted since it
+/// was observed is skipped; that entity's delta reconciles it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a validation batch binds its transaction, generation, definition, cursor, counters, budgets, and observed keys"
+)]
+async fn validate_observed_batch(
+    transaction: &impl crate::transaction::Mutation,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    definition: &ValidatedSecondaryIndexDefinition,
+    cursor: Option<IndexCursor>,
+    counters: OperationCounters,
+    limits: SearchIndexBatchLimits,
+    batch: &ObservedValidationBatch,
+) -> Result<IndexOperationStepResult> {
+    let values = transaction.multi_get(&batch.keys).await?;
+    let rows = batch
+        .keys
+        .iter()
+        .zip(values)
+        .filter_map(|(key, value)| value.map(|value| (key.clone(), value)))
+        .collect();
+    release_validated_rows(
+        transaction,
+        scope,
+        operation,
+        definition,
+        cursor,
+        counters,
+        limits,
+        rows,
+        batch.more,
+    )
+    .await
+}
+
+/// Releases one batch of applied-state rows read through the transaction.
+///
+/// This is the direct step's path; prepared validation observes its keys
+/// first (see [`validate_observed_batch`]).
 async fn validate_and_release_applied(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
@@ -1678,22 +2505,6 @@ async fn validate_and_release_applied(
     progress: &PrefixScanProgress,
     limits: SearchIndexBatchLimits,
 ) -> Result<IndexOperationStepResult> {
-    if generation_has_rows(
-        transaction,
-        scope,
-        RecordKind::BuildDelta,
-        operation.index_id(),
-        operation.generation(),
-    )
-    .await?
-    {
-        return Ok(progressed_build(SecondaryBuildStage::CatchUp(
-            PrefixScanProgress {
-                cursor: None,
-                counters: progress.counters,
-            },
-        )));
-    }
     let prefix = generation_prefix(
         scope,
         RecordKind::AppliedState,
@@ -1702,19 +2513,63 @@ async fn validate_and_release_applied(
     );
     let start =
         cursor_suffix(&prefix, progress.cursor.as_ref())?.map_or(Bound::Unbounded, Bound::Excluded);
-    let mut rows = transaction
+    let mut scanned = transaction
         .scan_prefix(&prefix, (start, Bound::<Bytes>::Unbounded))
         .await?;
-    let mut accounting = BatchAccounting::new(progress.counters, limits);
-    let mut cursor = progress.cursor.clone();
-    let mut exhausted = true;
-    while accounting.can_read_another() {
-        let Some(row) = rows.next().await? else {
+    let batch_entities = limits.max_entities().get();
+    let mut rows = Vec::with_capacity(batch_entities);
+    while rows.len() < batch_entities {
+        let Some(row) = scanned.next().await? else {
             break;
         };
-        let input_bytes = row.key.len().saturating_add(row.value.len()) as u64;
-        let (entity, applied) = decode_applied(scope, &row.key, &row.value)?;
-        let AppliedFamilyState::Secondary(Some(value)) = applied.state else {
+        rows.push((row.key, row.value));
+    }
+    let more = rows.len() == batch_entities && scanned.next().await?.is_some();
+    release_validated_rows(
+        transaction,
+        scope,
+        operation,
+        definition,
+        progress.cursor.clone(),
+        progress.counters,
+        limits,
+        rows,
+        more,
+    )
+    .await
+}
+
+/// Releases one batch of validated applied-state rows while writes continue.
+///
+/// A row may be released only while its entity has no pending delta: the row
+/// is then the only proof of what the generation holds (see [`HeldValue`]).
+/// Each entity's delta is point-read through the transaction. An entity with
+/// a delta pending keeps its row: a later validation or activation drain
+/// reconciles that delta with the Release disposition, which deletes the row
+/// with it, so the cursor may pass it. A write that records a delta for, or
+/// changes the source of, an entity the batch releases conflicts with the
+/// batch's read of that delta, applied-state row or source row, so the batch
+/// retries rather than release a row the new delta depends on.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "releasing a batch binds its transaction, generation, definition, cursor, counters, budgets, rows, and continuation"
+)]
+async fn release_validated_rows(
+    transaction: &impl crate::transaction::Mutation,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    definition: &ValidatedSecondaryIndexDefinition,
+    cursor: Option<IndexCursor>,
+    counters: OperationCounters,
+    limits: SearchIndexBatchLimits,
+    rows: Vec<(Bytes, Bytes)>,
+    more: bool,
+) -> Result<IndexOperationStepResult> {
+    let mut accounting = BatchAccounting::new(counters, limits);
+    let mut candidates = Vec::with_capacity(rows.len());
+    for (key, value) in rows {
+        let (entity, applied) = decode_applied(scope, &key, &value)?;
+        let AppliedFamilyState::Secondary(Some(applied_value)) = applied.state else {
             return Err(corruption(
                 "secondary validation found non-secondary or empty applied state",
             ));
@@ -1725,68 +2580,134 @@ async fn validate_and_release_applied(
         {
             return Err(corruption("secondary applied-state ownership mismatch"));
         }
-        if definition.unique() {
-            let properties = read_authoritative_properties(transaction, scope, definition, entity)
-                .await?
-                .ok_or_else(|| corruption("unique secondary owner source row disappeared"))?;
-            let authoritative = canonical_value(definition, &properties, entity.id)
-                .map_err(|_| corruption("unique secondary owner source is unsupported"))?;
-            if authoritative.as_ref() != Some(&value) {
-                return Err(corruption(
-                    "unique secondary applied state differs from authoritative source",
-                ));
-            }
-            let entry_key = secondary_entry_key(
-                scope,
-                operation.index_id(),
-                operation.generation(),
-                definition,
-                value.clone(),
-                entity.id,
-            )?;
-            let Some(entry) = transaction.get(&entry_key).await? else {
-                return Err(corruption("unique secondary applied state has no entry"));
-            };
-            let owner = decode_secondary_entry_value(
-                operation.index_id(),
-                operation.generation(),
-                definition_lane(definition),
-                &entry,
-            )?;
-            if owner != entity.id {
-                return Ok(IndexOperationStepResult::Blocked(
-                    IndexOperationBlocker::UniquenessViolation {
-                        first_entity_id: owner,
-                        second_entity_id: entity.id,
-                    },
-                ));
-            }
-        }
-        let mut plan = EntityWritePlan::default();
-        plan.delete(row.key.clone());
-        if !accounting.can_admit_input(input_bytes) || !accounting.can_admit_output(&plan) {
-            if accounting.is_empty() {
-                return Ok(IndexOperationStepResult::Blocked(
-                    IndexOperationBlocker::OversizedEntity {
-                        entity_kind: entity.kind,
-                        entity_id: entity.id,
-                        observed: input_bytes.max(plan.output_bytes),
-                        limit: limits
-                            .max_input_bytes()
-                            .get()
-                            .min(limits.max_output_bytes().get()),
-                    },
-                ));
-            }
-            exhausted = false;
-            break;
-        }
-        plan.stage(transaction).await?;
-        accounting.admit_scan(input_bytes, Some(&plan))?;
-        cursor = Some(IndexCursor::try_new(row.key).map_err(operation_error)?);
+        candidates.push(((key, value), entity, applied_value));
     }
-    if !accounting.can_read_another() {
-        exhausted = false;
+    let mut exhausted = !more;
+    let delta_keys = candidates
+        .iter()
+        .map(|(_, entity, _)| {
+            scoped_index_key(
+                scope,
+                ScopedKey::BuildDelta(IndexEntityStateKey {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    entity: *entity,
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    let pending_deltas = transaction.multi_get(&delta_keys).await?;
+    // A unique row is released only once its authoritative row and entry
+    // agree with it. They are read a group at a time: few round trips keep
+    // the batch's transaction, and so its conflicts, short, while each
+    // group's source rows count against the batch's input budget before the
+    // next group is read.
+    let mut scratch = view::Scratch::new();
+    let mut cursor = cursor;
+    let mut rows = candidates.into_iter().zip(pending_deltas).peekable();
+    'groups: while rows.peek().is_some() {
+        let group = rows
+            .by_ref()
+            .take(UNIQUE_VALIDATION_READ_GROUP)
+            .collect::<Vec<_>>();
+        let (authoritative_rows, entries) = if definition.unique() {
+            let property_keys = group
+                .iter()
+                .map(|((_, entity, _), _)| authoritative_property_key(scope, *entity))
+                .collect::<Vec<_>>();
+            let entry_keys = group
+                .iter()
+                .map(|((_, entity, value), _)| {
+                    secondary_entry_key(
+                        scope,
+                        operation.index_id(),
+                        operation.generation(),
+                        definition,
+                        value.clone(),
+                        entity.id,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (
+                transaction.multi_get(&property_keys).await?,
+                transaction.multi_get(&entry_keys).await?,
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        for (index, (((key, row_value), entity, value), pending_delta)) in
+            group.into_iter().enumerate()
+        {
+            if !accounting.can_read_another() {
+                exhausted = false;
+                break 'groups;
+            }
+            let source_bytes = authoritative_rows
+                .get(index)
+                .and_then(Option::as_ref)
+                .map_or(0, Bytes::len);
+            let input_bytes = key
+                .len()
+                .saturating_add(row_value.len())
+                .saturating_add(source_bytes) as u64;
+            let mut plan = EntityWritePlan::default();
+            if pending_delta.is_none() {
+                if definition.unique() {
+                    let properties = authoritative_rows[index]
+                        .as_ref()
+                        .map(|bytes| decode_indexed_source(definition, bytes, &mut scratch))
+                        .transpose()?
+                        .ok_or_else(|| {
+                            corruption("unique secondary owner source row disappeared")
+                        })?;
+                    let authoritative = canonical_value(definition, &properties, entity.id)
+                        .map_err(|_| corruption("unique secondary owner source is unsupported"))?;
+                    if authoritative.as_ref() != Some(&value) {
+                        return Err(corruption(
+                            "unique secondary applied state differs from authoritative source",
+                        ));
+                    }
+                    let Some(entry) = entries[index].as_ref() else {
+                        return Err(corruption("unique secondary applied state has no entry"));
+                    };
+                    let owner = decode_secondary_entry_value(
+                        operation.index_id(),
+                        operation.generation(),
+                        definition_lane(definition),
+                        entry,
+                    )?;
+                    if owner != entity.id {
+                        return Ok(IndexOperationStepResult::Blocked(
+                            IndexOperationBlocker::UniquenessViolation {
+                                first_entity_id: owner,
+                                second_entity_id: entity.id,
+                            },
+                        ));
+                    }
+                }
+                plan.delete(key.clone());
+            }
+            if !accounting.can_admit_input(input_bytes) || !accounting.can_admit_output(&plan) {
+                if accounting.is_empty() {
+                    return Ok(IndexOperationStepResult::Blocked(
+                        IndexOperationBlocker::OversizedEntity {
+                            entity_kind: entity.kind,
+                            entity_id: entity.id,
+                            observed: input_bytes.max(plan.output_bytes),
+                            limit: limits
+                                .max_input_bytes()
+                                .get()
+                                .min(limits.max_output_bytes().get()),
+                        },
+                    ));
+                }
+                exhausted = false;
+                break 'groups;
+            }
+            plan.stage(transaction)?;
+            accounting.admit_scan(input_bytes, Some(&plan))?;
+            cursor = Some(IndexCursor::try_new(key).map_err(operation_error)?);
+        }
     }
     let counters = accounting.finish()?;
     let next = if exhausted {
@@ -2014,7 +2935,7 @@ async fn delete_generation_rows(
                 exhausted = false;
                 break;
             }
-            plan.stage(transaction).await?;
+            plan.stage(transaction)?;
             accounting.admit_scan(input_bytes, Some(&plan))?;
             cursor = Some(IndexCursor::try_new(row.key).map_err(operation_error)?);
         }
@@ -2089,7 +3010,7 @@ async fn delete_delta_and_applied_rows(
                 exhausted = false;
                 break;
             }
-            plan.stage(transaction).await?;
+            plan.stage(transaction)?;
             accounting.admit_scan(input_bytes, Some(&plan))?;
         }
         if !accounting.can_read_another() {
@@ -2117,11 +3038,7 @@ enum CleanupBatch {
     Blocked(IndexOperationBlocker),
 }
 
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 async fn apply_active_change(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
@@ -2160,7 +3077,7 @@ async fn apply_active_change(
                 .or_default()
                 .insert(entity_id.get(), true);
         }
-        return stage_bitmap_changes(transaction, &changes).await;
+        return stage_bitmap_changes(transaction, &changes);
     }
 
     'delete_old: {
@@ -2321,14 +3238,17 @@ fn apply_active_change_from_overlay(
     Ok(())
 }
 
+/// Plans one drained delta from the entity's lifecycle rows, read through
+/// the transaction.
 async fn reconciliation_plan(
     transaction: &impl crate::transaction::Mutation,
     scope: DataScope,
     state_key: IndexEntityStateKey,
     definition: &ValidatedSecondaryIndexDefinition,
     delta_state: &CoalescedBuildDeltaState,
-    next_value: Option<CanonicalSecondaryValue>,
-) -> Result<ReconciliationPlan> {
+    next_value: Option<&CanonicalSecondaryValue>,
+    disposition: AppliedStateDisposition,
+) -> Result<EntityReconciliation> {
     let IndexEntityStateKey {
         index_id,
         generation,
@@ -2339,83 +3259,74 @@ async fn reconciliation_plan(
             "secondary reconciliation entity kind disagrees with definition",
         ));
     }
-    let applied_key = scoped_index_key(
-        scope,
-        ScopedKey::AppliedState(IndexEntityStateKey {
-            index_id,
-            generation,
-            entity,
-        }),
-    );
+    let applied_key = scoped_index_key(scope, ScopedKey::AppliedState(state_key));
     let applied_value = transaction.get(&applied_key).await?;
-    let previous = reconciliation_previous_value(
+    let held = held_value(
         scope,
-        index_id,
-        generation,
-        entity,
+        state_key,
         &applied_key,
         applied_value.as_deref(),
         delta_state,
     )?;
     let mut unique_entries = BTreeMap::new();
-    if definition.unique() && previous != next_value {
-        for value in [previous.as_ref(), next_value.as_ref()]
-            .into_iter()
-            .flatten()
-        {
-            let key = secondary_entry_key(
-                scope,
-                index_id,
-                generation,
-                definition,
-                value.clone(),
-                entity.id,
-            )?;
-            let observed = transaction.get(&key).await?;
-            unique_entries.insert(key, observed);
-        }
-    }
-    reconciliation_plan_from_observations(
-        scope,
-        index_id,
-        generation,
-        definition,
-        entity,
-        applied_key,
-        previous,
-        next_value,
-        &unique_entries,
-    )
-}
-
-fn reconciliation_previous_value(
-    scope: DataScope,
-    index_id: IndexId,
-    generation: IndexGenerationId,
-    entity: IndexEntity,
-    applied_key: &[u8],
-    applied_value: Option<&[u8]>,
-    delta_state: &CoalescedBuildDeltaState,
-) -> Result<Option<CanonicalSecondaryValue>> {
-    if applied_value.is_some() {
-        return decode_previous_applied(
+    if definition.unique() {
+        for key in unique_observation_keys(
             scope,
             index_id,
             generation,
-            entity,
-            applied_key,
-            applied_value,
-        );
+            definition,
+            entity.id,
+            held.candidate(),
+            next_value,
+        )? {
+            let observed = transaction.get(&key).await?;
+            unique_entries.insert(key, UniqueEntry::Observed(observed));
+        }
     }
-    match delta_state {
-        CoalescedBuildDeltaState::SecondaryBefore(previous) => Ok(previous.clone()),
-        CoalescedBuildDeltaState::Marker => Err(corruption(
-            "secondary build delta has no original value after applied-state release",
-        )),
-        CoalescedBuildDeltaState::VectorBefore(_) => Err(corruption(
-            "secondary build delta contains vector recovery state",
-        )),
-    }
+    decide_reconciliation(
+        transaction,
+        scope,
+        state_key,
+        definition,
+        &held,
+        next_value,
+        &mut unique_entries,
+        disposition,
+    )
+    .await
+}
+
+/// What an entity's applied-state row and pending delta prove its generation
+/// holds (see [`HeldValue`]).
+fn held_value(
+    scope: DataScope,
+    state_key: IndexEntityStateKey,
+    applied_key: &[u8],
+    applied_value: Option<&[u8]>,
+    delta_state: &CoalescedBuildDeltaState,
+) -> Result<HeldValue> {
+    let Some(applied) = decode_previous_applied(
+        scope,
+        state_key.index_id,
+        state_key.generation,
+        state_key.entity,
+        applied_key,
+        applied_value,
+    )?
+    else {
+        return match delta_state {
+            CoalescedBuildDeltaState::SecondaryBefore(before) => {
+                Ok(HeldValue::Unconfirmed(before.clone()))
+            }
+            CoalescedBuildDeltaState::Marker => Err(corruption(
+                "secondary build delta has no original value after applied-state release",
+            )),
+            CoalescedBuildDeltaState::VectorBefore(_) => Err(corruption(
+                "secondary build delta contains vector recovery state",
+            )),
+        };
+    };
+    Ok(HeldValue::Applied(applied))
 }
 
 fn decode_previous_applied(
@@ -2438,17 +3349,240 @@ fn decode_previous_applied(
     {
         return Err(corruption("secondary applied state key/value mismatch"));
     }
-    let AppliedFamilyState::Secondary(value) = applied.state else {
-        return Err(corruption(
+    match applied.state {
+        AppliedFamilyState::Secondary(Some(value)) => Ok(Some(value)),
+        AppliedFamilyState::Secondary(None) => {
+            Err(corruption("secondary applied state names no value"))
+        }
+        AppliedFamilyState::Vector(_) | AppliedFamilyState::Text(_) => Err(corruption(
             "secondary generation contains another applied family",
-        ));
-    };
-    Ok(value)
+        )),
+    }
 }
 
+/// Unique entry keys one reconciliation must observe: each value in `held`
+/// other than `next_value`, which it may release, and `next_value`, which it
+/// claims. A key longer than storage admits names no entry and is skipped.
+fn unique_observation_keys<'a>(
+    scope: DataScope,
+    index_id: IndexId,
+    generation: IndexGenerationId,
+    definition: &ValidatedSecondaryIndexDefinition,
+    entity_id: IndexEntityId,
+    held: impl IntoIterator<Item = &'a CanonicalSecondaryValue>,
+    next_value: Option<&'a CanonicalSecondaryValue>,
+) -> Result<Vec<Bytes>> {
+    let mut keys = Vec::new();
+    for value in held
+        .into_iter()
+        .filter(|value| Some(*value) != next_value)
+        .chain(next_value)
+    {
+        let key = secondary_entry_key(
+            scope,
+            index_id,
+            generation,
+            definition,
+            value.clone(),
+            entity_id,
+        )?;
+        if key.len() <= STORAGE_KEY_MAX_LEN {
+            keys.push(key);
+        }
+    }
+    Ok(keys)
+}
+
+/// A unique entry as one batch's reconciliations see it.
+///
+/// A scan reads its source from a snapshot opened after the step's
+/// transaction, so a claim an earlier entity of the batch staged can name a
+/// value that entity's row holds only in that later snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UniqueEntry {
+    /// Read through the step's transaction.
+    Observed(Option<Bytes>),
+    /// Staged by an earlier reconciliation of the same batch, from the
+    /// source values the batch read.
+    Staged(Option<Bytes>),
+}
+
+impl UniqueEntry {
+    /// The entry's encoded value, if one is present.
+    fn value(&self) -> Option<&Bytes> {
+        match self {
+            Self::Observed(value) | Self::Staged(value) => value.as_ref(),
+        }
+    }
+}
+
+/// One entity's reconciliation with every unique claim decided.
+enum EntityReconciliation {
+    /// The writes that reconcile the entity, and the owner whose stale
+    /// unique claim they take over, if any.
+    Writes {
+        plan: EntityWritePlan,
+        released_owner: Option<IndexEntityId>,
+    },
+    Blocked(IndexOperationBlocker),
+}
+
+/// Plans one entity's reconciliation and decides a unique entry it must claim
+/// from another entity.
+///
+/// Writers keep a unique generation's claims current (see
+/// [`claim_while_building`]), but an entry may still name an entity whose
+/// authoritative row has moved off the value since its last reconciliation:
+/// a build step that read the source outside its transaction gave the entity
+/// the value, or a write made before writers claimed values during builds
+/// moved it. Either way it is a stale claim that the entity's pending delta
+/// will release. Blocking on it would stop a build whose source holds
+/// no duplicate, whichever order the claims drain in, so the claim moves to
+/// `entity` here and the owner's applied row is deleted with it: the owner
+/// then holds nothing until its pending delta reconciles it (see
+/// [`HeldValue`]). An owner whose row still holds the value is a real
+/// duplicate. Its row is read through the transaction, so a write that
+/// changes it before commit makes the step retry. An owner whose claim an
+/// earlier reconciliation of the same batch staged is a duplicate in the
+/// source the batch read; the caller keeps both rows in the transaction's
+/// read set, so a write that moves either before commit makes the step
+/// retry.
 #[allow(
     clippy::too_many_arguments,
-    reason = "reconciliation requires the exact generation, entity, before/after state, and observed unique rows"
+    reason = "a decided reconciliation needs the transaction, exact entity, definition, held and next values, observed unique rows, and applied-state disposition"
+)]
+async fn decide_reconciliation(
+    transaction: &impl crate::transaction::Mutation,
+    scope: DataScope,
+    state_key: IndexEntityStateKey,
+    definition: &ValidatedSecondaryIndexDefinition,
+    held: &HeldValue,
+    next_value: Option<&CanonicalSecondaryValue>,
+    unique_entries: &mut BTreeMap<Bytes, UniqueEntry>,
+    disposition: AppliedStateDisposition,
+) -> Result<EntityReconciliation> {
+    let IndexEntityStateKey {
+        index_id,
+        generation,
+        entity,
+    } = state_key;
+    let applied_key = scoped_index_key(scope, ScopedKey::AppliedState(state_key));
+    let mut released_owner = None;
+    loop {
+        let (owner, key) = match reconciliation_plan_from_observations(
+            scope,
+            index_id,
+            generation,
+            definition,
+            entity,
+            applied_key.clone(),
+            held,
+            next_value,
+            unique_entries,
+            disposition,
+        )? {
+            ReconciliationPlan::Writes(mut plan) => {
+                released_owner.into_iter().for_each(|owner| {
+                    plan.delete(scoped_index_key(
+                        scope,
+                        ScopedKey::AppliedState(IndexEntityStateKey {
+                            index_id,
+                            generation,
+                            entity: IndexEntity {
+                                kind: entity.kind,
+                                id: owner,
+                            },
+                        }),
+                    ));
+                });
+                return Ok(EntityReconciliation::Writes {
+                    plan,
+                    released_owner,
+                });
+            }
+            ReconciliationPlan::Blocked(blocker) => {
+                return Ok(EntityReconciliation::Blocked(blocker));
+            }
+            ReconciliationPlan::Contended { owner, key } => (owner, key),
+        };
+        let Some(next) = next_value else {
+            return Err(corruption(
+                "secondary reconciliation contended a value it does not claim",
+            ));
+        };
+        if released_owner.is_some() {
+            return Err(corruption(
+                "secondary reconciliation contended a released unique claim",
+            ));
+        }
+        // The batch read both values from one source view, which may be
+        // newer than the transaction's snapshot, so the owner's row must not
+        // be read through the transaction here.
+        if matches!(unique_entries.get(&key), Some(UniqueEntry::Staged(_))) {
+            return Ok(EntityReconciliation::Blocked(
+                IndexOperationBlocker::UniquenessViolation {
+                    first_entity_id: owner,
+                    second_entity_id: entity.id,
+                },
+            ));
+        }
+        let owner_state = IndexEntityStateKey {
+            index_id,
+            generation,
+            entity: IndexEntity {
+                kind: entity.kind,
+                id: owner,
+            },
+        };
+        let owner_holds_value = transaction
+            .get(authoritative_property_key(scope, owner_state.entity))
+            .await?
+            .is_some_and(|bytes| {
+                decode_indexed_source(definition, &bytes, &mut view::Scratch::new())
+                    .ok()
+                    .and_then(|properties| {
+                        canonical_value(definition, &properties, owner)
+                            .ok()
+                            .flatten()
+                    })
+                    .as_ref()
+                    == Some(next)
+            });
+        if owner_holds_value {
+            return Ok(EntityReconciliation::Blocked(
+                IndexOperationBlocker::UniquenessViolation {
+                    first_entity_id: owner,
+                    second_entity_id: entity.id,
+                },
+            ));
+        }
+        // Every write that moves a reconciled row records a delta, so a
+        // stale claim always has one pending.
+        if transaction
+            .get(scoped_index_key(scope, ScopedKey::BuildDelta(owner_state)))
+            .await?
+            .is_none()
+        {
+            return Err(corruption(
+                "a unique secondary owner left its value without a pending delta",
+            ));
+        }
+        unique_entries.insert(key, UniqueEntry::Staged(None));
+        released_owner = Some(owner);
+    }
+}
+
+/// Plans one entity's reconciliation from observed rows.
+///
+/// Every unique entry the plan reads must be in `unique_entries` (see
+/// [`unique_observation_keys`]). A previous value is released where the
+/// generation provably holds it for `entity`, and the next value is written
+/// unless the applied row proves the generation already holds it. A unique
+/// next value whose entry names another entity is returned as
+/// [`ReconciliationPlan::Contended`] for [`decide_reconciliation`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "reconciliation requires the exact generation, entity, held and next values, observed unique rows, and applied-state disposition"
 )]
 fn reconciliation_plan_from_observations(
     scope: DataScope,
@@ -2457,105 +3591,134 @@ fn reconciliation_plan_from_observations(
     definition: &ValidatedSecondaryIndexDefinition,
     entity: IndexEntity,
     applied_key: Bytes,
-    previous: Option<CanonicalSecondaryValue>,
-    next_value: Option<CanonicalSecondaryValue>,
-    unique_entries: &BTreeMap<Bytes, Option<Bytes>>,
+    held: &HeldValue,
+    next_value: Option<&CanonicalSecondaryValue>,
+    unique_entries: &BTreeMap<Bytes, UniqueEntry>,
+    disposition: AppliedStateDisposition,
 ) -> Result<ReconciliationPlan> {
     let entity_id = entity.id;
+    let lane = definition_lane(definition);
+    let observed_owner = |key: &Bytes| -> Result<Option<IndexEntityId>> {
+        unique_entries
+            .get(key)
+            .ok_or_else(|| {
+                corruption("unique secondary entry was not observed before reconciliation")
+            })?
+            .value()
+            .map(|value| decode_secondary_entry_value(index_id, generation, lane, value))
+            .transpose()
+    };
+    let applied = matches!(held, HeldValue::Applied(_));
+    let previous = held.candidate();
+    // Only the applied row proves the generation already holds a value.
+    let holds_next = applied && previous == next_value;
     let mut plan = EntityWritePlan::default();
-    if previous != next_value {
-        'delete_previous: {
-            let Some(previous) = previous else {
-                break 'delete_previous;
-            };
-            let key =
-                secondary_entry_key(scope, index_id, generation, definition, previous, entity_id)?;
-            // A build delta keeps the value an entity had, including one
-            // whose entry key storage could never write.
-            if key.len() > STORAGE_KEY_MAX_LEN {
-                break 'delete_previous;
-            }
-            if definition.unique() {
-                'verify_previous: {
-                    let Some(value) = unique_entries.get(&key).and_then(Option::as_ref) else {
-                        break 'verify_previous;
-                    };
-                    let owner = decode_secondary_entry_value(
-                        index_id,
-                        generation,
-                        definition_lane(definition),
-                        value,
-                    )?;
-                    if owner != entity_id {
-                        return Ok(ReconciliationPlan::Blocked(
-                            IndexOperationBlocker::UniquenessViolation {
-                                first_entity_id: owner,
-                                second_entity_id: entity_id,
-                            },
-                        ));
-                    }
+    'release_previous: {
+        let Some(previous) = previous else {
+            break 'release_previous;
+        };
+        if Some(previous) == next_value {
+            break 'release_previous;
+        }
+        let key = secondary_entry_key(
+            scope,
+            index_id,
+            generation,
+            definition,
+            previous.clone(),
+            entity_id,
+        )?;
+        // A build delta keeps the value an entity had, including one
+        // whose entry key storage could never write.
+        if key.len() > STORAGE_KEY_MAX_LEN {
+            break 'release_previous;
+        }
+        if definition.unique() {
+            match observed_owner(&key)? {
+                Some(owner) if owner == entity_id => {}
+                // An unconfirmed value the entry does not credit to this
+                // entity is not held by it.
+                Some(_) | None if !applied => break 'release_previous,
+                Some(owner) => {
+                    return Ok(ReconciliationPlan::Blocked(
+                        IndexOperationBlocker::UniquenessViolation {
+                            first_entity_id: owner,
+                            second_entity_id: entity_id,
+                        },
+                    ));
                 }
-            }
-            if definition_uses_equality_bitmap(definition) {
-                plan.bitmap_remove(key, entity_id);
-            } else {
-                plan.delete(key);
+                None => {}
             }
         }
-        'put_next: {
-            let Some(next) = next_value.as_ref() else {
-                break 'put_next;
-            };
-            let lane = definition_lane(definition);
-            let key = secondary_entry_key(
-                scope,
-                index_id,
-                generation,
-                definition,
-                next.clone(),
-                entity_id,
-            )?;
-            if definition.unique() {
-                'verify_next: {
-                    let Some(value) = unique_entries.get(&key).and_then(Option::as_ref) else {
-                        break 'verify_next;
-                    };
-                    let owner = decode_secondary_entry_value(index_id, generation, lane, value)?;
-                    if owner != entity_id {
-                        return Ok(ReconciliationPlan::Blocked(
-                            IndexOperationBlocker::UniquenessViolation {
-                                first_entity_id: owner,
-                                second_entity_id: entity_id,
-                            },
-                        ));
-                    }
-                }
-            }
-            if definition_uses_equality_bitmap(definition) {
-                plan.bitmap_add(key, entity_id);
-            } else {
-                let value = SecondaryEntryValue {
-                    index_id,
-                    generation,
-                    lane,
-                    entity_id,
-                };
-                plan.put(key, encode_secondary_entry(&value));
-            }
+        if definition_uses_equality_bitmap(definition) {
+            plan.bitmap_remove(key, entity_id);
+        } else {
+            plan.delete(key);
         }
     }
-    match next_value {
-        Some(next) => {
-            let value = AppliedEntityStateValue {
+    'claim_next: {
+        let Some(next) = next_value else {
+            break 'claim_next;
+        };
+        let key = secondary_entry_key(
+            scope,
+            index_id,
+            generation,
+            definition,
+            next.clone(),
+            entity_id,
+        )?;
+        if definition.unique() {
+            match observed_owner(&key)? {
+                Some(owner) if owner == entity_id => break 'claim_next,
+                // Validation applies the same checks to a row it releases.
+                Some(owner) if holds_next => {
+                    return Ok(ReconciliationPlan::Blocked(
+                        IndexOperationBlocker::UniquenessViolation {
+                            first_entity_id: owner,
+                            second_entity_id: entity_id,
+                        },
+                    ));
+                }
+                Some(owner) => return Ok(ReconciliationPlan::Contended { owner, key }),
+                None if holds_next => {
+                    return Err(corruption("unique secondary applied state has no entry"));
+                }
+                None => {}
+            }
+        } else if holds_next {
+            break 'claim_next;
+        }
+        if definition_uses_equality_bitmap(definition) {
+            plan.bitmap_add(key, entity_id);
+        } else {
+            let value = SecondaryEntryValue {
                 index_id,
                 generation,
-                entity_kind: entity.kind,
+                lane,
                 entity_id,
-                state: AppliedFamilyState::Secondary(Some(next)),
             };
-            plan.put(applied_key, encode_applied_state(&value));
+            plan.put(key, encode_secondary_entry(&value));
         }
-        None => plan.delete(applied_key),
+    }
+    match (disposition, next_value) {
+        (AppliedStateDisposition::Retain, Some(next)) => {
+            if !holds_next {
+                let value = AppliedEntityStateValue {
+                    index_id,
+                    generation,
+                    entity_kind: entity.kind,
+                    entity_id,
+                    state: AppliedFamilyState::Secondary(Some(next.clone())),
+                };
+                plan.put(applied_key, encode_applied_state(&value));
+            }
+        }
+        (AppliedStateDisposition::Retain, None) | (AppliedStateDisposition::Release, _) => {
+            if applied {
+                plan.delete(applied_key);
+            }
+        }
     }
     Ok(ReconciliationPlan::Writes(plan))
 }
@@ -2563,6 +3726,12 @@ fn reconciliation_plan_from_observations(
 enum ReconciliationPlan {
     Writes(EntityWritePlan),
     Blocked(IndexOperationBlocker),
+    /// The next value's unique entry names another entity, which only that
+    /// entity's authoritative row can tell from a stale claim.
+    Contended {
+        owner: IndexEntityId,
+        key: Bytes,
+    },
 }
 
 #[derive(Default)]
@@ -2606,7 +3775,7 @@ impl EntityWritePlan {
         });
     }
 
-    async fn stage(&self, transaction: &impl crate::transaction::Mutation) -> Result<()> {
+    fn stage(&self, transaction: &impl crate::transaction::Mutation) -> Result<()> {
         let mut bitmap_changes = BTreeMap::<Bytes, BTreeMap<u64, bool>>::new();
         for write in &self.writes {
             match write {
@@ -2626,7 +3795,7 @@ impl EntityWritePlan {
                 }
             }
         }
-        stage_bitmap_changes(transaction, &bitmap_changes).await?;
+        stage_bitmap_changes(transaction, &bitmap_changes)?;
         Ok(())
     }
 }
@@ -2644,7 +3813,7 @@ enum EntityWrite {
     },
 }
 
-async fn stage_bitmap_changes(
+fn stage_bitmap_changes(
     transaction: &impl crate::transaction::Mutation,
     changes: &BTreeMap<Bytes, BTreeMap<u64, bool>>,
 ) -> Result<()> {
@@ -2660,10 +3829,11 @@ async fn stage_bitmap_changes(
         }
         merges.bitmap(crate::transaction::merges::Key::Encoded(key), &delta)?;
     }
-    merges.stage().await?;
+    merges.stage()?;
     Ok(())
 }
 
+/// One transaction's batch budgets, shared by every stage of a step.
 struct BatchAccounting {
     counters: OperationCounters,
     limits: SearchIndexBatchLimits,
@@ -2898,11 +4068,7 @@ fn mutation_value_error(
 /// with `handle`. Unique entries and V4 non-unique bitmaps each use one point
 /// read. Null and values no lane can encode are answered by the verified
 /// label rows outside the lane (see [`unindexed_label_rows`]).
-#[cfg(any(
-    test,
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing"
-))]
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
 pub(crate) async fn lookup_active_equality_generation(
     reader: &(impl DbReadOps + Send + Sync),
     handle: &ActiveIndexHandle,
@@ -2922,7 +4088,7 @@ pub(crate) async fn lookup_active_equality_generation(
 
 /// Owners of `values` in one Active unique node equality generation, read
 /// unbudgeted (see [`exact::lookup_active_unique_equality_batch_admitted`]).
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn lookup_active_unique_equality_batch(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
@@ -3051,7 +4217,7 @@ async fn equality_lane_rows(
     let scope = handle.scope();
     let mut held = roaring::RoaringTreemap::new();
     if definition_uses_equality_bitmap(definition) {
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(any(test, feature = "bench-internals"))]
         record(ReadKind::Scan);
         let prefix = IndexKey::data_prefix(
             scope,
@@ -3089,7 +4255,7 @@ async fn equality_lane_rows(
     }
     // Unique owners, and the deployed V3 per-entity entries a legacy reader
     // still unions, are one entry per entity in the definition's lane.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(any(test, feature = "bench-internals"))]
     record(ReadKind::Scan);
     let lane = definition_lane(definition);
     let prefix = IndexKey::data_prefix(
@@ -3151,7 +4317,7 @@ pub(crate) async fn verified_unindexed_rows(
         if batch.is_empty() {
             return Ok(verified.finish());
         }
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(any(test, feature = "bench-internals"))]
         batch.iter().for_each(|_| record(ReadKind::Graph));
         let keys = batch
             .iter()
@@ -3308,7 +4474,7 @@ pub(crate) enum SecondaryRangeQuery {
 ///
 /// Storage bounds use typed, self-delimiting payloads. Every candidate is then
 /// checked against authoritative graph state before it can consume `limit`.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn scan_active_range_generation(
     reader: &(impl DbReadOps + Sync),
     handle: &ActiveIndexHandle,
@@ -3852,7 +5018,6 @@ fn operation_error(error: crate::index_lifecycle::IndexOperationModelError) -> H
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::time::Duration;
 
     use slatedb::object_store::memory::InMemory;
@@ -5159,7 +6324,7 @@ mod tests {
                 "{:?}",
                 SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()))
             ),
-            "SecondaryIndexDriver { catch_up_tail_delay_millis: 1 }"
+            "SecondaryIndexDriver { .. }"
         );
 
         // Bounds no range lane can encode or order are empty ranges.
@@ -5690,25 +6855,14 @@ mod tests {
         operation_id: IndexOperationId,
         claim_sequence: &mut u64,
     ) -> IndexOperationRecord {
-        for _ in 0..8 {
-            let operation = read_operation(db, DataScope::LegacyUnscoped, operation_id)
-                .await
-                .expect("secondary operation is readable")
-                .expect("secondary operation exists");
-            if matches!(
-                operation.progress(),
-                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
-                    SecondaryBuildStage::CatchUp(_)
-                ))
-            ) {
-                return operation;
-            }
-            assert_eq!(
-                drive_one(db, driver, operation_id, claim_sequence).await,
-                CommittedOperationStep::Progressed
-            );
-        }
-        panic!("secondary build did not reach catch-up")
+        drive_until_stage(db, driver, operation_id, claim_sequence, |stage| {
+            matches!(stage, SecondaryBuildStage::CatchUp(_))
+        })
+        .await;
+        read_operation(db, DataScope::LegacyUnscoped, operation_id)
+            .await
+            .expect("secondary operation is readable")
+            .expect("secondary operation exists")
     }
 
     fn one_entity_limits() -> SearchIndexBatchLimits {
@@ -5794,6 +6948,75 @@ mod tests {
         }
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Applies a node write the way writers did before they claimed unique
+    /// values during builds: the source row and a coalesced build delta, with
+    /// the generation's entries untouched. A build that began before an
+    /// upgrade still holds such deltas, and the stale claims they leave.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a legacy write names its generation, entity, and both property sets"
+    )]
+    async fn legacy_building_write(
+        db: &Db,
+        scope: DataScope,
+        definition: &ValidatedDynamicIndexDefinition,
+        index_id: IndexId,
+        generation: IndexGenerationId,
+        entity_id: u64,
+        before: &[Property],
+        after: &[Property],
+    ) {
+        let ValidatedDynamicIndexDefinition::Secondary(secondary) = definition else {
+            panic!("a secondary definition");
+        };
+        let entity = IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::new(entity_id),
+        };
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("legacy write begins");
+        let delta_key = scoped_index_key(
+            scope,
+            ScopedKey::BuildDelta(IndexEntityStateKey {
+                index_id,
+                generation,
+                entity,
+            }),
+        );
+        if transaction
+            .get(&delta_key)
+            .await
+            .expect("legacy delta reads")
+            .is_none()
+        {
+            transaction
+                .put(
+                    delta_key,
+                    encode_build_delta(&CoalescedBuildDeltaValue {
+                        index_id,
+                        generation,
+                        entity_kind: entity.kind,
+                        entity_id: entity.id,
+                        state: CoalescedBuildDeltaState::SecondaryBefore(
+                            canonical_value(secondary, before, entity.id).ok().flatten(),
+                        ),
+                    }),
+                )
+                .expect("legacy delta stages");
+        }
+        let key = source_key(scope, IndexElementKind::Node, entity_id);
+        if after.is_empty() {
+            transaction.delete(key).expect("legacy delete stages");
+        } else {
+            transaction
+                .put(key, encode_properties(after))
+                .expect("legacy source stages");
+        }
+        transaction.commit().await.expect("legacy write commits");
     }
 
     #[tokio::test]
@@ -6071,9 +7294,10 @@ mod tests {
             &definition,
             entity,
             applied_key.clone(),
-            None,
-            Some(next.clone()),
+            &HeldValue::Unconfirmed(None),
+            Some(&next),
             &BTreeMap::new(),
+            AppliedStateDisposition::Retain,
         )
         .expect("bitmap reconciliation plan validates") else {
             panic!("fresh bitmap membership cannot be blocked")
@@ -6083,7 +7307,6 @@ mod tests {
             .await
             .expect("bitmap reconciliation transaction begins");
         plan.stage(&transaction)
-            .await
             .expect("bitmap reconciliation stages");
         transaction
             .commit()
@@ -6195,7 +7418,6 @@ mod tests {
             &transaction,
             &BTreeMap::from([(key.clone(), BTreeMap::from([(1, false), (3, true)]))]),
         )
-        .await
         .expect("mixed removal and addition stages");
         transaction
             .commit()
@@ -6223,7 +7445,6 @@ mod tests {
             &transaction,
             &BTreeMap::from([(key.clone(), BTreeMap::from([(2, false), (3, false)]))]),
         )
-        .await
         .expect("complete removal stages");
         transaction
             .commit()
@@ -6238,7 +7459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn corrupt_node_and_edge_equality_rows_fail_closed() {
+    async fn corrupt_node_and_edge_equality_rows_fail_closed_without_failing_a_flush() {
         for (kind, definition) in [
             (
                 "node",
@@ -6265,27 +7486,35 @@ mod tests {
             )
             .expect("equality bitmap key validates");
             let corrupt = Bytes::from_static(b"corrupt-equality-bitmap");
+            let validated = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            assert!(
+                crate::transaction::Mutation::put(&validated, &key, &corrupt).is_err(),
+                "{kind} equality corruption"
+            );
+            drop(validated);
+            // Corrupted outside Helix and already flushed: staging never reads
+            // it, the memtable flush still builds, and reads fail closed.
             db.put(&key, corrupt.clone()).await.unwrap();
+            let memtable = slatedb::config::FlushOptions {
+                flush_type: slatedb::config::FlushType::MemTable,
+            };
+            db.flush_with_options(memtable.clone()).await.unwrap();
 
             let transaction = db
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
                 .unwrap();
-            assert!(
-                stage_bitmap_changes(
-                    &transaction,
-                    &BTreeMap::from([(key.clone(), BTreeMap::from([(1, false)]))]),
-                )
-                .await
-                .is_err(),
-                "{kind} equality corruption"
-            );
-            transaction.rollback();
-            assert_eq!(
-                db.get(&key).await.unwrap(),
-                Some(corrupt),
-                "{kind} equality corruption"
-            );
+            stage_bitmap_changes(
+                &transaction,
+                &BTreeMap::from([(key.clone(), BTreeMap::from([(1, false)]))]),
+            )
+            .expect("staging never reads the corrupt row");
+            transaction.commit().await.unwrap();
+            db.flush_with_options(memtable).await.unwrap();
+            assert!(db.get(&key).await.is_err(), "{kind} equality corruption");
             db.close().await.unwrap();
         }
     }
@@ -6330,13 +7559,11 @@ mod tests {
             &left,
             &BTreeMap::from([(key.clone(), BTreeMap::from([(2, true)]))]),
         )
-        .await
         .expect("left addition stages");
         stage_bitmap_changes(
             &right,
             &BTreeMap::from([(key.clone(), BTreeMap::from([(3, true)]))]),
         )
-        .await
         .expect("right addition stages");
 
         left.commit().await.expect("left addition commits");
@@ -6425,7 +7652,6 @@ mod tests {
                                 txn,
                                 &BTreeMap::from([(key.clone(), BTreeMap::from([(id, present)]))]),
                             )
-                            .await
                             .unwrap();
                         }
                         let (first, second, first_change, second_change) = if left_first {
@@ -6723,19 +7949,18 @@ mod tests {
             .await
             .expect("first entity records a build delta");
 
-        let prepared = prepare_secondary_catch_up(
-            &db,
-            scope,
-            &operation,
-            one_entity_limits(),
-            NonZeroU64::new(1).unwrap(),
-        )
-        .await
-        .expect("one exact delta prepares");
-        assert!(matches!(
-            &prepared.catch_up,
-            PreparedSecondaryCatchUp::Exact { keys, .. } if keys.len() == 1
-        ));
+        let prepared = PreparedSecondaryOperationStep {
+            step: PreparedSecondaryStep::Exact {
+                keys: vec![IndexEntityStateKey {
+                    index_id,
+                    generation,
+                    entity: IndexEntity {
+                        kind: IndexElementKind::Node,
+                        id: IndexEntityId::initial(),
+                    },
+                }],
+            },
+        };
         let catch_up = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
@@ -6772,7 +7997,7 @@ mod tests {
         );
         let first = user_properties("first@example.com");
         put_source(&db, scope, IndexElementKind::Node, 0, &first).await;
-        let (operation_id, _, _) = create_build(&db, scope, &definition, 0).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
         let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
         let mut claim_sequence = 1;
         let operation = drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
@@ -6780,15 +8005,18 @@ mod tests {
         mutate_source(&db, scope, IndexElementKind::Node, 0, &first, &updated)
             .await
             .expect("first update records a build delta");
-        let prepared = prepare_secondary_catch_up(
-            &db,
-            scope,
-            &operation,
-            one_entity_limits(),
-            NonZeroU64::new(1).unwrap(),
-        )
-        .await
-        .expect("same-entity delta prepares");
+        let prepared = PreparedSecondaryOperationStep {
+            step: PreparedSecondaryStep::Exact {
+                keys: vec![IndexEntityStateKey {
+                    index_id,
+                    generation,
+                    entity: IndexEntity {
+                        kind: IndexElementKind::Node,
+                        id: IndexEntityId::initial(),
+                    },
+                }],
+            },
+        };
         let catch_up = db
             .begin(IsolationLevel::SerializableSnapshot)
             .await
@@ -6826,20 +8054,23 @@ mod tests {
         let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
         let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
         let mut claim_sequence = 1;
-        let operation = drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
         let updated = user_properties("updated@example.com");
         mutate_source(&db, scope, IndexElementKind::Node, 0, &first, &updated)
             .await
             .expect("update records one build delta");
-        let prepared = prepare_secondary_catch_up(
-            &db,
-            scope,
-            &operation,
-            SearchIndexBackfillLimits::default().batch(),
-            NonZeroU64::new(1).unwrap(),
-        )
-        .await
-        .expect("delta selection prepares");
+        let prepared = PreparedSecondaryOperationStep {
+            step: PreparedSecondaryStep::Exact {
+                keys: vec![IndexEntityStateKey {
+                    index_id,
+                    generation,
+                    entity: IndexEntity {
+                        kind: IndexElementKind::Node,
+                        id: IndexEntityId::initial(),
+                    },
+                }],
+            },
+        };
         drop(prepared);
         assert_eq!(
             generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation,)
@@ -6859,121 +8090,2489 @@ mod tests {
         db.close().await.expect("secondary test database closes");
     }
 
+    /// Drives one build until its durable stage satisfies `reached`.
+    async fn drive_until_stage(
+        db: &Db,
+        driver: &SecondaryIndexDriver,
+        operation_id: IndexOperationId,
+        claim_sequence: &mut u64,
+        reached: fn(&SecondaryBuildStage) -> bool,
+    ) {
+        for _ in 0..8 {
+            if reached(&build_stage(db, operation_id).await) {
+                return;
+            }
+            assert_eq!(
+                drive_one(db, driver, operation_id, claim_sequence).await,
+                CommittedOperationStep::Progressed
+            );
+        }
+        panic!("secondary build did not reach the expected stage")
+    }
+
+    /// Returns the durable build stage of one operation.
+    async fn build_stage(db: &Db, operation_id: IndexOperationId) -> SecondaryBuildStage {
+        let operation = read_operation(db, DataScope::LegacyUnscoped, operation_id)
+            .await
+            .expect("secondary operation is readable")
+            .expect("secondary operation exists");
+        let IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(stage)) =
+            operation.progress()
+        else {
+            panic!("secondary build retains constructing progress");
+        };
+        stage.clone()
+    }
+
+    /// Asserts an Active generation holds exactly the indexed values of
+    /// `sources`, with no build delta or applied-state row left behind.
+    async fn assert_generation_equals_source(
+        db: &Db,
+        scope: DataScope,
+        definition: &ValidatedDynamicIndexDefinition,
+        index_id: IndexId,
+        generation: IndexGenerationId,
+        sources: &BTreeMap<u64, Vec<Property>>,
+    ) {
+        assert!(matches!(
+            read_index(db, scope, definition).await.state(),
+            IndexStateV2::Active { .. }
+        ));
+        for kind in [RecordKind::BuildDelta, RecordKind::AppliedState] {
+            assert!(
+                generation_rows(db, scope, kind, index_id, generation)
+                    .await
+                    .is_empty(),
+                "{kind:?} rows outlive activation"
+            );
+        }
+        let ValidatedDynamicIndexDefinition::Secondary(secondary) = definition else {
+            unreachable!("secondary fixture is type-checked")
+        };
+        let mut expected = BTreeMap::<Bytes, BTreeSet<u64>>::new();
+        for (&entity_id, properties) in sources {
+            let entity = IndexEntityId::new(entity_id);
+            let Some(value) = canonical_value(secondary, properties, entity)
+                .expect("fixture source values are indexable")
+            else {
+                continue;
+            };
+            let key = secondary_entry_key(scope, index_id, generation, secondary, value, entity)
+                .expect("fixture entry key validates");
+            expected.entry(key).or_default().insert(entity_id);
+        }
+        let mut actual = BTreeMap::<Bytes, BTreeSet<u64>>::new();
+        if definition_uses_equality_bitmap(secondary) {
+            for (key, value) in generation_rows(
+                db,
+                scope,
+                RecordKind::SecondaryEqualityBitmap,
+                index_id,
+                generation,
+            )
+            .await
+            {
+                let ids = SecondaryEqualityBitmapValue::decode(&value)
+                    .expect("generation bitmap decodes")
+                    .into_ids();
+                if !ids.is_empty() {
+                    actual.insert(key, ids.iter().collect());
+                }
+            }
+        } else {
+            for (key, value) in
+                generation_rows(db, scope, RecordKind::SecondaryEntry, index_id, generation).await
+            {
+                let owner = decode_secondary_entry_value(
+                    index_id,
+                    generation,
+                    definition_lane(secondary),
+                    &value,
+                )
+                .expect("generation entry decodes");
+                actual.entry(key).or_default().insert(owner.get());
+            }
+        }
+        assert_eq!(actual, expected, "the generation diverged from its source");
+    }
+
+    /// Writes before every step used to send each gated step back to
+    /// catch-up. Each step now drains the deltas it observes, so the build
+    /// activates within a fixed number of steps for every lane.
     #[tokio::test]
-    async fn only_the_empty_catch_up_barrier_waits_for_scope_mutations() {
+    async fn builds_activate_while_a_fresh_write_precedes_every_step() {
+        for (ordinal, definition) in [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+            SecondaryIndexDefinition::node_range("User", "email"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let db = test_db(&format!("secondary-sustained-writes-{ordinal}")).await;
+            let scope = DataScope::LegacyUnscoped;
+            let definition = validated(definition.expect("test definition is valid"));
+            let mut sources = BTreeMap::new();
+            for entity_id in 0..4 {
+                let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+                put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+                sources.insert(entity_id, properties);
+            }
+            let (operation_id, index_id, generation) =
+                create_build(&db, scope, &definition, 3).await;
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+            let mut claim_sequence = 1;
+            drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+
+            let mut activated = false;
+            for step in 0_u64..12 {
+                let inserted = 4 + step;
+                let properties = user_properties(&format!("inserted-{step}@example.com"));
+                mutate_source(
+                    &db,
+                    scope,
+                    IndexElementKind::Node,
+                    inserted,
+                    &[],
+                    &properties,
+                )
+                .await
+                .expect("insert records a build delta");
+                sources.insert(inserted, properties);
+                let updated = step % 4;
+                let after = user_properties(&format!("updated-{step}@example.com"));
+                mutate_source(
+                    &db,
+                    scope,
+                    IndexElementKind::Node,
+                    updated,
+                    &sources[&updated],
+                    &after,
+                )
+                .await
+                .expect("update records a build delta");
+                sources.insert(updated, after);
+                match drive_one(&db, &driver, operation_id, &mut claim_sequence).await {
+                    CommittedOperationStep::Progressed => {}
+                    CommittedOperationStep::Completed => {
+                        activated = true;
+                        break;
+                    }
+                    step @ (CommittedOperationStep::TransientFailure
+                    | CommittedOperationStep::Blocked) => {
+                        panic!("sustained writes must not block the build: {step:?}")
+                    }
+                }
+            }
+            assert!(
+                activated,
+                "{definition:?} must activate while every step follows a write"
+            );
+            let after = user_properties("after-activation@example.com");
+            mutate_source(&db, scope, IndexElementKind::Node, 0, &sources[&0], &after)
+                .await
+                .expect("an Active update maintains its entry");
+            sources.insert(0, after);
+            assert_generation_equals_source(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                &sources,
+            )
+            .await;
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// Reproduces a writer committing while each gated step waits for the
+    /// scope permit, so every step observes a fresh delta. The step drains
+    /// it under the gate and advances instead of returning to catch-up.
+    #[tokio::test]
+    async fn gated_steps_drain_the_write_they_waited_for() {
+        for (ordinal, definition) in [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let db = test_db(&format!("secondary-gated-write-window-{ordinal}")).await;
+            let scope = DataScope::LegacyUnscoped;
+            let definition = validated(definition.expect("test definition is valid"));
+            let mut sources = BTreeMap::new();
+            for entity_id in 0..4 {
+                let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+                put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+                sources.insert(entity_id, properties);
+            }
+            let (operation_id, index_id, generation) =
+                create_build(&db, scope, &definition, 3).await;
+            let gates = Arc::new(IndexScopeGates::default());
+            let driver = SecondaryIndexDriver::new(Arc::clone(&gates));
+            let mut claim_sequence = 1;
+            drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+
+            let mut activated = false;
+            for step in 0_u64..8 {
+                let in_flight = gates.mutation_permit(scope).await;
+                let pending = drive_one(&db, &driver, operation_id, &mut claim_sequence);
+                tokio::pin!(pending);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), &mut pending)
+                        .await
+                        .is_err(),
+                    "every step from catch-up on waits for the in-flight write"
+                );
+                let inserted = 4 + step;
+                let properties = user_properties(&format!("waited-{step}@example.com"));
+                mutate_source(
+                    &db,
+                    scope,
+                    IndexElementKind::Node,
+                    inserted,
+                    &[],
+                    &properties,
+                )
+                .await
+                .expect("the in-flight write commits while the step waits");
+                sources.insert(inserted, properties);
+                drop(in_flight);
+                match tokio::time::timeout(Duration::from_secs(5), pending)
+                    .await
+                    .expect("the step acquires the gate once the write commits")
+                {
+                    CommittedOperationStep::Progressed => {}
+                    CommittedOperationStep::Completed => {
+                        activated = true;
+                        break;
+                    }
+                    step @ (CommittedOperationStep::TransientFailure
+                    | CommittedOperationStep::Blocked) => {
+                        panic!("a drained write must not block the build: {step:?}")
+                    }
+                }
+            }
+            assert!(
+                activated,
+                "{definition:?} must activate while each step waits for a write"
+            );
+            assert_generation_equals_source(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                &sources,
+            )
+            .await;
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// A crash inside a gated step loses its uncommitted transaction and
+    /// nothing else. Before every step a write lands; the step then runs the
+    /// production claim, preparation, and gate, and is dropped once it has
+    /// staged, with the database dropped unclosed. After each reopen every
+    /// delta, applied row, and entry is as the step's committed drains left
+    /// them, and the next step, from another writer epoch, still advances
+    /// the build until it activates equal to its source.
+    #[tokio::test]
+    async fn sustained_writes_converge_across_a_crash_inside_every_gated_step() {
+        let store = Arc::new(InMemory::new());
+        let path = "secondary-sustained-writes-crash";
+        let open = || {
+            Db::builder(path, store.clone())
+                .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+                .build()
+        };
+        let mut db = open().await.expect("crash test database opens");
+        bootstrap_writer(&db)
+            .await
+            .expect("crash test database bootstraps");
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let mut sources = BTreeMap::new();
+        for entity_id in 0..4 {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 3).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        // The crashed steps run as a process the later steps do not share.
+        let crashed_epoch = WriterEpoch::from_bytes([0x5C; 16]).expect("writer epoch is non-nil");
+
+        let mut activated = false;
+        for step in 0_u64..12 {
+            let inserted = 4 + step;
+            let properties = user_properties(&format!("inserted-{step}@example.com"));
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                inserted,
+                &[],
+                &properties,
+            )
+            .await
+            .expect("insert records a build delta");
+            sources.insert(inserted, properties);
+            let updated = step % 4;
+            let after = user_properties(&format!("updated-{step}@example.com"));
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                updated,
+                &sources[&updated],
+                &after,
+            )
+            .await
+            .expect("update records a build delta");
+            sources.insert(updated, after);
+
+            let pause =
+                crate::index_lifecycle::outbox::step_pause::StepPause::arm(&db, |progress| {
+                    matches!(
+                        progress,
+                        IndexOperationProgress::SecondaryBuild(
+                            SecondaryBuildProgress::Constructing(
+                                SecondaryBuildStage::CatchUp(_)
+                                    | SecondaryBuildStage::Validate(_)
+                                    | SecondaryBuildStage::Activate(_)
+                            )
+                        )
+                    )
+                });
+            let OperationPointerObservation::Eligible(eligible) =
+                observe_operation_pointer(&db, operation_id, crashed_epoch, NOW_MILLIS)
+                    .await
+                    .expect("operation pointer is readable")
+            else {
+                panic!("the next gated step is eligible");
+            };
+            let claimed = claim_operation(
+                &db,
+                &eligible,
+                crashed_epoch,
+                ClaimSequence::new(claim_sequence).expect("claim sequence is non-zero"),
+                NOW_MILLIS,
+                ClaimPermission::Normal,
+            )
+            .await
+            .expect("the crashing claim succeeds")
+            .expect("exact queued revision is claimable");
+            claim_sequence += 1;
+            let lifecycle_rows = {
+                let crashing = execute_claimed_step(
+                    &db,
+                    &claimed,
+                    &driver,
+                    SearchIndexBackfillLimits::default().batch(),
+                    NOW_MILLIS,
+                );
+                tokio::pin!(crashing);
+                tokio::select! {
+                    () = pause.reached() => {}
+                    outcome = &mut crashing => {
+                        panic!("the gated step committed before its crash: {outcome:?}")
+                    }
+                }
+                // Drains the step committed under its gate before its own
+                // transaction are durable; that transaction is not.
+                let mut committed = Vec::new();
+                for kind in [
+                    RecordKind::BuildDelta,
+                    RecordKind::AppliedState,
+                    RecordKind::SecondaryEntry,
+                ] {
+                    committed.push(generation_rows(&db, scope, kind, index_id, generation).await);
+                }
+                committed
+                // The held step and its staged transaction die here.
+            };
+            drop(pause);
+            drop(db);
+            db = open()
+                .await
+                .expect("crash test database reopens after the crash");
+            let mut recovered = Vec::new();
+            for kind in [
+                RecordKind::BuildDelta,
+                RecordKind::AppliedState,
+                RecordKind::SecondaryEntry,
+            ] {
+                recovered.push(generation_rows(&db, scope, kind, index_id, generation).await);
+            }
+            assert_eq!(
+                recovered, lifecycle_rows,
+                "an uncommitted step transaction leaves no trace"
+            );
+
+            match drive_one(&db, &driver, operation_id, &mut claim_sequence).await {
+                CommittedOperationStep::Progressed => {}
+                CommittedOperationStep::Completed => {
+                    activated = true;
+                    break;
+                }
+                step @ (CommittedOperationStep::TransientFailure
+                | CommittedOperationStep::Blocked) => {
+                    panic!("a recovered build must not stop under writes: {step:?}")
+                }
+            }
+        }
+        assert!(activated, "the build must activate across crashes");
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("crash test database closes");
+    }
+
+    /// Writes inside the scanned range commit while a source batch is held
+    /// between staging and commit. The batch was read outside the step's
+    /// serializable transaction, so a non-unique step still commits on its
+    /// first attempt. A unique step conflicts with the claiming writes to the
+    /// entities it read (see [`claim_while_building`]) and retries. Either
+    /// way each write's delta carries its change into the generation.
+    #[tokio::test]
+    async fn source_scan_commits_through_writes_to_its_range() {
+        for (ordinal, definition) in [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+            SecondaryIndexDefinition::node_range("User", "email"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let db = test_db(&format!("secondary-scan-window-writes-{ordinal}")).await;
+            let scope = DataScope::LegacyUnscoped;
+            let definition = validated(definition.expect("test definition is valid"));
+            let mut sources = BTreeMap::new();
+            for entity_id in 0..4 {
+                let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+                put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+                sources.insert(entity_id, properties);
+            }
+            // Leased IDs 4..=7 lie inside the source bound without rows yet.
+            let (operation_id, index_id, generation) =
+                create_build(&db, scope, &definition, 7).await;
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+            let mut claim_sequence = 1;
+            let pause =
+                crate::index_lifecycle::outbox::step_pause::StepPause::arm(&db, |progress| {
+                    matches!(
+                        progress,
+                        IndexOperationProgress::SecondaryBuild(
+                            SecondaryBuildProgress::Constructing(SecondaryBuildStage::Scan(
+                                SourceScanProgress { cursor: None, .. }
+                            ))
+                        )
+                    )
+                });
+            let committed = {
+                let step = drive_one(&db, &driver, operation_id, &mut claim_sequence);
+                tokio::pin!(step);
+                tokio::select! {
+                    () = pause.reached() => {}
+                    outcome = &mut step => panic!("the scan committed before its pause: {outcome:?}"),
+                }
+                let updated = user_properties("updated-1@example.com");
+                mutate_source(
+                    &db,
+                    scope,
+                    IndexElementKind::Node,
+                    1,
+                    &sources[&1],
+                    &updated,
+                )
+                .await
+                .expect("a scanned entity updates while the scan is held");
+                sources.insert(1, updated);
+                mutate_source(&db, scope, IndexElementKind::Node, 2, &sources[&2], &[])
+                    .await
+                    .expect("a scanned entity is deleted while the scan is held");
+                sources.remove(&2);
+                let inserted = user_properties("inserted-5@example.com");
+                mutate_source(&db, scope, IndexElementKind::Node, 5, &[], &inserted)
+                    .await
+                    .expect("an entity inside the source bound is inserted while the scan is held");
+                sources.insert(5, inserted);
+                pause.release();
+
+                step.await
+            };
+            let ValidatedDynamicIndexDefinition::Secondary(secondary) = &definition else {
+                unreachable!("secondary fixture is type-checked")
+            };
+            if secondary.unique() {
+                assert_eq!(
+                    committed,
+                    CommittedOperationStep::TransientFailure,
+                    "a unique scan conflicts with the claiming writes and retries"
+                );
+            } else {
+                assert_eq!(committed, CommittedOperationStep::Progressed);
+                assert_eq!(pause.stagings(), 1, "the scan commits on its first attempt");
+                assert!(matches!(
+                    build_stage(&db, operation_id).await,
+                    SecondaryBuildStage::CatchUp(_)
+                ));
+            }
+            assert_eq!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+            assert_generation_equals_source(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                &sources,
+            )
+            .await;
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// Batch limits whose single-vector cap equals the transaction's.
+    fn batch_limits(
+        entities: usize,
+        input_bytes: u64,
+        output_operations: u64,
+        output_bytes: u64,
+    ) -> SearchIndexBatchLimits {
+        SearchIndexBatchLimits::try_new(
+            std::num::NonZeroUsize::new(entities).expect("entity limit is positive"),
+            NonZeroU64::new(input_bytes).expect("input limit is positive"),
+            NonZeroU64::new(output_operations).expect("operation limit is positive"),
+            NonZeroU64::new(output_bytes).expect("output limit is positive"),
+            NonZeroU64::new(output_bytes).expect("output limit is positive"),
+        )
+        .expect("test limits are internally consistent")
+    }
+
+    /// A source row a scan blocks on is read through its serializable
+    /// transaction, so a repair that commits inside the step's window makes
+    /// the step lose its commit rather than record a stale durable blocker.
+    /// Each case repairs a different guarded row: an oversized input row, a
+    /// row that does not decode, a value the index cannot hold, a plan larger
+    /// than the output budget, and either owner of a duplicate.
+    #[tokio::test]
+    async fn a_scan_blocker_repaired_inside_the_step_window_retries() {
+        enum Broken {
+            Properties(Vec<Property>),
+            Bytes(Bytes),
+        }
+        let unique = || {
+            validated(
+                SecondaryIndexDefinition::node_unique_equality("User", "email")
+                    .expect("unique definition"),
+            )
+        };
+        let equality = || {
+            validated(
+                SecondaryIndexDefinition::node_equality("User", "email")
+                    .expect("equality definition"),
+            )
+        };
+        let long = user_properties(&format!("{}@example.com", "x".repeat(600)));
+        let duplicate = user_properties("duplicate@example.com");
+        let cases = [
+            (
+                "oversized input row",
+                equality(),
+                batch_limits(1024, 512, 4096, 1024 * 1024),
+                vec![(0, Broken::Properties(long.clone()))],
+                0,
+            ),
+            (
+                "undecodable row",
+                equality(),
+                SearchIndexBackfillLimits::default().batch(),
+                vec![(0, Broken::Bytes(Bytes::from_static(b"malformed")))],
+                0,
+            ),
+            (
+                "unsupported value",
+                validated(
+                    SecondaryIndexDefinition::node_range("User", "email")
+                        .expect("range definition"),
+                ),
+                SearchIndexBackfillLimits::default().batch(),
+                vec![(
+                    0,
+                    Broken::Properties(vec![
+                        Property::string("$label", "User"),
+                        Property::new("email", PropertyValue::Bool(true)),
+                    ]),
+                )],
+                0,
+            ),
+            (
+                "oversized output plan",
+                equality(),
+                batch_limits(1024, 1024 * 1024, 4096, 400),
+                vec![(0, Broken::Properties(long))],
+                0,
+            ),
+            (
+                "first owner of a duplicate",
+                unique(),
+                SearchIndexBackfillLimits::default().batch(),
+                vec![
+                    (0, Broken::Properties(duplicate.clone())),
+                    (1, Broken::Properties(duplicate.clone())),
+                ],
+                0,
+            ),
+            (
+                "second owner of a duplicate",
+                unique(),
+                SearchIndexBackfillLimits::default().batch(),
+                vec![
+                    (0, Broken::Properties(duplicate.clone())),
+                    (1, Broken::Properties(duplicate)),
+                ],
+                1,
+            ),
+        ];
+        for (ordinal, (case, definition, limits, rows, repaired)) in cases.into_iter().enumerate() {
+            let db = test_db(&format!("secondary-scan-blocker-window-{ordinal}")).await;
+            let scope = DataScope::LegacyUnscoped;
+            let mut sources = BTreeMap::new();
+            let mut upper = 0;
+            for (entity_id, row) in rows {
+                match row {
+                    Broken::Properties(properties) => {
+                        put_source(&db, scope, IndexElementKind::Node, entity_id, &properties)
+                            .await;
+                        sources.insert(entity_id, properties);
+                    }
+                    Broken::Bytes(bytes) => {
+                        db.put(source_key(scope, IndexElementKind::Node, entity_id), bytes)
+                            .await
+                            .expect("malformed source row is written");
+                    }
+                }
+                upper = entity_id;
+            }
+            let (operation_id, index_id, generation) =
+                create_build(&db, scope, &definition, upper).await;
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+            let mut claim_sequence = 1;
+            let pause =
+                crate::index_lifecycle::outbox::step_pause::StepPause::arm(&db, |progress| {
+                    matches!(
+                        progress,
+                        IndexOperationProgress::SecondaryBuild(
+                            SecondaryBuildProgress::Constructing(SecondaryBuildStage::Scan(_))
+                        )
+                    )
+                });
+            // A writer epoch the later steps do not share.
+            let held_epoch = WriterEpoch::from_bytes([0x5B; 16]).expect("writer epoch is non-nil");
+            let OperationPointerObservation::Eligible(eligible) =
+                observe_operation_pointer(&db, operation_id, held_epoch, NOW_MILLIS)
+                    .await
+                    .expect("operation pointer is readable")
+            else {
+                panic!("{case}: the queued scan is eligible");
+            };
+            let claimed = claim_operation(
+                &db,
+                &eligible,
+                held_epoch,
+                ClaimSequence::new(claim_sequence).expect("claim sequence is non-zero"),
+                NOW_MILLIS,
+                ClaimPermission::Normal,
+            )
+            .await
+            .expect("scan claim succeeds")
+            .expect("exact queued revision is claimable");
+            claim_sequence += 1;
+            let committed = {
+                let step = execute_claimed_step(&db, &claimed, &driver, limits, NOW_MILLIS);
+                tokio::pin!(step);
+                tokio::select! {
+                    () = pause.reached() => {}
+                    outcome = &mut step => {
+                        panic!("{case}: the scan committed before its pause: {outcome:?}")
+                    }
+                }
+                let fixed = user_properties(&format!("repaired-{repaired}@example.com"));
+                let key = source_key(scope, IndexElementKind::Node, repaired);
+                db.put(&key, encode_properties(&fixed))
+                    .await
+                    .expect("the blocking row is repaired while the scan is held");
+                sources.insert(repaired, fixed);
+                pause.release();
+                step.await
+            };
+            assert_eq!(
+                committed.expect("a lost conflict releases the claim"),
+                CommittedOperationStep::TransientFailure,
+                "{case}: a repaired blocker must not commit"
+            );
+            assert_eq!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed,
+                "{case}: the retried scan converges"
+            );
+            assert_generation_equals_source(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                &sources,
+            )
+            .await;
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// Returns the build stage a step result progressed to.
+    fn progressed_stage(result: &IndexOperationStepResult) -> &SecondaryBuildStage {
+        let IndexOperationStepResult::Progressed(IndexOperationProgress::SecondaryBuild(
+            SecondaryBuildProgress::Constructing(stage),
+        )) = result
+        else {
+            panic!("the step progressed a build: {result:?}");
+        };
+        stage
+    }
+
+    /// Returns one build stage's cumulative counters.
+    fn stage_counters(stage: &SecondaryBuildStage) -> OperationCounters {
+        match stage {
+            SecondaryBuildStage::Scan(progress) => progress.counters,
+            SecondaryBuildStage::CatchUp(progress) | SecondaryBuildStage::Validate(progress) => {
+                progress.counters
+            }
+            SecondaryBuildStage::Activate(progress) => progress.counters,
+        }
+    }
+
+    /// Runs one step outside the outbox, as a gated step's own transaction
+    /// does after its gate, and returns its result. The step's physical
+    /// writes commit only when `commit` is set; the checkpoint never does.
+    async fn direct_step(
+        db: &Db,
+        driver: &SecondaryIndexDriver,
+        operation_id: IndexOperationId,
+        limits: SearchIndexBatchLimits,
+        commit: bool,
+    ) -> IndexOperationStepResult {
+        let operation = read_operation(db, DataScope::LegacyUnscoped, operation_id)
+            .await
+            .expect("secondary operation is readable")
+            .expect("secondary operation exists");
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("direct step transaction begins");
+        let execution = driver
+            .step(
+                db,
+                &transaction,
+                DataScope::LegacyUnscoped,
+                &operation,
+                limits,
+            )
+            .await
+            .expect("the direct step stages");
+        if commit {
+            transaction.commit().await.expect("the direct step commits");
+        }
+        execution.result().clone()
+    }
+
+    /// An activation drain that its transaction's budget stops keeps its
+    /// stage, and the delta past the budget stays pending. Each budget is set
+    /// to admit exactly the first of two pending reconciliations, measured by
+    /// a step that rolls back. Validation drains no delta in its own
+    /// transaction; it passes entities with pending deltas to the drains.
+    #[tokio::test]
+    async fn gated_drains_a_budget_stops_keep_their_stage() {
+        {
+            for budget in 0..4_usize {
+                let db = test_db(&format!("secondary-drain-budget-{budget}")).await;
+                let scope = DataScope::LegacyUnscoped;
+                let definition = validated(
+                    SecondaryIndexDefinition::node_equality("User", "email")
+                        .expect("node equality definition"),
+                );
+                let mut sources = BTreeMap::new();
+                for entity_id in 0..2 {
+                    let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+                    put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+                    sources.insert(entity_id, properties);
+                }
+                let (operation_id, index_id, generation) =
+                    create_build(&db, scope, &definition, 1).await;
+                let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+                let mut claim_sequence = 1;
+                drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, |stage| {
+                    matches!(stage, SecondaryBuildStage::Activate(_))
+                })
+                .await;
+                for entity_id in 0..2 {
+                    let after = user_properties(&format!("moved-{entity_id}@example.com"));
+                    mutate_source(
+                        &db,
+                        scope,
+                        IndexElementKind::Node,
+                        entity_id,
+                        &sources[&entity_id],
+                        &after,
+                    )
+                    .await
+                    .expect("update records a build delta");
+                    sources.insert(entity_id, after);
+                }
+                let start = build_stage(&db, operation_id).await;
+                let before = stage_counters(&start);
+                let generous = 8 * 1024 * 1024;
+                let first = stage_counters(progressed_stage(
+                    &direct_step(
+                        &db,
+                        &driver,
+                        operation_id,
+                        batch_limits(1, generous, 4096, generous),
+                        false,
+                    )
+                    .await,
+                ));
+                let limits = match budget {
+                    0 => batch_limits(1, generous, 4096, generous),
+                    1 => batch_limits(1024, first.input_bytes - before.input_bytes, 4096, generous),
+                    2 => batch_limits(
+                        1024,
+                        generous,
+                        first.output_operations - before.output_operations,
+                        generous,
+                    ),
+                    _ => batch_limits(
+                        1024,
+                        generous,
+                        4096,
+                        first.output_bytes - before.output_bytes,
+                    ),
+                };
+                let result = direct_step(&db, &driver, operation_id, limits, true).await;
+                let after = progressed_stage(&result);
+                assert!(
+                    matches!(start, SecondaryBuildStage::Activate(_)),
+                    "the build was driven to activation"
+                );
+                assert!(
+                    matches!(after, SecondaryBuildStage::Activate(_)),
+                    "budget {budget} left activation: {after:?}"
+                );
+                assert_eq!(
+                    generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
+                        .await
+                        .len(),
+                    1,
+                    "budget {budget}: the reconciliation past the budget stays pending"
+                );
+                assert_eq!(
+                    drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                    CommittedOperationStep::Completed
+                );
+                assert_generation_equals_source(
+                    &db,
+                    scope,
+                    &definition,
+                    index_id,
+                    generation,
+                    &sources,
+                )
+                .await;
+                db.close().await.expect("secondary test database closes");
+            }
+        }
+    }
+
+    /// Each write window brings more deltas than one transaction admits,
+    /// whether the entity budget or an output budget is what stops it. The
+    /// gated step holds the scope permit across bounded drains until the
+    /// prefix is empty, so every step advances and the build activates within
+    /// a fixed number of steps, for one build and for two builds sharing the
+    /// scope.
+    #[tokio::test]
+    async fn gated_steps_converge_when_each_write_window_exceeds_a_batch() {
+        // A fresh insert stages three writes, so four output operations admit
+        // one per transaction while the entity budget would admit 1,024.
+        let generous = 8 * 1024 * 1024;
+        let output_bound = batch_limits(1024, generous, 4, generous);
+        for (ordinal, (builds, limits)) in [1_usize, 2]
+            .into_iter()
+            .flat_map(|builds| [(builds, one_entity_limits()), (builds, output_bound)])
+            .enumerate()
+        {
+            let db = test_db(&format!("secondary-window-above-batch-{ordinal}")).await;
+            let scope = DataScope::LegacyUnscoped;
+            let definitions = [
+                SecondaryIndexDefinition::node_equality("User", "email"),
+                SecondaryIndexDefinition::node_range("User", "email"),
+            ]
+            .into_iter()
+            .take(builds)
+            .map(|definition| validated(definition.expect("test definition is valid")))
+            .collect::<Vec<_>>();
+            let mut sources = BTreeMap::new();
+            for entity_id in 0..2 {
+                let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+                put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+                sources.insert(entity_id, properties);
+            }
+            let mut operations = Vec::new();
+            for definition in &definitions {
+                operations.push(create_build(&db, scope, definition, 1).await);
+            }
+            let gates = Arc::new(IndexScopeGates::default());
+            let driver = SecondaryIndexDriver::new(Arc::clone(&gates));
+            let mut claim_sequence = 1;
+            for &(operation_id, _, _) in &operations {
+                while !matches!(
+                    build_stage(&db, operation_id).await,
+                    SecondaryBuildStage::CatchUp(_)
+                ) {
+                    assert_eq!(
+                        drive_one_with_limits(
+                            &db,
+                            &driver,
+                            operation_id,
+                            &mut claim_sequence,
+                            limits
+                        )
+                        .await,
+                        CommittedOperationStep::Progressed
+                    );
+                }
+            }
+
+            let mut running = operations.iter().map(|&(id, _, _)| id).collect::<Vec<_>>();
+            for _ in 0..64 {
+                let mut still_running = Vec::new();
+                for operation_id in running {
+                    // Three indexed inserts commit while the step waits for
+                    // the scope permit they hold. Catch-up and activation
+                    // always wait; validation waits only once it fences.
+                    let fences = !matches!(
+                        build_stage(&db, operation_id).await,
+                        SecondaryBuildStage::Validate(_)
+                    );
+                    let in_flight = gates.mutation_permit(scope).await;
+                    let pending = drive_one_with_limits(
+                        &db,
+                        &driver,
+                        operation_id,
+                        &mut claim_sequence,
+                        limits,
+                    );
+                    tokio::pin!(pending);
+                    let early = tokio::time::timeout(Duration::from_millis(50), &mut pending).await;
+                    if fences {
+                        assert!(
+                            early.is_err(),
+                            "catch-up and activation wait for the in-flight writes"
+                        );
+                    }
+                    let first = sources.keys().next_back().map_or(0, |last| last + 1);
+                    for entity_id in first..first + 3 {
+                        let properties =
+                            user_properties(&format!("window-{entity_id}@example.com"));
+                        mutate_source(
+                            &db,
+                            scope,
+                            IndexElementKind::Node,
+                            entity_id,
+                            &[],
+                            &properties,
+                        )
+                        .await
+                        .expect("an in-flight write commits while the step waits");
+                        sources.insert(entity_id, properties);
+                    }
+                    drop(in_flight);
+                    // A fenced validation drains every pending delta, one
+                    // durable transaction per entity under these limits.
+                    let step = match early {
+                        Ok(step) => step,
+                        Err(_) => tokio::time::timeout(Duration::from_secs(60), pending)
+                            .await
+                            .expect("the step acquires the gate once the writes commit"),
+                    };
+                    match step {
+                        CommittedOperationStep::Progressed => still_running.push(operation_id),
+                        CommittedOperationStep::Completed => {}
+                        step @ (CommittedOperationStep::TransientFailure
+                        | CommittedOperationStep::Blocked) => {
+                            panic!("a window above one batch must not stop the build: {step:?}")
+                        }
+                    }
+                }
+                running = still_running;
+                if running.is_empty() {
+                    break;
+                }
+            }
+            assert!(
+                running.is_empty(),
+                "{builds} builds must activate while each window exceeds a batch"
+            );
+            for (definition, &(_, index_id, generation)) in definitions.iter().zip(&operations) {
+                assert_generation_equals_source(
+                    &db, scope, definition, index_id, generation, &sources,
+                )
+                .await;
+            }
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// A scan reads its source from a snapshot opened after the step's
+    /// transaction. A write between the two that gives an earlier entity of
+    /// the batch a later entity's unique value is a duplicate in the batch's
+    /// view, not a stale claim: the step reports it instead of corruption,
+    /// its commit conflicts with the write, and the retry blocks on the same
+    /// duplicate durably.
+    #[tokio::test]
+    async fn a_unique_scan_reports_a_duplicate_written_after_its_transaction_began() {
+        let db = test_db("secondary-unique-scan-snapshot-skew").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("node unique equality definition"),
+        );
+        let original = user_properties("original-0@example.com");
+        let shared = user_properties("shared@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &original).await;
+        put_source(&db, scope, IndexElementKind::Node, 1, &shared).await;
+        let (operation_id, _, _) = create_build(&db, scope, &definition, 1).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("secondary operation is readable")
+            .expect("secondary operation exists");
+        assert!(matches!(
+            operation.progress(),
+            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                SecondaryBuildStage::Scan(_)
+            ))
+        ));
+
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("scan transaction begins");
+        mutate_source(&db, scope, IndexElementKind::Node, 0, &original, &shared)
+            .await
+            .expect("a Building unique index admits the duplicate as a delta");
+        let execution = driver
+            .step(
+                &db,
+                &transaction,
+                scope,
+                &operation,
+                SearchIndexBackfillLimits::default().batch(),
+            )
+            .await
+            .expect("the scan stages without reporting corruption");
+        let is_duplicate = |blocker: &IndexOperationBlocker| {
+            matches!(
+                blocker,
+                IndexOperationBlocker::UniquenessViolation {
+                    first_entity_id,
+                    second_entity_id,
+                } if first_entity_id.get() == 0 && second_entity_id.get() == 1
+            )
+        };
+        assert!(
+            matches!(execution.result(), IndexOperationStepResult::Blocked(blocker) if is_duplicate(blocker)),
+            "{:?}",
+            execution.result()
+        );
+        assert_eq!(
+            transaction
+                .commit()
+                .await
+                .expect_err("the write after the transaction began conflicts")
+                .kind(),
+            slatedb::ErrorKind::Transaction
+        );
+
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Blocked
+        );
+        let blocked = read_operation(&db, scope, operation_id)
+            .await
+            .expect("blocked operation is readable")
+            .expect("blocked operation exists");
+        assert!(
+            matches!(
+                blocked.execution_state(),
+                IndexOperationExecutionState::Blocked(blocker) if is_duplicate(blocker)
+            ),
+            "{:?}",
+            blocked.execution_state()
+        );
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A duplicate found by the activation drain blocks the build after the
+    /// earlier entities' reconciliations commit; repairing the duplicate and
+    /// retrying converges to the source.
+    #[tokio::test]
+    async fn a_blocked_validation_drain_commits_a_consistent_prefix() {
+        let db = test_db("secondary-blocked-validation-drain").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let mut sources = BTreeMap::new();
+        for entity_id in 0..3 {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 2).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, |stage| {
+            matches!(stage, SecondaryBuildStage::Validate(_))
+        })
+        .await;
+        // Writers now reject the duplicate; a build that began before they
+        // claimed values during builds may still hold it as a delta.
+        let moved = user_properties("moved-0@example.com");
+        let duplicate = sources[&2].clone();
+        for (entity_id, after) in [(0, moved), (1, duplicate)] {
+            legacy_building_write(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                entity_id,
+                &sources[&entity_id],
+                &after,
+            )
+            .await;
+            sources.insert(entity_id, after);
+        }
+
+        // Validation passes both entities, whose deltas are pending, to the
+        // activation drain, which blocks on the duplicate.
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Blocked
+        );
+        let blocked = read_operation(&db, scope, operation_id)
+            .await
+            .expect("blocked operation is readable")
+            .expect("blocked operation exists");
+        assert!(matches!(
+            blocked.execution_state(),
+            IndexOperationExecutionState::Blocked(IndexOperationBlocker::UniquenessViolation {
+                first_entity_id,
+                second_entity_id,
+            }) if first_entity_id.get() == 2 && second_entity_id.get() == 1
+        ));
+        let entity_key = |kind: fn(IndexEntityStateKey) -> ScopedKey, entity_id: u64| {
+            scoped_index_key(
+                scope,
+                kind(IndexEntityStateKey {
+                    index_id,
+                    generation,
+                    entity: IndexEntity {
+                        kind: IndexElementKind::Node,
+                        id: IndexEntityId::new(entity_id),
+                    },
+                }),
+            )
+        };
+        for (key, present) in [
+            (entity_key(ScopedKey::BuildDelta, 0), false),
+            (entity_key(ScopedKey::AppliedState, 0), false),
+            (entity_key(ScopedKey::BuildDelta, 1), true),
+            (entity_key(ScopedKey::AppliedState, 1), true),
+        ] {
+            assert_eq!(
+                db.get(key)
+                    .await
+                    .expect("lifecycle row is readable")
+                    .is_some(),
+                present
+            );
+        }
+
+        let repaired = user_properties("repaired-1@example.com");
+        mutate_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            1,
+            &sources[&1],
+            &repaired,
+        )
+        .await
+        .expect("the duplicate is repaired while the build is blocked");
+        sources.insert(1, repaired);
+        crate::index_lifecycle::outbox::retry_operation(&db, scope, operation_id)
+            .await
+            .expect("the blocked build retries at its checkpoint");
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// An entity that had its value when the build was created, lost it
+    /// before the scan reached it, and regained it after keeps its entry in
+    /// every lane. Its delta still names the original value, which the
+    /// generation never held: without an applied row that value is only a
+    /// candidate, so the drain writes the restored value although the delta
+    /// calls it unchanged.
+    #[tokio::test]
+    async fn a_value_lost_before_the_scan_and_restored_after_keeps_its_entry() {
+        let lanes = [
+            (
+                SecondaryIndexDefinition::node_equality("User", "email"),
+                IndexElementKind::Node,
+            ),
+            (
+                SecondaryIndexDefinition::node_unique_equality("User", "email"),
+                IndexElementKind::Node,
+            ),
+            (
+                SecondaryIndexDefinition::node_range("User", "email"),
+                IndexElementKind::Node,
+            ),
+            (
+                SecondaryIndexDefinition::edge_equality("User", "email"),
+                IndexElementKind::Edge,
+            ),
+            (
+                SecondaryIndexDefinition::edge_range("User", "email"),
+                IndexElementKind::Edge,
+            ),
+        ];
+        let original = user_properties("original@example.com");
+        let absences = [
+            // The indexed property is removed.
+            vec![Property::string("$label", "User")],
+            // The entity moves to another label.
+            vec![
+                Property::string("$label", "Other"),
+                Property::string("email", "original@example.com"),
+            ],
+        ];
+        for (lane, (definition, kind)) in lanes.into_iter().enumerate() {
+            let definition = validated(definition.expect("test definition is valid"));
+            for (variant, absent) in absences.iter().enumerate() {
+                let db = test_db(&format!("secondary-restored-after-scan-{lane}-{variant}")).await;
+                let scope = DataScope::LegacyUnscoped;
+                put_source(&db, scope, kind, 0, &original).await;
+                let (operation_id, index_id, generation) =
+                    create_build(&db, scope, &definition, 0).await;
+                mutate_source(&db, scope, kind, 0, &original, absent)
+                    .await
+                    .expect("the value is lost before the scan");
+                let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+                let mut claim_sequence = 1;
+                drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+                mutate_source(&db, scope, kind, 0, absent, &original)
+                    .await
+                    .expect("the value is restored after the scan");
+                assert_eq!(
+                    drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                    CommittedOperationStep::Completed,
+                    "lane {lane}, variant {variant}"
+                );
+                assert_generation_equals_source(
+                    &db,
+                    scope,
+                    &definition,
+                    index_id,
+                    generation,
+                    &BTreeMap::from([(0, original.clone())]),
+                )
+                .await;
+                db.close().await.expect("secondary test database closes");
+            }
+        }
+    }
+
+    /// An entity deleted before the scan reached it leaves a delta naming the
+    /// value it had when the build was created. Another entity takes that
+    /// value before the scan, and the deleted entity never held it in the
+    /// generation, so its drain leaves the new owner's entry alone instead
+    /// of reporting a duplicate.
+    #[tokio::test]
+    async fn a_unique_value_freed_before_the_scan_does_not_block_its_new_owner() {
+        let db = test_db("secondary-unique-freed-before-scan").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let shared = user_properties("shared@example.com");
+        let other = user_properties("other@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &shared).await;
+        put_source(&db, scope, IndexElementKind::Node, 1, &other).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 1).await;
+        mutate_source(&db, scope, IndexElementKind::Node, 0, &shared, &[])
+            .await
+            .expect("the first owner is deleted before the scan");
+        mutate_source(&db, scope, IndexElementKind::Node, 1, &other, &shared)
+            .await
+            .expect("another entity takes the freed value before the scan");
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(
+            &db,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            &BTreeMap::from([(1, shared)]),
+        )
+        .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A drain that releases a unique entity whose value it finds unchanged
+    /// checks the entity's entry exactly as validation would have: a missing
+    /// entry is corruption and another owner blocks the build, where the
+    /// applied row used to be released unchecked. Each broken entry is
+    /// injected directly.
+    #[tokio::test]
+    async fn a_release_drain_checks_an_unchanged_unique_entry() {
+        for (ordinal, foreign_owner) in [false, true].into_iter().enumerate() {
+            let db = test_db(&format!("secondary-release-unchanged-unique-{ordinal}")).await;
+            let scope = DataScope::LegacyUnscoped;
+            let definition = validated(
+                SecondaryIndexDefinition::node_unique_equality("User", "email")
+                    .expect("unique definition"),
+            );
+            let kept = user_properties("kept@example.com");
+            put_source(&db, scope, IndexElementKind::Node, 0, &kept).await;
+            put_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                1,
+                &user_properties("other@example.com"),
+            )
+            .await;
+            let (operation_id, index_id, generation) =
+                create_build(&db, scope, &definition, 1).await;
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+            let mut claim_sequence = 1;
+            drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, |stage| {
+                matches!(stage, SecondaryBuildStage::Validate(_))
+            })
+            .await;
+            let ValidatedDynamicIndexDefinition::Secondary(secondary) = &definition else {
+                unreachable!("secondary fixture is type-checked")
+            };
+            let entity = IndexEntityId::initial();
+            let entry_key = secondary_entry_key(
+                scope,
+                index_id,
+                generation,
+                secondary,
+                canonical_value(secondary, &kept, entity)
+                    .expect("fixture value is supported")
+                    .expect("fixture value is indexed"),
+                entity,
+            )
+            .expect("fixture entry key validates");
+            if foreign_owner {
+                db.put(
+                    &entry_key,
+                    encode_secondary_entry(&SecondaryEntryValue {
+                        index_id,
+                        generation,
+                        lane: definition_lane(secondary),
+                        entity_id: IndexEntityId::new(1),
+                    }),
+                )
+                .await
+                .expect("the entry is pointed at another entity");
+            } else {
+                db.delete(&entry_key).await.expect("the entry is removed");
+            }
+            // The entity leaves its value and returns inside the window,
+            // through writes that, like those before writers claimed values
+            // during builds, leave the broken entry in place.
+            let away = user_properties("away@example.com");
+            for (before, after) in [(&kept, &away), (&away, &kept)] {
+                legacy_building_write(
+                    &db,
+                    scope,
+                    &definition,
+                    index_id,
+                    generation,
+                    0,
+                    before,
+                    after,
+                )
+                .await;
+            }
+
+            // Validation passes the entity, whose delta is pending, to the
+            // activation drain.
+            assert_eq!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Blocked
+            );
+            let blocked = read_operation(&db, scope, operation_id)
+                .await
+                .expect("blocked operation is readable")
+                .expect("blocked operation exists");
+            let expected = if foreign_owner {
+                IndexOperationBlocker::UniquenessViolation {
+                    first_entity_id: IndexEntityId::new(1),
+                    second_entity_id: entity,
+                }
+            } else {
+                IndexOperationBlocker::InvariantViolation
+            };
+            assert_eq!(
+                blocked.execution_state(),
+                &IndexOperationExecutionState::Blocked(expected)
+            );
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// A unique entry the scan gave an earlier entity still names it after
+    /// that entity moved off the value. A later entity that took the value
+    /// before the scan reached it takes the stale claim over instead of
+    /// blocking the build on a duplicate the source never held.
+    #[tokio::test]
+    async fn a_scan_takes_over_a_unique_claim_its_owner_moved_off() {
+        let db = test_db("secondary-scan-stale-unique-owner").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let mut sources = BTreeMap::new();
+        for (entity_id, email) in [(0, "taken@example.com"), (1, "spare@example.com")] {
+            let properties = user_properties(email);
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 1).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        // The first batch scans only entity 0, which claims its value.
+        assert_eq!(
+            drive_one_with_limits(
+                &db,
+                &driver,
+                operation_id,
+                &mut claim_sequence,
+                one_entity_limits()
+            )
+            .await,
+            CommittedOperationStep::Progressed
+        );
+        assert!(matches!(
+            build_stage(&db, operation_id).await,
+            SecondaryBuildStage::Scan(_)
+        ));
+        for (entity_id, email) in [(0, "moved@example.com"), (1, "taken@example.com")] {
+            let after = user_properties(email);
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &sources[&entity_id],
+                &after,
+            )
+            .await
+            .expect("a building unique index records the move as a delta");
+            sources.insert(entity_id, after);
+        }
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Unique values that move between entities while the build records
+    /// deltas leave entries naming entities that moved off them. A drain
+    /// takes such a stale claim over instead of blocking on it, whichever
+    /// entity it reconciles first: for a value moved to an entity that sorts
+    /// first, and for two entities swapping values, in catch-up and inside a
+    /// validation window.
+    #[tokio::test]
+    async fn unique_drains_take_over_claims_their_owners_moved_off() {
+        for (ordinal, validate) in [false, true].into_iter().enumerate() {
+            for swap in [false, true] {
+                let db = test_db(&format!("secondary-unique-stale-owner-{ordinal}-{swap}")).await;
+                let scope = DataScope::LegacyUnscoped;
+                let definition = validated(
+                    SecondaryIndexDefinition::node_unique_equality("User", "email")
+                        .expect("unique definition"),
+                );
+                let mut sources = BTreeMap::new();
+                for (entity_id, email) in [(0, "low@example.com"), (1, "high@example.com")] {
+                    let properties = user_properties(email);
+                    put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+                    sources.insert(entity_id, properties);
+                }
+                let (operation_id, index_id, generation) =
+                    create_build(&db, scope, &definition, 1).await;
+                let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+                let mut claim_sequence = 1;
+                let reached: fn(&SecondaryBuildStage) -> bool = if validate {
+                    |stage| matches!(stage, SecondaryBuildStage::Validate(_))
+                } else {
+                    |stage| matches!(stage, SecondaryBuildStage::CatchUp(_))
+                };
+                drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, reached).await;
+                // Entity 0 sorts first and takes entity 1's value; entity 1
+                // takes entity 0's value or moves away.
+                let moves = if swap {
+                    [(0, "high@example.com"), (1, "low@example.com")]
+                } else {
+                    [(1, "away@example.com"), (0, "high@example.com")]
+                };
+                // Writes before writers claimed values during builds left
+                // these moves as deltas only, so the entries go stale.
+                for (entity_id, email) in moves {
+                    let after = user_properties(email);
+                    legacy_building_write(
+                        &db,
+                        scope,
+                        &definition,
+                        index_id,
+                        generation,
+                        entity_id,
+                        &sources[&entity_id],
+                        &after,
+                    )
+                    .await;
+                    sources.insert(entity_id, after);
+                }
+                assert_eq!(
+                    drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                    CommittedOperationStep::Completed,
+                    "validate {validate}, swap {swap}"
+                );
+                assert_generation_equals_source(
+                    &db,
+                    scope,
+                    &definition,
+                    index_id,
+                    generation,
+                    &sources,
+                )
+                .await;
+                db.close().await.expect("secondary test database closes");
+            }
+        }
+    }
+
+    /// An exact catch-up batch that takes a stale claim over from an entity
+    /// later in the same batch reconciles that entity from its delta, since
+    /// the applied row the batch read for it is gone.
+    #[tokio::test]
+    async fn exact_catch_up_takes_over_a_claim_from_an_entity_later_in_its_batch() {
+        let db = test_db("secondary-exact-stale-unique-owner").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let mut sources = BTreeMap::new();
+        for (entity_id, email) in [(0, "low@example.com"), (1, "high@example.com")] {
+            let properties = user_properties(email);
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 1).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        let operation = drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        for (entity_id, email) in [(1, "away@example.com"), (0, "high@example.com")] {
+            let after = user_properties(email);
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &sources[&entity_id],
+                &after,
+            )
+            .await
+            .expect("a building unique index records the move as a delta");
+            sources.insert(entity_id, after);
+        }
+        let prepared = PreparedSecondaryOperationStep {
+            step: PreparedSecondaryStep::Exact {
+                keys: (0..2)
+                    .map(|entity_id| IndexEntityStateKey {
+                        index_id,
+                        generation,
+                        entity: IndexEntity {
+                            kind: IndexElementKind::Node,
+                            id: IndexEntityId::new(entity_id),
+                        },
+                    })
+                    .collect(),
+            },
+        };
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("exact catch-up transaction begins");
+        let execution = prepared
+            .stage(
+                &transaction,
+                scope,
+                &operation,
+                SearchIndexBackfillLimits::default().batch(),
+            )
+            .await
+            .expect("exact catch-up stages");
+        assert!(
+            matches!(
+                execution.result(),
+                IndexOperationStepResult::Progressed(IndexOperationProgress::SecondaryBuild(
+                    SecondaryBuildProgress::Constructing(SecondaryBuildStage::CatchUp(_))
+                ))
+            ),
+            "the stale claim does not block the batch"
+        );
+        transaction.commit().await.expect("exact catch-up commits");
+        assert!(
+            generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Only a catch-up backlog within [`GATED_BACKLOG_BATCHES`] takes the
+    /// exclusive gate; a larger one is reconciled by exact keys while writes
+    /// continue, without waiting for the scope's in-flight writes.
+    #[tokio::test]
+    async fn only_a_catch_up_backlog_within_its_gated_reach_waits_for_scope_mutations() {
         let db = test_db("secondary-catch-up-final-barrier").await;
         let scope = DataScope::LegacyUnscoped;
         let definition = validated(
             SecondaryIndexDefinition::node_equality("User", "email")
                 .expect("node equality definition"),
         );
-        let first = user_properties("first@example.com");
-        put_source(&db, scope, IndexElementKind::Node, 0, &first).await;
-        let (operation_id, _, _) = create_build(&db, scope, &definition, 0).await;
+        let entities = 10_u64;
+        for entity_id in 0..entities {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+        }
+        let (operation_id, index_id, generation) =
+            create_build(&db, scope, &definition, entities - 1).await;
         let gates = Arc::new(IndexScopeGates::default());
         let driver = SecondaryIndexDriver::new(Arc::clone(&gates));
         let mut claim_sequence = 1;
         let operation = drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
-
-        let mutation = gates.mutation_permit(scope).await;
-        let final_barrier = driver.prepare_step(
-            &db,
-            scope,
-            &operation,
-            SearchIndexBackfillLimits::default().batch(),
-        );
-        tokio::pin!(final_barrier);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut final_barrier)
-                .await
-                .is_err(),
-            "empty catch-up must wait for exclusive scope authority"
-        );
-        drop(mutation);
-        tokio::time::timeout(Duration::from_secs(2), final_barrier)
-            .await
-            .expect("final barrier acquires after the mutation finishes")
-            .expect("final barrier prepares");
-
-        let updated = user_properties("updated@example.com");
-        mutate_source(&db, scope, IndexElementKind::Node, 0, &first, &updated)
-            .await
-            .expect("update records one exact delta");
-        let mutation = gates.mutation_permit(scope).await;
-        let exact = tokio::time::timeout(
-            Duration::from_secs(2),
-            driver.prepare_step(
+        for entity_id in 0..entities {
+            mutate_source(
                 &db,
                 scope,
-                &operation,
-                SearchIndexBackfillLimits::default().batch(),
+                IndexElementKind::Node,
+                entity_id,
+                &user_properties(&format!("seed-{entity_id}@example.com")),
+                &user_properties(&format!("updated-{entity_id}@example.com")),
+            )
+            .await
+            .expect("update records one build delta");
+        }
+
+        // The ten deltas are equally sized. An input budget whose reach
+        // covers their bytes admits them; one whose reach falls a byte short
+        // does not, and its first batch then holds one delta. A budget
+        // smaller than any delta still names the first one, for exact
+        // catch-up to report oversized.
+        let delta_bytes = generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
+            .await
+            .iter()
+            .map(|(key, value)| u64::try_from(key.len() + value.len()).expect("row fits u64"))
+            .sum::<u64>();
+        let reach = u64::try_from(GATED_BACKLOG_BATCHES).expect("reach fits u64");
+        let generous = 8 * 1024 * 1024;
+        for (limits, gated) in [
+            (SearchIndexBackfillLimits::default().batch(), true),
+            (one_entity_limits(), false),
+            (batch_limits(2, generous, 4096, generous), true),
+            (
+                batch_limits(1024, delta_bytes.div_ceil(reach), 4096, generous),
+                true,
             ),
-        )
-        .await
-        .expect("exact-key preparation does not wait for the shared scope permit")
-        .expect("exact-key catch-up prepares");
-        assert_eq!(exact.family(), IndexOperationFamily::Secondary);
-        drop(exact);
-        drop(mutation);
+            (
+                batch_limits(1024, (delta_bytes - 1) / reach, 4096, generous),
+                false,
+            ),
+            (batch_limits(1024, 1, 4096, generous), false),
+        ] {
+            let observed = observe_backlog(&db, scope, &operation, limits)
+                .await
+                .expect("catch-up selection is observed");
+            assert_eq!(observed.is_none(), gated, "{limits:?}");
+            assert!(
+                observed.is_none_or(|keys| keys.len() == 1),
+                "{limits:?}: the first batch holds one delta"
+            );
+        }
+        // Exact-key preparation commits nothing, so the gated case runs last:
+        // its drain empties the prefix.
+        for (limits, waits) in [
+            (one_entity_limits(), false),
+            (SearchIndexBackfillLimits::default().batch(), true),
+        ] {
+            let mutation = gates.mutation_permit(scope).await;
+            let prepared = driver.prepare_step(&db, scope, &operation, limits);
+            tokio::pin!(prepared);
+            if waits {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), &mut prepared)
+                        .await
+                        .is_err(),
+                    "a backlog within the gated reach must wait for exclusive scope authority"
+                );
+                drop(mutation);
+                let prepared = tokio::time::timeout(Duration::from_secs(2), prepared)
+                    .await
+                    .expect("the barrier acquires after the mutation finishes")
+                    .expect("the barrier prepares");
+                assert_eq!(prepared.family(), IndexOperationFamily::Secondary);
+            } else {
+                let prepared = tokio::time::timeout(Duration::from_secs(2), prepared)
+                    .await
+                    .expect("exact-key preparation does not wait for the shared scope permit")
+                    .expect("exact-key catch-up prepares");
+                assert_eq!(prepared.family(), IndexOperationFamily::Secondary);
+                drop(prepared);
+                drop(mutation);
+            }
+        }
+        assert!(
+            generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
+                .await
+                .is_empty(),
+            "the gated step drains the prefix before its own transaction opens"
+        );
         db.close().await.expect("secondary test database closes");
     }
 
+    /// Catch-up fences the scope's writers but leaves planning alone: the
+    /// write fence neither excludes shared catalog permits nor advances the
+    /// catalog version. Validation fences neither. Only activation, which
+    /// changes the Active index set, takes the lifecycle permit, excluding
+    /// planning and advancing the version as it is released.
     #[tokio::test]
-    async fn exhausted_exact_tail_persists_the_configured_coalescing_deadline() {
-        let db = test_db("secondary-catch-up-tail-delay").await;
+    async fn only_activation_gates_planning_and_advances_the_catalog_version() {
+        let db = test_db("secondary-step-gates").await;
         let scope = DataScope::LegacyUnscoped;
         let definition = validated(
             SecondaryIndexDefinition::node_equality("User", "email")
                 .expect("node equality definition"),
         );
-        let first = user_properties("first@example.com");
-        put_source(&db, scope, IndexElementKind::Node, 0, &first).await;
-        let (operation_id, _, _) = create_build(&db, scope, &definition, 0).await;
-        let driver = SecondaryIndexDriver::with_catch_up_delay(
-            Arc::new(IndexScopeGates::default()),
-            SecondaryIndexLifecycleCatchUpTailDelayMillis::new(7).unwrap(),
-        );
+        let entities = 4_u64;
+        for entity_id in 0..entities {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+        }
+        let (operation_id, _, _) = create_build(&db, scope, &definition, entities - 1).await;
+        let gates = Arc::new(IndexScopeGates::default());
+        let driver = SecondaryIndexDriver::new(Arc::clone(&gates));
         let mut claim_sequence = 1;
-        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
-        let updated = user_properties("updated@example.com");
-        mutate_source(&db, scope, IndexElementKind::Node, 0, &first, &updated)
-            .await
-            .expect("update records one build delta");
-        assert_eq!(
-            drive_one_at(
-                &db,
-                &driver,
-                operation_id,
-                &mut claim_sequence,
-                SearchIndexBackfillLimits::default().batch(),
-                100,
+        let limits = SearchIndexBackfillLimits::default().batch();
+        type StageCase = (&'static str, bool, bool, fn(&SecondaryBuildStage) -> bool);
+        let stages: [StageCase; 3] = [
+            ("catch-up", true, true, |stage| {
+                matches!(stage, SecondaryBuildStage::CatchUp(_))
+            }),
+            ("validation", false, true, |stage| {
+                matches!(stage, SecondaryBuildStage::Validate(_))
+            }),
+            ("activation", true, false, |stage| {
+                matches!(stage, SecondaryBuildStage::Activate(_))
+            }),
+        ];
+        for (stage, fences_writers, planning_continues, reached) in stages {
+            drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, reached).await;
+            let operation = read_operation(&db, scope, operation_id)
+                .await
+                .expect("secondary operation is readable")
+                .expect("secondary operation exists");
+            let before = gates.catalog_permit(scope).await.version();
+            let prepared = driver
+                .prepare_step(&db, scope, &operation, limits)
+                .await
+                .expect("the gated step prepares");
+            let writer =
+                tokio::time::timeout(Duration::from_millis(50), gates.mutation_permit(scope)).await;
+            assert_eq!(
+                writer.is_err(),
+                fences_writers,
+                "{stage}: only catch-up and activation fence writers"
+            );
+            drop(writer);
+            let planning =
+                tokio::time::timeout(Duration::from_millis(50), gates.catalog_permit(scope)).await;
+            assert_eq!(
+                planning.is_ok(),
+                planning_continues,
+                "{stage}: only activation excludes planning"
+            );
+            drop(planning);
+            drop(prepared);
+            assert_eq!(
+                gates.catalog_permit(scope).await.version() == before,
+                planning_continues,
+                "{stage}: only activation advances the catalog version"
+            );
+        }
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Seeds `entities` users, starts a build over them, and drives it to the
+    /// first stage `reached` accepts.
+    async fn build_at_stage(
+        name: &str,
+        definition: &ValidatedDynamicIndexDefinition,
+        entities: u64,
+        reached: fn(&SecondaryBuildStage) -> bool,
+    ) -> (
+        Db,
+        Arc<IndexScopeGates>,
+        SecondaryIndexDriver,
+        IndexOperationId,
+        IndexId,
+        IndexGenerationId,
+        u64,
+        BTreeMap<u64, Vec<Property>>,
+    ) {
+        let db = test_db(name).await;
+        let scope = DataScope::LegacyUnscoped;
+        let mut sources = BTreeMap::new();
+        for entity_id in 0..entities {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) =
+            create_build(&db, scope, definition, entities - 1).await;
+        let gates = Arc::new(IndexScopeGates::default());
+        let driver = SecondaryIndexDriver::new(Arc::clone(&gates));
+        let mut claim_sequence = 1;
+        drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, reached).await;
+        (
+            db,
+            gates,
+            driver,
+            operation_id,
+            index_id,
+            generation,
+            claim_sequence,
+            sources,
+        )
+    }
+
+    fn is_validation(stage: &SecondaryBuildStage) -> bool {
+        matches!(stage, SecondaryBuildStage::Validate(_))
+    }
+
+    fn is_activation(stage: &SecondaryBuildStage) -> bool {
+        matches!(stage, SecondaryBuildStage::Activate(_))
+    }
+
+    /// A validation step neither waits for in-flight writes nor blocks new
+    /// ones: it commits while a graph transaction holds the scope's shared
+    /// mutation permit.
+    #[tokio::test]
+    async fn validation_releases_rows_while_writes_continue() {
+        for definition in [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+        ] {
+            let definition = validated(definition.expect("test definition is valid"));
+            let (db, gates, driver, operation_id, index_id, generation, mut claim_sequence, _) =
+                build_at_stage(
+                    "secondary-validation-ungated",
+                    &definition,
+                    4,
+                    is_validation,
+                )
+                .await;
+            let scope = DataScope::LegacyUnscoped;
+            let in_flight = gates.mutation_permit(scope).await;
+            let step = tokio::time::timeout(
+                Duration::from_secs(5),
+                drive_one(&db, &driver, operation_id, &mut claim_sequence),
             )
-            .await,
+            .await
+            .expect("validation does not wait for in-flight writes");
+            assert_eq!(step, CommittedOperationStep::Progressed);
+            assert!(
+                generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation)
+                    .await
+                    .is_empty(),
+                "validation released every row while the write was in flight"
+            );
+            assert!(is_activation(&build_stage(&db, operation_id).await));
+            drop(in_flight);
+            assert_eq!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// A write that records a delta for an entity after a validation batch's
+    /// snapshot conflicts with the batch's point read of that delta, so the
+    /// batch cannot release a row the new delta depends on.
+    #[tokio::test]
+    async fn a_write_racing_a_validation_batch_makes_it_retry() {
+        for definition in [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+        ] {
+            let definition = validated(definition.expect("test definition is valid"));
+            let (
+                db,
+                _,
+                driver,
+                operation_id,
+                index_id,
+                generation,
+                mut claim_sequence,
+                mut sources,
+            ) = build_at_stage("secondary-validation-race", &definition, 3, is_validation).await;
+            let scope = DataScope::LegacyUnscoped;
+            let operation = read_operation(&db, scope, operation_id)
+                .await
+                .expect("operation reads")
+                .expect("operation exists");
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .expect("validation transaction begins");
+            let after = user_properties("raced@example.com");
+            mutate_source(&db, scope, IndexElementKind::Node, 1, &sources[&1], &after)
+                .await
+                .expect("the racing write commits");
+            sources.insert(1, after);
+            driver
+                .step(
+                    &db,
+                    &transaction,
+                    scope,
+                    &operation,
+                    SearchIndexBackfillLimits::default().batch(),
+                )
+                .await
+                .expect("the batch stages from its snapshot");
+            assert!(
+                transaction.commit().await.is_err(),
+                "the batch conflicts with the write on the entity it released"
+            );
+            assert_eq!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+            assert_generation_equals_source(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                &sources,
+            )
+            .await;
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// A unique validation batch counts each entity's source row against its
+    /// input budget, as the scan did, reading source rows a group at a time,
+    /// so large properties cannot make one batch read past the budget.
+    #[tokio::test]
+    async fn a_unique_validation_batch_counts_source_rows_against_its_input_budget() {
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let entities = 6_u64;
+        let (db, _, driver, operation_id, index_id, generation, mut claim_sequence, _) =
+            build_at_stage(
+                "secondary-validation-budget",
+                &definition,
+                entities,
+                is_validation,
+            )
+            .await;
+        let scope = DataScope::LegacyUnscoped;
+        let applied =
+            generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation).await;
+        assert_eq!(applied.len(), 6);
+        let source = db
+            .get(source_key(scope, IndexElementKind::Node, 0))
+            .await
+            .expect("source reads")
+            .expect("source exists");
+        let (key, value) = &applied[0];
+        let per_row = u64::try_from(key.len() + value.len() + source.len()).expect("fits");
+        let generous = 8 * 1024 * 1024;
+        let limits = batch_limits(1024, per_row * 2 + per_row / 2, 4096, generous);
+        assert_eq!(
+            drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed
+        );
+        assert!(is_validation(&build_stage(&db, operation_id).await));
+        assert_eq!(
+            generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation)
+                .await
+                .len(),
+            4,
+            "the budget admits two rows with their source rows"
+        );
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A prepared validation batch observed its keys before its transaction
+    /// opened and reads its rows by key, so a write to an entity beyond the
+    /// batch commits without making the batch retry.
+    #[tokio::test]
+    async fn a_validation_batch_commits_through_writes_beyond_it() {
+        for definition in [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+        ] {
+            let definition = validated(definition.expect("test definition is valid"));
+            let (db, _, driver, operation_id, _, _, mut claim_sequence, sources) = build_at_stage(
+                "secondary-validation-point-reads",
+                &definition,
+                3,
+                is_validation,
+            )
+            .await;
+            let scope = DataScope::LegacyUnscoped;
+            let limits = one_entity_limits();
+            let operation = read_operation(&db, scope, operation_id)
+                .await
+                .expect("operation reads")
+                .expect("operation exists");
+            let prepared = driver
+                .prepare_step(&db, scope, &operation, limits)
+                .await
+                .expect("validation prepares");
+            let PreparedIndexOperationStep::Secondary { prepared, .. } = &prepared else {
+                panic!("validation prepares an observed batch");
+            };
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .expect("validation transaction begins");
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                2,
+                &sources[&2],
+                &user_properties("beyond@example.com"),
+            )
+            .await
+            .expect("a write beyond the batch commits");
+            prepared
+                .stage(&transaction, scope, &operation, limits)
+                .await
+                .expect("the batch stages");
+            transaction
+                .commit()
+                .await
+                .expect("the batch commits through the write beyond it");
+            assert_eq!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+            db.close().await.expect("secondary test database closes");
+        }
+    }
+
+    /// Validation keeps the row of an entity with a pending delta and moves
+    /// on; activation reconciles the delta and releases the row with it. (A
+    /// write to a unique generation deletes the row itself, so this uses a
+    /// non-unique index.)
+    #[tokio::test]
+    async fn validation_passes_an_entity_with_a_pending_delta_to_activation() {
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        let (db, _, driver, operation_id, index_id, generation, mut claim_sequence, mut sources) =
+            build_at_stage(
+                "secondary-validation-pending",
+                &definition,
+                3,
+                is_validation,
+            )
+            .await;
+        let scope = DataScope::LegacyUnscoped;
+        let after = user_properties("pending@example.com");
+        mutate_source(&db, scope, IndexElementKind::Node, 1, &sources[&1], &after)
+            .await
+            .expect("the write records a delta");
+        sources.insert(1, after);
+        assert_eq!(
+            drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Progressed
+        );
+        assert!(is_activation(&build_stage(&db, operation_id).await));
+        let applied =
+            generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation).await;
+        assert_eq!(
+            applied.len(),
+            1,
+            "only the entity with a pending delta keeps its row"
+        );
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert!(
+            generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation)
+                .await
+                .is_empty()
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A validation preparation that finds the cursor where the previous one
+    /// left it made no progress, as when its batch lost its commit. After
+    /// [`PREPARATIONS_BEFORE_FENCE`] such preparations the next one
+    /// fences writers, and a batch that moves the cursor resets the count.
+    #[tokio::test]
+    async fn a_validation_batch_that_keeps_losing_conflicts_fences_writers() {
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        let (db, gates, driver, operation_id, _, _, mut claim_sequence, _) = build_at_stage(
+            "secondary-validation-fallback",
+            &definition,
+            4,
+            is_validation,
+        )
+        .await;
+        let scope = DataScope::LegacyUnscoped;
+        let limits = one_entity_limits();
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("operation reads")
+            .expect("operation exists");
+        let writer_waits = || async {
+            tokio::time::timeout(Duration::from_millis(50), gates.mutation_permit(scope))
+                .await
+                .is_err()
+        };
+        for attempt in 1..=PREPARATIONS_BEFORE_FENCE + 1 {
+            let prepared = driver
+                .prepare_step(&db, scope, &operation, limits)
+                .await
+                .expect("validation prepares");
+            assert_eq!(
+                writer_waits().await,
+                attempt > PREPARATIONS_BEFORE_FENCE,
+                "attempt {attempt}"
+            );
+            drop(prepared);
+        }
+        assert_eq!(
+            drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await,
             CommittedOperationStep::Progressed
         );
         let operation = read_operation(&db, scope, operation_id)
             .await
-            .expect("delayed operation is readable")
-            .expect("delayed operation exists");
-        assert!(matches!(
-            operation.execution_state(),
-            IndexOperationExecutionState::Queued {
-                not_before_unix_millis: Some(107)
-            }
-        ));
-        let writer_epoch = WriterEpoch::from_bytes([0x5A; 16]).unwrap();
-        assert!(matches!(
-            observe_operation_pointer(&db, operation_id, writer_epoch, 106)
+            .expect("operation reads")
+            .expect("operation exists");
+        assert!(is_validation(&build_stage(&db, operation_id).await));
+        let prepared = driver
+            .prepare_step(&db, scope, &operation, limits)
+            .await
+            .expect("validation prepares");
+        assert!(
+            !writer_waits().await,
+            "a batch that moved the cursor resets the count"
+        );
+        drop(prepared);
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A validation backlog beyond the gated reach is reconciled by exact keys
+    /// while writes continue, keeping validation's cursor; once it fits,
+    /// validation releases rows again, and activation drains only the rest.
+    #[tokio::test]
+    async fn validation_drains_a_backlog_beyond_its_reach_without_fencing() {
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let entities = 12_u64;
+        let (
+            db,
+            gates,
+            driver,
+            operation_id,
+            index_id,
+            generation,
+            mut claim_sequence,
+            mut sources,
+        ) = build_at_stage(
+            "secondary-validation-exact",
+            &definition,
+            entities,
+            is_validation,
+        )
+        .await;
+        let scope = DataScope::LegacyUnscoped;
+        for entity_id in 0..entities {
+            let after = user_properties(&format!("moved-{entity_id}@example.com"));
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &sources[&entity_id],
+                &after,
+            )
+            .await
+            .expect("the write records a delta");
+            sources.insert(entity_id, after);
+        }
+        let limits = one_entity_limits();
+        let reach = u64::try_from(GATED_BACKLOG_BATCHES).expect("reach fits u64");
+        let SecondaryBuildStage::Validate(start) = build_stage(&db, operation_id).await else {
+            panic!("the build waits in validation");
+        };
+        for remaining in (reach + 1..=entities).rev() {
+            let in_flight = gates.mutation_permit(scope).await;
+            let step = tokio::time::timeout(
+                Duration::from_secs(5),
+                drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{remaining} deltas: an exact drain does not wait"));
+            assert_eq!(step, CommittedOperationStep::Progressed);
+            let SecondaryBuildStage::Validate(after) = build_stage(&db, operation_id).await else {
+                panic!("{remaining} deltas: an exact drain stays in validation");
+            };
+            assert_eq!(after.cursor, start.cursor, "{remaining} deltas");
+            assert_eq!(
+                generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
+                    .await
+                    .len(),
+                usize::try_from(remaining - 1).expect("small count"),
+            );
+            drop(in_flight);
+        }
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Writes that commit while a catch-up step awaits the gate can take its
+    /// backlog past the gated reach. The step observes the backlog again once
+    /// the gate is held, releases it, and reconciles by exact keys, so it
+    /// never stalls writers for more than that reach.
+    #[tokio::test]
+    async fn a_backlog_grown_past_the_reach_while_awaiting_the_gate_releases_it() {
+        let db = test_db("secondary-catch-up-reach-recheck").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        let entities = 10_u64;
+        for entity_id in 0..entities {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+        }
+        let (operation_id, index_id, generation) =
+            create_build(&db, scope, &definition, entities - 1).await;
+        let gates = Arc::new(IndexScopeGates::default());
+        let driver = SecondaryIndexDriver::new(Arc::clone(&gates));
+        let mut claim_sequence = 1;
+        let operation = drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        let limits = one_entity_limits();
+        for entity_id in 0..2 {
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &user_properties(&format!("seed-{entity_id}@example.com")),
+                &user_properties(&format!("updated-{entity_id}@example.com")),
+            )
+            .await
+            .expect("update records one build delta");
+        }
+
+        let in_flight = gates.mutation_permit(scope).await;
+        let prepared = driver.prepare_step(&db, scope, &operation, limits);
+        tokio::pin!(prepared);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut prepared)
                 .await
-                .unwrap(),
-            OperationPointerObservation::Delayed { delay_millis: 1 }
-        ));
-        assert!(matches!(
-            observe_operation_pointer(&db, operation_id, writer_epoch, 107)
+                .is_err(),
+            "a backlog within the gated reach waits for the in-flight writes"
+        );
+        for entity_id in 2..entities {
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &user_properties(&format!("seed-{entity_id}@example.com")),
+                &user_properties(&format!("updated-{entity_id}@example.com")),
+            )
+            .await
+            .expect("an in-flight write commits while the step waits");
+        }
+        drop(in_flight);
+        let prepared = tokio::time::timeout(Duration::from_secs(2), prepared)
+            .await
+            .expect("the step acquires the gate once the writes commit")
+            .expect("the step prepares");
+        tokio::time::timeout(Duration::from_secs(2), gates.mutation_permit(scope))
+            .await
+            .expect("an exact catch-up step holds no scope permit");
+        assert_eq!(
+            generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
                 .await
-                .unwrap(),
-            OperationPointerObservation::Eligible(_)
-        ));
+                .len(),
+            usize::try_from(entities).expect("entity count fits usize"),
+            "nothing drains under the gate once the backlog is beyond its reach"
+        );
+        drop(prepared);
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A delta larger than a whole batch's input budget, in a backlog beyond
+    /// the gated reach, blocks the build as oversized instead of handing
+    /// exact catch-up an empty batch.
+    #[tokio::test]
+    async fn a_delta_larger_than_the_gated_reach_blocks_as_oversized() {
+        let db = test_db("secondary-oversized-first-delta").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        let wide = user_properties(&format!("{}@example.com", "w".repeat(4096)));
+        put_source(&db, scope, IndexElementKind::Node, 0, &wide).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        // The delta keeps the wide before-image.
+        mutate_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            &wide,
+            &user_properties("narrow@example.com"),
+        )
+        .await
+        .expect("update records one build delta");
+        let input_limit = 64;
+        let deltas =
+            generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation).await;
+        let [(key, value)] = deltas.as_slice() else {
+            panic!("one delta is pending: {deltas:?}");
+        };
+        let reach = u64::try_from(GATED_BACKLOG_BATCHES).expect("reach fits u64");
+        assert!(
+            u64::try_from(key.len() + value.len()).expect("row fits u64") > input_limit * reach,
+            "the delta alone exceeds the gated reach"
+        );
+
+        let generous = 8 * 1024 * 1024;
+        assert_eq!(
+            drive_one_with_limits(
+                &db,
+                &driver,
+                operation_id,
+                &mut claim_sequence,
+                batch_limits(1024, input_limit, 4096, generous),
+            )
+            .await,
+            CommittedOperationStep::Blocked
+        );
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("secondary operation is readable")
+            .expect("secondary operation exists");
+        assert!(
+            matches!(
+                operation.execution_state(),
+                IndexOperationExecutionState::Blocked(IndexOperationBlocker::OversizedEntity {
+                    entity_kind: IndexElementKind::Node,
+                    entity_id,
+                    observed,
+                    ..
+                }) if entity_id.get() == 0 && *observed > input_limit * reach
+            ),
+            "{:?}",
+            operation.execution_state()
+        );
         db.close().await.expect("secondary test database closes");
     }
 
@@ -7543,10 +11142,19 @@ mod tests {
             std::num::NonZeroU64::new(1024 * 1024).expect("one MiB is positive"),
         )
         .expect("one-update limits are internally consistent");
-        driver
+        let execution = driver
             .step(&db, &transaction, scope, &operation, one_update_limits)
             .await
             .expect("bounded driver-owned catch-up executes");
+        assert!(
+            matches!(
+                execution.result(),
+                IndexOperationStepResult::Progressed(IndexOperationProgress::SecondaryBuild(
+                    SecondaryBuildProgress::Constructing(SecondaryBuildStage::CatchUp(_))
+                ))
+            ),
+            "a drain the output budget stops stays in catch-up"
+        );
         transaction
             .commit()
             .await
@@ -7574,7 +11182,7 @@ mod tests {
         let second_before = user_properties("second@example.com");
         put_source(&db, scope, IndexElementKind::Node, 0, &first_before).await;
         put_source(&db, scope, IndexElementKind::Node, 1, &second_before).await;
-        let (operation_id, _, _) = create_build(&db, scope, &definition, 1).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 1).await;
         let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
         let mut claim_sequence = 1;
 
@@ -7582,27 +11190,23 @@ mod tests {
             drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
             CommittedOperationStep::Progressed
         );
+        // Writers now reject the second write (see
+        // `a_building_unique_index_rejects_a_write_duplicating_a_value_it_holds`);
+        // a build that began before they claimed values may still hold both.
         let duplicate = user_properties("duplicate@example.com");
-        mutate_source(
-            &db,
-            scope,
-            IndexElementKind::Node,
-            0,
-            &first_before,
-            &duplicate,
-        )
-        .await
-        .expect("first building mutation stores its delta atomically");
-        mutate_source(
-            &db,
-            scope,
-            IndexElementKind::Node,
-            1,
-            &second_before,
-            &duplicate,
-        )
-        .await
-        .expect("second building mutation stores its delta atomically");
+        for (entity_id, before) in [(0, &first_before), (1, &second_before)] {
+            legacy_building_write(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                entity_id,
+                before,
+                &duplicate,
+            )
+            .await;
+        }
 
         assert_eq!(
             drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
@@ -7684,6 +11288,807 @@ mod tests {
             .await
             .expect("conflicting source row lookup succeeds")
             .is_none());
+        db.close().await.expect("secondary test database closes");
+    }
+
+    fn unique_email_definition() -> ValidatedDynamicIndexDefinition {
+        validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        )
+    }
+
+    fn rejects_duplicate(result: &Result<()>, existing: u64, attempted: u64) -> bool {
+        matches!(
+            result,
+            Err(HelixDbError::UniqueConstraintViolation {
+                existing_node_id,
+                attempted_node_id,
+                ..
+            }) if *existing_node_id == existing && *attempted_node_id == attempted
+        )
+    }
+
+    /// From the moment a unique build has indexed a value, a write that
+    /// duplicates it fails with the same error an Active index returns, and
+    /// commits nothing: no source row and no build delta.
+    #[tokio::test]
+    async fn a_building_unique_index_rejects_a_write_duplicating_a_value_it_holds() {
+        let db = test_db("secondary-unique-build-rejects-duplicates").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        let taken = user_properties("taken@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &taken).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        let stages: [fn(&SecondaryBuildStage) -> bool; 2] = [
+            |stage| matches!(stage, SecondaryBuildStage::CatchUp(_)),
+            |stage| matches!(stage, SecondaryBuildStage::Validate(_)),
+        ];
+        for (attempted, reached) in (1_u64..).zip(stages) {
+            drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, reached).await;
+            let result =
+                mutate_source(&db, scope, IndexElementKind::Node, attempted, &[], &taken).await;
+            assert!(rejects_duplicate(&result, 0, attempted), "{result:?}");
+            assert!(db
+                .get(source_key(scope, IndexElementKind::Node, attempted))
+                .await
+                .expect("source lookup succeeds")
+                .is_none());
+            assert!(
+                generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation)
+                    .await
+                    .is_empty(),
+                "a rejected write records no delta"
+            );
+        }
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A write cannot see a value held only by a row the scan has not reached:
+    /// there is no entry to find yet. That duplicate still blocks the build
+    /// when the scan meets it, naming the writer's entity first.
+    #[tokio::test]
+    async fn a_duplicate_of_a_row_the_scan_has_not_reached_still_blocks_the_build() {
+        let db = test_db("secondary-unique-build-unscanned-duplicate").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        put_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            &user_properties("first@example.com"),
+        )
+        .await;
+        let unscanned = user_properties("unscanned@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 1, &unscanned).await;
+        let (operation_id, _, _) = create_build(&db, scope, &definition, 1).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_one_with_limits(
+                &db,
+                &driver,
+                operation_id,
+                &mut claim_sequence,
+                one_entity_limits()
+            )
+            .await,
+            CommittedOperationStep::Progressed,
+            "the first scan step reaches entity 0 only"
+        );
+        mutate_source(&db, scope, IndexElementKind::Node, 2, &[], &unscanned)
+            .await
+            .expect("no entry names the unscanned value yet");
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Blocked
+        );
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("blocked operation is readable")
+            .expect("blocked operation exists");
+        assert!(matches!(
+            operation.execution_state(),
+            IndexOperationExecutionState::Blocked(IndexOperationBlocker::UniquenessViolation {
+                first_entity_id,
+                second_entity_id,
+            }) if first_entity_id.get() == 2 && second_entity_id.get() == 1
+        ));
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A value released by one entity can be claimed by another during the
+    /// build, before or after the scan reaches the claimant, without ever
+    /// blocking the build; the activated generation matches the source.
+    #[tokio::test]
+    async fn a_value_moving_between_entities_during_a_build_never_blocks_it() {
+        let db = test_db("secondary-unique-build-value-move").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        let mut sources = BTreeMap::new();
+        for (entity_id, email) in [(0, "a@example.com"), (1, "b@example.com")] {
+            let properties = user_properties(email);
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 1).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        assert_eq!(
+            drive_one_with_limits(
+                &db,
+                &driver,
+                operation_id,
+                &mut claim_sequence,
+                one_entity_limits()
+            )
+            .await,
+            CommittedOperationStep::Progressed
+        );
+        // Entity 0 is scanned and moves off its value; unscanned entity 1
+        // takes it, then entity 0 takes entity 1's old value.
+        for (entity_id, email) in [
+            (0, "c@example.com"),
+            (1, "a@example.com"),
+            (0, "b@example.com"),
+        ] {
+            let after = user_properties(email);
+            mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &sources[&entity_id],
+                &after,
+            )
+            .await
+            .expect("a released value is free to claim");
+            sources.insert(entity_id, after);
+        }
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Two writers that claim one value during a build in overlapping
+    /// transactions both read its entry, so only the first commits.
+    #[tokio::test]
+    async fn concurrent_writers_claiming_one_value_during_a_build_admit_exactly_one() {
+        let db = test_db("secondary-unique-build-concurrent-claims").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        put_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            &user_properties("seed@example.com"),
+        )
+        .await;
+        let (operation_id, _, _) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        let shared = user_properties("shared@example.com");
+        let first = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("first writer begins");
+        let second = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("second writer begins");
+        for (transaction, entity_id) in [(&first, 1), (&second, 2)] {
+            let mutations = load_mutation_set(transaction, scope)
+                .await
+                .expect("mutation catalog loads");
+            maintain_entity(
+                transaction,
+                scope,
+                &mutations,
+                IndexElementKind::Node,
+                entity_id,
+                &[],
+                &shared,
+            )
+            .await
+            .expect("each writer's snapshot shows the value free");
+            transaction
+                .put(
+                    source_key(scope, IndexElementKind::Node, entity_id),
+                    encode_properties(&shared),
+                )
+                .expect("source row stages");
+        }
+        first.commit().await.expect("the first claim commits");
+        assert!(
+            second.commit().await.is_err(),
+            "the second claim conflicts with the first"
+        );
+        assert!(rejects_duplicate(
+            &mutate_source(&db, scope, IndexElementKind::Node, 2, &[], &shared).await,
+            1,
+            2
+        ));
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A claim whose owner moved off the value without releasing it, as a
+    /// write made before writers claimed during builds left it, is stale: a
+    /// writer that wants the value takes it over, and the owner's pending
+    /// delta reconciles without deleting the new claim.
+    #[tokio::test]
+    async fn a_write_takes_over_a_stale_claim_whose_owner_moved_off() {
+        let db = test_db("secondary-unique-build-stale-claim").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        let taken = user_properties("taken@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &taken).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+
+        // Entity 0 moves off its value the way a pre-claim write did, leaving
+        // its claim in place.
+        let moved = user_properties("moved@example.com");
+        legacy_building_write(
+            &db,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            0,
+            &taken,
+            &moved,
+        )
+        .await;
+        mutate_source(&db, scope, IndexElementKind::Node, 1, &[], &taken)
+            .await
+            .expect("a stale claim is taken over");
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        let sources = BTreeMap::from([(0, moved), (1, taken)]);
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Asserts a building unique generation holds exactly one entry per entity
+    /// in `holders`, for that entity's value.
+    async fn assert_unique_claims(
+        db: &Db,
+        scope: DataScope,
+        definition: &ValidatedDynamicIndexDefinition,
+        index_id: IndexId,
+        generation: IndexGenerationId,
+        holders: &[(u64, &[Property])],
+    ) {
+        let ValidatedDynamicIndexDefinition::Secondary(secondary) = definition else {
+            unreachable!("secondary fixture is type-checked")
+        };
+        let expected = holders
+            .iter()
+            .map(|&(entity_id, properties)| {
+                let entity = IndexEntityId::new(entity_id);
+                let value = canonical_value(secondary, properties, entity)
+                    .expect("fixture value is supported")
+                    .expect("fixture value is indexed");
+                let key =
+                    secondary_entry_key(scope, index_id, generation, secondary, value, entity)
+                        .expect("fixture entry key validates");
+                (key, entity_id)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let actual = generation_rows(db, scope, RecordKind::SecondaryEntry, index_id, generation)
+            .await
+            .into_iter()
+            .map(|(key, value)| {
+                let owner = decode_secondary_entry_value(
+                    index_id,
+                    generation,
+                    definition_lane(secondary),
+                    &value,
+                )
+                .expect("generation entry decodes");
+                (key, owner.get())
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(actual, expected, "the building generation's claims");
+    }
+
+    /// Reads one entity's build delta before-image and applied-state row.
+    async fn entity_lifecycle_rows(
+        db: &Db,
+        scope: DataScope,
+        index_id: IndexId,
+        generation: IndexGenerationId,
+        entity_id: u64,
+    ) -> (Option<CoalescedBuildDeltaState>, bool) {
+        let state_key = IndexEntityStateKey {
+            index_id,
+            generation,
+            entity: IndexEntity {
+                kind: IndexElementKind::Node,
+                id: IndexEntityId::new(entity_id),
+            },
+        };
+        let delta_key = scoped_index_key(scope, ScopedKey::BuildDelta(state_key));
+        let delta = db.get(&delta_key).await.expect("delta reads").map(|value| {
+            decode_delta(scope, &delta_key, &value)
+                .expect("delta decodes")
+                .1
+                .state
+        });
+        let applied = db
+            .get(scoped_index_key(scope, ScopedKey::AppliedState(state_key)))
+            .await
+            .expect("applied state reads")
+            .is_some();
+        (delta, applied)
+    }
+
+    /// A write that moves a reconciled entity leaves the generation holding
+    /// only its new claim: the old entry is released, its applied-state row
+    /// deleted, and the delta's before-image is the claimed value. A binary
+    /// that predates claims then reconciles a later write from that image,
+    /// so it releases the claim instead of leaving it without an owner.
+    #[tokio::test]
+    async fn a_moved_claim_is_released_by_a_later_pre_claim_write() {
+        let db = test_db("secondary-unique-build-claim-rollback-move").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        let ValidatedDynamicIndexDefinition::Secondary(secondary) = &definition else {
+            panic!("a secondary definition");
+        };
+        let seed = user_properties("seed@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &seed).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        assert!(
+            entity_lifecycle_rows(&db, scope, index_id, generation, 0)
+                .await
+                .1,
+            "the scan recorded the entity"
+        );
+
+        let claimed = user_properties("claimed@example.com");
+        mutate_source(&db, scope, IndexElementKind::Node, 0, &seed, &claimed)
+            .await
+            .expect("the move claims its new value");
+        let (delta, applied) = entity_lifecycle_rows(&db, scope, index_id, generation, 0).await;
+        assert_eq!(
+            delta,
+            Some(CoalescedBuildDeltaState::SecondaryBefore(
+                canonical_value(secondary, &claimed, IndexEntityId::new(0))
+                    .expect("claimed value is canonical")
+            ))
+        );
+        assert!(!applied, "the move deletes the applied-state row");
+        assert_unique_claims(
+            &db,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            &[(0, &claimed)],
+        )
+        .await;
+
+        // A binary without claims moves the entity again, then deletes it.
+        let later = user_properties("later@example.com");
+        for (before, after) in [(&claimed, &later), (&later, &Vec::new())] {
+            legacy_building_write(
+                &db,
+                scope,
+                &definition,
+                index_id,
+                generation,
+                0,
+                before,
+                after,
+            )
+            .await;
+        }
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(
+            &db,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            &BTreeMap::new(),
+        )
+        .await;
+        mutate_source(&db, scope, IndexElementKind::Node, 1, &[], &claimed)
+            .await
+            .expect("no orphan claim holds the value after activation");
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// An insert's claim is recorded as its delta's before-image, so a binary
+    /// without claims that deletes the entity before catch-up releases the
+    /// claim; the index never activates with an entry no row holds.
+    #[tokio::test]
+    async fn an_inserted_claim_is_released_by_a_pre_claim_delete() {
+        let db = test_db("secondary-unique-build-claim-rollback-insert").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        put_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            &user_properties("seed@example.com"),
+        )
+        .await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        let inserted = user_properties("inserted@example.com");
+        mutate_source(&db, scope, IndexElementKind::Node, 1, &[], &inserted)
+            .await
+            .expect("the insert claims its value");
+        legacy_building_write(
+            &db,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            1,
+            &inserted,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(
+            &db,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            &BTreeMap::from([(0, user_properties("seed@example.com"))]),
+        )
+        .await;
+        mutate_source(&db, scope, IndexElementKind::Node, 2, &[], &inserted)
+            .await
+            .expect("the deleted entity's value is free after activation");
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A pre-claim write to an entity validation already released leaves a
+    /// delta whose before-image names the entry the generation still holds.
+    /// A later claiming write releases that entry too, so recording its own
+    /// value as the before-image never orphans it.
+    #[tokio::test]
+    async fn a_claiming_write_releases_the_entry_a_pre_claim_delta_recorded() {
+        let db = test_db("secondary-unique-build-claim-after-legacy").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        let seed = user_properties("seed@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &seed).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, |stage| {
+            matches!(stage, SecondaryBuildStage::Activate(_))
+        })
+        .await;
+        assert!(
+            !entity_lifecycle_rows(&db, scope, index_id, generation, 0)
+                .await
+                .1,
+            "validation released the entity"
+        );
+        let legacy = user_properties("legacy@example.com");
+        legacy_building_write(
+            &db,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            0,
+            &seed,
+            &legacy,
+        )
+        .await;
+        let claimed = user_properties("claimed@example.com");
+        mutate_source(&db, scope, IndexElementKind::Node, 0, &legacy, &claimed)
+            .await
+            .expect("the claiming write releases the recorded entry");
+        assert_unique_claims(
+            &db,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            &[(0, &claimed)],
+        )
+        .await;
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        mutate_source(&db, scope, IndexElementKind::Node, 1, &[], &seed)
+            .await
+            .expect("the released seed value is free");
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A scan reads its source outside its transaction. A claiming write that
+    /// moves a scanned entity after that read but before the scan commits
+    /// writes the entity's applied-state row, which the scan read through its
+    /// transaction, so the scan cannot record the released value beside the
+    /// new claim; it retries and indexes the moved value.
+    #[tokio::test]
+    async fn a_scan_racing_a_claiming_write_on_its_entity_retries() {
+        let db = test_db("secondary-unique-build-scan-race").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        let before = user_properties("before@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &before).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("operation reads")
+            .expect("operation exists");
+        assert!(matches!(
+            operation.progress(),
+            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                SecondaryBuildStage::Scan(_)
+            ))
+        ));
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("scan transaction begins");
+        driver
+            .step(
+                &db,
+                &transaction,
+                scope,
+                &operation,
+                SearchIndexBackfillLimits::default().batch(),
+            )
+            .await
+            .expect("the scan stages the value it read");
+        let after = user_properties("after@example.com");
+        mutate_source(&db, scope, IndexElementKind::Node, 0, &before, &after)
+            .await
+            .expect("the claiming write commits first");
+        assert!(
+            transaction.commit().await.is_err(),
+            "the scan conflicts on the entity's applied-state row"
+        );
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(
+            &db,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            &BTreeMap::from([(0, after)]),
+        )
+        .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A scan preparation that finds the cursor where the previous one left it
+    /// made no progress, as when its batch lost its commit to a claiming
+    /// write. After [`PREPARATIONS_BEFORE_FENCE`] such preparations the next
+    /// one fences writers, and a batch that moves the cursor resets the count.
+    #[tokio::test]
+    async fn a_scan_that_keeps_losing_conflicts_fences_writers() {
+        let db = test_db("secondary-unique-scan-fallback").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        for entity_id in 0..4 {
+            put_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &user_properties(&format!("seed-{entity_id}@example.com")),
+            )
+            .await;
+        }
+        let (operation_id, _, _) = create_build(&db, scope, &definition, 3).await;
+        let gates = Arc::new(IndexScopeGates::default());
+        let driver = SecondaryIndexDriver::new(Arc::clone(&gates));
+        let mut claim_sequence = 1;
+        let limits = one_entity_limits();
+        let writer_waits = || async {
+            tokio::time::timeout(Duration::from_millis(50), gates.mutation_permit(scope))
+                .await
+                .is_err()
+        };
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("operation reads")
+            .expect("operation exists");
+        for attempt in 1..=PREPARATIONS_BEFORE_FENCE + 1 {
+            let prepared = driver
+                .prepare_step(&db, scope, &operation, limits)
+                .await
+                .expect("the scan prepares");
+            assert_eq!(
+                writer_waits().await,
+                attempt > PREPARATIONS_BEFORE_FENCE,
+                "attempt {attempt}"
+            );
+            drop(prepared);
+        }
+        assert_eq!(
+            drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Progressed
+        );
+        let operation = read_operation(&db, scope, operation_id)
+            .await
+            .expect("operation reads")
+            .expect("operation exists");
+        assert!(matches!(
+            build_stage(&db, operation_id).await,
+            SecondaryBuildStage::Scan(_)
+        ));
+        let prepared = driver
+            .prepare_step(&db, scope, &operation, limits)
+            .await
+            .expect("the scan prepares");
+        assert!(
+            !writer_waits().await,
+            "a batch that moved the cursor resets the count"
+        );
+        drop(prepared);
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Deleting an entity during a build releases its claim at once.
+    #[tokio::test]
+    async fn a_delete_during_a_build_releases_its_unique_claim() {
+        let db = test_db("secondary-unique-build-delete").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        let taken = user_properties("taken@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &taken).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 0).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        mutate_source(&db, scope, IndexElementKind::Node, 0, &taken, &[])
+            .await
+            .expect("delete releases the claim");
+        mutate_source(&db, scope, IndexElementKind::Node, 1, &[], &taken)
+            .await
+            .expect("the released value is free");
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        let sources = BTreeMap::from([(1, taken)]);
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// Once the scan has indexed every row, a write during the build is
+    /// rejected exactly when it would duplicate another entity's value, as
+    /// on an Active index, through activation and after it. Inserts, moves
+    /// and deletes over a small value pool collide often; the generation
+    /// ends equal to the source.
+    #[tokio::test]
+    async fn unique_claims_during_a_build_match_a_uniqueness_model() {
+        let db = test_db("secondary-unique-build-model").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = unique_email_definition();
+        let pool = (0..5)
+            .map(|value| user_properties(&format!("value-{value}@example.com")))
+            .collect::<Vec<_>>();
+        let mut sources = BTreeMap::new();
+        for entity_id in 0..3_u64 {
+            let properties = pool[usize::try_from(entity_id).expect("small id")].clone();
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 2).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        let mut activated = false;
+        for step in 0..80 {
+            let entity_id = next(6);
+            let choice = next(6);
+            let before = sources.get(&entity_id).cloned().unwrap_or_default();
+            let after = match usize::try_from(choice).expect("small choice") {
+                5 => Vec::new(),
+                value => pool[value].clone(),
+            };
+            let holder = sources
+                .iter()
+                .find(|(other, properties)| **other != entity_id && **properties == after)
+                .map(|(other, _)| *other);
+            let result = mutate_source(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                entity_id,
+                &before,
+                &after,
+            )
+            .await;
+            match holder.filter(|_| !after.is_empty()) {
+                Some(existing) => {
+                    assert!(
+                        rejects_duplicate(&result, existing, entity_id),
+                        "step {step}: {result:?}"
+                    );
+                }
+                None => {
+                    result.unwrap_or_else(|error| panic!("step {step}: {error:?}"));
+                    if after.is_empty() {
+                        sources.remove(&entity_id);
+                    } else {
+                        sources.insert(entity_id, after);
+                    }
+                }
+            }
+            if !activated && step % 3 == 0 {
+                match drive_one(&db, &driver, operation_id, &mut claim_sequence).await {
+                    CommittedOperationStep::Progressed => {}
+                    CommittedOperationStep::Completed => activated = true,
+                    other @ (CommittedOperationStep::TransientFailure
+                    | CommittedOperationStep::Blocked) => {
+                        panic!("step {step}: the build must not stall: {other:?}")
+                    }
+                }
+            }
+        }
+        if !activated {
+            assert_eq!(
+                drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+        }
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
         db.close().await.expect("secondary test database closes");
     }
 
@@ -7927,10 +12332,7 @@ mod tests {
                 SecondaryBuildStage::Validate(_) => "validate",
                 SecondaryBuildStage::Activate(_) => "activate",
             });
-            let driver = SecondaryIndexDriver::with_catch_up_delay(
-                Arc::new(IndexScopeGates::default()),
-                SecondaryIndexLifecycleCatchUpTailDelayMillis::new(1).unwrap(),
-            );
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
             let step = drive_one(&db, &driver, build_id, &mut claim_sequence).await;
             if step == CommittedOperationStep::Completed {
                 break;
@@ -7973,10 +12375,7 @@ mod tests {
                 SecondaryCleanupProgress::DeleteDeltas(_) => "delete_deltas",
                 SecondaryCleanupProgress::Finalize(_) => "finalize",
             });
-            let driver = SecondaryIndexDriver::with_catch_up_delay(
-                Arc::new(IndexScopeGates::default()),
-                SecondaryIndexLifecycleCatchUpTailDelayMillis::new(1).unwrap(),
-            );
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
             let step = drive_one(&db, &driver, drop_id, &mut claim_sequence).await;
             if step == CommittedOperationStep::Completed {
                 break;
@@ -8209,8 +12608,6 @@ mod ordered_tests;
 #[cfg(test)]
 mod test_read_counters;
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../tests/production_support/secondary_unique_batch.rs"]
+#[cfg(test)]
+#[path = "../../tests/unit/secondary_unique_batch.rs"]
 mod unique_batch_contracts;
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) use unique_batch_contracts::run as run_unique_batch_production_contracts;

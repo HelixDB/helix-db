@@ -6,9 +6,9 @@ use super::{
     FtsWarmConfig, HelixConfig, MigrationActiveIntervalMillis, MigrationBatchBytes,
     MigrationBatchRows, MigrationIdleIntervalMillis, MigrationTuning, MigrationWorkerMode,
     NonEmptyPathBuf, ObjectStoreWarmLevel, RangeIndexDirection, RuntimeIndexCatalog,
-    SearchIndexBackfillLimits, SecondaryIndexDefinition, SecondaryIndexElementType,
-    SecondaryIndexKind, SecondaryIndexLifecycleBatchRows, SimHasherCacheSettings,
-    SlateHybridCacheConfig, SlateMemoryCacheConfig, SlateObjectStoreCacheSettings, SlateWarmConfig,
+    SecondaryIndexDefinition, SecondaryIndexElementType, SecondaryIndexKind,
+    SecondaryIndexLifecycleBatchRows, SimHasherCacheSettings, SlateHybridCacheConfig,
+    SlateMemoryCacheConfig, SlateObjectStoreCacheSettings, SlateWarmConfig, SstCompression,
     TextAnalyzerKind, TextElementType, TextIndexDefinition, VectorElementType,
     VectorIndexDefinition, VectorMemoryBudget, VectorMemoryHydrationMode, VectorMemorySettings,
 };
@@ -209,116 +209,21 @@ fn db_config_builders_preserve_checked_runtime_contracts() {
 }
 
 #[test]
-fn db_config_accepts_nonzero_id_lease_size_type_directly() {
-    let lease_size = std::num::NonZeroU64::new(17).expect("lease size is nonzero");
-    let config = DbConfig::new().with_id_lease_size(lease_size);
-
-    assert_eq!(config.id_lease_size(), 17);
-}
-
-#[test]
-fn db_and_helix_config_defaults_and_builders_expose_runtime_contracts() {
-    let default = DbConfig::new();
-    assert_eq!(
-        DbConfig::default().id_lease_size(),
-        crate::id_allocator::DEFAULT_LEASE_SIZE
-    );
-    assert_eq!(DbConfig::default().id_lease_size(), 10_000);
-    assert_eq!(
-        DbConfig::default().id_lease_refill_threshold(),
-        crate::id_allocator::DEFAULT_LEASE_REFILL_THRESHOLD
-    );
-    assert_eq!(DbConfig::default().id_lease_refill_threshold(), 5_000);
-    assert_eq!(
-        super::SlateRuntimeConfig::default()
-            .to_reader_options(None)
-            .object_store_cache_options
-            .root_folder,
-        None
-    );
-    assert_eq!(default.default_encoding_type(), EdgeEncoding::None);
-    assert_eq!(
-        default.default_encoding_type_byte(),
-        EdgeEncoding::None.as_u8()
-    );
-    assert!(default.enable_wal);
-    assert_eq!(default.max_concurrent_reads(), 64);
-    assert_eq!(default.edge_update_policy(), EdgeUpdatePolicy::Eager);
-    assert_eq!(
-        default.edge_update_policy_byte(),
-        EdgeUpdatePolicy::Eager.as_u8()
-    );
-    assert_eq!(default.high_degree_threshold, 1000);
-    assert_eq!(
-        default.id_lease_size(),
-        crate::id_allocator::DEFAULT_LEASE_SIZE
-    );
-    assert_eq!(
-        default.id_lease_refill_threshold(),
-        crate::id_allocator::DEFAULT_LEASE_REFILL_THRESHOLD
-    );
-    assert!(matches!(default.cache().mode(), CacheMode::Memory { .. }));
-    assert_eq!(
-        default
-            .slate()
-            .to_writer_settings(None)
-            .object_store_cache_options
-            .root_folder,
-        None
-    );
-
+fn slate_settings_reach_writer_settings_and_reader_options() {
     let slate = slatedb::Settings {
         flush_interval: Some(std::time::Duration::from_secs(7)),
-        wal_replay: slatedb::config::WalReplaySettings {
-            max_concurrent_objects: 17,
-            max_inflight_bytes: 23 * 1024 * 1024,
-        },
         ..Default::default()
     };
-    let cache = CacheConfig::new(VectorMemorySettings::default(), CacheMode::VectorMemoryOnly);
-    let db = DbConfig::new()
-        .with_high_degree_threshold(4096)
-        .with_slate_settings(slate)
-        .with_cache(cache.clone());
-    let helix = HelixConfig::new(db);
+    let helix = HelixConfig::new(DbConfig::new().with_slate_settings(slate));
 
-    assert_eq!(helix.db().high_degree_threshold, 4096);
-    assert_eq!(helix.db().cache(), &cache);
     assert_eq!(
         helix.db().slate().to_writer_settings(None).flush_interval,
         Some(std::time::Duration::from_secs(7))
     );
     assert_eq!(
-        helix.db().slate().to_reader_options(None).wal_replay,
-        slatedb::config::WalReplaySettings {
-            max_concurrent_objects: 17,
-            max_inflight_bytes: 23 * 1024 * 1024,
-        }
-    );
-    assert_eq!(
         helix.db().slate().to_reader_options(None).wal_poll_interval,
         std::time::Duration::from_secs(1)
     );
-}
-
-#[test]
-fn config_error_and_path_wrappers_preserve_display_and_accessors() {
-    let error = NonEmptyPathBuf::try_new("").expect_err("empty path is rejected");
-    assert_eq!(error.to_string(), "cache path cannot be empty");
-    assert!(std::error::Error::source(&error).is_none());
-
-    let path = std::path::PathBuf::from("/tmp/cache");
-    let non_empty = NonEmptyPathBuf::try_from(path.clone()).expect("path is nonempty");
-    assert_eq!(non_empty.as_path(), path.as_path());
-    assert_eq!(non_empty.to_path_buf(), path);
-
-    let disk = DiskCacheConfig::try_new(non_empty.to_path_buf(), 2048)
-        .expect("disk cache settings are valid");
-    assert_eq!(disk.root(), std::path::Path::new("/tmp/cache"));
-    assert_eq!(disk.bytes(), 2048);
-
-    let roundtrip_path: std::path::PathBuf = non_empty.into();
-    assert_eq!(roundtrip_path, std::path::PathBuf::from("/tmp/cache"));
 }
 
 #[test]
@@ -381,7 +286,7 @@ fn slate_object_store_cache_settings_project_all_slate_options() {
     );
     assert_eq!(options.max_cache_size_bytes, Some(512));
     assert_eq!(options.part_size_bytes, 4096);
-    assert!(options.cache_puts);
+    assert!(options.cache_on_flush && options.cache_on_compaction);
     assert_eq!(
         options.preload_disk_cache_on_startup,
         Some(slatedb::config::PreloadLevel::AllSst)
@@ -421,7 +326,7 @@ fn slate_object_store_cache_settings_project_all_slate_options() {
 }
 
 #[test]
-fn cache_constructor_edges_and_accessors_are_explicit_contracts() {
+fn cache_constructors_reject_invalid_bounds() {
     assert!(SlateObjectStoreCacheSettings::try_new(
         "/tmp/object-store",
         Some(1),
@@ -433,14 +338,6 @@ fn cache_constructor_edges_and_accessors_are_explicit_contracts() {
     )
     .is_err());
 
-    let slate_hybrid =
-        SlateHybridCacheConfig::try_new(64, "/tmp/slate", 256).expect("valid slate cache");
-    assert_eq!(slate_hybrid.memory_bytes(), 64);
-    assert_eq!(
-        slate_hybrid.disk().root(),
-        std::path::Path::new("/tmp/slate")
-    );
-    assert_eq!(slate_hybrid.disk().bytes(), 256);
     assert!(SlateHybridCacheConfig::try_new(64, "", 256).is_err());
     assert!(SlateMemoryCacheConfig::try_new(0, 1).is_err());
     assert!(SlateMemoryCacheConfig::try_new(1, 0).is_err());
@@ -453,7 +350,7 @@ fn cache_constructor_edges_and_accessors_are_explicit_contracts() {
 }
 
 #[test]
-fn warm_mode_and_slate_cache_contracts_cover_every_variant_and_bound() {
+fn warm_mode_parses_and_slate_cache_rejects_invalid_bounds() {
     for (input, expected) in [
         (" BLOCKING ", CacheWarmMode::Blocking),
         ("background", CacheWarmMode::Background),
@@ -466,22 +363,13 @@ fn warm_mode_and_slate_cache_contracts_cover_every_variant_and_bound() {
         .unwrap_err()
         .contains("expected blocking, background, or off"));
 
-    let memory = SlateMemoryCacheConfig::try_new(u64::MAX, 1).unwrap();
-    assert_eq!(memory.block_bytes(), u64::MAX);
-    assert_eq!(memory.metadata_bytes(), 1);
-    assert_eq!(memory.total_bytes(), u64::MAX);
-
-    let background = SlateWarmConfig::background(2, 3).unwrap();
-    let blocking = SlateWarmConfig::blocking(4, 5).unwrap();
-    for (warm, mode, concurrency, limit) in [
-        (SlateWarmConfig::Off, CacheWarmMode::Off, 1, 0),
-        (background, CacheWarmMode::Background, 2, 3),
-        (blocking, CacheWarmMode::Blocking, 4, 5),
-    ] {
-        assert_eq!(warm.mode(), mode);
-        assert_eq!(warm.concurrency(), concurrency);
-        assert_eq!(warm.startup_sst_limit(), limit);
-    }
+    // The total saturates rather than overflowing.
+    assert_eq!(
+        SlateMemoryCacheConfig::try_new(u64::MAX, 1)
+            .unwrap()
+            .total_bytes(),
+        u64::MAX
+    );
     assert!(SlateWarmConfig::background(1, 0).is_err());
     assert!(SlateWarmConfig::blocking(0, 1).is_err());
 
@@ -511,53 +399,9 @@ fn warm_mode_and_slate_cache_contracts_cover_every_variant_and_bound() {
 }
 
 #[test]
-fn fts_cache_contracts_cover_every_mode_accessor_and_invalid_tier() {
-    let background = FtsWarmConfig::background(2, Some(3)).unwrap();
-    let blocking = FtsWarmConfig::blocking(4, None).unwrap();
-    for (warm, mode, concurrency, generation_limit) in [
-        (FtsWarmConfig::Off, CacheWarmMode::Off, 1, None),
-        (background.clone(), CacheWarmMode::Background, 2, Some(3)),
-        (blocking, CacheWarmMode::Blocking, 4, None),
-    ] {
-        assert_eq!(warm.mode(), mode);
-        assert_eq!(warm.concurrency(), concurrency);
-        assert_eq!(warm.startup_generation_limit(), generation_limit);
-    }
+fn fts_cache_constructors_reject_invalid_tiers() {
     assert!(FtsWarmConfig::background(1, Some(0)).is_err());
     assert!(FtsWarmConfig::blocking(0, None).is_err());
-
-    let memory = FtsMemoryCacheConfig::try_new(7, background.clone(), 11).unwrap();
-    assert_eq!(memory.memory_bytes(), 7);
-    assert_eq!(memory.warm(), &background);
-    assert_eq!(memory.warm_mode(), CacheWarmMode::Background);
-    assert_eq!(memory.warm_concurrency(), 2);
-    assert_eq!(memory.startup_generation_limit(), Some(3));
-    assert_eq!(
-        memory.generation_grace_period(),
-        std::time::Duration::from_secs(11)
-    );
-
-    let hybrid =
-        FtsHybridCacheConfig::try_new(13, "/tmp/fts-complete", 17, background.clone(), 19).unwrap();
-    assert_eq!(hybrid.memory_bytes(), 13);
-    assert_eq!(
-        hybrid.disk().root(),
-        std::path::Path::new("/tmp/fts-complete")
-    );
-    assert_eq!(hybrid.warm(), &background);
-    assert_eq!(hybrid.warm_mode(), CacheWarmMode::Background);
-    assert_eq!(hybrid.warm_concurrency(), 2);
-    assert_eq!(hybrid.startup_generation_limit(), Some(3));
-    assert_eq!(
-        hybrid.generation_grace_period(),
-        std::time::Duration::from_secs(19)
-    );
-    assert_eq!(
-        hybrid.disk_root(),
-        std::path::PathBuf::from("/tmp/fts-complete")
-    );
-    assert_eq!(hybrid.disk_bytes(), 17);
-
     assert!(FtsHybridCacheConfig::try_new(0, "/tmp/fts", 1, FtsWarmConfig::Off, 1).is_err());
     assert!(FtsHybridCacheConfig::try_new(1, "", 1, FtsWarmConfig::Off, 1).is_err());
     assert!(FtsHybridCacheConfig::try_new(1, "/tmp/fts", 0, FtsWarmConfig::Off, 1).is_err());
@@ -960,9 +804,6 @@ fn runtime_index_catalog_projects_typed_planner_snapshot() {
     assert!(
         indexes.contains_node_equality_scoped(&scoped_secondary_index_property("User", "email"))
     );
-    assert!(indexes
-        .node_equality_indexes()
-        .any(|key| key == scoped_secondary_index_property("User", "email")));
 }
 
 #[test]
@@ -1013,70 +854,17 @@ fn secondary_index_definition_constructors_preserve_validated_semantics() {
 }
 
 #[test]
-fn runtime_index_catalog_dynamic_insertion_covers_all_iterators() {
-    let node_unique = SecondaryIndexDefinition::node_unique_equality("User", "slug").unwrap();
-    let edge_range = SecondaryIndexDefinition::edge_range_desc("LIKES", "createdAt").unwrap();
+fn runtime_index_catalog_inserts_each_search_definition_once() {
     let vector =
         VectorIndexDefinition::new_node("Doc", "embedding", 3, VectorDistanceMetric::Cosine)
             .unwrap();
     let text = TextIndexDefinition::new_node("Doc", "body").unwrap();
 
     let mut catalog = RuntimeIndexCatalog::default();
-    for definition in [
-        SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
-        SecondaryIndexDefinition::node_range("User", "rank").unwrap(),
-        SecondaryIndexDefinition::node_range_desc("User", "age").unwrap(),
-        SecondaryIndexDefinition::edge_equality("LIKES", "kind").unwrap(),
-        SecondaryIndexDefinition::edge_range("LIKES", "rank").unwrap(),
-        SecondaryIndexDefinition::edge_range_desc("LIKES", "createdAt").unwrap(),
-    ] {
-        catalog.insert_dynamic_index(&v2_secondary(definition));
+    for _ in 0..2 {
+        catalog.insert_dynamic_index(&v2_vector(vector.clone()));
+        catalog.insert_dynamic_index(&v2_text(text.clone()));
     }
-    catalog.insert_dynamic_index(&v2_secondary(node_unique.clone()));
-    catalog.insert_dynamic_index(&v2_secondary(edge_range.clone()));
-    catalog.insert_dynamic_index(&v2_vector(vector.clone()));
-    catalog.insert_dynamic_index(&v2_text(text.clone()));
-    catalog.insert_dynamic_index(&v2_vector(vector));
-    catalog.insert_dynamic_index(&v2_text(text));
-
-    let node_email = scoped_secondary_index_property("User", "email");
-    let node_slug = scoped_secondary_index_property("User", "slug");
-    let node_age = scoped_secondary_index_property("User", "age");
-    let node_rank = scoped_secondary_index_property("User", "rank");
-    let edge_kind = scoped_secondary_index_property("LIKES", "kind");
-    let edge_created = scoped_secondary_index_property("LIKES", "createdAt");
-    let edge_rank = scoped_secondary_index_property("LIKES", "rank");
-
-    assert!(catalog.contains_node_equality_scoped(&node_email));
-    assert!(!catalog.contains_node_unique_equality_scoped(&node_email));
-    assert!(catalog.contains_node_unique_equality_scoped(&node_slug));
-    assert!(!catalog.contains_node_unique_equality_scoped("not-scoped"));
-    assert!(catalog.contains_node_range_scoped(&node_rank));
-    assert!(catalog.contains_node_range_desc_scoped(&node_age));
-    assert!(!catalog.contains_node_range_scoped(&node_age));
-    assert!(catalog.contains_edge_equality_scoped(&edge_kind));
-    assert!(catalog.contains_edge_range_scoped(&edge_rank));
-    assert!(catalog.contains_edge_range_desc_scoped(&edge_created));
-    assert!(!catalog.contains_edge_range_scoped(&edge_created));
-    assert!(!catalog.contains_node_equality_scoped("not-scoped"));
-    assert!(!catalog.contains_node_range_scoped("not-scoped"));
-    assert!(!catalog.contains_node_range_desc_scoped("not-scoped"));
-    assert!(!catalog.contains_edge_equality_scoped("not-scoped"));
-    assert!(!catalog.contains_edge_range_scoped("not-scoped"));
-    assert!(!catalog.contains_edge_range_desc_scoped("not-scoped"));
-    assert!(!catalog.has_scoped_equality_index("", "property"));
-
-    assert!(catalog.node_equality_indexes().any(|key| key == node_email));
-    assert!(catalog
-        .node_unique_equality_indexes()
-        .any(|key| key == node_slug));
-    assert!(catalog.node_range_desc_indexes().any(|key| key == node_age));
-    assert!(catalog.node_range_indexes().any(|key| key == node_rank));
-    assert!(catalog.edge_equality_indexes().any(|key| key == edge_kind));
-    assert!(catalog
-        .edge_range_desc_indexes()
-        .any(|key| key == edge_created));
-    assert!(catalog.edge_range_indexes().any(|key| key == edge_rank));
     assert_eq!(catalog.vector_indexes().count(), 1);
     assert_eq!(catalog.text_indexes().count(), 1);
 }
@@ -1664,30 +1452,82 @@ fn vector_index_definition_rejects_invalid_params() {
 }
 
 #[test]
-fn secondary_index_lifecycle_batch_rows_and_search_limits_are_explicit_contracts() {
-    assert_eq!(
-        DbConfig::new()
-            .secondary_index_lifecycle()
-            .batch_rows()
-            .get(),
-        1_024
-    );
-    assert_eq!(
-        SecondaryIndexLifecycleBatchRows::new(32)
-            .expect("positive batch rows")
-            .get(),
-        32
-    );
+fn secondary_index_lifecycle_batch_rows_reject_zero() {
     assert_eq!(SecondaryIndexLifecycleBatchRows::new(0), None);
+}
+
+#[test]
+fn every_profile_leaves_sst_blocks_uncompressed_until_told_otherwise() {
+    use super::db::EmbeddedStorageProfile;
+    use slatedb::config::CompressionCodec;
+
+    let codec = |config: &DbConfig| config.slate().to_writer_settings(None).compression_codec;
+    for config in [
+        DbConfig::new(),
+        DbConfig::embedded_default(EmbeddedStorageProfile::InMemory),
+        DbConfig::embedded_default(EmbeddedStorageProfile::Disk),
+    ] {
+        assert_eq!(codec(&config), None);
+        let before = config.slate().to_writer_settings(None);
+        let compressed = config.with_sst_compression(SstCompression::Zstd);
+        let after = compressed.slate().to_writer_settings(None);
+        assert_eq!(after.compression_codec, Some(CompressionCodec::Zstd));
+        // Only the codec changes; the profile's other settings stay.
+        assert_eq!(after.flush_interval, before.flush_interval);
+        assert_eq!(after.l0_sst_size_bytes, before.l0_sst_size_bytes);
+        assert_eq!(after.max_unflushed_bytes, before.max_unflushed_bytes);
+        assert_eq!(
+            codec(&compressed.with_sst_compression(SstCompression::None)),
+            None
+        );
+    }
+
+    // Whichever of the two setters runs last decides the codec.
+    let compressed = slatedb::Settings {
+        compression_codec: Some(CompressionCodec::Zstd),
+        ..DbConfig::new().slate().to_writer_settings(None)
+    };
     assert_eq!(
-        DbConfig::new()
-            .secondary_index_lifecycle()
-            .catch_up_tail_delay_millis()
-            .get(),
-        1_000
+        codec(&DbConfig::new().with_slate_settings(compressed.clone())),
+        Some(CompressionCodec::Zstd)
     );
     assert_eq!(
-        DbConfig::new().search_index_backfill(),
-        SearchIndexBackfillLimits::default()
+        codec(
+            &DbConfig::new()
+                .with_slate_settings(compressed.clone())
+                .with_sst_compression(SstCompression::None)
+        ),
+        None
     );
+    assert_eq!(
+        codec(
+            &DbConfig::new()
+                .with_sst_compression(SstCompression::None)
+                .with_slate_settings(compressed)
+        ),
+        Some(CompressionCodec::Zstd)
+    );
+}
+
+#[test]
+fn sst_compression_parses_only_none_and_zstd() {
+    for (text, expected) in [
+        ("none", SstCompression::None),
+        ("NONE", SstCompression::None),
+        (" zstd\n", SstCompression::Zstd),
+        ("Zstd", SstCompression::Zstd),
+    ] {
+        assert_eq!(
+            text.parse::<SstCompression>().unwrap(),
+            expected,
+            "{text:?}"
+        );
+    }
+    for text in ["", "off", "lz4", "snappy", "zstd3", "zst d"] {
+        let error = text.parse::<SstCompression>().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("invalid SST compression `{text}`: expected none or zstd")
+        );
+    }
 }

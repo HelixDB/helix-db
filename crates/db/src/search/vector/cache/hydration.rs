@@ -412,17 +412,12 @@ where
     Ok(targets)
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../../tests/production_support/vector/hydration.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/hydration.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {
-    #[tokio::test]
-    async fn idle_refresh_and_production_contracts() {
-        super::production_contracts::run().await;
-    }
-
     use bytes::Bytes;
     use slatedb::object_store::memory::InMemory;
     use slatedb::{Db, IsolationLevel};
@@ -613,7 +608,7 @@ mod tests {
         let reader = slatedb::DbReader::open(
             "vector-cache-reader-hydration",
             object_store,
-            None,
+            slatedb::DbReaderMode::ManagedCheckpoint,
             slatedb::config::DbReaderOptions {
                 manifest_poll_interval: std::time::Duration::from_millis(10),
                 wal_poll_interval: std::time::Duration::from_millis(10),

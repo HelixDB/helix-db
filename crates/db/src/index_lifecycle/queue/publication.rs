@@ -351,6 +351,8 @@ pub(crate) struct VectorPublicationResources {
     pub(crate) simhasher_registry: Arc<SimHasherRegistry>,
     pub(crate) batch_reads: crate::batch_reads::BatchReads,
     pub(crate) planning_cache: Arc<VectorBuildCache>,
+    /// Workers scoring upcoming inserts beside the planner; none plans alone.
+    pub(crate) presearch_workers: Option<std::num::NonZeroUsize>,
 }
 
 /// Object storage and limits for immutable text split publication.
@@ -1422,10 +1424,7 @@ impl QueuePublisher {
 
     /// Makes every entity held back after failing to plan due for its retry,
     /// as if [`MAX_STALLED_WAIT`] had passed.
-    #[cfg(any(
-        test,
-        all(feature = "production-coverage", feature = "index-lifecycle-testing")
-    ))]
+    #[cfg(test)]
     pub(crate) fn make_failed_retries_due(&self) {
         let now = Instant::now();
         self.schedules
@@ -2120,13 +2119,9 @@ async fn load_generation_record(
     Ok(None)
 }
 
-#[cfg(all(
-    feature = "production-coverage",
-    feature = "index-lifecycle-testing",
-    not(test)
-))]
-#[path = "../../../tests/production_support/queue_publication.rs"]
-pub(crate) mod production_contracts;
+#[cfg(all(test, feature = "index-lifecycle-testing"))]
+#[path = "../../../tests/unit/queue_publication.rs"]
+mod lifecycle_testing_tests;
 
 /// What retrying a failed publication can change, which decides how the
 /// failure is handled.
@@ -2196,6 +2191,7 @@ impl FailureKind {
             | HelixDbError::InvalidVectorConfig(_)
             | HelixDbError::InvalidVectorItem(_)
             | HelixDbError::Query(_)
+            | HelixDbError::UnboundParameter { .. }
             | HelixDbError::Planner(_)
             | HelixDbError::InvalidQueryJson(_)
             | HelixDbError::WriterModeRequired { .. }

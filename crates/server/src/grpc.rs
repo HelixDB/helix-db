@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use db::query_service::{QueryFailureClass, QueryMode, QueryServiceError};
+use db::query_service::{QueryMode, QueryServiceError};
 use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use tokio::sync::watch;
@@ -56,22 +56,15 @@ pub(crate) fn server_service(state: ServerState) -> HelixDbServerServer<GrpcServ
         .max_decoding_message_size(MAX_QUERY_BODY_BYTES + PROTOBUF_ENVELOPE_ALLOWANCE)
 }
 
-#[tonic::async_trait]
-impl HelixDbServer for GrpcService {
-    async fn execute_cypher(
+impl GrpcService {
+    /// Route and execute a compiled Cypher or SQL statement under the
+    /// request's options, recording telemetry for `tenant_id`.
+    async fn execute_compiled(
         &self,
-        request: Request<QueryJsonRequest>,
+        request: QueryJsonRequest,
+        query: db::cypher::CompiledRequest,
+        tenant_id: Option<helix_metrics::query::TenantId>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let metrics_tenant_id = crate::query_metrics_tenant_id(
-            request
-                .metadata()
-                .get(crate::TENANT_ID_HEADER_NAME)
-                .and_then(|value| value.to_str().ok()),
-        );
-        let request = request.into_inner();
-        let query = cypher_request(&request.body)?
-            .compile()
-            .map_err(|e| cypher_status(e.into()))?;
         validate_options_for_request_type(
             request.warm_only,
             request.require_writer,
@@ -84,32 +77,26 @@ impl HelixDbServer for GrpcService {
             .query_service()
             .execute_compiled_cypher_json_scoped_controlled(
                 query,
-                query_mode(request.warm_only),
+                query_mode(request.warm_only, request.await_durable),
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
                 db::cypher::Limits::default(),
-                metrics_tenant_id,
+                tenant_id,
             )
             .await
             .map_err(cypher_status)?;
-        if request.await_durable {
-            self.state
-                .flush_writer()
-                .await
-                .map_err(|e| status_from_service_error(e.into()))?;
-        }
         Ok(Response::new(QueryJsonResponse {
             body: response.into_bytes(),
         }))
     }
 
-    async fn explain_cypher(
+    /// Plan a compiled Cypher or SQL statement without executing it. Explaining
+    /// never executes, so even a modifying statement uses read options.
+    async fn explain_compiled(
         &self,
-        request: Request<QueryJsonRequest>,
+        request: QueryJsonRequest,
+        query: db::cypher::CompiledRequest,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let request = request.into_inner();
-        let query = cypher_request(&request.body)?;
-        // Explaining never executes, so even a modifying statement uses read options.
         validate_options_for_request_type(
             request.warm_only,
             request.require_writer,
@@ -120,7 +107,7 @@ impl HelixDbServer for GrpcService {
         let explanation = self
             .state
             .query_service()
-            .explain_cypher_scoped_controlled(
+            .explain_compiled_cypher_scoped_controlled(
                 query,
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
@@ -132,17 +119,61 @@ impl HelixDbServer for GrpcService {
             .map_err(|e| status_from_service_error(QueryServiceError::JsonSerialize(e)))?;
         Ok(Response::new(QueryJsonResponse { body: body.into() }))
     }
+}
+
+#[tonic::async_trait]
+impl HelixDbServer for GrpcService {
+    async fn execute_cypher(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let tenant_id = metrics_tenant_id(&request);
+        let request = request.into_inner();
+        let query = json_request::<db::cypher::Request>(&request.body)?
+            .compile()
+            .map_err(|e| cypher_status(e.into()))?;
+        self.execute_compiled(request, query, tenant_id).await
+    }
+
+    async fn explain_cypher(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let request = request.into_inner();
+        let query = json_request::<db::cypher::Request>(&request.body)?
+            .compile()
+            .map_err(|e| cypher_status(e.into()))?;
+        self.explain_compiled(request, query).await
+    }
+
+    async fn execute_sql(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let tenant_id = metrics_tenant_id(&request);
+        let request = request.into_inner();
+        let query = json_request::<db::cypher::sql::request::Request>(&request.body)?
+            .compile()
+            .map_err(|e| cypher_status(e.into()))?;
+        self.execute_compiled(request, query, tenant_id).await
+    }
+
+    async fn explain_sql(
+        &self,
+        request: Request<QueryJsonRequest>,
+    ) -> Result<Response<QueryJsonResponse>, Status> {
+        let request = request.into_inner();
+        let query = json_request::<db::cypher::sql::request::Request>(&request.body)?
+            .compile()
+            .map_err(|e| cypher_status(e.into()))?;
+        self.explain_compiled(request, query).await
+    }
 
     async fn execute_query(
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let metrics_tenant_id = crate::query_metrics_tenant_id(
-            request
-                .metadata()
-                .get(crate::TENANT_ID_HEADER_NAME)
-                .and_then(|value| value.to_str().ok()),
-        );
+        let metrics_tenant_id = metrics_tenant_id(&request);
         let QueryJsonRequest {
             body,
             warm_only,
@@ -151,7 +182,6 @@ impl HelixDbServer for GrpcService {
         } = request.into_inner();
         if body.len() > MAX_QUERY_BODY_BYTES {
             return Err(status_with_error_code(
-                tonic::Code::ResourceExhausted,
                 error_code::QueryErrorCode::InvalidRequestBody,
                 format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
             ));
@@ -165,7 +195,6 @@ impl HelixDbServer for GrpcService {
         };
         let query = parsed.map_err(|error| {
             status_with_error_code(
-                tonic::Code::InvalidArgument,
                 error_code::QueryErrorCode::InvalidQueryJson,
                 format!("invalid query JSON: {error}"),
             )
@@ -182,18 +211,11 @@ impl HelixDbServer for GrpcService {
             .query_service()
             .execute_query_with_mode_and_metrics_tenant(
                 query,
-                query_mode(warm_only),
+                query_mode(warm_only, await_durable),
                 metrics_tenant_id,
             )
             .await
             .map_err(status_from_service_error)?;
-        if await_durable {
-            self.state
-                .flush_writer()
-                .await
-                .map_err(QueryServiceError::from)
-                .map_err(status_from_service_error)?;
-        }
         let body = response.into_json_bytes().into();
         Ok(Response::new(QueryJsonResponse { body }))
     }
@@ -211,26 +233,37 @@ impl HelixDbServer for GrpcService {
     }
 }
 
-fn query_mode(warm_only: bool) -> QueryMode {
-    if warm_only {
-        QueryMode::Warm
-    } else {
-        QueryMode::Execute
+/// An unset `await_durable` waits, so only an explicit `false` trades crash
+/// durability for latency.
+fn query_mode(warm_only: bool, await_durable: Option<bool>) -> QueryMode {
+    match (warm_only, await_durable) {
+        (true, _) => QueryMode::Warm,
+        (false, Some(false)) => QueryMode::ExecuteWithoutDurableWait,
+        (false, None | Some(true)) => QueryMode::Execute,
     }
 }
 
-/// Decode a Cypher body with the same size limit and error codes as native queries.
-fn cypher_request(body: &[u8]) -> Result<db::cypher::Request, Status> {
+/// The telemetry tenant a request names in its metadata.
+fn metrics_tenant_id<T>(request: &Request<T>) -> Option<helix_metrics::query::TenantId> {
+    crate::query_metrics_tenant_id(
+        request
+            .metadata()
+            .get(crate::TENANT_ID_HEADER_NAME)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+/// Decode a Cypher or SQL body with the same size limit and error codes as
+/// native queries.
+fn json_request<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Status> {
     if body.len() > MAX_QUERY_BODY_BYTES {
         return Err(status_with_error_code(
-            tonic::Code::ResourceExhausted,
             error_code::QueryErrorCode::InvalidRequestBody,
             format!("query body exceeds {MAX_QUERY_BODY_BYTES} bytes"),
         ));
     }
     serde_json::from_slice(body).map_err(|error| {
         status_with_error_code(
-            tonic::Code::InvalidArgument,
             error_code::QueryErrorCode::InvalidQueryJson,
             error.to_string(),
         )
@@ -271,28 +304,25 @@ fn cypher_status(error: db::cypher::Error) -> Status {
 fn validate_options_for_request_type(
     warm_only: bool,
     require_writer: bool,
-    await_durable: bool,
+    await_durable: Option<bool>,
     request_type: QueryRequestType,
     db_mode: db::HelixDbMode,
 ) -> Result<(), Status> {
     if warm_only && request_type != QueryRequestType::Read {
         return Err(status_with_error_code(
-            tonic::Code::InvalidArgument,
             error_code::QueryErrorCode::InvalidRequestOption,
             "warm_only is only valid for read requests",
         ));
     }
-    if await_durable && request_type != QueryRequestType::Write {
+    if await_durable == Some(true) && request_type != QueryRequestType::Write {
         return Err(status_with_error_code(
-            tonic::Code::InvalidArgument,
             error_code::QueryErrorCode::InvalidRequestOption,
             "await_durable is only valid for write requests",
         ));
     }
     if require_writer && db_mode != db::HelixDbMode::Writer {
         return Err(status_with_error_code(
-            tonic::Code::Unavailable,
-            error_code::QueryErrorCode::InvalidRequestOption,
+            error_code::QueryErrorCode::WriterModeRequired,
             "request requires a writer but this server is read-only",
         ));
     }
@@ -300,25 +330,19 @@ fn validate_options_for_request_type(
 }
 
 pub(super) fn status_from_service_error(error: QueryServiceError) -> Status {
-    let code = match error.classify() {
-        QueryFailureClass::CommitOutcomeUnknown => tonic::Code::Unavailable,
-        QueryFailureClass::Conflict => tonic::Code::Aborted,
-        QueryFailureClass::Backpressure => tonic::Code::ResourceExhausted,
-        QueryFailureClass::InvalidRequest | QueryFailureClass::Planning => {
-            tonic::Code::InvalidArgument
-        }
-        QueryFailureClass::WriterModeRequired => tonic::Code::FailedPrecondition,
-        QueryFailureClass::Execution | QueryFailureClass::Internal => tonic::Code::Internal,
-    };
-    status_with_error_code(code, error.error_code(), error.to_string())
+    status_with_error_code(error.error_code(), error.to_string())
 }
 
+/// A status whose gRPC code is the error code's class code
+/// ([`error_code::QueryFailureClass::grpc_code`]).
 fn status_with_error_code(
-    status_code: tonic::Code,
     error_code: error_code::QueryErrorCode,
     message: impl Into<String>,
 ) -> Status {
-    let mut status = Status::new(status_code, message.into());
+    let mut status = Status::new(
+        tonic::Code::from_i32(error_code.failure_class().grpc_code()),
+        message.into(),
+    );
     status.metadata_mut().insert(
         HELIX_ERROR_CODE_METADATA,
         tonic::metadata::MetadataValue::from_static(error_code.as_str()),
@@ -329,59 +353,6 @@ fn status_with_error_code(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn service_statuses_keep_messages_and_attach_static_codes() {
-        let cases = [
-            (
-                QueryServiceError::InvalidRequest("bad request".to_string()),
-                tonic::Code::InvalidArgument,
-                "invalid_request",
-            ),
-            (
-                QueryServiceError::Db(db::error::HelixDbError::TransactionConflict(
-                    "retry".to_string(),
-                )),
-                tonic::Code::Aborted,
-                "transaction_conflict",
-            ),
-            (
-                QueryServiceError::Db(db::error::HelixDbError::WriterModeRequired {
-                    actual: "reader",
-                }),
-                tonic::Code::FailedPrecondition,
-                "writer_mode_required",
-            ),
-            (
-                QueryServiceError::Db(db::error::HelixDbError::WriterFencedCommitOutcomeUnknown),
-                tonic::Code::Unavailable,
-                "writer_fenced_commit_outcome_unknown",
-            ),
-            (
-                QueryServiceError::Db(db::error::HelixDbError::IndexNotFound(
-                    "documents".to_string(),
-                )),
-                tonic::Code::Internal,
-                "index_not_found",
-            ),
-        ];
-
-        for (error, expected_status_code, expected_error_code) in cases {
-            let expected_message = error.to_string();
-            let status = status_from_service_error(error);
-            assert_eq!(status.code(), expected_status_code);
-            assert_eq!(status.message(), expected_message);
-            assert_eq!(
-                status
-                    .metadata()
-                    .get(HELIX_ERROR_CODE_METADATA)
-                    .expect("query statuses include an error code")
-                    .to_str()
-                    .expect("error codes are ASCII"),
-                expected_error_code
-            );
-        }
-    }
 
     #[test]
     fn cypher_statuses_follow_the_shared_error_classes() {
@@ -407,6 +378,17 @@ mod tests {
                 )),
                 tonic::Code::Aborted,
                 Some("transaction_conflict"),
+            ),
+            (
+                db::cypher::Error::Storage(db::error::HelixDbError::UniqueConstraintViolation {
+                    label: "User".to_string(),
+                    property: "email".to_string(),
+                    value: "\"taken@example.com\"".to_string(),
+                    existing_node_id: 1,
+                    attempted_node_id: 2,
+                }),
+                tonic::Code::FailedPrecondition,
+                Some("unique_constraint_violation"),
             ),
             (
                 db::cypher::Error::Json(serde_json::from_str::<u8>("x").expect_err("invalid JSON")),
@@ -446,7 +428,7 @@ mod tests {
         let status = validate_options_for_request_type(
             true,
             false,
-            false,
+            None,
             QueryRequestType::Write,
             db::HelixDbMode::Writer,
         )

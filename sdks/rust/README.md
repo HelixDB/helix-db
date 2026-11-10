@@ -181,7 +181,7 @@ Optional header toggles can be chained before choosing the query kind:
 
 - `.writer_only()` — require the request to be served by a writer node (`x-helix-require-writer`).
 - `.warm_only()` — fan the read out for cache warming (`x-helix-warm`); reads only.
-- `.should_await_durability(true)` — block until the write is durable (`x-helix-await-durable`).
+- `.should_await_durability(false)` — return once the write is applied on the writer instead of waiting until it is durable, so a crash before its WAL upload loses it (`x-helix-await-durable`).
 
 `send()` is generic over the deserialized response type `R` and returns `Result<R, HelixError>`.
 `HelixError` distinguishes transport errors, non-success responses from the server (`RemoteError`),
@@ -719,3 +719,28 @@ The API key and database ID apply to Cypher as they do to native queries. A
 warm-only read that Helix Cloud answers with `204 No Content` returns no rows.
 Embedded clients reject request options. See the [Cypher guide](https://docs.helix-db.com/database/helix-db/query-guides/cypher)
 for the language profile, parameters, lossless values, errors and transaction behavior.
+
+## SQL
+
+SQL statements are translated to Cypher and run the same way, with `?`
+parameters bound in order and optional table and join-column mappings:
+
+```rust
+use helix_db::SqlMappings;
+
+let mappings = SqlMappings::default().table("people", "User");
+let rows = client
+    .sql("SELECT u.name AS name FROM people u WHERE u.age >= ?",
+        vec![serde_json::json!(30)], &mappings, Some("adults"))
+    .await?;               // CypherResponse { columns, rows }
+
+// Named parameters (:name, $name, @name) take a map; explain plans without writing.
+let params = std::collections::BTreeMap::from([("name".to_string(), serde_json::json!("Ada"))]);
+let plan = client
+    .explain_sql("INSERT INTO people (name) VALUES (:name)", params, &mappings, None)
+    .await?;
+```
+
+`request_builder::<()>().sql(...)` sets request options as for Cypher, then
+`.send()` or `.explain()`. See the [SQL guide](https://docs.helix-db.com/database/helix-db/query-guides/sql) for how tables, columns
+and joins translate, and which SQL is rejected.

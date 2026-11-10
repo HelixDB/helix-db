@@ -61,9 +61,11 @@ use crate::index_lifecycle::{
     BuildOperationOutcome, IndexCursor, IndexElementKind, IndexEntityId, IndexOperationBlocker,
     IndexOperationExecutionState, IndexOperationFamily, IndexOperationOutcome,
     IndexOperationProgress, IndexOperationRecord, IndexRecordV2, OperationCounters,
-    PrefixScanProgress, SourceScanProgress, TextBuildProgress, TextBuildStage, TextLogicalVersion,
-    TextManifestValidationProgress, ValidatedDynamicIndexDefinition, ValidatedTextIndexDefinition,
+    PrefixScanProgress, SourceScanProgress, StepGate, TextBuildProgress, TextBuildStage,
+    TextLogicalVersion, TextManifestValidationProgress, ValidatedDynamicIndexDefinition,
+    ValidatedTextIndexDefinition,
 };
+use crate::transaction::Mutation;
 
 /// Inseparable storage services required by split-producing lifecycle work.
 struct TextStorageRuntime {
@@ -266,7 +268,7 @@ impl PreparedTextWrite {
     /// Stages this put or delete.
     fn stage(&self, transaction: &DbTransaction) -> Result<()> {
         match &self.value {
-            Some(value) => transaction.put(&self.key, value)?,
+            Some(value) => Mutation::put(transaction, &self.key, value)?,
             None => transaction.delete(&self.key)?,
         }
         Ok(())
@@ -491,7 +493,11 @@ impl PreparedTextOperationStep {
                 for write in &prepared.lifecycle_writes {
                     write.stage(transaction)?;
                 }
-                transaction.put(&prepared.artifact_key, &prepared.artifact_value)?;
+                Mutation::put(
+                    transaction,
+                    &prepared.artifact_key,
+                    &prepared.artifact_value,
+                )?;
                 if !prepared.retired_artifact_keys.is_empty() {
                     super::compaction::stage_input_retirement(
                         transaction,
@@ -632,17 +638,29 @@ impl IndexOperationDriver for TextIndexDriver {
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
-        let needs_exclusive = matches!(
-            operation.progress(),
-            IndexOperationProgress::TextBuild(
-                TextBuildProgress::Constructing(TextBuildStage::Activate(_))
-                    | TextBuildProgress::Aborting(_)
-            ) | IndexOperationProgress::TextCleanup(_)
-        );
-        if needs_exclusive {
-            return Ok(Box::new(self.scope_gates.lifecycle_permit(scope).await));
-        }
-        Ok(Box::new(()))
+        let gate = match operation.progress() {
+            IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(stage)) => {
+                match stage {
+                    TextBuildStage::ScanSource(_)
+                    | TextBuildStage::ScanPartitions(_)
+                    | TextBuildStage::CatchUp(_)
+                    | TextBuildStage::Compact(_)
+                    | TextBuildStage::PrepareManifests(_)
+                    | TextBuildStage::ValidateManifests(_) => StepGate::None,
+                    TextBuildStage::Activate(_) => StepGate::Lifecycle,
+                }
+            }
+            // Abort and cleanup delete rows of a generation that is not Active.
+            IndexOperationProgress::TextBuild(TextBuildProgress::Aborting(_))
+            | IndexOperationProgress::TextCleanup(_) => StepGate::WriteFence,
+            IndexOperationProgress::SecondaryBuild(_)
+            | IndexOperationProgress::VectorBuild(_)
+            | IndexOperationProgress::SecondaryCleanup(_)
+            | IndexOperationProgress::VectorCleanup(_) => {
+                return Err(corruption("text driver received another family progress"));
+            }
+        };
+        Ok(self.scope_gates.step_permit(scope, gate).await)
     }
 
     async fn prepare_step(
@@ -739,11 +757,15 @@ impl IndexOperationDriver for TextIndexDriver {
                     .await?;
                 Ok(PreparedIndexOperationStep::text(step))
             }
-            TextBuildStage::ScanSource(_)
-            | TextBuildStage::CatchUp(_)
-            | TextBuildStage::Activate(_) => Ok(PreparedIndexOperationStep::driver_owned(
+            TextBuildStage::ScanSource(_) | TextBuildStage::CatchUp(_) => Ok(
+                PreparedIndexOperationStep::driver_owned(IndexOperationFamily::Text, Box::new(())),
+            ),
+            // Activation publishes the index to planning, so like every other
+            // family it holds the scope's exclusive lifecycle permit, which
+            // also advances the scope's catalog version as it is released.
+            TextBuildStage::Activate(_) => Ok(PreparedIndexOperationStep::driver_owned(
                 IndexOperationFamily::Text,
-                Box::new(()),
+                self.acquire_step_permit(scope, operation).await?,
             )),
         }
     }
@@ -2846,7 +2868,7 @@ async fn scan_source(
         })
     };
     for (key, value) in writes {
-        transaction.put(key, value)?;
+        Mutation::put(transaction, key, value)?;
     }
     statistics_batch.validate(transaction).await?;
     statistics_batch.stage_validated(transaction)?;

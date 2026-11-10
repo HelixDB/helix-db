@@ -222,7 +222,7 @@ fn config() -> DbConfig {
         defaults.text_compaction(),
     )
     .expect("one-entity reconciliation limits are valid");
-    DbConfig::new().with_search_index_backfill_limits(limits)
+    super::contract_config().with_search_index_backfill_limits(limits)
 }
 
 async fn open(database: String, config: DbConfig) -> HelixDB {
@@ -424,7 +424,7 @@ async fn reference_build(
 ) -> HelixDB {
     let db = open(
         format!("text-build-reconciliation-reference-{ordinal}"),
-        DbConfig::new(),
+        super::contract_config(),
     )
     .await;
     assert_eq!(

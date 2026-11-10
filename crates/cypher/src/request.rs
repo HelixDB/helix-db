@@ -88,6 +88,20 @@ pub struct CompiledRequest {
 }
 
 impl CompiledRequest {
+    pub(crate) fn new(
+        query: r::Query,
+        parameters: BTreeMap<String, query::QueryValue>,
+        text: String,
+        query_name: Option<String>,
+    ) -> Self {
+        Self {
+            query,
+            parameters,
+            text,
+            query_name,
+        }
+    }
+
     /// The validated statement's effect, without parsing or allocating.
     pub fn request_type(&self) -> query::QueryRequestType {
         match self.query.effect() {
@@ -96,7 +110,7 @@ impl CompiledRequest {
         }
     }
 
-    /// The statement as the client sent it.
+    /// The Cypher statement: as the client sent it, or as translated from SQL.
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -116,14 +130,19 @@ impl CompiledRequest {
 fn deserialize_parameters<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<BTreeMap<String, query::QueryValue>, D::Error> {
-    let values = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    decode_parameters(BTreeMap::<String, serde_json::Value>::deserialize(
+        deserializer,
+    )?)
+    .map_err(serde::de::Error::custom)
+}
+
+/// Decode named parameters in their lossless JSON encoding.
+pub(crate) fn decode_parameters(
+    values: impl IntoIterator<Item = (String, serde_json::Value)>,
+) -> std::result::Result<BTreeMap<String, query::QueryValue>, String> {
     values
         .into_iter()
-        .map(|(name, value)| {
-            decode_parameter(value)
-                .map(|value| (name, value))
-                .map_err(serde::de::Error::custom)
-        })
+        .map(|(name, value)| decode_parameter(value).map(|value| (name, value)))
         .collect()
 }
 

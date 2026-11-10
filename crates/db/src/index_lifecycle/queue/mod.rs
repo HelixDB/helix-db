@@ -28,8 +28,9 @@
 //! statistics marker with the document it builds, which queued publication
 //! diffs against. Rows the build owns (operation, canonical record, applied
 //! and entity state, statistics, tenant mappings, physical rows) stay in the
-//! step's serializable read set. Secondary builds have no queue and read
-//! source rows serializably.
+//! step's serializable read set. Secondary builds have no queue: their scan
+//! reads source rows the same way, and a build delta recorded with each later
+//! write takes the queue's place (see `index_lifecycle::secondary`).
 //!
 //! The queue corrects documents, not blockers, and a blocker is durable. A
 //! step that blocks on a graph row therefore also reads that row through its
@@ -113,8 +114,8 @@ pub struct IndexOperationQueueStats {
     /// fetches on a cache miss), the map layout's read-time merge resolution
     /// (also in [`crate::OperationQueueMergeStats::resolved`]), and decoding.
     pub queue_read_micros: u64,
-    /// Enqueue commits this handle observed succeed (durable foreground
-    /// operation commits).
+    /// Enqueue commits this handle observed succeed (foreground operation
+    /// commits, applied and possibly not yet durable).
     pub committed_operations: u64,
     /// Durable operations whose enqueue commit this handle did not observe
     /// succeed: found in storage at startup or by reconciliation, or proven
@@ -268,6 +269,9 @@ impl QueueTarget {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/unit/queue_admission_memory.rs"]
+mod admission_memory_tests;
+#[cfg(test)]
 mod codec_storage_tests;
 #[cfg(test)]
 mod drain_tests;
@@ -277,6 +281,9 @@ mod grouping_tests;
 mod isolation_tests;
 #[cfg(test)]
 mod layout_tests;
+#[cfg(all(test, feature = "index-lifecycle-testing"))]
+#[path = "../../../tests/unit/index_operation_queue.rs"]
+mod lifecycle_testing_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
@@ -285,6 +292,8 @@ mod open_measurement_tests;
 mod overlay_tests;
 #[cfg(test)]
 mod planning_session_tests;
+#[cfg(test)]
+mod presearch_tests;
 #[cfg(test)]
 mod publication_tests;
 #[cfg(test)]

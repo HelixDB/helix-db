@@ -153,7 +153,7 @@ pub(crate) enum ActiveMetricKind {
 
 impl ActiveMetricKind {
     /// Return the stable metric identity bound by this active capability.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) const fn kind(self) -> MetricKind {
         match self {
             Self::Cosine => MetricKind::Cosine,
@@ -227,7 +227,7 @@ pub(crate) enum ActiveVectorCodec {
 
 impl ActiveVectorCodec {
     /// Return the stable codec ID bound by this active capability.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) const fn kind(self) -> VectorCodecKind {
         match self {
             Self::F32V1 => VectorCodecKind::F32V1,

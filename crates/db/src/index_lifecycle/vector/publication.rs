@@ -215,7 +215,7 @@ pub(crate) async fn stage_active_effects(
     clippy::too_many_arguments,
     reason = "publication binds the exact storage, target, budget, planner resources, and session checkpoints"
 )]
-async fn stage_with_distance<D: Distance>(
+async fn stage_with_distance<D: Distance + 'static>(
     db: &Db,
     transaction: &DbTransaction,
     target: &VectorPlanTarget<'_>,
@@ -236,8 +236,20 @@ async fn stage_with_distance<D: Distance>(
         .planning_cache
         .checkout_publication::<D>(permit, reuse.as_ref(), limits.max_input_bytes())
         .await;
+    let presearch = super::driver::start_presearch::<D>(
+        db,
+        target,
+        definition,
+        effects,
+        resources,
+        &mut session,
+    )
+    .await;
     let mut staged = 0_usize;
     for (position, effect) in effects.iter().enumerate() {
+        if let Some(presearch) = &presearch {
+            session.offer_distance_memo(presearch.take(position).await);
+        }
         let next = effect
             .replacement
             .as_ref()
@@ -284,6 +296,9 @@ async fn stage_with_distance<D: Distance>(
             lifecycle_bytes,
         )?;
         staged += 1;
+    }
+    if let Some(presearch) = presearch {
+        presearch.finish(&mut session).await;
     }
     #[cfg(test)]
     {

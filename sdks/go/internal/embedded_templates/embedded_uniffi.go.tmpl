@@ -98,6 +98,22 @@ func (d *uniffiDatabase) ExplainCypherJson(request []byte) ([]byte, error) {
 	return response, nil
 }
 
+func (d *uniffiDatabase) SqlJson(request []byte) ([]byte, error) {
+	response, err := d.db.SqlJson(request)
+	if err != nil {
+		return nil, wrapNativeQueryError(err)
+	}
+	return response, nil
+}
+
+func (d *uniffiDatabase) ExplainSqlJson(request []byte) ([]byte, error) {
+	response, err := d.db.ExplainSqlJson(request)
+	if err != nil {
+		return nil, wrapNativeQueryError(err)
+	}
+	return response, nil
+}
+
 func (d *uniffiDatabase) Close() error {
 	if err := d.db.Close(); err != nil {
 		return wrapNativeQueryError(err)

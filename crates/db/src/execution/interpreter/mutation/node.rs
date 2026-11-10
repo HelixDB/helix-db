@@ -8,12 +8,37 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::contracts::{decode_stored_edges, label_of};
+use super::contracts::label_of;
+use super::edge::PairMembers;
 use super::MutationIndexContext;
 use super::*;
 use crate::index_lifecycle::graph_mutation::{
     CanonicalPropertyRow, GraphEntity, GraphMutationTransition, PropertyEdit, PropertyEditOutcome,
 };
+
+/// Nodes read and staged together. Each batch ends with a topology flush,
+/// because the next batch's reads must see it. A delete's peak memory follows its largest
+/// batch, so a batch also ends at the node reaching [`DELETE_BATCH_PAIRS`], and
+/// shrinks when the request's budget refuses it.
+const NODE_DELETE_BATCH: usize = 512;
+
+/// Neighbor pairs that end a batch. Each pair loads a pair row and its edges.
+const DELETE_BATCH_PAIRS: usize = 4096;
+
+/// Topology rows a delete collects before flushing them. A flush builds one
+/// merge per row, so this bounds its working memory, and the deltas waiting
+/// for it, at what deleting a few nodes needs. Staging uses the batch's
+/// observations, so a flush in mid-batch changes no result.
+pub(in crate::execution::interpreter) const DELETE_FLUSH_ROWS: usize = 512;
+
+/// One batch's node rows and the neighbor pairs attached to them.
+struct ObservedNodeDeletions {
+    rows: BTreeMap<u64, CanonicalPropertyRow>,
+    pairs: BTreeSet<(u64, u64)>,
+    /// Requested nodes covered, in ID order. The rest wait for a later batch.
+    covered: usize,
+    _memory: Option<crate::query_resources::Reservation>,
+}
 
 /// Sorted, deduplicated node-row observations with an ordered mutation overlay.
 pub(super) struct ObservedNodeRows {
@@ -27,6 +52,10 @@ pub(super) struct ObservedNodeExistence {
 }
 
 impl ObservedNodeExistence {
+    pub(super) fn contains(&self, node_id: u64) -> bool {
+        self.present.contains(&node_id)
+    }
+
     pub(super) fn require(&self, node_id: u64) -> Result<()> {
         if self.present.contains(&node_id) {
             Ok(())
@@ -39,6 +68,11 @@ impl ObservedNodeExistence {
 impl ObservedNodeRows {
     pub(super) fn observed(&self, node_id: u64) -> Option<CanonicalPropertyRow> {
         self.rows.get(&node_id).cloned().flatten()
+    }
+
+    /// Moves the row out, releasing the observation's hold on it.
+    pub(super) fn take(&mut self, node_id: u64) -> Option<CanonicalPropertyRow> {
+        self.rows.remove(&node_id).flatten()
     }
 
     pub(super) fn replace(&mut self, node_id: u64, row: Option<CanonicalPropertyRow>) {
@@ -112,7 +146,7 @@ impl<'db> ExecutionContext<'db> {
         let _ = self
             .set_node_property_observed(txn, node_id, property, observed, index_context)
             .await?;
-        index_context.flush_topology(txn).await?;
+        index_context.flush_topology(txn)?;
         Ok(())
     }
 
@@ -347,121 +381,274 @@ impl<'db> ExecutionContext<'db> {
         })
     }
 
+    /// One read of which `node_ids` exist in the transaction's view, its own
+    /// writes included, taking no read dependency on their rows. The caller
+    /// must stage an adjacency merge on each node it relies on, or record the
+    /// read so commit restores the dependency: see `ExistenceReads`.
     pub(super) async fn observe_node_existence(
         &self,
         txn: &impl crate::transaction::Mutation,
         node_ids: impl IntoIterator<Item = u64>,
     ) -> Result<ObservedNodeExistence> {
-        let node_ids = node_ids.into_iter().collect::<BTreeSet<_>>();
-        let keys = node_ids
-            .iter()
-            .map(|node_id| {
-                self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-                    *node_id,
-                )))
-            })
-            .collect::<Vec<_>>();
-        let values = if keys.is_empty() {
-            Vec::new()
-        } else {
-            txn.multi_get(&keys).await?
-        };
-        let mut present = BTreeSet::new();
-        for ((node_id, key), value) in node_ids.into_iter().zip(keys).zip(values) {
-            if value.is_some() || txn.get(&key).await?.is_some() {
-                present.insert(node_id);
-            }
-        }
-        Ok(ObservedNodeExistence { present })
-    }
-
-    pub(super) async fn delete_node(
-        &self,
-        txn: &impl crate::transaction::Mutation,
-        node_id: u64,
-        index_context: &mut MutationIndexContext,
-    ) -> Result<()> {
-        let key = self.storage_key(keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(
-            node_id,
-        )));
-        let Some(stored) = txn.get(&key).await? else {
-            return Ok(());
-        };
-        let transition = GraphMutationTransition::delete(
+        let requested = super::observations::RowKeys::new(
+            node_ids,
+            super::observations::Kind::Nodes,
             self.tenant_scope,
-            GraphEntity::node(node_id),
-            CanonicalPropertyRow::decode_with_budget(stored, self.row_memory.as_ref())?,
-        );
-        let properties = transition
-            .before()
-            .expect("a delete transition has a before row")
-            .properties();
-        index_context.flush_topology(txn).await?;
-        let incident_edges = self.incident_edge_ids(txn, node_id, index_context).await?;
-        let mut observed_edges = self
-            .observe_edge_deletions(txn, incident_edges.iter().copied(), index_context)
-            .await?;
-        for edge_id in incident_edges {
-            self.check_execution_deadline()?;
-            self.delete_edge_observed(txn, edge_id, observed_edges.take(edge_id)?, index_context)
-                .await?;
-        }
-        index_context.flush_topology(txn).await?;
-        if let Some(label) = label_of(properties) {
-            index_context.topology_mutations().remove_node_label(
-                self.tenant_scope,
-                label,
-                node_id,
-            )?;
-        }
-        index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
-        index_context.property_writes.stage(
-            txn,
-            self.tenant_scope,
-            GraphEntity::node(node_id),
-            None,
             self.row_memory.as_ref(),
         )?;
-        txn.delete(
-            self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
-                node_id,
-            ))),
+        if requested.ids.is_empty() {
+            return Ok(ObservedNodeExistence {
+                present: BTreeSet::new(),
+            });
+        }
+        let request = crate::query_resources::properties::ReadRequest::new(
+            requested.keys.len(),
+            self.row_memory.as_ref(),
         )?;
-        Ok(())
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: requested.keys.len(),
+                ..Default::default()
+            })
+        });
+        let values = request.attach(txn.read_without_dependency(&requested.keys).await?)?;
+        Ok(ObservedNodeExistence {
+            present: requested
+                .ids
+                .iter()
+                .copied()
+                .zip(values)
+                .filter_map(|(id, value)| value.map(|_| id))
+                .collect(),
+        })
     }
 
-    pub(super) async fn incident_edge_ids(
+    /// One read of each node's row and adjacency row, stopping at the node
+    /// that reaches [`DELETE_BATCH_PAIRS`].
+    async fn observe_node_deletions(
         &self,
         txn: &impl crate::transaction::Mutation,
-        node_id: u64,
-        index_context: &MutationIndexContext,
-    ) -> Result<BTreeSet<u64>> {
-        let key = self.storage_key(keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(
-            node_id,
-        )));
-        let edges = decode_stored_edges(txn.get(&key).await?)?;
-        let pairs = edges
-            .iter_out()
-            .map(|to| (node_id, to))
-            .chain(edges.iter_in().map(|from| (from, node_id)))
-            .collect::<BTreeSet<_>>();
-        let keys = pairs
-            .into_iter()
-            .map(|(from, to)| {
-                self.storage_key(keys::DataKeyKind::EdgePairIndex(
-                    keys::EdgePairIndexKey::new(from, to),
-                ))
+        node_ids: &[u64],
+    ) -> Result<ObservedNodeDeletions> {
+        let requested = super::observations::RowKeys::new(
+            node_ids.iter().copied(),
+            super::observations::Kind::NodeDeletions,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+        )?;
+        if requested.ids.is_empty() {
+            return Ok(ObservedNodeDeletions {
+                rows: BTreeMap::new(),
+                pairs: BTreeSet::new(),
+                covered: 0,
+                _memory: None,
+            });
+        }
+        let row_bytes = helix_planner::relational::allocation::btree_bytes::<
+            u64,
+            CanonicalPropertyRow,
+        >(requested.ids.len());
+        let mut memory = self
+            .row_memory
+            .as_ref()
+            .map(|budget| budget.reserve(row_bytes))
+            .transpose()?;
+        let request = crate::query_resources::properties::ReadRequest::new(
+            requested.keys.len(),
+            self.row_memory.as_ref(),
+        )?;
+        self.row_memory.iter().for_each(|budget| {
+            budget.record_reads(crate::query_resources::StorageReadUsage {
+                multi_get_batches: 1,
+                multi_get_keys: requested.keys.len(),
+                ..Default::default()
             })
-            .collect::<Vec<_>>();
-        let mut edge_ids = BTreeSet::new();
-        for value in index_context.observe_topology(txn, &keys).await? {
+        });
+        let mut values = request.attach(txn.multi_get(&requested.keys).await?)?;
+        let mut rows = BTreeMap::new();
+        let mut pairs = BTreeSet::new();
+        let mut covered = 0;
+        for node_id in requested.ids.iter().copied() {
             self.check_execution_deadline()?;
-            let Some(value) = value else {
+            let row = values.next().expect("each node has one row result");
+            let adjacency = values.next().expect("each node has one adjacency result");
+            covered += 1;
+            let Some(row) = row else {
                 continue;
             };
-            edge_ids.extend(values::indexes::SecondaryEqualityValue::decode(&value)?.into_ids());
+            rows.insert(node_id, CanonicalPropertyRow::decode_read(row)?);
+            let Some(adjacency) = adjacency else {
+                continue;
+            };
+            let edges = values::adjacency::decode_edges(adjacency.bytes())?;
+            let added = usize::try_from(edges.nxts_out.len().saturating_add(edges.nxts_in.len()))
+                .map_err(|_| HelixDbError::QueryMemoryLimitExceeded)?;
+            memory
+                .as_mut()
+                .map(|memory| {
+                    memory.resize(row_bytes.saturating_add(
+                        helix_planner::relational::allocation::btree_bytes::<(u64, u64), ()>(
+                            pairs.len().saturating_add(added),
+                        ),
+                    ))
+                })
+                .transpose()?;
+            pairs.extend(
+                edges
+                    .iter_out()
+                    .map(|to| (node_id, to))
+                    .chain(edges.iter_in().map(|from| (from, node_id))),
+            );
+            if pairs.len() >= DELETE_BATCH_PAIRS {
+                break;
+            }
         }
-        Ok(edge_ids)
+        Ok(ObservedNodeDeletions {
+            rows,
+            pairs,
+            covered,
+            _memory: memory,
+        })
+    }
+
+    /// Deletes `edges`, then `nodes`, both strictly ascending. A node without
+    /// a row is skipped. Each batch makes one multi-get per dependency level,
+    /// however many nodes it holds: node and adjacency rows, then pair rows,
+    /// then edge rows, with no row read twice. It flushes topology once per
+    /// [`DELETE_FLUSH_ROWS`] collected rows and once at its end.
+    ///
+    /// `check_attached` sees each batch's pairs before anything of that batch
+    /// is staged. Edges of `edges` count as pair members until their batch
+    /// deletes them. A refusal may follow staged earlier batches, so the
+    /// caller must drop the transaction.
+    ///
+    /// Observation only reads, so a batch the memory budget refuses retries
+    /// with half its nodes. One node may need all the memory it ever did.
+    pub(super) async fn delete_elements<E: From<HelixDbError>>(
+        &self,
+        txn: &impl crate::transaction::Mutation,
+        edges: &[u64],
+        nodes: &[u64],
+        check_attached: impl Fn(&PairMembers) -> std::result::Result<(), E>,
+        index_context: &mut MutationIndexContext,
+    ) -> std::result::Result<(), E> {
+        assert!(
+            edges.is_sorted_by(|a, b| a < b) && nodes.is_sorted_by(|a, b| a < b),
+            "deletion targets are strictly ascending"
+        );
+        // Prior clauses may still own coalesced pair or adjacency changes,
+        // and every observation below must include them.
+        index_context.flush_topology(txn)?;
+        let mut selected = edges;
+        let mut remaining = nodes;
+        let mut batch_size = NODE_DELETE_BATCH;
+        loop {
+            let batch = &remaining[..batch_size.min(remaining.len())];
+            let refused = |error: &HelixDbError| {
+                matches!(error, HelixDbError::QueryMemoryLimitExceeded) && batch.len() > 1
+            };
+            let observed = async {
+                let ObservedNodeDeletions {
+                    rows,
+                    pairs,
+                    covered,
+                    _memory,
+                } = self.observe_node_deletions(txn, batch).await?;
+                let mut members = PairMembers::default();
+                self.observe_pair_members(txn, pairs.iter().copied(), &mut members, index_context)
+                    .await?;
+                Ok::<_, HelixDbError>((rows, members, covered, _memory))
+            }
+            .await;
+            let (rows, members, covered, _memory) = match observed {
+                Err(error) if refused(&error) => {
+                    batch_size = batch.len() / 2;
+                    continue;
+                }
+                observed => observed?,
+            };
+            check_attached(&members)?;
+            let mut observed_edges = match self
+                .observe_edge_deletions(txn, selected.iter().copied(), members, index_context)
+                .await
+            {
+                Err(error) if refused(&error) => {
+                    batch_size = batch.len() / 2;
+                    continue;
+                }
+                observed => observed?,
+            };
+            selected = &[];
+            for edge_id in observed_edges.edge_ids() {
+                self.check_execution_deadline()?;
+                self.delete_edge_observed(
+                    txn,
+                    edge_id,
+                    observed_edges.take(edge_id)?,
+                    index_context,
+                )
+                .await?;
+                if index_context.pending_topology_rows() >= DELETE_FLUSH_ROWS {
+                    index_context.flush_topology(txn)?;
+                }
+            }
+            let staged = rows.keys().copied().collect::<Vec<_>>();
+            for (node_id, row) in rows {
+                self.check_execution_deadline()?;
+                let transition = GraphMutationTransition::delete(
+                    self.tenant_scope,
+                    GraphEntity::node(node_id),
+                    row,
+                );
+                let properties = transition
+                    .before()
+                    .expect("a delete transition has a before row")
+                    .properties();
+                label_of(properties)
+                    .map(|label| {
+                        index_context.topology_mutations().remove_node_label(
+                            self.tenant_scope,
+                            label,
+                            node_id,
+                        )
+                    })
+                    .transpose()?;
+                index_context.maintain_graph_indexes(transition, self.row_memory.as_ref())?;
+                index_context.property_writes.stage(
+                    txn,
+                    self.tenant_scope,
+                    GraphEntity::node(node_id),
+                    None,
+                    self.row_memory.as_ref(),
+                )?;
+                if index_context.pending_topology_rows() >= DELETE_FLUSH_ROWS {
+                    index_context.flush_topology(txn)?;
+                }
+            }
+            // The tombstone is the last write to each adjacency row, so it
+            // replaces this batch's deltas in the write batch.
+            index_context.flush_topology(txn)?;
+            staged
+                .into_iter()
+                .try_for_each(|node_id| {
+                    txn.delete(self.storage_key(keys::DataKeyKind::Adjacency(
+                        keys::AdjacencyKey::new(node_id),
+                    )))
+                })
+                .map_err(HelixDbError::from)?;
+            remaining = &remaining[covered..];
+            if remaining.is_empty() {
+                return Ok(());
+            }
+            // A cut batch shows what these nodes cost: start the next one
+            // there instead of reading rows it would drop.
+            batch_size = if covered < batch.len() {
+                covered
+            } else {
+                batch_size.saturating_mul(2).min(NODE_DELETE_BATCH)
+            };
+        }
     }
 
     pub(super) async fn node_targets(&self, plan: &ir::NodeTargetPlan) -> Result<Vec<u64>> {
@@ -527,12 +714,62 @@ mod tests {
         rows
     }
 
+    /// One membership row a cascade delete changes.
+    #[derive(Debug, Clone, Copy)]
+    enum CorruptRow {
+        NodeLabel,
+        EdgePair,
+        EdgeLabelOut,
+        EdgeLabelIn,
+        GlobalEdgeLabel,
+        Adjacency,
+        NodeEquality,
+        EdgeEquality,
+    }
+
+    /// What a cascade delete does when one of its rows was corrupted outside
+    /// Helix.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CascadeOutcome {
+        /// The delete only stages a removal delta for the row, which never
+        /// reads it: every record goes and the delta commits.
+        Deletes,
+        /// The delete reads the row to find incident edges, so it fails
+        /// closed and writes nothing.
+        RejectsOnRead,
+    }
+
+    /// A membership row corrupted outside Helix never fails a memtable flush.
+    ///
+    /// Staging a removal never reads the row it changes, so a cascade delete
+    /// commits unless it reads the corrupt row itself, in which case it
+    /// rejects without writing anything. Either way the next flush builds.
     #[tokio::test]
-    async fn rejected_cascade_delete_preserves_every_graph_and_index_row() {
+    async fn cascade_delete_over_a_corrupt_row_is_atomic_and_never_fails_a_flush() {
+        for (corrupt, expected) in [
+            (None, CascadeOutcome::Deletes),
+            (Some(CorruptRow::NodeLabel), CascadeOutcome::Deletes),
+            (Some(CorruptRow::EdgePair), CascadeOutcome::RejectsOnRead),
+            (Some(CorruptRow::EdgeLabelOut), CascadeOutcome::Deletes),
+            (Some(CorruptRow::EdgeLabelIn), CascadeOutcome::Deletes),
+            (Some(CorruptRow::GlobalEdgeLabel), CascadeOutcome::Deletes),
+            (Some(CorruptRow::Adjacency), CascadeOutcome::RejectsOnRead),
+            (Some(CorruptRow::NodeEquality), CascadeOutcome::Deletes),
+            (Some(CorruptRow::EdgeEquality), CascadeOutcome::Deletes),
+        ] {
+            cascade_delete_over_a_corrupt_row(corrupt, expected).await;
+        }
+    }
+
+    async fn cascade_delete_over_a_corrupt_row(
+        corrupt: Option<CorruptRow>,
+        expected: CascadeOutcome,
+    ) {
         let scope = keys::scope::DataScope::LegacyUnscoped;
-        let config = test_support::in_memory_config("mutation-corrupt-cascade-delete")
-            .with_equality_index("User", "status")
-            .with_edge_equality_index("FOLLOWS", "status");
+        let config =
+            test_support::in_memory_config(&format!("mutation-corrupt-cascade-delete-{corrupt:?}"))
+                .with_equality_index("User", "status")
+                .with_edge_equality_index("FOLLOWS", "status");
         let db = test_support::open_db_with_config(config).await;
         let target = test_support::add_node_with_properties(
             &db,
@@ -580,60 +817,42 @@ mod tests {
                 })
             })
             .expect("the edge equality generation is active");
-        let cases = [
-            (
-                "node-label",
-                super::super::topology::node_label_key(scope, "User"),
+        let corrupt_key = corrupt.map(|row| match row {
+            CorruptRow::NodeLabel => super::super::topology::node_label_key(scope, "User"),
+            CorruptRow::EdgePair => super::super::topology::edge_pair_key(scope, target, neighbor),
+            CorruptRow::EdgeLabelOut => super::super::topology::edge_label_neighbor_key(
+                scope,
+                crate::encoding::indexes::EdgeDirection::Out,
+                target,
+                "FOLLOWS",
             ),
-            (
-                "edge-pair",
-                super::super::topology::edge_pair_key(scope, target, neighbor),
+            CorruptRow::EdgeLabelIn => super::super::topology::edge_label_neighbor_key(
+                scope,
+                crate::encoding::indexes::EdgeDirection::In,
+                target,
+                "FOLLOWS",
             ),
-            (
-                "edge-label-out",
-                super::super::topology::edge_label_neighbor_key(
-                    scope,
-                    crate::encoding::indexes::EdgeDirection::Out,
-                    target,
-                    "FOLLOWS",
-                ),
-            ),
-            (
-                "edge-label-in",
-                super::super::topology::edge_label_neighbor_key(
-                    scope,
-                    crate::encoding::indexes::EdgeDirection::In,
-                    target,
-                    "FOLLOWS",
-                ),
-            ),
-            (
-                "global-edge-label",
-                super::super::topology::global_edge_label_key(scope, "FOLLOWS"),
-            ),
-            (
-                "adjacency",
-                keys::DataKey::Data {
-                    scope,
-                    kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(target)),
-                }
-                .to_bytes(),
-            ),
-            (
-                "node-equality",
+            CorruptRow::GlobalEdgeLabel => {
+                super::super::topology::global_edge_label_key(scope, "FOLLOWS")
+            }
+            CorruptRow::Adjacency => keys::DataKey::Data {
+                scope,
+                kind: keys::DataKeyKind::Adjacency(keys::AdjacencyKey::new(target)),
+            }
+            .to_bytes(),
+            CorruptRow::NodeEquality => {
                 crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
                     node_equality,
                     "shared",
-                ),
-            ),
-            (
-                "edge-equality",
+                )
+            }
+            CorruptRow::EdgeEquality => {
                 crate::index_lifecycle::secondary::equality_bitmap_key_for_test(
                     edge_equality,
                     "shared",
-                ),
-            ),
-        ];
+                )
+            }
+        });
         let node_key = keys::DataKey::Data {
             scope,
             kind: keys::DataKeyKind::NodeProperty(keys::NodePropertyKey::new(target)),
@@ -676,45 +895,55 @@ mod tests {
             2,
         );
 
-        for (name, key) in cases {
-            let original = db
-                .inner_db()
-                .get(&key)
-                .await
-                .unwrap()
-                .unwrap_or_else(|| panic!("{name} fixture row exists"));
+        let memtable = slatedb::config::FlushOptions {
+            flush_type: slatedb::config::FlushType::MemTable,
+        };
+        // Corrupt the row outside Helix and flush it below the next memtable.
+        async {
+            let Some(key) = &corrupt_key else {
+                return;
+            };
+            assert!(
+                db.inner_db().get(key).await.unwrap().is_some(),
+                "{corrupt:?} fixture row exists"
+            );
             db.inner_db()
-                .put(&key, Bytes::from_static(b"corrupt-membership-row"))
+                .put(key, Bytes::from_static(b"corrupt-membership-row"))
                 .await
                 .unwrap();
-            let before = all_rows(&db).await;
-            db.execute(
+            db.inner_db()
+                .flush_with_options(memtable.clone())
+                .await
+                .unwrap();
+        }
+        .await;
+        let before = all_rows(&db).await;
+        let outcome = db
+            .execute(
                 &drop_node,
                 context::ParamBindings::default()
-                    .with_value(node_param.clone(), AstPropertyValue::I64(target as i64)),
+                    .with_value(node_param, AstPropertyValue::I64(target as i64)),
             )
             .await
-            .expect_err("corrupt membership rows reject the cascade delete");
-            assert_eq!(all_rows(&db).await, before, "{name}");
-            for record_key in [&node_key, &outgoing_key, &incoming_key] {
-                assert!(
-                    db.inner_db().get(record_key).await.unwrap().is_some(),
-                    "{name} preserves node and edge records"
-                );
+            .map(drop);
+        match (expected, outcome) {
+            (CascadeOutcome::Deletes, Ok(_)) => {}
+            (CascadeOutcome::RejectsOnRead, Err(_)) => {
+                assert_eq!(all_rows(&db).await, before, "{corrupt:?}");
             }
-            db.inner_db().put(&key, original).await.unwrap();
+            (expected, outcome) => panic!("{corrupt:?}: expected {expected:?}, got {outcome:?}"),
         }
-
-        db.execute(
-            &drop_node,
-            context::ParamBindings::default()
-                .with_value(node_param, AstPropertyValue::I64(target as i64)),
-        )
-        .await
-        .expect("the repaired fixture still permits a complete cascade delete");
         for record_key in [&node_key, &outgoing_key, &incoming_key] {
-            assert!(db.inner_db().get(record_key).await.unwrap().is_none());
+            assert_eq!(
+                db.inner_db().get(record_key).await.unwrap().is_none(),
+                expected == CascadeOutcome::Deletes,
+                "{corrupt:?}"
+            );
         }
+        db.inner_db()
+            .flush_with_options(memtable)
+            .await
+            .unwrap_or_else(|error| panic!("{corrupt:?} failed a memtable flush: {error}"));
         db.close().await.unwrap();
     }
 
@@ -830,7 +1059,7 @@ mod tests {
             .await
             .expect("snapshot transaction begins");
         context
-            .delete_node(&txn, to, &mut index_context)
+            .delete_elements::<HelixDbError>(&txn, &[], &[to], |_| Ok(()), &mut index_context)
             .await
             .expect("target node and incoming edge are deleted");
         assert_eq!(
@@ -845,7 +1074,7 @@ mod tests {
         ));
 
         context
-            .delete_node(&txn, 99, &mut index_context)
+            .delete_elements::<HelixDbError>(&txn, &[], &[99], |_| Ok(()), &mut index_context)
             .await
             .expect("deleting a missing node is idempotent");
     }

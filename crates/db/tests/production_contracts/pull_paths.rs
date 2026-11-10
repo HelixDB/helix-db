@@ -1857,7 +1857,7 @@ async fn late_bound_membership_plans_classify_each_request_domain() {
         .execute(&plan, context::ParamBindings::default())
         .await
         .expect_err("a late-bound parameter must be bound at execution");
-    assert_eq!(error.error_code(), QueryErrorCode::InvalidQuery);
+    assert_eq!(error.error_code(), QueryErrorCode::UnboundParameter);
     assert_eq!(
         error.to_string(),
         "Query error: parameter `values` is not bound"

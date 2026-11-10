@@ -58,7 +58,7 @@ Advanced server-only headers are available from `requestBuilder<R>()`:
 ```ts
 await client.requestBuilder<MyResponse>().writerOnly().query(request).send();
 await client.requestBuilder<void>().warmOnly().query(request).send();
-await client.requestBuilder<MyResponse>().shouldAwaitDurability(false).query(request).send();
+await client.requestBuilder<MyResponse>().shouldAwaitDurability(true).query(request).send();
 ```
 
 `warmOnly()` is read-only. It sends the ordinary read with
@@ -369,7 +369,7 @@ options, build the request with `requestBuilder()` and finish with `.send()` or
 
 ```ts
 await client.requestBuilder().writerOnly().cypher("CREATE (u:User {name: $name}) RETURN u", { name: "Ada" }).send();
-await client.requestBuilder().shouldAwaitDurability(false).cypher("MATCH (u:User) SET u.seen = true").send();
+await client.requestBuilder().shouldAwaitDurability(true).cypher("MATCH (u:User) SET u.seen = true").send();
 await client.requestBuilder().warmOnly().cypher("MATCH (u:User) RETURN u.name AS name").send();
 await client.requestBuilder().writerOnly().cypher("MATCH (u:User) RETURN u").explain();
 ```
@@ -389,3 +389,22 @@ three parts in `code` as `category:phase:detail`, such as
 Embedded clients reject server request options with an `InvalidRequest` error,
 as for native queries. `explainCypher(...)` needs an embedded package with
 Cypher explain support; older packages raise `EmbeddedUnavailable`.
+
+## SQL
+
+SQL statements are translated to Cypher and run the same way. A parameter list
+binds each `?` in order; an object binds `:name`, `$name` and `@name`. Mappings
+rename tables and join columns. See the [SQL guide](https://docs.helix-db.com/database/helix-db/query-guides/sql).
+
+```ts
+const result = await client.sql("SELECT u.name AS name FROM people u WHERE u.age >= ?", [30], { tables: { people: "User" } }, "adults");
+// { columns: ["name"], rows: [["Ada"], ...] }
+
+const plan = await client.explainSql("INSERT INTO User (name) VALUES (:name)", { name: "Ada" });
+await client.requestBuilder().writerOnly().sql("UPDATE User SET seen = TRUE").send();
+```
+
+`sql(query, parameters = [], mappings = {}, queryName?)` sends `POST /v2/sql`
+and `explainSql(...)` sends `POST /v2/sql/explain`, with the results, options,
+errors and embedded behavior of the Cypher methods. Embedded SQL needs a native
+package with SQL support; older packages raise `EmbeddedUnavailable`.

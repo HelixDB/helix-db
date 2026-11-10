@@ -1,7 +1,7 @@
 //! Exact-operation publication lag.
 //!
-//! Lag is the time from a locally observed durable enqueue commit to the
-//! durable acknowledgement of that same operation ID. Operations this process
+//! Lag is the time from a locally observed enqueue commit, durable or only
+//! applied, to the durable acknowledgement of that same operation ID. Operations this process
 //! learned were durable without first observing their commit return (loaded
 //! at startup, reconciled after an uncertain commit, or acknowledged, or
 //! their acknowledgement attempted, by publication before the producer saw

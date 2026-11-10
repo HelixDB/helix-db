@@ -22,6 +22,7 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result};
 use crate::execution_control;
+use crate::transaction::Mutation;
 
 use super::failpoints::{self, IndexOutboxFailpoint};
 use super::outbox::{self, ExpectedCanonicalRevision};
@@ -89,7 +90,7 @@ impl InitialBuildProgress {
 }
 
 /// Creates or converges on one canonical BUILD operation.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn create_index_operation(
     db: &Db,
     scope: DataScope,
@@ -180,7 +181,7 @@ pub(crate) async fn create_legacy_vector_adoption_operation(
 }
 
 /// Runs canonical duplicate classification inside an already selected source cut.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 async fn create_index_operation_in_transaction(
     transaction: DbTransaction,
     scope: DataScope,
@@ -315,7 +316,8 @@ async fn create_index_operation_in_transaction_with_physical(
                 "legacy vector reservation cannot begin another adoption",
             ));
         };
-        transaction.put(
+        Mutation::put(
+            &transaction,
             IndexKey::Global {
                 kind: GlobalKey::LegacyVectorPhysicalReservation(physical_index_id),
             }
@@ -452,12 +454,14 @@ pub(crate) async fn drop_index_operation_with_control(
                 .map_err(|error| HelixDbError::InvariantViolation(error.to_string()))?;
             let pointer = outbox::pointer_for(scope, &next_operation);
             outbox::validate_link(scope, &next_index, &next_operation, Some(&pointer))?;
-            transaction.put(index_key, encode_index_record(&next_index))?;
-            transaction.put(
+            Mutation::put(&transaction, index_key, encode_index_record(&next_index))?;
+            Mutation::put(
+                &transaction,
                 outbox::scoped_operation_key(scope, operation.operation_id()),
                 encode_operation_record(&next_operation),
             )?;
-            transaction.put(
+            Mutation::put(
+                &transaction,
                 outbox::global_operation_key(operation.operation_id()),
                 encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(pointer)),
             )?;

@@ -26,7 +26,7 @@ pub(crate) mod secondary {
     pub(crate) use crate::encoding::v2::values::indexes::SecondaryEqualityValue;
 }
 
-#[cfg(any(test, feature = "fuzzing", feature = "production-coverage"))]
+#[cfg(any(test, feature = "fuzzing"))]
 #[deprecated(note = "use encoding::v2::values::indexes::text")]
 pub(crate) mod text_index {
     #[deprecated(note = "use encoding::v2::legacy::text")]
@@ -34,7 +34,7 @@ pub(crate) mod text_index {
         live_state::decode as decode_live_state, manifest::decode as decode_manifest,
         version_counter::decode as decode_version_counter,
     };
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     #[deprecated(note = "use encoding::v2::legacy::text")]
     pub(crate) use crate::encoding::v2::legacy::text::{
         live_state::encode_for_retained_api as encode_live_state,
@@ -71,7 +71,7 @@ pub mod vectors {
     pub(crate) mod markers {
         #[deprecated(note = "use encoding::v2::legacy::vector::transaction_guard")]
         pub(crate) use crate::encoding::v2::legacy::vector::transaction_guard::decode_active_txn_guard;
-        #[cfg(any(test, feature = "fuzzing", feature = "production-coverage"))]
+        #[cfg(any(test, feature = "fuzzing"))]
         #[deprecated(note = "use encoding::v2::legacy::vector::transaction_guard")]
         pub(crate) use crate::encoding::v2::legacy::vector::transaction_guard::encode_active_txn_guard;
         #[deprecated(note = "use encoding::v2::values::indexes::vector::markers")]
@@ -81,7 +81,7 @@ pub mod vectors {
     pub(crate) mod metadata {
         #[deprecated(note = "use encoding::v2::legacy::vector::metadata")]
         pub(crate) use crate::encoding::v2::legacy::vector::metadata::decode_legacy_metadata;
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(test)]
         #[deprecated(note = "use encoding::v2::legacy::vector::metadata")]
         pub(crate) use crate::encoding::v2::legacy::vector::metadata::encode_legacy_metadata_for_contract;
         #[deprecated(note = "use encoding::v2::values::indexes::vector::metadata")]

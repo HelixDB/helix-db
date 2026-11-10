@@ -1,6 +1,6 @@
 ---
 title: "Connect and sync data"
-description: "Add a source to a Helix Foundry workspace, test its credential, sync its tables and read what each table holds"
+description: "Find your way around Helix Foundry's Connectors section, add a source, test its credential, keep its tables synced and read what each table holds"
 sidebarTitle: "Connect data"
 pageType: "Guide"
 ---
@@ -8,31 +8,88 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 A connection is a source Foundry reads, such as a Stripe account or a PostgreSQL
-database. Each sync copies its tables into a snapshot that generations and loads read.
-Owners and admins add, sync, edit and delete connections; members see them.
+database. Each sync copies its tables into a snapshot that generations and loads read,
+and Foundry syncs every connection on a schedule. Owners and admins add, sync, edit and
+delete connections; members see them.
 
 <Frame caption="Connect Stripe, test the key, sync it and open a table.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/data/connect-data-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/data/connect-data.webm"></video>
 </Frame>
 
-## The Data page
+## The Connectors section
 
-**Data** lists every connection with its status, its tables and their row counts, and
-when it last synced. Search finds a source or a table by name.
+**Connectors**, in the sidebar, holds the workspace's connections,
+[API sources](/foundry/data/api-sources) and [documents](/foundry/data/documents). The
+Connectors explorer, a panel beside the sidebar, lists them as a tree; the page beside
+it shows what you open.
+
+**Connectors** itself is an overview: how many connections, tables, records, documents
+and document sets the workspace has, a grid of its connections with their status,
+tables, records and last sync, and its document sets with the ontologies that read each
+one. Select a connection's row to open it.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/data/data-page.png" alt="The Data page with a synced Stripe connection and a synced PostgreSQL database" />
+  <img src="https://assets.helix-db.com/docs/foundry/data/overview.png" alt="The Connectors overview with its totals, a grid of the Stripe and Shop database connections, and the General and Board minutes document sets, beside the Connectors explorer" />
 </Frame>
+
+## The Connectors explorer
+
+The explorer's tree has, at its root:
+
+- a folder per kind of connection the workspace has, such as **Stripe** or
+  **PostgreSQL**, holding those connections;
+- folders of your own, each holding the connections moved into it;
+- **Documents**, with a folder per document set holding its documents.
+
+Select a connection to open its page, or a document to open its page. A connection's dot
+shows its last sync's status, and its arrow opens its synced tables. **Filter** narrows
+the tree to what matches, tables included. The row of the page you have open is
+highlighted, and the folders holding it open.
+
+The tree works from the keyboard: the arrow keys move between rows and open and close
+folders, <kbd>Home</kbd> and <kbd>End</kbd> go to the first and last rows,
+<kbd>Enter</kbd> opens a row, and <kbd>F2</kbd> renames it.
+
+<Frame caption="Make a folder, move a connection into it, upload a document and open it.">
+  <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/data/organise-data-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/data/organise-data.webm"></video>
+</Frame>
+
+## Arrange the explorer
+
+Owners and admins arrange the tree for the whole workspace; everyone sees the same
+order and names, and members can't change them.
+
+- **Rename** a folder, connection, document set or document with the pencil beside its
+  name, or <kbd>F2</kbd> on its row. <kbd>Enter</kbd> saves and <kbd>Escape</kbd>
+  cancels. Renaming a kind's folder or Documents changes only the folder's name.
+- **Reorder** a row by dragging its grip, or select the grip for **Move up** and **Move
+  down**. A connection's grip also has **Move to…**, to move it into one of your
+  folders or back to its kind's, and a document's has **Move to another set…**.
+- **New folder**, in the explorer's head, makes a folder of connections at the root.
+  Drag connections into it, or move them from their menus. Folders hold connections
+  only, and don't nest.
+- **Delete folder**, from a folder's grip, sends its connections back to their kinds'
+  folders. Nothing else changes.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/explorer-menu.png" alt="The Connectors explorer with a connection's grip menu open: Move up, Move down and Move to…" />
+</Frame>
+
+Rows can't be moved while a filter is on. Sync, and a document set's upload, describe and
+delete buttons, show on a row while you point at it or it has the focus.
 
 ## Add a connection
 
 <Steps>
   <Step title="Choose the source">
-    Select **Add data**, then choose where the data is. Apps are listed first, then
-    databases. A tick marks a kind the workspace already connects; you can add another.
+    Select **Add data** on the Connectors overview, or **+** in the explorer's head, then
+    choose where the data is: an app, a database, files in Amazon S3, or an
+    [API source](/foundry/data/api-sources) your app or agent sends data to. A tick marks
+    a kind the workspace already connects; you can add another. Every plan offers every
+    kind.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/data/add-data.png" alt="The Where is your data? picker with Stripe, WorkOS, PostHog, PostgreSQL and MySQL" />
+      <img src="https://assets.helix-db.com/docs/foundry/data/add-data.png" alt="The Where is your data? picker with Stripe, WorkOS, PostHog, GitHub, Linear, Cal.com and Granola, then PostgreSQL and MySQL, Amazon S3, and API source" />
     </Frame>
   </Step>
 
@@ -52,9 +109,9 @@ when it last synced. Search finds a source or a table by name.
   <Step title="Test the connection">
     Select **Test connection**. Foundry reads the source with the credential and lists
     what it can read: each table with its key and its links to other tables. Anything
-    the credential can't read is named below the list and is skipped. For a database,
-    choose the tables to sync here. Every table starts selected, and keeping them all
-    also syncs tables added later; at least one must stay selected.
+    the credential can't read is named below the list and is skipped. For a database or
+    S3, choose the tables to sync here. Every table starts selected, and keeping them
+    all also syncs tables added later; at least one must stay selected.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/data/stripe-tested.png" alt="A successful Stripe test listing the objects the key can read with their keys and links" />
@@ -63,9 +120,14 @@ when it last synced. Search finds a source or a table by name.
 
   <Step title="Connect and sync">
     Select **Connect and sync**. Foundry stores the credential encrypted, opens the
-    connection's page and queues its first sync.
+    connection's page and queues its first sync. The connection joins its kind's folder
+    in the explorer.
   </Step>
 </Steps>
+
+An agent connected through the [Helix MCP](/foundry/agents/helix-mcp) can't add a
+connection itself: it gives you a link that opens this form for the kind you asked for,
+so credentials never pass through the agent.
 
 ## Follow a sync
 
@@ -79,11 +141,35 @@ history.
   <img src="https://assets.helix-db.com/docs/foundry/data/connection.png" alt="A synced Stripe connection with its recent syncs, details and table cards" />
 </Frame>
 
-Syncs run when you select **Sync now** (or **Sync** on the Data page) and after you
-change a connection's settings. Foundry doesn't sync on a schedule yet. Each sync reads
-every table in full and replaces its snapshot; a table that finished keeps its new
-snapshot even if a later table fails. A connection runs one sync at a time. While one
-runs, its settings can't change and it can't be deleted.
+A table that finished keeps its new snapshot even if a later table fails. A connection
+runs one sync at a time. While one runs, its settings can't change and it can't be
+deleted.
+
+## Syncs on a schedule
+
+Foundry syncs every connection on its own, as often as the workspace's
+[plan](/foundry/workspace/plans-and-billing) says:
+
+| Plan | Syncs | Each sync reads |
+| --- | --- | --- |
+| Free | Once a day | Every table in full |
+| Pro | Every hour | Only what changed since the last sync, and every table in full once a day |
+| Max | Every 15 minutes | Only what changed since the last sync, and every table in full once a day |
+
+Reading only what changed uses what each source can tell: Stripe's and WorkOS's events,
+records updated since the last sync, or new files in S3. A daily full read catches what
+those can't see, such as deleted records. PostgreSQL and MySQL tables, and any table
+without a primary key, are read in full each time and compared with the last snapshot.
+A Stripe key needs **Read** on Events for this; without it, every sync reads every table
+in full, and the test says so.
+
+You can also sync at any time: select **Sync now** on a connection's page, or **Sync**
+on its row in the explorer. A connection also syncs after you change its settings. An
+[API source](/foundry/data/api-sources) syncs about a minute after pieces arrive, on
+every plan.
+
+When a sync changes tables an ontology's current load reads, the ontology
+[refreshes](/foundry/ontologies/load-data#automatic-refreshes) by itself.
 
 ## Read a synced table
 
@@ -115,7 +201,13 @@ last four characters, such as `rk_live…Qx7m`; a database shows that a password
   <Card title="Connectors" icon="plug" href="/foundry/data/connectors">
     What each source needs, and what it syncs.
   </Card>
+  <Card title="Documents" icon="file-lines" href="/foundry/data/documents">
+    Upload contracts and notes into document sets.
+  </Card>
   <Card title="Generate an ontology" icon="wand-magic-sparkles" href="/foundry/ontologies/generate-and-version">
-    Draft an ontology from your synced tables.
+    Draft an ontology from your synced tables and documents.
+  </Card>
+  <Card title="Workspaces and navigation" icon="compass" href="/foundry/start-here/workspaces-and-navigation">
+    The sidebar, the panels and search.
   </Card>
 </CardGroup>

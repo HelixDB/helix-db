@@ -24,7 +24,8 @@ pub(in crate::rules) use simplify::simplify_access_filter;
 /// Explore the simplified filter or its index rewrite (full, partial, or
 /// label-domain), preserving every residual and any caller-owned pipeline
 /// suffix. Equality seeds that read one index and evaluate other indexed
-/// conjuncts per record are never offered.
+/// conjuncts per record are never offered, except the unique key that
+/// [`required_index_access_filter`] requires.
 pub(in crate::rules) fn access_filter_alternatives(
     filter: &logical::AccessFilter,
     input: &optimizer::RuleInput<'_>,

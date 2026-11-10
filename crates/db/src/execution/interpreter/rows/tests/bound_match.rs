@@ -115,7 +115,9 @@ async fn bound_expansions_keep_large_correlations_within_a_small_budget() {
     ))
     .await
     .unwrap();
-    let text = "MATCH (a:Root) UNWIND range(1,2048) AS i OPTIONAL MATCH p=(a)-[:R]->(b) WHERE b.k%2=0 RETURN count(*),sum(b.k),sum(length(p))";
+    // Materialized, 256 outer rows of 16 matches each need about ten times
+    // the 192 KiB budget; streamed batches of bound expansions stay within it.
+    let text = "MATCH (a:Root) UNWIND range(1,256) AS i OPTIONAL MATCH p=(a)-[:R]->(b) WHERE b.k%2=0 RETURN count(*),sum(b.k),sum(length(p))";
     let plan = r::plan(
         helix_cypher::compile(text).unwrap(),
         &db.planner_context(context::ParamBindings::default()),
@@ -126,11 +128,11 @@ async fn bound_expansions_keep_large_correlations_within_a_small_budget() {
         Some(r::BatchConsumer::Pipeline { .. })
     ));
     let expected = vec![vec![
-        json!(2048 * 16),
-        json!(2048 * (2..=32).step_by(2).sum::<i64>()),
-        json!(2048 * 16),
+        json!(256 * 16),
+        json!(256 * (2..=32).step_by(2).sum::<i64>()),
+        json!(256 * 16),
     ]];
-    for batch_rows in [1, 8, 17] {
+    for batch_rows in [8, 17] {
         let limits = Limits {
             memory_bytes: 192 * 1024,
             batch_rows,

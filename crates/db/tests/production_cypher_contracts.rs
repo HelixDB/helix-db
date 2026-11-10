@@ -87,6 +87,9 @@ mod graph_mutations;
 #[path = "cypher/production_paths_matching.rs"]
 mod production_paths_matching;
 
+#[path = "cypher/sql.rs"]
+mod sql;
+
 #[tokio::test]
 async fn node_scans_feed_aggregation_and_top_k_without_retaining_the_relation() {
     let db = database().await;
@@ -823,6 +826,50 @@ async fn durable_cypher_data_survives_reopen_and_reader_mode_rejects_writes() {
         vec![vec![json!(1)]]
     );
     reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn disk_database_reopens_under_either_sst_codec() {
+    use db::config::SstCompression::{None as Uncompressed, Zstd};
+
+    for (written_with, reopened_with) in [(Zstd, Uncompressed), (Uncompressed, Zstd)] {
+        let root = tempfile::tempdir().unwrap();
+        let source = HelixDbSource::Disk {
+            root: root.path().to_path_buf(),
+            database: "mixed-codecs".to_string(),
+        };
+        let config = |compression| {
+            source
+                .embedded_default_config()
+                .with_sst_compression(compression)
+        };
+
+        let db = HelixDB::open_with_config(source.clone(), config(written_with))
+            .await
+            .unwrap();
+        run(&db, "UNWIND range(1,200) AS i CREATE (:Old {key:i})").await;
+        db.flush_writer().await.unwrap();
+        db.close().await.unwrap();
+
+        let reopened = HelixDB::open_with_config(source.clone(), config(reopened_with))
+            .await
+            .unwrap();
+        assert_eq!(
+            run(&reopened, "MATCH (n:Old) RETURN count(n)").await.rows,
+            vec![vec![json!(200)]]
+        );
+        run(&reopened, "UNWIND range(1,100) AS i CREATE (:New {key:i})").await;
+        reopened.flush_writer().await.unwrap();
+        reopened.close().await.unwrap();
+
+        // Default config: both codecs stay readable side by side.
+        let again = HelixDB::open(source.clone()).await.unwrap();
+        assert_eq!(
+            run(&again, "MATCH (n) RETURN count(n)").await.rows,
+            vec![vec![json!(300)]]
+        );
+        again.close().await.unwrap();
+    }
 }
 
 #[tokio::test]

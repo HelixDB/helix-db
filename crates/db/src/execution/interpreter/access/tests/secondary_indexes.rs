@@ -81,6 +81,13 @@ async fn seed_active_secondary_generation(
         &active,
     )
     .expect("managed secondary fixture projects an Active handle");
+    // Publish like a real activation, under the scope's exclusive lifecycle
+    // permit, so cached planning catalogs observe the new Active index.
+    let publication = db
+        .inner
+        .index_scope_gates
+        .lifecycle_permit(DataScope::LegacyUnscoped)
+        .await;
     db.inner_db()
         .put(
             ManagedKey::Data {
@@ -92,6 +99,7 @@ async fn seed_active_secondary_generation(
         )
         .await
         .expect("managed secondary Active record persists");
+    drop(publication);
 
     let definition = handle.secondary_definition().unwrap();
     let equality_element_kind = match definition {
@@ -2417,7 +2425,6 @@ async fn regression_node_dynamic_equality_never_falls_back_to_colliding_legacy_p
         entity_id,
         DataScope::LegacyUnscoped,
     )
-    .await
     .unwrap();
     transaction.commit().await.unwrap();
 
@@ -2479,7 +2486,6 @@ async fn regression_edge_dynamic_equality_never_falls_back_to_colliding_legacy_p
         "collision",
         DataScope::LegacyUnscoped,
     )
-    .await
     .unwrap();
     transaction.commit().await.unwrap();
 

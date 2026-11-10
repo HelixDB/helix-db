@@ -39,7 +39,9 @@ jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+    # A cold leg builds cargo-fuzz and the ASAN target before its five-minute
+    # window; set from a cold estimate, tighten to the measured p95 + 5 min.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -66,28 +68,30 @@ jobs:
             target: current_index_v2_bitmap
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@nightly
+      # A dated nightly: a new one each day breaks builds and cache keys.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-11-01
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ matrix.fuzz_dir }}
           workspaces: ${{ matrix.fuzz_dir }} -> target
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Run checked-in regression corpus and five-minute fuzz window
         working-directory: ${{ matrix.fuzz_dir }}
+        # cargo-fuzz passes -Z flags, so override the stable rust-toolchain.toml pin.
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-11-01
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300
 
   workload-matrix:
     name: Deterministic workload seeds
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
-      - name: Nightly lifecycle histories
-        run: >-
-          cargo test -p helix-db-testkit
-          lifecycle_workload::tests::nightly_seed_matrix_runs_long_multi_index_histories
-          -- --ignored --exact
       - name: Oversized V4 bitmap cleanup and reopen
         run: >-
           cargo test -p db
@@ -117,7 +121,7 @@ jobs:
       # ignored golden graph; this step runs them at full scale.
       - name: Full-scale random vector write sequences and the pinned golden graph
         env:
-          GRAPH_SEEDS: "4"
+          GRAPH_SEEDS: "8"
           DIRECT_SEEDS: "24"
           STRAY_SEEDS: "2"
         run: >-
@@ -141,28 +145,3 @@ jobs:
           cargo test --release -p db --features production-scale
           --test production_index_lifecycle_scale index_lifecycle_vector_ci_contract
           -- --exact --nocapture --test-threads=1
-
-  coverage:
-    name: ${{ matrix.name }}
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Planner all-target coverage
-            script: scripts/workspace-coverage.sh planner
-          - name: DB all-target coverage
-            script: scripts/workspace-coverage.sh db
-          - name: DB production coverage
-            script: scripts/db-production-coverage.sh
-          - name: Server production coverage
-            script: scripts/server-production-coverage.sh
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: ${{ matrix.script }}

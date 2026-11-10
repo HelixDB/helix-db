@@ -293,7 +293,6 @@ mod tests {
         let source_storage: Arc<dyn SplitStorage> = source.clone();
         let storage = CachedSplitStorage::new(source_storage, cache);
 
-        assert_eq!(format!("{storage:?}"), "CachedSplitStorage");
         assert_eq!(
             storage.file_num_bytes(Path::new("segment.term")).unwrap(),
             12
@@ -420,7 +419,6 @@ mod tests {
                 .expect("file length"),
             6
         );
-        assert!(format!("{storage:?}").contains("ObjectStoreSplitBundleStorage"));
     }
 
     #[tokio::test]

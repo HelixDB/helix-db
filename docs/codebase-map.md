@@ -64,13 +64,15 @@ cargo metadata --offline --locked --no-deps --format-version 1
 
 ```mermaid
 flowchart TD
-    TS["TypeScript / Python / Go SDKs"] --> HTTP["HTTP: /v2/query, /v2/cypher"]
+    TS["TypeScript / Python / Go SDKs"] --> HTTP["HTTP: /v2/query, /v2/cypher, /v2/sql"]
     CLI["CLI: query / cypher"] --> HTTP
     GRPC["gRPC methods"] --> SERVICE["db::query_service · request authority"]
     HTTP --> SERVICE
     RUST["Rust SDK / embedded HelixDB"] --> SERVICE
     FFI["UniFFI embedded bindings"] --> SERVICE
     SERVICE --> DSL["Native JSON AST · helix-ast"]
+    HTTP --> SQL["SQL translate · sqlparser → Cypher syntax"]
+    SQL --> CYPHER
     SERVICE --> CYPHER["Cypher compile · lexer → parser → bind"]
     DSL --> NATIVE["planner::planning · native adapters"]
     CYPHER --> ROWS["planner::relational::Query · validated scopes/effects"]
@@ -89,6 +91,7 @@ flowchart TD
 | Request service | [query_service.rs](../crates/db/src/query_service.rs), [cypher.rs](../crates/db/src/cypher.rs) | Tenant scope, execute/explain mode, parameters, catalog observation, cancellation and output format belong to one attempt. |
 | Native language | [AST](../crates/ast/src), [native planning](../crates/planner/src/planning) | SDK JSON contracts and native semantics remain supported. |
 | Cypher language | [frontend](../crates/cypher/src), [requests](../crates/cypher/src/request.rs), [transport contract](../crates/cypher/src/api.rs) | Resolve names to stable slots; reject unsupported semantics before execution; never translate through native DSL syntax. |
+| SQL language | [translator](../crates/cypher/src/sql.rs), [requests](../crates/cypher/src/sql/request.rs) | Translate one statement into Cypher syntax without reading storage; follow SQL's results; reject what Cypher cannot express before execution. |
 | Result encoding | [Cypher output](../crates/db/src/cypher/output.rs), [parameter decoding](../crates/db/src/cypher/parameters.rs) | Ordered columns, rectangular rows, lossless graph IDs and values; diagnostics stay outside result data. Prepare output before committing writes. |
 | Native bindings | [UniFFI](../bindings/uniffi/src), [Rust SDK](../sdks/rust/src) | Own API/language conversion and runtime handles; delegate storage and query execution to the engine. |
 
@@ -177,7 +180,6 @@ The [scalar memory allowance](../crates/planner/src/relational/evaluation/memory
 tracks nested temporary bounds and borrows the request's peak counter. It carries
 no storage handle. Evaluation and row aggregation share the same accumulator
 admission boundary, including the overlap between an input and retained state.
-Private allowance tests live separately from production coverage.
 
 Materialisation depends on the selected pipeline:
 
@@ -196,7 +198,9 @@ Materialisation depends on the selected pipeline:
 Disk spilling is not implemented. Resource exhaustion must fail the query, never
 silently truncate its successful result. The public behaviour is in the
 [Cypher guide](database/helix-db/query-guides/cypher.mdx), and implementation
-detail is in the [Cypher implementation notes](cypher.md).
+detail is in the [Cypher implementation notes](cypher.md). SQL translates into
+the same Cypher syntax; see the [SQL guide](database/helix-db/query-guides/sql.mdx)
+and the [SQL implementation notes](sql.md).
 
 ## Storage, transactions and indexes
 
@@ -260,10 +264,9 @@ submitted commit. Tests must distinguish pre-commit rollback from that boundary.
 | [Complete plan regressions](planner-regressions.md) | Frozen inputs, complete plan signatures and explicit full-plan diffs across storage-latency profiles. Runtime reads and memory remain separate review gates. |
 | [Planner tests](../crates/planner/tests) and [planner corpus script](../scripts/planner-normalized-corpus.sh) | Validation, rewrite legality, deterministic fallback, costs, operator contracts and plan-quality regressions. |
 | [Row executor tests](../crates/db/src/execution/interpreter/rows/tests) | Batches versus materialised/reference execution, independent expected rows, errors, scopes, admission and rollback. |
-| [Production contracts](../crates/db/tests/production_internal_contracts.rs) with `production-coverage` | Production-linked storage/interpreter behaviour beyond `cfg(test)` paths. |
+| `cargo test -p db --features index-lifecycle-testing --test <target>` and `cargo nextest run -p db --features index-lifecycle-testing --lib -E 'test(/::lifecycle_testing_tests::/)'` | Explicitly scheduled lifecycle, queue, and text contracts that `--all-targets` skips. CI lists every such target, and the library's `lifecycle_testing_tests` modules, in the `Rust CI` workflow. Contracts over private internals are ordinary unit tests whose bodies live in [`crates/db/tests/unit`](../crates/db/tests/unit). |
 | `cargo run --locked -p helix-opencypher-tck -- --gate --output target/cypher-tck.json` | Whole pinned corpus accounting, required scenarios, individual previous-pass regressions, errors, graph effects and harness health. The capability manifest must equal the current `--profile-draft` classification, and each exclusion must stop at its declared capability. |
 | `npm --prefix sdks/typescript run test:parity` | Cross-language request fixtures and embedded/server execution, including disk restart behaviour. Requires local test servers. |
-| [Cypher coverage](../scripts/cypher-coverage.sh), [workspace coverage](../scripts/workspace-coverage.sh), specialised coverage scripts | Explicit denominators and minimum coverage. Passing functional tests alone does not establish a coverage threshold. |
 | [Cypher scaling](../crates/db/examples/cypher_scaling.rs), [DB benches](../crates/db/benches), [planner benches](../crates/planner/benches) | Independent expected results, bounded planner work, actual read counts and admitted-memory guards; latency measured separately. |
 | `cargo fmt --all -- --check` and `cargo clippy --workspace -- -D warnings` | Formatting and code-quality gates with the pinned stable toolchain. |
 

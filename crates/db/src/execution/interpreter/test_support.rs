@@ -41,6 +41,23 @@ impl TestDbConfig {
         self
     }
 
+    pub(crate) fn with_tenant_text_index(
+        mut self,
+        label: impl Into<String>,
+        property: impl Into<String>,
+        tenant: impl Into<String>,
+    ) -> Self {
+        self.indexes.push(
+            config::TextIndexDefinition::new_node(label, property)
+                .expect("valid text index")
+                .with_tenant_property(tenant)
+                .expect("valid tenant property")
+                .try_into()
+                .expect("valid v2 text index"),
+        );
+        self
+    }
+
     pub(crate) fn with_unique_equality_index(
         mut self,
         label: impl Into<String>,
@@ -413,8 +430,9 @@ pub(crate) async fn add_edge_with_properties(
     *id
 }
 
-#[cfg(all(feature = "production-coverage", not(test)))]
-pub(crate) async fn run_production_contracts() {
+/// Proves the shared fixtures build their indexes, plans, and graph rows.
+#[tokio::test]
+async fn fixtures_build_indexes_plans_and_graph_rows() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let config = in_memory_config_with_store("interpreter-support-contracts", Arc::clone(&store))
         .with_range_desc_index("User", "rank")

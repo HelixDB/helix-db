@@ -54,6 +54,14 @@ pub enum Item {
         alias: Option<String>,
         text: String,
     },
+    /// A column named outside the statement text: printing omits the name,
+    /// and no Cypher statement parses to it. SQL translation names grouped
+    /// columns after their SQL text this way, so that a literal in that text
+    /// never reaches the printed statement that telemetry records.
+    Named {
+        expression: Expr,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

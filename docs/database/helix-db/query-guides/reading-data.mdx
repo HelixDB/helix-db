@@ -138,6 +138,13 @@ WITH u LIMIT 25
 RETURN id(u) AS id, u.name AS name
 ```
 
+```sql SQL
+SELECT id(u) AS id, u.name AS name
+FROM User u
+WHERE u.status = 'active'
+LIMIT 25
+```
+
 </CodeGroup>
 
 ## Read by indexed property
@@ -206,6 +213,12 @@ g().n_with_label_where("User", SourcePredicate.eq("email", "alice@example.com"))
 ```cypher Cypher
 MATCH (user:User {email: 'alice@example.com'})
 RETURN id(user) AS user
+```
+
+```sql SQL
+SELECT id(u) AS "user"
+FROM User u
+WHERE u.email = 'alice@example.com'
 ```
 
 </CodeGroup>

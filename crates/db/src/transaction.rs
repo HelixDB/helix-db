@@ -19,11 +19,52 @@ mod reads;
 #[cfg(test)]
 mod tests;
 
+/// When a request's commit returns to its caller.
+///
+/// SlateDB's WAL uploads in sequence order, so a crash loses only a suffix of
+/// applied commits: a durable commit makes every lower sequence durable too.
+/// That is what lets internal commits, which are always [`Self::Durable`],
+/// build on an [`Self::Applied`] request commit: index publication reads a
+/// queued operation and acknowledges it at a higher sequence, so the
+/// acknowledgement can never outlive the enqueue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitDurability {
+    /// Return once the commit is durable in object storage.
+    Durable,
+    /// Return once the commit is applied and visible on the writer. A crash
+    /// before its WAL upload loses it, atomically and with every later commit.
+    Applied,
+}
+
+/// Waits until every commit at or below `sequence` is durable, without forcing
+/// a WAL upload. A closing database ends the wait with its close reason.
+pub(crate) async fn await_durable_through(
+    db: &slatedb::Db,
+    sequence: u64,
+) -> std::result::Result<(), slatedb::Error> {
+    let mut subscription = db.subscribe();
+    let status = subscription
+        .wait_for(|status| status.durable_seq >= sequence || status.close_reason.is_some())
+        .await
+        .map_err(|error| slatedb::Error::internal(format!("database status ended: {error}")))?;
+    match status.close_reason {
+        Some(reason) if status.durable_seq < sequence => Err(slatedb::Error::closed(
+            format!("database closed before sequence {sequence} became durable"),
+            reason,
+        )),
+        Some(_) | None => Ok(()),
+    }
+}
+
 /// An owned request transaction. Only its owner has lifecycle authority.
 pub(crate) struct Owned {
     raw: DbTransaction,
     tracking: Option<Box<read_tracking::Tracker>>,
     merges: Option<Box<merges::Tracker>>,
+    /// Read calls on this transaction, for round-trip contracts. The backend
+    /// resolves a key with staged merges in a multi-get by its own point get.
+    #[cfg(test)]
+    reads: std::sync::atomic::AtomicUsize,
 }
 
 impl Owned {
@@ -46,7 +87,20 @@ impl Owned {
             raw,
             tracking,
             merges,
+            #[cfg(test)]
+            reads: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// The sequence of the snapshot this transaction reads.
+    pub(crate) fn snapshot_sequence(&self) -> u64 {
+        self.raw.seqnum()
+    }
+
+    /// Read calls made on this transaction.
+    #[cfg(test)]
+    pub(crate) fn storage_reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Commit the request's writes. Called only inside the finite commit
@@ -54,13 +108,21 @@ impl Owned {
     /// the backend outcome is known.
     pub(crate) async fn commit(
         self,
+        durability: CommitDurability,
     ) -> std::result::Result<Option<slatedb::WriteHandle>, slatedb::Error> {
         let Self {
             raw,
             tracking,
             merges,
+            #[cfg(test)]
+                reads: _,
         } = self;
-        let result = raw.commit().await;
+        let result = raw
+            .commit_with_options(&slatedb::config::WriteOptions {
+                await_durable: durability == CommitDurability::Durable,
+                ..slatedb::config::WriteOptions::default()
+            })
+            .await;
         drop(merges);
         drop(tracking);
         result
@@ -109,6 +171,13 @@ impl ReadSource for Owned {
     fn read_context(&self) -> ReadContext<'_> {
         ReadContext(self.mutation_view())
     }
+
+    #[cfg(test)]
+    fn before_read(&self, _: ReadKind) -> std::result::Result<(), slatedb::Error> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 impl ReadSource for View<'_> {
@@ -118,27 +187,61 @@ impl ReadSource for View<'_> {
 }
 
 /// The native mutation contract preserves backend isolation and write behavior.
-/// Checked disjoint merges deliberately retain their untracked validation reads.
+/// Membership merges never read the stored row; puts keep those rows decodable.
 pub(crate) trait Mutation: DbReadOps + Send + Sync + sealed::Sealed {
     fn mutation_view(&self) -> View<'_>;
 
+    /// Stages a full value. A value for a merge-maintained membership row must
+    /// decode exactly as the merge operator decodes that row's stored value,
+    /// so later deltas can always merge into it; see [`validate_put`]. With
+    /// [`put_unbatched`], this is the production path to the backend's puts:
+    /// clippy.toml disallows the raw ones. The only raw put left is the
+    /// tenant-envelope startup copy, which moves legacy rows verbatim.
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         &self,
         key: K,
         value: V,
     ) -> std::result::Result<(), slatedb::Error> {
-        self.mutation_view().raw.put(key, value)
+        let view = self.mutation_view();
+        validate_put(view.tracking, key.as_ref(), value.as_ref())?;
+        #[allow(clippy::disallowed_methods)]
+        view.raw.put(key, value)
     }
 
+    /// Owned-bytes form of [`Self::put`], with the same validation.
     fn put_bytes(&self, key: Bytes, value: Bytes) -> std::result::Result<(), slatedb::Error> {
-        self.mutation_view().raw.put_bytes(key, value)
+        let view = self.mutation_view();
+        validate_put(view.tracking, &key, &value)?;
+        #[allow(clippy::disallowed_methods)]
+        view.raw.put_bytes(key, value)
     }
 
     fn delete<K: AsRef<[u8]>>(&self, key: K) -> std::result::Result<(), slatedb::Error> {
         self.mutation_view().raw.delete(key)
     }
 
-    #[cfg(test)]
+    /// Reads distinct `keys` from this transaction's view, its own writes
+    /// included, without adding a conflict dependency on them. A caller must
+    /// show a concurrent change to these rows cannot invalidate its decision,
+    /// or register the dependency later through [`Self::mark_read`]. This is
+    /// a graph existence read, so vector measurement hooks do not see it.
+    fn read_without_dependency<'a>(
+        &'a self,
+        keys: &'a [Bytes],
+    ) -> call::Read<'a, Vec<Option<Bytes>>> {
+        let view = self.mutation_view();
+        call::admit(view.tracking.map(|tracker| &tracker.budget), async move {
+            let _memory = view
+                .tracking
+                .map(|tracker| tracker.reserve(keys.len().saturating_mul(size_of::<Bytes>())))
+                .transpose()
+                .map_err(storage_error)?;
+            view.raw.multi_get_untracked(keys).await
+        })
+    }
+
+    /// Adds `keys` to the conflict dependencies, exactly as reading them at
+    /// the transaction's snapshot would have.
     fn mark_read<K: AsRef<[u8]>, I: IntoIterator<Item = K>>(
         &self,
         keys: I,
@@ -193,6 +296,48 @@ impl Mutation for View<'_> {
     fn mutation_view(&self) -> View<'_> {
         *self
     }
+}
+
+/// Writes one value outside any transaction, with [`Mutation::put`]'s check.
+pub(crate) async fn put_unbatched(
+    db: &slatedb::Db,
+    key: &[u8],
+    value: &[u8],
+) -> std::result::Result<slatedb::WriteHandle, slatedb::Error> {
+    validate_put(None, key, value)?;
+    #[allow(clippy::disallowed_methods)]
+    db.put(key, value).await
+}
+
+/// Rejects a full value a membership row could not take deltas on.
+///
+/// Membership deltas are staged without reading the stored row, so this keeps
+/// those rows mergeable: a memtable holding both an undecodable base and a
+/// delta for one key could not build its L0 table. Any other key returns after
+/// classification, without touching the value. A budgeted transaction admits
+/// the decode's allocation bound before decoding.
+fn validate_put(
+    tracking: Option<&read_tracking::Tracker>,
+    key: &[u8],
+    value: &[u8],
+) -> std::result::Result<(), slatedb::Error> {
+    let Some(row) = crate::merge_operator::MembershipRow::of(key) else {
+        return Ok(());
+    };
+    let invalid = |error: Box<dyn std::error::Error + Send + Sync>| {
+        slatedb::Error::invalid("full value for a merge-maintained row does not decode".to_owned())
+            .with_source(error)
+    };
+    let _decode = tracking
+        .map(|tracker| {
+            let bound = row
+                .base_allocation_bound(value)
+                .map_err(|error| invalid(Box::new(error)))?;
+            tracker.reserve(bound).map_err(storage_error)
+        })
+        .transpose()?;
+    row.validate_base(value)
+        .map_err(|error| invalid(Box::new(error)))
 }
 
 /// Private source marker survives SlateDB's required error type. Never infer

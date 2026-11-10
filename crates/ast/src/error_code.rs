@@ -176,6 +176,8 @@ pub enum QueryErrorCode {
     InvalidVectorConfiguration,
     /// A query payload or encoded query is invalid.
     InvalidQuery,
+    /// The query reads a parameter the request did not bind.
+    UnboundParameter,
     /// The operation requires a writer database handle.
     WriterModeRequired,
     /// The operation requires a standalone reader database handle.
@@ -210,43 +212,248 @@ pub enum QueryErrorCode {
     InternalError,
 }
 
-impl QueryErrorCode {
-    /// Whether database execution rejected caller-controlled input or mutation size.
-    ///
-    /// This is the shared classification for typed vector validation and active-text
-    /// admission errors. It excludes persisted-data corruption and storage failures;
-    /// request syntax and planner errors have their own transport classifications.
-    ///
-    /// ```
-    /// use helix_ast::error_code::QueryErrorCode;
-    /// assert!(QueryErrorCode::ActiveTextMutationLimitExceeded.is_invalid_database_input());
-    /// assert!(!QueryErrorCode::StorageError.is_invalid_database_input());
-    /// ```
+/// How every transport reports a [`QueryErrorCode`].
+///
+/// Each code has exactly one class ([`QueryErrorCode::failure_class`]), and the
+/// class alone decides the HTTP status, the gRPC code, the `retryable` hint and
+/// whether a failed write is proven to have committed nothing. Transports match
+/// on the class rather than on codes, so a new code cannot reach a client with
+/// a status chosen by a fallthrough.
+///
+/// ```
+/// use helix_ast::error_code::{QueryErrorCode, QueryFailureClass};
+/// let class = QueryErrorCode::UniqueConstraintViolation.failure_class();
+/// assert_eq!(class, QueryFailureClass::StateConflict);
+/// assert_eq!(class.http_status(), 409);
+/// assert_eq!(class.retryable(), Some(false));
+/// assert!(class.rejects_before_commit());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QueryFailureClass {
+    /// The request or the data it carries is invalid; resending it unchanged
+    /// fails again.
+    InvalidRequest,
+    /// Query planning rejected the request before execution started.
+    Planning,
+    /// The request names a node, edge, index or index operation that does not
+    /// exist.
+    NotFound,
+    /// Concurrent work aborted the request: a transaction conflict, a changed
+    /// reader view or a stale index generation. An unchanged retry may succeed.
+    Conflict,
+    /// The request conflicts with the database's current state, such as a
+    /// unique value another node already owns or an index that is busy.
+    /// Resending it unchanged fails again until that state changes.
+    StateConflict,
+    /// Asynchronous index work is saturated. An unchanged retry may succeed
+    /// once outstanding work is published.
+    Backpressure,
+    /// The request exceeded its own resource budget.
+    ResourceLimit,
+    /// The request ran past its deadline. A write may have committed.
+    Timeout,
+    /// This database handle cannot serve the request: it is the wrong mode,
+    /// closed, retiring or not yet migrated.
+    Unavailable,
+    /// A started commit's outcome cannot be proven either way.
+    CommitOutcomeUnknown,
+    /// The database failed internally. A write may have committed.
+    Internal,
+}
+
+impl QueryFailureClass {
+    /// HTTP status every Helix HTTP endpoint returns for this class.
     #[must_use]
-    pub const fn is_invalid_database_input(self) -> bool {
-        matches!(
-            self,
-            Self::InvalidVectorDimension
-                | Self::InvalidVectorComponent
-                | Self::VectorComponentMagnitudeExceeded
-                | Self::ZeroNormCosineVector
-                | Self::ActiveTextMutationLimitExceeded
-                | Self::IndexOperationBatchTooLarge
-        )
+    pub const fn http_status(self) -> u16 {
+        match self {
+            Self::InvalidRequest | Self::Planning => 400,
+            Self::NotFound => 404,
+            Self::Timeout => 408,
+            Self::Conflict | Self::StateConflict => 409,
+            Self::Backpressure | Self::ResourceLimit => 429,
+            Self::Internal => 500,
+            Self::Unavailable | Self::CommitOutcomeUnknown => 503,
+        }
     }
 
-    /// Whether the database rejected the whole request (a write before
-    /// commit, or a strong search) because asynchronous index work is
-    /// saturated, so an unchanged retry may succeed.
+    /// Canonical gRPC status code number every Helix gRPC service returns for
+    /// this class.
     ///
     /// ```
-    /// use helix_ast::error_code::QueryErrorCode;
-    /// assert!(QueryErrorCode::IndexBackpressure.is_retryable_backpressure());
-    /// assert!(!QueryErrorCode::TransactionConflict.is_retryable_backpressure());
+    /// use helix_ast::error_code::QueryFailureClass;
+    /// // INVALID_ARGUMENT
+    /// assert_eq!(QueryFailureClass::InvalidRequest.grpc_code(), 3);
     /// ```
     #[must_use]
-    pub const fn is_retryable_backpressure(self) -> bool {
-        matches!(self, Self::IndexBackpressure)
+    pub const fn grpc_code(self) -> i32 {
+        const INVALID_ARGUMENT: i32 = 3;
+        const DEADLINE_EXCEEDED: i32 = 4;
+        const NOT_FOUND: i32 = 5;
+        const RESOURCE_EXHAUSTED: i32 = 8;
+        const FAILED_PRECONDITION: i32 = 9;
+        const ABORTED: i32 = 10;
+        const INTERNAL: i32 = 13;
+        const UNAVAILABLE: i32 = 14;
+        match self {
+            Self::InvalidRequest | Self::Planning => INVALID_ARGUMENT,
+            Self::NotFound => NOT_FOUND,
+            Self::Conflict => ABORTED,
+            // Retrying the same handle cannot help either, so both match
+            // the Cypher API's writer-required status.
+            Self::StateConflict | Self::Unavailable => FAILED_PRECONDITION,
+            Self::Backpressure | Self::ResourceLimit => RESOURCE_EXHAUSTED,
+            Self::Timeout => DEADLINE_EXCEEDED,
+            Self::CommitOutcomeUnknown => UNAVAILABLE,
+            Self::Internal => INTERNAL,
+        }
+    }
+
+    /// The public `retryable` hint, when the class settles it.
+    ///
+    /// Both conflict classes answer 409, so each states its hint.
+    #[must_use]
+    pub const fn retryable(self) -> Option<bool> {
+        match self {
+            Self::Conflict | Self::Backpressure => Some(true),
+            Self::StateConflict | Self::CommitOutcomeUnknown => Some(false),
+            Self::InvalidRequest
+            | Self::Planning
+            | Self::NotFound
+            | Self::ResourceLimit
+            | Self::Timeout
+            | Self::Unavailable
+            | Self::Internal => None,
+        }
+    }
+
+    /// Whether a failed write of this class is proven to have committed nothing.
+    ///
+    /// The database raises codes of these classes only before a request's
+    /// commit starts, or, for [`Self::Conflict`], when the commit itself
+    /// aborts. Timeouts, unknown commit outcomes and internal failures can
+    /// follow a durable commit, so a caller must reconcile rather than resend.
+    ///
+    /// The guarantee covers the failing operation. An index-management request
+    /// with several create, drop, retry or abort operations commits each one
+    /// on its own, so a lifecycle failure after the first leaves the earlier
+    /// operations committed (HEL-991).
+    ///
+    /// ```
+    /// use helix_ast::error_code::QueryFailureClass;
+    /// assert!(QueryFailureClass::StateConflict.rejects_before_commit());
+    /// assert!(!QueryFailureClass::Internal.rejects_before_commit());
+    /// ```
+    #[must_use]
+    pub const fn rejects_before_commit(self) -> bool {
+        match self {
+            Self::InvalidRequest
+            | Self::Planning
+            | Self::NotFound
+            | Self::Conflict
+            | Self::StateConflict
+            | Self::Backpressure
+            | Self::ResourceLimit
+            | Self::Unavailable => true,
+            Self::Timeout | Self::CommitOutcomeUnknown | Self::Internal => false,
+        }
+    }
+}
+
+impl QueryErrorCode {
+    /// The one class every transport reports this code with.
+    #[must_use]
+    pub const fn failure_class(self) -> QueryFailureClass {
+        match self {
+            Self::InvalidRequest
+            | Self::InvalidQueryJson
+            | Self::InvalidRequestBody
+            | Self::InvalidRequestOption
+            | Self::InvalidIndexOperationId
+            | Self::InvalidNodeId
+            | Self::UnboundParameter
+            | Self::SecondaryLifecycleSteppingRequiresDisabledMode
+            | Self::MigrationSteppingRequiresDisabledMode
+            | Self::ActiveTextMutationLimitExceeded
+            | Self::IndexOperationBatchTooLarge
+            | Self::InvalidIndexSourceData
+            | Self::InvalidSecondaryIndexValue
+            | Self::InvalidVectorConfiguration
+            | Self::UnsupportedUniqueIndexValueType
+            | Self::InvalidVectorDimension
+            | Self::InvalidVectorComponent
+            | Self::VectorComponentMagnitudeExceeded
+            | Self::ZeroNormCosineVector => QueryFailureClass::InvalidRequest,
+            Self::InternalPlannerError
+            | Self::UnsupportedEdgeAllTarget
+            | Self::NonLiteralIndexExpression
+            | Self::MissingPlanningEqualityParameter
+            | Self::UnsupportedPlanningEqualityParameter
+            | Self::InvalidSearchTenant
+            | Self::InvalidSearchTenantValue
+            | Self::InvalidSearchResultCount
+            | Self::InvalidSearchResultCountExpression
+            | Self::InvalidSearchInput
+            | Self::InvalidBatchConditionMinSize
+            | Self::InvalidInitialBatchCondition
+            | Self::DuplicatePropertyAssignment
+            | Self::DuplicatePropertySelection
+            | Self::DuplicateProjectionAlias
+            | Self::DuplicateReturnVariable
+            | Self::DuplicateElementId
+            | Self::DuplicateOrderKey
+            | Self::UnboundContext
+            | Self::InvalidSubTraversalOperation
+            | Self::InvalidAfterBindOperation
+            | Self::ReadOnlyTraversalInWriteBatch
+            | Self::InvalidBranchArity
+            | Self::InvalidBatchArity
+            | Self::InvalidRepeatEmit
+            | Self::InvalidRepeatCount
+            | Self::InvalidShortestPathCount
+            | Self::InvalidOrderKeys
+            | Self::InvalidProjectionArity
+            | Self::InvalidStreamRange
+            | Self::InvalidStreamBoundExpression
+            | Self::InvalidEmptyName
+            | Self::InvalidPredicateArity => QueryFailureClass::Planning,
+            Self::NodeNotFound
+            | Self::EdgeNotFound
+            | Self::IndexNotFound
+            | Self::IndexOperationNotFound => QueryFailureClass::NotFound,
+            Self::TransactionConflict
+            | Self::RequestReadViewChanged
+            | Self::StaleIndexGeneration => QueryFailureClass::Conflict,
+            Self::UniqueConstraintViolation
+            | Self::IndexAlreadyExists
+            | Self::IndexDefinitionConflict
+            | Self::IndexBusy
+            | Self::IndexOperationNotAbortable
+            | Self::IndexBuildBlocked => QueryFailureClass::StateConflict,
+            Self::IndexBackpressure => QueryFailureClass::Backpressure,
+            Self::QueryMemoryLimitExceeded => QueryFailureClass::ResourceLimit,
+            Self::QueryDeadlineExceeded => QueryFailureClass::Timeout,
+            Self::WriterModeRequired
+            | Self::ReaderModeRequired
+            | Self::DatabaseClosed
+            | Self::QueryCancelledByReaderRetirement
+            | Self::IndexLifecycleUnavailable
+            | Self::MigrationRequired
+            | Self::WriterMigrationRequired => QueryFailureClass::Unavailable,
+            Self::WriterFencedCommitOutcomeUnknown => QueryFailureClass::CommitOutcomeUnknown,
+            Self::StorageError
+            | Self::InvalidConfiguration
+            | Self::InvalidIndexModel
+            | Self::UnsupportedIndexStorageVersion
+            | Self::IdentifierExhausted
+            | Self::IndexIdExhausted
+            | Self::VectorPhysicalIdExhausted
+            | Self::IndexGenerationExhausted
+            | Self::IndexRevisionExhausted
+            | Self::IndexOperationRevisionExhausted
+            | Self::InvalidQuery
+            | Self::ResponseSerializationError
+            | Self::InternalError => QueryFailureClass::Internal,
+        }
     }
 
     /// Every code in the stable public catalog.
@@ -323,6 +530,7 @@ impl QueryErrorCode {
         Self::WriterFencedCommitOutcomeUnknown,
         Self::InvalidVectorConfiguration,
         Self::InvalidQuery,
+        Self::UnboundParameter,
         Self::WriterModeRequired,
         Self::ReaderModeRequired,
         Self::IndexAlreadyExists,
@@ -421,6 +629,7 @@ impl QueryErrorCode {
             Self::WriterFencedCommitOutcomeUnknown => "writer_fenced_commit_outcome_unknown",
             Self::InvalidVectorConfiguration => "invalid_vector_configuration",
             Self::InvalidQuery => "invalid_query",
+            Self::UnboundParameter => "unbound_parameter",
             Self::WriterModeRequired => "writer_mode_required",
             Self::ReaderModeRequired => "reader_mode_required",
             Self::IndexAlreadyExists => "index_already_exists",
@@ -500,23 +709,113 @@ mod tests {
     }
 
     #[test]
-    fn database_input_classification_is_a_closed_subset_of_the_catalog() {
-        let classified: Vec<_> = QueryErrorCode::ALL
+    fn every_class_has_one_pinned_transport_contract() {
+        use QueryFailureClass as Class;
+        // (class, HTTP, gRPC, retryable, rejects before commit)
+        let contracts = [
+            (Class::InvalidRequest, 400, 3, None, true),
+            (Class::Planning, 400, 3, None, true),
+            (Class::NotFound, 404, 5, None, true),
+            (Class::Conflict, 409, 10, Some(true), true),
+            (Class::StateConflict, 409, 9, Some(false), true),
+            (Class::Backpressure, 429, 8, Some(true), true),
+            (Class::ResourceLimit, 429, 8, None, true),
+            (Class::Timeout, 408, 4, None, false),
+            (Class::Unavailable, 503, 9, None, true),
+            (Class::CommitOutcomeUnknown, 503, 14, Some(false), false),
+            (Class::Internal, 500, 13, None, false),
+        ];
+        for (class, http, grpc, retryable, rejects) in contracts {
+            // A new class fails to compile here until it is pinned above.
+            match class {
+                Class::InvalidRequest
+                | Class::Planning
+                | Class::NotFound
+                | Class::Conflict
+                | Class::StateConflict
+                | Class::Backpressure
+                | Class::ResourceLimit
+                | Class::Timeout
+                | Class::Unavailable
+                | Class::CommitOutcomeUnknown
+                | Class::Internal => {}
+            }
+            assert_eq!(class.http_status(), http, "{class:?}");
+            assert_eq!(class.grpc_code(), grpc, "{class:?}");
+            assert_eq!(class.retryable(), retryable, "{class:?}");
+            assert_eq!(class.rejects_before_commit(), rejects, "{class:?}");
+        }
+        let classes: std::collections::BTreeSet<_> = QueryErrorCode::ALL
             .iter()
-            .copied()
-            .filter(|code| code.is_invalid_database_input())
+            .map(|code| format!("{:?}", code.failure_class()))
             .collect();
-        assert_eq!(
-            classified,
-            vec![
-                QueryErrorCode::ActiveTextMutationLimitExceeded,
-                QueryErrorCode::IndexOperationBatchTooLarge,
+        assert_eq!(classes.len(), contracts.len(), "every class has a code");
+    }
+
+    #[test]
+    fn caller_visible_failures_keep_their_classes() {
+        use QueryFailureClass as Class;
+        for (code, class) in [
+            (
+                QueryErrorCode::UniqueConstraintViolation,
+                Class::StateConflict,
+            ),
+            (QueryErrorCode::IndexAlreadyExists, Class::StateConflict),
+            (QueryErrorCode::IndexBuildBlocked, Class::StateConflict),
+            (QueryErrorCode::TransactionConflict, Class::Conflict),
+            (QueryErrorCode::StaleIndexGeneration, Class::Conflict),
+            (QueryErrorCode::NodeNotFound, Class::NotFound),
+            (QueryErrorCode::IndexNotFound, Class::NotFound),
+            (QueryErrorCode::UnboundParameter, Class::InvalidRequest),
+            (
                 QueryErrorCode::InvalidVectorDimension,
-                QueryErrorCode::InvalidVectorComponent,
-                QueryErrorCode::VectorComponentMagnitudeExceeded,
-                QueryErrorCode::ZeroNormCosineVector,
-            ]
-        );
+                Class::InvalidRequest,
+            ),
+            (QueryErrorCode::InternalPlannerError, Class::Planning),
+            (QueryErrorCode::IndexBackpressure, Class::Backpressure),
+            (
+                QueryErrorCode::QueryMemoryLimitExceeded,
+                Class::ResourceLimit,
+            ),
+            (QueryErrorCode::QueryDeadlineExceeded, Class::Timeout),
+            (QueryErrorCode::WriterModeRequired, Class::Unavailable),
+            (
+                QueryErrorCode::WriterFencedCommitOutcomeUnknown,
+                Class::CommitOutcomeUnknown,
+            ),
+            (QueryErrorCode::StorageError, Class::Internal),
+            (QueryErrorCode::InvalidQuery, Class::Internal),
+            (QueryErrorCode::ResponseSerializationError, Class::Internal),
+        ] {
+            assert_eq!(code.failure_class(), class, "{code}");
+        }
+    }
+
+    /// The public error reference lists every code once, with the HTTP status
+    /// of its class, so the documentation cannot drift from the transports.
+    #[test]
+    fn the_error_reference_documents_each_code_with_its_class_status() {
+        let reference =
+            include_str!("../../../docs/database/helix-db/query-guides/error-handling.mdx");
+        let documented: std::collections::HashMap<_, _> = reference
+            .lines()
+            .filter_map(|line| {
+                // | `code` | meaning | HTTP | retry | correctable |
+                let cells: Vec<_> = line.split('|').map(str::trim).collect();
+                let [_, code, _, status, _, _, _] = cells.as_slice() else {
+                    return None;
+                };
+                let code = code.strip_prefix('`')?.strip_suffix('`')?;
+                Some((code.parse::<QueryErrorCode>().ok()?, *status))
+            })
+            .collect();
+        for code in QueryErrorCode::ALL {
+            assert_eq!(
+                documented.get(code).copied(),
+                Some(code.failure_class().http_status().to_string().as_str()),
+                "{code}"
+            );
+        }
     }
 
     #[test]

@@ -268,14 +268,14 @@ mod tests {
         );
         assert!(matches!(
             context.search_query_vector(&vector_unbound).await,
-            Err(HelixDbError::Query(message)) if message == "parameter `unbound` is not bound"
+            Err(HelixDbError::UnboundParameter { used_as: crate::error::ParameterUse::Value, name }) if name == "unbound"
         ));
         let text_unbound = ir::TextQueryInputPlan::Expr(
             ir::SearchQueryExprPlan::new(Expr::param("unbound")).unwrap(),
         );
         assert!(matches!(
             context.search_query_text(&text_unbound).await,
-            Err(HelixDbError::Query(message)) if message == "parameter `unbound` is not bound"
+            Err(HelixDbError::UnboundParameter { used_as: crate::error::ParameterUse::Value, name }) if name == "unbound"
         ));
     }
 }

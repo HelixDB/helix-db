@@ -21,6 +21,7 @@ var (
 	ErrEmptyParameterName        = errors.New("helix: parameter name must not be empty")
 	ErrMixedParameterModes       = errors.New("helix: typed and untyped parameters cannot be mixed")
 	ErrInvalidParameterType      = errors.New("helix: invalid parameter type")
+	ErrObjectParameterInnerType  = errors.New("helix: object parameter type cannot have an inner type")
 	ErrInvalidDateTimeParameter  = errors.New("helix: invalid datetime parameter")
 	// ErrEventualWriteSearchConsistency rejects eventual search on write
 	// requests; write batches always search strongly.
@@ -2790,7 +2791,14 @@ func (q *QueryRequest) ParamValue(name string, value any) ParamRef {
 	v, err := queryValueFromValue(value, name)
 	return q.addParam(name, ParamTypeValue(), v, err)
 }
+
+// ParamObject declares a typed object parameter. Object parameters have no
+// element type in the query AST, so passing an inner type is rejected instead
+// of being silently ignored.
 func (q *QueryRequest) ParamObject(name string, value any, inner ...QueryParamType) ParamRef {
+	if len(inner) > 0 {
+		return q.addParam(name, ParamTypeObject(), nil, ErrObjectParameterInnerType)
+	}
 	v, err := queryValueFromValue(value, name)
 	return q.addParam(name, ParamTypeObject(), v, err)
 }

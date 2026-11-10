@@ -22,20 +22,22 @@ type CypherResponse struct {
 	Rows    [][]any  `json:"rows"`
 }
 
-// cypherRoute is a Cypher HTTP path; postCypher pairs each with the embedded
-// binding method that serves the same JSON contract.
-type cypherRoute string
+// statementRoute is a Cypher or SQL HTTP path; postStatement pairs each with
+// the embedded binding method that serves the same JSON contract.
+type statementRoute string
 
 const (
-	cypherExecuteRoute cypherRoute = "/v2/cypher"
-	cypherExplainRoute cypherRoute = "/v2/cypher/explain"
+	cypherExecuteRoute statementRoute = "/v2/cypher"
+	cypherExplainRoute statementRoute = "/v2/cypher/explain"
+	sqlExecuteRoute    statementRoute = "/v2/sql"
+	sqlExplainRoute    statementRoute = "/v2/sql/explain"
 )
 
 // Cypher executes once. It never retries an uncertain modifying statement.
 // Exec options and the client's database ID apply as they do for Exec.
 func (c *Client) Cypher(ctx context.Context, query CypherRequest, opts ...ExecOption) (*CypherResponse, error) {
 	var result CypherResponse
-	if err := c.postCypher(ctx, cypherExecuteRoute, query, opts, &result); err != nil {
+	if err := c.postStatement(ctx, cypherExecuteRoute, query, opts, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -46,15 +48,15 @@ func (c *Client) Cypher(ctx context.Context, query CypherRequest, opts ...ExecOp
 // Explaining a modifying statement writes nothing.
 func (c *Client) ExplainCypher(ctx context.Context, query CypherRequest, opts ...ExecOption) (map[string]any, error) {
 	var result map[string]any
-	if err := c.postCypher(ctx, cypherExplainRoute, query, opts, &result); err != nil {
+	if err := c.postStatement(ctx, cypherExplainRoute, query, opts, &result); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
-// postCypher sends one request to route, or to its embedded binding method,
-// and decodes the JSON response into out with numbers kept exact.
-func (c *Client) postCypher(ctx context.Context, route cypherRoute, query CypherRequest, opts []ExecOption, out any) error {
+// postStatement sends one Cypher or SQL request to route, or to its embedded
+// binding method, and decodes the JSON response into out with numbers kept exact.
+func (c *Client) postStatement(ctx context.Context, route statementRoute, query any, opts []ExecOption, out any) error {
 	if c == nil {
 		return &HelixError{Kind: ErrorInvalidRequest, Details: "nil client"}
 	}
@@ -86,8 +88,20 @@ func (c *Client) postCypher(ctx context.Context, route cypherRoute, query Cypher
 				return &HelixError{Kind: ErrorEmbeddedUnavailable, Details: "rebuild native bindings with Cypher explain support"}
 			}
 			native = db.ExplainCypherJson
+		case sqlExecuteRoute:
+			db, ok := c.embedded.(interface{ SqlJson([]byte) ([]byte, error) })
+			if !ok {
+				return &HelixError{Kind: ErrorEmbeddedUnavailable, Details: "rebuild native bindings with SQL support"}
+			}
+			native = db.SqlJson
+		case sqlExplainRoute:
+			db, ok := c.embedded.(interface{ ExplainSqlJson([]byte) ([]byte, error) })
+			if !ok {
+				return &HelixError{Kind: ErrorEmbeddedUnavailable, Details: "rebuild native bindings with SQL support"}
+			}
+			native = db.ExplainSqlJson
 		default:
-			panic("helix: unknown Cypher route " + string(route))
+			panic("helix: unknown statement route " + string(route))
 		}
 		if data, err = native(body); err != nil {
 			return embeddedError(err)
@@ -117,7 +131,7 @@ func (c *Client) postCypher(ctx context.Context, route cypherRoute, query Cypher
 		}
 		if response.StatusCode != http.StatusOK {
 			remoteErr := decodeRemoteError(data, response.Status, response.StatusCode)
-			if response.StatusCode == http.StatusConflict {
+			if remoteErr.Code == QueryErrorCodeTransactionConflict {
 				remoteErr.Err = ErrConflict
 			}
 			return remoteErr

@@ -284,6 +284,7 @@ impl<'db> ExecutionContext<'db> {
             // be read.
             prepared_memberships: super::stream::PreparedMemberships::default(),
             search_consistency: self.search_consistency,
+            commit_durability: self.commit_durability,
             shared_index_reads: Arc::clone(&self.shared_index_reads),
             // Parallel contexts share the parent's immutable reader snapshot.
             pending_sets: Arc::clone(&self.pending_sets),
@@ -710,12 +711,12 @@ mod tests {
                 plan.execution_program(),
             )
             .await
-            .expect("writer transaction executes the parallel stage serially");
+            .expect("writer snapshot executes the parallel stage serially");
 
         assert_eq!(context.step_outputs.len(), 1);
         context
             .close_request_read_view()
-            .expect("writer read transaction rolls back");
+            .expect("writer read view closes");
     }
 
     #[tokio::test]

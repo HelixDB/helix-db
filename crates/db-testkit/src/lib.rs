@@ -2,8 +2,8 @@
 //!
 //! The crate deliberately depends only on public planner and DB contracts. It
 //! provides a typed workload language, independent correctness models,
-//! replayable traces, deterministic shrinking, and fixture interfaces that do
-//! not commit workloads to one storage or coordinator implementation.
+//! replayable traces, and fixture interfaces that do not commit workloads to
+//! one storage or coordinator implementation.
 //!
 //! ```
 //! use helix_db_testkit::{
@@ -39,15 +39,12 @@
 pub mod action;
 pub mod error;
 pub mod fixtures;
-pub mod history;
+pub mod gated_wal;
 pub mod ids;
 pub mod launch_gate;
 pub mod lifecycle;
-pub mod lifecycle_workload;
 pub mod model;
 pub mod planner_domain;
-pub mod replay;
-pub mod shrink;
 pub mod sustained;
 pub mod trace;
 pub mod transport_corpus;

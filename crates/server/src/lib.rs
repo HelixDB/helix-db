@@ -241,6 +241,8 @@ pub async fn run_until_ctrl_c(config: ServerConfig) -> ServerResult<()> {
 ///     grpc_addr: "127.0.0.1:0".parse().unwrap(),
 ///     db_path: "server-shutdown-example".to_string(),
 ///     storage: StorageConfig::Memory,
+///     wal_flush_interval_ms: None,
+///     sst_compression: db::config::SstCompression::default(),
 ///     index_operation_queue: db::config::IndexOperationQueueTuning::default(),
 /// };
 /// server::run_with_shutdown(config, async {}).await.unwrap();

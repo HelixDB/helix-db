@@ -18,14 +18,14 @@ use crate::transaction::Mutation;
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 const NO_INJECTED_FAILURE: usize = usize::MAX;
 
 /// Exact final vector writes staged in one SlateDB transaction.
@@ -83,9 +83,9 @@ impl VectorWriteMeasurement {
 pub(crate) struct MeasuredVectorTransaction<'txn> {
     inner: crate::transaction::View<'txn>,
     recorder: VectorWriteRecorder,
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     writes_until_failure: AtomicUsize,
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     reads_until_failure: AtomicUsize,
 }
 
@@ -95,21 +95,21 @@ impl<'txn> MeasuredVectorTransaction<'txn> {
         Self {
             inner: inner.mutation_view(),
             recorder: VectorWriteRecorder::new(),
-            #[cfg(any(test, feature = "production-coverage"))]
+            #[cfg(test)]
             writes_until_failure: AtomicUsize::new(NO_INJECTED_FAILURE),
-            #[cfg(any(test, feature = "production-coverage"))]
+            #[cfg(test)]
             reads_until_failure: AtomicUsize::new(NO_INJECTED_FAILURE),
         }
     }
 
     /// Injects one pre-write storage failure for transaction-boundary tests.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn fail_next_write(&self) {
         self.fail_write_after(0);
     }
 
     /// Injects one storage failure after `successful_writes` measured writes.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     pub(crate) fn fail_write_after(&self, successful_writes: usize) {
         assert_ne!(successful_writes, NO_INJECTED_FAILURE);
         self.writes_until_failure
@@ -121,7 +121,7 @@ impl<'txn> MeasuredVectorTransaction<'txn> {
     /// This deterministic test seam faults the complete measured transaction
     /// read boundary, allowing mutation contracts to visit every async error
     /// continuation without replacing SlateDB or duplicating vector codecs.
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     pub(crate) fn fail_read_after(&self, successful_reads: usize) {
         assert_ne!(successful_reads, NO_INJECTED_FAILURE);
         self.reads_until_failure
@@ -129,7 +129,7 @@ impl<'txn> MeasuredVectorTransaction<'txn> {
     }
 
     /// Consumes one configured I/O position and reports whether it must fail.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn take_injected_failure(counter: &AtomicUsize) -> bool {
         counter
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
@@ -143,7 +143,7 @@ impl<'txn> MeasuredVectorTransaction<'txn> {
     }
 
     /// Returns the deterministic backend error used by measured read seams.
-    #[cfg(any(test, feature = "production-coverage"))]
+    #[cfg(test)]
     fn injected_read_error() -> slatedb::Error {
         slatedb::Error::unavailable("injected measured vector read failure".to_string())
     }
@@ -174,14 +174,14 @@ impl<'txn> MeasuredVectorTransaction<'txn> {
 
     /// Stages an owned-byte put without changing its current encoded bytes.
     pub(crate) fn put_bytes(&self, key: Bytes, value: Bytes) -> Result<(), slatedb::Error> {
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(test)]
         if Self::take_injected_failure(&self.writes_until_failure) {
             return Err(slatedb::Error::unavailable(
                 "injected measured vector write failure".to_string(),
             ));
         }
         self.inner.put_bytes(key.clone(), value.clone())?;
-        #[cfg(feature = "production-coverage")]
+        #[cfg(feature = "bench-internals")]
         crate::search::vector::record_benchmark_put(key.len(), value.len());
         self.recorder
             .writes
@@ -195,7 +195,7 @@ impl<'txn> MeasuredVectorTransaction<'txn> {
     where
         K: AsRef<[u8]>,
     {
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(test)]
         if Self::take_injected_failure(&self.writes_until_failure) {
             return Err(slatedb::Error::unavailable(
                 "injected measured vector write failure".to_string(),
@@ -203,7 +203,7 @@ impl<'txn> MeasuredVectorTransaction<'txn> {
         }
         let key = Bytes::copy_from_slice(key.as_ref());
         self.inner.delete(key.clone())?;
-        #[cfg(feature = "production-coverage")]
+        #[cfg(feature = "bench-internals")]
         crate::search::vector::record_benchmark_delete(key.len());
         self.recorder
             .writes
@@ -342,9 +342,9 @@ impl VectorWriteRecorder {
         MeasuredVectorTransaction {
             inner: inner.mutation_view(),
             recorder: self.clone(),
-            #[cfg(any(test, feature = "production-coverage"))]
+            #[cfg(test)]
             writes_until_failure: AtomicUsize::new(NO_INJECTED_FAILURE),
-            #[cfg(any(test, feature = "production-coverage"))]
+            #[cfg(test)]
             reads_until_failure: AtomicUsize::new(NO_INJECTED_FAILURE),
         }
     }
@@ -356,27 +356,27 @@ impl crate::transaction::ReadSource for MeasuredVectorTransaction<'_> {
     }
 
     fn before_read(&self, kind: crate::transaction::ReadKind) -> Result<(), slatedb::Error> {
-        #[cfg(any(test, feature = "production-coverage"))]
+        #[cfg(test)]
         if Self::take_injected_failure(&self.reads_until_failure) {
             return Err(Self::injected_read_error());
         }
         match kind {
             crate::transaction::ReadKind::Point => {
-                #[cfg(feature = "production-coverage")]
+                #[cfg(feature = "bench-internals")]
                 crate::search::vector::record_benchmark_point_get();
                 #[cfg(test)]
                 self.recorder.record_reads(1);
             }
             crate::transaction::ReadKind::MultiGet { keys } => {
-                #[cfg(feature = "production-coverage")]
+                #[cfg(feature = "bench-internals")]
                 crate::search::vector::record_benchmark_multi_get(keys);
                 #[cfg(test)]
                 self.recorder.record_reads(keys);
-                #[cfg(not(any(test, feature = "production-coverage")))]
+                #[cfg(not(test))]
                 let _ = keys;
             }
             crate::transaction::ReadKind::Scan => {
-                #[cfg(feature = "production-coverage")]
+                #[cfg(feature = "bench-internals")]
                 crate::search::vector::record_benchmark_scan();
             }
         }
@@ -574,9 +574,9 @@ pub(crate) enum VectorWriteMeasurementError {
     ForeignCheckpoint,
 }
 
-#[cfg(feature = "production-coverage")]
-#[path = "../../../../tests/production_support/vector/write_transaction.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../../tests/unit/vector/write_transaction.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod read_admission_tests;

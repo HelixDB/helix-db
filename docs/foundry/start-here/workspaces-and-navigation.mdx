@@ -1,6 +1,6 @@
 ---
 title: "Workspaces and navigation"
-description: "Sign in to Helix Foundry, choose or create a workspace, and find your way with the sidebar, search and themes"
+description: "Sign in to Helix Foundry, choose or create a workspace, and find your way with the sidebar, the section panels, search and themes"
 sidebarTitle: "Workspaces and navigation"
 pageType: "Guide"
 ---
@@ -38,20 +38,62 @@ workspace starts on Foundry Free.
 To switch later, use the workspace menu at the top of the sidebar. Foundry remembers
 the workspace you chose in this browser.
 
-## Home
-
-Home says where the workspace stands: its connections and synced tables, its
-ontologies, its members and its plan. Each card links to the page that changes it.
+A workspace without an ontology opens on **Create your first ontology**, which connects
+data and uploads documents in place. Until its first ontology exists, the sidebar holds
+only the workspace menu and your account, and Settings is open for the plan.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/start-here/home.png" alt="Home with the Data, Ontologies, Team and Plan cards" />
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/onboarding.png" alt="A new workspace on Create your first ontology, with Set up with your agent and the Name step" />
+</Frame>
+
+## The main page: Ask
+
+Foundry opens on [Ask](/foundry/ask/ask-questions), on the ontology you last opened,
+or the newest. Ask your data a question there, or pick a suggestion; the **Ontology**
+picker at the top opens another ontology. Select **helixfoundry** at the top of the
+sidebar to come back to it from anywhere.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/home.png" alt="Ask, Foundry's main page: What do you want to know about Customer contracts? with suggested questions, beside the sidebar with Ask, Ontologies, Explorer and Connectors, two threads under New thread, and the month's questions spend" />
+</Frame>
+
+## The sidebar
+
+The sidebar is on every page. From the top:
+
+- **helixfoundry**, which opens Ask, and the search button.
+- The workspace menu, to switch workspaces.
+- The sections, by name: **Ask**, **Ontologies**, **Explorer** and **Connectors**.
+- What the open section adds below them. For Ask, **New thread** and the ontology's
+  threads, with what the workspace has spent on questions this month at the foot.
+- Your account menu, and **Settings**.
+
+Three sections have a second panel, beside the sidebar:
+
+| Section | Its panel |
+| --- | --- |
+| **Ontologies** | The workspace's ontologies, with the pages of the one open |
+| **Explorer** | The labels of the graph, or the types in Records. Press <kbd>[</kbd> to hide it and show it again. |
+| **Connectors** | The Connectors explorer: connections and documents as a tree |
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/data/overview.png" alt="The Connectors section: the sidebar, the Connectors explorer panel beside it, and the Connectors overview" />
+</Frame>
+
+On a phone, select the menu button at the top of the page. The drawer it opens holds the
+sidebar, or, in a section with a panel, a column of section icons and the panel side by
+side.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/phone-drawer.png" alt="The navigation drawer on a phone, with the section icons and the Connectors explorer side by side" />
 </Frame>
 
 ## Search with the command palette
 
-Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and Linux) to
-search pages, synced tables and ontologies. Owners and admins also get **Add data** and
-**Create an ontology** there.
+Press <kbd>⌘</kbd> <kbd>K</kbd> (<kbd>Ctrl</kbd> <kbd>K</kbd> on Windows and Linux), or
+select the search icon, to search pages, connections, synced tables, documents and
+ontologies, switch workspace or theme, and reopen what you opened recently. Owners and
+admins also get **Add data**, **New API source** and **Create an ontology** there.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/start-here/command-palette.png" alt="The command palette searching for cus, listing synced tables and an ontology" />
@@ -59,18 +101,22 @@ search pages, synced tables and ontologies. Owners and admins also get **Add dat
 
 ## Account menu and theme
 
-Select your name at the foot of the sidebar for Settings, Members, Plan & billing, the
-theme and **Sign out**. Choose **System**, **Light** or **Dark**; Foundry keeps the
-choice in this browser.
+Select your name at the foot of the sidebar for Settings, Members, Plan & billing with
+the workspace's plan, this month's [usage](/foundry/workspace/usage), the theme and
+**Sign out**. Choose **System**, **Light** or **Dark**; Foundry keeps the choice in this
+browser.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/start-here/account-menu.png" alt="The account menu with Settings, Plan & billing, the theme choices and Sign out" />
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/account-menu.png" alt="The account menu with Settings, Members, Plan & billing, Usage with this month's spend on loads, API sources and questions, the theme choices and Sign out" />
 </Frame>
 
 ## Workspace settings
 
 **Settings** → **General** shows the workspace's name, address, region and your role.
 Rename or delete a workspace in the Helix dashboard; Foundry shares it with Helix Cloud.
+Settings also holds [AI models](/foundry/workspace/ai-models),
+[Members](/foundry/workspace/members-and-roles) and
+[Plan & billing](/foundry/workspace/plans-and-billing).
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/workspace/settings.png" alt="Settings, General tab, with the workspace's name, address, region, role and ID" />

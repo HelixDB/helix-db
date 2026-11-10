@@ -1204,7 +1204,10 @@ async fn watch_compactions(
                 .map(|run| {
                     (
                         run.id,
-                        run.sst_views.iter().map(|view| view.id).collect::<Vec<_>>(),
+                        run.sst_views()
+                            .iter()
+                            .map(|view| view.id)
+                            .collect::<Vec<_>>(),
                     )
                 });
             if let Some((before_l0, before_last, was_pending)) = &previous {

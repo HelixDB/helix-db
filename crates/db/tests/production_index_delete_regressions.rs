@@ -3,6 +3,8 @@
 //! Every fixture creates graph data before its dynamic index, waits for retroactive
 //! activation, and then deletes a label-matching entity that has no indexed property.
 
+#![recursion_limit = "256"]
+
 use std::{future::Future, num::NonZeroUsize, time::Duration};
 
 use db::{HelixDB, HelixDbSource};

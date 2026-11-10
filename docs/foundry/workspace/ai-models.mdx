@@ -1,0 +1,74 @@
+---
+title: "AI models"
+description: "Choose where a Helix Foundry workspace's drafts, document reads and questions run: the default, or your own Anthropic API key on Pro or Max"
+sidebarTitle: "AI models"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Foundry uses AI models to draft ontologies, read documents into loads, check the facts
+it finds, and answer questions. **Settings** → **AI models** says where they run. Owners
+choose; everyone else in the workspace sees the choice.
+
+<Frame>
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/ai-models.png" alt="Settings, AI models: Choose where AI runs, with Default chosen and Claude, with your own API key" />
+</Frame>
+
+## Default
+
+**Default** runs on hosted providers through Helix, and you pay for what you use. Every
+workspace starts on it, and it is there on every plan. Today it runs on Anthropic's
+Claude models.
+
+## Your own Anthropic key
+
+On Foundry Pro or Max, an owner can run the workspace's AI on the workspace's own
+Anthropic API key instead, under the terms of its Anthropic account.
+
+<Steps>
+  <Step title="Choose Claude">
+    Select **Claude**, paste an Anthropic API key, and choose a model for each task, or
+    keep the recommended ones.
+
+    <Frame>
+      <img src="https://assets.helix-db.com/docs/foundry/workspace/ai-models-claude.png" alt="AI models with Claude chosen: the API key field and the model for each task" />
+    </Frame>
+  </Step>
+
+  <Step title="Test and save">
+    Select **Test and save** and confirm. Foundry tests the key and models before it uses
+    them: the page follows the test and says when it passed, or why it failed. Until it
+    passes, the setting before stays in force.
+  </Step>
+</Steps>
+
+From then on, new drafts, document reads and questions run on your key. Documents are
+read again on their next load, at your key's cost. To go back, choose **Default** and
+select **Use the default**; it takes effect at once.
+
+Foundry keeps the key encrypted and never shows it again. Spend on your own key counts
+toward the workspace's [monthly caps](/foundry/workspace/usage) all the same. On Free,
+choosing Claude says that bringing your own model key needs Foundry Pro, with a link to
+upgrade.
+
+### If the workspace leaves Pro
+
+A workspace that moves to Free while it runs on its own key is paused: its drafts,
+document reads and questions are refused until it is on Pro or Max again, or an owner
+chooses **Default**. The page says so.
+
+## Who can change it
+
+Only owners. Admins and members see where the workspace's AI runs.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Usage" icon="gauge" href="/foundry/workspace/usage">
+    This month's AI spend, against its caps.
+  </Card>
+  <Card title="Plans and billing" icon="credit-card" href="/foundry/workspace/plans-and-billing">
+    Upgrade to Pro or Max.
+  </Card>
+</CardGroup>

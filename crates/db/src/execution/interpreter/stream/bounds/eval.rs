@@ -50,9 +50,10 @@ pub(in crate::execution::interpreter) fn eval_stream_bound(
                     Some(query::QueryValue::I64(value)) => Some(*value),
                     Some(_) => None,
                     None => {
-                        return Err(HelixDbError::Query(format!(
-                            "parameter `{name}` is not bound"
-                        )))
+                        return Err(HelixDbError::UnboundParameter {
+                            used_as: crate::error::ParameterUse::Value,
+                            name: name.to_string(),
+                        })
                     }
                 },
             }

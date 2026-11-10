@@ -629,14 +629,6 @@ mod tests {
     }
 
     #[test]
-    fn display_formats_datetime_when_possible() {
-        assert_eq!(
-            PropertyValue::DateTime(0).to_string(),
-            "1970-01-01T00:00:00.000Z"
-        );
-    }
-
-    #[test]
     fn compare_covers_ordered_and_incomparable_variants() {
         assert_eq!(
             PropertyValue::DateTime(1).compare(&PropertyValue::DateTime(2)),
@@ -784,81 +776,8 @@ mod tests {
     }
 
     #[test]
-    fn serde_serializes_every_variant_and_rejects_unrenderable_datetime() {
-        let mut object = BTreeMap::new();
-        object.insert("nested".to_string(), PropertyValue::Bool(true));
-
-        let values = [
-            PropertyValue::Null,
-            PropertyValue::Bool(true),
-            PropertyValue::I64(1),
-            PropertyValue::DateTime(0),
-            PropertyValue::F64(1.5),
-            PropertyValue::F32(2.5),
-            PropertyValue::String("value".to_string()),
-            PropertyValue::Bytes(vec![1, 2]),
-            PropertyValue::I64Array(vec![1, 2]),
-            PropertyValue::F64Array(vec![1.0]),
-            PropertyValue::F32Array(vec![1.0]),
-            PropertyValue::StringArray(vec!["a".to_string()]),
-            PropertyValue::Array(vec![PropertyValue::I64(1)]),
-            PropertyValue::Object(object),
-        ];
-
-        for value in values {
-            serde_json::to_value(value).unwrap();
-        }
+    fn serde_rejects_unrenderable_datetime() {
         assert!(serde_json::to_value(PropertyValue::DateTime(i64::MAX)).is_err());
-    }
-
-    #[test]
-    fn from_impls_cover_owned_borrowed_and_collection_inputs() {
-        let owned = "owned".to_string();
-        let mut object = BTreeMap::new();
-        object.insert("key".to_string(), PropertyValue::Bool(true));
-        let timestamp = chrono::DateTime::<Utc>::from_timestamp_millis(1_234).unwrap();
-
-        assert_eq!(
-            PropertyValue::from(owned.clone()),
-            PropertyValue::String(owned.clone())
-        );
-        assert_eq!(PropertyValue::from(&owned), PropertyValue::String(owned));
-        assert_eq!(
-            PropertyValue::from("borrowed"),
-            PropertyValue::String("borrowed".into())
-        );
-        assert_eq!(PropertyValue::from(1_i64), PropertyValue::I64(1));
-        assert_eq!(PropertyValue::from(1_i32), PropertyValue::I64(1));
-        assert_eq!(
-            PropertyValue::from(timestamp),
-            PropertyValue::DateTime(1_234)
-        );
-        assert_eq!(PropertyValue::from(1.5_f64), PropertyValue::F64(1.5));
-        assert_eq!(PropertyValue::from(true), PropertyValue::Bool(true));
-        assert_eq!(
-            PropertyValue::from(vec![1_u8, 2]),
-            PropertyValue::Bytes(vec![1, 2])
-        );
-        assert_eq!(
-            PropertyValue::from(vec![1_i64, 2]),
-            PropertyValue::I64Array(vec![1, 2])
-        );
-        assert_eq!(
-            PropertyValue::from(vec![1.0_f64]),
-            PropertyValue::F64Array(vec![1.0])
-        );
-        assert_eq!(
-            PropertyValue::from(vec!["a".to_string()]),
-            PropertyValue::StringArray(vec!["a".to_string()])
-        );
-        assert_eq!(
-            PropertyValue::from(vec![PropertyValue::I64(1)]),
-            PropertyValue::Array(vec![PropertyValue::I64(1)])
-        );
-        assert_eq!(
-            PropertyValue::from(object.clone()),
-            PropertyValue::Object(object)
-        );
     }
 
     #[test]

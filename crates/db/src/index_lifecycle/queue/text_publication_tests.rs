@@ -613,7 +613,10 @@ async fn oversized_text_is_rejected_before_commit_instead_of_blocking_publicatio
         ),
         "{error:?}"
     );
-    assert!(error.is_invalid_input());
+    assert_eq!(
+        error.error_code().failure_class(),
+        helix_ast::error_code::QueryFailureClass::InvalidRequest
+    );
     assert_eq!(
         node_count(&db).await,
         0,
@@ -1224,13 +1227,15 @@ async fn blocked_text_head_does_not_stall_later_entities() {
     db.close().await.unwrap();
 }
 
-/// Publishes a 24,000-term document under twice today's output limits, then
-/// reopens `store` under today's: one publication can then never replace that
-/// document with any other wide document today's producer admits.
+/// Publishes a 48-term document under twice the output limits of
+/// [`tight_publication_config`], then reopens `store` under that config, which
+/// admits at most 26 terms per document: one publication can then never
+/// replace that document with any other wide document today's producer
+/// admits, such as the 20-term ones these tests write.
 async fn reopen_after_lowered_limits(name: &str) -> (HelixDB, u64, QueueTarget) {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let defaults = SearchIndexBackfillLimits::default();
-    let batch = defaults.batch();
+    let today = tight_publication_config().search_index_backfill();
+    let batch = today.batch();
     let doubled = SearchIndexBackfillLimits::try_new(
         SearchIndexBatchLimits::try_new(
             batch.max_entities(),
@@ -1240,25 +1245,25 @@ async fn reopen_after_lowered_limits(name: &str) -> (HelixDB, u64, QueueTarget) 
             batch.max_single_vector_output_bytes(),
         )
         .unwrap(),
-        defaults.edge_property_read_batch(),
-        defaults.text_artifacts(),
-        defaults.text_compaction(),
+        today.edge_property_read_batch(),
+        today.text_artifacts(),
+        today.text_compaction(),
     )
     .unwrap();
     let db = open(
         name,
         Arc::clone(&store),
-        queued(IndexOperationQueueTuning::default()).with_search_index_backfill_limits(doubled),
+        tight_publication_config().with_search_index_backfill_limits(doubled),
     )
     .await;
     install(&db, None).await;
-    let wide = add(&db, &distinct_terms("old", 24_000, 4), None).await;
+    let wide = add(&db, &distinct_terms("old", 48, 4), None).await;
     let target = target(&db, QueueFamily::Text).await;
     assert_eq!(drain(&db, target).await, (1, 1));
     db.close().await.unwrap();
 
-    let db = open(name, store, queued(IndexOperationQueueTuning::default())).await;
-    let error = add_text(&db, &distinct_terms("old", 24_000, 4))
+    let db = open(name, store, tight_publication_config()).await;
+    let error = add_text(&db, &distinct_terms("old", 48, 4))
         .await
         .expect_err("today's producer refuses the published document");
     assert!(
@@ -1285,8 +1290,8 @@ async fn blocked_text_head_after_lowered_limits_does_not_stall_later_entities() 
     // Each replacement alone is admitted; the published document plus
     // either exceeds every publication. Two of them trim the head's
     // operation ceiling before it blocks.
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
-    set(&db, wide, "body", &distinct_terms("second", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
+    set(&db, wide, "body", &distinct_terms("second", 20, 4)).await;
     let later = add(&db, "later words", None).await;
     let mut outcomes = Vec::new();
     for _ in 0..16 {
@@ -1305,9 +1310,9 @@ async fn blocked_text_head_after_lowered_limits_does_not_stall_later_entities() 
         db.index_operation_queue_stats().blocked_attempts > 0,
         "the stats report the blocked head after {outcomes:?}"
     );
-    assert_eq!(ids(search(&db, "secondx9999", 10, None).await), [wide]);
+    assert_eq!(ids(search(&db, "secondx19", 10, None).await), [wide]);
     assert!(search(&db, "firstx0", 10, None).await.is_empty());
-    assert!(search(&db, "oldx23999", 10, None).await.is_empty());
+    assert!(search(&db, "oldx47", 10, None).await.is_empty());
     assert_eq!(ids(search(&db, "later", 10, None).await), [later]);
     assert_eq!(
         queued_entities(&db).await,
@@ -1358,8 +1363,8 @@ async fn blocked_text_head_after_lowered_limits_does_not_stall_later_entities() 
 #[tokio::test]
 async fn a_repair_publishes_a_head_blocked_after_its_operation_ceiling_was_trimmed() {
     let (db, wide, target) = reopen_after_lowered_limits("text-lowered-repair").await;
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
-    set(&db, wide, "body", &distinct_terms("second", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
+    set(&db, wide, "body", &distinct_terms("second", 20, 4)).await;
     let mut outcomes = Vec::new();
     for _ in 0..4 {
         outcomes.push(publisher(&db).publish_once(target).await.unwrap());
@@ -1426,7 +1431,7 @@ async fn deleting_a_held_back_document_repairs_it() {
             .sum::<u64>()
     };
     assert_eq!(documents().await, 1);
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     assert_eq!(
         publisher(&db).publish_once(target).await.unwrap(),
         PublicationOutcome::Blocked
@@ -1470,7 +1475,7 @@ async fn wait_for_operations(db: &HelixDB, target: QueueTarget, operations: u64,
 #[tokio::test]
 async fn the_worker_publishes_around_a_held_back_entity_and_then_its_repair() {
     let (db, wide, target) = reopen_after_lowered_limits("text-worker-held").await;
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     let later = add(&db, "later words", None).await;
     publisher(&db).hooks().paused.store(false, Ordering::SeqCst);
     wait_for_operations(&db, target, 1, "later entities publish around the head").await;
@@ -1509,13 +1514,13 @@ async fn the_worker_publishes_around_a_held_back_entity_and_then_its_repair() {
 async fn a_write_queued_while_a_repair_halves_starts_a_new_repair() {
     let (db, wide, target) = reopen_after_lowered_limits("text-repair-mid-halving").await;
     let publisher = publisher(&db);
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     assert_eq!(
         publisher.publish_once(target).await.unwrap(),
         PublicationOutcome::Blocked
     );
-    set(&db, wide, "body", &distinct_terms("second", 10_000, 4)).await;
-    set(&db, wide, "body", &distinct_terms("third", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("second", 20, 4)).await;
+    set(&db, wide, "body", &distinct_terms("third", 20, 4)).await;
     // All three do not fit, so the repair halves past the blocked first.
     assert_eq!(
         publisher.publish_once(target).await.unwrap(),
@@ -1549,7 +1554,7 @@ async fn a_write_queued_while_a_repair_halves_starts_a_new_repair() {
 async fn a_held_entity_written_before_every_attempt_does_not_starve_its_generation() {
     let (db, wide, target) = reopen_after_lowered_limits("text-hot-held").await;
     let publisher = publisher(&db);
-    let hot = |write: usize| distinct_terms(&format!("hot{write}y"), 10_000, 4);
+    let hot = |write: usize| distinct_terms(&format!("hot{write}y"), 20, 4);
     let mut writes = 0;
     set(&db, wide, "body", &hot(writes)).await;
     assert_eq!(
@@ -1609,7 +1614,7 @@ async fn a_held_entity_written_before_every_attempt_does_not_starve_its_generati
 async fn a_repair_runs_although_other_entities_are_rewritten_between_publications() {
     let (db, wide, target) = reopen_after_lowered_limits("text-repair-rotation").await;
     let publisher = publisher(&db);
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     assert_eq!(
         publisher.publish_once(target).await.unwrap(),
         PublicationOutcome::Blocked
@@ -1661,9 +1666,9 @@ async fn a_stalled_generation_waits_for_a_write_instead_of_polling() {
     let (db, wide, target) = reopen_after_lowered_limits("text-stalled-waits").await;
     // The writer's own publisher never schedules in tests; one with the same
     // limits does.
-    let defaults = DbConfig::new().search_index_backfill();
-    let scheduler = publisher_with_limits(&db, defaults.batch(), defaults.active_text_mutation());
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    let limits = tight_publication_config().search_index_backfill();
+    let scheduler = publisher_with_limits(&db, limits.batch(), limits.active_text_mutation());
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     assert_eq!(
         scheduler.publish_once(target).await.unwrap(),
         PublicationOutcome::Blocked
@@ -1716,11 +1721,11 @@ async fn a_stalled_generation_waits_for_a_write_instead_of_polling() {
 #[tokio::test]
 async fn a_repair_behind_a_retained_queue_publishes_without_stalling() {
     let (db, wide, target) = reopen_after_lowered_limits("text-retained-repair").await;
-    let defaults = DbConfig::new().search_index_backfill();
-    let scheduler = publisher_with_limits(&db, defaults.batch(), defaults.active_text_mutation());
+    let limits = tight_publication_config().search_index_backfill();
+    let scheduler = publisher_with_limits(&db, limits.batch(), limits.active_text_mutation());
     let reads = || scheduler.metrics().queue_reads.load(Ordering::Relaxed);
     let retained = || db.index_queue_store().retained().retained_bytes();
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     assert_eq!(
         scheduler.publish_once(target).await.unwrap(),
         PublicationOutcome::Blocked
@@ -1758,9 +1763,9 @@ async fn a_repair_behind_a_retained_queue_publishes_without_stalling() {
 #[tokio::test]
 async fn an_enqueue_returning_after_a_stalled_read_makes_its_generation_eligible() {
     let (db, wide, target) = reopen_after_lowered_limits("text-stalled-commit-race").await;
-    let defaults = DbConfig::new().search_index_backfill();
-    let scheduler = publisher_with_limits(&db, defaults.batch(), defaults.active_text_mutation());
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    let limits = tight_publication_config().search_index_backfill();
+    let scheduler = publisher_with_limits(&db, limits.batch(), limits.active_text_mutation());
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     assert_eq!(
         scheduler.publish_once(target).await.unwrap(),
         PublicationOutcome::Blocked
@@ -1821,10 +1826,11 @@ async fn the_worker_retries_a_stalled_generation_when_an_enqueue_is_cancelled_mi
             IndexOperationQueueTuning::default()
                 .with_recovery_sweep_interval(Duration::from_secs(600))
                 .unwrap(),
-        ),
+        )
+        .with_search_index_backfill_limits(tight_publication_config().search_index_backfill()),
     )
     .await;
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     // A producer's write to the held entity, charged and submitted.
     let operation = QueuedOperationId::try_from_u128(1).unwrap();
     let mut reservation = db
@@ -2277,7 +2283,7 @@ async fn a_delete_repairs_a_held_entity_past_one_acknowledgement() {
 #[tokio::test]
 async fn dropping_an_index_releases_its_held_back_entities() {
     let (db, wide, target) = reopen_after_lowered_limits("text-held-dropped").await;
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     assert_eq!(
         publisher(&db).publish_once(target).await.unwrap(),
         PublicationOutcome::Blocked
@@ -2314,7 +2320,7 @@ async fn dropping_an_index_releases_its_held_back_entities() {
 async fn an_uncertain_repair_commit_releases_its_hold() {
     let (db, wide, target) = reopen_after_lowered_limits("text-held-uncertain").await;
     let publisher = publisher(&db);
-    set(&db, wide, "body", &distinct_terms("first", 10_000, 4)).await;
+    set(&db, wide, "body", &distinct_terms("first", 20, 4)).await;
     assert_eq!(
         publisher.publish_once(target).await.unwrap(),
         PublicationOutcome::Blocked

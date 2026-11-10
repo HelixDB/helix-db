@@ -352,8 +352,8 @@ async fn region_counting_its_own_rows_skips_the_deferred_flush() {
         },
     )
     .await;
-    let Err(HelixDbError::Query(message)) = result else {
+    let Err(HelixDbError::UnboundParameter { name, .. }) = result else {
         panic!("the unbound source parameter fails before any flush: {result:?}");
     };
-    assert!(message.contains("`unbound` is not bound"), "{message}");
+    assert_eq!(name, "unbound");
 }

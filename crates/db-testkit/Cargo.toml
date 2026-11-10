@@ -7,17 +7,18 @@ publish = false
 [dependencies]
 async-trait = "0.1"
 db = { path = "../db" }
+futures = "0.3"
 helix-ast = { path = "../ast" }
 helix-planner = { path = "../planner" }
+object_store = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
-object_store = "0.14"
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true

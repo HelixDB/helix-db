@@ -15,7 +15,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const REFRESH_WINDOW_SECONDS: i64 = 60;
@@ -25,6 +25,11 @@ const PAGE_SIZE: &str = "200";
 /// server that never ends pagination cannot hang the CLI.
 const MAX_PAGES: usize = 50;
 const PRE_DISPATCH_AUTH_REASON: &str = "SESSION_REJECTED_PRE_DISPATCH";
+/// Generous because the server waits on identity providers and may be setting up
+/// a first-time account.
+const PUBLIC_POST_TIMEOUT: Duration = Duration::from_secs(60);
+/// The longest error body without a JSON message that is still worth printing.
+const MAX_PLAIN_ERROR_BODY: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -36,7 +41,7 @@ pub struct SessionCredentials {
 }
 
 impl SessionCredentials {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.access_token.trim().is_empty()
             || self.refresh_token.trim().is_empty()
             || self.expires_at <= 0
@@ -81,6 +86,13 @@ struct RawResponse {
 }
 
 impl RawResponse {
+    async fn read(request: reqwest::RequestBuilder) -> Result<Self> {
+        let response = request.send().await?;
+        let status = response.status();
+        let body = response.bytes().await?.to_vec();
+        Ok(Self { status, body })
+    }
+
     fn is_pre_dispatch_auth_rejection(&self) -> bool {
         if self.status != StatusCode::UNAUTHORIZED {
             return false;
@@ -104,7 +116,18 @@ impl RawResponse {
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                 })
-                .unwrap_or_else(|| String::from_utf8_lossy(&self.body).trim().to_owned());
+                .unwrap_or_else(|| {
+                    // Without a JSON message this may be a proxy's error page,
+                    // which says nothing the status does not and floods the
+                    // terminal.
+                    let body = String::from_utf8_lossy(&self.body);
+                    let body = body.trim();
+                    if body.starts_with('<') || body.len() > MAX_PLAIN_ERROR_BODY {
+                        String::new()
+                    } else {
+                        body.to_owned()
+                    }
+                });
             return Err(HttpError {
                 action: action.to_owned(),
                 status: self.status,
@@ -160,6 +183,7 @@ pub struct CloudClient {
     base_url: String,
     credentials_path: PathBuf,
     lock_path: PathBuf,
+    public_post_timeout: Duration,
 }
 
 impl CloudClient {
@@ -180,6 +204,7 @@ impl CloudClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             credentials_path,
             lock_path,
+            public_post_timeout: PUBLIC_POST_TIMEOUT,
         })
     }
 
@@ -207,9 +232,38 @@ impl CloudClient {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_public_post_timeout(mut self, timeout: Duration) -> Self {
+        self.public_post_timeout = timeout;
+        self
+    }
+
+    /// Whether requests reach the server protected: over HTTPS, or without
+    /// leaving this machine.
+    pub(crate) fn has_secure_transport(&self) -> bool {
+        reqwest::Url::parse(&self.base_url).is_ok_and(|url| {
+            url.scheme() == "https"
+                || url.host_str().is_some_and(|host| {
+                    host == "localhost"
+                        || host
+                            .trim_matches(['[', ']'])
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|address| address.is_loopback())
+                })
+        })
+    }
+
+    /// POSTs without a session. These are the login requests, which run with
+    /// someone waiting at a terminal, so a stalled server fails them after
+    /// [`PUBLIC_POST_TIMEOUT`] rather than hanging the login. A request that gets
+    /// no answer is an error that downcasts to [`reqwest::Error`].
     pub async fn public_post(&self, path: &str, body: Value, action: &str) -> Result<Value> {
-        self.send(None, Method::POST, path, &[], Some(body))
-            .await?
+        let request = self
+            .request(None, Method::POST, path, &[], Some(body))
+            .timeout(self.public_post_timeout);
+        RawResponse::read(request)
+            .await
+            .wrap_err_with(|| format!("Failed to {action}: could not reach Helix Cloud"))?
             .into_value(action)
     }
 
@@ -382,6 +436,17 @@ impl CloudClient {
         query: &[(&str, &str)],
         body: Option<Value>,
     ) -> Result<RawResponse> {
+        RawResponse::read(self.request(access_token, method, path, query, body)).await
+    }
+
+    fn request(
+        &self,
+        access_token: Option<&str>,
+        method: Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> reqwest::RequestBuilder {
         let mut request = self
             .http
             .request(method, format!("{}{}", self.base_url, path))
@@ -392,10 +457,7 @@ impl CloudClient {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request.send().await?;
-        let status = response.status();
-        let body = response.bytes().await?.to_vec();
-        Ok(RawResponse { status, body })
+        request
     }
 }
 
@@ -467,6 +529,80 @@ mod tests {
             expires_at: unix_now() + 3600,
             email: "user@example.com".into(),
         }
+    }
+
+    fn client(base_url: &str) -> CloudClient {
+        CloudClient::with_paths(base_url.to_owned(), PathBuf::from("credentials")).unwrap()
+    }
+
+    #[test]
+    fn only_https_and_this_machine_count_as_secure_transport() {
+        for secure in [
+            "https://api.prod.helix-db.com",
+            "https://localhost.example.com",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://127.8.0.1",
+            "http://[::1]:8080",
+        ] {
+            assert!(client(secure).has_secure_transport(), "{secure}");
+        }
+        for insecure in [
+            "http://api.prod.helix-db.com",
+            "http://staging",
+            "http://localhost.example.com",
+            "http://127.0.0.1.example.com",
+            "http://10.0.0.1",
+            "http://[2001:db8::1]",
+            "not a url",
+        ] {
+            assert!(!client(insecure).has_secure_transport(), "{insecure}");
+        }
+    }
+
+    #[tokio::test]
+    async fn public_post_gives_up_on_a_stalled_server() {
+        // Connections sit in the backlog: accepted by the kernel, never answered.
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = client(&format!("http://{}", stalled.local_addr().unwrap()))
+            .with_public_post_timeout(Duration::from_millis(200));
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.public_post("/v1/auth/password:sign-in", Value::Null, "sign in"),
+        )
+        .await
+        .expect("the request must give up by itself")
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "Failed to sign in: could not reach Helix Cloud"
+        );
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+    }
+
+    #[test]
+    fn error_messages_skip_pages_a_proxy_sent() {
+        let message = |body: &str| {
+            let response = RawResponse {
+                status: StatusCode::BAD_GATEWAY,
+                body: body.as_bytes().to_vec(),
+            };
+            let error = response.into_value("act").unwrap_err();
+            error.downcast_ref::<HttpError>().unwrap().message.clone()
+        };
+        let long = "x".repeat(MAX_PLAIN_ERROR_BODY + 1);
+
+        assert_eq!(
+            message(r#"{"message":"from the server"}"#),
+            "from the server"
+        );
+        assert_eq!(message(&format!(r#"{{"message":"{long}"}}"#)), long);
+        assert_eq!(message("  upstream unavailable\n"), "upstream unavailable");
+        assert_eq!(message("<html><body>Bad gateway</body></html>"), "");
+        assert_eq!(message(&long), "");
+        assert_eq!(message(""), "");
     }
 
     #[test]

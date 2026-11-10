@@ -392,7 +392,7 @@ pub(crate) async fn load_active_manifest_page(
 /// Missing state is corruption for a V2 candidate: unlike configured-static
 /// manifests, every document admitted to a V2 split has a canonical
 /// generation-qualified state row.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 pub(crate) async fn load_active_entity_state(
     reader: &(impl DbReadOps + Send + Sync),
     root: &ValidatedActiveTextManifestRoot,
@@ -551,9 +551,9 @@ fn corruption(message: impl Into<String>) -> HelixDbError {
     HelixDbError::IndexCatalogCorruption(message.into())
 }
 
-#[cfg(any(test, feature = "production-coverage"))]
-#[path = "../../../tests/production_support/index_lifecycle_text_serving.rs"]
-pub(crate) mod production_contracts;
+#[cfg(test)]
+#[path = "../../../tests/unit/index_lifecycle_text_serving.rs"]
+mod contract_tests;
 
 #[cfg(test)]
 mod tests {
@@ -568,11 +568,6 @@ mod tests {
         IndexOperationId, IndexRecordV2, IndexRevision, IndexStateTransition, PhysicalGeneration,
         ValidatedDynamicIndexDefinition,
     };
-
-    #[tokio::test]
-    async fn production_text_serving_matrix_runs_in_workspace_tests() {
-        production_contracts::run().await;
-    }
 
     /// Opens one isolated in-memory SlateDB fixture.
     async fn test_db(name: &str) -> Db {

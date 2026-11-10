@@ -20,6 +20,7 @@ use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{IndexElementKind, ValidatedDynamicIndexDefinition};
 use crate::search;
 use crate::search::vector::{self, VectorIndex};
+use crate::transaction::Mutation;
 
 use super::{
     scan_bounds_for_prefix, LegacyDynamicIndexCatalogEntry, LegacyDynamicIndexDefinition,
@@ -164,7 +165,7 @@ async fn materialize_batch(
     };
     debug_assert_eq!(stage, job.state.running_stage().unwrap_or(stage));
     let bounds = scan_bounds_for_prefix(&prefix, resume_after_key.as_ref());
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadBefore)?;
     let mut rows = transaction.scan(bounds).await?;
     let mut processed_rows = 0_u64;
@@ -272,10 +273,10 @@ async fn materialize_batch(
             break;
         }
         if changed {
-            #[cfg(feature = "production-coverage")]
+            #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteBefore)?;
-            transaction.put(property_key, encoded)?;
-            #[cfg(feature = "production-coverage")]
+            Mutation::put(transaction, property_key, encoded)?;
+            #[cfg(test)]
             super::trip_migration_failpoint(super::MigrationFailpoint::BatchWriteAfter)?;
         }
         admitted_bytes = next_admitted_bytes;
@@ -283,7 +284,7 @@ async fn materialize_batch(
         committed_cursor = MigrationResumeKey::new(row.key.to_vec());
     }
 
-    #[cfg(feature = "production-coverage")]
+    #[cfg(test)]
     super::trip_migration_failpoint(super::MigrationFailpoint::BatchReadAfter)?;
     let Some(resume_after_key) = committed_cursor else {
         return Ok(MigrationBatch::StageComplete);

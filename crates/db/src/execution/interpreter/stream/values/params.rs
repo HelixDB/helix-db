@@ -15,5 +15,8 @@ pub(in crate::execution::interpreter::stream) fn param_value_from(
         .get(name)
         .cloned()
         .map(query_value_to_db_value)
-        .ok_or_else(|| HelixDbError::Query(format!("parameter `{name}` is not bound")))
+        .ok_or_else(|| HelixDbError::UnboundParameter {
+            used_as: crate::error::ParameterUse::Value,
+            name: name.to_string(),
+        })
 }

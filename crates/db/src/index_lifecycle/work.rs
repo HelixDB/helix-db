@@ -299,7 +299,9 @@ impl SplitRef {
 pub(crate) enum CoalescedBuildDeltaState {
     /// The owning family reconciles from durable builder state or authoritative data.
     Marker,
-    /// Original secondary value before the first still-pending mutation.
+    /// Original secondary value before the first still-pending mutation. A
+    /// write to a building unique generation records the value it just
+    /// claimed instead, which is then exactly what the generation holds.
     SecondaryBefore(Option<CanonicalSecondaryValue>),
     /// Original vector partition before the first still-pending mutation.
     VectorBefore(Option<TextPartition>),

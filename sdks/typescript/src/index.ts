@@ -2,7 +2,7 @@
 //
 // The query DSL lives in `./dsl.ts` and is re-exported wholesale here. This file
 // adds the network client (`Client`, `QueryBuilder`, `QueryExecutionRequest`,
-// `CypherExecutionRequest`, `HelixError`), mirroring the Rust SDK layout where the
+// `StatementRequest`, `HelixError`), mirroring the Rust SDK layout where the
 // DSL lives in `dsl.rs` and the client in `lib.rs`.
 
 export * from "./dsl.js";
@@ -14,14 +14,14 @@ import { GraphSelection, NativeGraph, loadGraph } from "./graph.js";
 const DEFAULT_URL = "http://localhost:6969";
 const QUERY_PATH = "/v2/query";
 
-/** Graph IDs and large integers are lossless tagged values within each row. */
+/** A Cypher or SQL result. Graph IDs and large integers are lossless tagged values within each row. */
 export interface CypherResponse {
   columns: string[];
   rows: unknown[][];
 }
 
 /**
- * Planning diagnostics from `POST /v2/cypher/explain`; the statement is not executed.
+ * Planning diagnostics from `POST /v2/cypher/explain` or `POST /v2/sql/explain`; the statement is not executed.
  *
  * Only the top-level effect and operator list are typed. Operator contracts,
  * bindings, returns, planner metrics, and notices are planner diagnostics whose
@@ -34,22 +34,47 @@ export interface CypherExplanation {
   [field: string]: unknown;
 }
 
-/** A Cypher route: its server path, and the native method serving it in embedded mode. */
-interface CypherRoute {
+/**
+ * SQL parameters: a list binds each `?` in order (`$1`, `$2`, …); an object binds
+ * `:name`, `$name`, `@name` and `?N` placeholders by name.
+ */
+export type SqlParameters = unknown[] | Record<string, unknown>;
+
+/**
+ * How SQL names map onto the graph for one request: `tables` maps a table to a
+ * node label (or a join's middle table to a relationship type), and
+ * `joinColumns` maps a join's `ON` column, written `table.column`, to a
+ * relationship type. Names without a mapping are used as written.
+ */
+export interface SqlMappings {
+  tables?: Record<string, string>;
+  joinColumns?: Record<string, string>;
+}
+
+/** A statement route: its server path, and the native method serving it in embedded mode. */
+interface StatementRoute {
   path: string;
-  native: "cypher_json" | "explain_cypher_json";
+  native: "cypher_json" | "explain_cypher_json" | "sql_json" | "explain_sql_json";
   unavailable: string;
 }
 
-const CYPHER_EXECUTE: CypherRoute = {
-  path: "/v2/cypher",
-  native: "cypher_json",
-  unavailable: "rebuild native bindings with Cypher support",
+/** The execute and explain routes of one statement language. */
+interface StatementRoutes {
+  execute: StatementRoute;
+  explain: StatementRoute;
+}
+
+const CYPHER_ROUTES: StatementRoutes = {
+  execute: { path: "/v2/cypher", native: "cypher_json", unavailable: "rebuild native bindings with Cypher support" },
+  explain: {
+    path: "/v2/cypher/explain",
+    native: "explain_cypher_json",
+    unavailable: "rebuild native bindings with Cypher explain support",
+  },
 };
-const CYPHER_EXPLAIN: CypherRoute = {
-  path: "/v2/cypher/explain",
-  native: "explain_cypher_json",
-  unavailable: "rebuild native bindings with Cypher explain support",
+const SQL_ROUTES: StatementRoutes = {
+  execute: { path: "/v2/sql", native: "sql_json", unavailable: "rebuild native bindings with SQL support" },
+  explain: { path: "/v2/sql/explain", native: "explain_sql_json", unavailable: "rebuild native bindings with SQL support" },
 };
 
 /**
@@ -172,8 +197,16 @@ export class HelixError extends Error {
     return new HelixError("Embedded", `embedded HelixDB error: ${message}`, message, code);
   }
 
+  /**
+   * Returns whether a transaction conflict aborted the request, so resending
+   * it unchanged may succeed.
+   *
+   * This reads the `transaction_conflict` code, not the status: HTTP 409 also
+   * reports conflicts with the database's state, such as
+   * `unique_constraint_violation`, which fail again when resent.
+   */
   isConflict(): boolean {
-    return this.kind === "Remote" && this.statusCode === 409;
+    return this.kind === "Remote" && this.code === "transaction_conflict";
   }
 
   isRateLimited(): boolean {
@@ -229,13 +262,13 @@ interface RequestParts {
   query: QueryRequest;
 }
 
-/** Complete Cypher request handed from {@link QueryBuilder} to {@link CypherExecutionRequest}. */
-interface CypherRequestParts {
+/** Complete Cypher or SQL request handed from {@link QueryBuilder} to {@link StatementRequest}. */
+interface StatementRequestParts {
   backend: ClientBackend;
   headers: Record<string, string>;
-  query: string;
-  parameters: Record<string, unknown>;
-  queryName?: string;
+  routes: StatementRoutes;
+  /** The JSON request body, before lossless encoding. */
+  body: Record<string, unknown>;
 }
 
 interface QueryResponse {
@@ -268,6 +301,8 @@ type NativeHelixDB = {
   query_json(request: Uint8Array): Promise<Uint8Array>;
   cypher_json?(request: Uint8Array): Promise<Uint8Array>;
   explain_cypher_json?(request: Uint8Array): Promise<Uint8Array>;
+  sql_json?(request: Uint8Array): Promise<Uint8Array>;
+  explain_sql_json?(request: Uint8Array): Promise<Uint8Array>;
   graph?(request: Uint8Array, spec: unknown): Promise<unknown>;
   close(): Promise<void>;
 };
@@ -400,6 +435,30 @@ export class Client {
     return explanation;
   }
 
+  /**
+   * Translate one SQL statement to Cypher and execute it like {@link Client.cypher}.
+   *
+   * ```ts
+   * const rows = await client.sql("SELECT p.name FROM people p WHERE p.age > ?", [30], { tables: { people: "Person" } });
+   * ```
+   */
+  sql(query: string, parameters: SqlParameters = [], mappings: SqlMappings = {}, queryName?: string): Promise<CypherResponse> {
+    return this.requestBuilder().sql(query, parameters, mappings, queryName).send();
+  }
+
+  /** Plan one SQL statement's translation without executing it, like {@link Client.explainCypher}. */
+  async explainSql(
+    query: string,
+    parameters: SqlParameters = [],
+    mappings: SqlMappings = {},
+    queryName?: string,
+  ): Promise<CypherExplanation> {
+    const explanation = await this.requestBuilder().sql(query, parameters, mappings, queryName).explain();
+    // Only a warm-only request succeeds with 204 No Content, and this one sends no options.
+    if (explanation === undefined) throw HelixError.remote(204, "", "No Content");
+    return explanation;
+  }
+
   /** Begin building an advanced server request whose 200 response body deserializes into `R`. */
   requestBuilder<R = unknown>(): QueryBuilder<R> {
     return new QueryBuilder<R>(this.backend);
@@ -471,13 +530,27 @@ export class QueryBuilder<R = unknown> {
   }
 
   /** Attach one Cypher statement and target `POST /v2/cypher` or `POST /v2/cypher/explain`. */
-  cypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): CypherExecutionRequest {
-    return new CypherExecutionRequest({
+  cypher(query: string, parameters: Record<string, unknown> = {}, queryName?: string): StatementRequest {
+    return new StatementRequest({
       backend: this.backend,
       headers: { ...this.headers },
-      query,
-      parameters,
-      queryName,
+      routes: CYPHER_ROUTES,
+      body: { query, parameters, query_name: queryName },
+    });
+  }
+
+  /** Attach one SQL statement and target `POST /v2/sql` or `POST /v2/sql/explain`. */
+  sql(query: string, parameters: SqlParameters = [], mappings: SqlMappings = {}, queryName?: string): StatementRequest {
+    return new StatementRequest({
+      backend: this.backend,
+      headers: { ...this.headers },
+      routes: SQL_ROUTES,
+      body: {
+        query,
+        parameters,
+        query_name: queryName,
+        mappings: { tables: mappings.tables ?? {}, join_columns: mappings.joinColumns ?? {} },
+      },
     });
   }
 }
@@ -549,42 +622,42 @@ export class QueryExecutionRequest<R = unknown> {
 }
 
 /**
- * One Cypher statement with the request options of the {@link QueryBuilder} that created it.
+ * One Cypher or SQL statement with the request options of the {@link QueryBuilder} that created it.
  *
  * ```ts
  * const rows = await client.requestBuilder().writerOnly().cypher("CREATE (n:User {name: $name}) RETURN n", { name: "Ada" }).send();
- * const plan = await client.requestBuilder().cypher("MATCH (n:User) RETURN n").explain();
+ * const plan = await client.requestBuilder().sql("SELECT u.name FROM User u").explain();
  * ```
  */
-export class CypherExecutionRequest {
-  constructor(private readonly parts: CypherRequestParts) {}
+export class StatementRequest {
+  constructor(private readonly parts: StatementRequestParts) {}
 
   /**
-   * Execute the statement (`POST /v2/cypher`), retaining tagged lossless values in the response.
+   * Execute the statement (`POST /v2/cypher` or `POST /v2/sql`), retaining tagged lossless values in the response.
    * A Helix Cloud warm-only read answers `204 No Content`, which resolves to no columns and no rows.
    */
   async send(): Promise<CypherResponse> {
-    const response = await this.execute(CYPHER_EXECUTE);
+    const response = await this.execute(this.parts.routes.execute);
     return response === undefined ? { columns: [], rows: [] } : (response as CypherResponse);
   }
 
   /**
-   * Plan the statement without executing it (`POST /v2/cypher/explain`). The server applies options as a read.
-   * Resolves to `undefined` only when a Helix Cloud warm-only request answers `204 No Content`.
+   * Plan the statement without executing it (`POST /v2/cypher/explain` or `POST /v2/sql/explain`). The server
+   * applies options as a read. Resolves to `undefined` only when a Helix Cloud warm-only request answers `204 No Content`.
    */
   async explain(): Promise<CypherExplanation | undefined> {
-    return (await this.execute(CYPHER_EXPLAIN)) as CypherExplanation | undefined;
+    return (await this.execute(this.parts.routes.explain)) as CypherExplanation | undefined;
   }
 
   /** Resolves to the decoded JSON body, or `undefined` for a `204 No Content` warm success. */
-  private async execute(route: CypherRoute): Promise<unknown> {
-    const { backend, headers, query, parameters, queryName } = this.parts;
+  private async execute(route: StatementRoute): Promise<unknown> {
+    const { backend, headers } = this.parts;
 
     // Integers outside the JavaScript safe range and non-finite floats have no
     // plain JSON form, so they travel as the server's lossless tagged values.
     let body: string;
     try {
-      body = JSON.stringify({ query, parameters, query_name: queryName }, (_key, value: unknown) =>
+      body = JSON.stringify(this.parts.body, (_key, value: unknown) =>
         typeof value === "bigint"
           ? { $type: "integer", value: value.toString() }
           : typeof value === "number" && !Number.isFinite(value)

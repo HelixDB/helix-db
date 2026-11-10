@@ -1,0 +1,6 @@
+# CI test runs (`cargo nextest run --profile ci`). Each test runs in its own
+# process; failures are reported together at the end instead of stopping early.
+[profile.ci]
+fail-fast = false
+failure-output = "immediate-final"
+slow-timeout = { period = "120s" }

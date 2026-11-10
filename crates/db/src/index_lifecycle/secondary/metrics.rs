@@ -1,4 +1,4 @@
-//! Explicit measurement scopes for tests and production-coverage benchmarks.
+//! Explicit measurement scopes for tests and `bench-internals` benchmarks.
 //! Unscoped work is ignored. A spawned worker must enter a clone of its parent's
 //! observer; concurrent measurements and nested scopes cannot reset each other.
 use std::{

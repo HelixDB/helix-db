@@ -18,4 +18,5 @@ mod request;
 mod schema_storage;
 mod scopes;
 mod simple_case;
+mod sql;
 mod wildcard_identity;

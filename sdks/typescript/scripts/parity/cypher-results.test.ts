@@ -17,7 +17,7 @@ const cases = await readCypherCases();
 const scalar: CypherCase = {
   name: "comparison",
   query: "RETURN 1",
-  parameters: {},
+  statement: { language: "cypher", parameters: {} },
   afterDiskReopen: false,
   expectation: {
     kind: "result",
@@ -35,7 +35,18 @@ const scalar: CypherCase = {
 
 test("corpus rejects missing cases, unsafe filenames and incompatible assertions", async () => {
   const original = JSON.parse(await readFile(cypherFixturePath, "utf8"));
-  assert.equal(parseCypherCases(original).length, 16);
+  const parsed = parseCypherCases(original);
+  assert.equal(parsed.length, 24);
+  assert.deepStrictEqual(parsed[16]!.statement, {
+    language: "sql",
+    parameters: ["Ada", { $type: "integer", value: "9223372036854775807" }, "Grace", -1],
+    mappings: { tables: { people: "SqlPerson" }, joinColumns: {} },
+  });
+  assert.deepStrictEqual(parsed[18]!.statement, {
+    language: "sql",
+    parameters: { person: "Ada", team: "Compilers" },
+    mappings: { tables: {}, joinColumns: {} },
+  });
   const changes = [
     (v: typeof original) => {
       v.schema_version = 2;
@@ -69,6 +80,24 @@ test("corpus rejects missing cases, unsafe filenames and incompatible assertions
     },
     (v: typeof original) => {
       v.cases[3].normalize_graph_ids = true;
+    },
+    (v: typeof original) => {
+      v.cases[0].language = "gql";
+    },
+    (v: typeof original) => {
+      v.cases[0].mappings = {};
+    },
+    (v: typeof original) => {
+      v.cases[16].mappings = { labels: {} };
+    },
+    (v: typeof original) => {
+      v.cases[16].mappings = { tables: { people: 1 } };
+    },
+    (v: typeof original) => {
+      v.cases[16].parameters = "Ada";
+    },
+    (v: typeof original) => {
+      v.cases[23].expected_error_phase = "translate";
     },
   ];
   for (const change of changes) {

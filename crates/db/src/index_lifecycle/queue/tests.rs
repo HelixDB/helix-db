@@ -172,6 +172,21 @@ pub(super) fn publisher_with_limits(
     limits: SearchIndexBatchLimits,
     text: ActiveTextMutationLimits,
 ) -> Arc<QueuePublisher> {
+    publisher_with_presearch(
+        db,
+        limits,
+        text,
+        crate::search::vector::default_presearch_workers(),
+    )
+}
+
+/// A [`publisher_with_limits`] publisher with exactly `presearch_workers`.
+pub(super) fn publisher_with_presearch(
+    db: &HelixDB,
+    limits: SearchIndexBatchLimits,
+    text: ActiveTextMutationLimits,
+    presearch_workers: Option<std::num::NonZeroUsize>,
+) -> Arc<QueuePublisher> {
     QueuePublisher::new(
         db.inner_db(),
         Arc::clone(db.index_operation_backlog()),
@@ -186,6 +201,7 @@ pub(super) fn publisher_with_limits(
                     .expect("the writer runs a publisher")
                     .planning_cache(),
             ),
+            presearch_workers,
         },
         limits,
         super::publication::TextPublicationResources {
@@ -571,7 +587,11 @@ async fn a_write_over_the_member_limit_on_its_own_fails_without_retry() {
         }
     ));
     assert!(!error.is_index_backpressure(), "{error}");
-    assert!(error.is_invalid_input(), "{error}");
+    assert_eq!(
+        error.error_code().failure_class(),
+        helix_ast::error_code::QueryFailureClass::InvalidRequest,
+        "{error}"
+    );
     assert_eq!(node_count(&db).await, 0, "the graph write rolled back");
     // Nothing stayed charged: writes within the limit are admitted.
     add_text(&db, "one").await.unwrap();
@@ -752,11 +772,23 @@ async fn oversized_operands_fail_before_commit_without_leaking_capacity() {
     let error = add_text(&db, &"x".repeat(128))
         .await
         .expect_err("operand too large");
-    assert!(matches!(
-        error,
-        HelixDbError::IndexOperationBatchTooLarge { limit: 64, .. }
-    ));
-    assert!(error.is_invalid_input());
+    assert!(
+        matches!(
+            error,
+            HelixDbError::IndexOperationBatchTooLarge {
+                resource: IndexOperationBatchResource::OperandBytes,
+                observed,
+                limit: 64,
+                ..
+            } if observed > 64
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("operand_bytes"), "{error}");
+    assert_eq!(
+        error.error_code().failure_class(),
+        helix_ast::error_code::QueryFailureClass::InvalidRequest
+    );
     assert_eq!(node_count(&db).await, 0);
     let text_target = target(&db, QueueFamily::Text).await;
     assert_eq!(

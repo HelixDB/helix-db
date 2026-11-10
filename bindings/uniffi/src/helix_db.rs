@@ -231,6 +231,26 @@ impl HelixDB {
         serde_json::to_vec(&explanation).map_err(|e| HelixError::from(db::cypher::Error::Json(e)))
     }
 
+    /// Translate one SQL statement to Cypher and execute it, returning the same
+    /// JSON as `POST /v2/sql`.
+    pub async fn sql_json(&self, request: Vec<u8>) -> Result<Vec<u8>, HelixError> {
+        let request = serde_json::from_slice::<db::cypher::sql::request::Request>(&request)
+            .map_err(HelixError::invalid_sql_json)?;
+        let inner = Arc::clone(&self.inner);
+        let response = runtime::run(async move { inner.sql_json(request).await }).await??;
+        Ok(response.into_vec())
+    }
+
+    /// Plan a SQL statement's translation without executing it, returning the
+    /// same JSON as `POST /v2/sql/explain`.
+    pub async fn explain_sql_json(&self, request: Vec<u8>) -> Result<Vec<u8>, HelixError> {
+        let request = serde_json::from_slice::<db::cypher::sql::request::Request>(&request)
+            .map_err(HelixError::invalid_sql_json)?;
+        let inner = Arc::clone(&self.inner);
+        let explanation = runtime::run(async move { inner.explain_sql(request).await }).await??;
+        serde_json::to_vec(&explanation).map_err(|e| HelixError::from(db::cypher::Error::Json(e)))
+    }
+
     /// Execute one ordinary read request and construct a reusable native graph.
     pub async fn graph(
         &self,
@@ -450,6 +470,74 @@ mod tests {
         ] {
             let HelixError::InvalidRequest { error, .. } = db
                 .explain_cypher_json(request)
+                .await
+                .expect_err("invalid requests reject")
+            else {
+                panic!("expected an invalid request");
+            };
+            assert_eq!(error, expected);
+        }
+        db.close().await.expect("DB should close");
+    }
+
+    #[tokio::test]
+    async fn sql_json_executes_and_explains_without_writing() {
+        let db = HelixDB::open(HelixDbSource::InMemory {
+            database: "uniffi-sql".to_string(),
+        })
+        .await
+        .expect("in-memory DB should open");
+
+        let plan = db
+            .explain_sql_json(
+                br#"{"query":"INSERT INTO Planned (name) VALUES (?)","parameters":["a"]}"#.to_vec(),
+            )
+            .await
+            .expect("explain should plan a write");
+        let plan: serde_json::Value = serde_json::from_slice(&plan).expect("plan is JSON");
+        assert_eq!(plan["effect"], "Write");
+
+        db.sql_json(
+            br#"{"query":"INSERT INTO Person (name) VALUES (?)","parameters":["Ada"]}"#.to_vec(),
+        )
+        .await
+        .expect("SQL should insert");
+        let rejected = db
+            .sql_json(br#"{"query":"SELECT (SELECT 1) FROM Person p"}"#.to_vec())
+            .await
+            .expect_err("subqueries are rejected");
+        assert!(
+            matches!(rejected, HelixError::InvalidRequest { error, .. } if error == "unsupported_feature:compile:procedures_and_subqueries")
+        );
+        let rows = db
+            .sql_json(
+                br#"{"query":"SELECT p.name FROM people p","mappings":{"tables":{"people":"Person"}}}"#
+                    .to_vec(),
+            )
+            .await
+            .expect("SQL should read");
+        let rows: serde_json::Value = serde_json::from_slice(&rows).expect("rows are JSON");
+        assert_eq!(rows["columns"], serde_json::json!(["p.name"]));
+        assert_eq!(rows["rows"], serde_json::json!([["Ada"]]));
+        let count = db
+            .sql_json(br#"{"query":"SELECT count(*) FROM Planned"}"#.to_vec())
+            .await
+            .expect("SQL should count");
+        let count: serde_json::Value = serde_json::from_slice(&count).expect("rows are JSON");
+        assert_eq!(count["rows"], serde_json::json!([[0]]));
+
+        for (request, expected) in [
+            (
+                br#"{"query":"SELECT 1","mapping":{}}"#.to_vec(),
+                "invalid_sql_json",
+            ),
+            (
+                br#"{"query":"SELEC 1"}"#.to_vec(),
+                "syntax_error:compile:unexpected_syntax",
+            ),
+        ] {
+            let HelixError::InvalidRequest { error, .. } = db
+                .explain_sql_json(request)
                 .await
                 .expect_err("invalid requests reject")
             else {

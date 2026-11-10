@@ -107,6 +107,11 @@ impl shared::AccessFilterIndexFamily for EdgeIndexFamily {
         )
     }
 
+    /// Edge equality indexes are never unique.
+    fn unique_key(_source: &Self::Source) -> Option<shared::UniqueKey> {
+        None
+    }
+
     fn branch_residual_union(
         branches: Vec<(Self::Source, Option<ir::PredicatePlan>)>,
     ) -> Option<Self::Source> {

@@ -7,14 +7,14 @@ The Helix CLI — binary `helix`, crate `helix-cli` (v3.0.1). It is a **runtime 
 This CLI has **no `helix compile` and no `helix check`**, and there is **no `.hx` query workflow** in it. (Older notes/memory that mention those commands describe the v2 CLI and are stale.) In v3:
 
 - **Queries are JSON requests** sent to a *running* instance via `POST /v2/query` (`helix query`). Validation happens server-side, in the instance.
-- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.12`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (SeaweedFS-backed) with `--disk`.
+- **Local instances are Docker/Podman containers** (image `ghcr.io/helixdb/helixdb:v0.0.15`), managed by `LocalRuntime`. `helix start` starts one; in-memory by default, on-disk (SeaweedFS-backed) with `--disk`.
 - **Cloud instances are linked resources.** The CLI authenticates only with a rotating WorkOS session and sends Cloud queries through WFE's backend broker. It does not deploy query bundles or call Cloud gateways directly.
 
 The Rust DSL builder lives in `sdks/rust/` (a client library), not in this CLI.
 
 ## Entry point & dispatch
 
-`src/main.rs` defines the clap `Cli` struct with three **global flags** — `--json` (machine output, never prompts), `--quiet` (errors + final result only), and `-v/--verbose` (timing detail) — mapped onto `output::OutputMode` (`Human(Verbosity)` | `Json`; `--json` conflicts with the other two). The `Commands` enum lists every subcommand; `main()` matches each to `commands::<name>::run(...)`. With no subcommand it prints the welcome banner (`display_welcome`). A failed command goes through `output::report_error` (cliclack-styled block, or `{"error":{…}}` under `--json`) before `exit(1)`; clap usage errors under `--json` become the same JSON with exit 2. Metrics are bootstrapped (`MetricsSender::new`) and an update check runs on every non-JSON invocation.
+`src/main.rs` defines the clap `Cli` struct with three **global flags** — `--json` (machine output, never prompts), `--quiet` (errors + final result, plus `output::essential` lines a user needs in order to carry on), and `-v/--verbose` (timing detail) — mapped onto `output::OutputMode` (`Human(Verbosity)` | `Json`; `--json` conflicts with the other two). The `Commands` enum lists every subcommand; `main()` matches each to `commands::<name>::run(...)`. With no subcommand it prints the welcome banner (`display_welcome`). A failed command goes through `output::report_error` (cliclack-styled block, or `{"error":{…}}` under `--json`) before `exit(1)`; clap usage errors under `--json` become the same JSON with exit 2. Metrics are bootstrapped (`MetricsSender::new`) and an update check runs on every non-JSON invocation.
 
 ## Output contract
 
@@ -62,7 +62,7 @@ Instance args default to `dev`, else the only instance, else a prompt (TTY), els
 - `query [instance|cluster:<id>|tenant:<id>] (--file <req.json> | --body '<json>' | -e/--ts '<ts>' | --ts-file <query.ts>) [--warm] [--host <h>] [--port <p>]` — local targets send to `POST /v2/query` with auth disabled. Cloud targets use the active WorkOS session and WFE's separate read/write broker endpoints; a typed target needs no helix.toml. They never load an application key. The four input flags are mutually exclusive and exactly one is required. TypeScript input is evaluated through the cached `@helix-db/helix-db` SDK. Results print as highlighted JSON with a `status · latency · target` footer on stderr, or compact JSON under `--json`.
 
 **Cloud**
-- `auth (login|status|logout)` — WorkOS PKCE login and rotating session credentials. Refresh is serialized and persisted atomically. There is no API-key or service-credential login.
+- `auth (login [github|google|microsoft|sso [--email]|password [--email]]|status|logout)` — WorkOS login and rotating session credentials; login asks for a method when none is named. Browser methods use PKCE through the loopback callback; `password` reads the password from a hidden prompt only and is refused unless the Cloud URL is HTTPS or loopback. `sso_required` replies continue through single sign-on, and email verification allows three attempts. Each callback connection gets its own task, and only the `state` from the authorize URL can finish a login. `CloudClient::public_post` is bounded by a timeout because someone is waiting at a terminal. Refresh is serialized and persisted atomically. There is no API-key or service-credential login.
 - `workspace (list|get)` — discover workspaces without global selection state.
 - `project (list|get|create <name>|delete|link)` — discover/manage projects; `link` (picker when no argument) writes only this `helix.toml` and keeps the local project name.
 - `cluster (list|get|indexes)` — discover and inspect existing clusters.
@@ -135,7 +135,7 @@ Chef is framed as one `intro`/`outro` session. `Step` provides `println` (print 
 **Project config — `helix.toml`** (`HelixConfig` in `config.rs`, found via `ProjectContext::find_and_load`):
 
 - `[project]` — `name` (required), optional `id` / `workspace_id`, `queries` (default `db/`), `container_runtime` (`docker` | `podman`, default docker).
-- `[local.<name>]` — `port` (default `6969`), `image` (default `ghcr.io/helixdb/helixdb`), `tag` (default `v0.0.12`), `storage` (`memory` | `disk`, default memory).
+- `[local.<name>]` — `port` (default `6969`), `image` (default `ghcr.io/helixdb/helixdb`), `tag` (default `v0.0.15`), `storage` (`memory` | `disk`, default memory).
 - `[enterprise.<name>]` — typed `database = "cluster:<id>"|"tenant:<id>"`, plus optional stable `workspace_id` and `project_id` linkage. Gateway URLs, query keys, query bundles, and sync snapshots are rejected as obsolete.
 
 `HelixConfig::validate` requires a non-empty project name, at least one instance, non-empty instance names, and a valid typed database for each Cloud instance. `default_config()` seeds a single in-memory `local.dev`.

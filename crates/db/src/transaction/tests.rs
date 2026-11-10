@@ -219,7 +219,7 @@ async fn rejected_read_does_not_reach_backend_or_hide_its_memory_error() {
     // dependency. Our unrelated write can still commit under serializable mode.
     db.inner_db().put(&key, row.encoded()).await.unwrap();
     transaction.put(&next, row.encoded()).unwrap();
-    transaction.commit().await.unwrap();
+    transaction.commit(CommitDurability::Durable).await.unwrap();
     assert_eq!(budget.available(), 1024 * 1024);
     assert_eq!(
         db.inner_db().get(next).await.unwrap().as_ref(),
@@ -256,7 +256,11 @@ async fn admitted_point_and_empty_range_reads_keep_serializable_conflicts() {
         db.inner_db().put(&key, row.encoded()).await.unwrap();
         transaction.put(&own, row.encoded()).unwrap();
         assert_eq!(
-            transaction.commit().await.unwrap_err().kind(),
+            transaction
+                .commit(CommitDurability::Durable)
+                .await
+                .unwrap_err()
+                .kind(),
             slatedb::ErrorKind::Transaction
         );
         assert!(db.inner_db().get(own).await.unwrap().is_none());
@@ -347,7 +351,7 @@ async fn detached_completion_retains_read_admission_and_abort_releases_it() {
                 .commit_completions
                 .run(async move {
                     wait.await.unwrap();
-                    transaction.commit().await.unwrap();
+                    transaction.commit(CommitDurability::Durable).await.unwrap();
                 })
                 .unwrap();
             drop(task);
@@ -367,6 +371,120 @@ async fn detached_completion_retains_read_admission_and_abort_releases_it() {
             assert!(db.inner_db().get(&written).await.unwrap().is_none());
         }
         assert_eq!(budget.available(), 1024 * 1024);
+    }
+    db.close().await.unwrap();
+}
+
+/// The put guard classifies the key first: any row deltas never merge into
+/// returns before the value is read, admitted or allocated for, so property
+/// puts pay only the key classification.
+#[tokio::test]
+async fn puts_to_rows_without_merges_skip_validation_and_admission() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "put-guard-early-return".into(),
+    })
+    .await
+    .unwrap();
+    let budget = query_resources::Budget::new(1024 * 1024);
+    let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+    let property = graph_mutation::GraphEntity::node(1).property_key(DataScope::LegacyUnscoped);
+    // Undecodable as any membership row, and no admission is left to take.
+    let value = Bytes::from(vec![0xAB; 64 * 1024]);
+    let occupied = budget.reserve(budget.available()).unwrap();
+    let view = transaction.mutation_view();
+    let (result, allocations) =
+        crate::allocation_testing::observe(|| validate_put(view.tracking, &property, &value));
+    result.unwrap();
+    assert_eq!(allocations.bytes, 0);
+    Mutation::put(&transaction, &property, &value).unwrap();
+    Mutation::put_bytes(&transaction, property.clone(), value.clone()).unwrap();
+    drop(occupied);
+    assert_eq!(
+        transaction.raw.get(&property).await.unwrap(),
+        Some(value.clone())
+    );
+    drop(transaction);
+    db.close().await.unwrap();
+}
+
+/// A membership put admits its decode's bound before decoding, releases it
+/// afterwards, and reports a refused admission as a memory-limit error rather
+/// than an invalid value.
+#[tokio::test]
+async fn budgeted_membership_puts_admit_the_decode_before_running_it() {
+    use crate::encoding::v2::keys::{AdjacencyKey, DataKey, DataKeyKind, EdgePairIndexKey};
+    use crate::encoding::v2::values::adjacency;
+
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "put-guard-admission".into(),
+    })
+    .await
+    .unwrap();
+    let bitmap = DataKey::Data {
+        scope: DataScope::LegacyUnscoped,
+        kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 2)),
+    }
+    .to_bytes();
+    let adjacency_key = DataKey::Data {
+        scope: DataScope::LegacyUnscoped,
+        kind: DataKeyKind::Adjacency(AdjacencyKey::new(1)),
+    }
+    .to_bytes();
+    let ids = roaring::RoaringTreemap::from_iter((0..4096_u64).map(|id| id << 32));
+    let mut edges = adjacency::Edges::new();
+    ids.iter().for_each(|id| edges.add_out(id));
+    for (key, value) in [
+        (
+            bitmap,
+            crate::encoding::v2::values::indexes::SecondaryEqualityValue::encode_ids(&ids),
+        ),
+        (adjacency_key, adjacency::encode_edges(&edges)),
+    ] {
+        let row = crate::merge_operator::MembershipRow::of(&key).unwrap();
+        let bound = row.base_allocation_bound(&value).unwrap();
+        let budget = query_resources::Budget::new(64 * 1024 * 1024);
+        let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+        let view = transaction.mutation_view();
+        let initial = budget.available();
+        let (result, allocations) =
+            crate::allocation_testing::observe(|| validate_put(view.tracking, &key, &value));
+        result.unwrap();
+        assert!(allocations.peak_bytes > 0 && allocations.peak_bytes <= bound);
+        assert_eq!(
+            budget.available(),
+            initial,
+            "the decode admission is transient"
+        );
+
+        let occupied = budget.reserve(initial - bound + 1).unwrap();
+        let (result, allocations) =
+            crate::allocation_testing::observe(|| validate_put(view.tracking, &key, &value));
+        let error = result.unwrap_err();
+        assert!(is_admission_failure(&error), "{error:?}");
+        assert!(matches!(
+            HelixDbError::from(error),
+            HelixDbError::QueryMemoryLimitExceeded
+        ));
+        // Only the admission error's message: the decode would allocate
+        // per container, far beyond this.
+        assert!(
+            allocations.peak_bytes <= 256,
+            "decoded before admission: {allocations:?}"
+        );
+        assert!(Mutation::put_bytes(&transaction, key.clone(), value.clone()).is_err());
+        drop(occupied);
+        Mutation::put_bytes(&transaction, key.clone(), value.clone()).unwrap();
+        assert_eq!(transaction.raw.get(&key).await.unwrap(), Some(value));
+
+        let error = Mutation::put(&transaction, &key, b"corrupt").unwrap_err();
+        assert!(!is_admission_failure(&error));
+        assert_eq!(error.kind(), slatedb::ErrorKind::Invalid);
+        assert_eq!(
+            HelixDbError::from(error).error_code(),
+            helix_ast::error_code::QueryErrorCode::StorageError
+        );
+        drop(transaction);
+        assert_eq!(budget.available(), 64 * 1024 * 1024);
     }
     db.close().await.unwrap();
 }

@@ -6,7 +6,8 @@
 //! filter) under every terminal, with and without statistics, and with the
 //! optional exploration budget exhausted: the selected plan never scans, and
 //! no per-row filter mentions an indexed property. Only a predicate with no
-//! index-served conjunct scans.
+//! index-served conjunct scans. These indexes are not unique: a unique key
+//! evaluates the other conjuncts on its one candidate (see `unique_driver`).
 
 use crate::planning::tests::support::*;
 

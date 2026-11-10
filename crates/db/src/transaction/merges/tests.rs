@@ -2,13 +2,20 @@ use super::*;
 use crate::{
     allocation_testing,
     encoding::v2::keys::{scope::DataScope, AdjacencyKey, DataKeyKind, EdgePairIndexKey},
-    transaction::{Mutation, Owned},
+    transaction::{CommitDurability, Mutation, Owned},
 };
 
 fn bitmap_key(id: u64) -> DataKey<'static> {
     DataKey::Data {
         scope: DataScope::LegacyUnscoped,
         kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(id, id)),
+    }
+}
+
+fn adjacency_key(id: u64) -> DataKey<'static> {
+    DataKey::Data {
+        scope: DataScope::LegacyUnscoped,
+        kind: DataKeyKind::Adjacency(AdjacencyKey::new(id)),
     }
 }
 
@@ -230,9 +237,13 @@ async fn batch_and_entry_rejection_precede_encoding_and_backend_writes() {
     let mut batch = transaction.merge_batch(1).unwrap();
     let held = budget.reserve(budget.available()).unwrap();
     let (result, allocations) = allocation_testing::observe(|| {
-        batch.push(Key::Typed(bitmap_key(1)), 1, std::iter::once(1), || {
-            panic!("encoder ran before admission")
-        })
+        batch.push(
+            Family::Bitmap,
+            Key::Typed(bitmap_key(1)),
+            1,
+            std::iter::once(1),
+            || panic!("encoder ran before admission"),
+        )
     });
     assert!(matches!(
         result,
@@ -246,7 +257,7 @@ async fn batch_and_entry_rejection_precede_encoding_and_backend_writes() {
     drop(batch.bitmap(Key::Typed(bitmap_key(1)), &delta).unwrap());
     let held = budget.reserve(budget.available()).unwrap();
     assert!(matches!(
-        batch.stage().await,
+        batch.stage(),
         Err(HelixDbError::QueryMemoryLimitExceeded)
     ));
     assert_eq!(
@@ -306,7 +317,7 @@ async fn canonical_bitmap_and_adjacency_batches_preserve_values_and_epoch_histor
             let mut batch = transaction.merge_batch(2).unwrap();
             drop(batch.bitmap(Key::Encoded(&key), &delta).unwrap());
             let edge_key = batch.adjacency(Key::Typed(adjacency_key), &edges).unwrap();
-            batch.stage().await.unwrap();
+            batch.stage().unwrap();
             let value = transaction.raw.get(&key).await.unwrap().unwrap();
             assert_eq!(
                 equality::SecondaryEqualityBitmapValue::decode(&value)
@@ -331,62 +342,419 @@ async fn canonical_bitmap_and_adjacency_batches_preserve_values_and_epoch_histor
             }
             previous = budget.available();
         }
-        transaction.commit().await.unwrap();
+        transaction.commit(CommitDurability::Durable).await.unwrap();
         assert_eq!(budget.available(), 16 * 1024 * 1024);
         assert!(db.inner_db().get(&key).await.unwrap().is_some());
     }
     db.close().await.unwrap();
 }
 
+/// One invalid entry rejects its whole batch before any operand is staged.
+#[derive(Debug, Clone, Copy)]
+enum Rejection {
+    DuplicateKey,
+    BitmapDeltaOnAdjacencyRow,
+    AdjacencyDeltaOnBitmapRow,
+    BitmapDeltaOnRangeRow,
+    BitmapDeltaOnPropertyRow,
+    AdjacencyDeltaOnPropertyRow,
+    OverlappingDelta,
+    TruncatedDelta,
+}
+
+/// A range presence row: it shares the property-index prefix with membership
+/// bitmaps but never takes a merge.
+fn range_key(id: u64) -> DataKey<'static> {
+    use crate::encoding::indexes::range::{RangeIndexDirection, RangeIndexKey};
+    DataKey::Data {
+        scope: DataScope::LegacyUnscoped,
+        kind: DataKeyKind::PropertyIndex(
+            crate::encoding::v2::keys::indexes::PropertyIndexKey::Range(RangeIndexKey::new(
+                RangeIndexDirection::Asc,
+                crate::encoding::indexes::hash_property_name("age"),
+                std::borrow::Cow::Borrowed("42"),
+                id,
+            )),
+        ),
+    }
+}
+
+fn property_key(id: u64) -> DataKey<'static> {
+    DataKey::Data {
+        scope: DataScope::LegacyUnscoped,
+        kind: DataKeyKind::NodeProperty(crate::encoding::v2::keys::NodePropertyKey::new(id)),
+    }
+}
+
 #[tokio::test]
-async fn checked_backend_errors_leave_no_partial_writes_and_retain_admission() {
+async fn rejected_batches_stage_nothing_and_release_admission() {
     let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
-        database: "merge-atomic-validation".into(),
+        database: "merge-rejection-atomicity".into(),
     })
     .await
     .unwrap();
-    let budget = Budget::new(1024 * 1024);
-    for duplicate in [false, true] {
-        if !duplicate {
+    let mut delta = equality::BitmapMembershipDelta::default();
+    delta.add(1);
+    let mut edges = adjacency::AdjacencyMembershipDelta::default();
+    edges.add_out(1);
+    // Additions and removals both hold member 1: the frame is well formed, so
+    // only the merge operator's own decoder rejects it.
+    let overlapping = {
+        let mut bytes = b"HLXRBM2\0".to_vec();
+        let mut member = Vec::new();
+        roaring::RoaringTreemap::from_iter([1_u64])
+            .serialize_into(&mut member)
+            .unwrap();
+        for _ in 0..2 {
+            bytes.extend_from_slice(&u32::try_from(member.len()).unwrap().to_be_bytes());
+            bytes.extend_from_slice(&member);
+        }
+        Bytes::from(bytes)
+    };
+    let truncated = delta.encode().slice(..12);
+    for rejection in [
+        Rejection::DuplicateKey,
+        Rejection::BitmapDeltaOnAdjacencyRow,
+        Rejection::AdjacencyDeltaOnBitmapRow,
+        Rejection::BitmapDeltaOnRangeRow,
+        Rejection::BitmapDeltaOnPropertyRow,
+        Rejection::AdjacencyDeltaOnPropertyRow,
+        Rejection::OverlappingDelta,
+        Rejection::TruncatedDelta,
+    ] {
+        for budgeted in [false, true] {
+            let budget = Budget::new(1024 * 1024);
+            let transaction = Owned::begin(&db.inner_db(), budgeted.then_some(&budget))
+                .await
+                .unwrap();
+            let mut batch = transaction.merge_batch(2).unwrap();
+            drop(batch.bitmap(Key::Typed(bitmap_key(1)), &delta).unwrap());
+            let second = match rejection {
+                Rejection::DuplicateKey => batch.bitmap(Key::Typed(bitmap_key(1)), &delta),
+                Rejection::BitmapDeltaOnAdjacencyRow => {
+                    batch.bitmap(Key::Typed(adjacency_key(2)), &delta)
+                }
+                Rejection::AdjacencyDeltaOnBitmapRow => {
+                    batch.adjacency(Key::Typed(bitmap_key(2)), &edges)
+                }
+                Rejection::BitmapDeltaOnRangeRow => batch.bitmap(Key::Typed(range_key(2)), &delta),
+                Rejection::BitmapDeltaOnPropertyRow => {
+                    batch.bitmap(Key::Typed(property_key(2)), &delta)
+                }
+                Rejection::AdjacencyDeltaOnPropertyRow => {
+                    batch.adjacency(Key::Typed(property_key(2)), &edges)
+                }
+                Rejection::OverlappingDelta => batch.push(
+                    Family::Bitmap,
+                    Key::Typed(bitmap_key(2)),
+                    overlapping.len(),
+                    std::iter::once(1),
+                    || overlapping.clone(),
+                ),
+                Rejection::TruncatedDelta => batch.push(
+                    Family::Bitmap,
+                    Key::Typed(bitmap_key(2)),
+                    truncated.len(),
+                    std::iter::once(1),
+                    || truncated.clone(),
+                ),
+            };
+            drop(second.unwrap());
+            // Budgeted or not, and whichever check refuses it, a rejected
+            // batch is one invalid-argument storage error.
+            let error = batch.stage().unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    HelixDbError::Storage(error) if error.kind() == slatedb::ErrorKind::Invalid
+                ),
+                "{rejection:?} budgeted={budgeted}: {error:?}"
+            );
+            assert_eq!(
+                error.error_code(),
+                helix_ast::error_code::QueryErrorCode::StorageError
+            );
+            assert!(
+                transaction
+                    .raw
+                    .get(bitmap_key(1).to_bytes())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{rejection:?} staged its valid entry"
+            );
+            if budgeted {
+                assert_eq!(
+                    transaction
+                        .merges
+                        .as_ref()
+                        .unwrap()
+                        .state
+                        .lock()
+                        .totals
+                        .entries,
+                    0
+                );
+            }
+            drop(transaction);
+            assert_eq!(budget.available(), 1024 * 1024);
+        }
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn staging_never_reads_the_stored_row() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "merge-no-stored-row-read".into(),
+    })
+    .await
+    .unwrap();
+    let mut delta = equality::BitmapMembershipDelta::default();
+    delta.add(u64::MAX - 1);
+    delta.remove(3);
+    let mut edges = adjacency::AdjacencyMembershipDelta::default();
+    edges.add_out(u64::MAX - 1);
+    edges.remove_in(3);
+    let large = roaring::RoaringTreemap::from_iter((0..1 << 20).map(|id| id * 3));
+    let mut large_edges = adjacency::Edges::new();
+    large.iter().for_each(|id| large_edges.add_out(id));
+    let mut stage_allocations = Vec::new();
+    for (stored, row) in [
+        ("absent", None),
+        (
+            "small",
+            Some((
+                equality::SecondaryEqualityBitmapValue::new([3].into_iter().collect()).encode(),
+                adjacency::encode_edges(&adjacency::Edges::new()),
+            )),
+        ),
+        (
+            "large",
+            Some((
+                equality::SecondaryEqualityBitmapValue::new(large.clone()).encode(),
+                adjacency::encode_edges(&large_edges),
+            )),
+        ),
+        (
+            "corrupt",
+            Some((
+                Bytes::from_static(b"corrupt-bitmap"),
+                Bytes::from_static(b"corrupt-adjacency"),
+            )),
+        ),
+    ] {
+        let id = stage_allocations.len() as u64;
+        if let Some((bitmap, adjacency)) = row {
             db.inner_db()
-                .put(bitmap_key(2).to_bytes(), b"corrupt")
+                .put(bitmap_key(id).to_bytes(), bitmap)
+                .await
+                .unwrap();
+            db.inner_db()
+                .put(adjacency_key(id).to_bytes(), adjacency)
                 .await
                 .unwrap();
         }
+        let transaction = Owned::begin(&db.inner_db(), None).await.unwrap();
+        let mut batch = transaction.merge_batch(2).unwrap();
+        drop(batch.bitmap(Key::Typed(bitmap_key(id)), &delta).unwrap());
+        drop(
+            batch
+                .adjacency(Key::Typed(adjacency_key(id)), &edges)
+                .unwrap(),
+        );
+        let (result, allocations) = allocation_testing::observe(|| batch.stage());
+        result.unwrap_or_else(|error| panic!("{stored} row: {error}"));
+        stage_allocations.push((stored, allocations.bytes));
+        drop(transaction);
+    }
+    // Staging allocates only for the delta, so every stored row costs the same.
+    assert!(
+        stage_allocations
+            .iter()
+            .all(|(_, bytes)| *bytes == stage_allocations[0].1),
+        "{stage_allocations:?}"
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn staged_entries_apply_in_push_order_across_epochs() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "merge-push-order".into(),
+    })
+    .await
+    .unwrap();
+    for (row, add_first) in [(0, true), (1, false)] {
+        let transaction = Owned::begin(&db.inner_db(), None).await.unwrap();
+        for add in [add_first, !add_first] {
+            let mut delta = equality::BitmapMembershipDelta::default();
+            let mut edges = adjacency::AdjacencyMembershipDelta::default();
+            if add {
+                delta.add(7);
+                edges.add_out(7);
+            } else {
+                delta.remove(7);
+                edges.remove_out(7);
+            }
+            let mut batch = transaction.merge_batch(2).unwrap();
+            drop(batch.bitmap(Key::Typed(bitmap_key(row)), &delta).unwrap());
+            drop(
+                batch
+                    .adjacency(Key::Typed(adjacency_key(row)), &edges)
+                    .unwrap(),
+            );
+            batch.stage().unwrap();
+        }
+        transaction.commit(CommitDurability::Durable).await.unwrap();
+        let bitmap = db.inner_db().get(bitmap_key(row).to_bytes()).await.unwrap();
+        let adjacency = db
+            .inner_db()
+            .get(adjacency_key(row).to_bytes())
+            .await
+            .unwrap();
+        if add_first {
+            assert_eq!(bitmap, None);
+            assert_eq!(adjacency, None);
+        } else {
+            assert_eq!(
+                equality::SecondaryEqualityBitmapValue::decode(&bitmap.unwrap())
+                    .unwrap()
+                    .ids(),
+                &roaring::RoaringTreemap::from_iter([7])
+            );
+            assert_eq!(
+                adjacency::decode_edges(&adjacency.unwrap())
+                    .unwrap()
+                    .iter_out()
+                    .collect::<Vec<_>>(),
+                vec![7]
+            );
+        }
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn budgeted_staging_admits_validation_before_decoding() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "merge-budgeted-validation".into(),
+    })
+    .await
+    .unwrap();
+    let mut delta = equality::BitmapMembershipDelta::default();
+    let mut edges = adjacency::AdjacencyMembershipDelta::default();
+    for id in 0..4096 {
+        delta.add(id << 32);
+        edges.add_out(id << 32);
+        edges.remove_in(id);
+    }
+    for decode_admitted in [false, true] {
+        let budget = Budget::new(64 * 1024 * 1024);
         let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
-        let mut delta = equality::BitmapMembershipDelta::default();
-        delta.add(1);
+        let initial = budget.available();
         let mut batch = transaction.merge_batch(2).unwrap();
         drop(batch.bitmap(Key::Typed(bitmap_key(1)), &delta).unwrap());
         drop(
             batch
-                .bitmap(
-                    Key::Typed(bitmap_key(if duplicate { 1 } else { 2 })),
-                    &delta,
-                )
+                .adjacency(Key::Typed(adjacency_key(1)), &edges)
                 .unwrap(),
         );
-        let error = batch.stage().await.unwrap_err();
-        assert!(!matches!(error, HelixDbError::QueryMemoryLimitExceeded));
-        assert_eq!(
-            transaction
-                .merges
-                .as_ref()
-                .unwrap()
-                .state
-                .lock()
-                .totals
-                .entries,
-            2
-        );
-        assert!(transaction
-            .raw
-            .get(bitmap_key(1).to_bytes())
-            .await
+        let decode = equality::SecondaryEqualityBitmapValue::prepare(&batch.entries[0].operand)
             .unwrap()
-            .is_none());
+            .allocation_bound()
+            .max(
+                adjacency::prepare_edges(&batch.entries[1].operand)
+                    .unwrap()
+                    .allocation_bound(),
+            );
+        let construction = Batch::construction_bytes(batch.capacity, batch.totals);
+        let history = batch.totals.history_bytes();
+        // Leave room for everything but the decode, so admission fails first.
+        let held = (!decode_admitted).then(|| budget.reserve(budget.available() - 1).unwrap());
+        let (result, allocations) = allocation_testing::observe(|| batch.stage());
+        if decode_admitted {
+            result.unwrap();
+            assert!(
+                allocations.peak_bytes <= construction + decode + history,
+                "peak={}, admitted={}",
+                allocations.peak_bytes,
+                construction + decode + history
+            );
+            // Construction and decode admission end with staging; history stays.
+            assert_eq!(initial - budget.available(), history - size_of::<Tracker>());
+        } else {
+            assert!(matches!(
+                result,
+                Err(HelixDbError::QueryMemoryLimitExceeded)
+            ));
+            // Only the duplicate-key set: the refused decode never ran.
+            assert!(allocations.peak_bytes <= 1024, "{allocations:?}");
+            assert!(transaction
+                .raw
+                .get(bitmap_key(1).to_bytes())
+                .await
+                .unwrap()
+                .is_none());
+        }
+        drop(held);
         drop(transaction);
-        assert_eq!(budget.available(), 1024 * 1024);
+        assert_eq!(budget.available(), 64 * 1024 * 1024);
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn adjacency_conflicts_follow_member_and_direction() {
+    let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+        database: "merge-adjacency-conflicts".into(),
+    })
+    .await
+    .unwrap();
+    for (row, right_incoming, right_member, conflicts) in [
+        (0, false, 5, true),
+        (1, true, 5, false),
+        (2, false, 6, false),
+    ] {
+        let left = Owned::begin(&db.inner_db(), None).await.unwrap();
+        let right = Owned::begin(&db.inner_db(), None).await.unwrap();
+        let mut left_edges = adjacency::AdjacencyMembershipDelta::default();
+        left_edges.add_out(5);
+        let mut right_edges = adjacency::AdjacencyMembershipDelta::default();
+        if right_incoming {
+            right_edges.add_in(right_member);
+        } else {
+            right_edges.remove_out(right_member);
+        }
+        for (transaction, edges) in [(&left, &left_edges), (&right, &right_edges)] {
+            let mut batch = transaction.merge_batch(1).unwrap();
+            drop(
+                batch
+                    .adjacency(Key::Typed(adjacency_key(row)), edges)
+                    .unwrap(),
+            );
+            batch.stage().unwrap();
+        }
+        left.commit(CommitDurability::Durable).await.unwrap();
+        assert_eq!(
+            right.commit(CommitDurability::Durable).await.is_err(),
+            conflicts,
+            "row {row}"
+        );
+        let stored = adjacency::decode_edges(
+            &db.inner_db()
+                .get(adjacency_key(row).to_bytes())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored.iter_out().collect::<Vec<_>>(), vec![5], "row {row}");
+        assert_eq!(
+            stored.iter_in().collect::<Vec<_>>(),
+            if right_incoming { vec![5] } else { vec![] },
+            "row {row}"
+        );
     }
     db.close().await.unwrap();
 }
@@ -408,7 +776,7 @@ async fn abandoned_batches_and_cancelled_transactions_release_all_merge_owners()
         let alias = abandoned
             .bitmap(Key::Typed(bitmap_key(100)), &delta)
             .unwrap();
-        drop(abandoned.stage()); // An unpolled future never stages backend state.
+        drop(abandoned); // An unstaged batch leaves no backend state.
         assert!(budget.available() < initial);
         drop(alias);
         assert_eq!(budget.available(), initial);
@@ -416,7 +784,7 @@ async fn abandoned_batches_and_cancelled_transactions_release_all_merge_owners()
         let key = batch
             .bitmap(Key::Typed(bitmap_key(u64::from(commit))), &delta)
             .unwrap();
-        batch.stage().await.unwrap();
+        batch.stage().unwrap();
         let plain_key = Bytes::copy_from_slice(&key);
         drop(key);
         let retained = budget.available();
@@ -427,7 +795,7 @@ async fn abandoned_batches_and_cancelled_transactions_release_all_merge_owners()
                 .commit_completions
                 .run(async move {
                     wait.await.unwrap();
-                    transaction.commit().await.unwrap();
+                    transaction.commit(CommitDurability::Durable).await.unwrap();
                 })
                 .unwrap();
             drop(task);
@@ -486,7 +854,10 @@ async fn typed_entry_construction_fits_admission_for_dense_sparse_and_large_delt
     db.close().await.unwrap();
 }
 
-#[tokio::test]
+/// Staging is synchronous, so concurrency comes from threads: each batch
+/// stages on its own thread, released together by a barrier, against one
+/// shared budget and, for views of one transaction, one shared history ledger.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admitted_batches_preserve_disjoint_conflicts_and_concurrent_view_accounting() {
     let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
         database: "merge-concurrent-admission".into(),
@@ -497,47 +868,68 @@ async fn admitted_batches_preserve_disjoint_conflicts_and_concurrent_view_accoun
         let budget = Budget::new(1024 * 1024);
         let left = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
         let right = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
-        let mut first = equality::BitmapMembershipDelta::default();
-        first.add(1);
-        let mut second = equality::BitmapMembershipDelta::default();
-        second.add(if overlap { 1 } else { 2 });
-        let mut left_batch = left.merge_batch(1).unwrap();
-        let mut right_batch = right.merge_batch(1).unwrap();
-        drop(
-            left_batch
-                .bitmap(Key::Typed(bitmap_key(u64::from(overlap))), &first)
-                .unwrap(),
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|threads| {
+            for (view, member) in [
+                (left.mutation_view(), 1),
+                (right.mutation_view(), if overlap { 1 } else { 2 }),
+            ] {
+                let barrier = &barrier;
+                threads.spawn(move || {
+                    let mut delta = equality::BitmapMembershipDelta::default();
+                    delta.add(member);
+                    let mut batch = view.merge_batch(1).unwrap();
+                    drop(
+                        batch
+                            .bitmap(Key::Typed(bitmap_key(u64::from(overlap))), &delta)
+                            .unwrap(),
+                    );
+                    barrier.wait();
+                    batch.stage().unwrap();
+                });
+            }
+        });
+        left.commit(CommitDurability::Durable).await.unwrap();
+        assert_eq!(
+            right.commit(CommitDurability::Durable).await.is_err(),
+            overlap
         );
-        drop(
-            right_batch
-                .bitmap(Key::Typed(bitmap_key(u64::from(overlap))), &second)
-                .unwrap(),
-        );
-        let (left_result, right_result) = tokio::join!(left_batch.stage(), right_batch.stage());
-        left_result.unwrap();
-        right_result.unwrap();
-        left.commit().await.unwrap();
-        assert_eq!(right.commit().await.is_err(), overlap);
         assert_eq!(budget.available(), 1024 * 1024);
     }
-    let budget = Budget::new(1024 * 1024);
+    const THREADS: u64 = 8;
+    const BATCHES: u64 = 16;
+    let budget = Budget::new(16 * 1024 * 1024);
     let owner = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
-    let view = owner.mutation_view();
-    let mut first = equality::BitmapMembershipDelta::default();
-    first.add(7);
-    let mut left = owner.merge_batch(1).unwrap();
-    let mut right = view.merge_batch(1).unwrap();
-    drop(left.bitmap(Key::Typed(bitmap_key(10)), &first).unwrap());
-    drop(right.bitmap(Key::Typed(bitmap_key(11)), &first).unwrap());
-    let (left, right) = tokio::join!(left.stage(), right.stage());
-    left.unwrap();
-    right.unwrap();
+    let initial = budget.available();
+    let barrier = std::sync::Barrier::new(THREADS as usize);
+    std::thread::scope(|threads| {
+        for thread in 0..THREADS {
+            let (barrier, view) = (&barrier, owner.mutation_view());
+            threads.spawn(move || {
+                let mut delta = equality::BitmapMembershipDelta::default();
+                delta.add(7);
+                barrier.wait();
+                for batch in 0..BATCHES {
+                    let mut staged = view.merge_batch(1).unwrap();
+                    drop(
+                        staged
+                            .bitmap(Key::Typed(bitmap_key(thread * BATCHES + batch)), &delta)
+                            .unwrap(),
+                    );
+                    staged.stage().unwrap();
+                }
+            });
+        }
+    });
+    let history = owner.merges.as_ref().unwrap().state.lock().totals;
+    assert_eq!(history.entries as u64, THREADS * BATCHES);
+    // Construction and decode admission ended with each batch; history stays.
     assert_eq!(
-        owner.merges.as_ref().unwrap().state.lock().totals.entries,
-        2
+        initial - budget.available(),
+        history.history_bytes() - size_of::<Tracker>()
     );
-    owner.commit().await.unwrap();
-    assert_eq!(budget.available(), 1024 * 1024);
+    owner.commit(CommitDurability::Durable).await.unwrap();
+    assert_eq!(budget.available(), 16 * 1024 * 1024);
     db.close().await.unwrap();
 }
 
@@ -552,6 +944,7 @@ async fn missing_cardinality_and_key_admission_failure_never_invoke_the_encoder(
     let owner = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
     let mut batch = owner.merge_batch(1).unwrap();
     let result = batch.push(
+        Family::Bitmap,
         Key::Typed(bitmap_key(1)),
         1,
         std::iter::from_fn(|| Some(1)),
@@ -570,9 +963,13 @@ async fn missing_cardinality_and_key_admission_failure_never_invoke_the_encoder(
     let additional =
         Batch::construction_bytes(1, entry) - Batch::construction_bytes(1, Totals::default());
     let held = budget.reserve(budget.available() - additional).unwrap();
-    let result = batch.push(Key::Typed(bitmap_key(1)), 1, std::iter::once(1), || {
-        panic!("rejected key encoded operand")
-    });
+    let result = batch.push(
+        Family::Bitmap,
+        Key::Typed(bitmap_key(1)),
+        1,
+        std::iter::once(1),
+        || panic!("rejected key encoded operand"),
+    );
     assert!(matches!(
         result,
         Err(HelixDbError::QueryMemoryLimitExceeded)
@@ -580,8 +977,94 @@ async fn missing_cardinality_and_key_admission_failure_never_invoke_the_encoder(
     assert!(batch.entries.is_empty());
     drop(held);
     drop(batch);
-    owner.merge_batch(0).unwrap().stage().await.unwrap();
+    owner.merge_batch(0).unwrap().stage().unwrap();
     drop(owner);
     assert_eq!(budget.available(), 1024 * 1024);
     db.close().await.unwrap();
+}
+
+/// Both paths end in the backend's `merge_disjoint_with_discriminators` with
+/// the same keys, operands and tokens, so conflicts and stored rows match.
+#[tokio::test]
+async fn staging_matches_the_previous_checked_backend_staging() {
+    let mut runs = Vec::new();
+    for checked in [false, true] {
+        let db = crate::HelixDB::open(crate::HelixDbSource::InMemory {
+            database: format!("merge-equivalence-{checked}"),
+        })
+        .await
+        .unwrap();
+        let mut outcomes = Vec::new();
+        for (row, left_member, right_member, right_removes) in [
+            (0, 1, 1, false),
+            (1, 1, 2, false),
+            (2, 1, 1, true),
+            (3, 1, 2, true),
+        ] {
+            let left = Owned::begin(&db.inner_db(), None).await.unwrap();
+            let right = Owned::begin(&db.inner_db(), None).await.unwrap();
+            for (transaction, member, removes) in [
+                (&left, left_member, false),
+                (&right, right_member, right_removes),
+            ] {
+                let mut delta = equality::BitmapMembershipDelta::default();
+                let mut edges = adjacency::AdjacencyMembershipDelta::default();
+                if removes {
+                    delta.remove(member);
+                    edges.remove_in(member);
+                } else {
+                    delta.add(member);
+                    edges.add_in(member);
+                }
+                if checked {
+                    let incoming = edges
+                        .incoming_members()
+                        .map(|id| (1_u128 << u64::BITS) | u128::from(id));
+                    transaction
+                        .raw
+                        .merge_disjoint_checked_batch([
+                            slatedb::DisjointMergeBatchEntry::from_tokens(
+                                bitmap_key(row).to_bytes(),
+                                delta.members().map(u128::from),
+                                delta.encode(),
+                            ),
+                            slatedb::DisjointMergeBatchEntry::from_tokens(
+                                adjacency_key(row).to_bytes(),
+                                incoming,
+                                edges.encode(),
+                            ),
+                        ])
+                        .await
+                        .unwrap();
+                } else {
+                    let mut batch = transaction.merge_batch(2).unwrap();
+                    drop(batch.bitmap(Key::Typed(bitmap_key(row)), &delta).unwrap());
+                    drop(
+                        batch
+                            .adjacency(Key::Typed(adjacency_key(row)), &edges)
+                            .unwrap(),
+                    );
+                    batch.stage().unwrap();
+                }
+            }
+            left.commit(CommitDurability::Durable).await.unwrap();
+            outcomes.push(right.commit(CommitDurability::Durable).await.is_ok());
+        }
+        db.inner_db()
+            .flush_with_options(slatedb::config::FlushOptions {
+                flush_type: slatedb::config::FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        let mut rows = Vec::new();
+        for row in 0..4 {
+            for key in [bitmap_key(row).to_bytes(), adjacency_key(row).to_bytes()] {
+                rows.push(db.inner_db().get(&key).await.unwrap());
+            }
+        }
+        runs.push((outcomes, rows));
+        db.close().await.unwrap();
+    }
+    assert_eq!(runs[0].0, vec![false, true, false, true]);
+    assert_eq!(runs[0], runs[1]);
 }

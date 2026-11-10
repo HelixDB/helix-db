@@ -1,6 +1,8 @@
 //! Fixed V3/V4 secondary-equality hot-path benchmark.
 
-use db::production_coverage::{
+#![recursion_limit = "256"]
+
+use db::bench_internals::{
     benchmark_million_sequential_id_bitmap, SecondaryEqualityHotPathFixture,
     SecondaryEqualityInsertMode, SecondaryEqualityReadMode,
 };
@@ -13,11 +15,11 @@ static ALLOCATOR: support::TrackingAllocator = support::TrackingAllocator::new()
 
 #[derive(Serialize)]
 struct BenchmarkReport {
-    sequential: db::production_coverage::SecondaryEqualityInsertSample,
-    read_sequential: db::production_coverage::SecondaryEqualityReadSample,
-    read_concurrent: db::production_coverage::SecondaryEqualityReadSample,
-    concurrent: db::production_coverage::SecondaryEqualityInsertSample,
-    million_sequential_id_bitmap: db::production_coverage::SecondaryEqualityMillionBitmapSample,
+    sequential: db::bench_internals::SecondaryEqualityInsertSample,
+    read_sequential: db::bench_internals::SecondaryEqualityReadSample,
+    read_concurrent: db::bench_internals::SecondaryEqualityReadSample,
+    concurrent: db::bench_internals::SecondaryEqualityInsertSample,
+    million_sequential_id_bitmap: db::bench_internals::SecondaryEqualityMillionBitmapSample,
 }
 
 fn main() {

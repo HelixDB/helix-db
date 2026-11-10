@@ -1,6 +1,6 @@
 //! Markerless tenant envelope used before the current scoped-key marker.
 
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 use bytes::{BufMut, Bytes};
 
 use crate::encoding::v2::keys::scope::{TenantId, TENANT_ID_LEN};
@@ -39,7 +39,7 @@ impl<'a> LegacyTenantEnvelope<'a> {
 }
 
 /// Encodes a markerless tenant envelope for migration fixtures.
-#[cfg(any(test, feature = "production-coverage"))]
+#[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn encode_for_contract(tenant: TenantId, logical_key: &[u8]) -> Bytes {
     assert!(

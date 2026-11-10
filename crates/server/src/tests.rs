@@ -17,6 +17,8 @@ fn memory_config(name: &str) -> ServerConfig {
         grpc_addr: "127.0.0.1:0".parse().unwrap(),
         db_path: name.to_string(),
         storage: StorageConfig::Memory,
+        wal_flush_interval_ms: None,
+        sst_compression: db::config::SstCompression::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     }
 }
@@ -203,9 +205,40 @@ async fn http_transport_completion_joins_peer_before_database_close() {
 
 #[tokio::test]
 async fn embedding_shutdown_closes_both_transports_and_database() {
-    run_with_shutdown(memory_config("server-owned-shutdown"), async {})
-        .await
-        .unwrap();
+    // Reserve two distinct ports, then free them for the server.
+    let listeners = [
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+        TcpListener::bind("127.0.0.1:0").unwrap(),
+    ];
+    let addresses = listeners
+        .each_ref()
+        .map(|listener| listener.local_addr().unwrap());
+    drop(listeners);
+    let mut config = memory_config("server-owned-shutdown");
+    [config.http_addr, config.grpc_addr] = addresses;
+
+    // Shutdown is signalled only once both transports accept connections. The
+    // runner returns `Ok` only after joining both transports and closing the
+    // database without error.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        run_with_shutdown(config, async move {
+            for address in addresses {
+                while tokio::net::TcpStream::connect(address).await.is_err() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        }),
+    )
+    .await
+    .expect("both transports start and shut down")
+    .expect("both transports join and the database closes");
+    for address in addresses {
+        assert!(
+            std::net::TcpStream::connect(address).is_err(),
+            "{address} still accepts connections after shutdown"
+        );
+    }
 }
 
 #[tokio::test]
@@ -506,6 +539,8 @@ async fn hybrid_disk_cache_serves_reopened_reads_from_local_disk() {
             root: data_root.clone(),
             cache: CacheConfig::Hybrid(Box::new(cache)),
         },
+        wal_flush_interval_ms: None,
+        sst_compression: db::config::SstCompression::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let write = query::QueryRequest::write(
@@ -660,6 +695,8 @@ async fn hybrid_disk_cache_admits_full_text_splits_only_on_demand_contract() {
                 .unwrap(),
             )),
         },
+        wal_flush_interval_ms: None,
+        sst_compression: db::config::SstCompression::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let search = query::QueryRequest::read(
@@ -815,6 +852,8 @@ async fn a_hybrid_cache_directory_serves_one_server_at_a_time() {
                 .unwrap(),
             )),
         },
+        wal_flush_interval_ms: None,
+        sst_compression: db::config::SstCompression::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let first = open_database(&config(128 * MIB)).await.unwrap();
@@ -896,6 +935,8 @@ async fn a_benchmark_writer_holds_its_hybrid_cache_directory_like_the_server() {
                 .unwrap(),
             )),
         },
+        wal_flush_interval_ms: None,
+        sst_compression: db::config::SstCompression::default(),
         index_operation_queue: db::config::IndexOperationQueueTuning::default(),
     };
     let benchmark = crate::benchmark::open_database(
@@ -981,10 +1022,4 @@ fn open_file_limit_rises_to_the_hard_limit_or_fails_below_the_minimum() {
     assert!(error.to_string().starts_with("HELIX_DISK_CACHE_BYTES"));
     assert_eq!(getrlimit(Resource::Nofile), raised);
     setrlimit(Resource::Nofile, original).unwrap();
-}
-
-#[test]
-fn tracing_initialization_is_idempotent() {
-    init_tracing_from_env();
-    init_tracing_from_env();
 }

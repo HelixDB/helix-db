@@ -50,6 +50,7 @@ use super::{
 };
 
 mod all_index_validation;
+mod sustained_secondary_writes;
 mod text_build_reconciliation;
 
 const MAXIMUM_CONTROLLER_TURNS: usize = 4_096;
@@ -94,7 +95,7 @@ pub(super) async fn run_repeated_faults() {
             HelixDbSource::InMemory {
                 database: format!("index-lifecycle-lifecycle-repeated-fault-{ordinal}"),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -219,7 +220,7 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                 HelixDbSource::InMemory {
                     database: format!("index-lifecycle-public-boundary-{ordinal}"),
                 },
-                DbConfig::new(),
+                contract_config(),
                 LifecycleTestScheduling::Explicit,
             )
             .await
@@ -316,23 +317,28 @@ pub(super) async fn run_secondary_vector_public_boundaries() {
                 .await
                 .expect("public-boundary operation resumes after writes");
             assert_monotonic_step(&evidence);
-            let resumed = db
+            let resumed_status = db
                 .get_index_operation(scope, operation_id)
                 .await
-                .expect("public-boundary operation remains readable")
-                .common()
-                .stage;
+                .expect("public-boundary operation remains readable");
+            let resumed = resumed_status.common().stage;
             match shape.family() {
-                PublicMutationFamily::Secondary
-                    if matches!(
-                        stage,
-                        IndexOperationStage::Validate | IndexOperationStage::Activate
-                    ) =>
-                {
-                    assert_eq!(
-                        resumed,
-                        IndexOperationStage::CatchUp,
-                        "{shape:?} must re-enter CatchUp after a public write at {stage:?}"
+                // The gated step drains a write window's deltas itself:
+                // validation moves on with its releases, and activation
+                // completes in the same step.
+                PublicMutationFamily::Secondary if stage == IndexOperationStage::Validate => {
+                    assert!(
+                        matches!(
+                            resumed,
+                            IndexOperationStage::Validate | IndexOperationStage::Activate
+                        ),
+                        "{shape:?} must drain public writes at {stage:?} and stay past catch-up, resumed at {resumed:?}"
+                    );
+                }
+                PublicMutationFamily::Secondary if stage == IndexOperationStage::Activate => {
+                    assert!(
+                        matches!(resumed_status, IndexOperationStatus::Succeeded { .. }),
+                        "{shape:?} must drain public writes at {stage:?} and activate in that step: {resumed_status:?}"
                     );
                 }
                 PublicMutationFamily::Secondary => {}
@@ -401,7 +407,7 @@ fn one_row_lifecycle_config() -> DbConfig {
         defaults.text_compaction(),
     )
     .expect("one-row lifecycle backfill limits remain internally consistent");
-    DbConfig::new()
+    contract_config()
         .with_secondary_index_lifecycle_tuning(
             SecondaryIndexLifecycleTuning::default().with_batch_rows(
                 SecondaryIndexLifecycleBatchRows::new(1)
@@ -852,7 +858,7 @@ async fn run_concurrent_create_convergence() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-concurrent-create".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -1025,7 +1031,7 @@ async fn run_conflicting_create_convergence() {
             HelixDbSource::InMemory {
                 database: format!("index-lifecycle-lifecycle-conflicting-create-{ordinal}"),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -1101,7 +1107,7 @@ async fn run_activation_and_drop_serialization() {
                     if drop_wins { "drop" } else { "activation" }
                 ),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -1193,7 +1199,7 @@ async fn run_active_drop_and_mutation_serialization() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-active-drop-mutation".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -1291,6 +1297,16 @@ async fn run_active_drop_and_mutation_serialization() {
     db.close()
         .await
         .expect("active DROP/mutation writer closes");
+}
+
+/// Contract databases flush SlateDB writes every millisecond, as embedded
+/// in-memory databases do. `DbConfig::new()` keeps SlateDB's 100 ms default,
+/// so every awaited commit would wait out the interval.
+fn contract_config() -> DbConfig {
+    DbConfig::new().with_slate_settings(slatedb::Settings {
+        flush_interval: Some(Duration::from_millis(1)),
+        ..slatedb::Settings::default()
+    })
 }
 
 /// Runs real background workers concurrently with bounded public writers.
@@ -1415,19 +1431,22 @@ async fn wait_for_automatic_terminal(
 /// Runs data-bearing backfill/mutation and uniqueness contracts.
 pub(super) async fn run_mutations() {
     run_secondary_mutation_interleaving().await;
-    run_unique_activation_conflict_repair().await;
+    run_unique_activation_conflict_rejection().await;
     run_secondary_edge_mutation_interleaving().await;
     run_every_family_public_mutation_interleaving().await;
     run_partitioned_search_edge_tenant_moves().await;
 }
 
-/// Proves an activation-boundary unique conflict blocks, repairs, and retries.
-async fn run_unique_activation_conflict_repair() {
+/// Proves a duplicate written at the activation boundary of a unique build
+/// fails at write time, leaving no delta, and the build still activates.
+/// A duplicate already in the source blocks, repairs, and retries in
+/// `run_secondary_mutation_interleaving`.
+async fn run_unique_activation_conflict_rejection() {
     let db = HelixDB::open_for_index_lifecycle_testing(
         HelixDbSource::InMemory {
             database: "index-lifecycle-unique-activation-conflict".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -1476,43 +1495,14 @@ async fn run_unique_activation_conflict_repair() {
         Property::string("$label", "ActivationUnique"),
         Property::string("value", duplicate),
     ];
-    mutate_source(&db, scope, entity_ids.start + 1, &second, &conflicting)
-        .await
-        .expect("activation-boundary duplicate records one build delta");
-    let evidence = controller
-        .advance(
-            &db,
-            LifecycleWorkTarget::Operation {
-                scope,
-                operation_id,
-            },
-        )
-        .await
-        .expect("activation-boundary duplicate returns to catch-up");
-    assert_monotonic_step(&evidence);
-    assert_eq!(
-        db.get_index_operation(scope, operation_id)
-            .await
-            .expect("activation unique operation remains readable")
-            .common()
-            .stage,
-        IndexOperationStage::CatchUp
+    assert!(
+        matches!(
+            mutate_source(&db, scope, entity_ids.start + 1, &second, &conflicting).await,
+            Err(HelixDbError::UniqueConstraintViolation { .. })
+        ),
+        "an activation-boundary duplicate fails at write time"
     );
-    let blocked = drive_to_terminal(&db, &controller, scope, operation_id).await;
-    assert!(matches!(blocked, IndexOperationStatus::Blocked { .. }));
-
-    let repaired = vec![
-        Property::string("$label", "ActivationUnique"),
-        Property::string("value", "activation-repaired"),
-    ];
-    mutate_source(&db, scope, entity_ids.start + 1, &conflicting, &repaired)
-        .await
-        .expect("blocked activation unique source repairs");
-    let retried = db
-        .retry_index_operation(scope, operation_id)
-        .await
-        .expect("activation unique operation retries");
-    assert_eq!(retried.common().stage, blocked.common().stage);
+    assert_build_deltas_empty(&db, scope, &definition).await;
     assert!(matches!(
         drive_to_terminal(&db, &controller, scope, operation_id).await,
         IndexOperationStatus::Succeeded { .. }
@@ -1522,7 +1512,7 @@ async fn run_unique_activation_conflict_repair() {
         &db,
         scope,
         &definition,
-        "activation-repaired",
+        "activation-distinct",
         [entity_ids.start + 1],
     )
     .await;
@@ -1542,9 +1532,14 @@ pub(super) async fn run_text_build_reconciliation() {
     text_build_reconciliation::run().await;
 }
 
+/// Runs secondary builds that must activate while public writes never stop.
+pub(super) async fn run_secondary_sustained_writes() {
+    sustained_secondary_writes::run().await;
+}
+
 /// Interleaves source changes with two builds and proves unique repair/retry.
 async fn run_secondary_mutation_interleaving() {
-    let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
+    let config = contract_config().with_secondary_index_lifecycle_tuning(
         SecondaryIndexLifecycleTuning::default().with_batch_rows(
             SecondaryIndexLifecycleBatchRows::new(4).expect("test batch is positive"),
         ),
@@ -1840,19 +1835,16 @@ async fn run_secondary_mutation_interleaving() {
     .await;
     assert_build_deltas_empty(&db, scope, &alias_definition).await;
 
+    // Both rows already hold the duplicate when the build starts, so the
+    // scan blocks on it; a write cannot add one while the build runs.
     let unique_ids = allocate_node_ids(&db, 2).await;
     let duplicate = "duplicate-while-building";
     for entity_id in unique_ids.clone() {
-        let unique = if entity_id == unique_ids.start {
-            duplicate.to_string()
-        } else {
-            format!("initial-unique-{entity_id}")
-        };
         let properties = document_with_values(
             "IndexedUser",
             format!("unique-source-{entity_id}@example.com"),
             format!("unique-source-alias-{entity_id}"),
-            unique,
+            duplicate,
         );
         mutate_source(&db, scope, entity_id, &[], &properties)
             .await
@@ -1878,36 +1870,6 @@ async fn run_secondary_mutation_interleaving() {
     else {
         panic!("fresh unique definition must enqueue");
     };
-    drive_until_stage(
-        &db,
-        &controller,
-        scope,
-        unique_operation_id,
-        IndexOperationStage::Validate,
-    )
-    .await;
-    let conflicting_id = unique_ids.end - 1;
-    let conflicting_before = document_with_values(
-        "IndexedUser",
-        format!("unique-source-{conflicting_id}@example.com"),
-        format!("unique-source-alias-{conflicting_id}"),
-        format!("initial-unique-{conflicting_id}"),
-    );
-    let conflicting_after = document_with_values(
-        "IndexedUser",
-        format!("unique-source-{conflicting_id}@example.com"),
-        format!("unique-source-alias-{conflicting_id}"),
-        duplicate,
-    );
-    mutate_source(
-        &db,
-        scope,
-        conflicting_id,
-        &conflicting_before,
-        &conflicting_after,
-    )
-    .await
-    .expect("duplicate introduced during validation commits as build delta");
     let blocked = drive_to_terminal(&db, &controller, scope, unique_operation_id).await;
     assert!(matches!(blocked, IndexOperationStatus::Blocked { .. }));
 
@@ -1932,6 +1894,27 @@ async fn run_secondary_mutation_interleaving() {
         .await
         .expect("unique build retries from its exact checkpoint");
     assert_eq!(retried.common().stage, blocked.common().stage);
+    drive_until_stage(
+        &db,
+        &controller,
+        scope,
+        unique_operation_id,
+        IndexOperationStage::Validate,
+    )
+    .await;
+    let duplicate_again = document_with_values(
+        "IndexedUser",
+        format!("unique-source-{repaired_id}@example.com"),
+        format!("unique-source-alias-{repaired_id}"),
+        duplicate,
+    );
+    assert!(
+        matches!(
+            mutate_source(&db, scope, repaired_id, &repaired_after, &duplicate_again).await,
+            Err(HelixDbError::UniqueConstraintViolation { .. })
+        ),
+        "a duplicate written during validation fails at write time"
+    );
     assert!(matches!(
         drive_to_terminal(&db, &controller, scope, unique_operation_id).await,
         IndexOperationStatus::Succeeded { .. }
@@ -2037,7 +2020,7 @@ async fn run_secondary_mutation_interleaving() {
 
 /// Exercises edge inserts, updates, deletes, and Active maintenance.
 async fn run_secondary_edge_mutation_interleaving() {
-    let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
+    let config = contract_config().with_secondary_index_lifecycle_tuning(
         SecondaryIndexLifecycleTuning::default().with_batch_rows(
             SecondaryIndexLifecycleBatchRows::new(2).expect("edge scan batch is positive"),
         ),
@@ -2421,7 +2404,7 @@ async fn run_every_family_public_mutation_interleaving() {
             HelixDbSource::InMemory {
                 database: format!("index-lifecycle-lifecycle-public-mutation-{ordinal}"),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -2520,7 +2503,7 @@ async fn run_partitioned_search_edge_tenant_moves() {
             HelixDbSource::InMemory {
                 database: format!("index-lifecycle-lifecycle-partitioned-edge-{family_ordinal}"),
             },
-            DbConfig::new(),
+            contract_config(),
             LifecycleTestScheduling::Explicit,
         )
         .await
@@ -3230,12 +3213,12 @@ async fn mutate_edge_source(
 }
 
 /// Compares one active physical equality lookup with an exact ID set.
-async fn assert_equality<const N: usize>(
+async fn assert_equality(
     db: &HelixDB,
     scope: DataScope,
     definition: &ValidatedDynamicIndexDefinition,
     value: &str,
-    expected: [u64; N],
+    expected: impl IntoIterator<Item = u64>,
 ) {
     let record = crate::index_lifecycle::repository::load_index_record(
         db.lifecycle_test_writer_db()
@@ -3341,7 +3324,7 @@ async fn run_family_shapes() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-family-shapes".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -3417,7 +3400,7 @@ async fn run_create_drop_state_matrix() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-create-drop-matrix".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -3649,7 +3632,7 @@ async fn run_building_drop_stage_matrix() {
             .into_iter()
             .enumerate()
         {
-            let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
+            let config = contract_config().with_secondary_index_lifecycle_tuning(
                 SecondaryIndexLifecycleTuning::default().with_batch_rows(
                     SecondaryIndexLifecycleBatchRows::new(2)
                         .expect("drop matrix scan batch is positive"),
@@ -3815,7 +3798,7 @@ async fn run_active_drop_snapshot_survival() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-active-drop-snapshot-survival".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -3942,7 +3925,7 @@ async fn run_active_vector_drop_snapshot_survival() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-active-vector-drop-snapshot-survival".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await
@@ -4063,7 +4046,7 @@ async fn run_scope_isolation() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-lifecycle-scope-isolation".to_string(),
         },
-        DbConfig::new(),
+        contract_config(),
         LifecycleTestScheduling::Explicit,
     )
     .await

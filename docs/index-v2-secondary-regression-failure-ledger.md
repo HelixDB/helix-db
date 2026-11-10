@@ -60,7 +60,6 @@ V2-to-V3 migration, dual read, compatibility decoder, or shadow keyspace.
 | Test | Defect captured |
 | --- | --- |
 | `disabled_secondary_worker_never_hangs_writer_open` | Legacy definition convergence previously waited forever after accepting work while the secondary worker was disabled; the regression enforces a strict timeout. |
-| `disabled_secondary_lifecycle_has_a_public_one_step_api` | Disabled mode previously had no operable production one-step API. |
 
 `process_secondary_index_lifecycle_once` now uses the installed production
 driver, normal observation/claim/fencing/recovery/commit path, configured

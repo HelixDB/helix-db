@@ -8,7 +8,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use db::query_service::{QueryFailureClass, QueryMode, QueryResponse, QueryServiceError};
+use db::query_service::{QueryMode, QueryResponse, QueryServiceError};
 use helix_ast::error_code;
 use helix_ast::query::{QueryRequest, QueryRequestType};
 use serde::Serialize;
@@ -39,7 +39,8 @@ pub async fn serve(
 
 pub(crate) fn router(state: ServerState) -> Router {
     // Paths stay literal: docs/scripts/check-openapi.mjs reads them from this
-    // file. The Cypher paths equal `helix_cypher::api::{HTTP_PATH, HTTP_EXPLAIN_PATH}`.
+    // file. The Cypher and SQL paths equal `helix_cypher::api::{HTTP_PATH,
+    // HTTP_EXPLAIN_PATH, HTTP_SQL_PATH, HTTP_SQL_EXPLAIN_PATH}`.
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -47,6 +48,8 @@ pub(crate) fn router(state: ServerState) -> Router {
         .route("/v2/query", post(execute_query))
         .route("/v2/cypher", post(execute_cypher))
         .route("/v2/cypher/explain", post(explain_cypher))
+        .route("/v2/sql", post(execute_sql))
+        .route("/v2/sql/explain", post(explain_sql))
         .with_state(state)
 }
 
@@ -104,7 +107,6 @@ async fn execute_query(
         Ok(request) => request,
         Err(error) => {
             return error_response(
-                StatusCode::BAD_REQUEST,
                 error_code::QueryErrorCode::InvalidQueryJson,
                 format!("invalid query JSON: {error}"),
             );
@@ -123,14 +125,7 @@ async fn execute_query(
         )
         .await
     {
-        Ok(response) => {
-            if options.await_durable == Some(true)
-                && let Err(error) = state.flush_writer().await
-            {
-                return service_error_response(error.into());
-            }
-            query_response(response)
-        }
+        Ok(response) => query_response(response),
         Err(error) => service_error_response(error),
     }
 }
@@ -138,23 +133,22 @@ async fn execute_query(
 async fn read_body(body: Body) -> Result<Bytes, Box<Response>> {
     to_bytes(body, MAX_QUERY_BODY_BYTES).await.map_err(|error| {
         Box::new(error_response(
-            StatusCode::BAD_REQUEST,
             error_code::QueryErrorCode::InvalidRequestBody,
             format!("failed to read request body: {error}"),
         ))
     })
 }
 
-async fn read_cypher_request(
+/// Read the options and JSON body of a Cypher or SQL request.
+async fn read_json_request<T: serde::de::DeserializeOwned>(
     headers: &HeaderMap,
     body: Body,
-) -> Result<(RequestOptions, db::cypher::Request), Box<Response>> {
+) -> Result<(RequestOptions, T), Box<Response>> {
     let options =
         RequestOptions::from_headers(headers).map_err(|error| Box::new(error.into_response()))?;
     let bytes = read_body(body).await?;
-    let request = serde_json::from_slice::<db::cypher::Request>(&bytes).map_err(|error| {
+    let request = serde_json::from_slice::<T>(&bytes).map_err(|error| {
         Box::new(error_response(
-            StatusCode::BAD_REQUEST,
             error_code::QueryErrorCode::InvalidQueryJson,
             error.to_string(),
         ))
@@ -167,16 +161,42 @@ async fn explain_cypher(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let (options, request) = match read_cypher_request(&headers, body).await {
+    let (options, request) = match read_json_request::<db::cypher::Request>(&headers, body).await {
         Ok(request) => request,
         Err(response) => return *response,
     };
+    match request.compile() {
+        Ok(request) => explain_compiled(&state, &options, request).await,
+        Err(error) => cypher_error_response(error.into()),
+    }
+}
+
+/// `POST /v2/sql/explain`: translate one SQL statement, then plan it exactly
+/// like `POST /v2/cypher/explain`.
+async fn explain_sql(State(state): State<ServerState>, headers: HeaderMap, body: Body) -> Response {
+    let (options, request) =
+        match read_json_request::<db::cypher::sql::request::Request>(&headers, body).await {
+            Ok(request) => request,
+            Err(response) => return *response,
+        };
+    match request.compile() {
+        Ok(request) => explain_compiled(&state, &options, request).await,
+        Err(error) => cypher_error_response(error.into()),
+    }
+}
+
+/// Explaining never executes, so even a modifying statement uses read options.
+async fn explain_compiled(
+    state: &ServerState,
+    options: &RequestOptions,
+    request: db::cypher::CompiledRequest,
+) -> Response {
     if let Err(error) = options.validate_for_request_type(QueryRequestType::Read, state.db_mode()) {
         return error.into_response();
     }
     match state
         .query_service()
-        .explain_cypher_scoped_controlled(
+        .explain_compiled_cypher_scoped_controlled(
             request,
             db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
@@ -194,14 +214,35 @@ async fn execute_cypher(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let (options, request) = match read_cypher_request(&headers, body).await {
+    let (options, request) = match read_json_request::<db::cypher::Request>(&headers, body).await {
         Ok(request) => request,
         Err(response) => return *response,
     };
-    let request = match request.compile() {
-        Ok(request) => request,
-        Err(error) => return cypher_error_response(error.into()),
-    };
+    match request.compile() {
+        Ok(request) => execute_compiled(&state, &options, request).await,
+        Err(error) => cypher_error_response(error.into()),
+    }
+}
+
+/// `POST /v2/sql`: translate one SQL statement to Cypher, then route and
+/// execute it exactly like `POST /v2/cypher`.
+async fn execute_sql(State(state): State<ServerState>, headers: HeaderMap, body: Body) -> Response {
+    let (options, request) =
+        match read_json_request::<db::cypher::sql::request::Request>(&headers, body).await {
+            Ok(request) => request,
+            Err(response) => return *response,
+        };
+    match request.compile() {
+        Ok(request) => execute_compiled(&state, &options, request).await,
+        Err(error) => cypher_error_response(error.into()),
+    }
+}
+
+async fn execute_compiled(
+    state: &ServerState,
+    options: &RequestOptions,
+    request: db::cypher::CompiledRequest,
+) -> Response {
     if let Err(error) = options.validate_for_request_type(request.request_type(), state.db_mode()) {
         return error.into_response();
     }
@@ -217,19 +258,12 @@ async fn execute_cypher(
         )
         .await;
     match result {
-        Ok(response) => {
-            if options.await_durable == Some(true)
-                && let Err(error) = state.flush_writer().await
-            {
-                return service_error_response(error.into());
-            }
-            (
-                StatusCode::OK,
-                [(header::CONTENT_TYPE, "application/json")],
-                response.into_bytes(),
-            )
-                .into_response()
-        }
+        Ok(response) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            response.into_bytes(),
+        )
+            .into_response(),
         Err(error) => cypher_error_response(error),
     }
 }
@@ -258,33 +292,7 @@ fn query_response(response: QueryResponse) -> Response {
 }
 
 pub(super) fn service_error_response(error: QueryServiceError) -> Response {
-    let class = error.classify();
-    let status = match class {
-        QueryFailureClass::CommitOutcomeUnknown | QueryFailureClass::WriterModeRequired => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
-        QueryFailureClass::Conflict => StatusCode::CONFLICT,
-        QueryFailureClass::Backpressure => StatusCode::TOO_MANY_REQUESTS,
-        QueryFailureClass::InvalidRequest | QueryFailureClass::Planning => StatusCode::BAD_REQUEST,
-        QueryFailureClass::Execution | QueryFailureClass::Internal => {
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    };
-    error_response_with_retryable(
-        status,
-        error.error_code(),
-        error.to_string(),
-        match class {
-            QueryFailureClass::CommitOutcomeUnknown => Some(false),
-            QueryFailureClass::Backpressure => Some(true),
-            QueryFailureClass::Conflict
-            | QueryFailureClass::InvalidRequest
-            | QueryFailureClass::Planning
-            | QueryFailureClass::WriterModeRequired
-            | QueryFailureClass::Execution
-            | QueryFailureClass::Internal => None,
-        },
-    )
+    error_response(error.error_code(), error.to_string())
 }
 
 #[derive(Serialize)]
@@ -295,27 +303,18 @@ struct QueryErrorEnvelope<'a> {
     retryable: Option<bool>,
 }
 
-fn error_response(
-    status: StatusCode,
-    code: error_code::QueryErrorCode,
-    message: impl Into<String>,
-) -> Response {
-    error_response_with_retryable(status, code, message, None)
-}
-
-fn error_response_with_retryable(
-    status: StatusCode,
-    code: error_code::QueryErrorCode,
-    message: impl Into<String>,
-    retryable: Option<bool>,
-) -> Response {
+/// The public envelope with the status and `retryable` hint of the code's
+/// class ([`error_code::QueryFailureClass`]).
+fn error_response(code: error_code::QueryErrorCode, message: impl Into<String>) -> Response {
+    let class = code.failure_class();
     let message = message.into();
     json_response(
-        status,
+        StatusCode::from_u16(class.http_status())
+            .expect("query failure classes use valid HTTP statuses"),
         &QueryErrorEnvelope {
             error: code,
             msg: &message,
-            retryable,
+            retryable: class.retryable(),
         },
     )
 }
@@ -363,33 +362,32 @@ impl RequestOptions {
     ) -> Result<(), HttpError> {
         if self.warm_only && request_type != QueryRequestType::Read {
             return Err(HttpError::new(
-                StatusCode::BAD_REQUEST,
                 error_code::QueryErrorCode::InvalidRequestOption,
                 "x-helix-warm is only valid for read requests",
             ));
         }
         if self.await_durable == Some(true) && request_type != QueryRequestType::Write {
             return Err(HttpError::new(
-                StatusCode::BAD_REQUEST,
                 error_code::QueryErrorCode::InvalidRequestOption,
                 "x-helix-await-durable is only valid for write requests",
             ));
         }
         if self.require_writer && db_mode != db::HelixDbMode::Writer {
             return Err(HttpError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                error_code::QueryErrorCode::InvalidRequestOption,
+                error_code::QueryErrorCode::WriterModeRequired,
                 "request requires a writer but this server is read-only",
             ));
         }
         Ok(())
     }
 
+    /// An absent `x-helix-await-durable` waits, so only an explicit `false`
+    /// trades crash durability for latency.
     fn query_mode(&self) -> QueryMode {
-        if self.warm_only {
-            QueryMode::Warm
-        } else {
-            QueryMode::Execute
+        match (self.warm_only, self.await_durable) {
+            (true, _) => QueryMode::Warm,
+            (false, Some(false)) => QueryMode::ExecuteWithoutDurableWait,
+            (false, None | Some(true)) => QueryMode::Execute,
         }
     }
 }
@@ -407,7 +405,6 @@ fn parse_optional_bool_header(
     };
     let value = value.to_str().map_err(|_| {
         HttpError::new(
-            StatusCode::BAD_REQUEST,
             error_code::QueryErrorCode::InvalidRequestOption,
             format!("{name} must be a UTF-8 boolean header"),
         )
@@ -416,7 +413,6 @@ fn parse_optional_bool_header(
         "true" | "1" => Ok(Some(true)),
         "false" | "0" => Ok(Some(false)),
         _ => Err(HttpError::new(
-            StatusCode::BAD_REQUEST,
             error_code::QueryErrorCode::InvalidRequestOption,
             format!("{name} must be true or false"),
         )),
@@ -425,26 +421,20 @@ fn parse_optional_bool_header(
 
 #[derive(Debug)]
 struct HttpError {
-    status: StatusCode,
     code: error_code::QueryErrorCode,
     message: String,
 }
 
 impl HttpError {
-    fn new(
-        status: StatusCode,
-        code: error_code::QueryErrorCode,
-        message: impl Into<String>,
-    ) -> Self {
+    fn new(code: error_code::QueryErrorCode, message: impl Into<String>) -> Self {
         Self {
-            status,
             code,
             message: message.into(),
         }
     }
 
     fn into_response(self) -> Response {
-        error_response(self.status, self.code, self.message)
+        error_response(self.code, self.message)
     }
 }
 
@@ -571,6 +561,27 @@ mod tests {
                 assert_eq!(json.get("details"), None);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn writer_routing_on_a_reader_is_writer_mode_required() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-helix-require-writer",
+            "true".parse().expect("valid header"),
+        );
+        let response = RequestOptions::from_headers(&headers)
+            .expect("valid request options")
+            .validate_for_request_type(QueryRequestType::Read, db::HelixDbMode::ReadOnly)
+            .expect_err("a reader cannot serve writer-routed requests")
+            .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 4_096)
+            .await
+            .expect("routing error body is bounded");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("error body is JSON");
+        assert_eq!(json["error"], "writer_mode_required");
+        assert_eq!(json.get("retryable"), None);
     }
 
     #[tokio::test]

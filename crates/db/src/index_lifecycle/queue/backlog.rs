@@ -24,8 +24,8 @@
 //! most twice its charge: from about 1.7 times for a delete to 2 times for a
 //! large vector. A logical index's retained-byte limit therefore bounds that
 //! heap to twice the limit, whatever mix of operations fills it. The
-//! `production_queue_admission_memory` test measures every shape at the
-//! allocator's chunk sizes and enforces the bound.
+//! `retained_operation_memory_stays_within_twice_its_charge` unit test
+//! measures every shape at the allocator's chunk sizes and enforces the bound.
 //!
 //! The ledger applies the overhead itself, to the encoded size every path
 //! reports: foreground admission (including blocker repairs admitted beyond
@@ -110,8 +110,9 @@ use super::QueueTarget;
 /// Fixed bytes charged to every retained operation beyond its encoded record.
 ///
 /// See "Charges" in the module documentation; the
-/// `production_queue_admission_memory` test asserts that it covers the
-/// measured payload-independent memory of every operation shape.
+/// `retained_operation_memory_stays_within_twice_its_charge` unit test asserts
+/// that it covers the measured payload-independent memory of every operation
+/// shape.
 pub(crate) const OPERATION_OVERHEAD_BYTES: u64 = 576;
 
 /// Returns the bytes an operation whose record encodes in `encoded_bytes`
@@ -1089,7 +1090,7 @@ pub(crate) struct BacklogReservation {
 }
 
 impl BacklogReservation {
-    /// Marks the durable commit as submitted.
+    /// Marks the commit as submitted.
     pub(crate) fn begin_commit(&mut self) {
         assert_eq!(
             self.phase,
@@ -1099,7 +1100,9 @@ impl BacklogReservation {
         self.phase = ReservationPhase::Committing;
     }
 
-    /// Records a durable commit.
+    /// Records a commit that was applied, and durable unless the request chose
+    /// not to wait. A crash before its upload loses the enqueue and this charge
+    /// together, since recovery rebuilds the ledger from storage.
     pub(crate) fn committed(mut self) {
         self.finish(ReservationOutcome::Committed);
     }
