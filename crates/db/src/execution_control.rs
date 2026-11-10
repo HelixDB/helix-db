@@ -136,6 +136,26 @@ impl ExecutionControl {
         Ok(())
     }
 
+    /// Runs cancellable work until execution expiry or until `limit` elapses,
+    /// whichever comes first; both end it with
+    /// [`HelixDbError::QueryDeadlineExceeded`].
+    ///
+    /// For waits that only storage can end, such as a WAL upload: without a
+    /// request deadline they would otherwise last as long as storage is
+    /// unreachable.
+    pub(crate) async fn run_within<F, T>(&self, limit: Duration, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let limit = Instant::now() + limit;
+        Self {
+            deadline: Some(self.deadline.map_or(limit, |deadline| deadline.min(limit))),
+            reader_retirement: self.reader_retirement.clone(),
+        }
+        .run(future)
+        .await
+    }
+
     /// Runs cancellable work until execution expiry.
     pub(crate) async fn run<F, T>(&self, future: F) -> Result<T>
     where
@@ -227,6 +247,68 @@ mod tests {
             HelixDbError::QueryCancelledByReaderRetirement
         ));
         assert!(cancellation.is_cancelled());
+    }
+
+    /// A bounded run ends at whichever comes first of the request deadline
+    /// and its own limit, and otherwise returns the work's result.
+    #[tokio::test]
+    async fn bounded_work_stops_at_the_earlier_of_deadline_and_limit() {
+        let pending = || async {
+            std::future::pending::<()>().await;
+            Ok::<_, HelixDbError>(())
+        };
+        for (case, control, limit) in [
+            (
+                "limit without a deadline",
+                ExecutionControl::unlimited(),
+                Duration::from_millis(1),
+            ),
+            (
+                "limit before the deadline",
+                ExecutionControl::from_timeout(Duration::from_secs(60)),
+                Duration::from_millis(1),
+            ),
+            (
+                "deadline before the limit",
+                ExecutionControl::from_timeout(Duration::from_millis(1)),
+                Duration::from_secs(60),
+            ),
+        ] {
+            let error = tokio::time::timeout(
+                Duration::from_secs(10),
+                control.run_within(limit, pending()),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{case}: the bound ends the work"))
+            .expect_err("pending work is cancelled");
+            assert!(
+                matches!(error, HelixDbError::QueryDeadlineExceeded),
+                "{case}: {error}"
+            );
+        }
+        assert_eq!(
+            ExecutionControl::unlimited()
+                .run_within(Duration::from_secs(60), async { Ok::<_, HelixDbError>(7) })
+                .await
+                .expect("finished work returns its result"),
+            7
+        );
+    }
+
+    /// A bounded run keeps the request's retirement signal.
+    #[tokio::test]
+    async fn bounded_work_still_stops_at_reader_retirement() {
+        let cancellation = ReaderRetirementCancellation::new();
+        cancellation.cancel();
+        let error = ExecutionControl::unlimited()
+            .with_reader_retirement_cancellation(cancellation)
+            .run_within(Duration::from_secs(60), async { Ok::<_, HelixDbError>(()) })
+            .await
+            .expect_err("a retired reader stops bounded work");
+        assert!(matches!(
+            error,
+            HelixDbError::QueryCancelledByReaderRetirement
+        ));
     }
 
     #[tokio::test]
