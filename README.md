@@ -335,7 +335,8 @@ connected to, say, one user or one project instead of the whole index. See the
 
 Yes. The engine is Apache 2.0. Run it embedded inside your own process, as a local or self-hosted
 server (in memory, on disk, or on S3-compatible object storage), or on Helix Cloud. All three use
-the same SDKs and the same `POST /v2/query` endpoint.
+the same SDKs; server and Cloud clients send queries to `POST /v2/query`, while embedded clients
+run them inside your process.
 
 ### Can I bring existing Cypher queries?
 
