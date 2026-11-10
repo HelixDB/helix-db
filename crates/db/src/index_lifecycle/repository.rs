@@ -57,12 +57,11 @@ fn metadata_or_migration_required(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ReaderStorageCompatibility {
     /// V2/V3 non-unique equality entries are unioned with V4 equality bitmaps,
-    /// and label rows may still be hash-keyed as for
-    /// [`Self::LegacyLabelHash`].
+    /// and label rows are hash-keyed as for [`Self::LegacyLabelHash`].
     LegacyEqualityUnion,
-    /// Label index rows may still be filed under their retired hash keys: the
-    /// writer has not published the label identity migration. A label read
-    /// falls back to the hash-keyed row when its exact row is empty.
+    /// Label index rows are read under their retired hash keys: the writer
+    /// has not published the label identity migration, so exact rows may be
+    /// absent or an incomplete copy.
     LegacyLabelHash,
     /// All physical reads use the current storage format.
     Current,
@@ -102,22 +101,14 @@ pub(crate) async fn require_reader_bootstrap_or_legacy(
         let progress =
             crate::migrations::storage_schema_progress(reader, DataScope::LegacyUnscoped).await?;
         let cleanup_ready = crate::migrations::index_storage_v4_cleanup_ready(reader).await?;
-        if bootstrap == ValidatedReaderBootstrap::LegacyEqualityUnion && cleanup_ready {
+        if bootstrap == ReaderStorageCompatibility::LegacyEqualityUnion && cleanup_ready {
             return Err(HelixDbError::MigrationRequired {
                 reason: "index storage V4 cleanup is marked complete beside legacy storage"
                     .to_string(),
             });
         }
         return match (progress, tenant_envelope_ready) {
-            (crate::migrations::StorageSchemaProgress::Complete, true) => Ok(match bootstrap {
-                ValidatedReaderBootstrap::LegacyEqualityUnion => {
-                    ReaderStorageCompatibility::LegacyEqualityUnion
-                }
-                ValidatedReaderBootstrap::LegacyLabelHash => {
-                    ReaderStorageCompatibility::LegacyLabelHash
-                }
-                ValidatedReaderBootstrap::Current => ReaderStorageCompatibility::Current,
-            }),
+            (crate::migrations::StorageSchemaProgress::Complete, true) => Ok(bootstrap),
             (
                 crate::migrations::StorageSchemaProgress::NotStarted
                 | crate::migrations::StorageSchemaProgress::GraphReady
@@ -174,18 +165,11 @@ pub(crate) async fn require_reader_bootstrap_or_legacy(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValidatedReaderBootstrap {
-    Current,
-    LegacyLabelHash,
-    LegacyEqualityUnion,
-}
-
 fn validate_bootstrap_values(
     marker: &[u8],
     logical: Option<&[u8]>,
     vector: Option<&[u8]>,
-) -> Result<ValidatedReaderBootstrap> {
+) -> Result<ReaderStorageCompatibility> {
     let IndexV2MetadataValue::StorageVersion(version) =
         metadata_or_migration_required(marker, "storage marker")?
     else {
@@ -233,13 +217,13 @@ fn validate_bootstrap_values(
     }
     // Versions from EQUALITY_BITMAPS share one equality layout, so a current
     // reader also serves a store its writer has not upgraded yet. Label rows
-    // are exact only once the writer publishes LABEL_IDENTITY.
+    // are read by their hash keys until the writer publishes LABEL_IDENTITY.
     Ok(if version < IndexStorageVersion::EQUALITY_BITMAPS {
-        ValidatedReaderBootstrap::LegacyEqualityUnion
+        ReaderStorageCompatibility::LegacyEqualityUnion
     } else if version < IndexStorageVersion::LABEL_IDENTITY {
-        ValidatedReaderBootstrap::LegacyLabelHash
+        ReaderStorageCompatibility::LegacyLabelHash
     } else {
-        ValidatedReaderBootstrap::Current
+        ReaderStorageCompatibility::Current
     })
 }
 
@@ -1176,7 +1160,7 @@ mod tests {
         assert_eq!(
             validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
                 .expect("storage with V4 equality encoding is accepted"),
-            ValidatedReaderBootstrap::Current
+            ReaderStorageCompatibility::Current
         );
         // A writer that has not yet published the label identity migration
         // leaves version-4 and version-5 stores readable through hash label rows.
@@ -1188,7 +1172,7 @@ mod tests {
             assert_eq!(
                 validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
                     .expect("pre-label versions share the current equality layout"),
-                ValidatedReaderBootstrap::LegacyLabelHash
+                ReaderStorageCompatibility::LegacyLabelHash
             );
         }
         for legacy in [0x0002, 0x0003] {
@@ -1198,7 +1182,7 @@ mod tests {
             assert_eq!(
                 validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
                     .expect("only versions two and three have explicit reader compatibility"),
-                ValidatedReaderBootstrap::LegacyEqualityUnion
+                ReaderStorageCompatibility::LegacyEqualityUnion
             );
         }
     }
@@ -1206,14 +1190,9 @@ mod tests {
     #[test]
     fn reader_storage_compatibility_only_advances_monotonically() {
         use ReaderStorageCompatibility::{Current, LegacyEqualityUnion, LegacyLabelHash};
-        for (index, from) in [LegacyEqualityUnion, LegacyLabelHash, Current]
-            .into_iter()
-            .enumerate()
-        {
-            for (other, observed) in [LegacyEqualityUnion, LegacyLabelHash, Current]
-                .into_iter()
-                .enumerate()
-            {
+        let ordered = [LegacyEqualityUnion, LegacyLabelHash, Current];
+        for (index, from) in ordered.into_iter().enumerate() {
+            for (other, observed) in ordered.into_iter().enumerate() {
                 let advanced = from.advance(observed);
                 if other < index {
                     assert!(matches!(

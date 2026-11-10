@@ -1506,7 +1506,8 @@ impl HelixDB {
             if migration_authorized {
                 migrations::run_blocking_startup_migration(&writer, config.migrations()).await?;
                 // After graph-format rewrites, so every edge has its by-ID
-                // record, and before any graph write, so no write races a move.
+                // record, and before any graph write, so the copied hash rows
+                // hold still.
                 migrations::migrate_label_identity(&db).await?;
                 index_lifecycle::outbox::reconcile_legacy_reader_coordination_operations(
                     &db,

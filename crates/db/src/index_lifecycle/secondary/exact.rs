@@ -978,25 +978,32 @@ mod tests {
                 put_v3_equality_entry(&db, &handle, "shared", 1).await;
                 put_v3_equality_entry(&db, &handle, "other", 2).await;
                 put_v4_equality_bitmap(&db, &handle, "shared", [3]).await;
-                db.put(
-                    DataKey::Data {
-                        scope: handle.scope(),
-                        kind: DataKeyKind::PropertyIndex(
-                            crate::encoding::indexes::PropertyIndexKey::NodeLabel(
-                                crate::encoding::indexes::label::NodeLabelKey::new(
-                                    crate::encoding::indexes::label::LabelIdentity::new("User")
-                                        .unwrap(),
-                                ),
-                            ),
+                // The label row as a V2/V3 store and as a current store file it.
+                for label_row in [
+                    crate::encoding::indexes::PropertyIndexKey::Equality(
+                        crate::encoding::v2::legacy::label_hash::LegacyNodeLabelKey::for_label(
+                            "User",
                         ),
-                    }
-                    .to_bytes(),
-                    crate::search::encode_roaring_treemap(&roaring::RoaringTreemap::from_iter(
-                        1..=5,
-                    )),
-                )
-                .await
-                .unwrap();
+                    ),
+                    crate::encoding::indexes::PropertyIndexKey::NodeLabel(
+                        crate::encoding::indexes::label::NodeLabelKey::new(
+                            crate::encoding::indexes::label::LabelIdentity::new("User").unwrap(),
+                        ),
+                    ),
+                ] {
+                    db.put(
+                        DataKey::Data {
+                            scope: handle.scope(),
+                            kind: DataKeyKind::PropertyIndex(label_row),
+                        }
+                        .to_bytes(),
+                        crate::search::encode_roaring_treemap(&roaring::RoaringTreemap::from_iter(
+                            1..=5,
+                        )),
+                    )
+                    .await
+                    .unwrap();
+                }
                 let label = UnindexedLabel {
                     scope: handle.scope(),
                     kind: IndexElementKind::Node,

@@ -66,34 +66,34 @@ pub(crate) enum PropertyIndexKey<'a> {
 
     /// Node label index: exact label -> set of NodeIds
     /// ```text
-    /// Key: [0x03][0x11][digest:8][len:4][label]
+    /// Key: [0x03][0x11][len:2][label]
     /// Value: RoaringTreemap<NodeId>
     /// ```
-    NodeLabel(NodeLabelKey),
+    NodeLabel(NodeLabelKey<'a>),
 
     /// Edge label index: exact label -> set of EdgeIds
     /// ```text
-    /// Key: [0x03][0x12][digest:8][len:4][label]
+    /// Key: [0x03][0x12][len:2][label]
     /// Value: RoaringTreemap<EdgeId>
     /// ```
-    EdgeLabel(EdgeLabelKey),
+    EdgeLabel(EdgeLabelKey<'a>),
 
     /// Edge-label neighbor index: endpoint+exact label -> set of opposite NodeIds
     /// ```text
-    /// Out: [0x03][0x13][0x00][source:8][digest:8][len:4][label]
-    /// In:  [0x03][0x13][0x01][target:8][digest:8][len:4][label]
+    /// Out: [0x03][0x13][0x00][source:8][len:2][label]
+    /// In:  [0x03][0x13][0x01][target:8][len:2][label]
     /// Value: RoaringTreemap<NodeId>
     /// ```
-    EdgeLabelNeighbor(EdgeLabelNeighborKey),
+    EdgeLabelNeighbor(EdgeLabelNeighborKey<'a>),
 
-    /// Retired hash-keyed edge label rows, read only by the label identity migration
+    /// Retired hash-keyed edge label rows, read only before label identity is published
     /// ```text
     /// Key: [0x03][0x04][label_hash:8]
     /// Value: RoaringTreemap<EdgeId>
     /// ```
     LegacyEdgeLabel(LegacyEdgeLabelKey),
 
-    /// Retired hash-keyed edge-label neighbor rows, read only by the label identity migration
+    /// Retired hash-keyed edge-label neighbor rows, read only before label identity is published
     /// ```text
     /// Out: [0x03][0x10][0x00][source:8][label_hash:8]
     /// In:  [0x03][0x10][0x01][target:8][label_hash:8]
@@ -570,8 +570,8 @@ mod tests {
             [8; 8],
         ));
         let identity = LabelIdentity::new("FOLLOWS").unwrap();
-        let node_label = PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity.clone()));
-        let edge_label = PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(identity.clone()));
+        let node_label = PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity));
+        let edge_label = PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(identity));
         let edge_label_neighbor = PropertyIndexKey::EdgeLabelNeighbor(EdgeLabelNeighborKey::new(
             EdgeDirection::In,
             17,

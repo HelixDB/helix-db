@@ -14,9 +14,10 @@ use super::{
 /// of stores whose queued index work they would ignore.
 ///
 /// Version 6 marks stores whose label index rows are keyed by the exact label
-/// rather than its 64-bit hash. The startup label identity migration moves
-/// every row and publishes it last, which fences binaries that support at most
-/// version 5 out of stores whose label rows they could no longer find.
+/// rather than its 64-bit hash. The startup label identity migration copies
+/// every hash-keyed row to its exact key, leaving the hash rows in place, and
+/// publishes version 6 last, so binaries that support at most version 5 keep
+/// reading correct hash rows until then and refuse the store afterwards.
 pub(crate) const CURRENT_INDEX_STORAGE_VERSION: u16 = 0x0006;
 
 /// Decoded non-zero index storage format.
@@ -31,7 +32,7 @@ impl IndexStorageVersion {
     /// share one equality layout.
     pub(crate) const EQUALITY_BITMAPS: Self = Self(0x0004);
     /// First version that may hold asynchronous index-operation queues, and
-    /// the last whose label rows are keyed by label hash.
+    /// the last whose readers find label rows under their hash keys.
     pub(crate) const OPERATION_QUEUES: Self = Self(0x0005);
     /// First version whose label index rows are keyed by the exact label.
     pub(crate) const LABEL_IDENTITY: Self = Self(CURRENT_INDEX_STORAGE_VERSION);

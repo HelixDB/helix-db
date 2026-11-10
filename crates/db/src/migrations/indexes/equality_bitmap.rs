@@ -240,6 +240,10 @@ pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Resul
         ));
     }
 
+    // Before the label identity migration every label row is hash-keyed.
+    if source_version >= IndexStorageVersion::LABEL_IDENTITY {
+        super::label_identity::make_legacy_label_fixture(db).await?;
+    }
     let catalog = discover_catalog(db).await?;
     if !catalog.building.is_empty() {
         return Err(corruption(
@@ -1023,7 +1027,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::search::add_to_global_edge_label_index_scoped(
+        crate::search::add_to_legacy_global_edge_label_index_scoped(
             &transaction,
             "KNOWS",
             entity_id,
