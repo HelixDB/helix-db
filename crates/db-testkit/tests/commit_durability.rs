@@ -404,50 +404,60 @@ const DURABLE_WAIT_LIMIT: Duration = Duration::from_secs(30);
 /// stops waiting for a held upload at the durable wait limit instead of
 /// waiting as long as storage is unreachable.
 ///
-/// Paused time skips the wait. The limit counts on the real clock, so the time
-/// paused tokio reports is the limit less the paused time the test skipped
-/// before the request, plus the real time it took, which is why each test makes
-/// one such request and the bounds leave room for both.
-async fn assert_stops_at_the_durable_wait_limit(db: &Arc<HelixDB>, request: QueryRequest) {
-    let started = tokio::time::Instant::now();
-    let error = HelixQueryService::new(Arc::clone(db))
-        .execute_query(request)
-        .await
-        .expect_err("nothing is durable while the upload is held");
+/// The wait runs on the real clock: commits apply on the writer's own thread,
+/// which paused tokio time would race past. A request that loses a retryable
+/// conflict to such a commit, as a racing index DDL can, is retried.
+async fn assert_stops_at_the_durable_wait_limit(
+    db: &Arc<HelixDB>,
+    request: impl Fn() -> QueryRequest,
+) {
+    let service = HelixQueryService::new(Arc::clone(db));
+    let mut conflicts = 0;
+    let (started, error) = loop {
+        let started = tokio::time::Instant::now();
+        let error = service
+            .execute_query(request())
+            .await
+            .expect_err("nothing is durable while the upload is held");
+        if !error.is_transaction_conflict() || conflicts == 100 {
+            break (started, error);
+        }
+        conflicts += 1;
+    };
     assert!(error.is_deadline_exceeded(), "{error}");
     let waited = started.elapsed();
     assert!(
-        waited >= DURABLE_WAIT_LIMIT / 2 && waited <= DURABLE_WAIT_LIMIT * 2,
+        waited >= DURABLE_WAIT_LIMIT && waited < DURABLE_WAIT_LIMIT + RETURNS,
         "waited {waited:?} on the held upload"
     );
 }
 
 /// The write's commit stays applied.
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_write_without_a_deadline_stops_at_the_durable_wait_limit() {
     let store = Arc::new(GatedWalStore::default());
     let db = open_leased(&store).await;
 
     store.hold();
-    assert_stops_at_the_durable_wait_limit(&db, add("held")).await;
+    assert_stops_at_the_durable_wait_limit(&db, || add("held")).await;
     assert_eq!(node_count(&db).await, 1, "the timed-out write is applied");
     store.release();
     db.close().await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread")]
 async fn an_empty_write_without_a_deadline_stops_at_the_durable_wait_limit() {
     let store = Arc::new(GatedWalStore::default());
     let db = open_leased(&store).await;
 
     store.hold();
     execute(&db, add("applied"), QueryMode::ExecuteWithoutDurableWait).await;
-    assert_stops_at_the_durable_wait_limit(&db, observe()).await;
+    assert_stops_at_the_durable_wait_limit(&db, observe).await;
     store.release();
     db.close().await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_no_op_index_ddl_without_a_deadline_stops_at_the_durable_wait_limit() {
     let store = Arc::new(GatedWalStore::default());
     let db = open_leased(&store).await;
@@ -455,10 +465,10 @@ async fn a_no_op_index_ddl_without_a_deadline_stops_at_the_durable_wait_limit() 
 
     store.hold();
     let winner = assert_pending(Box::pin(service.execute_query(create_name_index()))).await;
-    assert_stops_at_the_durable_wait_limit(&db, create_name_index()).await;
+    assert_stops_at_the_durable_wait_limit(&db, create_name_index).await;
     store.release();
-    // Paused time has run past the real clock, so the winner's own bounded
-    // wait may end the moment its commit returns; only the loser is checked.
+    // The winner waited as long as the loser, so it may have timed out too;
+    // only the loser is checked.
     drop(winner.await);
     db.close().await.unwrap();
 }
