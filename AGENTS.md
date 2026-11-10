@@ -52,7 +52,7 @@ you should run formatting and clippy before finishing your work. Rust crates in 
 Run tests on Crucible (https://crucibl.sh), not with a local `cargo test`. The `crucible` MCP server is in `.mcp.json`: Claude Code asks once to trust it, then sign in with `/mcp` → `crucible` → Authenticate (Codex: `codex mcp add crucible --url https://mcp.crucibl.sh/mcp`). Run tests locally only if Crucible is unavailable: no `crucible` tools, sign-in fails, or `status` shows no ready base for `HelixDB/helix-db`.
 
 1. `status`: take the `base.commit` of `HelixDB/helix-db`, then `git fetch origin <base.commit>` so your clone has it (the base can lag behind `main`).
-2. `create_diff_upload(repo: "HelixDB/helix-db", base: "<base.commit>")`, then run the `command` it returns, as given, from the repo root. It uploads `git diff <base.commit>` (your commits and uncommitted edits) and prints one line. Don't print the diff yourself.
+2. `create_diff_upload(repo: "HelixDB/helix-db", base: "<base.commit>")`, then run the `command` it returns, as given, from the repo root. It uploads `git diff <base.commit>` with untracked files included (your commits, uncommitted edits and new files) and prints one line. Don't print the diff yourself.
 3. `run_tests(repo: "HelixDB/helix-db", base: "<base.commit>", diff_upload: "<diff_upload>")`. For one test, add `filters: ["<test name>"]`. An upload runs once: repeat steps 2 and 3 for each run.
 4. A `{"status":"running","job_id":…}` answer: call `get_job(id: "<job_id>", wait_seconds: 45)` until it finishes.
 5. On a failure, read `failures`, then `get_job_logs(id: "<job_id>", grep: "FAIL|panicked|error[")`. Don't page through the whole log.
