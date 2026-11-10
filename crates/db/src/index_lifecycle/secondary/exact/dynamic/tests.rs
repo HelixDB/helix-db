@@ -13,34 +13,45 @@ async fn put_label_rows(
 ) {
     use crate::encoding::indexes::label::{EdgeLabelKey, LabelIdentity, NodeLabelKey};
     use crate::encoding::indexes::PropertyIndexKey;
-    use crate::encoding::v2::legacy::label_hash::{LegacyEdgeLabelKey, LegacyNodeLabelKey};
 
     let definition = handle.secondary_definition().unwrap();
     let label = definition.label().as_str();
     let identity = LabelIdentity::new(label).unwrap();
-    let rows = match definition.element_kind() {
-        IndexElementKind::Node => [
-            PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity)),
-            PropertyIndexKey::Equality(LegacyNodeLabelKey::for_label(label)),
-        ],
-        IndexElementKind::Edge => [
-            PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(identity)),
-            PropertyIndexKey::LegacyEdgeLabel(LegacyEdgeLabelKey::for_label(label)),
-        ],
+    let ids = ids.into_iter().collect::<roaring::RoaringTreemap>();
+    let exact = match definition.element_kind() {
+        IndexElementKind::Node => PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity)),
+        IndexElementKind::Edge => PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(identity)),
     };
-    let value = crate::search::encode_roaring_treemap(&ids.into_iter().collect());
-    for index in rows {
-        db.put(
-            crate::encoding::v2::keys::DataKey::Data {
-                scope: handle.scope(),
-                kind: crate::encoding::v2::keys::DataKeyKind::PropertyIndex(index),
-            }
-            .to_bytes(),
-            value.clone(),
-        )
-        .await
+    db.put(
+        crate::encoding::v2::keys::DataKey::Data {
+            scope: handle.scope(),
+            kind: crate::encoding::v2::keys::DataKeyKind::PropertyIndex(exact),
+        }
+        .to_bytes(),
+        crate::search::encode_roaring_treemap(&ids),
+    )
+    .await
+    .unwrap();
+    let transaction = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+    for id in &ids {
+        match definition.element_kind() {
+            IndexElementKind::Node => crate::search::add_to_equality_index_scoped(
+                &transaction,
+                "$label",
+                label,
+                id,
+                handle.scope(),
+            ),
+            IndexElementKind::Edge => crate::search::add_to_legacy_global_edge_label_index_scoped(
+                &transaction,
+                label,
+                id,
+                handle.scope(),
+            ),
+        }
         .unwrap();
     }
+    transaction.commit().await.unwrap();
 }
 
 #[tokio::test]
