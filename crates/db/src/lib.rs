@@ -7325,13 +7325,14 @@ mod tests {
             )
             .await
             .expect("the planned catalog still holds the text index");
-        let response = query_service::QueryResponse::from_execution_result(result)
-            .expect("search response converts");
+        let response: serde_json::Value = serde_json::from_slice(
+            query_service::QueryResponse::from_execution_result(result)
+                .expect("search response converts")
+                .json_bytes(),
+        )
+        .expect("the response is JSON");
         assert_eq!(
-            response.returns()["hits"]
-                .as_array()
-                .expect("hits are a list")
-                .len(),
+            response["hits"].as_array().expect("hits are a list").len(),
             1
         );
         db.close().await.expect("writer closes");
