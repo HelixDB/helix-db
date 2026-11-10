@@ -296,6 +296,9 @@ pub(in crate::execution::interpreter) struct ExecutionContext<'db> {
     pub(in crate::execution::interpreter) search_consistency: helix_ast::query::SearchConsistency,
     /// When this request's graph commits return.
     pub(in crate::execution::interpreter) commit_durability: crate::transaction::CommitDurability,
+    /// Longest this request waits for a commit to become durable:
+    /// [`crate::transaction::DURABLE_WAIT_LIMIT`], shorter only in tests.
+    pub(in crate::execution::interpreter) durable_wait_limit: std::time::Duration,
     /// Concurrent secondary-set child reads shared by every step context of
     /// the request.
     pub(in crate::execution::interpreter) shared_index_reads: Arc<super::access::SharedIndexReads>,
@@ -382,6 +385,7 @@ impl<'db> ExecutionContext<'db> {
             prepared_memberships: super::stream::PreparedMemberships::default(),
             search_consistency: helix_ast::query::SearchConsistency::Strong,
             commit_durability: crate::transaction::CommitDurability::Durable,
+            durable_wait_limit: crate::transaction::DURABLE_WAIT_LIMIT,
             shared_index_reads: Arc::default(),
             pending_sets: Arc::default(),
             #[cfg(test)]

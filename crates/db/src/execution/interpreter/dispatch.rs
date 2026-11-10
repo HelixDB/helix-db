@@ -185,7 +185,10 @@ impl<'db> ExecutionContext<'db> {
                     // A DDL that changed nothing commits nothing, and its
                     // receipt may rest on a racing DDL's applied record.
                     self.execution_control
-                        .run(self.db.await_visible_writes_durable())
+                        .run_within(
+                            self.durable_wait_limit,
+                            self.db.await_visible_writes_durable(),
+                        )
                         .await?;
                 }
                 if resume_request_scope && result.is_ok() {

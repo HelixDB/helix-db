@@ -285,6 +285,7 @@ impl<'db> ExecutionContext<'db> {
             prepared_memberships: super::stream::PreparedMemberships::default(),
             search_consistency: self.search_consistency,
             commit_durability: self.commit_durability,
+            durable_wait_limit: self.durable_wait_limit,
             shared_index_reads: Arc::clone(&self.shared_index_reads),
             // Parallel contexts share the parent's immutable reader snapshot.
             pending_sets: Arc::clone(&self.pending_sets),
