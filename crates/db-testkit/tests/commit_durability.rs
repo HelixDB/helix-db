@@ -397,6 +397,71 @@ async fn no_op_index_ddl_stops_at_its_deadline() {
     db.close().await.unwrap();
 }
 
+/// Longest a durable request waits for its upload; see `DURABLE_WAIT_LIMIT`.
+const DURABLE_WAIT_LIMIT: Duration = Duration::from_secs(30);
+
+/// Runs `request` without a deadline, as every native query runs, and checks it
+/// stops waiting for a held upload at the durable wait limit instead of
+/// waiting as long as storage is unreachable.
+///
+/// Paused time skips the wait. The limit counts on the real clock, so the time
+/// paused tokio reports is the limit less what the test advanced before the
+/// request, which is why each test makes one such request.
+async fn assert_stops_at_the_durable_wait_limit(db: &Arc<HelixDB>, request: QueryRequest) {
+    let started = tokio::time::Instant::now();
+    let error = HelixQueryService::new(Arc::clone(db))
+        .execute_query(request)
+        .await
+        .expect_err("nothing is durable while the upload is held");
+    assert!(error.is_deadline_exceeded(), "{error}");
+    let waited = started.elapsed();
+    assert!(
+        waited > PENDING && waited <= DURABLE_WAIT_LIMIT + PENDING,
+        "waited {waited:?} on the held upload"
+    );
+}
+
+/// The write's commit stays applied.
+#[tokio::test(start_paused = true)]
+async fn a_write_without_a_deadline_stops_at_the_durable_wait_limit() {
+    let store = Arc::new(GatedWalStore::default());
+    let db = open_leased(&store).await;
+
+    store.hold();
+    assert_stops_at_the_durable_wait_limit(&db, add("held")).await;
+    assert_eq!(node_count(&db).await, 1, "the timed-out write is applied");
+    store.release();
+    db.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_empty_write_without_a_deadline_stops_at_the_durable_wait_limit() {
+    let store = Arc::new(GatedWalStore::default());
+    let db = open_leased(&store).await;
+
+    store.hold();
+    execute(&db, add("applied"), QueryMode::ExecuteWithoutDurableWait).await;
+    assert_stops_at_the_durable_wait_limit(&db, observe()).await;
+    store.release();
+    db.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_no_op_index_ddl_without_a_deadline_stops_at_the_durable_wait_limit() {
+    let store = Arc::new(GatedWalStore::default());
+    let db = open_leased(&store).await;
+    let service = HelixQueryService::new(Arc::clone(&db));
+
+    store.hold();
+    let winner = assert_pending(Box::pin(service.execute_query(create_name_index()))).await;
+    assert_stops_at_the_durable_wait_limit(&db, create_name_index()).await;
+    store.release();
+    // Paused time has run past the real clock, so the winner's own bounded
+    // wait may end the moment its commit returns; only the loser is checked.
+    drop(winner.await);
+    db.close().await.unwrap();
+}
+
 /// Reading an operation's status is planned like DDL, but stays a read: it never
 /// waits on a held upload and keeps working on a replica.
 #[tokio::test(flavor = "multi_thread")]

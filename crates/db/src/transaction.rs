@@ -36,6 +36,15 @@ pub(crate) enum CommitDurability {
     Applied,
 }
 
+/// Longest a request waits for a commit, its own or one its response rests on,
+/// to become durable.
+///
+/// Only object storage accepting the WAL ends that wait. A request that runs
+/// out of it fails with a timeout, which callers must reconcile rather than
+/// resend: its commit, if it made one, is applied and may still become
+/// durable.
+pub(crate) const DURABLE_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Waits until every commit at or below `sequence` is durable, without forcing
 /// a WAL upload. A closing database ends the wait with its close reason.
 pub(crate) async fn await_durable_through(

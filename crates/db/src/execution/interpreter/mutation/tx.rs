@@ -259,11 +259,15 @@ impl<'db> ExecutionContext<'db> {
     /// finalized only from the commit outcome; the index worker is woken once
     /// the enqueue is visible, durable or not.
     ///
-    /// A durable commit with nothing to write has no WAL entry to wait on, yet
-    /// its response may rest on an applied write it observed. It waits for the
-    /// durable sequence to pass its snapshot, without forcing a WAL upload. That
-    /// wait commits nothing, so it stays outside the finite commit completion
-    /// and inside the request's deadline.
+    /// The finite commit completion only applies the commit, so its outcome,
+    /// reservations and mutation permit settle as soon as it is visible. A
+    /// durable request then waits for the durable sequence to pass its
+    /// commit, without forcing a WAL upload, for at most its durable wait
+    /// limit ([`crate::transaction::DURABLE_WAIT_LIMIT`]): past the commit boundary
+    /// the request's deadline no longer applies, and a request that outlasts
+    /// the limit fails with a timeout while its applied commit may still
+    /// become durable. With nothing to write, it waits instead for the
+    /// snapshot its response may rest on, within its deadline as well.
     pub(super) async fn commit_write_tx(&self, mut active: ActiveWriteTx) -> Result<()> {
         active.index_context.prepare_topology(&active.txn)?;
         let uncovered = super::observations::RowKeys::new(
@@ -320,7 +324,7 @@ impl<'db> ExecutionContext<'db> {
             if let Some(reservation) = reservation.as_mut() {
                 reservation.begin_commit();
             }
-            let committed = match txn.commit(durability).await {
+            let committed = match txn.commit(CommitDurability::Applied).await {
                 Ok(committed) => committed,
                 Err(error) => {
                     // Only a definite conflict proves nothing committed; any
@@ -338,32 +342,42 @@ impl<'db> ExecutionContext<'db> {
                         .await);
                 }
             };
-            let wrote = committed.is_some();
+            let sequence = committed.map(|handle| handle.seqnum());
             let Some(reservation) = reservation else {
-                return Ok(wrote);
+                return Ok(sequence);
             };
             reservation.committed();
             db.wake_index_worker().await;
-            Ok(wrote)
+            Ok(sequence)
         };
         let complete = match self.row_memory.as_ref() {
             Some(budget) => futures::future::Either::Left(budget.admitted_future(complete)?),
             None => futures::future::Either::Right(complete),
         };
-        let wrote = self.db.inner.commit_completions.run(complete)?.await?;
-        if wrote || durability == CommitDurability::Applied {
+        let committed = self.db.inner.commit_completions.run(complete)?.await?;
+        if durability == CommitDurability::Applied {
             return Ok(());
         }
         let crate::HelixStorage::Writer(writer) = self.db.storage() else {
             unreachable!("a prepared write retains its original writer runtime");
         };
-        self.execution_control
-            .run(async {
-                crate::transaction::await_durable_through(writer.db(), snapshot_sequence)
+        let durable_through = |sequence| async move {
+            crate::transaction::await_durable_through(writer.db(), sequence)
+                .await
+                .map_err(HelixDbError::from_storage_commit)
+        };
+        match committed {
+            Some(sequence) => {
+                crate::execution_control::ExecutionControl::from_timeout(self.durable_wait_limit)
+                    .run(durable_through(sequence))
                     .await
-                    .map_err(HelixDbError::from_storage_commit)
-            })
-            .await
+            }
+            None => {
+                self.execution_control
+                    .run_within(self.durable_wait_limit, durable_through(snapshot_sequence))
+                    .await
+            }
+        }
     }
 }
 
@@ -694,6 +708,173 @@ mod additional_tests {
             db.inner_db().get(&key).await.unwrap(),
             Some(Bytes::from_static(b"committed"))
         );
+    }
+
+    /// Opens a database whose WAL uploads `gate` controls.
+    async fn gated_db(
+        name: &str,
+    ) -> (
+        HelixDB,
+        Arc<crate::search::vector::gated_wal::GatedWalStore>,
+    ) {
+        let gate = Arc::new(crate::search::vector::gated_wal::GatedWalStore::new());
+        let db = test_support::open_db_with_object_store(
+            name,
+            Arc::clone(&gate) as Arc<dyn slatedb::object_store::ObjectStore>,
+        )
+        .await;
+        (db, gate)
+    }
+
+    fn property_key(node: u64) -> Bytes {
+        crate::encoding::keys::DataKey::Data {
+            scope: crate::encoding::keys::scope::DataScope::LegacyUnscoped,
+            kind: crate::encoding::keys::DataKeyKind::NodeProperty(
+                crate::encoding::keys::NodePropertyKey::new(node),
+            ),
+        }
+        .to_bytes()
+    }
+
+    /// Commits one row through a request context with `durability`, waiting
+    /// at most `limit` for it to become durable.
+    async fn commit_row(
+        db: &HelixDB,
+        node: u64,
+        durability: CommitDurability,
+        limit: Duration,
+    ) -> Result<()> {
+        let mut context = ExecutionContext::new(db, context::ParamBindings::default());
+        context.commit_durability = durability;
+        context.durable_wait_limit = limit;
+        context.enable_request_write_scope().await?;
+        context
+            .active_write_tx()
+            .expect("the write scope is open")
+            .txn
+            .put(property_key(node), Bytes::from_static(b"row"))?;
+        context.commit_request_write_scope().await
+    }
+
+    /// A durable write whose WAL never uploads fails with a timeout once its
+    /// durable wait limit passes, rather than waiting for storage forever. Its
+    /// commit is applied, so it becomes durable once uploads resume.
+    #[tokio::test]
+    async fn a_durable_write_stops_waiting_for_a_stuck_wal_at_its_limit() {
+        use crate::search::vector::gated_wal::WalUploads;
+        let (db, gate) = gated_db("durable-write-stuck-wal").await;
+        gate.uploads.send_replace(WalUploads::Held);
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            commit_row(
+                &db,
+                1,
+                CommitDurability::Durable,
+                Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("the limit ends the wait")
+        .expect_err("a WAL that never uploads cannot make the write durable");
+        assert!(
+            matches!(error, HelixDbError::QueryDeadlineExceeded),
+            "{error}"
+        );
+        assert!(
+            !error.error_code().failure_class().rejects_before_commit(),
+            "a timeout after the commit leaves the caller to reconcile"
+        );
+        assert_eq!(
+            db.inner_db().get(property_key(1)).await.unwrap(),
+            Some(Bytes::from_static(b"row")),
+            "the commit is applied"
+        );
+        gate.uploads.send_replace(WalUploads::Open);
+        let sequence = db.inner_db().snapshot().await.unwrap().seq();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::transaction::await_durable_through(&db.inner_db(), sequence),
+        )
+        .await
+        .expect("the write becomes durable once uploads resume")
+        .unwrap();
+        db.close().await.unwrap();
+    }
+
+    /// An applied write never waits for its WAL, so a stuck upload cannot
+    /// delay it.
+    #[tokio::test]
+    async fn an_applied_write_returns_while_its_wal_is_stuck() {
+        use crate::search::vector::gated_wal::WalUploads;
+        let (db, gate) = gated_db("applied-write-stuck-wal").await;
+        gate.uploads.send_replace(WalUploads::Held);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            commit_row(&db, 1, CommitDurability::Applied, Duration::from_millis(1)),
+        )
+        .await
+        .expect("an applied write does not wait")
+        .expect("an applied write commits");
+        gate.uploads.send_replace(WalUploads::Open);
+        db.close().await.unwrap();
+    }
+
+    /// A durable write with nothing to write rests on the applied writes its
+    /// snapshot saw. With their WAL stuck, it stops at its durable wait limit
+    /// even without a request deadline, and at an earlier request deadline.
+    #[tokio::test]
+    async fn a_durable_no_op_stops_waiting_for_a_stuck_wal_at_its_limit() {
+        use crate::search::vector::gated_wal::WalUploads;
+        let (db, gate) = gated_db("durable-no-op-stuck-wal").await;
+        gate.uploads.send_replace(WalUploads::Held);
+        commit_row(&db, 1, CommitDurability::Applied, Duration::ZERO)
+            .await
+            .expect("an applied write commits");
+        let no_op = |limit, control| {
+            let db = &db;
+            async move {
+                let mut context = ExecutionContext::new(db, context::ParamBindings::default());
+                context.durable_wait_limit = limit;
+                context.execution_control = control;
+                context.enable_request_write_scope().await?;
+                context.commit_request_write_scope().await
+            }
+        };
+        for (case, limit, control) in [
+            (
+                "durable wait limit",
+                Duration::from_millis(200),
+                crate::execution_control::ExecutionControl::unlimited(),
+            ),
+            (
+                "request deadline",
+                Duration::from_secs(60),
+                crate::execution_control::ExecutionControl::from_timeout(Duration::from_millis(
+                    200,
+                )),
+            ),
+        ] {
+            let error = tokio::time::timeout(Duration::from_secs(10), no_op(limit, control))
+                .await
+                .unwrap_or_else(|_| panic!("{case}: the wait ends"))
+                .expect_err("the observed write cannot become durable");
+            assert!(
+                matches!(error, HelixDbError::QueryDeadlineExceeded),
+                "{case}: {error}"
+            );
+        }
+        gate.uploads.send_replace(WalUploads::Open);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            no_op(
+                Duration::from_secs(60),
+                crate::execution_control::ExecutionControl::unlimited(),
+            ),
+        )
+        .await
+        .expect("the no-op returns once uploads resume")
+        .expect("the observed write becomes durable");
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
