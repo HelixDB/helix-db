@@ -19,6 +19,10 @@ concurrency:
   group: typescript-sdk-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # Labels OSS telemetry from this workflow's Helix processes as internal.
+  HELIX_DEPLOYMENT_ID: helix-internal-ci
+
 jobs:
   package:
     name: Package (Node ${{ matrix.node }})

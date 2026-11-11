@@ -87,6 +87,7 @@ class RuntimeController:
                     "DB_PATH": f"python-parity-{self.label}/",
                 }
             )
+            environment.setdefault("HELIX_DEPLOYMENT_ID", "helix-internal-dev")
             self.process = subprocess.Popen(
                 [str(self.runtime.path)],
                 cwd=WORKSPACE_ROOT,
@@ -111,6 +112,9 @@ class RuntimeController:
                     f"127.0.0.1:{self.port}:8080",
                     "--env",
                     "HELIX_DATA_DIR=/var/lib/helix",
+                    "--env",
+                    "HELIX_DEPLOYMENT_ID="
+                    + os.environ.get("HELIX_DEPLOYMENT_ID", "helix-internal-dev"),
                     "--mount",
                     f"type=volume,source={self.volume},target=/var/lib/helix",
                     self.runtime.reference,

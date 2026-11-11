@@ -86,6 +86,9 @@ pub fn load_query_metrics_settings() -> Result<Option<QueryMetricsSettings>, Cli
     if let Some(level) = std::env::var_os("HELIX_TELEMETRY_LEVEL") {
         config.level = parse_metrics_level(&level.to_string_lossy())?;
     }
+    if do_not_track(std::env::var_os("DO_NOT_TRACK")) {
+        config.level = MetricsLevel::Off;
+    }
     if let Some(installation_id) = std::env::var_os("HELIX_TELEMETRY_INSTALLATION_ID") {
         config.installation_id = Some(installation_id.to_string_lossy().into_owned());
     }
@@ -154,13 +157,26 @@ pub(crate) fn save_metrics_config_to(
     Ok(())
 }
 
+/// Parses `HELIX_TELEMETRY_LEVEL`. Boolean words are accepted too, so one
+/// on/off switch (such as Foundry's `FOUNDRY_TELEMETRY`) can be passed
+/// through unchanged: `on`, `true`, `yes` and `1` mean `basic`.
 fn parse_metrics_level(value: &str) -> Result<MetricsLevel, CliMetricsError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "full" => Ok(MetricsLevel::Full),
-        "basic" => Ok(MetricsLevel::Basic),
-        "off" => Ok(MetricsLevel::Off),
+        "basic" | "on" | "true" | "yes" | "1" => Ok(MetricsLevel::Basic),
+        "off" | "false" | "no" | "0" => Ok(MetricsLevel::Off),
         _ => Err(CliMetricsError::InvalidEnum("query metrics level")),
     }
+}
+
+/// Whether `DO_NOT_TRACK` (<https://consoledonottrack.com>) turns telemetry
+/// off: it does for any value except empty, `0`, `false` and `no`. It
+/// overrides every other setting.
+pub fn do_not_track(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.to_string_lossy().trim().to_ascii_lowercase();
+        !matches!(value.as_str(), "" | "0" | "false" | "no")
+    })
 }
 
 pub(crate) fn unix_seconds(time: SystemTime) -> u64 {
@@ -172,6 +188,39 @@ pub(crate) fn unix_seconds(time: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn levels_accept_switch_words_and_reject_others() {
+        for (value, level) in [
+            ("full", MetricsLevel::Full),
+            (" Basic ", MetricsLevel::Basic),
+            ("on", MetricsLevel::Basic),
+            ("TRUE", MetricsLevel::Basic),
+            ("yes", MetricsLevel::Basic),
+            ("1", MetricsLevel::Basic),
+            ("off", MetricsLevel::Off),
+            ("false", MetricsLevel::Off),
+            ("No", MetricsLevel::Off),
+            ("0", MetricsLevel::Off),
+        ] {
+            assert_eq!(parse_metrics_level(value).expect(value), level);
+        }
+        for value in ["", "maybe", "2"] {
+            assert!(parse_metrics_level(value).is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn do_not_track_turns_off_for_any_value_but_empty_or_false() {
+        let dnt = |value: &str| do_not_track(Some(value.into()));
+        assert!(!do_not_track(None));
+        for value in ["", " ", "0", "false", "FALSE", "no"] {
+            assert!(!dnt(value), "{value:?}");
+        }
+        for value in ["1", "true", "yes", "anything"] {
+            assert!(dnt(value), "{value:?}");
+        }
+    }
 
     #[test]
     fn missing_config_defaults_to_basic() {

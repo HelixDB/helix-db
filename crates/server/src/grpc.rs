@@ -58,12 +58,12 @@ pub(crate) fn server_service(state: ServerState) -> HelixDbServerServer<GrpcServ
 
 impl GrpcService {
     /// Route and execute a compiled Cypher or SQL statement under the
-    /// request's options, recording telemetry for `tenant_id`.
+    /// request's options, recording telemetry with the request's `context`.
     async fn execute_compiled(
         &self,
         request: QueryJsonRequest,
         query: db::cypher::CompiledRequest,
-        tenant_id: Option<helix_metrics::query::TenantId>,
+        context: helix_metrics::query::RequestContext,
     ) -> Result<Response<QueryJsonResponse>, Status> {
         validate_options_for_request_type(
             request.warm_only,
@@ -81,7 +81,7 @@ impl GrpcService {
                 db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
                 db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
                 db::cypher::Limits::default(),
-                tenant_id,
+                context,
             )
             .await
             .map_err(cypher_status)?;
@@ -127,12 +127,12 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let tenant_id = metrics_tenant_id(&request);
+        let context = metrics_context(&request);
         let request = request.into_inner();
         let query = json_request::<db::cypher::Request>(&request.body)?
             .compile()
             .map_err(|e| cypher_status(e.into()))?;
-        self.execute_compiled(request, query, tenant_id).await
+        self.execute_compiled(request, query, context).await
     }
 
     async fn explain_cypher(
@@ -150,12 +150,12 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let tenant_id = metrics_tenant_id(&request);
+        let context = metrics_context(&request);
         let request = request.into_inner();
         let query = json_request::<db::cypher::sql::request::Request>(&request.body)?
             .compile()
             .map_err(|e| cypher_status(e.into()))?;
-        self.execute_compiled(request, query, tenant_id).await
+        self.execute_compiled(request, query, context).await
     }
 
     async fn explain_sql(
@@ -173,7 +173,7 @@ impl HelixDbServer for GrpcService {
         &self,
         request: Request<QueryJsonRequest>,
     ) -> Result<Response<QueryJsonResponse>, Status> {
-        let metrics_tenant_id = metrics_tenant_id(&request);
+        let metrics_context = metrics_context(&request);
         let QueryJsonRequest {
             body,
             warm_only,
@@ -209,10 +209,10 @@ impl HelixDbServer for GrpcService {
         let response = self
             .state
             .query_service()
-            .execute_query_with_mode_and_metrics_tenant(
+            .execute_query_with_mode_and_metrics_context(
                 query,
                 query_mode(warm_only, await_durable),
-                metrics_tenant_id,
+                metrics_context,
             )
             .await
             .map_err(status_from_service_error)?;
@@ -243,14 +243,15 @@ fn query_mode(warm_only: bool, await_durable: Option<bool>) -> QueryMode {
     }
 }
 
-/// The telemetry tenant a request names in its metadata.
-fn metrics_tenant_id<T>(request: &Request<T>) -> Option<helix_metrics::query::TenantId> {
-    crate::query_metrics_tenant_id(
+/// The telemetry context a request's metadata names: its tenant and user agent.
+fn metrics_context<T>(request: &Request<T>) -> helix_metrics::query::RequestContext {
+    let header = |name| {
         request
             .metadata()
-            .get(crate::TENANT_ID_HEADER_NAME)
-            .and_then(|value| value.to_str().ok()),
-    )
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    };
+    crate::query_metrics_context(header(crate::TENANT_ID_HEADER_NAME), header("user-agent"))
 }
 
 /// Decode a Cypher or SQL body with the same size limit and error codes as
@@ -353,6 +354,38 @@ fn status_with_error_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metrics_context_comes_from_tenant_and_user_agent_metadata() {
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            crate::TENANT_ID_HEADER_NAME,
+            "tenant-1".parse().expect("valid metadata"),
+        );
+        request.metadata_mut().insert(
+            "user-agent",
+            "grpc-go/1.70.0 extra".parse().expect("valid metadata"),
+        );
+        let context = metrics_context(&request);
+        assert_eq!(
+            context
+                .tenant_id
+                .as_ref()
+                .map(helix_metrics::query::TenantId::as_str),
+            Some("tenant-1")
+        );
+        assert_eq!(
+            context
+                .user_agent
+                .as_ref()
+                .map(helix_metrics::query::UserAgent::as_str),
+            Some("grpc-go/1.70.0")
+        );
+        assert_eq!(
+            metrics_context(&Request::new(())),
+            helix_metrics::query::RequestContext::default()
+        );
+    }
 
     #[test]
     fn cypher_statuses_follow_the_shared_error_classes() {
