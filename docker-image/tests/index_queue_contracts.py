@@ -39,6 +39,7 @@ Usage:
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import random
 import subprocess
@@ -127,6 +128,8 @@ class Server:
     def start(self):
         subprocess.run(["docker", "rm", "-f", self.name], capture_output=True)
         command = ["docker", "run", "-d", "--name", self.name, "-p", f"{self.port}:8080"]
+        deployment_id = os.environ.get("HELIX_DEPLOYMENT_ID", "helix-internal-dev")
+        command += ["-e", f"HELIX_DEPLOYMENT_ID={deployment_id}"]
         if self.s3 is None:
             command += [
                 "-e", "HELIX_DATA_DIR=/var/lib/helix",

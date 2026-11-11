@@ -22,6 +22,9 @@ COPY . .
 
 # Benchmark builds only: `docker-image/build.sh --async-index-benchmark`.
 ARG HELIX_CARGO_FEATURES=""
+# Commit the server reports in its telemetry version. Release tags are applied
+# after the image is built, so the commit is what identifies a release.
+ARG HELIX_BUILD_COMMIT=""
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \

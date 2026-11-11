@@ -1,0 +1,5 @@
+# Labels OSS telemetry from local and EC2 cargo runs in this repository so it
+# is never counted as open-source usage. CI workflows set helix-internal-ci,
+# which takes precedence over this default.
+[env]
+HELIX_DEPLOYMENT_ID = "helix-internal-dev"

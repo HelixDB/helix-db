@@ -1,14 +1,17 @@
 //! Typed JSON contract and bounded HTTP transport for anonymous telemetry.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use url::Url;
 use uuid::Uuid;
+
+use crate::attribution;
 
 pub const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://telemetry.helix-db.com/v1/events";
 pub const MAX_ENVELOPE_EVENTS: usize = 500;
@@ -60,6 +63,11 @@ pub enum Source {
     Embedded,
 }
 
+/// Sender identity copied onto every event of an envelope.
+///
+/// Attribution fields are optional on the wire because spooled CLI envelopes
+/// written before they existed must still decode; [`ClientInfo::new`] always
+/// sets them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ClientInfo {
     pub version: String,
@@ -68,19 +76,40 @@ pub struct ClientInfo {
     pub installation_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(flatten)]
+    pub environment: Option<attribution::Environment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
 }
 
 impl ClientInfo {
+    /// Builds the identity of one sender.
+    ///
+    /// `version` is the sending product's version, not this crate's.
     pub fn new(
+        version: &str,
         installation_id: impl Into<String>,
         user_id: Option<String>,
+        attribution: &attribution::Attribution,
     ) -> Result<Self, TelemetryError> {
         let client = Self {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: version.to_owned(),
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
             installation_id: installation_id.into(),
             user_id,
+            session_id: Some(attribution.session_id().to_string()),
+            environment: Some(attribution.environment()),
+            project_id: attribution
+                .project_id()
+                .map(|project_id| project_id.as_str().to_owned()),
+            deployment_id: attribution
+                .deployment_id()
+                .map(|deployment_id| deployment_id.as_str().to_owned()),
         };
         client.validate()?;
         Ok(client)
@@ -91,10 +120,15 @@ impl ClientInfo {
         validate_client_field("client.os", &self.os)?;
         validate_client_field("client.arch", &self.arch)?;
         validate_client_field("client.installation_id", &self.installation_id)?;
-        if let Some(user_id) = &self.user_id {
-            validate_client_field("client.user_id", user_id)?;
-        }
-        Ok(())
+        [
+            ("client.user_id", &self.user_id),
+            ("client.session_id", &self.session_id),
+            ("client.project_id", &self.project_id),
+            ("client.deployment_id", &self.deployment_id),
+        ]
+        .into_iter()
+        .filter_map(|(field, value)| Some((field, value.as_deref()?)))
+        .try_for_each(|(field, value)| validate_client_field(field, value))
     }
 }
 
@@ -289,6 +323,7 @@ pub async fn post_envelope(client: &reqwest::Client, endpoint: &str, body: Vec<u
 #[derive(Clone)]
 pub struct Recorder {
     sender: mpsc::Sender<Command>,
+    summary: Arc<watch::Sender<Option<Event>>>,
 }
 
 impl Recorder {
@@ -296,6 +331,14 @@ impl Recorder {
     #[must_use]
     pub fn record(&self, event: Event) -> bool {
         self.sender.try_send(Command::Event(event)).is_ok()
+    }
+
+    /// Replaces the pending cumulative summary. It never waits and never
+    /// fails: the transport sends the latest summary ahead of any queued
+    /// events and resends it until ingest accepts it, so neither a full queue
+    /// nor a rejected request can lose it.
+    pub fn set_summary(&self, event: Event) {
+        self.summary.send_replace(Some(event));
     }
 }
 
@@ -305,7 +348,8 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Flushes queued events for a bounded amount of time.
+    /// Flushes the pending summary and queued events for a bounded amount
+    /// of time.
     pub async fn shutdown(mut self) {
         let (complete_sender, complete_receiver) = oneshot::channel();
         let mut join = self
@@ -343,10 +387,14 @@ pub struct Started {
     pub runtime: Runtime,
 }
 
+/// Starts the transport. A pending summary that ingest did not accept is
+/// resent with the next batch of events, or on its own after
+/// `summary_retry`, so an unreachable endpoint is not retried every flush.
 pub fn start(
     source: Source,
     client: ClientInfo,
     endpoint: impl Into<String>,
+    summary_retry: Duration,
 ) -> Result<Started, TelemetryError> {
     let endpoint = endpoint.into();
     validate_endpoint(&endpoint)?;
@@ -354,10 +402,22 @@ pub fn start(
         .timeout(REQUEST_TIMEOUT)
         .build()?;
     let (sender, receiver) = mpsc::channel(QUEUE_EVENTS);
-    let join = tokio::spawn(run_transport(receiver, source, client, endpoint, http));
+    let (summary, summary_receiver) = watch::channel(None);
+    let transport = Transport {
+        source,
+        client,
+        endpoint,
+        http,
+        summary: summary_receiver,
+        summary_retry,
+        pending_summary: None,
+        summary_retry_at: tokio::time::Instant::now(),
+    };
+    let join = tokio::spawn(transport.run(receiver));
     Ok(Started {
         recorder: Recorder {
             sender: sender.clone(),
+            summary: Arc::new(summary),
         },
         runtime: Runtime {
             sender,
@@ -366,57 +426,88 @@ pub fn start(
     })
 }
 
-async fn run_transport(
-    mut receiver: mpsc::Receiver<Command>,
+struct Transport {
     source: Source,
     client: ClientInfo,
     endpoint: String,
     http: reqwest::Client,
-) {
-    let mut events = Vec::new();
-    let mut interval = tokio::time::interval(FLUSH_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    interval.tick().await;
-    loop {
-        tokio::select! {
-            command = receiver.recv() => {
-                let Some(command) = command else {
-                    deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
-                    return;
-                };
-                match command {
-                    Command::Event(event) => {
-                        events.push(event);
-                        if events.len() == MAX_ENVELOPE_EVENTS {
-                            deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
+    summary: watch::Receiver<Option<Event>>,
+    summary_retry: Duration,
+    /// The latest summary ingest has not accepted yet.
+    pending_summary: Option<Event>,
+    /// When a pending summary may next go out without events to carry it.
+    summary_retry_at: tokio::time::Instant,
+}
+
+impl Transport {
+    async fn run(mut self, mut receiver: mpsc::Receiver<Command>) {
+        let mut events = Vec::new();
+        let mut interval = tokio::time::interval(FLUSH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                command = receiver.recv() => {
+                    let Some(command) = command else {
+                        self.deliver(std::mem::take(&mut events), true).await;
+                        return;
+                    };
+                    match command {
+                        Command::Event(event) => {
+                            events.push(event);
+                            if events.len() == MAX_ENVELOPE_EVENTS {
+                                self.deliver(std::mem::take(&mut events), false).await;
+                            }
+                        }
+                        Command::Shutdown(complete) => {
+                            self.deliver(std::mem::take(&mut events), true).await;
+                            let _ = complete.send(());
+                            return;
                         }
                     }
-                    Command::Shutdown(complete) => {
-                        deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
-                        let _ = complete.send(());
-                        return;
-                    }
                 }
-            }
-            _ = interval.tick() => {
-                deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
+                _ = interval.tick() => {
+                    self.deliver(std::mem::take(&mut events), false).await;
+                }
             }
         }
     }
-}
 
-async fn deliver_events(
-    source: Source,
-    client: &ClientInfo,
-    endpoint: &str,
-    http: &reqwest::Client,
-    events: Vec<Event>,
-) {
-    let Ok(envelopes) = encode_envelopes(source, client, events) else {
-        return;
-    };
-    for envelope in envelopes {
-        let _ = post_envelope(http, endpoint, envelope).await;
+    /// Sends `events`, led by the pending summary when there is one and
+    /// either events carry it, its retry time has come, or this is the last
+    /// delivery.
+    async fn deliver(&mut self, events: Vec<Event>, last: bool) {
+        {
+            // Unlike `Receiver::has_changed`, this still sees a summary set
+            // just before every recorder was dropped.
+            let latest = self.summary.borrow_and_update();
+            if latest.has_changed() {
+                self.pending_summary = latest.clone();
+                self.summary_retry_at = tokio::time::Instant::now();
+            }
+        }
+        let summary = self.pending_summary.clone().filter(|_| {
+            !events.is_empty() || last || tokio::time::Instant::now() >= self.summary_retry_at
+        });
+        let carries_summary = summary.is_some();
+        let Ok(envelopes) = encode_envelopes(
+            self.source,
+            &self.client,
+            summary.into_iter().chain(events).collect(),
+        ) else {
+            return;
+        };
+        for (index, envelope) in envelopes.into_iter().enumerate() {
+            let delivery = post_envelope(&self.http, &self.endpoint, envelope).await;
+            if index == 0 && carries_summary {
+                match delivery {
+                    Delivery::Accepted => self.pending_summary = None,
+                    Delivery::Rejected | Delivery::NoResponse => {
+                        self.summary_retry_at = tokio::time::Instant::now() + self.summary_retry;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -474,6 +565,12 @@ mod tests {
             arch: "arm64".to_owned(),
             installation_id: "installation-1".to_owned(),
             user_id: Some("user-1".to_owned()),
+            session_id: Some("5f0c6f1e-0000-4000-8000-000000000002".to_owned()),
+            environment: Some(attribution::Environment::Ci {
+                ci_provider: attribution::CiProvider::GithubActions,
+            }),
+            project_id: Some("9c1185a5c5e9fc54612808977ee8f548".to_owned()),
+            deployment_id: Some("helix-internal-ci".to_owned()),
         }
     }
 
@@ -498,8 +595,107 @@ mod tests {
         .expect("valid envelope");
         assert_eq!(
             String::from_utf8(envelope.to_vec().expect("encode envelope")).expect("UTF-8"),
-            r#"{"schema_version":1,"source":"helix-server","sent_at":"2026-07-28T12:00:01Z","client":{"version":"1.2.3","os":"darwin","arch":"arm64","installation_id":"installation-1","user_id":"user-1"},"events":[{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"outcome":"succeeded"}}]}"#
+            r#"{"schema_version":1,"source":"helix-server","sent_at":"2026-07-28T12:00:01Z","client":{"version":"1.2.3","os":"darwin","arch":"arm64","installation_id":"installation-1","user_id":"user-1","session_id":"5f0c6f1e-0000-4000-8000-000000000002","environment":"ci","ci_provider":"github_actions","project_id":"9c1185a5c5e9fc54612808977ee8f548","deployment_id":"helix-internal-ci"},"events":[{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"outcome":"succeeded"}}]}"#
         );
+    }
+
+    #[test]
+    fn client_reports_the_sender_version_and_attribution() {
+        let attribution =
+            attribution::Attribution::detect(attribution::DeploymentId::new("acme").ok());
+        let client =
+            ClientInfo::new("3.3.0", "installation-1", None, &attribution).expect("valid client");
+        assert_eq!(client.version, "3.3.0");
+        assert_eq!(
+            client.session_id,
+            Some(attribution.session_id().to_string())
+        );
+        assert_eq!(client.environment, Some(attribution.environment()));
+        assert!(matches!(
+            ClientInfo::new(&"9".repeat(65), "installation-1", None, &attribution),
+            Err(TelemetryError::InvalidClientField("client.version"))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_attribution_fields() {
+        for (field, mutate) in [
+            (
+                "client.session_id",
+                (|client: &mut ClientInfo| client.session_id = Some("a\n".to_owned()))
+                    as fn(&mut ClientInfo),
+            ),
+            ("client.project_id", |client| {
+                client.project_id = Some("x".repeat(65))
+            }),
+            ("client.deployment_id", |client| {
+                client.deployment_id = Some("a\u{7f}".to_owned())
+            }),
+            ("client.user_id", |client| {
+                client.user_id = Some("x".repeat(65))
+            }),
+        ] {
+            let mut invalid = client();
+            mutate(&mut invalid);
+            assert!(
+                matches!(invalid.validate(), Err(TelemetryError::InvalidClientField(name)) if name == field),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelopes_without_attribution_still_decode() {
+        let legacy = br#"{"schema_version":1,"source":"helix-cli","sent_at":"2026-07-28T12:00:01Z","client":{"version":"0.1.1","os":"linux","arch":"x86_64","installation_id":"installation-1"},"events":[{"event_id":"e","name":"cli.install","occurred_at":"2026-07-28T12:00:00Z","properties":{}}]}"#;
+        let envelope = Envelope::from_slice(legacy).expect("legacy envelope");
+        assert_eq!(envelope.client.session_id, None);
+        assert_eq!(envelope.client.environment, None);
+        assert_eq!(envelope.client.project_id, None);
+        assert_eq!(envelope.client.deployment_id, None);
+        assert!(!String::from_utf8(envelope.to_vec().expect("encode"))
+            .expect("UTF-8")
+            .contains("environment"));
+
+        let current = Envelope::with_sent_at(
+            Source::Server,
+            "2026-07-28T12:00:01Z",
+            client(),
+            vec![event(serde_json::json!({}))],
+        )
+        .expect("current envelope");
+        assert_eq!(
+            Envelope::from_slice(&current.to_vec().expect("encode")).expect("decode"),
+            current
+        );
+    }
+
+    #[test]
+    fn endpoints_must_be_https_except_on_loopback() {
+        for endpoint in [
+            "https://telemetry.helix-db.com/v1/events",
+            "http://127.0.0.1:18080/v1/events",
+            "http://localhost:18080/v1/events",
+        ] {
+            assert!(validate_endpoint(endpoint).is_ok(), "{endpoint}");
+        }
+        assert!(matches!(
+            validate_endpoint("http://telemetry.helix-db.com/v1/events"),
+            Err(TelemetryError::InsecureEndpoint)
+        ));
+        for endpoint in [
+            "not a url",
+            "https://user:secret@telemetry.helix-db.com/v1/events",
+            "https://telemetry.helix-db.com/v1/events?token=1",
+            "https://telemetry.helix-db.com/v1/events#fragment",
+        ] {
+            assert!(
+                matches!(
+                    validate_endpoint(endpoint),
+                    Err(TelemetryError::InvalidEndpoint)
+                ),
+                "{endpoint}"
+            );
+        }
     }
 
     #[test]

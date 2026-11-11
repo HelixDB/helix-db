@@ -5,11 +5,12 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::{Uuid, Version};
 
-use crate::telemetry;
+use crate::{attribution, telemetry};
 
 pub mod transport;
 
 const MAX_CONTEXT_ID_BYTES: usize = 64;
+const MAX_USER_AGENT_BYTES: usize = 64;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ValidationError {
@@ -51,6 +52,51 @@ impl TenantId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// First product token of a request's `User-Agent`, such as
+/// `helix-foundry/0.1.3` or `python-httpx/0.27.0`. Later tokens and comments,
+/// which can describe the caller's OS or device, are dropped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserAgent(String);
+
+impl UserAgent {
+    /// Keeps the first token, cut to 64 bytes. A header with no token or
+    /// with a non-ASCII or control byte in it gives `None`.
+    ///
+    /// ```
+    /// use helix_metrics::query::UserAgent;
+    ///
+    /// let product = |header| UserAgent::from_header(header).map(|agent| agent.as_str().to_owned());
+    /// assert_eq!(product("helix-foundry/0.1.3").as_deref(), Some("helix-foundry/0.1.3"));
+    /// assert_eq!(product("Mozilla/5.0 (Macintosh; Intel Mac OS X)").as_deref(), Some("Mozilla/5.0"));
+    /// assert_eq!(product("  "), None);
+    /// assert_eq!(product("caf\u{e9}/1"), None);
+    /// ```
+    #[must_use]
+    pub fn from_header(value: &str) -> Option<Self> {
+        let token = value.split_ascii_whitespace().next()?;
+        let token = token.get(..MAX_USER_AGENT_BYTES).unwrap_or(token);
+        token
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
+            .then(|| Self(token.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// What a transport knows about the request a query arrived in. Neither
+/// value affects execution; both are only reported.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RequestContext {
+    /// From the `x-helix-tenant-id` header.
+    pub tenant_id: Option<TenantId>,
+    /// From the `User-Agent` header.
+    pub user_agent: Option<UserAgent>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,10 +162,16 @@ impl OssIdentity {
         self.user_id.as_ref()
     }
 
-    pub(crate) fn client_info(&self) -> Result<telemetry::ClientInfo, telemetry::TelemetryError> {
+    pub(crate) fn client_info(
+        &self,
+        version: &str,
+        attribution: &attribution::Attribution,
+    ) -> Result<telemetry::ClientInfo, telemetry::TelemetryError> {
         telemetry::ClientInfo::new(
+            version,
             self.installation_id.to_string(),
             self.user_id.as_ref().map(|user_id| user_id.0.clone()),
+            attribution,
         )
     }
 }
@@ -257,7 +309,7 @@ pub struct QueryEvent {
     pub raw_query: CanonicalQuery,
     pub query_type: QueryType,
     pub latency_micros: u64,
-    pub tenant_id: Option<TenantId>,
+    pub context: RequestContext,
     pub outcome: QueryOutcome,
     pub planner_diagnostics: Option<Value>,
 }
@@ -269,7 +321,7 @@ impl QueryEvent {
         raw_query: CanonicalQuery,
         query_type: QueryType,
         latency_micros: u64,
-        tenant_id: Option<TenantId>,
+        context: RequestContext,
         outcome: QueryOutcome,
         planner_diagnostics: Option<Value>,
     ) -> Self {
@@ -280,7 +332,7 @@ impl QueryEvent {
             raw_query,
             query_type,
             latency_micros,
-            tenant_id,
+            context,
             outcome,
             planner_diagnostics,
         }
@@ -290,6 +342,11 @@ impl QueryEvent {
         self.into_telemetry_with_cluster(None)
     }
 
+    /// Converts to a `query.execute` event.
+    ///
+    /// An event over the properties limit is still sent so it is counted:
+    /// planner diagnostics are dropped first, then the canonical query is
+    /// replaced by `{"omitted":"too_large"}`.
     pub(crate) fn into_telemetry_with_cluster(
         self,
         cluster_id: Option<&ClusterId>,
@@ -301,6 +358,8 @@ impl QueryEvent {
             #[serde(skip_serializing_if = "Option::is_none")]
             tenant_id: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            user_agent: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             query_name: Option<String>,
             canonical_query: Value,
             query_type: QueryType,
@@ -310,9 +369,10 @@ impl QueryEvent {
             planner_diagnostics: Option<Value>,
         }
 
-        let properties = Properties {
+        let mut properties = Properties {
             cluster_id: cluster_id.map(|cluster_id| cluster_id.0.clone()),
-            tenant_id: self.tenant_id.map(|tenant_id| tenant_id.0),
+            tenant_id: self.context.tenant_id.map(|tenant_id| tenant_id.0),
+            user_agent: self.context.user_agent.map(|user_agent| user_agent.0),
             query_name: self.name.map(|name| name.0),
             canonical_query: self.raw_query.into_value(),
             query_type: self.query_type,
@@ -320,16 +380,34 @@ impl QueryEvent {
             outcome: self.outcome,
             planner_diagnostics: self.planner_diagnostics,
         };
-        telemetry::Event::with_identity(
-            self.event_id,
-            "query.execute",
-            self.occurred_at,
-            serde_json::to_value(properties)?,
-        )
+        let encode = |properties: &Properties| {
+            telemetry::Event::with_identity(
+                self.event_id.as_str(),
+                "query.execute",
+                self.occurred_at.as_str(),
+                serde_json::to_value(properties)?,
+            )
+        };
+        let degradations: [fn(&mut Properties); 2] = [
+            |properties| properties.planner_diagnostics = None,
+            |properties| properties.canonical_query = serde_json::json!({"omitted": "too_large"}),
+        ];
+        let mut event = encode(&properties);
+        for degrade in degradations {
+            if !matches!(event, Err(telemetry::TelemetryError::PropertiesTooLarge)) {
+                break;
+            }
+            degrade(&mut properties);
+            event = encode(&properties);
+        }
+        event
     }
 }
 
-fn context_id(value: impl Into<String>, name: &'static str) -> Result<String, ValidationError> {
+pub(crate) fn context_id(
+    value: impl Into<String>,
+    name: &'static str,
+) -> Result<String, ValidationError> {
     let value = non_empty(value, name)?;
     if value.len() > MAX_CONTEXT_ID_BYTES
         || value.trim() != value
@@ -421,7 +499,10 @@ mod tests {
             raw_query: CanonicalQuery::new(r#"{"queries":[],"returns":["users"]}"#).expect("query"),
             query_type: QueryType::Read,
             latency_micros: 42,
-            tenant_id: Some(TenantId::new("tenant-1").expect("tenant ID")),
+            context: RequestContext {
+                tenant_id: Some(TenantId::new("tenant-1").expect("tenant ID")),
+                user_agent: UserAgent::from_header("helix-foundry/0.1.3 (linux)"),
+            },
             outcome: QueryOutcome::Succeeded {
                 warnings: Vec::new(),
             },
@@ -439,7 +520,7 @@ mod tests {
         let event = query_event();
         assert_eq!(
             serde_json::to_string(&event).expect("encode event"),
-            r#"{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"canonical_query":{"queries":[],"returns":["users"]},"cluster_id":"cluster-1","latency_micros":42,"outcome":{"status":"succeeded","warnings":[]},"planner_diagnostics":{"insights":[],"statistics":{"total_operators":1}},"query_name":"find_users","query_type":"read","tenant_id":"tenant-1"}}"#
+            r#"{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"canonical_query":{"queries":[],"returns":["users"]},"cluster_id":"cluster-1","latency_micros":42,"outcome":{"status":"succeeded","warnings":[]},"planner_diagnostics":{"insights":[],"statistics":{"total_operators":1}},"query_name":"find_users","query_type":"read","tenant_id":"tenant-1","user_agent":"helix-foundry/0.1.3"}}"#
         );
         let encoded = serde_json::to_string(&event.properties).expect("properties");
         for sensitive in ["parameters", "embeddings", "email", "returned_rows"] {
@@ -485,6 +566,10 @@ mod tests {
             arch: "arm64".to_owned(),
             installation_id: "installation-1".to_owned(),
             user_id: None,
+            session_id: None,
+            environment: None,
+            project_id: None,
+            deployment_id: None,
         };
         let envelope = telemetry::Envelope::with_sent_at(
             telemetry::Source::Server,
@@ -495,7 +580,7 @@ mod tests {
         .expect("query envelope");
         assert_eq!(
             String::from_utf8(envelope.to_vec().expect("encode envelope")).expect("UTF-8"),
-            r#"{"schema_version":1,"source":"helix-server","sent_at":"2026-07-28T12:00:01Z","client":{"version":"1.2.3","os":"darwin","arch":"arm64","installation_id":"installation-1"},"events":[{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"canonical_query":{"queries":[],"returns":["users"]},"cluster_id":"cluster-1","latency_micros":42,"outcome":{"status":"succeeded","warnings":[]},"planner_diagnostics":{"insights":[],"statistics":{"total_operators":1}},"query_name":"find_users","query_type":"read","tenant_id":"tenant-1"}}]}"#
+            r#"{"schema_version":1,"source":"helix-server","sent_at":"2026-07-28T12:00:01Z","client":{"version":"1.2.3","os":"darwin","arch":"arm64","installation_id":"installation-1"},"events":[{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"canonical_query":{"queries":[],"returns":["users"]},"cluster_id":"cluster-1","latency_micros":42,"outcome":{"status":"succeeded","warnings":[]},"planner_diagnostics":{"insights":[],"statistics":{"total_operators":1}},"query_name":"find_users","query_type":"read","tenant_id":"tenant-1","user_agent":"helix-foundry/0.1.3"}}]}"#
         );
     }
 
@@ -508,7 +593,7 @@ mod tests {
             raw_query: CanonicalQuery::new(r#"{"queries":[],"returns":[]}"#).expect("query"),
             query_type: QueryType::Read,
             latency_micros: 7,
-            tenant_id: None,
+            context: RequestContext::default(),
             outcome: QueryOutcome::Succeeded {
                 warnings: Vec::new(),
             },
@@ -525,6 +610,10 @@ mod tests {
                 arch: "arm64".to_owned(),
                 installation_id: "installation-1".to_owned(),
                 user_id: None,
+                session_id: None,
+                environment: None,
+                project_id: None,
+                deployment_id: None,
             },
             vec![event],
         )
@@ -533,6 +622,95 @@ mod tests {
             String::from_utf8(envelope.to_vec().expect("encode envelope")).expect("UTF-8"),
             r#"{"schema_version":1,"source":"helix-embedded","sent_at":"2026-07-28T12:00:01Z","client":{"version":"1.2.3","os":"darwin","arch":"arm64","installation_id":"installation-1"},"events":[{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"canonical_query":{"queries":[],"returns":[]},"cluster_id":"cluster-1","latency_micros":7,"outcome":{"status":"succeeded","warnings":[]},"query_type":"read"}}]}"#
         );
+    }
+
+    fn oversized_event(
+        name: &str,
+        raw_query: CanonicalQuery,
+        planner_diagnostics: Option<Value>,
+    ) -> QueryEvent {
+        QueryEvent {
+            event_id: "018f6f1e-0000-7000-8000-000000000001".to_owned(),
+            occurred_at: "2026-07-28T12:00:00Z".to_owned(),
+            name: Some(QueryName::new(name).expect("query name")),
+            raw_query,
+            query_type: QueryType::Write,
+            latency_micros: 9,
+            context: RequestContext::default(),
+            outcome: QueryOutcome::Succeeded {
+                warnings: Vec::new(),
+            },
+            planner_diagnostics,
+        }
+    }
+
+    #[test]
+    fn oversized_events_drop_diagnostics_then_the_query_but_are_still_sent() {
+        let small = || CanonicalQuery::new(r#"{"queries":[]}"#).expect("query");
+        let large = || {
+            CanonicalQuery::new(
+                serde_json::json!({"queries": "q".repeat(telemetry::MAX_PROPERTIES_BYTES)})
+                    .to_string(),
+            )
+            .expect("query")
+        };
+        let diagnostics =
+            serde_json::json!({"insights": "d".repeat(telemetry::MAX_PROPERTIES_BYTES)});
+
+        let without_diagnostics = oversized_event("q", small(), Some(diagnostics.clone()))
+            .into_telemetry()
+            .expect("diagnostics dropped");
+        assert_eq!(
+            without_diagnostics.properties.get("planner_diagnostics"),
+            None
+        );
+        assert_eq!(
+            without_diagnostics.properties["canonical_query"],
+            serde_json::json!({"queries": []})
+        );
+
+        let without_query = oversized_event("q", large(), Some(diagnostics))
+            .into_telemetry()
+            .expect("query omitted");
+        assert_eq!(without_query.properties.get("planner_diagnostics"), None);
+        assert_eq!(
+            without_query.properties["canonical_query"],
+            serde_json::json!({"omitted": "too_large"})
+        );
+        assert_eq!(without_query.properties["query_name"], "q");
+        assert_eq!(without_query.properties["latency_micros"], 9);
+        assert_eq!(
+            without_query.event_id,
+            "018f6f1e-0000-7000-8000-000000000001"
+        );
+
+        assert!(matches!(
+            oversized_event(&"n".repeat(telemetry::MAX_PROPERTIES_BYTES), small(), None)
+                .into_telemetry(),
+            Err(telemetry::TelemetryError::PropertiesTooLarge)
+        ));
+    }
+
+    #[test]
+    fn user_agent_keeps_one_bounded_ascii_token() {
+        let product = |header: &str| UserAgent::from_header(header).map(|agent| agent.0);
+        assert_eq!(
+            product("\tpython-httpx/0.27.0  extra").as_deref(),
+            Some("python-httpx/0.27.0")
+        );
+        assert_eq!(
+            product(&format!("{}/1", "a".repeat(100))),
+            Some("a".repeat(MAX_USER_AGENT_BYTES))
+        );
+        for rejected in [
+            "",
+            "\t \n",
+            "tool\u{1}/1",
+            "tool\u{7f}/1",
+            "\u{e9}t\u{e9}/1",
+        ] {
+            assert_eq!(product(rejected), None, "{rejected:?}");
+        }
     }
 
     #[test]

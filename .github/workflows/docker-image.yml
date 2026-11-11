@@ -36,6 +36,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Labels OSS telemetry from this workflow's Helix processes as internal.
+  HELIX_DEPLOYMENT_ID: helix-internal-ci
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
 
@@ -94,6 +96,7 @@ jobs:
           file: Dockerfile
           platforms: ${{ matrix.platform }}
           tags: ${{ env.HELIX_IMAGE_REF }}
+          build-args: HELIX_BUILD_COMMIT=${{ github.sha }}
           load: true
           push: false
           provenance: false

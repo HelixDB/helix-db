@@ -387,6 +387,44 @@ pub enum HelixDbSource {
 }
 
 impl HelixDbSource {
+    /// Telemetry deployment ID derived from this source's storage.
+    ///
+    /// Only AWS S3 storage has one: its bucket names are globally unique,
+    /// while memory, disk and custom S3 endpoints reuse the same names across
+    /// unrelated users.
+    ///
+    /// ```
+    /// use db::HelixDbSource;
+    ///
+    /// let s3 = |endpoint: Option<&str>| HelixDbSource::ObjectStorage {
+    ///     database: "db/".to_string(),
+    ///     bucket: "acme-data".to_string(),
+    ///     region: "us-east-2".to_string(),
+    ///     endpoint: endpoint.map(str::to_string),
+    ///     allow_http: false,
+    /// };
+    /// assert!(s3(None).telemetry_deployment_id().is_some());
+    /// assert!(s3(Some("http://seaweedfs:8333")).telemetry_deployment_id().is_none());
+    /// let memory = HelixDbSource::InMemory { database: "db/".to_string() };
+    /// assert!(memory.telemetry_deployment_id().is_none());
+    /// ```
+    #[must_use]
+    pub fn telemetry_deployment_id(&self) -> Option<helix_metrics::attribution::DeploymentId> {
+        match self {
+            Self::ObjectStorage {
+                database,
+                bucket,
+                endpoint,
+                ..
+            } => helix_metrics::attribution::DeploymentId::for_s3(
+                bucket,
+                database,
+                endpoint.as_deref(),
+            ),
+            Self::InMemory { .. } | Self::InMemoryToken { .. } | Self::Disk { .. } => None,
+        }
+    }
+
     /// Build the bounded defaults used by an embedded handle for this source.
     ///
     /// Local storage uses a shorter durability cadence and smaller cache/write-buffer
@@ -977,7 +1015,7 @@ struct HelixDBInner {
     #[cfg(feature = "index-lifecycle-testing")]
     lifecycle_metrics: Arc<index_lifecycle_testing::AutomaticLifecycleMetrics>,
     query_metrics: RwLock<Option<OssQueryMetrics>>,
-    query_metrics_runtime: Mutex<Option<telemetry::Runtime>>,
+    query_metrics_runtime: Mutex<Option<helix_metrics::query::transport::QueryMetricsRuntime>>,
     commit_completions: commit_completion::Tracker,
     close_state: Mutex<CloseState>,
     /// Index membership sets resolved from secondary indexes by any request.
@@ -1145,7 +1183,7 @@ impl HelixDB {
             config,
         )
         .await?;
-        Ok(db.with_embedded_query_metrics().await)
+        Ok(db.with_embedded_query_metrics(None).await)
     }
 
     /// Opens one parity-harness process over a caller-provided store.
@@ -1186,9 +1224,10 @@ impl HelixDB {
     /// # });
     /// ```
     pub async fn open_with_config(source: HelixDbSource, config: DbConfig) -> Result<Self> {
+        let deployment_id = source.telemetry_deployment_id();
         let (path, object_store, gc_boundary_files) = source.into_parts()?;
         let db = Self::open_writer_inner(path, object_store, gc_boundary_files, config).await?;
-        Ok(db.with_embedded_query_metrics().await)
+        Ok(db.with_embedded_query_metrics(deployment_id).await)
     }
 
     /// Opens a managed writer using one exact monotonic SlateDB fencing epoch.
@@ -1554,10 +1593,11 @@ impl HelixDB {
 
     /// Open a read-only database handle with explicit tuning config.
     pub async fn open_reader_with_config(source: HelixDbSource, config: DbConfig) -> Result<Self> {
+        let deployment_id = source.telemetry_deployment_id();
         // A reader runs no garbage collector.
         let (path, object_store, _) = source.into_parts()?;
         let db = Self::open_reader_inner(path, object_store, config).await?;
-        Ok(db.with_embedded_query_metrics().await)
+        Ok(db.with_embedded_query_metrics(deployment_id).await)
     }
 
     /// Opens a read-only handle for a transport server that owns its metrics
@@ -1602,7 +1642,7 @@ impl HelixDB {
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Self> {
         let db = Self::open_reader_inner(database.into(), object_store, DbConfig::new()).await?;
-        Ok(db.with_embedded_query_metrics().await)
+        Ok(db.with_embedded_query_metrics(None).await)
     }
 
     /// Opens a configured read-only handle over a caller-provided object store.
@@ -1612,7 +1652,7 @@ impl HelixDB {
         config: DbConfig,
     ) -> Result<Self> {
         let db = Self::open_reader_inner(database.into(), object_store, config).await?;
-        Ok(db.with_embedded_query_metrics().await)
+        Ok(db.with_embedded_query_metrics(None).await)
     }
 
     #[cfg(test)]
@@ -2743,7 +2783,7 @@ impl HelixDB {
             self,
             request,
             query_service::QueryMode::Execute,
-            None,
+            Default::default(),
             query_metrics.as_ref(),
         )
         .await
@@ -2763,7 +2803,7 @@ impl HelixDB {
             request,
             query_service::QueryMode::Execute,
             tenant_scope,
-            None,
+            Default::default(),
             query_metrics.as_ref(),
             execution_control::ExecutionControl::unlimited(),
         )
@@ -2792,7 +2832,7 @@ impl HelixDB {
             request,
             query_service::QueryMode::Execute,
             tenant_scope,
-            None,
+            Default::default(),
             query_metrics.as_ref(),
             execution_control::ExecutionControl::unlimited(),
         )
@@ -2930,13 +2970,22 @@ impl HelixDB {
         result
     }
 
-    async fn with_embedded_query_metrics(self) -> Self {
+    /// Starts embedded query telemetry. `deployment_id` is derived from the
+    /// opened storage; caller-provided object stores have none.
+    async fn with_embedded_query_metrics(
+        self,
+        deployment_id: Option<helix_metrics::attribution::DeploymentId>,
+    ) -> Self {
         if cfg!(test)
             || self.inner.config.db().query_telemetry() == config::QueryTelemetry::Disabled
         {
             return self;
         }
-        match helix_metrics::query::transport::start_oss_from_env(telemetry::Source::Embedded) {
+        match helix_metrics::query::transport::start_oss_from_env(
+            telemetry::Source::Embedded,
+            env!("CARGO_PKG_VERSION"),
+            deployment_id,
+        ) {
             Ok(Some(started)) => {
                 *self
                     .inner
@@ -4846,9 +4895,13 @@ mod tests {
         .await
         .expect("open database");
         let identity = OssIdentity::new(InstallationId::now(), None);
-        let started =
-            transport::start(telemetry::Source::Embedded, &identity, "http://127.0.0.1:9")
-                .expect("test metrics config");
+        let started = transport::start(
+            telemetry::Source::Embedded,
+            "test",
+            &identity,
+            "http://127.0.0.1:9",
+        )
+        .expect("test metrics config");
         let recorder = started.recorder.clone();
         db.set_embedded_query_metrics_for_tests(recorder.clone());
 

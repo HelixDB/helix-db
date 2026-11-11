@@ -120,6 +120,7 @@ def start(
         "HELIX_BENCHMARK_ROLE": role,
         "HELIX_BENCHMARK_SAMPLE_MS": str(sample_ms),
         "HELIX_INDEX_QUEUE_LAYOUT": layout,
+        "HELIX_DEPLOYMENT_ID": os.environ.get("HELIX_DEPLOYMENT_ID", "helix-internal-dev"),
     }
     command = ["run", "-d", "--name", name, "-p", f"{bind}:{port}:8080"]
     command += ["--ulimit", f"nofile={NOFILE}:{NOFILE}"]

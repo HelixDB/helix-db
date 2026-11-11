@@ -22,6 +22,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Labels OSS telemetry from this workflow's Helix processes as internal.
+  HELIX_DEPLOYMENT_ID: helix-internal-ci
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
