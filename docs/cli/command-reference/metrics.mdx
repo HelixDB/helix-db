@@ -36,6 +36,9 @@ helix metrics <SUBCOMMAND>
 - The setting is saved in `~/.helix/metrics.toml` (or `$HELIX_HOME/metrics.toml`).
 - `full` asks for an email address in a terminal and validates it before saving. Without a terminal, or with `--json`, it reads the address from stdin, one line at a time, until a valid one arrives.
 - Local instances started by the CLI receive the same telemetry level.
+- `DO_NOT_TRACK` set to anything but empty, `0`, `false` or `no` turns telemetry off for the CLI and the instances it starts, whatever the saved level.
+- `HELIX_TELEMETRY_LEVEL` sets the level of a server or embedded database: `full`, `basic` (or `on`, `true`, `yes`, `1`) or `off` (or `false`, `no`, `0`).
+- `basic` identifies the sender only by pseudonymous IDs: a random installation ID, a hash of the git repository, and `HELIX_DEPLOYMENT_ID` or a hash of the S3 bucket. Query events carry each query's shape with every value redacted, its latency and outcome, and the first word of the caller's `User-Agent`. No repository or bucket names, parameters, results or IP addresses are stored.
 
 ### `helix metrics status` output
 
