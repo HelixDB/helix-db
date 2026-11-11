@@ -113,7 +113,8 @@ class RuntimeController:
                     "--env",
                     "HELIX_DATA_DIR=/var/lib/helix",
                     "--env",
-                    f"HELIX_DEPLOYMENT_ID={os.environ.get('HELIX_DEPLOYMENT_ID', 'helix-internal-dev')}",
+                    "HELIX_DEPLOYMENT_ID="
+                    + os.environ.get("HELIX_DEPLOYMENT_ID", "helix-internal-dev"),
                     "--mount",
                     f"type=volume,source={self.volume},target=/var/lib/helix",
                     self.runtime.reference,
