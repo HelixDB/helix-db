@@ -4,7 +4,7 @@ This directory owns the build and test surface for the standalone HelixDB image.
 
 The canonical image repository is `ghcr.io/helixdb/helixdb`. The scripts require an explicit platform and image tag so local and CI runs exercise the same artifact.
 
-The next release is `ghcr.io/helixdb/helixdb:v0.0.15`, targeting Linux amd64
+The next release is `ghcr.io/helixdb/helixdb:v0.0.16`, targeting Linux amd64
 and arm64. The published release remains v0.0.14 until the release workflow succeeds. See the [local server guide](../docs/database/helix-db/start-here/local-development/local-server.mdx)
 for release-image commands. The `local-amd64` and `local-arm64` tags below refer
 to images built from your checkout.
