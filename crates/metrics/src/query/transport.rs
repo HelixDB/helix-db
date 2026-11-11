@@ -588,18 +588,6 @@ mod tests {
             ),
             Err(TransportConfigError::InvalidSource)
         ));
-        assert!(matches!(
-            start_with(
-                Source::Server,
-                client(),
-                "http://example.com",
-                None,
-                SUMMARY_INTERVAL
-            ),
-            Err(TransportConfigError::Telemetry(
-                telemetry::TelemetryError::InsecureEndpoint
-            ))
-        ));
     }
 
     #[test]

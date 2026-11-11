@@ -21,14 +21,14 @@ values only. `crates/metrics/src/attribution.rs` defines them:
 | `version` | The sender's own version. The server adds its image build commit, for example `0.1.0+b524727a2c1f`. |
 | `installation_id` | Random UUID per Helix home directory. It changes in every fresh container or CI run. |
 | `session_id` | Random UUID per telemetry runtime. |
-| `project_id` | Salted SHA-256 of the git repository (`host/owner/repo`), taken from CI variables or the working directory's `origin` remote. `helix start` passes it to the container as `HELIX_TELEMETRY_PROJECT_ID`. |
-| `deployment_id` | `HELIX_DEPLOYMENT_ID` as set, or a salted SHA-256 of an AWS S3 bucket and `DB_PATH`. Custom S3 endpoints get none, because local S3 servers reuse bucket names. |
+| `project_id` | SHA-256 of the git repository (`host/owner/repo`) under a fixed domain prefix, taken from CI variables or the working directory's `origin` remote. `helix start` passes it to the container as `HELIX_TELEMETRY_PROJECT_ID`. |
+| `deployment_id` | `HELIX_DEPLOYMENT_ID` as set, or a SHA-256 of an AWS S3 bucket and `DB_PATH`. Custom S3 endpoints get none, because local S3 servers reuse bucket names. |
 | `environment`, `ci_provider` | `ci` (with a provider such as `github_actions`), `kubernetes`, `container` or `host`. |
 
 The same repository gives the same `project_id` on a laptop, in CI and in
 local containers, so short-lived installations can be linked back to one user.
 No repository name, bucket name or IP address is sent, but the IDs are
-pseudonymous, not anonymous: the salts are public, so whoever holds the
+pseudonymous, not anonymous: the hash prefixes are public, so whoever holds the
 telemetry can check a known repository or bucket name against them.
 
 Helix's own traffic sets `HELIX_DEPLOYMENT_ID`: `helix-internal-ci` in CI

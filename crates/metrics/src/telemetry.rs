@@ -670,6 +670,35 @@ mod tests {
     }
 
     #[test]
+    fn endpoints_must_be_https_except_on_loopback() {
+        for endpoint in [
+            "https://telemetry.helix-db.com/v1/events",
+            "http://127.0.0.1:18080/v1/events",
+            "http://localhost:18080/v1/events",
+        ] {
+            assert!(validate_endpoint(endpoint).is_ok(), "{endpoint}");
+        }
+        assert!(matches!(
+            validate_endpoint("http://telemetry.helix-db.com/v1/events"),
+            Err(TelemetryError::InsecureEndpoint)
+        ));
+        for endpoint in [
+            "not a url",
+            "https://user:secret@telemetry.helix-db.com/v1/events",
+            "https://telemetry.helix-db.com/v1/events?token=1",
+            "https://telemetry.helix-db.com/v1/events#fragment",
+        ] {
+            assert!(
+                matches!(
+                    validate_endpoint(endpoint),
+                    Err(TelemetryError::InvalidEndpoint)
+                ),
+                "{endpoint}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_properties_over_backend_limit() {
         let properties = serde_json::json!({"value": "x".repeat(MAX_PROPERTIES_BYTES)});
         assert!(matches!(

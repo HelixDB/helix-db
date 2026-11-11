@@ -5,11 +5,12 @@
 //! installations back to one project or deployment without collecting IP
 //! addresses, repository names or bucket names:
 //!
-//! - [`ProjectId`]: salted SHA-256 of the git repository (`host/owner/repo`).
+//! - [`ProjectId`]: SHA-256 of the git repository (`host/owner/repo`), under a
+//!   fixed domain prefix.
 //!   The same repository gives the same ID on a laptop, in CI, and in
 //!   containers started by `helix start`, which pass it in [`PROJECT_ID_ENV`].
-//! - [`DeploymentId`]: [`DEPLOYMENT_ID_ENV`] as set, or a salted SHA-256 of an
-//!   AWS S3 bucket and database path.
+//! - [`DeploymentId`]: [`DEPLOYMENT_ID_ENV`] as set, or a SHA-256 of an AWS S3
+//!   bucket and database path, under another domain prefix.
 //! - [`Environment`]: CI provider, Kubernetes, container or host.
 //! - session ID: random per telemetry runtime. Query summaries are cumulative
 //!   per session, so a session's last summary is its query count.
@@ -30,8 +31,8 @@ pub const DEPLOYMENT_ID_ENV: &str = "HELIX_DEPLOYMENT_ID";
 /// have no git checkout to derive it from.
 pub const PROJECT_ID_ENV: &str = "HELIX_TELEMETRY_PROJECT_ID";
 
-const PROJECT_SALT: &[u8] = b"helix-telemetry-project-v1";
-const DEPLOYMENT_SALT: &[u8] = b"helix-telemetry-deployment-v1";
+const PROJECT_DOMAIN: &[u8] = b"helix-telemetry-project-v1";
+const DEPLOYMENT_DOMAIN: &[u8] = b"helix-telemetry-deployment-v1";
 const CONTAINER_MARKERS: [&str; 2] = ["/.dockerenv", "/run/.containerenv"];
 
 /// CI service a process runs in, detected from the variable it always sets.
@@ -127,7 +128,7 @@ pub enum Environment {
     Host,
 }
 
-/// Salted hash of a normalized git repository URL.
+/// Hash of a normalized git repository URL.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectId(String);
 
@@ -168,7 +169,7 @@ impl ProjectId {
             return None;
         }
         let repository = format!("{host}/{path}").to_ascii_lowercase();
-        Some(Self(salted_digest(PROJECT_SALT, [repository.as_str()])))
+        Some(Self(domain_digest(PROJECT_DOMAIN, [repository.as_str()])))
     }
 
     fn new(value: impl Into<String>) -> Result<Self, ValidationError> {
@@ -214,7 +215,7 @@ impl DeploymentId {
     pub fn for_s3(bucket: &str, database: &str, endpoint: Option<&str>) -> Option<Self> {
         endpoint
             .is_none()
-            .then(|| Self(salted_digest(DEPLOYMENT_SALT, [bucket, database])))
+            .then(|| Self(domain_digest(DEPLOYMENT_DOMAIN, [bucket, database])))
     }
 
     #[must_use]
@@ -330,9 +331,9 @@ fn is_enabled(value: Option<String>) -> bool {
     })
 }
 
-fn salted_digest<'a>(salt: &[u8], parts: impl IntoIterator<Item = &'a str>) -> String {
+fn domain_digest<'a>(domain: &[u8], parts: impl IntoIterator<Item = &'a str>) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(salt);
+    hasher.update(domain);
     for part in parts {
         hasher.update([0]);
         hasher.update(part.as_bytes());
