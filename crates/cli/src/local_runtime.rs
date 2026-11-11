@@ -5,6 +5,7 @@ use crate::output::Step;
 use crate::project::ProjectContext;
 use crate::utils::command_exists;
 use eyre::{eyre, Result};
+use helix_metrics::attribution;
 use helix_metrics::cli::{load_metrics_config, MetricsConfig, MetricsLevel};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
@@ -1877,10 +1878,21 @@ fn telemetry_env() -> Vec<ContainerEnv> {
             "off".to_owned(),
         )];
     };
-    telemetry_env_for(&config)
+    telemetry_env_for(
+        &config,
+        attribution::Attribution::detect(None).project_id(),
+        |name| std::env::var_os(name).is_some(),
+    )
 }
 
-fn telemetry_env_for(config: &MetricsConfig) -> Vec<ContainerEnv> {
+/// The container has no git checkout and none of the host's CI variables, so
+/// the CLI passes its own project ID and copies the CI markers and deployment
+/// label set on the host.
+fn telemetry_env_for(
+    config: &MetricsConfig,
+    project_id: Option<&attribution::ProjectId>,
+    host_has: impl Fn(&str) -> bool,
+) -> Vec<ContainerEnv> {
     let level = match config.level {
         MetricsLevel::Full => "full",
         MetricsLevel::Basic => "basic",
@@ -1912,6 +1924,14 @@ fn telemetry_env_for(config: &MetricsConfig) -> Vec<ContainerEnv> {
     if let Ok(cluster_id) = std::env::var("HELIX_CLUSTER_ID") {
         env.push(ContainerEnv::Literal("HELIX_CLUSTER_ID", cluster_id));
     }
+    env.extend(project_id.map(|project_id| {
+        ContainerEnv::Literal(attribution::PROJECT_ID_ENV, project_id.as_str().to_owned())
+    }));
+    env.extend(
+        attribution::forwarded_env_vars()
+            .filter(|name| host_has(name))
+            .map(ContainerEnv::Host),
+    );
     env
 }
 
@@ -2674,7 +2694,7 @@ mod tests {
             email: Some("secret@example.com".to_owned()),
             ..MetricsConfig::default()
         };
-        let basic_env = telemetry_env_for(&basic);
+        let basic_env = telemetry_env_for(&basic, None, |_| false);
         assert!(basic_env.contains(&ContainerEnv::Literal(
             "HELIX_TELEMETRY_INSTALLATION_ID",
             installation_id.clone(),
@@ -2686,14 +2706,52 @@ mod tests {
             .iter()
             .any(|value| value.to_docker_arg().contains("secret@example.com")));
 
-        let full_env = telemetry_env_for(&MetricsConfig {
-            level: MetricsLevel::Full,
-            ..basic
-        });
+        let full_env = telemetry_env_for(
+            &MetricsConfig {
+                level: MetricsLevel::Full,
+                ..basic.clone()
+            },
+            None,
+            |_| false,
+        );
         assert!(full_env.contains(&ContainerEnv::Literal(
             "HELIX_TELEMETRY_USER_ID",
             "user-1".to_owned(),
         )));
+        assert!(!full_env
+            .iter()
+            .any(|value| matches!(value, ContainerEnv::Host(_))));
+
+        let project_id =
+            attribution::ProjectId::from_repository_url("git@github.com:owner/repo.git")
+                .expect("project id");
+        let ci_env = telemetry_env_for(&basic, Some(&project_id), |name| {
+            matches!(name, "GITHUB_ACTIONS" | "HELIX_DEPLOYMENT_ID" | "HOME")
+        });
+        assert!(ci_env.contains(&ContainerEnv::Literal(
+            attribution::PROJECT_ID_ENV,
+            project_id.as_str().to_owned(),
+        )));
+        assert!(ci_env.contains(&ContainerEnv::Host("GITHUB_ACTIONS")));
+        assert!(ci_env.contains(&ContainerEnv::Host(attribution::DEPLOYMENT_ID_ENV)));
+        assert!(!ci_env.contains(&ContainerEnv::Host("HOME")));
+        assert!(!ci_env.contains(&ContainerEnv::Host("GITLAB_CI")));
+
+        let off_env = telemetry_env_for(
+            &MetricsConfig {
+                level: MetricsLevel::Off,
+                ..basic
+            },
+            Some(&project_id),
+            |_| true,
+        );
+        assert_eq!(
+            off_env,
+            [ContainerEnv::Literal(
+                "HELIX_TELEMETRY_LEVEL",
+                "off".to_owned()
+            )]
+        );
     }
 
     #[test]

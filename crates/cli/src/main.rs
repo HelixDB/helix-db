@@ -594,7 +594,7 @@ async fn main() -> Result<()> {
     };
     output::OutputMode::from_flags(cli.json, cli.quiet, cli.verbose).set();
 
-    let metrics_sender = metrics_sender::MetricsSender::new();
+    let metrics_sender = metrics_sender::MetricsSender::new(env!("CARGO_PKG_VERSION"));
     metrics_sender.send_cli_install_event_if_first_time();
     // Update notices are chrome; JSON consumers never see them, so skip the
     // network round-trips entirely.

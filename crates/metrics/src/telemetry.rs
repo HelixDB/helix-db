@@ -10,6 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 use url::Url;
 use uuid::Uuid;
 
+use crate::attribution;
+
 pub const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://telemetry.helix-db.com/v1/events";
 pub const MAX_ENVELOPE_EVENTS: usize = 500;
 pub const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
@@ -60,6 +62,11 @@ pub enum Source {
     Embedded,
 }
 
+/// Sender identity copied onto every event of an envelope.
+///
+/// Attribution fields are optional on the wire because spooled CLI envelopes
+/// written before they existed must still decode; [`ClientInfo::new`] always
+/// sets them.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ClientInfo {
     pub version: String,
@@ -68,19 +75,40 @@ pub struct ClientInfo {
     pub installation_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(flatten)]
+    pub environment: Option<attribution::Environment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<String>,
 }
 
 impl ClientInfo {
+    /// Builds the identity of one sender.
+    ///
+    /// `version` is the sending product's version, not this crate's.
     pub fn new(
+        version: &str,
         installation_id: impl Into<String>,
         user_id: Option<String>,
+        attribution: &attribution::Attribution,
     ) -> Result<Self, TelemetryError> {
         let client = Self {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: version.to_owned(),
             os: std::env::consts::OS.to_owned(),
             arch: std::env::consts::ARCH.to_owned(),
             installation_id: installation_id.into(),
             user_id,
+            session_id: Some(attribution.session_id().to_string()),
+            environment: Some(attribution.environment()),
+            project_id: attribution
+                .project_id()
+                .map(|project_id| project_id.as_str().to_owned()),
+            deployment_id: attribution
+                .deployment_id()
+                .map(|deployment_id| deployment_id.as_str().to_owned()),
         };
         client.validate()?;
         Ok(client)
@@ -91,10 +119,15 @@ impl ClientInfo {
         validate_client_field("client.os", &self.os)?;
         validate_client_field("client.arch", &self.arch)?;
         validate_client_field("client.installation_id", &self.installation_id)?;
-        if let Some(user_id) = &self.user_id {
-            validate_client_field("client.user_id", user_id)?;
-        }
-        Ok(())
+        [
+            ("client.user_id", &self.user_id),
+            ("client.session_id", &self.session_id),
+            ("client.project_id", &self.project_id),
+            ("client.deployment_id", &self.deployment_id),
+        ]
+        .into_iter()
+        .filter_map(|(field, value)| Some((field, value.as_deref()?)))
+        .try_for_each(|(field, value)| validate_client_field(field, value))
     }
 }
 
@@ -305,15 +338,20 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Flushes queued events for a bounded amount of time.
-    pub async fn shutdown(mut self) {
+    /// Flushes queued events, then `final_events`, for a bounded amount of
+    /// time. `final_events` bypass the bounded queue, so a full queue cannot
+    /// drop them.
+    pub async fn shutdown(mut self, final_events: Vec<Event>) {
         let (complete_sender, complete_receiver) = oneshot::channel();
         let mut join = self
             .join
             .take()
             .expect("telemetry runtime can only be shut down once");
         if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
-            let _ = self.sender.send(Command::Shutdown(complete_sender)).await;
+            let _ = self
+                .sender
+                .send(Command::Shutdown(final_events, complete_sender))
+                .await;
             let _ = complete_receiver.await;
             let _ = (&mut join).await;
         })
@@ -335,7 +373,7 @@ impl Drop for Runtime {
 
 enum Command {
     Event(Event),
-    Shutdown(oneshot::Sender<()>),
+    Shutdown(Vec<Event>, oneshot::Sender<()>),
 }
 
 pub struct Started {
@@ -391,7 +429,8 @@ async fn run_transport(
                             deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
                         }
                     }
-                    Command::Shutdown(complete) => {
+                    Command::Shutdown(final_events, complete) => {
+                        events.extend(final_events);
                         deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
                         let _ = complete.send(());
                         return;
@@ -474,6 +513,12 @@ mod tests {
             arch: "arm64".to_owned(),
             installation_id: "installation-1".to_owned(),
             user_id: Some("user-1".to_owned()),
+            session_id: Some("5f0c6f1e-0000-4000-8000-000000000002".to_owned()),
+            environment: Some(attribution::Environment::Ci {
+                ci_provider: attribution::CiProvider::GithubActions,
+            }),
+            project_id: Some("9c1185a5c5e9fc54612808977ee8f548".to_owned()),
+            deployment_id: Some("helix-internal-ci".to_owned()),
         }
     }
 
@@ -498,7 +543,77 @@ mod tests {
         .expect("valid envelope");
         assert_eq!(
             String::from_utf8(envelope.to_vec().expect("encode envelope")).expect("UTF-8"),
-            r#"{"schema_version":1,"source":"helix-server","sent_at":"2026-07-28T12:00:01Z","client":{"version":"1.2.3","os":"darwin","arch":"arm64","installation_id":"installation-1","user_id":"user-1"},"events":[{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"outcome":"succeeded"}}]}"#
+            r#"{"schema_version":1,"source":"helix-server","sent_at":"2026-07-28T12:00:01Z","client":{"version":"1.2.3","os":"darwin","arch":"arm64","installation_id":"installation-1","user_id":"user-1","session_id":"5f0c6f1e-0000-4000-8000-000000000002","environment":"ci","ci_provider":"github_actions","project_id":"9c1185a5c5e9fc54612808977ee8f548","deployment_id":"helix-internal-ci"},"events":[{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"outcome":"succeeded"}}]}"#
+        );
+    }
+
+    #[test]
+    fn client_reports_the_sender_version_and_attribution() {
+        let attribution =
+            attribution::Attribution::detect(attribution::DeploymentId::new("acme").ok());
+        let client =
+            ClientInfo::new("3.3.0", "installation-1", None, &attribution).expect("valid client");
+        assert_eq!(client.version, "3.3.0");
+        assert_eq!(
+            client.session_id,
+            Some(attribution.session_id().to_string())
+        );
+        assert_eq!(client.environment, Some(attribution.environment()));
+        assert!(matches!(
+            ClientInfo::new(&"9".repeat(65), "installation-1", None, &attribution),
+            Err(TelemetryError::InvalidClientField("client.version"))
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_attribution_fields() {
+        for (field, mutate) in [
+            (
+                "client.session_id",
+                (|client: &mut ClientInfo| client.session_id = Some("a\n".to_owned()))
+                    as fn(&mut ClientInfo),
+            ),
+            ("client.project_id", |client| {
+                client.project_id = Some("x".repeat(65))
+            }),
+            ("client.deployment_id", |client| {
+                client.deployment_id = Some("a\u{7f}".to_owned())
+            }),
+            ("client.user_id", |client| {
+                client.user_id = Some("x".repeat(65))
+            }),
+        ] {
+            let mut invalid = client();
+            mutate(&mut invalid);
+            assert!(
+                matches!(invalid.validate(), Err(TelemetryError::InvalidClientField(name)) if name == field),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelopes_without_attribution_still_decode() {
+        let legacy = br#"{"schema_version":1,"source":"helix-cli","sent_at":"2026-07-28T12:00:01Z","client":{"version":"0.1.1","os":"linux","arch":"x86_64","installation_id":"installation-1"},"events":[{"event_id":"e","name":"cli.install","occurred_at":"2026-07-28T12:00:00Z","properties":{}}]}"#;
+        let envelope = Envelope::from_slice(legacy).expect("legacy envelope");
+        assert_eq!(envelope.client.session_id, None);
+        assert_eq!(envelope.client.environment, None);
+        assert_eq!(envelope.client.project_id, None);
+        assert_eq!(envelope.client.deployment_id, None);
+        assert!(!String::from_utf8(envelope.to_vec().expect("encode"))
+            .expect("UTF-8")
+            .contains("environment"));
+
+        let current = Envelope::with_sent_at(
+            Source::Server,
+            "2026-07-28T12:00:01Z",
+            client(),
+            vec![event(serde_json::json!({}))],
+        )
+        .expect("current envelope");
+        assert_eq!(
+            Envelope::from_slice(&current.to_vec().expect("encode")).expect("decode"),
+            current
         );
     }
 

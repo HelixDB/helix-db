@@ -177,8 +177,9 @@ pub struct MetricsSender {
 }
 
 impl MetricsSender {
+    /// Starts CLI telemetry. `version` is the CLI's own version.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(version: &str) -> Self {
         let Ok(root) = config::metrics_root() else {
             return Self::disabled();
         };
@@ -193,20 +194,23 @@ impl MetricsSender {
         let Ok(endpoint) = metrics_endpoint() else {
             return Self::disabled();
         };
-        Self::configured(root, endpoint, config)
-    }
-
-    fn configured(root: std::path::PathBuf, endpoint: String, config: MetricsConfig) -> Self {
-        Self::configured_with_delivery_timeout(root, endpoint, config, spool::REQUEST_TIMEOUT)
+        Self::configured_with_delivery_timeout(
+            root,
+            endpoint,
+            config,
+            version,
+            spool::REQUEST_TIMEOUT,
+        )
     }
 
     fn configured_with_delivery_timeout(
         root: std::path::PathBuf,
         endpoint: String,
         config: MetricsConfig,
+        version: &str,
         delivery_timeout: Duration,
     ) -> Self {
-        let Some(client) = telemetry_client(&config) else {
+        let Some(client) = telemetry_client(&config, version) else {
             return Self::disabled();
         };
         let (tx, rx) = flume::bounded(EVENT_QUEUE_CAPACITY);
@@ -435,12 +439,6 @@ impl MetricsSender {
     }
 }
 
-impl Default for MetricsSender {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[derive(Clone, Copy)]
 enum OperationKind {
     Compile,
@@ -629,9 +627,11 @@ fn validate_outcome(outcome: &EventOutcome) -> Result<(), CliMetricsError> {
     Ok(())
 }
 
-fn telemetry_client(config: &MetricsConfig) -> Option<telemetry::ClientInfo> {
+fn telemetry_client(config: &MetricsConfig, version: &str) -> Option<telemetry::ClientInfo> {
     let identity = config.query_identity().ok()??;
-    identity.client_info().ok()
+    identity
+        .client_info(version, &crate::attribution::Attribution::detect(None))
+        .ok()
 }
 
 fn metrics_endpoint() -> Result<String, CliMetricsError> {
@@ -714,10 +714,18 @@ mod tests {
         }
         .into_telemetry()
         .expect("CLI event");
+        let client = telemetry_client(&config, "3.3.0").expect("client");
+        assert_eq!(client.version, "3.3.0");
+        assert_eq!(
+            Some(client.installation_id.as_str()),
+            config.installation_id.as_deref()
+        );
+        assert_eq!(client.user_id.as_deref(), Some("user-1"));
+        assert!(client.session_id.is_some() && client.environment.is_some());
         let envelope = telemetry::Envelope::with_sent_at(
             telemetry::Source::Cli,
             "2026-07-28T12:00:01Z",
-            telemetry_client(&config).expect("client"),
+            client.clone(),
             vec![event],
         )
         .expect("envelope");
@@ -725,11 +733,8 @@ mod tests {
         assert_eq!(
             encoded,
             format!(
-                r#"{{"schema_version":1,"source":"helix-cli","sent_at":"2026-07-28T12:00:01Z","client":{{"version":"{}","os":"{}","arch":"{}","installation_id":"{}","user_id":"user-1"}},"events":[{{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"cli.install","occurred_at":"2026-07-28T12:00:00Z","properties":{{}}}}]}}"#,
-                env!("CARGO_PKG_VERSION"),
-                std::env::consts::OS,
-                std::env::consts::ARCH,
-                config.installation_id.as_deref().expect("installation id"),
+                r#"{{"schema_version":1,"source":"helix-cli","sent_at":"2026-07-28T12:00:01Z","client":{},"events":[{{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"cli.install","occurred_at":"2026-07-28T12:00:00Z","properties":{{}}}}]}}"#,
+                serde_json::to_string(&client).expect("client JSON"),
             )
         );
         assert!(!encoded.contains("email"));
@@ -832,7 +837,7 @@ mod tests {
         let root = parent.path().join("not-a-directory");
         fs::write(&root, b"file").expect("blocking file");
         let mut config = MetricsConfig::default();
-        let client = telemetry_client(&config).expect("client");
+        let client = telemetry_client(&config, "9.9.9").expect("client");
         let (delivery_tx, delivery_rx) = flume::bounded(1);
         let mut events = vec![queued(Event::CliInstall)];
 
@@ -864,7 +869,7 @@ mod tests {
             ..worker_config.clone()
         };
         config::save_metrics_config_to(root.path(), &updated).expect("updated preferences");
-        let client = telemetry_client(&worker_config).expect("client");
+        let client = telemetry_client(&worker_config, "9.9.9").expect("client");
         let (delivery_tx, _delivery_rx) = flume::bounded(1);
         let mut events = vec![queued(Event::CliInstall)];
 
@@ -888,7 +893,7 @@ mod tests {
     fn invalid_events_are_discarded_without_blocking_valid_events() {
         let root = tempfile::tempdir().expect("root");
         let mut config = MetricsConfig::default();
-        let client = telemetry_client(&config).expect("client");
+        let client = telemetry_client(&config, "9.9.9").expect("client");
         let (delivery_tx, _delivery_rx) = flume::bounded(1);
         let mut events = vec![
             queued(Event::Compile(OperationEvent {
@@ -910,7 +915,7 @@ mod tests {
     async fn hanging_delivery_never_blocks_durable_shutdown() {
         let root = tempfile::tempdir().expect("root");
         let config = MetricsConfig::default();
-        let client = telemetry_client(&config).expect("client");
+        let client = telemetry_client(&config, "9.9.9").expect("client");
         spool::persist_events(
             root.path(),
             &client,
@@ -922,6 +927,7 @@ mod tests {
             root.path().to_path_buf(),
             endpoint,
             config,
+            "9.9.9",
             Duration::from_millis(100),
         );
         request_observed.await.expect("startup delivery request");

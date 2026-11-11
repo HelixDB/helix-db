@@ -267,7 +267,7 @@ async fn run_open_database_until_shutdown(
     shutdown: impl Future<Output = ServerResult<()>> + Send + 'static,
 ) -> ServerResult<()> {
     let ServerDatabase { db, cache_lock } = database;
-    let (query_metrics, query_metrics_runtime) = server_query_metrics();
+    let (query_metrics, query_metrics_runtime) = server_query_metrics(&config);
     let state = ServerState::new(Arc::clone(&db), query_metrics, config.storage.clone());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -390,17 +390,44 @@ where
     }
 }
 
-fn server_query_metrics() -> (
+fn server_query_metrics(
+    config: &ServerConfig,
+) -> (
     Option<helix_metrics::query::transport::OssQueryMetrics>,
-    Option<telemetry::Runtime>,
+    Option<helix_metrics::query::transport::QueryMetricsRuntime>,
 ) {
-    match helix_metrics::query::transport::start_oss_from_env(telemetry::Source::Server) {
+    match helix_metrics::query::transport::start_oss_from_env(
+        telemetry::Source::Server,
+        &telemetry_version(env!("CARGO_PKG_VERSION"), option_env!("HELIX_BUILD_COMMIT")),
+        config.db_source().telemetry_deployment_id(),
+    ) {
         Ok(Some(started)) => (Some(started.recorder), Some(started.runtime)),
         Ok(None) => (None, None),
         Err(error) => {
             tracing::warn!(%error, "server query metrics are disabled");
             (None, None)
         }
+    }
+}
+
+/// Version the server reports in telemetry: the crate version, plus the
+/// commit the image was built from. Release tags are applied to an image
+/// after it is built, so the commit is what identifies a release.
+///
+/// ```
+/// assert_eq!(server::telemetry_version("0.1.0", None), "0.1.0");
+/// assert_eq!(server::telemetry_version("0.1.0", Some("")), "0.1.0");
+/// assert_eq!(
+///     server::telemetry_version("0.1.0", Some("b524727a2c1f8f0e9d1d1f0b0d6c2e3a4b5c6d7e")),
+///     "0.1.0+b524727a2c1f",
+/// );
+/// ```
+#[doc(hidden)]
+#[must_use]
+pub fn telemetry_version(version: &str, build_commit: Option<&str>) -> String {
+    match build_commit.filter(|commit| !commit.is_empty()) {
+        Some(commit) => format!("{version}+{}", commit.get(..12).unwrap_or(commit)),
+        None => version.to_owned(),
     }
 }
 

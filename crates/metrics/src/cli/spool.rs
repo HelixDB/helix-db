@@ -216,6 +216,10 @@ mod tests {
             arch: "arm64".to_owned(),
             installation_id: "installation-1".to_owned(),
             user_id: user_id.map(str::to_owned),
+            session_id: None,
+            environment: None,
+            project_id: None,
+            deployment_id: None,
         }
     }
 

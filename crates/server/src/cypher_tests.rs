@@ -537,6 +537,7 @@ async fn cypher_executions_emit_anonymous_query_telemetry() {
     // An unroutable endpoint: events are counted when queued, never delivered.
     let started = helix_metrics::query::transport::start(
         helix_metrics::telemetry::Source::Server,
+        "test",
         &identity,
         "http://127.0.0.1:9",
     )
@@ -605,6 +606,7 @@ async fn sql_http_translates_routes_and_reports_like_cypher() {
         helix_metrics::query::OssIdentity::new(helix_metrics::query::InstallationId::now(), None);
     let started = helix_metrics::query::transport::start(
         helix_metrics::telemetry::Source::Server,
+        "test",
         &identity,
         "http://127.0.0.1:9",
     )

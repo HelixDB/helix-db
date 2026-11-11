@@ -5,7 +5,7 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::{Uuid, Version};
 
-use crate::telemetry;
+use crate::{attribution, telemetry};
 
 pub mod transport;
 
@@ -116,10 +116,16 @@ impl OssIdentity {
         self.user_id.as_ref()
     }
 
-    pub(crate) fn client_info(&self) -> Result<telemetry::ClientInfo, telemetry::TelemetryError> {
+    pub(crate) fn client_info(
+        &self,
+        version: &str,
+        attribution: &attribution::Attribution,
+    ) -> Result<telemetry::ClientInfo, telemetry::TelemetryError> {
         telemetry::ClientInfo::new(
+            version,
             self.installation_id.to_string(),
             self.user_id.as_ref().map(|user_id| user_id.0.clone()),
+            attribution,
         )
     }
 }
@@ -290,6 +296,11 @@ impl QueryEvent {
         self.into_telemetry_with_cluster(None)
     }
 
+    /// Converts to a `query.execute` event.
+    ///
+    /// An event over the properties limit is still sent so it is counted:
+    /// planner diagnostics are dropped first, then the canonical query is
+    /// replaced by `{"omitted":"too_large"}`.
     pub(crate) fn into_telemetry_with_cluster(
         self,
         cluster_id: Option<&ClusterId>,
@@ -310,7 +321,7 @@ impl QueryEvent {
             planner_diagnostics: Option<Value>,
         }
 
-        let properties = Properties {
+        let mut properties = Properties {
             cluster_id: cluster_id.map(|cluster_id| cluster_id.0.clone()),
             tenant_id: self.tenant_id.map(|tenant_id| tenant_id.0),
             query_name: self.name.map(|name| name.0),
@@ -320,16 +331,32 @@ impl QueryEvent {
             outcome: self.outcome,
             planner_diagnostics: self.planner_diagnostics,
         };
-        telemetry::Event::with_identity(
-            self.event_id,
-            "query.execute",
-            self.occurred_at,
-            serde_json::to_value(properties)?,
-        )
+        let encode = |properties: &Properties| {
+            telemetry::Event::with_identity(
+                self.event_id.as_str(),
+                "query.execute",
+                self.occurred_at.as_str(),
+                serde_json::to_value(properties)?,
+            )
+        };
+        let event = encode(&properties);
+        if !matches!(event, Err(telemetry::TelemetryError::PropertiesTooLarge)) {
+            return event;
+        }
+        properties.planner_diagnostics = None;
+        let event = encode(&properties);
+        if !matches!(event, Err(telemetry::TelemetryError::PropertiesTooLarge)) {
+            return event;
+        }
+        properties.canonical_query = serde_json::json!({"omitted": "too_large"});
+        encode(&properties)
     }
 }
 
-fn context_id(value: impl Into<String>, name: &'static str) -> Result<String, ValidationError> {
+pub(crate) fn context_id(
+    value: impl Into<String>,
+    name: &'static str,
+) -> Result<String, ValidationError> {
     let value = non_empty(value, name)?;
     if value.len() > MAX_CONTEXT_ID_BYTES
         || value.trim() != value
@@ -485,6 +512,10 @@ mod tests {
             arch: "arm64".to_owned(),
             installation_id: "installation-1".to_owned(),
             user_id: None,
+            session_id: None,
+            environment: None,
+            project_id: None,
+            deployment_id: None,
         };
         let envelope = telemetry::Envelope::with_sent_at(
             telemetry::Source::Server,
@@ -525,6 +556,10 @@ mod tests {
                 arch: "arm64".to_owned(),
                 installation_id: "installation-1".to_owned(),
                 user_id: None,
+                session_id: None,
+                environment: None,
+                project_id: None,
+                deployment_id: None,
             },
             vec![event],
         )
@@ -533,6 +568,73 @@ mod tests {
             String::from_utf8(envelope.to_vec().expect("encode envelope")).expect("UTF-8"),
             r#"{"schema_version":1,"source":"helix-embedded","sent_at":"2026-07-28T12:00:01Z","client":{"version":"1.2.3","os":"darwin","arch":"arm64","installation_id":"installation-1"},"events":[{"event_id":"018f6f1e-0000-7000-8000-000000000001","name":"query.execute","occurred_at":"2026-07-28T12:00:00Z","properties":{"canonical_query":{"queries":[],"returns":[]},"cluster_id":"cluster-1","latency_micros":7,"outcome":{"status":"succeeded","warnings":[]},"query_type":"read"}}]}"#
         );
+    }
+
+    fn oversized_event(
+        name: &str,
+        raw_query: CanonicalQuery,
+        planner_diagnostics: Option<Value>,
+    ) -> QueryEvent {
+        QueryEvent {
+            event_id: "018f6f1e-0000-7000-8000-000000000001".to_owned(),
+            occurred_at: "2026-07-28T12:00:00Z".to_owned(),
+            name: Some(QueryName::new(name).expect("query name")),
+            raw_query,
+            query_type: QueryType::Write,
+            latency_micros: 9,
+            tenant_id: None,
+            outcome: QueryOutcome::Succeeded {
+                warnings: Vec::new(),
+            },
+            planner_diagnostics,
+        }
+    }
+
+    #[test]
+    fn oversized_events_drop_diagnostics_then_the_query_but_are_still_sent() {
+        let small = || CanonicalQuery::new(r#"{"queries":[]}"#).expect("query");
+        let large = || {
+            CanonicalQuery::new(
+                serde_json::json!({"queries": "q".repeat(telemetry::MAX_PROPERTIES_BYTES)})
+                    .to_string(),
+            )
+            .expect("query")
+        };
+        let diagnostics =
+            serde_json::json!({"insights": "d".repeat(telemetry::MAX_PROPERTIES_BYTES)});
+
+        let without_diagnostics = oversized_event("q", small(), Some(diagnostics.clone()))
+            .into_telemetry()
+            .expect("diagnostics dropped");
+        assert_eq!(
+            without_diagnostics.properties.get("planner_diagnostics"),
+            None
+        );
+        assert_eq!(
+            without_diagnostics.properties["canonical_query"],
+            serde_json::json!({"queries": []})
+        );
+
+        let without_query = oversized_event("q", large(), Some(diagnostics))
+            .into_telemetry()
+            .expect("query omitted");
+        assert_eq!(without_query.properties.get("planner_diagnostics"), None);
+        assert_eq!(
+            without_query.properties["canonical_query"],
+            serde_json::json!({"omitted": "too_large"})
+        );
+        assert_eq!(without_query.properties["query_name"], "q");
+        assert_eq!(without_query.properties["latency_micros"], 9);
+        assert_eq!(
+            without_query.event_id,
+            "018f6f1e-0000-7000-8000-000000000001"
+        );
+
+        assert!(matches!(
+            oversized_event(&"n".repeat(telemetry::MAX_PROPERTIES_BYTES), small(), None)
+                .into_telemetry(),
+            Err(telemetry::TelemetryError::PropertiesTooLarge)
+        ));
     }
 
     #[test]
