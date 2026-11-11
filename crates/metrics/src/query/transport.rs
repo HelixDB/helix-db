@@ -363,7 +363,7 @@ mod tests {
             CanonicalQuery::new(r#"{"queries":[],"returns":[]}"#).expect("query"),
             QueryType::Read,
             1,
-            None,
+            super::RequestContext::default(),
             QueryOutcome::Succeeded {
                 warnings: Vec::new(),
             },

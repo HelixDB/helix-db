@@ -53,7 +53,8 @@ impl HelixQueryService {
     /// Execute an already compiled Cypher request after transport routing checks.
     /// Catalog acquisition, planning, parameters and transactions use this attempt.
     /// When anonymous telemetry is on, it records the statement's shape with every
-    /// literal redacted and `tenant_id`, which does not select the storage namespace.
+    /// literal redacted and the request `context`, which does not select the
+    /// storage namespace.
     pub async fn execute_compiled_cypher_json_scoped_controlled(
         &self,
         request: crate::cypher::CompiledRequest,
@@ -61,12 +62,12 @@ impl HelixQueryService {
         scope: DataScope,
         control: ExecutionControl,
         limits: crate::cypher::Limits,
-        tenant_id: Option<query::TenantId>,
+        context: query::RequestContext,
     ) -> crate::cypher::Result<crate::cypher::EncodedResponse> {
         let observation = self
             .query_metrics
             .as_ref()
-            .and_then(|_| QueryObservation::capture_cypher(&request, tenant_id));
+            .and_then(|_| QueryObservation::capture_cypher(&request, context));
         let started_at = std::time::Instant::now();
         let result = crate::cypher::execute_with::<crate::cypher::output::Json>(
             &self.db,
@@ -128,27 +129,28 @@ impl HelixQueryService {
         request: QueryRequest,
         mode: QueryMode,
     ) -> std::result::Result<QueryResponse, QueryServiceError> {
-        self.execute_query_with_mode_and_metrics_tenant(request, mode, None)
+        self.execute_query_with_mode_and_metrics_context(request, mode, Default::default())
             .await
     }
 
-    /// Execute an inline query and attach a transport tenant to anonymous telemetry.
+    /// Execute an inline query and attach the transport's request context
+    /// (tenant and user agent) to anonymous telemetry.
     ///
     /// This identity does not select the storage namespace. Call
     /// [`Self::execute_query_with_mode_scoped`] when execution must be tenant-scoped.
     /// A successful execution adds its plan's insights to
     /// [`Self::planner_insights`].
-    pub async fn execute_query_with_mode_and_metrics_tenant(
+    pub async fn execute_query_with_mode_and_metrics_context(
         &self,
         request: QueryRequest,
         mode: QueryMode,
-        tenant_id: Option<query::TenantId>,
+        context: query::RequestContext,
     ) -> std::result::Result<QueryResponse, QueryServiceError> {
         execute_query_on_observed(
             self.db.as_ref(),
             request,
             mode,
-            tenant_id,
+            context,
             self.query_metrics.as_ref(),
         )
         .await
@@ -194,7 +196,7 @@ impl HelixQueryService {
             request,
             mode,
             tenant_scope,
-            None,
+            Default::default(),
             self.query_metrics.as_ref(),
             execution_control,
         )
@@ -206,7 +208,7 @@ pub(crate) async fn execute_query_on_observed<B: ResponseBody>(
     db: &HelixDB,
     request: QueryRequest,
     mode: QueryMode,
-    tenant_id: Option<query::TenantId>,
+    context: query::RequestContext,
     query_metrics: Option<&OssQueryMetrics>,
 ) -> std::result::Result<QueryResponse<B>, QueryServiceError> {
     execute_query_on_scoped_observed(
@@ -214,7 +216,7 @@ pub(crate) async fn execute_query_on_observed<B: ResponseBody>(
         request,
         mode,
         DataScope::LegacyUnscoped,
-        tenant_id,
+        context,
         query_metrics,
         ExecutionControl::unlimited(),
     )
@@ -233,7 +235,7 @@ pub async fn execute_query_on_scoped(
         request,
         mode,
         tenant_scope,
-        None,
+        Default::default(),
         None,
         ExecutionControl::unlimited(),
     )
@@ -245,7 +247,7 @@ pub(crate) async fn execute_query_on_scoped_observed<B: ResponseBody>(
     request: QueryRequest,
     mode: QueryMode,
     tenant_scope: DataScope,
-    tenant_id: Option<query::TenantId>,
+    context: query::RequestContext,
     query_metrics: Option<&OssQueryMetrics>,
     execution_control: ExecutionControl,
 ) -> std::result::Result<QueryResponse<B>, QueryServiceError> {
@@ -254,7 +256,7 @@ pub(crate) async fn execute_query_on_scoped_observed<B: ResponseBody>(
     request
         .check_nesting()
         .map_err(|error| QueryServiceError::InvalidRequest(error.to_string()))?;
-    let observation = query_metrics.and_then(|_| QueryObservation::capture(&request, tenant_id));
+    let observation = query_metrics.and_then(|_| QueryObservation::capture(&request, context));
     let started_at = std::time::Instant::now();
     let result = match execution_control.check() {
         Ok(()) => match ValidatedQuery::from_request(request) {
@@ -350,11 +352,11 @@ struct QueryObservation {
     name: Option<query::QueryName>,
     raw_query: query::CanonicalQuery,
     query_type: query::QueryType,
-    tenant_id: Option<query::TenantId>,
+    context: query::RequestContext,
 }
 
 impl QueryObservation {
-    fn capture(request: &QueryRequest, tenant_id: Option<query::TenantId>) -> Option<Self> {
+    fn capture(request: &QueryRequest, context: query::RequestContext) -> Option<Self> {
         Some(Self {
             name: request
                 .query_name()
@@ -364,14 +366,14 @@ impl QueryObservation {
                 QueryRequestType::Read => query::QueryType::Read,
                 QueryRequestType::Write => query::QueryType::Write,
             },
-            tenant_id,
+            context,
         })
     }
 
     /// Cypher statements record their shape with every literal replaced by `?`.
     fn capture_cypher(
         request: &crate::cypher::CompiledRequest,
-        tenant_id: Option<query::TenantId>,
+        context: query::RequestContext,
     ) -> Option<Self> {
         let shape = helix_cypher::redact_literals(request.text()).ok()?;
         Some(Self {
@@ -386,7 +388,7 @@ impl QueryObservation {
                 QueryRequestType::Read => query::QueryType::Read,
                 QueryRequestType::Write => query::QueryType::Write,
             },
-            tenant_id,
+            context,
         })
     }
 
@@ -409,7 +411,7 @@ impl QueryObservation {
             self.raw_query,
             self.query_type,
             u64::try_from(latency.as_micros()).unwrap_or(u64::MAX),
-            self.tenant_id,
+            self.context,
             outcome,
             planner_diagnostics,
         )
@@ -1783,7 +1785,10 @@ mod tests {
         );
         let observation = QueryObservation::capture(
             &request,
-            Some(query::TenantId::new("tenant-1").expect("tenant ID")),
+            query::RequestContext {
+                tenant_id: Some(query::TenantId::new("tenant-1").expect("tenant ID")),
+                user_agent: query::UserAgent::from_header("helix-foundry/0.1.3"),
+            },
         )
         .expect("query observation");
 
@@ -1867,6 +1872,10 @@ mod tests {
             .to_string()
             .contains(SECRET_LITERAL));
         assert_eq!(telemetry_event.properties["tenant_id"], "tenant-1");
+        assert_eq!(
+            telemetry_event.properties["user_agent"],
+            "helix-foundry/0.1.3"
+        );
         for sensitive in ["returned_rows", "parameters", "embeddings", "email"] {
             assert!(telemetry_event.properties.get(sensitive).is_none());
         }
@@ -2806,7 +2815,8 @@ mod tests {
         );
         request.query_name = Some("create_person".to_owned());
         let observation =
-            QueryObservation::capture_cypher(&request.compile().unwrap(), None).unwrap();
+            QueryObservation::capture_cypher(&request.compile().unwrap(), Default::default())
+                .unwrap();
         assert_eq!(
             observation.raw_query.as_str(),
             r#"{"cypher":"CREATE ( p : Person { name : ? , age : ? } ) RETURN p . name , $id"}"#
@@ -2934,7 +2944,8 @@ mod tests {
             g().n_with_label_where("User", Predicate::eq("email", "secret@example.com")),
         ))
         .with_parameter_value("secret", QueryValue::String("do-not-send".to_owned()));
-        let observation = QueryObservation::capture(&request, None).expect("canonical query");
+        let observation =
+            QueryObservation::capture(&request, Default::default()).expect("canonical query");
         assert!(!observation.raw_query.as_str().contains("secret"));
         assert!(!observation.raw_query.as_str().contains("do-not-send"));
         assert!(!observation
@@ -3025,7 +3036,7 @@ mod tests {
 
         // A strong read search rejected by backpressure is bucketed with
         // conflicts but not described as one.
-        let rejected = QueryObservation::capture(&request, None)
+        let rejected = QueryObservation::capture(&request, Default::default())
             .expect("canonical query")
             .event(
                 Some(

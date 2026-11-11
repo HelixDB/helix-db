@@ -19,8 +19,8 @@ use uuid::Uuid;
 use crate::telemetry;
 
 pub use config::{
-    load_metrics_config, load_query_metrics_settings, save_metrics_config, MetricsConfig,
-    MetricsLevel, QueryMetricsSettings,
+    do_not_track, load_metrics_config, load_query_metrics_settings, save_metrics_config,
+    MetricsConfig, MetricsLevel, QueryMetricsSettings,
 };
 
 const EVENT_QUEUE_CAPACITY: usize = 1_000;
@@ -183,9 +183,12 @@ impl MetricsSender {
         let Ok(root) = config::metrics_root() else {
             return Self::disabled();
         };
-        let Ok(config) = config::load_metrics_config_from(&root) else {
+        let Ok(mut config) = config::load_metrics_config_from(&root) else {
             return Self::disabled();
         };
+        if do_not_track(std::env::var_os("DO_NOT_TRACK")) {
+            config.level = MetricsLevel::Off;
+        }
         if config.level == MetricsLevel::Off {
             let _ = spool::cleanup_obsolete(&root);
             let _ = spool::apply_privacy(&root, config.level);

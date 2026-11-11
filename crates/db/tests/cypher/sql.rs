@@ -22,7 +22,7 @@ async fn execute(service: &HelixQueryService, body: Value) -> cypher::Result<Val
             DataScope::LegacyUnscoped,
             ExecutionControl::unlimited(),
             cypher::Limits::default(),
-            None,
+            Default::default(),
         )
         .await?;
     Ok(serde_json::from_slice(response.body()).expect("a JSON body"))

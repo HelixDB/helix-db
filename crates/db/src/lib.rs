@@ -2783,7 +2783,7 @@ impl HelixDB {
             self,
             request,
             query_service::QueryMode::Execute,
-            None,
+            Default::default(),
             query_metrics.as_ref(),
         )
         .await
@@ -2803,7 +2803,7 @@ impl HelixDB {
             request,
             query_service::QueryMode::Execute,
             tenant_scope,
-            None,
+            Default::default(),
             query_metrics.as_ref(),
             execution_control::ExecutionControl::unlimited(),
         )
@@ -2832,7 +2832,7 @@ impl HelixDB {
             request,
             query_service::QueryMode::Execute,
             tenant_scope,
-            None,
+            Default::default(),
             query_metrics.as_ref(),
             execution_control::ExecutionControl::unlimited(),
         )

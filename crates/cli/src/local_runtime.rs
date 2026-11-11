@@ -1872,7 +1872,12 @@ fn s3_env(config: &LocalInstanceConfig) -> Result<Vec<ContainerEnv>> {
 }
 
 fn telemetry_env() -> Vec<ContainerEnv> {
-    let Ok(config) = load_metrics_config() else {
+    let Ok(config) = load_metrics_config().map(|mut config| {
+        if helix_metrics::cli::do_not_track(std::env::var_os("DO_NOT_TRACK")) {
+            config.level = MetricsLevel::Off;
+        }
+        config
+    }) else {
         return vec![ContainerEnv::Literal(
             "HELIX_TELEMETRY_LEVEL",
             "off".to_owned(),

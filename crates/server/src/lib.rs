@@ -31,8 +31,16 @@ pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync + 'static>>;
 pub const MAX_QUERY_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const TENANT_ID_HEADER_NAME: &str = "x-helix-tenant-id";
 
-pub(crate) fn query_metrics_tenant_id(value: Option<&str>) -> Option<query::TenantId> {
-    value.and_then(|value| query::TenantId::new(value).ok())
+/// Telemetry context of one request, from its tenant and `User-Agent`
+/// headers. A malformed header is left out rather than failing the query.
+pub(crate) fn query_metrics_context(
+    tenant_id: Option<&str>,
+    user_agent: Option<&str>,
+) -> query::RequestContext {
+    query::RequestContext {
+        tenant_id: tenant_id.and_then(|value| query::TenantId::new(value).ok()),
+        user_agent: user_agent.and_then(query::UserAgent::from_header),
+    }
 }
 
 /// Initialize tracing from `RUST_LOG`, falling back to server defaults.

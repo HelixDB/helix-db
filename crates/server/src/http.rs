@@ -118,10 +118,10 @@ async fn execute_query(
 
     match state
         .query_service()
-        .execute_query_with_mode_and_metrics_tenant(
+        .execute_query_with_mode_and_metrics_context(
             request,
             options.query_mode(),
-            options.metrics_tenant_id,
+            options.metrics_context,
         )
         .await
     {
@@ -254,7 +254,7 @@ async fn execute_compiled(
             db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
             db::execution_control::ExecutionControl::from_timeout(db::cypher::DEFAULT_TIMEOUT),
             db::cypher::Limits::default(),
-            options.metrics_tenant_id.clone(),
+            options.metrics_context.clone(),
         )
         .await;
     match result {
@@ -338,7 +338,7 @@ struct RequestOptions {
     warm_only: bool,
     require_writer: bool,
     await_durable: Option<bool>,
-    metrics_tenant_id: Option<helix_metrics::query::TenantId>,
+    metrics_context: helix_metrics::query::RequestContext,
 }
 
 impl RequestOptions {
@@ -347,9 +347,12 @@ impl RequestOptions {
             warm_only: parse_bool_header(headers, "x-helix-warm")?,
             require_writer: parse_bool_header(headers, "x-helix-require-writer")?,
             await_durable: parse_optional_bool_header(headers, "x-helix-await-durable")?,
-            metrics_tenant_id: crate::query_metrics_tenant_id(
+            metrics_context: crate::query_metrics_context(
                 headers
                     .get(crate::TENANT_ID_HEADER_NAME)
+                    .and_then(|value| value.to_str().ok()),
+                headers
+                    .get(header::USER_AGENT)
                     .and_then(|value| value.to_str().ok()),
             ),
         })
@@ -453,30 +456,50 @@ mod tests {
     }
 
     #[test]
-    fn tenant_metrics_identity_comes_from_the_query_header() {
+    fn metrics_context_comes_from_the_tenant_and_user_agent_headers() {
         let mut headers = HeaderMap::new();
         headers.insert(
             crate::TENANT_ID_HEADER_NAME,
             "tenant-1".parse().expect("valid header"),
+        );
+        headers.insert(
+            header::USER_AGENT,
+            "helix-foundry/0.1.3 (linux)".parse().expect("valid header"),
         );
 
         let options = RequestOptions::from_headers(&headers).expect("valid request options");
 
         assert_eq!(
             options
-                .metrics_tenant_id
+                .metrics_context
+                .tenant_id
                 .as_ref()
                 .map(helix_metrics::query::TenantId::as_str),
             Some("tenant-1")
+        );
+        assert_eq!(
+            options
+                .metrics_context
+                .user_agent
+                .as_ref()
+                .map(helix_metrics::query::UserAgent::as_str),
+            Some("helix-foundry/0.1.3")
         );
 
         headers.insert(
             crate::TENANT_ID_HEADER_NAME,
             " tenant-1".parse().expect("valid header bytes"),
         );
+        headers.insert(
+            header::USER_AGENT,
+            axum::http::HeaderValue::from_bytes(b"caf\xc3\xa9/1").expect("valid header bytes"),
+        );
         let options =
             RequestOptions::from_headers(&headers).expect("telemetry cannot reject a query");
-        assert!(options.metrics_tenant_id.is_none());
+        assert_eq!(
+            options.metrics_context,
+            helix_metrics::query::RequestContext::default()
+        );
     }
 
     #[tokio::test]

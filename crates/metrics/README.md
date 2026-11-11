@@ -50,11 +50,18 @@ the bounded queue or rate-limited by the ingest service are still counted.
 
 Query events include the canonical query AST, latency, outcome, errors or
 warnings, planner diagnostics, optional `cluster_id` from `HELIX_CLUSTER_ID`,
-and optional `tenant_id` from the query request's `x-helix-tenant-id` header.
-Embedded requests have no transport tenant header and omit `tenant_id`. Events
+optional `tenant_id` from the query request's `x-helix-tenant-id` header, and
+optional `user_agent`: the first product token of the request's `User-Agent`,
+such as `helix-foundry/0.1.3` or `python-httpx/0.27.0`. Later tokens and
+comments, which can describe the caller's OS or device, are dropped. Embedded
+requests have no transport headers and omit both. Events
 never include returned rows, parameters, embeddings, or email. `full`
 telemetry may include `user_id`; `basic` strips it and `off` disables
-telemetry.
+telemetry. `HELIX_TELEMETRY_LEVEL` also accepts `on`, `true`, `yes` and `1`
+(meaning `basic`) and `false`, `no` and `0` (meaning `off`), so one on/off
+switch can be passed through unchanged. `DO_NOT_TRACK` set to anything but
+empty, `0`, `false` or `no` turns telemetry off, overriding every other
+setting.
 
 The client enforces the ingestion contract before sending:
 
