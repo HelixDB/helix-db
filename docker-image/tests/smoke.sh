@@ -81,6 +81,7 @@ start_container() {
     --platform "$platform" \
     --name "$name" \
     -p "${port}:8080" \
+    -e "HELIX_DEPLOYMENT_ID=${HELIX_DEPLOYMENT_ID:-helix-internal-dev}" \
     "$@" \
     "$image" >/dev/null
   containers+=("$name")

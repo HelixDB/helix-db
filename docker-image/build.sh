@@ -108,6 +108,7 @@ fi
 if [[ -n "$cargo_features" ]]; then
   build_args+=(--build-arg "HELIX_CARGO_FEATURES=$cargo_features")
 fi
+build_args+=(--build-arg "HELIX_BUILD_COMMIT=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || true)")
 if [[ -n "$rust_image" ]]; then
   build_args+=(--build-arg "RUST_IMAGE=$rust_image")
 fi

@@ -24,6 +24,7 @@ import hashlib
 import http.client
 import json
 import math
+import os
 import statistics
 import subprocess
 import time
@@ -297,6 +298,7 @@ def run(args):
             resources.append((name, volume))
             docker("run", "-d", "--name", name, "--platform", "linux/arm64", "-p", "127.0.0.1::8080",
                    "-e", "HELIX_DATA_DIR=/var/lib/helix", "-e", "RUST_LOG=error",
+                   "-e", f"HELIX_DEPLOYMENT_ID={os.environ.get('HELIX_DEPLOYMENT_ID', 'helix-internal-dev')}",
                    "--mount", f"type=volume,source={volume},target=/var/lib/helix", image)
             ports[role] = int(docker("port", name, "8080/tcp").rsplit(":", 1)[1])
             ready(ports[role])

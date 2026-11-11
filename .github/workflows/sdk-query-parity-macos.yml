@@ -25,6 +25,10 @@ concurrency:
   group: sdk-query-parity-macos-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Labels OSS telemetry from this workflow's Helix processes as internal.
+  HELIX_DEPLOYMENT_ID: helix-internal-ci
+
 jobs:
   embedded:
     name: Generated embedded bindings (macOS)

@@ -21,6 +21,10 @@ concurrency:
   group: vector-kernels-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # Labels OSS telemetry from this workflow's Helix processes as internal.
+  HELIX_DEPLOYMENT_ID: helix-internal-ci
+
 jobs:
   architecture-kernels:
     name: ${{ matrix.kernel }}
