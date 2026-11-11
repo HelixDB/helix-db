@@ -10,7 +10,7 @@
   const HANDOFF_HOSTS = new Set([
     "helix-db.com",
     "www.helix-db.com",
-    "prod.app.helix-db.com",
+    "app.helix-db.com",
   ]);
 
   // Local previews and Mintlify preview deployments stay out of production data.
