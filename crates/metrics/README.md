@@ -27,7 +27,9 @@ values only. `crates/metrics/src/attribution.rs` defines them:
 
 The same repository gives the same `project_id` on a laptop, in CI and in
 local containers, so short-lived installations can be linked back to one user.
-No repository name, bucket name or IP address is sent.
+No repository name, bucket name or IP address is sent, but the IDs are
+pseudonymous, not anonymous: the salts are public, so whoever holds the
+telemetry can check a known repository or bucket name against them.
 
 Helix's own traffic sets `HELIX_DEPLOYMENT_ID`: `helix-internal-ci` in CI
 workflows, `helix-internal-dev` for cargo runs in this repository
@@ -35,8 +37,11 @@ workflows, `helix-internal-dev` for cargo runs in this repository
 Cloud pods. Exclude these values when counting open-source usage.
 
 Server and embedded runtimes count every query they record, whether its
-`query.execute` event is delivered or not. While the counts change, they send a
-`query.summary` event every 60 seconds and once more at shutdown:
+`query.execute` event is delivered or not. While the counts change, they set a
+`query.summary` event every 60 seconds and once more at shutdown. The
+transport sends the latest summary ahead of queued events and resends it
+until ingest accepts it: with the next batch of events, or on its own at most
+once a minute.
 
 ```json
 {"queries": 1500, "dropped_invalid": 0, "dropped_queue_full": 500}
@@ -44,7 +49,10 @@ Server and embedded runtimes count every query they record, whether its
 
 The counts are cumulative per `session_id`, so the true number of queries is
 the sum over sessions of each session's largest `queries`. Events dropped by
-the bounded queue or rate-limited by the ingest service are still counted.
+the bounded queue or rate-limited by the ingest service are still counted. A
+session that sent no summary (a process killed, or an embedded handle dropped
+without `close()`, within its first minute) is counted by its `query.execute`
+events: count each session as the larger of the two.
 
 ## Privacy and limits
 

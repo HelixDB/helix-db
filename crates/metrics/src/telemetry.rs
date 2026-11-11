@@ -1,12 +1,13 @@
 //! Typed JSON contract and bounded HTTP transport for anonymous telemetry.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use url::Url;
 use uuid::Uuid;
 
@@ -322,6 +323,7 @@ pub async fn post_envelope(client: &reqwest::Client, endpoint: &str, body: Vec<u
 #[derive(Clone)]
 pub struct Recorder {
     sender: mpsc::Sender<Command>,
+    summary: Arc<watch::Sender<Option<Event>>>,
 }
 
 impl Recorder {
@@ -329,6 +331,14 @@ impl Recorder {
     #[must_use]
     pub fn record(&self, event: Event) -> bool {
         self.sender.try_send(Command::Event(event)).is_ok()
+    }
+
+    /// Replaces the pending cumulative summary. It never waits and never
+    /// fails: the transport sends the latest summary ahead of any queued
+    /// events and resends it until ingest accepts it, so neither a full queue
+    /// nor a rejected request can lose it.
+    pub fn set_summary(&self, event: Event) {
+        self.summary.send_replace(Some(event));
     }
 }
 
@@ -338,20 +348,16 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Flushes queued events, then `final_events`, for a bounded amount of
-    /// time. `final_events` bypass the bounded queue, so a full queue cannot
-    /// drop them.
-    pub async fn shutdown(mut self, final_events: Vec<Event>) {
+    /// Flushes the pending summary and queued events for a bounded amount
+    /// of time.
+    pub async fn shutdown(mut self) {
         let (complete_sender, complete_receiver) = oneshot::channel();
         let mut join = self
             .join
             .take()
             .expect("telemetry runtime can only be shut down once");
         if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
-            let _ = self
-                .sender
-                .send(Command::Shutdown(final_events, complete_sender))
-                .await;
+            let _ = self.sender.send(Command::Shutdown(complete_sender)).await;
             let _ = complete_receiver.await;
             let _ = (&mut join).await;
         })
@@ -373,7 +379,7 @@ impl Drop for Runtime {
 
 enum Command {
     Event(Event),
-    Shutdown(Vec<Event>, oneshot::Sender<()>),
+    Shutdown(oneshot::Sender<()>),
 }
 
 pub struct Started {
@@ -381,10 +387,14 @@ pub struct Started {
     pub runtime: Runtime,
 }
 
+/// Starts the transport. A pending summary that ingest did not accept is
+/// resent with the next batch of events, or on its own after
+/// `summary_retry`, so an unreachable endpoint is not retried every flush.
 pub fn start(
     source: Source,
     client: ClientInfo,
     endpoint: impl Into<String>,
+    summary_retry: Duration,
 ) -> Result<Started, TelemetryError> {
     let endpoint = endpoint.into();
     validate_endpoint(&endpoint)?;
@@ -392,10 +402,22 @@ pub fn start(
         .timeout(REQUEST_TIMEOUT)
         .build()?;
     let (sender, receiver) = mpsc::channel(QUEUE_EVENTS);
-    let join = tokio::spawn(run_transport(receiver, source, client, endpoint, http));
+    let (summary, summary_receiver) = watch::channel(None);
+    let transport = Transport {
+        source,
+        client,
+        endpoint,
+        http,
+        summary: summary_receiver,
+        summary_retry,
+        pending_summary: None,
+        summary_retry_at: tokio::time::Instant::now(),
+    };
+    let join = tokio::spawn(transport.run(receiver));
     Ok(Started {
         recorder: Recorder {
             sender: sender.clone(),
+            summary: Arc::new(summary),
         },
         runtime: Runtime {
             sender,
@@ -404,58 +426,88 @@ pub fn start(
     })
 }
 
-async fn run_transport(
-    mut receiver: mpsc::Receiver<Command>,
+struct Transport {
     source: Source,
     client: ClientInfo,
     endpoint: String,
     http: reqwest::Client,
-) {
-    let mut events = Vec::new();
-    let mut interval = tokio::time::interval(FLUSH_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    interval.tick().await;
-    loop {
-        tokio::select! {
-            command = receiver.recv() => {
-                let Some(command) = command else {
-                    deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
-                    return;
-                };
-                match command {
-                    Command::Event(event) => {
-                        events.push(event);
-                        if events.len() == MAX_ENVELOPE_EVENTS {
-                            deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
+    summary: watch::Receiver<Option<Event>>,
+    summary_retry: Duration,
+    /// The latest summary ingest has not accepted yet.
+    pending_summary: Option<Event>,
+    /// When a pending summary may next go out without events to carry it.
+    summary_retry_at: tokio::time::Instant,
+}
+
+impl Transport {
+    async fn run(mut self, mut receiver: mpsc::Receiver<Command>) {
+        let mut events = Vec::new();
+        let mut interval = tokio::time::interval(FLUSH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                command = receiver.recv() => {
+                    let Some(command) = command else {
+                        self.deliver(std::mem::take(&mut events), true).await;
+                        return;
+                    };
+                    match command {
+                        Command::Event(event) => {
+                            events.push(event);
+                            if events.len() == MAX_ENVELOPE_EVENTS {
+                                self.deliver(std::mem::take(&mut events), false).await;
+                            }
+                        }
+                        Command::Shutdown(complete) => {
+                            self.deliver(std::mem::take(&mut events), true).await;
+                            let _ = complete.send(());
+                            return;
                         }
                     }
-                    Command::Shutdown(final_events, complete) => {
-                        events.extend(final_events);
-                        deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
-                        let _ = complete.send(());
-                        return;
-                    }
                 }
-            }
-            _ = interval.tick() => {
-                deliver_events(source, &client, &endpoint, &http, std::mem::take(&mut events)).await;
+                _ = interval.tick() => {
+                    self.deliver(std::mem::take(&mut events), false).await;
+                }
             }
         }
     }
-}
 
-async fn deliver_events(
-    source: Source,
-    client: &ClientInfo,
-    endpoint: &str,
-    http: &reqwest::Client,
-    events: Vec<Event>,
-) {
-    let Ok(envelopes) = encode_envelopes(source, client, events) else {
-        return;
-    };
-    for envelope in envelopes {
-        let _ = post_envelope(http, endpoint, envelope).await;
+    /// Sends `events`, led by the pending summary when there is one and
+    /// either events carry it, its retry time has come, or this is the last
+    /// delivery.
+    async fn deliver(&mut self, events: Vec<Event>, last: bool) {
+        {
+            // Unlike `Receiver::has_changed`, this still sees a summary set
+            // just before every recorder was dropped.
+            let latest = self.summary.borrow_and_update();
+            if latest.has_changed() {
+                self.pending_summary = latest.clone();
+                self.summary_retry_at = tokio::time::Instant::now();
+            }
+        }
+        let summary = self.pending_summary.clone().filter(|_| {
+            !events.is_empty() || last || tokio::time::Instant::now() >= self.summary_retry_at
+        });
+        let carries_summary = summary.is_some();
+        let Ok(envelopes) = encode_envelopes(
+            self.source,
+            &self.client,
+            summary.into_iter().chain(events).collect(),
+        ) else {
+            return;
+        };
+        for (index, envelope) in envelopes.into_iter().enumerate() {
+            let delivery = post_envelope(&self.http, &self.endpoint, envelope).await;
+            if index == 0 && carries_summary {
+                match delivery {
+                    Delivery::Accepted => self.pending_summary = None,
+                    Delivery::Rejected | Delivery::NoResponse => {
+                        self.summary_retry_at = tokio::time::Instant::now() + self.summary_retry;
+                    }
+                }
+            }
+        }
     }
 }
 

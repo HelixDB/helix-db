@@ -388,17 +388,19 @@ impl QueryEvent {
                 serde_json::to_value(properties)?,
             )
         };
-        let event = encode(&properties);
-        if !matches!(event, Err(telemetry::TelemetryError::PropertiesTooLarge)) {
-            return event;
+        let degradations: [fn(&mut Properties); 2] = [
+            |properties| properties.planner_diagnostics = None,
+            |properties| properties.canonical_query = serde_json::json!({"omitted": "too_large"}),
+        ];
+        let mut event = encode(&properties);
+        for degrade in degradations {
+            if !matches!(event, Err(telemetry::TelemetryError::PropertiesTooLarge)) {
+                break;
+            }
+            degrade(&mut properties);
+            event = encode(&properties);
         }
-        properties.planner_diagnostics = None;
-        let event = encode(&properties);
-        if !matches!(event, Err(telemetry::TelemetryError::PropertiesTooLarge)) {
-            return event;
-        }
-        properties.canonical_query = serde_json::json!({"omitted": "too_large"});
-        encode(&properties)
+        event
     }
 }
 

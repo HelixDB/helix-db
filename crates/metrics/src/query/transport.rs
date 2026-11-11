@@ -2,10 +2,11 @@
 //!
 //! Every recorded query is counted, whether or not its `query.execute` event
 //! is delivered. While counts change, a `query.summary` event with the
-//! session's cumulative counts is sent every [`SUMMARY_INTERVAL`], and once
-//! more at shutdown. A session's query count is therefore the `queries` of its
-//! last summary, even when individual events are dropped by the bounded queue
-//! or rate-limited by the ingest service.
+//! session's cumulative counts is set every [`SUMMARY_INTERVAL`], and once
+//! more at shutdown. The transport sends a summary ahead of queued events and
+//! resends it until ingest accepts it, so a session's query count is the
+//! `queries` of its last summary even when individual events are dropped by
+//! the bounded queue or rate-limited by the ingest service.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -143,24 +144,25 @@ impl OssQueryMetrics {
 pub struct QueryMetricsRuntime {
     telemetry: Option<telemetry::Runtime>,
     summaries: tokio::task::JoinHandle<()>,
+    recorder: telemetry::Recorder,
     counters: Arc<MetricsCounters>,
 }
 
 impl QueryMetricsRuntime {
-    /// Flushes queued events and the session's final summary for a bounded
-    /// amount of time.
+    /// Sets the session's final summary, then flushes it ahead of queued
+    /// events for a bounded amount of time.
     pub async fn shutdown(mut self) {
         self.summaries.abort();
-        let snapshot = self.counters.snapshot();
-        let final_summary = (snapshot.queries() > 0)
-            .then(|| snapshot.summary_event().ok())
-            .flatten();
         let Some(telemetry) = self.telemetry.take() else {
             return;
         };
-        telemetry
-            .shutdown(final_summary.into_iter().collect())
-            .await;
+        let snapshot = self.counters.snapshot();
+        (snapshot.queries() > 0)
+            .then(|| snapshot.summary_event().ok())
+            .flatten()
+            .into_iter()
+            .for_each(|summary| self.recorder.set_summary(summary));
+        telemetry.shutdown().await;
     }
 }
 
@@ -202,7 +204,7 @@ fn start_with(
     if !matches!(source, Source::Server | Source::Embedded) {
         return Err(TransportConfigError::InvalidSource);
     }
-    let started = telemetry::start(source, client, endpoint)?;
+    let started = telemetry::start(source, client, endpoint, summary_interval)?;
     let counters = Arc::new(MetricsCounters::default());
     let summaries = tokio::spawn(report_summaries(
         started.recorder.clone(),
@@ -211,20 +213,21 @@ fn start_with(
     ));
     Ok(StartedQueryMetrics {
         recorder: OssQueryMetrics {
-            recorder: started.recorder,
+            recorder: started.recorder.clone(),
             cluster_id,
             counters: Arc::clone(&counters),
         },
         runtime: QueryMetricsRuntime {
             telemetry: Some(started.runtime),
             summaries,
+            recorder: started.recorder,
             counters,
         },
     })
 }
 
-/// Sends the session's counts whenever they changed since the last summary
-/// that was queued. A summary dropped by a full queue is retried next tick.
+/// Sets the session's summary whenever its counts changed since the last
+/// one. The transport delivers it; see [`telemetry::Recorder::set_summary`].
 async fn report_summaries(
     recorder: telemetry::Recorder,
     counters: Arc<MetricsCounters>,
@@ -237,13 +240,14 @@ async fn report_summaries(
     loop {
         interval.tick().await;
         let snapshot = counters.snapshot();
-        if snapshot != reported
-            && snapshot
-                .summary_event()
-                .is_ok_and(|event| recorder.record(event))
-        {
-            reported = snapshot;
+        if snapshot == reported {
+            continue;
         }
+        let Ok(summary) = snapshot.summary_event() else {
+            continue;
+        };
+        recorder.set_summary(summary);
+        reported = snapshot;
     }
 }
 
@@ -304,17 +308,20 @@ mod tests {
     };
 
     /// Accepts telemetry over HTTP/1.1 keep-alive and forwards each decoded
-    /// envelope before answering `202`.
-    async fn capture() -> (String, mpsc::UnboundedReceiver<telemetry::Envelope>) {
+    /// envelope, answering `429` to the first `rejected` requests and `202`
+    /// after.
+    async fn capture(rejected: u64) -> (String, mpsc::UnboundedReceiver<telemetry::Envelope>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let endpoint = format!(
             "http://{}/v1/events",
             listener.local_addr().expect("address")
         );
         let (sender, receiver) = mpsc::unbounded_channel();
+        let answered = Arc::new(AtomicU64::new(0));
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let sender = sender.clone();
+                let answered = Arc::clone(&answered);
                 tokio::spawn(async move {
                     let mut stream = tokio::io::BufReader::new(stream);
                     loop {
@@ -339,11 +346,12 @@ mod tests {
                         stream.read_exact(&mut body).await.expect("body");
                         let _ = sender
                             .send(telemetry::Envelope::from_slice(&body).expect("valid envelope"));
-                        stream
-                            .get_mut()
-                            .write_all(b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n")
-                            .await
-                            .expect("respond");
+                        let status: &[u8] = if answered.fetch_add(1, Ordering::Relaxed) < rejected {
+                            b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\n\r\n"
+                        } else {
+                            b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n"
+                        };
+                        stream.get_mut().write_all(status).await.expect("respond");
                     }
                 });
             }
@@ -396,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn summaries_are_cumulative_skip_idle_ticks_and_end_with_a_final_summary() {
-        let (endpoint, mut received) = capture().await;
+        let (endpoint, mut received) = capture(0).await;
         let client = client();
         let started = start_with(
             Source::Server,
@@ -442,7 +450,7 @@ mod tests {
 
     #[tokio::test]
     async fn final_summary_counts_events_a_full_queue_dropped() {
-        let (endpoint, mut received) = capture().await;
+        let (endpoint, mut received) = capture(0).await;
         let started = start_with(Source::Embedded, client(), endpoint, None, SUMMARY_INTERVAL)
             .expect("loopback endpoint");
         // The current-thread runtime cannot drain the queue until this loop
@@ -455,6 +463,10 @@ mod tests {
 
         started.runtime.shutdown().await;
         let envelopes = drain(&mut received);
+        assert_eq!(
+            envelopes[0].events[0].name, "query.summary",
+            "the final summary leads the queued events"
+        );
         assert_eq!(executions(&envelopes), 1_000);
         assert_eq!(
             summaries(&envelopes),
@@ -463,8 +475,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rejected_summary_is_resent_until_accepted() {
+        let (endpoint, mut received) = capture(1).await;
+        let started = start_with(
+            Source::Server,
+            client(),
+            endpoint,
+            None,
+            Duration::from_millis(20),
+        )
+        .expect("loopback endpoint");
+        assert!(started.recorder.record(query("find_users")));
+        assert!(started.recorder.record(query("find_users")));
+
+        // The first request, carrying the summary and both events, gets a 429;
+        // the summary alone goes again once its retry time has passed.
+        let rejected = received.recv().await.expect("rejected envelope");
+        assert_eq!(summaries(std::slice::from_ref(&rejected)).len(), 1);
+        assert_eq!(executions(&[rejected]), 2);
+        let resent = received.recv().await.expect("resent summary");
+        assert_eq!(
+            summaries(std::slice::from_ref(&resent)),
+            [json!({"queries": 2, "dropped_invalid": 0, "dropped_queue_full": 0})]
+        );
+        assert_eq!(executions(std::slice::from_ref(&resent)), 0);
+        let accepted = resent.events[0].event_id.clone();
+        started.runtime.shutdown().await;
+        let after = drain(&mut received);
+        assert!(
+            after
+                .iter()
+                .flat_map(|envelope| &envelope.events)
+                .all(|event| event.event_id != accepted),
+            "an accepted summary is not sent again"
+        );
+        assert_eq!(
+            summaries(&after),
+            [json!({"queries": 2, "dropped_invalid": 0, "dropped_queue_full": 0})],
+            "shutdown sends the final counts once"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unaccepted_summary_rides_with_events_but_waits_to_go_alone() {
+        let (endpoint, mut received) = capture(u64::MAX).await;
+        let started = start_with(Source::Server, client(), endpoint, None, SUMMARY_INTERVAL)
+            .expect("loopback endpoint");
+        started.runtime.recorder.set_summary(
+            MetricsCounterSnapshot {
+                emitted_events: 7,
+                ..MetricsCounterSnapshot::default()
+            }
+            .summary_event()
+            .expect("summary"),
+        );
+        let first = received.recv().await.expect("first attempt");
+        assert_eq!(summaries(&[first]).len(), 1);
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(
+            drain(&mut received).is_empty(),
+            "an endpoint that refuses is not retried every flush"
+        );
+
+        assert!(started.recorder.record(query("find_users")));
+        let with_events = received.recv().await.expect("events with the summary");
+        assert_eq!(with_events.events[0].name, "query.summary");
+        assert_eq!(executions(&[with_events]), 1);
+        drop(started.runtime);
+    }
+
+    #[tokio::test]
     async fn sessions_without_queries_send_nothing() {
-        let (endpoint, mut received) = capture().await;
+        let (endpoint, mut received) = capture(0).await;
         let started = start_with(
             Source::Embedded,
             client(),

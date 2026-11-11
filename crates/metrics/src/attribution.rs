@@ -134,7 +134,7 @@ pub struct ProjectId(String);
 impl ProjectId {
     /// Hashes a git remote URL. HTTPS, SSH and scp-style URLs of one
     /// repository give the same ID; credentials, ports, case and `.git` are
-    /// ignored. Local paths give `None`.
+    /// ignored. Local paths, including Windows drive paths, give `None`.
     ///
     /// ```
     /// use helix_metrics::attribution::ProjectId;
@@ -150,7 +150,10 @@ impl ProjectId {
         let url = url.trim();
         let (authority, path) = match url.split_once("://") {
             Some((_, rest)) => rest.split_once('/')?,
-            None => url.split_once(':')?,
+            // As in git, a one-letter "host" in scp form is a Windows drive.
+            None => url
+                .split_once(':')
+                .filter(|(authority, _)| authority.len() > 1)?,
         };
         let host = authority
             .rsplit_once('@')
@@ -431,6 +434,8 @@ mod tests {
             "git@github.com:",
             "./relative/path:repo",
             "C:\\work\\repo",
+            "C:/repos/project.git",
+            "d:repos/project",
         ] {
             assert_eq!(project(url), None, "{url}");
         }
