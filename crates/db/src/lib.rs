@@ -987,7 +987,7 @@ pub struct HelixDB {
 /// a detached in-memory view.
 struct HelixDBInner {
     storage: HelixStorageParts,
-    reader_storage_compatibility: RwLock<index_lifecycle::repository::ReaderStorageCompatibility>,
+    reader_storage_compatibility: RwLock<index_lifecycle::repository::ObservedReaderCompatibility>,
     caches: HelixCaches,
     index_scope_gates: Arc<index_lifecycle::IndexScopeGates>,
     config: HelixConfig,
@@ -2000,7 +2000,11 @@ impl HelixDB {
         Self {
             inner: Arc::new(HelixDBInner {
                 storage,
-                reader_storage_compatibility: RwLock::new(reader_storage_compatibility),
+                reader_storage_compatibility: RwLock::new(
+                    index_lifecycle::repository::ObservedReaderCompatibility::opened(
+                        reader_storage_compatibility,
+                    ),
+                ),
                 caches: HelixCaches {
                     slate_db: slate_db_cache,
                     fts: fts_cache,
@@ -3708,28 +3712,28 @@ impl HelixDB {
         self.inner.storage.handle()
     }
 
+    /// Records the compatibility a reader snapshot at `sequence` validated.
     pub(crate) fn observe_reader_storage_compatibility(
         &self,
         observed: index_lifecycle::repository::ReaderStorageCompatibility,
+        sequence: u64,
     ) -> Result<()> {
-        let mut compatibility = self
-            .inner
+        self.inner
             .reader_storage_compatibility
             .write()
-            .expect("reader storage compatibility lock is not poisoned");
-        *compatibility = compatibility.advance(observed)?;
-        Ok(())
+            .expect("reader storage compatibility lock is not poisoned")
+            .observe(observed, sequence)
     }
 
     #[cfg(test)]
     pub(crate) fn reader_storage_compatibility_for_tests(
         &self,
     ) -> index_lifecycle::repository::ReaderStorageCompatibility {
-        *self
-            .inner
+        self.inner
             .reader_storage_compatibility
             .read()
             .expect("reader storage compatibility lock is not poisoned")
+            .newest()
     }
 
     /// Returns why one family cannot cross the public lifecycle boundary.
@@ -4036,7 +4040,9 @@ impl HelixDB {
     }
 
     #[cfg(test)]
-    /// Advances at most one immediately eligible background migration step.
+    /// Advances every pending background migration by one bounded step, as
+    /// one turn of the background worker does; see
+    /// [`migrations::background::process_background_step`].
     ///
     /// This writer-only surface is available only when the migration worker is
     /// Disabled so automatic and explicit controllers cannot race for a step.
@@ -4049,12 +4055,8 @@ impl HelixDB {
         if self.config().db().migrations().worker_mode() != config::MigrationWorkerMode::Disabled {
             return Err(HelixDbError::MigrationSteppingRequiresDisabledMode);
         }
-        migrations::process_migration_once(
-            writer,
-            DataScope::LegacyUnscoped,
-            self.config().db().migrations(),
-        )
-        .await
+        migrations::background::process_background_step(writer, self.config().db().migrations())
+            .await
     }
 
     #[cfg(any(test, feature = "bench-internals"))]
@@ -4232,7 +4234,7 @@ impl HelixDB {
                 if reader.status() != observed {
                     return Err(HelixDbError::RequestReadViewChanged);
                 }
-                self.observe_reader_storage_compatibility(compatibility)?;
+                self.observe_reader_storage_compatibility(compatibility, snapshot.seq())?;
                 // A reader load is exact for its snapshot sequence, so it is
                 // reusable and ordered like a planning load.
                 self.inner
@@ -5384,10 +5386,21 @@ mod tests {
         let marker = |version: IndexStorageVersion| {
             values::encode_metadata_value(&IndexV2MetadataValue::StorageVersion(version))
         };
+        // Without the background worker, whose steps record their own
+        // progress later, only the startup migrations write.
+        let embedded = || {
+            HelixDB::open_with_config(
+                source(),
+                DbConfig::new().with_migration_tuning(
+                    config::MigrationTuning::default()
+                        .with_worker_mode(config::MigrationWorkerMode::Disabled),
+                ),
+            )
+        };
 
         // A store as the last version-4 release leaves it: fully initialized,
         // with the V4 cleanup and tenant-envelope markers set.
-        let writer = HelixDB::open(source()).await.unwrap();
+        let writer = embedded().await.unwrap();
         writer
             .inner_db()
             .put(&key, marker(IndexStorageVersion::EQUALITY_BITMAPS))
@@ -5427,7 +5440,7 @@ mod tests {
         assert_eq!(raw_rows(&token).await, before, "failover changed storage");
 
         // An embedded writer publishes the current marker and nothing else.
-        let writer = HelixDB::open(source()).await.unwrap();
+        let writer = embedded().await.unwrap();
         writer.close().await.unwrap();
         let after = raw_rows(&token).await;
         let expected = before
@@ -5443,7 +5456,7 @@ mod tests {
         assert_eq!(after, expected);
 
         // Reopening a current store rewrites nothing.
-        let writer = HelixDB::open(source()).await.unwrap();
+        let writer = embedded().await.unwrap();
         writer.close().await.unwrap();
         assert_eq!(raw_rows(&token).await, after);
     }

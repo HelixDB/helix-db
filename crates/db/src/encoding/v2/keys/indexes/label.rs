@@ -92,6 +92,14 @@ impl<'a> LabelIdentity<'a> {
         let len = usize::from(u16::from_be_bytes(
             len.try_into().expect("label length slice is 2 bytes"),
         ));
+        // No writer frames a label past the bound, so this is a corrupt key,
+        // not a caller's label: [`EncodingError::LabelTooLong`] is reserved
+        // for labels a caller chose.
+        if len > MAX_LABEL_LEN {
+            return Err(EncodingError::InvalidIndexKey(format!(
+                "stored label frame of {len} bytes exceeds the {MAX_LABEL_LEN}-byte bound"
+            )));
+        }
         match slice.len().cmp(&(LABEL_LEN_PREFIX_LEN + len)) {
             core::cmp::Ordering::Less => {
                 return Err(EncodingError::BufferTooShort {
@@ -214,7 +222,6 @@ impl<'a> EdgeLabelKey<'a> {
         Self { identity }
     }
 
-    #[cfg(test)]
     pub(crate) const fn identity(&self) -> LabelIdentity<'a> {
         self.identity
     }
@@ -360,6 +367,10 @@ pub(crate) enum LabelScanPrefix {
 }
 
 impl LabelScanPrefix {
+    /// Every exact label keyspace, in key order.
+    pub(crate) const ALL: [Self; 3] =
+        [Self::NodeLabels, Self::EdgeLabels, Self::EdgeLabelNeighbors];
+
     pub(crate) fn to_bytes(self) -> Bytes {
         let mut buf = Vec::with_capacity(PREFIX_LEN + INDEX_PREFIX_LEN);
         buf.put_u8(KeyPrefix::PropertyIndex.as_u8());
@@ -472,7 +483,8 @@ mod tests {
             Err(EncodingError::LabelTooLong { len, maximum })
                 if len == MAX_LABEL_LEN + 1 && maximum == MAX_LABEL_LEN
         ));
-        // A persisted frame longer than the bound fails closed too.
+        // A persisted frame longer than the bound is a corrupt key, not a
+        // caller's label.
         let mut frame = u16::try_from(MAX_LABEL_LEN + 1)
             .unwrap()
             .to_be_bytes()
@@ -480,7 +492,7 @@ mod tests {
         frame.extend_from_slice(too_long.as_bytes());
         assert!(matches!(
             LabelIdentity::decode(&frame),
-            Err(EncodingError::LabelTooLong { .. })
+            Err(EncodingError::InvalidIndexKey(_))
         ));
 
         let key = crate::encoding::v2::keys::DataKey::Data {

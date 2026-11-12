@@ -126,9 +126,8 @@ async fn seed(
     transaction
         .put(node_key.clone(), node_value.clone())
         .expect("crash-recovery node row stages");
-    crate::search::add_to_equality_index_scoped(
+    crate::search::add_to_legacy_node_label_index_scoped(
         &transaction,
-        "$label",
         LABEL,
         NODE_ID,
         DataScope::LegacyUnscoped,

@@ -681,7 +681,8 @@ impl HelixDbError {
                 error_code::QueryErrorCode::TransactionConflict
             }
             Self::Storage(_) | Self::ObjectStore(_) => error_code::QueryErrorCode::StorageError,
-            // The caller chose the label; nothing stored is malformed.
+            // Only a label a caller chose is too long: a stored label frame
+            // past the bound decodes as a malformed key.
             Self::Encoding(EncodingError::LabelTooLong { .. }) => {
                 error_code::QueryErrorCode::InvalidQuery
             }

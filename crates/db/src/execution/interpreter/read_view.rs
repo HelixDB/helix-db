@@ -142,7 +142,7 @@ impl StableRequestReadView {
                         snapshot.as_ref(),
                     )
                     .await?;
-                db.observe_reader_storage_compatibility(compatibility)?;
+                db.observe_reader_storage_compatibility(compatibility, snapshot.seq())?;
                 Self::ReaderSnapshot {
                     snapshot,
                     compatibility,

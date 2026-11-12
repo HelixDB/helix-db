@@ -46,6 +46,7 @@ CODEC_OWNERS = {
     "keys/indexes/text.rs": "struct TextManifestRootKey",
     "keys/indexes/vector/metadata.rs": "struct VectorPartitionMappingKey",
     "values/global.rs": "fn encode_metadata_value",
+    "values/label_migration.rs": "struct LabelCopyProgressValue",
     "values/lifecycle/index_record.rs": "fn encode_index_record",
     "values/indexes/equality/mod.rs": "struct SecondaryEqualityBitmapValue",
     "values/indexes/range.rs": "fn encode_entry",
@@ -109,6 +110,7 @@ V2_SOURCE_FILES = {
     "values/delta_encoding_tests.rs",
     "values/edge_endpoints.rs",
     "values/id_allocation.rs",
+    "values/label_migration.rs",
     "values/property/mod.rs",
     "values/property/row.rs",
     "values/property/property.rs",
@@ -832,7 +834,6 @@ def validate_codec_architecture(root: Path) -> list[str]:
             or relative_path.startswith("crates/db/src/encoding/v1/")
             or relative_path in {
                 "crates/db/src/encoding/v2/keys/data.rs",
-                "crates/db/src/encoding/v2/keys/indexes/property.rs",
                 "crates/db/src/encoding/v2/keys/indexes/vector/mod.rs",
                 "crates/db/src/encoding/v2/keys/indexes/vector/storage_prefixes.rs",
                 "crates/db/src/fuzzing.rs",
@@ -841,6 +842,7 @@ def validate_codec_architecture(root: Path) -> list[str]:
                 "crates/db/src/index_lifecycle/vector/driver.rs",
                 "crates/db/src/index_lifecycle/vector/publication.rs",
                 "crates/db/src/index_lifecycle_testing.rs",
+                "crates/db/src/merge_operator.rs",
                 "crates/db/src/migration_parity.rs",
                 "crates/db/src/migrations.rs",
                 "crates/db/src/search/mod.rs",

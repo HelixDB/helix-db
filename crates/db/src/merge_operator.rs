@@ -16,6 +16,7 @@ use crate::encoding::v2::keys::indexes::vector::{
 use crate::encoding::v2::keys::indexes::{IndexPrefix, PropertyIndexKey};
 use crate::encoding::v2::keys::{DataKeyKind, KeyPrefix};
 use crate::encoding::v2::keys::{ManagedIndexKey as V2Key, ScopedKey as V2ScopedKey};
+use crate::encoding::v2::legacy::label_hash;
 use crate::encoding::v2::values::indexes::operation_queue;
 use crate::encoding::v2::values::indexes::SecondaryEqualityValue;
 use crate::encoding::v2::values::{adjacency as edges, indexes::vector as vectors};
@@ -908,15 +909,15 @@ impl HelixMergeOperator {
             }
             Some(prefix) if prefix == KeyPrefix::PropertyIndex.as_u8() => {
                 // Every label row is a bitmap, so its prefix decides without
-                // validating the label it carries.
+                // validating the label it carries. Retired hash-keyed rows
+                // keep merging until the label identity cleanup deletes them.
                 if matches!(
                     IndexPrefix::from_slice(logical),
                     Ok(IndexPrefix::NodeLabel
                         | IndexPrefix::EdgeLabel
-                        | IndexPrefix::EdgeLabelNeighbor(_)
-                        | IndexPrefix::LegacyEdgeLabel
-                        | IndexPrefix::LegacyEdgeLabelNeighbor(_))
-                ) {
+                        | IndexPrefix::EdgeLabelNeighbor(_))
+                ) || label_hash::LegacyLabelScanPrefix::of(logical).is_some()
+                {
                     return MergeKeyType::Bitmap(BitmapBase::PortablePrefix);
                 }
                 match DataKeyKind::parse_from_slice(logical) {
@@ -1341,11 +1342,6 @@ mod tests {
 
         let property = crate::encoding::indexes::hash_property_name("status");
         let value = crate::encoding::indexes::hash_property_value("shared");
-        // Retired hash-keyed label rows, parsed from their stored layout.
-        let legacy_edge_label = [0x03, 0x04, 1, 2, 3, 4, 5, 6, 7, 8];
-        let mut legacy_neighbor = vec![0x03, 0x10, 0x01];
-        legacy_neighbor.extend_from_slice(&1u64.to_be_bytes());
-        legacy_neighbor.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         let membership = [
             PropertyIndexKey::Equality(equality::EqualityIndexKey::new(property, value)),
             PropertyIndexKey::EdgeEquality(equality::EdgeEqualityIndexKey::new(
@@ -1365,8 +1361,6 @@ mod tests {
                 1,
                 label::LabelIdentity::new("shared").unwrap(),
             )),
-            PropertyIndexKey::parse_from_slice(&legacy_edge_label).unwrap(),
-            PropertyIndexKey::parse_from_slice(&legacy_neighbor).unwrap(),
             PropertyIndexKey::GlobalEdgeEquality(equality::GlobalEdgeEqualityIndexKey::new(
                 property, value,
             )),
@@ -1434,6 +1428,19 @@ mod tests {
                     kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(1, 2)),
                 }
                 .to_bytes()])
+                // Retired hash-keyed label rows, which only the legacy codec builds.
+                .chain(
+                    [
+                        label_hash::LegacyEdgeLabelKey::for_label("shared").to_bytes(),
+                        label_hash::LegacyEdgeLabelNeighborKey::for_label(
+                            crate::encoding::indexes::EdgeDirection::In,
+                            1,
+                            "shared",
+                        )
+                        .to_bytes(),
+                    ]
+                    .map(|logical| DataKey::data_prefix(scope, logical)),
+                )
                 .map(|key| {
                     (
                         key,

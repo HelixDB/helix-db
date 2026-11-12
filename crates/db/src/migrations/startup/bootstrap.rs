@@ -116,12 +116,20 @@ pub(crate) async fn advance_storage_version(
 
 /// The version a store's V2 storage marker records.
 pub(crate) async fn storage_version(read: &(impl DbReadOps + Sync)) -> Result<IndexStorageVersion> {
-    let marker = read
-        .get(global_key(GlobalKey::StorageVersion))
+    stored_storage_version(read)
         .await?
         .ok_or_else(|| HelixDbError::MigrationRequired {
             reason: "V2 storage marker is missing".to_string(),
-        })?;
+        })
+}
+
+/// The store's storage version, or `None` for a store no V2 writer has opened.
+pub(crate) async fn stored_storage_version(
+    read: &(impl DbReadOps + Sync),
+) -> Result<Option<IndexStorageVersion>> {
+    let Some(marker) = read.get(global_key(GlobalKey::StorageVersion)).await? else {
+        return Ok(None);
+    };
     let IndexV2MetadataValue::StorageVersion(version) =
         metadata_or_migration_required(&marker, "storage marker")?
     else {
@@ -129,7 +137,7 @@ pub(crate) async fn storage_version(read: &(impl DbReadOps + Sync)) -> Result<In
             reason: "V2 storage marker contains the wrong value kind".to_string(),
         });
     };
-    Ok(version)
+    Ok(Some(version))
 }
 
 /// Initializes a pristine managed database without entering a migration path.
