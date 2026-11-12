@@ -7,9 +7,13 @@
 //!
 //! `cargo run --release -p db --example index_build_throughput -- <runs>`
 //!
-//! - `IBT_TASKS`: `total,secondary,vector,text` worker tasks (default `2,2,1,1`).
+//! - `IBT_TASKS`: `total,secondary,vector,text` worker tasks (default: the
+//!   database's defaults).
 //! - `IBT_FLUSH_MS`: WAL flush interval (default 100, SlateDB's).
 //! - `IBT_ROOT`: directory for the databases (default a temp dir).
+//! - `IBT_URL`: a running server (`http://host:8080`) to send the same requests
+//!   to over `/v2/query` instead, each run in a fresh tenant. The server's own
+//!   settings apply, so `IBT_TASKS`, `IBT_FLUSH_MS` and `IBT_ROOT` don't.
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
@@ -19,6 +23,43 @@ use db::{HelixDB, HelixDbSource};
 use helix_ast::{batch, index::IndexSpec, query::QueryRequest, traversal};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Where the requests go: an embedded writer, or a server over HTTP.
+enum Target {
+    Embedded(HelixDB, DataScope),
+    Http {
+        client: reqwest::Client,
+        url: String,
+        tenant: String,
+    },
+}
+
+impl Target {
+    async fn query(&self, request: QueryRequest) -> Result<serde_json::Value> {
+        match self {
+            Self::Embedded(db, scope) => Ok(db.query_scoped(request, *scope).await?),
+            Self::Http {
+                client,
+                url,
+                tenant,
+            } => {
+                let response = client
+                    .post(format!("{url}/v2/query"))
+                    .header("x-helix-tenant-id", tenant)
+                    .header("content-type", "application/json")
+                    .body(serde_json::to_vec(&request)?)
+                    .send()
+                    .await?;
+                let status = response.status();
+                let body = response.text().await?;
+                if !status.is_success() {
+                    return Err(format!("{status}: {body}").into());
+                }
+                Ok(serde_json::from_str(&body)?)
+            }
+        }
+    }
+}
 
 const OWN_NODES: [&str; 9] = [
     "FoundryLoad",
@@ -93,7 +134,9 @@ fn foundry_specs() -> Vec<IndexSpec> {
 }
 
 fn env_tasks() -> Result<IndexLifecycleConcurrency> {
-    let raw = std::env::var("IBT_TASKS").unwrap_or_else(|_| "2,2,1,1".into());
+    let Ok(raw) = std::env::var("IBT_TASKS") else {
+        return Ok(IndexLifecycleConcurrency::default());
+    };
     let n: Vec<usize> = raw.split(',').map(str::parse).collect::<std::result::Result<_, _>>()?;
     let [total, secondary, vector, text] = n[..] else {
         return Err(format!("IBT_TASKS wants four numbers, got {raw}").into());
@@ -103,18 +146,32 @@ fn env_tasks() -> Result<IndexLifecycleConcurrency> {
 
 async fn run(root: &std::path::Path, run: usize) -> Result<()> {
     let flush = std::env::var("IBT_FLUSH_MS").map_or(Ok(100), |v| v.parse::<u64>())?;
-    std::fs::create_dir_all(root.join(format!("run-{run}")))?;
-    let source = HelixDbSource::Disk {
-        root: root.join(format!("run-{run}")),
-        database: "ibt".into(),
+    let tasks = env_tasks()?;
+    // A fresh tenant per run, so a server never finds the indexes already built.
+    let tenant = format!("01M74N56VRTHK2J90HVCVKY{:03}", run % 1000);
+    let target = match std::env::var("IBT_URL") {
+        Ok(url) => Target::Http {
+            client: reqwest::Client::new(),
+            url,
+            tenant,
+        },
+        Err(_) => {
+            std::fs::create_dir_all(root.join(format!("run-{run}")))?;
+            let source = HelixDbSource::Disk {
+                root: root.join(format!("run-{run}")),
+                database: "ibt".into(),
+            };
+            let tuning = IndexLifecycleThroughputTuning::new(Default::default(), tasks);
+            let config = source
+                .embedded_default_config()
+                .with_index_lifecycle_throughput_tuning(tuning)
+                .with_wal_flush_interval_ms(
+                    NonZeroU64::new(flush).ok_or("IBT_FLUSH_MS is zero")?,
+                );
+            let db = HelixDB::open_with_config(source, config).await?;
+            Target::Embedded(db, DataScope::Tenant(TenantId::from_ulid_str(&tenant)?))
+        }
     };
-    let tuning = IndexLifecycleThroughputTuning::new(Default::default(), env_tasks()?);
-    let config = source
-        .embedded_default_config()
-        .with_index_lifecycle_throughput_tuning(tuning)
-        .with_wal_flush_interval_ms(NonZeroU64::new(flush).ok_or("IBT_FLUSH_MS is zero")?);
-    let db = HelixDB::open_with_config(source, config).await?;
-    let scope = DataScope::Tenant(TenantId::from_ulid_str("01M74N56VRTHK2J90HVCVKY1RW")?);
 
     let specs = foundry_specs();
     let names: Vec<String> = (0..specs.len()).map(|i| format!("i{i}")).collect();
@@ -126,7 +183,7 @@ async fn run(root: &std::path::Path, run: usize) -> Result<()> {
         })
         .returning(names.clone());
     let started = Instant::now();
-    let created = db.query_scoped(QueryRequest::write(write), scope).await?;
+    let created = target.query(QueryRequest::write(write)).await?;
     let create_ms = started.elapsed().as_millis();
     let mut pending: Vec<(usize, String)> = names
         .iter()
@@ -148,7 +205,7 @@ async fn run(root: &std::path::Path, run: usize) -> Result<()> {
                 b.var_as(&format!("s{i}"), traversal::g().get_index_operation(op.as_str()))
             })
             .returning(pending.iter().map(|(i, _)| format!("s{i}")).collect::<Vec<_>>());
-        let status = db.query_scoped(QueryRequest::read(read), scope).await?;
+        let status = target.query(QueryRequest::read(read)).await?;
         let mut still = Vec::with_capacity(pending.len());
         for (i, op) in pending {
             match status[format!("s{i}")]["status"].as_str() {
@@ -162,14 +219,20 @@ async fn run(root: &std::path::Path, run: usize) -> Result<()> {
     }
     let at = |q: usize| done_at[(operations * q / 100).saturating_sub(1)].as_secs_f64();
     println!(
-        "run={run} tasks={} flush_ms={flush} indexes={} operations={operations} create_ms={create_ms} p25={:.1}s p50={:.1}s p90={:.1}s all={:.1}s",
-        std::env::var("IBT_TASKS").unwrap_or_else(|_| "2,2,1,1".into()),
+        "run={run} tasks={},{},{},{} flush_ms={flush} indexes={} operations={operations} create_ms={create_ms} p25={:.1}s p50={:.1}s p90={:.1}s all={:.1}s",
+        tasks.total_operation_tasks(),
+        tasks.secondary_tasks(),
+        tasks.vector_tasks(),
+        tasks.text_tasks(),
         specs.len(),
         at(25),
         at(50),
         at(90),
         at(100),
     );
+    let Target::Embedded(db, _) = target else {
+        return Ok(());
+    };
     db.close().await?;
     Ok(())
 }
