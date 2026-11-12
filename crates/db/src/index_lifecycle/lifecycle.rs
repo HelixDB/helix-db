@@ -22,7 +22,7 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result};
 use crate::execution_control;
-use crate::transaction::Mutation;
+use crate::transaction::{CommitDurability, Mutation};
 
 use super::failpoints::{self, IndexOutboxFailpoint};
 use super::outbox::{self, ExpectedCanonicalRevision};
@@ -129,17 +129,21 @@ pub(crate) async fn create_index_operation_from_current_source(
         scope,
         definition,
         mode,
+        CommitDurability::Durable,
         &execution_control,
     )
     .await
 }
 
-/// Captures and enqueues one request-owned BUILD at its durable boundary.
+/// Captures and enqueues one request-owned BUILD, returning once its commit
+/// is as durable as `durability` asks. A query's DDL commits applied and its
+/// request waits once for all of them.
 pub(crate) async fn create_index_operation_from_current_source_with_control(
     db: &Db,
     scope: DataScope,
     definition: ValidatedDynamicIndexDefinition,
     mode: helix_planner::ir::IndexCreateMode,
+    durability: CommitDurability,
     execution_control: &execution_control::ExecutionControl,
 ) -> Result<IndexDdlReceipt> {
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueBefore)?;
@@ -153,6 +157,7 @@ pub(crate) async fn create_index_operation_from_current_source_with_control(
         mode,
         initial_progress,
         VectorPhysicalSelection::Allocate,
+        durability,
         execution_control,
     )
     .await
@@ -175,6 +180,7 @@ pub(crate) async fn create_legacy_vector_adoption_operation(
         helix_planner::ir::IndexCreateMode::IfNotExists,
         InitialBuildProgress::legacy_vector(),
         VectorPhysicalSelection::AdoptLegacy(physical_index_id),
+        CommitDurability::Durable,
         &execution_control,
     )
     .await
@@ -197,6 +203,7 @@ async fn create_index_operation_in_transaction(
         mode,
         initial_progress,
         VectorPhysicalSelection::Allocate,
+        CommitDurability::Durable,
         execution_control,
     )
     .await
@@ -215,6 +222,7 @@ async fn create_index_operation_in_transaction_with_physical(
     mode: helix_planner::ir::IndexCreateMode,
     initial_progress: InitialBuildProgress,
     vector_physical: VectorPhysicalSelection,
+    durability: CommitDurability,
     execution_control: &execution_control::ExecutionControl,
 ) -> Result<IndexDdlReceipt> {
     execution_control.check()?;
@@ -348,7 +356,10 @@ async fn create_index_operation_in_transaction_with_physical(
     outbox::stage_operation(&transaction, scope, expected, &next_index, &operation).await?;
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
     transaction
-        .commit()
+        .commit_with_options(&slatedb::config::WriteOptions {
+            await_durable: durability == CommitDurability::Durable,
+            ..slatedb::config::WriteOptions::default()
+        })
         .await
         .map_err(HelixDbError::from_storage_commit)?;
     Ok(IndexDdlReceipt::Accepted {

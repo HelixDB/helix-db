@@ -63,6 +63,7 @@ pub(super) async fn run() {
     run_create_drop_state_matrix().await;
     run_building_drop_stage_matrix().await;
     run_scope_isolation().await;
+    run_create_batch_durability().await;
 }
 
 /// Runs retry-safe concurrent lifecycle races.
@@ -1400,6 +1401,62 @@ async fn run_automatic_worker_convergence() {
         assert_identity_hidden(&db, scope, &definition).await;
         db.close().await.expect("automatic lifecycle writer closes");
     }
+}
+
+/// Proves a batch of index creates returns only once every create is durable,
+/// though each commits applied: the request waits for one WAL upload at its
+/// end. No worker runs, so nothing else commits after the batch.
+async fn run_create_batch_durability() {
+    let db = HelixDB::open_for_index_lifecycle_testing(
+        HelixDbSource::InMemory {
+            database: "index-lifecycle-create-batch-durability".to_string(),
+        },
+        contract_config(),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await
+    .expect("create batch writer opens");
+    let names: Vec<String> = (0..8).map(|ordinal| format!("i{ordinal}")).collect();
+    let write = names
+        .iter()
+        .enumerate()
+        .fold(helix_ast::batch::write_batch(), |batch, (ordinal, name)| {
+            batch.var_as(
+                name,
+                helix_ast::traversal::g().create_index_if_not_exists(
+                    helix_ast::index::IndexSpec::node_equality(
+                        format!("DurableCreate{ordinal}"),
+                        "value",
+                    ),
+                ),
+            )
+        })
+        .returning(names.clone());
+    let receipts = db
+        .query(helix_ast::query::QueryRequest::write(write))
+        .await
+        .expect("create batch commits");
+    assert!(
+        names
+            .iter()
+            .all(|name| receipts[name]["operation_id"].is_string()),
+        "every create enqueues a build: {receipts}"
+    );
+    let crate::HelixStorage::Writer(writer) = db.storage() else {
+        panic!("the create batch runs on a writer");
+    };
+    let visible = writer
+        .db()
+        .snapshot()
+        .await
+        .expect("writer snapshot opens")
+        .seq();
+    let durable = writer.db().subscribe().borrow().durable_seq;
+    assert!(
+        durable >= visible,
+        "the batch returned at durable sequence {durable}, before visible {visible}"
+    );
+    db.close().await.expect("create batch writer closes");
 }
 
 /// Polls one automatic operation with a fixed parallel-suite timeout.
