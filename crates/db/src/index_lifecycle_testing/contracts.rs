@@ -19,7 +19,8 @@ use slatedb::object_store::ObjectStore;
 use slatedb::IsolationLevel;
 
 use crate::config::{
-    SearchIndexBackfillLimits, SearchIndexBatchLimits, SecondaryIndexDefinition,
+    IndexLifecycleConcurrency, IndexLifecycleThroughputTuning, SearchIndexBackfillLimits,
+    SearchIndexBatchLimits, SecondaryIndexDefinition,
     SecondaryIndexLifecycleBatchRows, SecondaryIndexLifecycleTuning, TextAnalyzerKind,
     TextElementType, TextIndexDefinition, VectorElementType, VectorIndexDefinition,
 };
@@ -73,6 +74,7 @@ pub(super) async fn run_races() {
     run_activation_and_drop_serialization().await;
     run_active_drop_and_mutation_serialization().await;
     run_automatic_worker_convergence().await;
+    run_concurrent_claim_convergence().await;
 }
 
 /// Proves two consecutive errors preserve one recoverable family checkpoint.
@@ -1457,6 +1459,65 @@ async fn run_create_batch_durability() {
         "the batch returned at durable sequence {durable}, before visible {visible}"
     );
     db.close().await.expect("create batch writer closes");
+}
+
+/// Proves the automatic worker claims each operation in its own task: with six
+/// secondary slots, empty builds step side by side instead of one claim per
+/// WAL upload, and every build converges without a worker failure or restart.
+async fn run_concurrent_claim_convergence() {
+    let concurrency =
+        IndexLifecycleConcurrency::try_new(6, 6, 1, 1).expect("six secondary slots validate");
+    let db = HelixDB::open_for_index_lifecycle_testing(
+        HelixDbSource::InMemory {
+            database: "index-lifecycle-concurrent-claims".to_string(),
+        },
+        DbConfig::new().with_index_lifecycle_throughput_tuning(
+            IndexLifecycleThroughputTuning::new(Default::default(), concurrency),
+        ),
+        LifecycleTestScheduling::Automatic,
+    )
+    .await
+    .expect("concurrent claim writer opens");
+    let controller = LifecycleTestController::new();
+    let scope = DataScope::LegacyUnscoped;
+    let mut operations = Vec::with_capacity(12);
+    for ordinal in 0..12 {
+        let definition: ValidatedDynamicIndexDefinition =
+            SecondaryIndexDefinition::node_equality(format!("ConcurrentClaim{ordinal}"), "value")
+                .expect("concurrent claim secondary validates")
+                .try_into()
+                .expect("concurrent claim secondary converts");
+        let IndexDdlReceipt::Accepted { operation_id, .. } = controller
+            .create_index(&db, scope, definition, ir::IndexCreateMode::ErrorIfExists)
+            .await
+            .expect("concurrent claim build is accepted")
+        else {
+            panic!("a fresh concurrent claim build must enqueue");
+        };
+        operations.push(operation_id);
+    }
+    for operation_id in operations {
+        assert!(matches!(
+            wait_for_automatic_terminal(&db, scope, operation_id).await,
+            IndexOperationStatus::Succeeded { .. }
+        ));
+    }
+    let worker = controller
+        .automatic_metrics(&db)
+        .expect("automatic metrics snapshot is available")
+        .worker;
+    // Claims made one at a time in the dispatch loop, each waiting for its own
+    // WAL upload, never let more than two or three steps overlap.
+    assert!(
+        worker.max_secondary_in_flight >= 4,
+        "claims must commit side by side: {worker:?}"
+    );
+    assert_eq!(
+        (worker.failures, worker.panics, worker.restarts),
+        (0, 0, 0),
+        "{worker:?}"
+    );
+    db.close().await.expect("concurrent claim writer closes");
 }
 
 /// Polls one automatic operation with a fixed parallel-suite timeout.
