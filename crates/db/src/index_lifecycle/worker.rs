@@ -318,19 +318,15 @@ impl InFlightTask {
                 .await
                 {
                     Ok(Some(claimed)) => claimed,
-                    // Another claim or step moved the operation first: nothing
-                    // committed, and the queue offers it again.
-                    Ok(None) => {
+                    Err(error) if !error.is_transaction_conflict() => return Err(error),
+                    // Another claim or step moved the operation first, or won a
+                    // serializable conflict with this claim: nothing committed,
+                    // and the queue offers the operation again.
+                    Ok(None) | Err(_) => {
                         #[cfg(feature = "index-lifecycle-testing")]
                         lifecycle_metrics.observe_worker_claim_conflict();
                         break 'operation (None, false);
                     }
-                    Err(error) if error.is_transaction_conflict() => {
-                        #[cfg(feature = "index-lifecycle-testing")]
-                        lifecycle_metrics.observe_worker_claim_conflict();
-                        break 'operation (None, false);
-                    }
-                    Err(error) => return Err(error),
                 };
                 #[cfg(feature = "index-lifecycle-testing")]
                 let _in_flight =
