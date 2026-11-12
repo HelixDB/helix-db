@@ -20,9 +20,9 @@ use slatedb::IsolationLevel;
 
 use crate::config::{
     IndexLifecycleConcurrency, IndexLifecycleThroughputTuning, SearchIndexBackfillLimits,
-    SearchIndexBatchLimits, SecondaryIndexDefinition,
-    SecondaryIndexLifecycleBatchRows, SecondaryIndexLifecycleTuning, TextAnalyzerKind,
-    TextElementType, TextIndexDefinition, VectorElementType, VectorIndexDefinition,
+    SearchIndexBatchLimits, SecondaryIndexDefinition, SecondaryIndexLifecycleBatchRows,
+    SecondaryIndexLifecycleTuning, TextAnalyzerKind, TextElementType, TextIndexDefinition,
+    VectorElementType, VectorIndexDefinition,
 };
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{encode_properties, Property};

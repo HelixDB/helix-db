@@ -215,6 +215,10 @@ enum VectorPhysicalSelection {
     AdoptLegacy(VectorPhysicalIndexId),
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one create's whole transaction context, passed by every enqueue path"
+)]
 async fn create_index_operation_in_transaction_with_physical(
     transaction: DbTransaction,
     scope: DataScope,

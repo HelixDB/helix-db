@@ -120,8 +120,8 @@ fn foundry_specs(prefix: &str) -> Vec<IndexSpec> {
             IndexSpec::node_text(&ty, "name", Some("foundry_part")),
         ]
     });
-    let links = (0..LINKS)
-        .map(|l| IndexSpec::edge_equality(format!("{prefix}LINK_{l}"), "fact_key"));
+    let links =
+        (0..LINKS).map(|l| IndexSpec::edge_equality(format!("{prefix}LINK_{l}"), "fact_key"));
     let loads = OWN_NODES
         .iter()
         .map(|l| format!("{prefix}{l}"))
@@ -141,11 +141,16 @@ fn env_tasks() -> Result<IndexLifecycleConcurrency> {
     let Ok(raw) = std::env::var("IBT_TASKS") else {
         return Ok(IndexLifecycleConcurrency::default());
     };
-    let n: Vec<usize> = raw.split(',').map(str::parse).collect::<std::result::Result<_, _>>()?;
+    let n: Vec<usize> = raw
+        .split(',')
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()?;
     let [total, secondary, vector, text] = n[..] else {
         return Err(format!("IBT_TASKS wants four numbers, got {raw}").into());
     };
-    Ok(IndexLifecycleConcurrency::try_new(total, secondary, vector, text)?)
+    Ok(IndexLifecycleConcurrency::try_new(
+        total, secondary, vector, text,
+    )?)
 }
 
 async fn run(root: &std::path::Path, run: usize) -> Result<()> {
@@ -168,9 +173,7 @@ async fn run(root: &std::path::Path, run: usize) -> Result<()> {
             let config = source
                 .embedded_default_config()
                 .with_index_lifecycle_throughput_tuning(tuning)
-                .with_wal_flush_interval_ms(
-                    NonZeroU64::new(flush).ok_or("IBT_FLUSH_MS is zero")?,
-                );
+                .with_wal_flush_interval_ms(NonZeroU64::new(flush).ok_or("IBT_FLUSH_MS is zero")?);
             let db = HelixDB::open_with_config(source, config).await?;
             Target::Embedded(db, DataScope::Tenant(TenantId::from_ulid_str(&tenant)?))
         }
@@ -183,7 +186,10 @@ async fn run(root: &std::path::Path, run: usize) -> Result<()> {
         .iter()
         .zip(&names)
         .fold(batch::write_batch(), |b, (spec, name)| {
-            b.var_as(name, traversal::g().create_index_if_not_exists(spec.clone()))
+            b.var_as(
+                name,
+                traversal::g().create_index_if_not_exists(spec.clone()),
+            )
         })
         .returning(names.clone());
     let started = Instant::now();
@@ -204,14 +210,26 @@ async fn run(root: &std::path::Path, run: usize) -> Result<()> {
     while !pending.is_empty() {
         if reported.elapsed() >= Duration::from_secs(5) {
             reported = Instant::now();
-            eprintln!("{:.0}s: {} pending", started.elapsed().as_secs_f64(), pending.len());
+            eprintln!(
+                "{:.0}s: {} pending",
+                started.elapsed().as_secs_f64(),
+                pending.len()
+            );
         }
         let read = pending
             .iter()
             .fold(batch::read_batch(), |b, (i, op)| {
-                b.var_as(&format!("s{i}"), traversal::g().get_index_operation(op.as_str()))
+                b.var_as(
+                    &format!("s{i}"),
+                    traversal::g().get_index_operation(op.as_str()),
+                )
             })
-            .returning(pending.iter().map(|(i, _)| format!("s{i}")).collect::<Vec<_>>());
+            .returning(
+                pending
+                    .iter()
+                    .map(|(i, _)| format!("s{i}"))
+                    .collect::<Vec<_>>(),
+            );
         let status = target.query(QueryRequest::read(read)).await?;
         let mut still = Vec::with_capacity(pending.len());
         for (i, op) in pending {
