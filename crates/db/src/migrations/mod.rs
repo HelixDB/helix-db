@@ -3899,7 +3899,7 @@ async fn maintain_current_edge_rows(
     add_adjacency(txn, scope, from, to, EdgeAdjacencyDirection::Out)?;
     add_adjacency(txn, scope, to, from, EdgeAdjacencyDirection::In)?;
 
-    // The label identity migration later in this open moves these rows to
+    // The label identity migration later in this open copies these rows to
     // their exact keys, with every other hash-keyed label row of the store.
     let properties = properties.unwrap_or(&[]);
     if let Some(label) = label_of(properties) {

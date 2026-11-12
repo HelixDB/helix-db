@@ -35,9 +35,8 @@ async fn put_label_rows(
     let transaction = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
     for id in &ids {
         match definition.element_kind() {
-            IndexElementKind::Node => crate::search::add_to_equality_index_scoped(
+            IndexElementKind::Node => crate::search::add_to_legacy_node_label_index_scoped(
                 &transaction,
-                "$label",
                 label,
                 id,
                 handle.scope(),

@@ -1001,9 +1001,8 @@ mod tests {
                 .unwrap();
                 let transaction = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
                 for id in 1..=5 {
-                    crate::search::add_to_equality_index_scoped(
+                    crate::search::add_to_legacy_node_label_index_scoped(
                         &transaction,
-                        "$label",
                         "User",
                         id,
                         handle.scope(),

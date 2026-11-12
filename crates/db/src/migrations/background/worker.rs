@@ -71,20 +71,28 @@ impl MigrationWorkerSupervisor {
     }
 }
 
+/// Advances every pending background migration by one bounded batch: the
+/// next runnable migration job, and the deletion of retired hash label rows.
+/// Returns whether either has more to do.
+///
+/// Both run every step, so neither waits for the other to finish, and one
+/// failing does not stop the other's batch from committing.
+pub(crate) async fn process_background_step(
+    writer: &HelixWriter,
+    tuning: MigrationTuning,
+) -> crate::error::Result<bool> {
+    let job = super::super::process_migration_once(writer, DataScope::LegacyUnscoped, tuning).await;
+    let cleanup =
+        super::super::indexes::label_identity::delete_hash_label_rows_once(writer.db(), tuning)
+            .await;
+    Ok(job? | cleanup?.advanced())
+}
+
 async fn run(
     writer: Arc<HelixWriter>,
     tuning: MigrationTuning,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    // Retired hash label rows go first: nothing reads them once the label
-    // identity migration is published, and a later open resumes the cleanup.
-    let _ = super::super::indexes::label_identity::delete_hash_label_rows(writer.db(), || {
-        *shutdown.borrow()
-    })
-    .await
-    .inspect_err(|error| {
-        tracing::warn!(%error, "label identity cleanup failed; the next writer open retries it");
-    });
     let mut failure_backoff =
         FailureBackoff::new(Duration::from_millis(tuning.idle_interval_millis().get()));
     loop {
@@ -92,25 +100,22 @@ async fn run(
             return;
         }
 
-        let delay =
-            match super::super::process_migration_once(&writer, DataScope::LegacyUnscoped, tuning)
-                .await
-            {
-                Ok(true) => {
-                    failure_backoff.reset();
-                    Duration::from_millis(tuning.active_interval_millis().get())
-                }
-                Ok(false) => return,
-                Err(error) => {
-                    let delay = failure_backoff.next_delay();
-                    tracing::warn!(
-                        %error,
-                        retry_delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                        "background migration batch failed; retrying with capped backoff"
-                    );
-                    delay
-                }
-            };
+        let delay = match process_background_step(&writer, tuning).await {
+            Ok(true) => {
+                failure_backoff.reset();
+                Duration::from_millis(tuning.active_interval_millis().get())
+            }
+            Ok(false) => return,
+            Err(error) => {
+                let delay = failure_backoff.next_delay();
+                tracing::warn!(
+                    %error,
+                    retry_delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    "background migration batch failed; retrying with capped backoff"
+                );
+                delay
+            }
+        };
 
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}

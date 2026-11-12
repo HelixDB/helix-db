@@ -68,16 +68,91 @@ pub(crate) enum ReaderStorageCompatibility {
 }
 
 impl ReaderStorageCompatibility {
-    /// Accepts only monotonic compatibility transitions for an open reader.
-    pub(crate) fn advance(self, observed: Self) -> Result<Self> {
-        if observed < self {
-            return Err(HelixDbError::MigrationRequired {
-                reason: format!(
-                    "reader storage compatibility moved backwards from {self:?} to {observed:?}"
-                ),
-            });
+    /// The read layout of a store at `version`, a version this binary supports.
+    ///
+    /// Versions from EQUALITY_BITMAPS share one equality layout, so a current
+    /// reader also serves a store its writer has not upgraded yet. Label rows
+    /// are read by their hash keys until the writer publishes LABEL_IDENTITY.
+    pub(crate) fn of_version(version: IndexStorageVersion) -> Self {
+        if version < IndexStorageVersion::EQUALITY_BITMAPS {
+            Self::LegacyEqualityUnion
+        } else if version < IndexStorageVersion::LABEL_IDENTITY {
+            Self::LegacyLabelHash
+        } else {
+            Self::Current
         }
-        Ok(observed)
+    }
+}
+
+/// The compatibility an open reader has observed, by snapshot sequence.
+///
+/// A store only moves forward, so a later snapshot never has an older
+/// layout. Requests observe concurrently and out of snapshot order: one that
+/// took its snapshot before the writer published a migration may report after
+/// one that took it after. So a backwards move is one between two snapshots,
+/// not two reports: a snapshot at or after one seen with a newer layout, yet
+/// with an older one.
+#[derive(Debug)]
+pub(crate) struct ObservedReaderCompatibility {
+    /// The lowest and highest snapshot sequence each layout was seen at.
+    seen: std::collections::BTreeMap<ReaderStorageCompatibility, (u64, u64)>,
+}
+
+impl ObservedReaderCompatibility {
+    /// Records the compatibility a reader validated as it opened, before any
+    /// request snapshot, so every request snapshot is at or after it.
+    pub(crate) fn opened(compatibility: ReaderStorageCompatibility) -> Self {
+        Self {
+            seen: std::collections::BTreeMap::from([(compatibility, (0, 0))]),
+        }
+    }
+
+    /// Records `compatibility` for a snapshot at `sequence`, failing if the
+    /// store moved backwards between it and a snapshot observed before.
+    pub(crate) fn observe(
+        &mut self,
+        compatibility: ReaderStorageCompatibility,
+        sequence: u64,
+    ) -> Result<()> {
+        let older_seen_later = self
+            .seen
+            .range(..compatibility)
+            .find(|(_, (_, highest))| *highest >= sequence);
+        let newer_seen_earlier = self
+            .seen
+            .range((
+                std::ops::Bound::Excluded(compatibility),
+                std::ops::Bound::Unbounded,
+            ))
+            .find(|(_, (lowest, _))| *lowest <= sequence);
+        older_seen_later
+            .or(newer_seen_earlier)
+            .map_or(Ok(()), |(other, _)| {
+                Err(HelixDbError::MigrationRequired {
+                    reason: format!(
+                        "reader storage compatibility moved backwards: {compatibility:?} at \
+                         sequence {sequence} disagrees with {other:?} seen at another sequence"
+                    ),
+                })
+            })?;
+        self.seen
+            .entry(compatibility)
+            .and_modify(|(lowest, highest)| {
+                *lowest = (*lowest).min(sequence);
+                *highest = (*highest).max(sequence);
+            })
+            .or_insert((sequence, sequence));
+        Ok(())
+    }
+
+    /// The newest compatibility observed.
+    #[cfg(test)]
+    pub(crate) fn newest(&self) -> ReaderStorageCompatibility {
+        *self
+            .seen
+            .keys()
+            .next_back()
+            .expect("a reader observes its compatibility as it opens")
     }
 }
 
@@ -215,16 +290,7 @@ fn validate_bootstrap_values(
             reason: "V2 allocator record contains the wrong value kind".to_string(),
         });
     }
-    // Versions from EQUALITY_BITMAPS share one equality layout, so a current
-    // reader also serves a store its writer has not upgraded yet. Label rows
-    // are read by their hash keys until the writer publishes LABEL_IDENTITY.
-    Ok(if version < IndexStorageVersion::EQUALITY_BITMAPS {
-        ReaderStorageCompatibility::LegacyEqualityUnion
-    } else if version < IndexStorageVersion::LABEL_IDENTITY {
-        ReaderStorageCompatibility::LegacyLabelHash
-    } else {
-        ReaderStorageCompatibility::Current
-    })
+    Ok(ReaderStorageCompatibility::of_version(version))
 }
 
 /// Loads and key/value-cross-validates every canonical record for one scope.
@@ -1188,45 +1254,52 @@ mod tests {
     }
 
     #[test]
-    fn reader_storage_compatibility_only_advances_monotonically() {
+    fn reader_storage_compatibility_only_moves_forward_between_snapshots() {
         use ReaderStorageCompatibility::{Current, LegacyEqualityUnion, LegacyLabelHash};
         let ordered = [LegacyEqualityUnion, LegacyLabelHash, Current];
-        for (index, from) in ordered.into_iter().enumerate() {
+        for (index, opened) in ordered.into_iter().enumerate() {
             for (other, observed) in ordered.into_iter().enumerate() {
-                let advanced = from.advance(observed);
+                let mut seen = ObservedReaderCompatibility::opened(opened);
+                let result = seen.observe(observed, 10);
                 if other < index {
                     assert!(matches!(
-                        advanced,
+                        result,
                         Err(HelixDbError::MigrationRequired { .. })
                     ));
+                    assert_eq!(seen.newest(), opened);
                 } else {
-                    assert_eq!(advanced.unwrap(), observed);
+                    result.unwrap();
+                    assert_eq!(seen.newest(), observed);
                 }
             }
         }
-        assert_eq!(
-            ReaderStorageCompatibility::LegacyEqualityUnion
-                .advance(ReaderStorageCompatibility::LegacyEqualityUnion)
-                .unwrap(),
-            ReaderStorageCompatibility::LegacyEqualityUnion
-        );
-        assert_eq!(
-            ReaderStorageCompatibility::LegacyEqualityUnion
-                .advance(ReaderStorageCompatibility::Current)
-                .unwrap(),
-            ReaderStorageCompatibility::Current
-        );
-        assert_eq!(
-            ReaderStorageCompatibility::Current
-                .advance(ReaderStorageCompatibility::Current)
-                .unwrap(),
-            ReaderStorageCompatibility::Current
-        );
-        assert!(matches!(
-            ReaderStorageCompatibility::Current
-                .advance(ReaderStorageCompatibility::LegacyEqualityUnion),
-            Err(HelixDbError::MigrationRequired { .. })
-        ));
+
+        // A request whose snapshot predates the publication may report after
+        // one whose snapshot follows it.
+        let mut seen = ObservedReaderCompatibility::opened(LegacyLabelHash);
+        seen.observe(Current, 20).unwrap();
+        seen.observe(LegacyLabelHash, 19).unwrap();
+        seen.observe(LegacyLabelHash, 12).unwrap();
+        seen.observe(Current, 25).unwrap();
+        assert_eq!(seen.newest(), Current);
+        // Not at or after a snapshot that already saw the newer layout.
+        for sequence in [20, 21] {
+            assert!(matches!(
+                seen.observe(LegacyLabelHash, sequence),
+                Err(HelixDbError::MigrationRequired { .. })
+            ));
+        }
+        // Nor a newer layout at or before a snapshot that saw an older one.
+        let mut seen = ObservedReaderCompatibility::opened(LegacyEqualityUnion);
+        seen.observe(LegacyLabelHash, 30).unwrap();
+        for sequence in [29, 30] {
+            assert!(matches!(
+                seen.observe(Current, sequence),
+                Err(HelixDbError::MigrationRequired { .. })
+            ));
+        }
+        seen.observe(Current, 31).unwrap();
+        assert_eq!(seen.newest(), Current);
     }
 
     #[test]

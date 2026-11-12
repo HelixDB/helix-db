@@ -63,13 +63,21 @@ big-endian `u16` byte length followed by its UTF-8 bytes) instead of the label's
 during open, after the blocking startup migrations and before it serves any graph
 write. It copies each node label, edge label, and edge-label neighbor row to its
 exact key, leaving every hash row in place, and publishes version 6 in one commit
-once every scope is copied. Until then readers of any version-5-capable binary
-keep reading complete hash rows, and a failed or interrupted copy leaves an
-ordinary version-5 store that older binaries still open; the next writer open
-clears the partial copy and copies again. After publication readers read only
-exact rows, and the background migration worker deletes the hash rows while the
-writer serves. Recovery-only managed failover reports `WriterMigrationRequired`
-for a version-5 store. Binaries that support at most version 5 refuse a version-6
+once every scope is copied. A row is named by its lowest live member whose label
+hashes to it; live members whose labels hash elsewhere are stale leftovers of a
+label change and are not copied, and a highest such member with a different label
+(two labels sharing a hash) fails the open closed. Until publication readers of
+any version-5-capable binary keep reading complete hash rows, and a failed or
+interrupted copy leaves an ordinary version-5 store that older binaries still
+open. Each copy batch records its last row and the open's SlateDB writer epoch:
+the next writer open resumes after it when that epoch is its own predecessor's,
+and otherwise, since another writer (possibly an older binary) may have changed
+the hash rows, clears the partial copy and copies again. After publication
+readers read only exact rows, and the background migration worker deletes the
+hash rows while the writer serves, one tuned batch per step beside the other
+background migrations, resuming after the last deleted row; with the worker
+disabled they stay until a step is taken. Recovery-only managed failover reports
+`WriterMigrationRequired` for a version-5 store. Binaries that support at most version 5 refuse a version-6
 store, so a rollback after publication needs a backup taken before the upgrade.
 Labels longer than the label index bound are rejected as invalid queries.
 

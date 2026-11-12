@@ -349,9 +349,8 @@ async fn seed_semantic_rows(
                 encode_properties(&node_properties),
             )
             .expect("semantic V1 node row stages");
-        crate::search::add_to_equality_index_scoped(
+        crate::search::add_to_legacy_node_label_index_scoped(
             &transaction,
-            "$label",
             seed.node_label,
             node_id,
             DataScope::LegacyUnscoped,
