@@ -248,11 +248,21 @@ impl WorkerPermits {
     }
 }
 
-/// Typed work retained by the task set after its durable claim succeeds.
+/// An eligible operation the task claims before its step, so claims of
+/// separate operations commit concurrently instead of one at a time in the
+/// dispatch loop.
+struct PendingClaim {
+    eligible: outbox::EligibleOperation,
+    writer_epoch: WriterEpoch,
+    sequence: ClaimSequence,
+    permission: ClaimPermission,
+}
+
+/// Typed work retained by the task set once its target is reserved.
 enum InFlightTask {
     Operation {
         target: IndexOperationId,
-        claimed: Box<outbox::ClaimedOperation>,
+        claim: Box<PendingClaim>,
         driver: Arc<dyn IndexOperationDriver>,
         limits: SearchIndexBatchLimits,
         _permits: InFlightPermits,
@@ -283,14 +293,45 @@ impl InFlightTask {
         let target = self.target();
         let (delay_millis, did_work) = match self {
             Self::Operation {
-                claimed,
+                claim,
                 driver,
                 limits,
                 _permits,
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_metrics,
                 ..
-            } => {
+            } => 'operation: {
+                let PendingClaim {
+                    eligible,
+                    writer_epoch,
+                    sequence,
+                    permission,
+                } = *claim;
+                let claimed = match outbox::claim_operation(
+                    db.as_ref(),
+                    &eligible,
+                    writer_epoch,
+                    sequence,
+                    now_unix_millis(),
+                    permission,
+                )
+                .await
+                {
+                    Ok(Some(claimed)) => claimed,
+                    // Another claim or step moved the operation first: nothing
+                    // committed, and the queue offers it again.
+                    Ok(None) => {
+                        #[cfg(feature = "index-lifecycle-testing")]
+                        lifecycle_metrics.observe_worker_claim_conflict();
+                        break 'operation (None, false);
+                    }
+                    Err(error) if error.is_transaction_conflict() => {
+                        #[cfg(feature = "index-lifecycle-testing")]
+                        lifecycle_metrics.observe_worker_claim_conflict();
+                        break 'operation (None, false);
+                    }
+                    Err(error) => return Err(error),
+                };
                 #[cfg(feature = "index-lifecycle-testing")]
                 let _in_flight =
                     lifecycle_metrics.begin_worker_task(match claimed.record.family() {
@@ -308,7 +349,7 @@ impl InFlightTask {
                 lifecycle_metrics.observe_operation(
                     outbox::execute_claimed_step_with_evidence(
                         db.as_ref(),
-                        claimed.as_ref(),
+                        &claimed,
                         driver.as_ref(),
                         limits,
                         now_unix_millis(),
@@ -318,7 +359,7 @@ impl InFlightTask {
                 #[cfg(not(feature = "index-lifecycle-testing"))]
                 outbox::execute_claimed_step(
                     db.as_ref(),
-                    claimed.as_ref(),
+                    &claimed,
                     driver.as_ref(),
                     limits,
                     now_unix_millis(),
@@ -1041,24 +1082,15 @@ async fn schedule_operation_task(
         if eligible.record.family() != family {
             continue;
         }
-        let claimed = outbox::claim_operation(
-            db,
-            &eligible,
-            writer_epoch,
-            claim_sequences.next()?,
-            now_unix_millis(),
-            permission,
-        )
-        .await?;
-        let Some(claimed) = claimed else {
-            #[cfg(feature = "index-lifecycle-testing")]
-            lifecycle_metrics.observe_worker_claim_conflict();
-            continue;
-        };
         return Ok(DispatchAttempt::Scheduled(Box::new(
             InFlightTask::Operation {
                 target: operation_id,
-                claimed: Box::new(claimed),
+                claim: Box::new(PendingClaim {
+                    eligible,
+                    writer_epoch,
+                    sequence: claim_sequences.next()?,
+                    permission,
+                }),
                 driver,
                 limits,
                 _permits: task_permits,
