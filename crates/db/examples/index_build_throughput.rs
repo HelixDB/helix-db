@@ -12,7 +12,7 @@
 //! - `IBT_FLUSH_MS`: WAL flush interval (default 100, SlateDB's).
 //! - `IBT_ROOT`: directory for the databases (default a temp dir).
 //! - `IBT_URL`: a running server (`http://host:8080`) to send the same requests
-//!   to over `/v2/query` instead, each run in a fresh tenant. The server's own
+//!   to over `/v2/query` instead. The server's own
 //!   settings apply, so `IBT_TASKS`, `IBT_FLUSH_MS` and `IBT_ROOT` don't.
 use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
@@ -85,8 +85,8 @@ const TYPES: usize = 10;
 const LINKS: usize = 15;
 
 /// The ontology engine's `ensure_indexes` for an ontology of `TYPES` named
-/// types with one name each and `LINKS` links.
-fn foundry_specs() -> Vec<IndexSpec> {
+/// types with one name each and `LINKS` links, every label after `prefix`.
+fn foundry_specs(prefix: &str) -> Vec<IndexSpec> {
     let own = [
         ("FoundryDocument", "doc_id"),
         ("FoundryDocument", "content_hash"),
@@ -104,11 +104,14 @@ fn foundry_specs() -> Vec<IndexSpec> {
         ("FoundryChunk", "chunk_key"),
         ("FoundryChunk", "stream"),
     ]
-    .map(|(label, prop)| IndexSpec::node_equality(label, prop))
+    .map(|(label, prop)| IndexSpec::node_equality(format!("{prefix}{label}"), prop))
     .into_iter()
-    .chain([IndexSpec::node_range("FoundryViolation", "violation_key")]);
+    .chain([IndexSpec::node_range(
+        format!("{prefix}FoundryViolation"),
+        "violation_key",
+    )]);
     let types = (0..TYPES).flat_map(|t| {
-        let ty = format!("Type{t}");
+        let ty = format!("{prefix}Type{t}");
         [
             IndexSpec::node_equality(&ty, "norm_name"),
             IndexSpec::node_range(&ty, "norm_name"),
@@ -117,17 +120,18 @@ fn foundry_specs() -> Vec<IndexSpec> {
             IndexSpec::node_text(&ty, "name", Some("foundry_part")),
         ]
     });
-    let links = (0..LINKS).map(|l| IndexSpec::edge_equality(format!("LINK_{l}"), "fact_key"));
+    let links = (0..LINKS)
+        .map(|l| IndexSpec::edge_equality(format!("{prefix}LINK_{l}"), "fact_key"));
     let loads = OWN_NODES
         .iter()
-        .map(|l| l.to_string())
-        .chain((0..TYPES).map(|t| format!("Type{t}")))
+        .map(|l| format!("{prefix}{l}"))
+        .chain((0..TYPES).map(|t| format!("{prefix}Type{t}")))
         .map(|l| IndexSpec::node_equality(l, "foundry_load"))
         .chain(
             OWN_EDGES
                 .iter()
-                .map(|l| l.to_string())
-                .chain((0..LINKS).map(|l| format!("LINK_{l}")))
+                .map(|l| format!("{prefix}{l}"))
+                .chain((0..LINKS).map(|l| format!("{prefix}LINK_{l}")))
                 .map(|l| IndexSpec::edge_equality(l, "foundry_load")),
         );
     own.chain(types).chain(links).chain(loads).collect()
@@ -147,8 +151,7 @@ fn env_tasks() -> Result<IndexLifecycleConcurrency> {
 async fn run(root: &std::path::Path, run: usize) -> Result<()> {
     let flush = std::env::var("IBT_FLUSH_MS").map_or(Ok(100), |v| v.parse::<u64>())?;
     let tasks = env_tasks()?;
-    // A fresh tenant per run, so a server never finds the indexes already built.
-    let tenant = format!("01M74N56VRTHK2J90HVCVKY{:03}", run % 1000);
+    let tenant = "01M74N56VRTHK2J90HVCVKY1RW".to_string();
     let target = match std::env::var("IBT_URL") {
         Ok(url) => Target::Http {
             client: reqwest::Client::new(),
@@ -173,7 +176,8 @@ async fn run(root: &std::path::Path, run: usize) -> Result<()> {
         }
     };
 
-    let specs = foundry_specs();
+    // Labels carry the run, so a server's earlier runs never leave them built.
+    let specs = foundry_specs(&format!("R{run}"));
     let names: Vec<String> = (0..specs.len()).map(|i| format!("i{i}")).collect();
     let write = specs
         .iter()
@@ -191,6 +195,9 @@ async fn run(root: &std::path::Path, run: usize) -> Result<()> {
         .filter_map(|(i, n)| Some((i, created[n]["operation_id"].as_str()?.to_owned())))
         .collect();
     let operations = pending.len();
+    if operations != specs.len() {
+        return Err(format!("{operations} of {} creates enqueued a build", specs.len()).into());
+    }
     eprintln!("created {operations} operations in {create_ms} ms");
     let mut done_at = Vec::with_capacity(operations);
     let mut reported = Instant::now();
