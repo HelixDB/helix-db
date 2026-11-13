@@ -1300,6 +1300,35 @@ func TestDateTimeAndPropertyValueConversions(t *testing.T) {
 	}
 }
 
+func TestNonFiniteFloatArraysFailLikeScalars(t *testing.T) {
+	// A NaN or ±Inf inside a float slice must be rejected the same way a scalar
+	// one is: at Validate() with the parameter path, not later inside
+	// encoding/json with "json: unsupported value".
+	values := []any{
+		[]float64{1, math.NaN()},
+		[]float64{math.Inf(-1)},
+		[]float32{1, float32(math.Inf(1))},
+		F64Array(math.NaN()),
+		F32Array(float32(math.NaN())),
+	}
+	for _, value := range values {
+		request := NewReadQueryRequest(Read())
+		request.ParamValue("v", value)
+		err := request.Validate()
+		var pathErr *PathError
+		if !errors.As(err, &pathErr) || !strings.Contains(err.Error(), "non-finite float") {
+			t.Fatalf("%#v: expected a non-finite float PathError from Validate, got %v", value, err)
+		}
+		if _, err := json.Marshal(MustPropertyValue(value)); err == nil {
+			t.Fatalf("%#v: expected property serialization to fail", value)
+		}
+	}
+
+	if _, err := json.Marshal(F64Array(1, 2.5)); err != nil {
+		t.Fatalf("finite float slice failed: %v", err)
+	}
+}
+
 func TestExpressionReferenceAndPredicateConversions(t *testing.T) {
 	marshaled := []any{
 		ExprInput(ExprID()),
