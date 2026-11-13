@@ -46,9 +46,11 @@ code and `msg` for the readable message:
 }
 ```
 
-The response never adds a separate `code` field. A non-JSON response from an
-older proxy or intermediary is still exposed by each SDK as readable details
-with no code.
+When the code's [class](#failure-classes) settles it, the envelope also carries a
+boolean `retryable`. The response never adds a separate `code` field. A non-JSON
+response from an older proxy or intermediary is still exposed by each SDK as
+readable details with no code, and an unknown path or method returns an empty
+`404` or `405`.
 
 ## Failure classes
 
@@ -71,12 +73,24 @@ each code's status.
 | Unavailable | 503 | `FAILED_PRECONDITION` | absent | Committed nothing |
 | Commit outcome unknown | 503 | `UNAVAILABLE` | `false` | May have committed |
 
+`retryable` appears only in this native envelope. A Cypher or SQL error body with
+`details`, and every gRPC status, omits it; use the class instead.
+
 HTTP 409 has two classes, so branch on `retryable` rather than the status. A
 retryable conflict (`transaction_conflict`, `request_read_view_changed` or
 `stale_index_generation`, with `retryable: true`) can succeed when resent
 unchanged. A conflict with the database's state, such as
 `unique_constraint_violation` (`retryable: false`), fails again until that
 state changes: choose another value or reconcile first.
+
+HTTP 429 also has more than one cause, and only some are transient. Generic HTTP
+clients often retry every 429; turn that off and branch on `error`:
+
+| `error` | Source | What to do |
+| --- | --- | --- |
+| `rate_limited` | Helix Cloud gateway | Wait for `Retry-After`, then resend |
+| `index_backpressure` | Database engine; `retryable: true` | Resend unchanged with bounded backoff |
+| `resource_limit`, `query_memory_limit_exceeded` | A per-query budget | Do not retry; the same request fails again. Reduce the work |
 
 An index-management request with several create, drop, retry or abort
 operations commits each operation as it runs. If a later operation fails, the
@@ -104,7 +118,7 @@ Embedded SDK errors join the three parts into one code,
 `category:phase:detail`, such as `syntax_error:compile:undefined_variable`.
 
 Request, storage, and transaction failures on the Cypher routes keep the native
-envelope and the codes below.
+envelope, its `retryable` field, and the codes below.
 
 | Category | Meaning | HTTP | Retry |
 | --- | --- | --- | --- |
@@ -116,8 +130,8 @@ envelope and the codes below.
 | `parameter_missing` | A referenced parameter was not supplied (`missing_parameter`). | 400 | After supplying it |
 | `entity_not_found` | A statement read a node or relationship it had deleted (`deleted_entity_access`). | 400 | After fixing the statement |
 | `constraint_verification_failed` | A plain `DELETE` targeted a node that still has relationships (`delete_connected_node`). | 400 | After using `DETACH DELETE` or removing the relationships |
-| `resource_limit` | A per-query budget was exceeded, for example `memory_limit`, `result_limit`, `collection_limit`, or `expression_depth`. | 429 | Not unchanged; reduce the work. Distinct from the gateway's `rate_limited` |
-| `access_mode_error` | A modifying statement reached a reader or a warm-only request (`writer_required`). | 503 | On the writer |
+| `resource_limit` | A per-query budget was exceeded, for example `memory_limit`, `result_limit`, `collection_limit`, or `expression_depth`; the [Cypher limits](/database/helix-db/query-guides/cypher#limits) list them all. | 429 | Not unchanged; reduce the work. Distinct from the gateway's `rate_limited` |
+| `access_mode_error` | A modifying statement reached a reader (`writer_required`). Over HTTP and gRPC, a modifying statement sent as warm-only fails earlier with `invalid_request_option` (400). | 503 | On the writer |
 | `internal_planner_error` | The planner broke one of its own invariants. | 500 | No automatic retry |
 
 The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists
@@ -215,6 +229,12 @@ code from exception text.
 - `index_backpressure` (HTTP 429) rejects the whole request before it takes
   effect and carries `retryable: true`. Retry it unchanged with bounded backoff;
   see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
+  The other 429 codes differ: `rate_limited` waits for `Retry-After`, and a
+  resource limit fails again unchanged.
+- A 408 on a write does not mean it failed. A write that waits for durability
+  waits at most 30 seconds for its WAL upload, then fails with
+  `query_deadline_exceeded` although it is already applied and may still become
+  durable. Read the state back before resending.
 - Availability and lifecycle failures should be retried only after the named
   condition changes. Validation and planning failures require a corrected
   request or schema/index configuration.
@@ -224,7 +244,9 @@ code from exception text.
 ## Error-code reference
 
 “Correctable” means whether a caller can change its request or deployment state
-to address the failure. Each code has one HTTP status at every boundary.
+to address the failure. Each code has one HTTP status at every boundary, except
+`internal_planner_error`: 400 here, and 500 as a
+[Cypher category](#cypher-errors) on the Cypher and SQL routes.
 
 ### Request validation
 
@@ -233,7 +255,7 @@ to address the failure. Each code has one HTTP status at every boundary.
 | `invalid_request` | The request is incompatible with the selected query mode. | 400 | After fixing the request | Yes |
 | `invalid_query_json` | The query body cannot be decoded as query JSON. | 400 | After fixing the body | Yes |
 | `invalid_request_body` | The transport cannot read the body or it exceeds the body limit. | 400 | After fixing the body | Yes |
-| `invalid_request_option` | A header or transport option is invalid; writer routing can also be unavailable. | 400 | After fixing the option or routing | Yes |
+| `invalid_request_option` | A header or transport option is invalid, such as `X-Helix-Warm` on a write or `X-Helix-Await-Durable: true` on a read. | 400 | After fixing the option | Yes |
 | `invalid_query` | An embedded or encoded query payload is invalid. | 500 | After fixing the query | Yes |
 | `unbound_parameter` | The query reads a parameter the request did not bind. | 400 | After binding the parameter | Yes |
 
@@ -279,7 +301,7 @@ to address the failure. Each code has one HTTP status at every boundary.
 
 | Code | Meaning | HTTP | Retry | Correctable |
 | --- | --- | --- | --- | --- |
-| `query_deadline_exceeded` | Execution exceeded its cooperative deadline. | 408 | With a larger deadline or less work | Sometimes |
+| `query_deadline_exceeded` | Execution exceeded its cooperative deadline, or a durable write waited 30 seconds for its WAL upload after it was applied. | 408 | With a larger deadline or less work; reconcile a write first | Sometimes |
 | `query_memory_limit_exceeded` | Request-owned storage or execution buffers exceeded the memory budget. Cypher maps this to `resource_limit` / `memory_limit` with HTTP 429. | 429 | After reducing retained data or increasing the embedded query budget | Sometimes |
 | `invalid_node_id` | A supplied node ID is invalid. | 400 | After fixing the ID | Yes |
 | `node_not_found` | A requested node does not exist. | 404 | After fixing state or ID | Yes |
@@ -359,7 +381,7 @@ embedded configurations may override it.
 | `migration_required` | Existing storage requires an explicit migration. | 503 | After migration | Operational |
 | `writer_migration_required` | A writer must open and migrate existing storage. | 503 | After writer migration | Operational |
 | `unsupported_index_storage_version` | Stored index data is newer than this binary supports. | 500 | After upgrading the binary | Operational |
-| `writer_mode_required` | The operation requires a writer handle. | 503 | On a writer | Operational |
+| `writer_mode_required` | The operation requires a writer handle, including a request with `X-Helix-Require-Writer` on a reader. | 503 | On a writer | Operational |
 | `reader_mode_required` | The operation requires a standalone reader handle. | 503 | On a reader | Operational |
 | `query_cancelled_by_reader_retirement` | Reader retirement cancelled the query before the reader closed. | 503 | After routing to another reader | Operational |
 | `writer_fenced_commit_outcome_unknown` | Writer fencing made the final commit outcome unknowable. | 503 | Only with idempotency protection | No |
