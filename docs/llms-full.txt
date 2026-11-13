@@ -3123,8 +3123,9 @@ data you already know.
 | Earlier named entry | `n(NodeRef.var(...))`; `NodeVar(...)` in Go |
 
 An ID list returns the nodes in the order given and skips IDs that do not exist. An ID
-parameter holds one `i64` ID or an array of them, typed `i64` or `{ "array": "i64" }`;
-any other value fails the query.
+parameter holds one non-negative integer ID or an array of them, either typed `i64` or
+`{ "array": "i64" }` or sent untyped as a JSON integer or array of integers; any other
+value fails the query.
 
 Source predicates are eligible for index push-down. Secondary indexes are defined per
 label, so a source must be scoped to a label to read one: `nWithLabelWhere` /
@@ -5571,9 +5572,11 @@ WHERE u.score >= 100
 - A missing property reads as `null`. `eq(property, null)` and `isNull` match both a
   missing property and a stored `null`. `isNotNull` matches neither. `hasKey` matches a
   stored `null` but not a missing property.
-- `neq` and `not` match rows where the property is missing, so
+- `neq` against a non-null value matches rows where the property is missing, so
   `neq("status", "archived")` also returns nodes without a `status`. Add
-  `isNotNull("status")` to exclude them.
+  `isNotNull("status")` to exclude them. `not` negates its predicate, so it matches a
+  missing property only when the inner predicate does not: `not(gt("age", 30))` does,
+  but `not(isNull("age"))` does not.
 - A comparison between values of different types is false: a string never equals or
   orders against a number, and a date-time never equals a string. `neq` across types
   is therefore true.
@@ -5782,8 +5785,9 @@ These rules describe native queries.
 - Rows with equal sort keys come back in ascending element ID order, in both
   directions, so repeating a request returns the same order.
 - `orderByMultiple` compares the first key, then uses the next key to break ties.
-- `$id` is a valid sort key. `$distance` and `$score` exist only directly after a
-  search, which already returns hits in rank order.
+- `$id` is a valid sort key. So are `$distance` and `$score` while each row is still
+  on its search hit: filter steps keep them, and a step to another element drops them.
+  A search already returns hits in rank order.
 - `orderBy` after `bind` is rejected with `invalid_after_bind_operation`.
 
 ## Bounds
@@ -6588,8 +6592,12 @@ helix.ReadQuery("docs_with_authors").
 ```
 
 The same pattern keeps `$score` from a text search. Each row pairs one hit with one
-author, so a document with no `AUTHORED_BY` edge produces no row; wrap the step in
-`optional(...)` to keep it.
+author, so a document with no `AUTHORED_BY` edge produces no row. To keep it, bind the
+author inside an optional step, as in `optional(sub().out("AUTHORED_BY").bind("author"))`,
+and project `BindingProjection.binding("author", "name", "author")`; such a document then
+comes back without an `author` field. Keep `current` out of it: when the optional step
+finds no author, the current element is still the document, so `current("name", ...)`
+would return the document's own `name`.
 
 ## Aggregate
 
@@ -7946,7 +7954,7 @@ longer list scans the label.
 
 | Limit | Value | `details.detail` |
 | --- | --- | --- |
-| Request body | 16 MiB on a local server; 2 MiB on Helix Cloud after gzip decoding (`413 payload_too_large`) | None |
+| Request body | 16 MiB on a local server (`400 invalid_request_body`); 2 MiB on Helix Cloud after gzip decoding (`413 payload_too_large`) | None |
 | JSON nesting in the request body | 127 levels (`400 invalid_query_json`) | None |
 | Statement text | 16 MiB | `query_too_large` |
 | Tokens in the statement | 200,000 | `too_many_tokens` |
@@ -10798,7 +10806,7 @@ database engine behind it use the same envelope; see the
 |  400 | `active_text_mutation_limit_exceeded` | `db error: Active text mutation exceeds <resource>: observed <usage>, limit <bound>. This is a hard per-document limit; shorten the indexed text.` | One indexed text document exceeds a hard per-document admission limit; graph changes are not committed. | Shorten the text before retrying; see [Limits](/database/helix-cloud/operate/limits#active-text-mutation-admission). |
 |  401 | `unauthorized`           | `unauthorized`                                                              | The supplied API key is unknown or no longer active.                      | Refresh or replace the key. A key created in the last few seconds may not be active yet; retry briefly. |
 |  402 | `tenant_disabled`        | `queries for this database are paused; check the workspace's billing status` | Queries for this database are paused by a billing gate, such as no active plan, an overdue payment, or a used-up quota or credit balance. | Resolve the workspace's billing state before retrying.                   |
-|  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation, for example a write with a read-only key, or a database key sent without its database ID or for another database. | Use a key with the required permission and send its database ID.         |
+|  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation, for example a write with a read-only key, or a database key sent for another database, or without its database ID on a dedicated cluster (a shared gateway returns `400` `tenant_id_required` instead). | Use a key with the required permission and send its database ID.         |
 |  408 | `query_timeout`          | `query exceeded its wall-clock limit`                                       | The query exceeded its wall-clock limit.                                  | Reconcile timed-out writes before considering a retry.                   |
 |  409 | `transaction_conflict`   | The database's conflict diagnostic                                          | A concurrent write prevented the transaction from committing. The body includes `"retryable": true`. | Retry the whole idempotent transaction with bounded backoff.             |
 |  413 | `payload_too_large`      | `request body exceeds the maximum allowed size`                             | The request body exceeds 2 MiB after decompression; see [Limits](/database/helix-cloud/operate/limits#request-size-compression-and-timeouts). | Reduce the request size.                                                 |
@@ -13794,8 +13802,8 @@ helix logs dev --follow      # stream
 A request JSON file must contain:
 
 - `request_type`: lowercase `"read"` or `"write"`.
-- `query_name` (optional): top-level operational name for logs and query diagnostics. Missing or
-  `null` falls back to `__dynamic__`.
+- `query_name` (optional): top-level operational name for logs and query diagnostics. May be
+  omitted or `null`.
 - `query`: exactly one `read` or `write` batch with `entries[]` and `returns[]`.
 - `parameters` and `parameter_types` (optional): named values and their declared types.
 

@@ -162,8 +162,9 @@ These rules describe native queries.
 - Rows with equal sort keys come back in ascending element ID order, in both
   directions, so repeating a request returns the same order.
 - `orderByMultiple` compares the first key, then uses the next key to break ties.
-- `$id` is a valid sort key. `$distance` and `$score` exist only directly after a
-  search, which already returns hits in rank order.
+- `$id` is a valid sort key. So are `$distance` and `$score` while each row is still
+  on its search hit: filter steps keep them, and a step to another element drops them.
+  A search already returns hits in rank order.
 - `orderBy` after `bind` is rejected with `invalid_after_bind_operation`.
 
 ## Bounds

@@ -23,8 +23,9 @@ data you already know.
 | Earlier named entry | `n(NodeRef.var(...))`; `NodeVar(...)` in Go |
 
 An ID list returns the nodes in the order given and skips IDs that do not exist. An ID
-parameter holds one `i64` ID or an array of them, typed `i64` or `{ "array": "i64" }`;
-any other value fails the query.
+parameter holds one non-negative integer ID or an array of them, either typed `i64` or
+`{ "array": "i64" }` or sent untyped as a JSON integer or array of integers; any other
+value fails the query.
 
 Source predicates are eligible for index push-down. Secondary indexes are defined per
 label, so a source must be scoped to a label to read one: `nWithLabelWhere` /

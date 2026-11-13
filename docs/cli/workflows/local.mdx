@@ -216,8 +216,8 @@ helix logs dev --follow      # stream
 A request JSON file must contain:
 
 - `request_type`: lowercase `"read"` or `"write"`.
-- `query_name` (optional): top-level operational name for logs and query diagnostics. Missing or
-  `null` falls back to `__dynamic__`.
+- `query_name` (optional): top-level operational name for logs and query diagnostics. May be
+  omitted or `null`.
 - `query`: exactly one `read` or `write` batch with `entries[]` and `returns[]`.
 - `parameters` and `parameter_types` (optional): named values and their declared types.
 

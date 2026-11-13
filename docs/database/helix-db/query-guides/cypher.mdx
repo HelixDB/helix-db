@@ -511,7 +511,7 @@ longer list scans the label.
 
 | Limit | Value | `details.detail` |
 | --- | --- | --- |
-| Request body | 16 MiB on a local server; 2 MiB on Helix Cloud after gzip decoding (`413 payload_too_large`) | None |
+| Request body | 16 MiB on a local server (`400 invalid_request_body`); 2 MiB on Helix Cloud after gzip decoding (`413 payload_too_large`) | None |
 | JSON nesting in the request body | 127 levels (`400 invalid_query_json`) | None |
 | Statement text | 16 MiB | `query_too_large` |
 | Tokens in the statement | 200,000 | `too_many_tokens` |

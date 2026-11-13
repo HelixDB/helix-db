@@ -140,9 +140,11 @@ WHERE u.score >= 100
 - A missing property reads as `null`. `eq(property, null)` and `isNull` match both a
   missing property and a stored `null`. `isNotNull` matches neither. `hasKey` matches a
   stored `null` but not a missing property.
-- `neq` and `not` match rows where the property is missing, so
+- `neq` against a non-null value matches rows where the property is missing, so
   `neq("status", "archived")` also returns nodes without a `status`. Add
-  `isNotNull("status")` to exclude them.
+  `isNotNull("status")` to exclude them. `not` negates its predicate, so it matches a
+  missing property only when the inner predicate does not: `not(gt("age", 30))` does,
+  but `not(isNull("age"))` does not.
 - A comparison between values of different types is false: a string never equals or
   orders against a number, and a date-time never equals a string. `neq` across types
   is therefore true.
