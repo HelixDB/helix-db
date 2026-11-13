@@ -89,7 +89,7 @@ delete buttons, show on a row while you point at it or it has the focus.
     kind.
 
     <Frame>
-      <img src="https://assets.helix-db.com/docs/foundry/data/add-data.png" alt="The Where is your data? picker with Stripe, WorkOS, PostHog, GitHub, Linear, Cal.com and Granola, then PostgreSQL and MySQL, Amazon S3, and API source" />
+      <img src="https://assets.helix-db.com/docs/foundry/data/add-data.png" alt="The Where is your data? picker with Stripe, WorkOS, PostHog, GitHub, Linear, Cal.com, Granola, Slack, Notion and Google Workspace, then PostgreSQL and MySQL, Amazon S3, and API source" />
     </Frame>
   </Step>
 
@@ -166,7 +166,8 @@ in full, and the test says so.
 You can also sync at any time: select **Sync now** on a connection's page, or **Sync**
 on its row in the explorer. A connection also syncs after you change its settings. An
 [API source](/foundry/data/api-sources) syncs about a minute after pieces arrive, on
-every plan.
+every plan; a large one waits longer between syncs (see
+[Read an API source](/foundry/data/api-sources#read-an-api-source)).
 
 When a sync changes tables an ontology's current load reads, the ontology
 [refreshes](/foundry/ontologies/load-data#automatic-refreshes) by itself.

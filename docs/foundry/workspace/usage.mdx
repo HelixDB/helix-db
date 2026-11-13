@@ -1,19 +1,19 @@
 ---
 title: "Usage and spending caps"
-description: "See what a Helix Foundry workspace has spent on AI this month, on loads, API sources and questions, against each monthly cap"
+description: "See what a Helix Foundry workspace has spent on AI this month, on loads, API sources, questions and workflow run assessments, against each monthly cap, and how generations are capped"
 sidebarTitle: "Usage"
 pageType: "Guide"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Reading documents into loads and answering questions use AI models, so they cost money;
-reading tables doesn't. Each has a monthly cap per workspace, the same on every plan.
-Select your name at the foot of the sidebar: **Usage**, in the account menu, shows what
-the workspace has spent this month.
+Reading documents into loads, answering questions and assessing workflow runs use AI
+models, so they cost money; reading tables doesn't. Each has a monthly cap per
+workspace, the same on every plan. **Usage**, in the account menu at the foot of the
+sidebar, shows what the workspace has spent this month.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/workspace/usage.png" alt="The account menu's Usage: this month's total, then Loads of $50.00, API sources within it of $20.00, and Questions of $15.00, each with a bar" />
+  <img src="https://assets.helix-db.com/docs/foundry/workspace/usage.png" alt="The account menu's Usage: this month's total, then Loads of $50.00, API sources within it of $20.00, Questions of $15.00 and Run assessments of $20.00, each with a bar" />
 </Frame>
 
 | Row | What it counts | Cap each month |
@@ -21,7 +21,8 @@ the workspace has spent this month.
 | **This month** | Everything below, once | |
 | **Loads** | Reading documents, and API sources' pieces, into your ontologies' loads | $50 |
 | **API sources** | Part of Loads: extracting API sources' pieces that no one started a load for | $20 |
-| **Questions** | Answering questions in Ask and through the Helix MCP | $15 |
+| **Questions** | Answering questions in the Analyst and through the Helix MCP | $15 |
+| **Run assessments** | Assessing how much your ontologies helped your agents' [workflow runs](/foundry/agents/helix-mcp#workflows) | $20 |
 
 Each row's bar fills as the month's spend nears its cap. Point at a row for what it
 counts; point at the total for the day the caps start again, the first of each month
@@ -37,11 +38,22 @@ counts; point at the total for the day the caps start again, the first of each m
 | API sources: $5 per source, $20 a month | Extraction no person started stops for the month: new pieces wait for next month, and ontologies keep the pieces they have. |
 | A question: $0.50 | The question stops at its limit. Ask something narrower. |
 | Questions: $15 a month | A question waits until the month's budget can hold it, or you cancel it. |
+| Run assessments: $20 a month | Runs that finish once it's reached aren't assessed. |
 
 A refresh that runs with the month spent still writes your tables, and reuses what
 earlier loads read from documents at no cost.
 
-Drafting an ontology isn't in Usage: each generation attempt stops at $5.
+## Generations
+
+Drafting an ontology isn't in Usage and has no monthly cap. Instead:
+
+- each generation attempt stops at $5 of model use;
+- a generation makes at most 3 attempts;
+- a workspace starts at most 10 generations and version edits an hour.
+
+On the workspace's [own key](/foundry/workspace/ai-models#your-own-anthropic-key),
+drafts run on that key and still aren't in Usage: see their cost in your Anthropic
+account.
 
 ## Next steps
 

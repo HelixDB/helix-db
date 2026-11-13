@@ -19,6 +19,8 @@ the other HelixDB v3 SDKs.
 
 ## Install
 
+The SDK requires Python 3.10 or later.
+
 ```bash
 python -m pip install helix-db==0.3.4
 ```
@@ -122,11 +124,8 @@ not part of this API; use the synchronous `Client.graph(...)` API.
 
 ## Verify
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 \
-PYTHONPATH=sdks/python/src \
-python -m unittest discover sdks/python/tests
-```
+With a [local instance](/database/helix-db/start-here/quickstart) running, run the
+Execute example and print `result`. A new database returns an empty `users` list.
 
 ## Next steps
 

@@ -14,11 +14,11 @@ vector, and text workloads with strong transactional guarantees. These choices h
 | Area                                 | Details                                                                                                                                |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | **Durable storage**                  | All data persists in object storage. No risk of data loss from local disk failure. Storage capacity scales independently of compute.   |
-| **Read scalability**                 | Readers auto-scale horizontally. Doubling readers doubles read throughput with no coordination overhead.                               |
+| **Read and write separation**        | Reads run on two readers, so read traffic stays off the writer unless a read asks for it. |
 | **Serializable transactions**       | Every query runs against a stable snapshot with ACID semantics by default.                                                             |
 | **Mixed graph, vector, and text workloads** | Graph traversals, vector search, and full-text search execute in the same transaction, against the same snapshot. No need to stitch together separate systems for those workloads. |
 | **Cost efficiency at scale**         | Object storage is significantly cheaper per GB than local SSDs or in-memory stores. Large datasets remain affordable.                  |
-| **Operational simplicity**           | Single writer eliminates distributed consensus. No leader election, no split-brain, no quorum management.                              |
+| **Managed failover**                 | One writer means no multi-writer consensus to run. Helix fences a failed writer and promotes a reader for you. |
 
 ## Not optimal for
 
@@ -26,6 +26,8 @@ vector, and text workloads with strong transactional guarantees. These choices h
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Sub-millisecond reads**    | Cache hits are fast, but cold reads require an object storage round trip. Workloads that require guaranteed sub-millisecond latency on every read are better served by in-memory databases. |
 | **Ultra-low write latency**  | Writes incur object storage latency for durability. Write throughput is high, but individual write latency has a floor set by object storage round-trip time.                               |
+| **Elastic read capacity**    | Each cluster has a fixed writer and two readers; readers are not added as load grows.                                                                                                        |
+| **Uninterrupted writes**     | During a writer failover, writes wait up to 90 seconds for the new writer, then fail with a retryable `503`.                                                                                  |
 | **Exhaustive vector recall** | Vector search is approximate (ANN). Applications that require 100% exact nearest neighbor results should use brute-force search on smaller datasets.                                        |
 
 ## Design choices
@@ -38,10 +40,12 @@ durability and cost characteristics are superior.
 cost of write throughput being bounded by a single node. In practice, batching and the high
 throughput of the writer process make this sufficient for most workloads.
 
-**Specialized cache paths.** Helix maintains separate cache paths for graph data, vector indexes,
-and text search artifacts. The tradeoff is less flexibility in cache allocation when only one
-workload dominates.
+**Fixed topology.** Every cluster runs one writer and two readers, so a reader is always ready to
+promote when the writer fails. The tradeoff is that read capacity does not grow with load.
 
 **Dynamic query model.** Queries travel inline with each request, so there is no deploy step and
 ad-hoc queries are fully supported. The tradeoff is the small per-request cost of deserializing the
 query AST on every call.
+
+See [Architecture](/database/helix-cloud/start-here/architecture) for how reads, writes, and
+failover work.

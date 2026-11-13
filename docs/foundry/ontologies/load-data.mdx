@@ -18,11 +18,12 @@ and switch back. Reads go to the current load.
 
 ## Start a load
 
-You can load when the current version is an agent draft that finished. Select **Load
-data** on the overview, on the version's page or in **Data loads**. Until the
-ontology's first load, its overview's setup steps stop at **Load it** and offer it
-there. The dialog says
-what the load reads and what it may spend; select **Load** to start it.
+You can load when the current version is an agent draft that finished. A workspace's
+[first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) is
+loaded for you as soon as its draft is stored. Otherwise, select **Load data** on the
+overview, on the version's page or in **Data loads**. Until the ontology's first load,
+its overview's setup steps stop at **Load it** and offer it there. The dialog says what
+the load reads and what it may spend; select **Load** to start it.
 
 - **Tables**: the synced tables, API sources and table files the version's mappings
   read.
@@ -72,8 +73,12 @@ sync changes a table the current load reads, or a connection's document it read 
 replaced or removed, the ontology owes a refresh: a load of its current version that
 Foundry starts itself. It runs at most once per the plan's interval (daily on Free,
 hourly on Pro, every 15 minutes on Max), and waits while another load or generation
-runs. A large API source adds 30 minutes per million rows to the wait. A refresh becomes
+runs. An API source's changes arrive with its own syncs, which a large source
+[spaces further apart](/foundry/data/api-sources#read-an-api-source). A refresh becomes
 current when it finishes, like any load.
+
+Refreshes are on by default for every ontology, with no setting on the website or in the
+Helix MCP to turn them off.
 
 A refresh reads again only what changed: documents it read before, with the same text
 and models, cost nothing. When the month's

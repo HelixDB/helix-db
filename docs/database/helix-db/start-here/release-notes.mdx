@@ -8,6 +8,102 @@ pageType: "Reference"
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
 <Update
+  label="November 2026"
+  rss={{
+    title: "Docker v0.0.16 and CLI 3.7.0: bounded durable waits and faster bulk writes",
+    description: "Durable requests stop waiting for storage after 30 seconds, bulk inserts run faster, index activation pauses less, and telemetry honors DO_NOT_TRACK"
+  }}
+>
+- **Durable requests time out after 30 s.** While the object store is unreachable, durable writes and native no-op requests fail with `query_deadline_exceeded` (HTTP 408) instead of hanging. The commit may still have happened, so reconcile before you resend. Index definition changes still wait without a limit.
+- **Faster bulk inserts:** 1.6–2.3x as many nodes per second in an in-process insert with 8 clients and 8 indexes. p99 at 8 clients rose from about 0.5 s to 1.1–3.1 s.
+- **Shorter pause when a secondary index activates:** the longest write gap during a 600K-row build fell from 11.9 s to 1.3 s.
+- **Responses are serialized without copying the returned rows.**
+- **Telemetry:** the server, embedded runtime and CLI turn telemetry off when `DO_NOT_TRACK` is anything but empty, `0`, `false` or `no`. `HELIX_TELEMETRY_LEVEL` also accepts `on`/`true`/`yes`/`1` for `basic` and `false`/`no`/`0` for `off`. `basic` now sends pseudonymous project and deployment IDs and a per-session query count; see [`helix metrics`](/cli/command-reference/metrics).
+- **Upgrading:** no storage changes since v0.0.15, so no migration.
+- **CLI 3.7.0** defaults to image v0.0.16 and passes its project ID, CI markers and `HELIX_DEPLOYMENT_ID` to the containers it starts. Projects that saved a `tag` in `helix.toml` keep using it until you change it.
+</Update>
+
+<Update
+  label="November 2026"
+  rss={{
+    title: "Docker v0.0.15 and CLI 3.6.2: optional durability waits and non-blocking index builds",
+    description: "await_durable false now skips the WAL wait, the WAL interval and SST codec are configurable, and index builds no longer stall reads"
+  }}
+>
+- **Behavior change: `X-Helix-Await-Durable: false` now skips the durability wait.** Before, every write waited for its WAL upload whatever the header said. With `false`, the server answers once the writer applies the write, so a crash before the next WAL upload loses it. Without the header, or with `true`, success still means durable. See [execution headers](/database/helix-db/query-guides/http-api#execution-headers).
+- **Writes that send `true` no longer flush twice**, which stalled writers under load: from about 60 to 1,200 vector writes per second with 128 clients on S3.
+- **`HELIX_WAL_FLUSH_INTERVAL_MS`** sets the milliseconds between WAL uploads, 1–60000 (default 100). Durable writes wait for the next upload, so a lower value cuts their latency and costs more object-store PUTs.
+- **`HELIX_SST_COMPRESSION`** sets the codec of new storage files: `none` (default) or `zstd`. Either setting reads both, but once `zstd` is on, v0.0.14 and earlier cannot read the data.
+- **Index builds no longer stall reads:** from about 66K to 205K reads per second during a 300K-row build with 32 readers and 4 writers. Builds take longer, since they share the machine with live traffic.
+- **Duplicates are rejected while a unique index builds.** A write that duplicates a value the build already indexed fails with `unique_constraint_violation` (409). Before, it was accepted and the build then blocked on it.
+- **A filter that combines a unique equality with other conditions reads one row:** five guarded claims over 1M jobs went from about 34 s to 35 ms.
+- **A large index publication no longer freezes the server** (for about 1.6 s).
+- **Very large merged index-queue rows no longer get the server OOM-killed** under sustained vector writes.
+- **A `SET` on a node no longer aborts concurrent edge inserts on it.**
+- **Faster node deletes:** `DETACH DELETE` of 6,000 connected nodes takes about half as long.
+- **Cypher `CREATE` and `SET` batch their storage work across rows.**
+- **Faster vector publication:** the index worker publishes 1.4–1.8x as many vectors per second.
+- **Upgrading:** new storage files index rows of 1 MiB or more by their full key. Older and newer images read both forms, and nothing is rewritten. Encodings, merge operators and the WAL format are unchanged.
+- **CLI 3.6.2** defaults to image v0.0.15.
+</Update>
+
+<Update
+  label="November 2026"
+  rss={{
+    title: "Docker v0.0.14 and CLI 3.6.1: concurrent request throughput",
+    description: "The planning catalog is reused until it changes, so concurrent requests no longer queue behind one another"
+  }}
+>
+- **Concurrent requests no longer queue on the planner**, which capped a scope at about 2,500 requests per second. Single-client writes are unchanged.
+- **A dropped index finishes dropping** when its client disconnects. A drop that races a build step retries instead of failing with `transaction_conflict`.
+- **Upgrading:** no storage changes since v0.0.13.
+- **CLI 3.6.1** defaults to image v0.0.14.
+</Update>
+
+<Update
+  label="November 2026"
+  rss={{
+    title: "Docker v0.0.13 and CLI 3.6.0: SQL, diagnostics, and one status per error code",
+    description: "SQL queries, helix doctor, breaking changes to empty returns and error statuses, fsync on local disk, and index builds that finish under writes"
+  }}
+>
+- **Breaking: an empty single-row return is `[]`, not `null`.** Returns the planner proves have at most one row (a one-ID source, `limit(1)`, a search with `k` of 1) returned `null` when nothing matched. Every row return is now an array, so test for an empty array. `count()` and `exists()` keep their scalar values. See [the query walkthrough](/database/helix-db/core-concepts/overview).
+- **Breaking: each error code has one HTTP status.** The code alone sets the HTTP status, gRPC status and `retryable` hint, so branch on the error code, not the status. See [failure classes](/database/helix-db/query-guides/error-handling#failure-classes). Changes:
+  - A duplicate unique value: `409` instead of `500`.
+  - `node_not_found` and the other not-found codes: `404`.
+  - `query_deadline_exceeded`: `408`. `query_memory_limit_exceeded`: `429`.
+  - Several invalid-input codes: `400`.
+  - A writer-only request sent to a reader: `writer_mode_required`.
+- **Breaking for Cypher clients: Cypher error codes are lower snake case:** `resource_limit` and `memory_limit` instead of `ResourceLimit` and `MemoryLimit`.
+- **[SQL](/database/helix-db/query-guides/sql).** `POST /v2/sql` and `POST /v2/sql/explain` translate one SQL statement into Cypher and run it on the same planner. gRPC and embedded databases serve SQL too.
+- **[`helix doctor`](/cli/command-reference/doctor) and `GET /v2/diagnostics`** check a server's storage, S3 bucket region, disk cache, memory, index publication, and recent queries' index use.
+- **Local disk storage (`HELIX_DATA_DIR`) fsyncs every write**, with no durable-write throughput loss in testing. Before, a write acknowledged as durable could sit in the page cache, so a crash or a full host disk could leave a database that would not open.
+- **Disk storage deletes old manifest and compaction files again.**
+- **Secondary index builds finish under sustained writes.** Before, a build could stay in catch-up while writes kept arriving, so equality lookups kept scanning their label and each write batch got slower.
+- **Faster writes** to busy labels, hub nodes and low-cardinality equality values, and to requests that add edges node by node.
+- **Typed Cypher relationship patterns start from relationship-label bitmaps.**
+- **Embedded readers reopened on the same disk root stop leaking file descriptors**, and a writer and its readers share one disk cache.
+- **Upgrading:** encodings, merge operators and the WAL format are unchanged.
+- **CLI 3.6.0** defaults to image v0.0.13 and adds `helix doctor`. `helix auth login` supports every sign-in method.
+- SDK methods for Cypher and SQL are not in a published SDK release yet; send direct HTTP requests.
+</Update>
+
+<Update
+  label="October 2026"
+  rss={{
+    title: "Docker v0.0.12 and CLI 3.5.1: Cypher and faster request handling",
+    description: "Cypher on its own routes, faster planning and request parsing, and the CLI's helix explorer and helix cypher commands"
+  }}
+>
+- **[Cypher](/database/helix-db/query-guides/cypher).** `POST /v2/cypher`, `POST /v2/cypher/explain` and the matching gRPC methods run Cypher on the same planner as native queries. `helix cypher` sends a statement to a local instance. The Cypher guide describes v0.0.13 and later, which renamed the Cypher error codes.
+- **Faster requests:** planning is about 1.8x as fast, parsing and allocation are faster, and request memory is freed sooner.
+- **Query and request JSON may nest at most 255 levels.**
+- **Faster full-text search:** a split hydrated to disk reopens from disk instead of the object store, and BM25 resolves live state only for candidates that can reach the top `k`.
+- **CLI 3.5.1** defaults to image v0.0.12.
+- **CLI 3.5.0** (default image still v0.0.11) adds [`helix explorer`](/cli/command-reference/explorer), which opens the graph Explorer for a running local instance on `127.0.0.1`. The CLI pins the Explorer image to v0.1.0.
+</Update>
+
+<Update
   label="October 2026"
   rss={{
     title: "Docker v0.0.11 and CLI 3.4.4: faster, bounded index queues",
@@ -172,7 +268,7 @@ pageType: "Reference"
 </Update>
 
 <Update
-  label="March 2026"
+  label="April 2026"
   rss={{
     title: "HelixDB Enterprise v1.0.0",
     description: "HelixDB Enterprise launched on April 2, 2026"

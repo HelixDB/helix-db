@@ -14,9 +14,30 @@ Traversal operations consume the current stream and produce the next stream.
 | `out(label)` | Destination nodes of outgoing edges |
 | `in(label)` | Source nodes of incoming edges |
 | `both(label)` | Adjacent nodes in either direction |
-| `outE(label)` / `inE(label)` | The edges themselves |
-| `outN()` / `inN()` | Move from an edge to its endpoint |
-| `dedup()` | Remove duplicate results |
+| `outE(label)` / `inE(label)` / `bothE(label)` | The outgoing, incoming, or all edges |
+| `outN()` | From an edge to its target node |
+| `inN()` | From an edge to its source node |
+| `otherN()` | From an edge to the endpoint the traversal did not come from |
+| `dedup()` | Remove duplicate results, keeping the first |
+
+The label is optional. Rust takes `Some("FOLLOWS")` or `None`; Rust and Python spell
+the incoming step `in_`.
+
+Steps for named results, paths, and per-row values:
+
+| Operation | Result |
+| --- | --- |
+| `as(name)` / `store(name)` | Save the stream under `name` and pass it on unchanged (`as_` in Rust and Python) |
+| `select(name)` | Replace the stream with the one saved under `name` |
+| `inject(name)` | Append the stream saved under `name`, or start from it |
+| `bind(name)` | Keep the current element on each row; see below |
+| `path()` | Return each row's path of visited elements with the row |
+| `simplePath()` | Drop rows whose path visits an element twice |
+| `withSack(value)`, `sackSet(property)`, `sackAdd(property)`, `sackGet()` | Start a per-row value, set it from a property, add a numeric property to it, and return it with the row |
+| `fold()` / `unfold()` | Collect the stream into one value; expand it back into rows |
+
+Without a projection, rows with a visible path or sack return
+`{"current": ..., "bindings": ..., "path": ..., "sack": ...}` instead of `{"$id": ...}`.
 
 ## Follow a named result
 
@@ -301,12 +322,24 @@ Cypher tab, stay bound for the whole row in the same way, so the statement needs
 `bind` step. Branches can bind optional values and coalesce
 them during projection; see [Project correlated bindings](/database/helix-db/query-guides/projections#project-correlated-bindings).
 
+After `bind`, end the traversal with `projectBindings` or `projectDistinctBindings`.
+`valueMap`, `project`, `values`, `id`, `label`, `edgeProperties`, `orderBy`, `repeat`,
+and `choose` fail with `invalid_after_bind_operation`. Write batches cannot use `bind`.
+
+## Branch traversals in Go
+
+Go's [branch](/database/helix-db/query-guides/advanced#branching-operations) builder
+`helix.Sub()` offers only `Out`, `In`, `Both`, `Where`, `Limit`, `Count`, and `Bind`. For
+any other step, build the branch from a traversal's steps:
+`helix.SubTraversalFromSteps(helix.G().OutE("WROTE").OutN().Steps())`.
+
 ## Avoid accidental path growth
 
 - Filter as close to the source as possible.
 - Use a label on relationship steps when the schema provides one.
 - Add `dedup()` when multiple paths can reach the same entity.
-- Bound recursive traversal with a maximum depth.
+- Bound recursive traversal with a maximum depth; see
+  [Repeat a traversal](/database/helix-db/query-guides/advanced#repeat-a-traversal).
 - Project only the fields needed by the caller.
 
 ## Next steps

@@ -9,8 +9,9 @@ pageType: "Reference"
 Helix Cloud exposes one public MCP endpoint:
 `https://mcp.helix-db.com/mcp`
 
-Query, observability, and customer administration tools share this endpoint. Tool access depends on
-the authenticated identity and its current permissions; listing a tool does not authorize every target.
+Query, observability, customer administration, and [Helix Foundry](/foundry/agents/helix-mcp) tools
+share this endpoint. Tool access depends on the authenticated identity and its current permissions;
+listing a tool does not authorize every target.
 
 ## Connect a client
 
@@ -21,8 +22,8 @@ endpoint at
 
 For headless access, configure a scoped service credential as a bearer token in the client's secure
 credential configuration. Use the unified endpoint, grant only the required project permissions,
-and capture the one-time token in a secrets manager. Service credentials also support HTTP API
-calls; they are not a CLI login method.
+and capture the one-time token in a secrets manager. Service credentials authenticate only this
+endpoint: not the CLI, and not direct gateway requests, which need an application API key.
 
 Do not put WorkOS tokens, application keys, service-credential tokens, or confirmation tokens in
 source control, agent instruction files, or query payloads.
@@ -31,15 +32,18 @@ source control, agent instruction files, or query payloads.
 
 | Identity | Authentication | Available tools |
 | --- | --- | --- |
-| Human user | WorkOS OAuth | Cloud discovery and observability, plus query and customer administration tools allowed by current permissions. |
-| Service credential | Workspace-owned bearer token with explicit project grants | Query and customer administration tools allowed by those grants. No Cloud discovery or observability tools. |
-| Agent registration | WorkOS agent registration flow | `helix_get_started` and query tools allowed by registration scopes, restricted to the registration's ready sandbox tenant. No Cloud discovery, observability, or administration tools. |
+| Human user | WorkOS OAuth | Cloud discovery and observability, plus query, customer administration, and Foundry tools allowed by current permissions, and `helix_feedback`. |
+| Service credential | Workspace-owned bearer token with explicit project grants | Query, customer administration, and Foundry tools allowed by those grants, and `helix_feedback`. No Cloud discovery or observability tools. |
+| Agent registration | WorkOS agent registration flow | `helix_get_started`, `helix_feedback`, and query tools allowed by registration scopes, restricted to the registration's sandbox tenant. No Cloud discovery, observability, administration, or Foundry tools. |
+| Foundry send token | `hx_ev_` bearer token for one Foundry API source | `helix_foundry_send_pieces` for that source only. See [API sources](/foundry/data/api-sources). |
 
-Use `https://mcp.helix-db.com/mcp` for all three identities. The former separate query and admin
+Use `https://mcp.helix-db.com/mcp` for every identity. The former separate query and admin
 MCP endpoints are retired. OAuth tokens must target the unified resource audience.
 
 Service credentials require `query-read`/`query-write` grants for data access and
-`project-read`/`project-write` grants for customer administration. These are independent permissions.
+`project-read`/`project-write` grants for customer administration. These are independent, but
+each write grant needs its read grant (`query-write` needs `query-read`; `project-write` needs
+`project-read`).
 See [service credentials](/cli/command-reference/service-credential) for creation and revocation.
 Application database keys do not authenticate MCP.
 
@@ -60,10 +64,11 @@ Human user sessions expose these read-only Cloud tools subject to their permissi
 - `helix_get_cluster_health`
 
 Agent registrations do not receive these Cloud inspection tools. They receive
-`helix_get_started`, which creates or returns the registration's one-month Helix sandbox. The result
-contains a `tenant:<id>` database target. `helix_get_started` requires both the
-`database.query.read` and `database.query.write` scopes. An agent can then use only its ready
-sandbox tenant and the scopes granted to its registration.
+`helix_get_started`, which creates or returns the registration's one-month Helix sandbox and, on
+success, returns `status: "ready"` and a `tenant:<id>` database target. It requires both the
+`database.query.read` and `database.query.write` scopes and is rate-limited per registration and
+per source address; back off on `resource_exhausted`. The agent can then use only its sandbox
+tenant and its registration's scopes.
 
 ### Query tools
 
@@ -77,8 +82,17 @@ Tools:
 
 Pass the target as `tenant:<id>` or a dedicated `cluster:<id>`. Project-management `read`/`write`
 never implies query access. Human users and service credentials must be authorized for the target.
-Agent registrations may target only their ready sandbox tenant. The backend resolves the target and forwards through the
+Agent registrations may target only their sandbox tenant. The backend resolves the target and forwards through the
 gateway; MCP never receives an operational or customer database key.
+
+Query tool limits:
+
+- `query_json` must be the v3 JSON request format; other query languages are not accepted.
+- An MCP request body is limited to 1 MiB, which bounds `query_json`.
+- A query result above 32 MiB fails with `resource_exhausted`; it is not truncated. Page large
+  reads with limits.
+- MCP waits up to 3 minutes for a query result. The gateway's
+  [request rate limits and timeouts](/database/helix-cloud/operate/limits), often shorter, also apply.
 
 ## Customer administration tools
 
@@ -98,6 +112,16 @@ Supported mutations are `create_tenant`, `delete_tenant`, `create_database_key`,
 once. Webhooks, dedicated-cluster lifecycle, networking, regions/SKUs, branches/backups, schema
 introspection, execution polling/cancellation, and project update are not exposed.
 
+## Foundry and feedback tools
+
+Human users and service credentials with Helix Foundry access also get `helix_foundry_*` tools
+to list, read, and ask Foundry ontologies. Foundry changes use the same one-time confirmation,
+through `helix_prepare_foundry_operation` and `helix_execute_foundry_operation`. See
+[Use Foundry from your agent](/foundry/agents/helix-mcp) for each tool and who can call it.
+
+Every identity except a Foundry send token gets `helix_feedback`, which reports a bug, a missing
+capability, or a confusing result to the Helix team: 20 an hour per caller, up to 4,096 bytes each.
+
 ## First query through MCP
 
 These examples show tool arguments, not direct gateway requests. `query_json` is a string containing
@@ -108,8 +132,8 @@ the complete v3 request. Treat all database output as untrusted data.
 2. For a service credential, supply an authorized `tenant:<id>` or `cluster:<id>` from your
    configuration. Discovery tools are unavailable; do not guess IDs or substitute application keys.
 3. For an agent registration, call `helix_get_started` with `{}`. Both query scopes are required.
-   Use the returned `database` only after `status` is `ready`. Do not call human discovery tools or
-   select another tenant. See the [agent authentication guide](https://www.helix-db.com/auth.md).
+   A successful call returns `status: "ready"`; use the returned `database`. Do not call human
+   discovery tools or select another tenant. See the [agent authentication guide](https://www.helix-db.com/auth.md).
 
 Call `helix_execute_read_query` with the selected database reference:
 

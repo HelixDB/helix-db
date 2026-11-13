@@ -36,9 +36,11 @@ Cloud, use the gateway URL and database ID shown in the dashboard. The
 shared query endpoint.
 
 The root OpenAPI server and the `/healthz`, `/readyz` and `/v2/diagnostics`
-operations describe a local HelixDB server. The Helix Cloud gateway is advertised
-only for `POST /v2/query`; its separate `/health` and `/readyz` contracts are not
-part of this specification.
+operations describe a local HelixDB server. The Helix Cloud gateway server is
+advertised on `POST /v2/query` and the Cypher and SQL operations. Instead of
+`/healthz` and `/v2/diagnostics`, a gateway serves unauthenticated `GET /health`
+(liveness) and `GET /readyz` (readiness), whose bodies this specification does
+not describe.
 
 `GET /v2/diagnostics` returns read-only checks of the server's setup: storage,
 the S3 bucket's region, the disk cache's device and room, memory, index
@@ -49,12 +51,28 @@ Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
 gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
 client must work against both environments. A `POST /v2/query` body may nest
 JSON arrays and objects at most 255 levels deep, including under keys the
-server ignores; a deeper body fails with `invalid_query_json`.
+server ignores, and a Cypher or SQL body at most 127 levels; a deeper body
+fails with `invalid_query_json`.
+
+### Compression
+
+A Helix Cloud gateway decodes `Content-Encoding: gzip` or `x-gzip` request bodies
+(`identity` means none) and applies its 2 MiB limit after decoding. Any other
+coding returns `415 unsupported_content_encoding` with `Accept-Encoding: gzip`.
+It gzips responses over 32 bytes when the request sends `Accept-Encoding: gzip`.
+
+A local server neither decodes nor compresses: a gzipped body fails with
+`400 invalid_query_json`. Clients that target both should send uncompressed JSON.
 
 ## Authentication
 
-Local servers do not require authentication by default. A Helix Cloud GA shared
-gateway requires a cluster API key and database ID:
+Local servers have no authentication: any client that reaches the port can read
+and write, so keep one on a trusted network or behind an authenticating proxy. By
+default the server binary listens on every interface (HTTP 8080, gRPC 8081), the
+Docker image binds gRPC to `127.0.0.1:8081` inside the container, and the CLI
+publishes HTTP as `6969` on every host interface.
+
+A Helix Cloud GA shared gateway requires a cluster API key and database ID:
 
 ```http
 Authorization: Bearer <cluster-api-key>
@@ -132,8 +150,8 @@ when `parameter_types` is present, it must describe every supplied parameter.
 | Header | Applies to | Purpose |
 | --- | --- | --- |
 | `X-Helix-Warm` | Reads | Warm eligible execution state before normal traffic. |
-| `X-Helix-Require-Writer` | Reads and writes | Reject execution when the selected server is not a writer. |
-| `X-Helix-Await-Durable` | Writes | Without it, or with `true`, success means the write is durable. `false` returns once it is applied on the writer, so a crash before its WAL upload loses it. |
+| `X-Helix-Require-Writer` | Reads and writes | A local non-writer server rejects the request with `503 writer_mode_required`; a Helix Cloud gateway routes it to the writer. |
+| `X-Helix-Await-Durable` | Writes | Omitted or `true`: success means the write is durable. `false`: returns once applied on the writer, so a crash before its WAL upload loses it. Helix Cloud rejects `false` with `400 invalid_request`. |
 | `X-Helix-Database-Id` | Helix Cloud | Select the managed database behind a gateway. |
 
 Boolean execution headers accept `true`, `false`, `1`, or `0`. Warm writes and
@@ -151,30 +169,36 @@ durability waits on reads are rejected with `400 Bad Request`.
 - `403` reports that the Helix Cloud API key lacks permission for the query.
 - `404` reports that the query named a node, edge, index or index operation
   that does not exist.
-- `408` reports that a query exceeded its deadline. A write may have committed.
-- `409` reports a conflict; branch on `retryable`. A retryable conflict, such
-  as `transaction_conflict`, carries `retryable: true`: retry the whole
-  transaction only when it is idempotent or protected by an application
-  idempotency key. A conflict with the database's state, such as
-  `unique_constraint_violation`, carries `retryable: false` and committed
-  nothing; resending it unchanged fails again.
+- `408` reports an exceeded deadline: `query_deadline_exceeded` from the engine
+  or `query_timeout` from a Helix Cloud gateway. Locally, `POST /v2/query` has no
+  execution deadline and Cypher and SQL have 30 seconds. A write that awaits
+  durability returns `408` after 30 seconds without its WAL upload, although it is
+  already applied: [read the state back](/database/helix-db/query-guides/error-handling#stability-and-retry-rules)
+  before resending.
+- `409` reports a conflict that committed nothing; branch on `retryable`. With
+  `true` (such as `transaction_conflict`), resend with bounded backoff. With
+  `false` (such as `unique_constraint_violation`), resending unchanged fails again.
 - `413` reports that a Helix Cloud request body exceeded 2 MiB. The gateway
   rejects it before query parsing.
-- `429` reports a Helix Cloud rate limit (`rate_limited`), which can include
-  `Retry-After`, or database engine backpressure (`index_backpressure`): a vector
-  or text index holds its maximum unpublished work, or a `strong` search lies
-  behind too many unpublished changes or would include more unpublished work than
-  it may. Backpressure responses carry
-  `retryable: true` and no `Retry-After`; nothing from the request took effect.
-  See [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
+- `415` reports a Helix Cloud request body whose `Content-Encoding` is not
+  `gzip` or `identity` (`unsupported_content_encoding`).
+- `429` reports a Helix Cloud rate limit (`rate_limited`),
+  [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure)
+  (`index_backpressure`), or an exceeded per-query budget (`resource_limit` for
+  Cypher and SQL, `query_memory_limit_exceeded` for `POST /v2/query`). Only some
+  are transient, so branch on `error` and do not retry every `429`; see
+  [HTTP 429](/database/helix-db/query-guides/error-handling#failure-classes).
 - `500` reports an internal query or storage failure.
 - `503` reports that a required writer or ready database is unavailable, or,
   with `retryable: false`, that a write's outcome is unknown.
 
 Local servers and Helix Cloud gateways return
-`{ "error": "<code>", "msg": "<message>" }`. Clients should branch on
-`error` and treat `msg` as diagnostic text. An oversized Cloud request uses
-`payload_too_large` as its stable error code. See the
+`{ "error": "<code>", "msg": "<message>" }`, plus a boolean `retryable` when the
+code's [failure class](/database/helix-db/query-guides/error-handling#failure-classes)
+settles it (409, `index_backpressure` and an unknown write outcome). Clients
+should branch on `error` and treat `msg` as diagnostic text. An oversized Cloud
+request uses `payload_too_large` as its stable error code. On a local server, an
+unknown path or method returns an empty `404` or `405` instead of this envelope. See the
 [query error reference](/database/helix-db/query-guides/error-handling) for engine
 error codes and retry guidance, and
 [Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling) for
@@ -215,7 +239,8 @@ database on a standalone server.
 
 The [Cypher guide](/database/helix-db/query-guides/cypher) lists which clauses,
 expressions, and functions are supported, and which constructs are rejected with
-an `unsupported_feature` error, such as `MERGE`, variable-length paths, and `UNION`.
+an `unsupported_feature` error, such as `MERGE`, variable-length paths, and `UNION`,
+and shows how to [upsert without `MERGE`](/database/helix-db/query-guides/cypher#upsert-without-merge).
 
 ### Lossless JSON values
 
@@ -243,16 +268,17 @@ Cypher errors include `error`, `msg`, and `details` with a specific `detail`,
 `phase` (`compile` or `runtime`), and a nullable UTF-8 byte `span`. `error` and
 `detail` are lower snake case codes, such as `resource_limit` and `memory_limit`;
 the [query error reference](/database/helix-db/query-guides/error-handling#cypher-errors)
-lists the categories. Malformed
-requests and storage errors retain the native envelope. Resource limits return
-`429`; request/semantic errors return `400`; conflicts return `409` (a duplicate
-unique value is `unique_constraint_violation`); internal failures return `500`;
-writer requirements or uncertain commits return `503`.
+lists the categories. Malformed requests and storage errors retain the native
+envelope, the only one that carries `retryable`. Resource
+limits return `429`; request/semantic errors return `400`; conflicts return
+`409` (a duplicate unique value is `unique_constraint_violation`); internal
+failures return `500`; writer requirements or uncertain commits return `503`.
 An uncertain commit includes `retryable:false` and must not be retried automatically.
 
 The local request and response limits are 16 MiB, with a default 30-second query
-deadline. An oversized request returns `400` with `invalid_request_body`. A Helix
-Cloud gateway accepts request bodies up to 2 MiB and returns `413` with
+deadline. An oversized request returns `400` with `invalid_request_body`. See
+[Cypher limits](/database/helix-db/query-guides/cypher#limits) for per-statement
+budgets. A Helix Cloud gateway accepts request bodies up to 2 MiB and returns `413` with
 `payload_too_large` above that. Its query time limit returns `408`, and its rate
 limit applies as for `POST /v2/query`. Gateway authentication, rate-limit and
 availability errors use the native envelope.
@@ -283,7 +309,7 @@ and `parameters` may be a list that binds `?` placeholders in written order:
 `POST /v2/sql/explain` takes the same body and plans the translated statement
 without executing it, exactly like `POST /v2/cypher/explain`: it returns the same
 planning report and uses read request options, so `X-Helix-Await-Durable:true`
-is invalid.
+is invalid. The report does not include the translated Cypher text.
 
 The [SQL guide](/database/helix-db/query-guides/sql) describes how tables, columns
 and joins translate, and which SQL is rejected.

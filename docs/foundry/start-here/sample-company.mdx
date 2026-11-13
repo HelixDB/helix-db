@@ -1,0 +1,104 @@
+---
+title: "Try Foundry on a sample company"
+description: "Watch Helix Foundry connect a made-up company's database and documents, build an ontology, load it into a Helix database and answer a question, before you connect your own data"
+sidebarTitle: "Sample company"
+pageType: "Tutorial"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
+
+The sample company runs Foundry end to end on Acme Corp, a made-up company that sells
+scheduling software to field-service businesses: Foundry connects its database and
+documents, builds an ontology, loads it and answers a question, all on one page. Owners
+and admins can start it.
+
+## Start the sample
+
+On **Get started**, select **See it on a sample company (1 min)** under **Start with a
+sample company**. **Acme Corp, a sample company** opens and runs each step by itself;
+each step opens as its work finishes and stays open.
+
+<Steps>
+  <Step title="Acme Corp's data">
+    Foundry connects Acme Corp's PostgreSQL database with a read-only login and syncs
+    `accounts`, `contacts`, `subscriptions`, `invoices`, `support_tickets` and
+    `product_usage`. It uploads nine documents into a document set named **Acme Corp
+    sample**: three customer contracts as PDFs, call notes, a support escalation, an
+    incident report and a price list.
+  </Step>
+
+  <Step title="The goal">
+    Understand each customer account with its people, plan, contract terms, invoices,
+    tickets, usage and calls, to see which renewals are at risk.
+  </Step>
+
+  <Step title="The ontology">
+    Foundry creates **Acme Corp customers** on a new Helix database from a ready-made
+    draft, so there's no AI draft to wait for, makes it current and shows its types and
+    links.
+  </Step>
+
+  <Step title="Loading">
+    The load writes the rows as records, each linked to its account, subscription or
+    contact, then reads the documents with AI models for the names and facts they hold.
+    **See the load** opens its page.
+  </Step>
+
+  <Step title="Ask the Analyst">
+    Once the load is written, the page asks the first suggested question and shows the
+    answer with the records and documents it came from. Then:
+
+    - under **Ask another**, a suggestion opens its thread in the
+      [Analyst](/foundry/ask/ask-questions);
+    - **Ask your own question** opens a new thread;
+    - **See the records** opens the [Explorer](/foundry/explore/explorer).
+  </Step>
+
+  <Step title="Now connect your own data">
+    **Connect your own data** opens the [first-ontology steps](/foundry/start-here/quickstart)
+    for your own sources. **Set up with your agent** copies a prompt for your agent to do
+    them with you.
+  </Step>
+</Steps>
+
+If a step fails, the page says why, with **Try again**. Reopening or reloading the page
+carries on where it was and makes nothing twice.
+
+## While you explore the sample
+
+While the sample is the workspace's only ontology, every page shows the banner **Sample
+data: you're exploring Acme Corp, a made-up company.** For owners and admins it links
+**Back to getting started**, or, once the sample's question is answered, **Get started
+with your own data**.
+
+The sample's connection and document set show in **Connectors**, but your own
+ontologies never offer them as sources. Its ontology, database and load are ordinary:
+the Analyst, the Explorer and Records read them like yours.
+
+## What it uses
+
+- **A Helix database** on Helix's shared cluster, in the workspace's first Helix project
+  or a new project named after the workspace, on the workspace's
+  [Helix Cloud plan](/foundry/workspace/plans-and-billing#the-helix-cloud-plan-for-databases).
+- **AI models**: reading the documents and answering questions use the workspace's
+  [AI models](/foundry/workspace/ai-models) and count toward its
+  [monthly caps](/foundry/workspace/usage) like any other load or question.
+
+Foundry [emails you once](/foundry/start-here/workspaces-and-navigation#emails-from-foundry)
+a day later if the workspace still has no data of its own.
+
+## Remove the sample
+
+Delete the **Acme Corp customers** ontology from its overview, then its connection and
+documents in **Connectors**.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/foundry/start-here/quickstart">
+    Build your first ontology from your own data.
+  </Card>
+  <Card title="Ask the Analyst" icon="comments" href="/foundry/ask/ask-questions">
+    Ask questions and read where each answer came from.
+  </Card>
+</CardGroup>

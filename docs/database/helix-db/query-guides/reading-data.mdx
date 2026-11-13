@@ -13,12 +13,18 @@ data you already know.
 
 | Intent | Builder |
 | --- | --- |
-| One or more node IDs | `n(NodeRef…)` |
+| One or more node IDs | `n(NodeRef.ids([...]))`; `NodeIDs(...)` in Go |
+| Node IDs from a parameter | `n(NodeRef.param("ids"))`; `NodeParam("ids")` in Go |
 | Nodes with a label | `nWithLabel` / `n_with_label` |
-| Nodes matching a source predicate | `nWhere` / `n_where` |
-| One or more edge IDs | `e(EdgeRef…)` |
-| Edges with a label | `eWithLabel` / `e_with_label` |
-| Earlier named entry | `NodeRef.var(...)` / `NodeVar(...)` |
+| Labeled nodes matching a source predicate | `nWithLabelWhere` / `n_with_label_where` |
+| Nodes matching a source predicate, any label | `nWhere` / `n_where` |
+| One or more edge IDs | `e(EdgeRef.ids([...]))`; `EdgeIDs(...)` in Go |
+| Edges with a label | `eWithLabel` / `e_with_label`, or `eWithLabelWhere` / `e_with_label_where` |
+| Earlier named entry | `n(NodeRef.var(...))`; `NodeVar(...)` in Go |
+
+An ID list returns nodes in the given order and skips missing IDs. An ID parameter is
+one non-negative integer ID or an array of them, typed (`i64`, `{ "array": "i64" }`) or
+untyped. Any other value fails the query.
 
 Source predicates are eligible for index push-down. Secondary indexes are defined per
 label, so a source must be scoped to a label to read one: `nWithLabelWhere` /
@@ -229,13 +235,23 @@ Use `NodeRef.var("user")` (or the equivalent SDK reference) as the source of a l
 entry. Named references are transaction-local; they do not create stored variables or
 routes.
 
+## Results without a projection
+
+An entry without a projection, such as `g().nWithLabel("User").limit(25)`, returns one
+`{"$id": ...}` per node or edge (plus `$distance` or `$score` after a search) and no
+properties. To read properties, end with `valueMap`, `project`, or another
+[projection](/database/helix-db/query-guides/projections).
+
 ## Next steps
 
 <CardGroup cols={2}>
   <Card title="Traverse relationships" icon="route" href="/database/helix-db/query-guides/traversals">
     Follow outgoing and incoming edges.
   </Card>
-  <Card title="Filter and order" icon="filter" href="/database/helix-db/query-guides/filtering">
-    Narrow and page the current stream.
+  <Card title="Filtering" icon="filter" href="/database/helix-db/query-guides/filtering">
+    Narrow the current stream with predicates.
+  </Card>
+  <Card title="Ordering and pagination" icon="arrow-down-wide-short" href="/database/helix-db/query-guides/ordering-and-pagination">
+    Sort the stream and return it one page at a time.
   </Card>
 </CardGroup>

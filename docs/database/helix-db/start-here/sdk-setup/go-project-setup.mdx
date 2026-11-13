@@ -73,16 +73,16 @@ crash before its WAL upload loses it. The client does not retry conflicts automa
 
 ## Release scope
 
-Use `v0.3.1` with a local or remote Helix server through `/v2/query`. Embedded
-constructors and `Client.Graph` return native-binding-unavailable errors in a
-standard module installation.
+Use `v0.3.1` with a local or remote Helix server through `/v2/query`. Its native
+bindings are not published, so `NewEmbeddedClient` and `NewEmbeddedReaderClient`
+return `ErrNativeBindingsUnavailable`, and `Client.Graph` returns
+`ErrNativeGraphUnavailable`. See
+[Embedded database](/database/helix-db/start-here/local-development/embedded-database#install).
 
 ## Verify
 
-```bash
-cd sdks/go
-go test ./...
-```
+With a [local instance](/database/helix-db/start-here/quickstart) running, run the
+Execute example and print `response.Users`. A new database returns an empty slice.
 
 ## Next steps
 

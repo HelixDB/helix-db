@@ -574,9 +574,8 @@ Rust's `#[query]` macro rewrites the function to return
 TypeScript and Python convert a batch with `toQueryRequest` / `to_query_request`,
 and Go's `WriteQuery(name)` took the name up front.
 
-`query_name` is optional diagnostic metadata for gateway logs and query diagnostics. It
-does not create a stored endpoint or deploy anything; a missing or `null` name is
-reported as `__dynamic__`.
+`query_name` is optional metadata for logs and query diagnostics. It does not create
+a stored endpoint or deploy anything; a request without one runs the same way.
 
 ## 7. Run it
 
@@ -612,6 +611,7 @@ response = Client("http://localhost:6969").query(request)
 ```
 
 ```bash CLI
+# Save the JSON tab from "The whole query" as write_users.json.
 helix query dev --file write_users.json
 ```
 
@@ -637,7 +637,9 @@ The shape of each value depends on how its entry ended:
 | `friends` | `value_map`, a terminal projection | One object per row containing the selected properties |
 
 Node and edge IDs are unsigned 64-bit integers, and projected properties come back as
-plain JSON values rather than the tagged form used in the request.
+plain JSON values rather than the tagged form used in the request. Date-times are
+RFC 3339 UTC strings with millisecond precision, such as `"2026-07-24T09:30:00.000Z"`,
+and bytes are arrays of numbers from 0 to 255.
 
 Returning a raw stream is rarely what a caller wants. End an entry with the terminal that
 produces the shape you need — each of these replaces `valueMap` on the `friends` entry:
@@ -650,13 +652,14 @@ produces the shape you need — each of these replaces `valueMap` on the `friend
 | `exists()` | `true` |
 | `project(…)` | One object per row with named fields |
 
-A declared return with no value, because it matched nothing or its entry was
-skipped, keeps the JSON type it has when populated:
+A declared return keeps its JSON type when it matches nothing:
 
-| Return | Populated | Empty or skipped |
+| Return | Matched rows or none | Entry skipped |
 | --- | --- | --- |
-| Row stream, including `n(<one id>)`, `limit(1)`, `fold` and mutations | Array | `[]` |
-| Scalar terminal, such as `count()` or `exists()` | Scalar | No synthetic empty value |
+| Row stream, including `n(<one id>)`, `limit(1)`, `fold` and mutations | Array, `[]` when empty | `[]` |
+| Scalar terminal, such as `count()` or `exists()` | Scalar, such as `0` or `false` | `[]` |
+
+An entry is skipped when it is a conditional entry whose condition is false.
 
 An empty `returns` declaration returns `{}` because it declares no response keys.
 

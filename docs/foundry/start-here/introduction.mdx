@@ -18,7 +18,7 @@ Foundry runs at [foundry.helix-db.com](https://foundry.helix-db.com), and your a
 reach it through the [Helix MCP](/foundry/agents/helix-mcp). Sign in with the account
 you use for Helix Cloud; your workspaces come with it.
 
-<Frame caption="The whole path in two minutes: synced data, a generated draft, a load, the Explorer and Ask.">
+<Frame caption="The whole path in two minutes: synced data, a generated draft, a load, the Explorer and the Analyst.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/start-here/tour-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/start-here/tour.webm"></video>
 </Frame>
 
@@ -35,7 +35,7 @@ you use for Helix Cloud; your workspaces come with it.
 | **Generation** | A request to Foundry's agent to draft a new version of the ontology from the tables, API sources and document sets you pick. |
 | **Version** | One draft of the ontology. Versions never change; you choose which one is current. |
 | **Load** | One write of the current version into the ontology's database: your tables, then the documents of its sets. A **refresh** is a load Foundry starts itself when the data changed. |
-| **Ask** | Questions about a load in plain language, answered with the sources they came from. Foundry opens on it. |
+| **Analyst** | Questions about a load in plain language, answered with the sources they came from. Foundry opens on it. |
 | **Explorer** | The graph and records view of a load, read from the database with your session. |
 
 The work flows in one direction:
@@ -45,7 +45,7 @@ flowchart LR
   A[Connect data and upload documents] --> B[Generate a draft]
   B --> C[Review and make it current]
   C --> D[Load into the database]
-  D --> E[Ask and explore]
+  D --> E[Ask the Analyst and explore]
   A -. syncs .-> D
 ```
 
@@ -66,8 +66,8 @@ You can do each step on the website, or have your agent do it through the
 A generation sends your synced tables, and up to five of the newest documents of each
 set it picks, to Foundry's agent, which drafts the version. A load sends your
 documents' text to AI models, which find the names and facts they hold and check them.
-Reading tables into a load uses no models. Ask sends your question, and what each step
-reads from the load, to AI models.
+Reading tables into a load uses no models. The Analyst sends your question, and what
+each step reads from the load, to AI models.
 
 By default these run on hosted providers through Helix, today Anthropic's Claude models.
 On Pro or Max, an owner can run them on the workspace's own Anthropic key instead; see
@@ -78,7 +78,10 @@ workspace's [monthly caps](/foundry/workspace/usage).
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/foundry/start-here/quickstart">
-    Go from sign-in to an explored graph in about ten minutes.
+    Go from sign-in to a first answer on your own data.
+  </Card>
+  <Card title="Try the sample company" icon="flask" href="/foundry/start-here/sample-company">
+    See every step on a made-up company's data first.
   </Card>
   <Card title="Connect data" icon="plug" href="/foundry/data/connect-data">
     Add a source, test it and sync its tables.
@@ -86,7 +89,7 @@ workspace's [monthly caps](/foundry/workspace/usage).
   <Card title="Generate an ontology" icon="wand-magic-sparkles" href="/foundry/ontologies/generate-and-version">
     Draft types, links and mappings from your tables.
   </Card>
-  <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
+  <Card title="Ask the Analyst" icon="comments" href="/foundry/ask/ask-questions">
     Ask your data questions in plain language.
   </Card>
   <Card title="Use Foundry from your agent" icon="robot" href="/foundry/agents/helix-mcp">

@@ -38,20 +38,34 @@ helix auth logout
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--json` | Print the result as JSON on stdout and never prompt. `status` prints `{"email":"...","workspaces":[{"id":"...","name":"..."}]}`. | Off |
+| `--json` | Print the result as JSON on stdout and never prompt. `status` prints `{"email":"...","workspaces":[{"id":"...","name":"..."}]}` and `logout` prints `{"loggedOut":true}`. `login` refuses `--json`. | Off |
 
 ## Behavior
 
 ### Login
 
-- `login` requires an interactive terminal, so it fails with `--json`.
-- Browser methods start WorkOS PKCE in a browser (and print the URL in case the browser does not open), then show a spinner while they wait for the loopback callback on `http://localhost:8765/callback`. The login times out after 5 minutes.
-- `password` signs in with an existing account. To create an account or reset a password, use [the sign-in page](https://helix-db.com/login). It only runs when Helix Cloud is reached over HTTPS or on this machine, so a password never travels unencrypted; browser methods are not affected.
+- `login` needs a terminal on stdin and stderr, so it fails with `--json`, in CI, or with piped input (`logging in needs an interactive terminal`). There is no unattended mode; see [Run in CI](/cli/scripting#run-in-ci).
+- Browser methods start WorkOS PKCE in a browser (and print the URL in case the browser does not open), then show a spinner while they wait for the loopback callback on `http://localhost:8765/callback`. The CLI listens on `127.0.0.1:8765`, a fixed port registered with WorkOS; if another program holds it, login fails with `bind the WorkOS callback listener on port 8765`. The login times out after 5 minutes.
+- `password` signs in with an existing account. To create an account or reset a password, use [the sign-in page](https://helix-db.com/login). It runs only when Helix Cloud is reached over HTTPS or on this machine, so a password never travels unencrypted; with a plain `http://` `CLOUD_AUTHORITY` it fails with `refusing to send a password over an unencrypted connection`. Browser methods are not affected.
 - A login request that gets no answer fails after 60 seconds. During email verification, the CLI asks for the code again instead.
 - `--quiet` still prints what a login needs: the URL, why a code prompt repeats, and the notice before single sign-on opens a second tab.
 - If your company requires single sign-on, any method continues through its identity provider in the browser.
 - If WorkOS requires email verification, the CLI prompts for the code and accepts up to three attempts.
 - It hydrates all current workspace memberships and stores only the rotating WorkOS session in `~/.helix/credentials` (or `$HELIX_HOME/credentials`).
+
+### Log in over SSH
+
+On a remote machine, a browser method's callback must reach the remote CLI on port 8765. Forward that
+port when you connect, then open the printed URL in your local browser:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 you@remote-host
+helix auth login github
+```
+
+Port 8765 must be free on your local machine. `helix auth login password` needs no callback, so it
+also works over SSH without forwarding, unless your account must use single sign-on, which continues
+in the browser.
 
 ### Session handling
 

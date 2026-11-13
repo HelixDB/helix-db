@@ -13,7 +13,8 @@ application keys your software uses to reach them. Cloud only.
 ## Usage
 
 ```bash
-helix database [list] [--workspace <workspace>] [--project <project>]
+helix database
+helix database list [--workspace <workspace>] [--project <project>]
 helix database get [DATABASE]
 helix database indexes [DATABASE]
 helix database create <NAME> [--slug <slug>] [--plan <plan> | --cluster <cluster>]
@@ -24,7 +25,9 @@ helix database key list [--database <database>]
 helix database key revoke <KEY> [--database <database>] [--yes]
 ```
 
-Every subcommand also accepts `--workspace` and `--project`.
+Every subcommand also accepts `--workspace` and `--project`, after the subcommand:
+`helix database list --project <project>`, not `helix database --project <project>`. Bare
+`helix database` lists the linked or only project's databases.
 
 ## Subcommands
 
@@ -55,7 +58,7 @@ Every subcommand also accepts `--workspace` and `--project`.
 | `--project <PROJECT>` | Project ID, slug, or name that owns the database. | Project linked in `helix.toml` |
 | `--database <DATABASE>` | `key create`, `key list`, `key revoke`: the database, in the same forms as `DATABASE`. | Same as `DATABASE` |
 | `--slug <SLUG>` | `create`: URL-safe database slug. | Derived from `NAME` |
-| `--plan <PLAN>` | `create`: plan code for a shared tenant database. Not allowed with `--cluster`. | Prompted in a terminal; required otherwise |
+| `--plan <PLAN>` | `create`: plan code for a shared tenant database. Not allowed with `--cluster`. List the codes with `helix api get /v1/workspace-plans`. | Prompted in a terminal; required otherwise |
 | `--cluster <CLUSTER>` | `create`: dedicated cluster ID, slug, or name to create the tenant on. | — |
 | `--access <ACCESS>` | `key create`: `read-only` or `read-write`. Required. | — |
 | `--name <NAME>` | `key create`: optional key name. | — |
@@ -66,10 +69,10 @@ Every subcommand also accepts `--workspace` and `--project`.
 
 - Arguments and defaults resolve as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution). When `helix.toml` links several databases, the CLI picks among them in a terminal.
 - `list` includes dedicated clusters and tenants in the project and marks linked databases; shared clusters are not listed.
-- `create` always creates a tenant database, either on a shared plan (`--plan`) or inside a dedicated cluster (`--cluster`).
+- `create` always creates a tenant database, either on a shared plan (`--plan`) or inside a dedicated cluster (`--cluster`). A shared database needs an active workspace plan.
 - Creating a database creates a default read-write application key and prints its raw token once on stdout. With `--json`, the full create response, including the token, is printed instead. The session-authenticated CLI never stores or uses the key.
 - Additional key creation is explicit, and each new raw token is also printed once. `key create` prints only the token on stdout, so you can capture it in a script.
-- Application keys are for software that calls the gateway (the Cloud database endpoint your application connects to) directly.
+- Application keys are for software that calls the gateway (the Cloud database endpoint your application connects to) directly. `get --json` prints a tenant's gateway host as `connectionEndpoint`. See [Run in CI](/cli/scripting#helix-cloud).
 - `delete` and `key revoke` ask for confirmation in a terminal. Without one, or with `--json`, they fail before any request unless you pass `--yes`. `delete` removes the named or linked database only; it never picks a project's only database on its own.
 - `delete` removes tenant databases only. Dedicated-cluster create/delete lifecycle is not supported by this CLI.
 

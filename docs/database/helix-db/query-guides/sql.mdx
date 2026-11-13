@@ -150,7 +150,9 @@ The native request options apply to SQL too:
 | Skip the durability wait (writes) | `.should_await_durability(false)` | `.shouldAwaitDurability(false)` | `helix.AwaitDurability(false)` | `await_durability=False` | `X-Helix-Await-Durable: false` |
 
 Writes wait for durability by default. Skipping the wait returns once the write is applied
-on the writer, so a crash before its WAL upload loses it.
+on the writer, so a crash before its WAL upload loses it. See
+[execution headers](/database/helix-db/query-guides/http-api#execution-headers) for how
+local servers and Helix Cloud handle each option.
 
 Rust and TypeScript set options on `request_builder()` / `requestBuilder()` before
 `.sql(...)`; Go and Python pass them to `SQL` and `sql`. Embedded clients reject
@@ -162,7 +164,8 @@ request options.
 the translated Cypher without running it, exactly like
 [explaining Cypher](/database/helix-db/query-guides/cypher#explain-a-statement).
 Explaining a write changes nothing. Planning checks parameters, so supply every
-parameter the statement uses.
+parameter the statement uses. The plan does not include the translated Cypher
+text; the tables below show what each SQL form becomes.
 
 <CodeGroup>
 
@@ -383,7 +386,8 @@ row values such as `(a, b) < (1, 2)` translate with SQL semantics. `||` and
 `CONCAT` join their operands as strings; `||` returns null when an operand is
 null, and `CONCAT` skips nulls, as in PostgreSQL. `CAST` uses Cypher's
 conversions: to an integer type it truncates toward zero, and text that does not
-convert becomes null rather than an error.
+convert becomes null rather than an error. `DECIMAL` and `NUMERIC` become a
+floating-point number, so they lose exact decimal precision.
 `LIKE` and `ILIKE` translate when the pattern is a literal whose only wildcards
 are a leading or trailing `%`: `'%x%'` becomes `CONTAINS`, `'x%'` `STARTS WITH`,
 and `'%x'` `ENDS WITH`.
@@ -396,7 +400,11 @@ Functions with a Cypher equivalent are renamed: `lower` and `upper` become
 must be a literal, since a computed one fails. `TRIM`, `LTRIM`, and `RTRIM`
 remove all surrounding whitespace, as Cypher's do, not only spaces. Other names
 pass through, so the [Cypher profile](/database/helix-db/query-guides/cypher#what-is-supported)
-decides which functions run.
+decides which functions run. Some renames land on Cypher functions outside the
+profile and are rejected (`function`): `CURRENT_TIMESTAMP` and `NOW()` become
+`localdatetime()`, `CURRENT_DATE` `date()`, `CURRENT_TIME` `localtime()`, `ln`
+`log`, `ceiling` `ceil`, `random` `rand`, and `stddev` `stDev`. Pass the current
+time as a parameter instead.
 
 ## What is not supported
 
@@ -410,7 +418,11 @@ These are rejected before anything runs, mostly with the error category
 | Subqueries | `WHERE p.id IN (SELECT ..)`, `EXISTS (..)` | `procedures_and_subqueries` |
 | Set operations | `UNION`, `INTERSECT`, `EXCEPT` | `union` |
 | Common table expressions and window functions | `WITH x AS (..)`, `row_number() OVER ()` | `sql_construct` |
-| Upserts | `ON CONFLICT`, `ON DUPLICATE KEY`, `REPLACE`, `INSERT OR` | `merge` |
+| Upserts (see the [upsert recipe](#upsert-without-on-conflict)) | `ON CONFLICT`, `ON DUPLICATE KEY`, `REPLACE`, `INSERT OR`, `INSERT IGNORE` | `merge` |
+| `DELETE` with `RETURNING`, `USING`, `ORDER BY`, or `LIMIT` | `DELETE FROM Person p WHERE .. RETURNING p.name` | `sql_construct` |
+| `UPDATE` with `FROM`, `ORDER BY`, or `LIMIT` | `UPDATE Person p SET .. FROM City c WHERE ..` | `sql_construct` |
+| `DISTINCT ON` | `SELECT DISTINCT ON (p.city) p.name FROM Person p` | `sql_construct` |
+| `USING` with more than one column | `JOIN Movie m USING (ACTED_IN, DIRECTED)` | `sql_construct` |
 | `INSERT` without a column list | `INSERT INTO Person VALUES ('Ada')` | `invalid_statement` |
 | `INSERT .. SELECT` | `INSERT INTO A (x) SELECT ..` | `sql_construct` |
 | `LIKE` patterns that need a regular expression | `LIKE 'M_trix'`, `LIKE '%a%b%'` | `sql_construct` |
@@ -445,8 +457,11 @@ floats, nodes, relationships, and paths.
 | `$1`, `?1` | The value named `1` | An object: `{"1": 30}` |
 
 A statement that uses `?` cannot also use numbered placeholders, since `?` takes
-those numbers. `IN (?)` binds a list parameter. Labels, relationship types, and
-column names are part of the statement, so keep values in parameters.
+those numbers; mixing them fails with `syntax_error` (`invalid_parameter`). A
+`parameters` list binds only `?` and numbered placeholders, so `:name` with a list
+fails with `parameter_missing`. `IN (?)` binds a list parameter. Labels,
+relationship types, and column names are part of the statement, so keep values in
+parameters.
 
 ## Writes and transactions
 
@@ -473,6 +488,33 @@ UPDATE Person p SET age = p.age + 1, nickname = NULL WHERE p.name = 'Ada'
 RETURNING p.age
 ```
 
+### Upsert without ON CONFLICT
+
+Upsert forms such as `ON CONFLICT` are rejected. Let a
+[unique index](/database/helix-db/query-guides/secondary-indexes#unique-indexes) on the
+key column decide, as in the
+[Cypher recipe](/database/helix-db/query-guides/cypher#upsert-without-merge):
+
+1. Create a unique equality index on the key property, such as `email` on `Person`.
+2. Send the `INSERT`:
+
+   ```sql
+   INSERT INTO Person (email, name) VALUES (:email, :name)
+   ```
+
+3. On `409 unique_constraint_violation`, the row exists and nothing was written.
+   Update it instead:
+
+   ```sql
+   UPDATE Person p SET name = :name WHERE p.email = :email
+   RETURNING p.email
+   ```
+
+4. If the update returns no rows, the row was deleted in between; go back to step 2.
+
+A multi-row `INSERT` fails as a whole on its first duplicate, so for a batch, select
+the existing keys first, insert the missing rows, and update the rest.
+
 ## Indexes and performance
 
 SQL runs as the translated Cypher, so it uses existing native indexes the same
@@ -481,7 +523,8 @@ way, without naming them. The
 apply to the translated statement:
 
 - An equality on a table's column, such as `WHERE u.email = ?`, can read an
-  equality index, and so can `IN` lists and `OR`ed equalities on one column.
+  equality index, and so can `IN` lists of up to 64 values and `OR`ed equalities
+  on one column.
 - A range such as `WHERE u.age >= 21 AND u.age < ?` can read a range index.
 - `WHERE id(u) = ?`, or `WHERE u.v$id IN (1, 2)` with a list of literal ids,
   reads those nodes directly. A list parameter, as in `IN (?)`, scans the label.
@@ -508,8 +551,11 @@ plus 1,024 binary operators and about 500,000 tokens, where every word, number,
 symbol, and whitespace character counts, including those inside quoted text.
 Forms that repeat an operand, such as `BETWEEN` or an alias in `GROUP BY`, may
 copy about 16 MB of it in total. Exceeding any of these fails with
-`resource_limit` (HTTP `429`). Send large values as parameters, which do not
-count.
+`resource_limit` (HTTP `429`), which fails again when resent unchanged. Send
+large values as parameters, which do not count. A large multi-row `INSERT`
+reaches these limits quickly; load in bulk with Cypher's
+[`UNWIND` of a list parameter](/database/helix-db/query-guides/cypher#load-and-fetch-in-batches)
+instead.
 
 ## Errors
 

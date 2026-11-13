@@ -23,12 +23,20 @@ set holds its documents. A workspace gets a set named **General** with its first
   <img src="https://assets.helix-db.com/docs/foundry/data/overview.png" alt="The Connectors overview beside the Connectors explorer, whose Documents folder holds the General and Board minutes sets and their documents" />
 </Frame>
 
-Some connections write documents of their own, in sets of their own: Granola keeps each
-meeting note's summary in **Notes**, and its transcripts in **Transcripts** when you turn
-them on; an [API source](/foundry/data/api-sources) read by entity extraction keeps its
-newest 500 pieces in its set. Each sync updates them, so they can't be uploaded to,
-moved, renamed or deleted, and they don't count toward the workspace's uploads. A
-connection keeps the newest 1,000 documents of each of its sets.
+Some connections write documents of their own, in sets of their own:
+
+| Connection | Its document sets |
+| --- | --- |
+| [Granola](/foundry/data/connectors#granola) | **Notes**: each meeting note's summary. **Transcripts**: each note's transcript, when you turn them on. |
+| [Slack](/foundry/data/connectors#slack) | **Conversations**: each finished day of each channel the app is in. |
+| [Notion](/foundry/data/connectors#notion) | **Pages**: each page shared with the integration. |
+| [Google Workspace](/foundry/data/connectors#google-workspace) | **Docs**: each Google Doc the connection's user can open. |
+| [API source](/foundry/data/api-sources) read by entity extraction | Its newest 500 pieces. |
+
+Each sync updates them, so they can't be uploaded to, moved, renamed or deleted, and
+they don't count toward the workspace's uploads. A connection keeps the newest 1,000
+documents of each of its sets. Like uploads, they're read only by ontologies whose
+version reads their set, and a load sends their text to AI models.
 
 Owners and admins manage the sets from their rows in the explorer:
 

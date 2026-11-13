@@ -4,7 +4,7 @@
     "title": "HelixDB HTTP API",
     "version": "2.0.0",
     "summary": "Execute operation-tree and Cypher queries against HelixDB",
-    "description": "The v2 operation-tree query contract and the Cypher execution and read-only planning contract are available on local servers and Helix Cloud gateways.",
+    "description": "The v2 operation-tree query contract and the Cypher execution and read-only planning contract are available on local servers and Helix Cloud gateways. Local servers have no authentication. A Helix Cloud gateway decodes `Content-Encoding: gzip` or `x-gzip` request bodies and applies its 2 MiB limit after decoding, refuses other codings with 415, and gzips responses for `Accept-Encoding: gzip`; local servers do neither. The health operations describe a local server; a gateway instead serves unauthenticated `GET /health` and `GET /readyz`, whose bodies this document does not describe. On a local server, an unknown path or method returns an empty 404 or 405; Helix Cloud gateways answer unknown paths with 403 forbidden for a database key, or 400 invalid_request without authorization.",
     "termsOfService": "https://www.helix-db.com/terms",
     "contact": {
       "name": "HelixDB",
@@ -40,7 +40,7 @@
     },
     {
       "name": "Health",
-      "description": "Inspect process liveness and database readiness."
+      "description": "Inspect a local server's liveness, readiness, and setup. A Helix Cloud gateway serves GET /health and GET /readyz instead."
     }
   ],
   "paths": {
@@ -48,7 +48,7 @@
       "post": {
         "operationId": "executeQuery",
         "summary": "Execute a HelixDB query",
-        "description": "Executes one read or write batch. request_type must match the closed read or write variant under query. Local servers accept request bodies up to 16 MiB. Helix Cloud gateways accept request bodies up to 2 MiB.",
+        "description": "Executes one read or write batch. request_type must match the closed read or write variant under query. Local servers accept request bodies up to 16 MiB and apply no execution deadline; a write that waits for durability still returns 408 if its WAL upload exceeds 30 seconds. Helix Cloud gateways accept request bodies up to 2 MiB after gzip decoding.",
         "x-helix-request-body-limits": {
           "localBytes": 16777216,
           "helixCloudBytes": 2097152
@@ -94,7 +94,7 @@
         ],
         "requestBody": {
           "required": true,
-          "description": "Maximum encoded body size: 16 MiB on a local HelixDB server and 2 MiB on a Helix Cloud gateway.",
+          "description": "Maximum body size: 16 MiB on a local HelixDB server, and 2 MiB after gzip decoding on a Helix Cloud gateway. Only Helix Cloud decodes `Content-Encoding: gzip`.",
           "content": {
             "application/json": {
               "schema": {
@@ -220,6 +220,9 @@
           "413": {
             "$ref": "#/components/responses/PayloadTooLarge"
           },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedContentEncoding"
+          },
           "429": {
             "$ref": "#/components/responses/RateLimited"
           },
@@ -259,7 +262,7 @@
       "get": {
         "operationId": "getReadiness",
         "summary": "Get database readiness",
-        "description": "Returns 200 only when the configured database handle and index runtime are ready to serve queries.",
+        "description": "Returns 200 when the configured database handle and index runtime are ready to serve queries. The index runtime has no not-ready state, so a server that answers returns 200.",
         "tags": [
           "Health"
         ],
@@ -276,7 +279,7 @@
             }
           },
           "503": {
-            "description": "The process is alive, but the database is not ready.",
+            "description": "Reserved for a process whose database is not ready; current servers do not return it.",
             "content": {
               "application/json": {
                 "schema": {
@@ -459,7 +462,7 @@
             }
           },
           "408": {
-            "description": "The Helix Cloud query exceeded its wall-clock limit.",
+            "description": "The statement exceeded its deadline: 30 seconds on a local server (`query_deadline_exceeded`), or the Helix Cloud query time limit (`query_timeout`). A write that waits for durability also returns 408, once applied, if its WAL upload exceeds 30 seconds. A write may have committed: read the state back before resending.",
             "content": {
               "application/json": {
                 "schema": {
@@ -488,8 +491,26 @@
               }
             }
           },
+          "415": {
+            "description": "A Helix Cloud gateway refused a Content-Encoding other than gzip or identity (`unsupported_content_encoding`).",
+            "headers": {
+              "Accept-Encoding": {
+                "description": "The content coding the gateway accepts.",
+                "schema": {
+                  "const": "gzip"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
           "429": {
-            "description": "Cypher resource limit exceeded (inspect details.detail), Helix Cloud rate limit exceeded, or index_backpressure.",
+            "description": "Branch on `error`: a Cypher resource limit (`resource_limit`; inspect details.detail) fails again when resent unchanged and carries no retryable; a Helix Cloud rate limit (`rate_limited`) carries Retry-After; `index_backpressure` carries `retryable: true` and committed nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -652,7 +673,7 @@
             }
           },
           "408": {
-            "description": "The Helix Cloud query exceeded its wall-clock limit.",
+            "description": "Planning exceeded its deadline: 30 seconds on a local server (`query_deadline_exceeded`), or the Helix Cloud query time limit (`query_timeout`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -671,8 +692,26 @@
               }
             }
           },
+          "415": {
+            "description": "A Helix Cloud gateway refused a Content-Encoding other than gzip or identity (`unsupported_content_encoding`).",
+            "headers": {
+              "Accept-Encoding": {
+                "description": "The content coding the gateway accepts.",
+                "schema": {
+                  "const": "gzip"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
           "429": {
-            "description": "Cypher resource limit exceeded (inspect details.detail), Helix Cloud rate limit exceeded, or index_backpressure.",
+            "description": "Branch on `error`: a Cypher resource limit (`resource_limit`; inspect details.detail) fails again when resent unchanged and carries no retryable; a Helix Cloud rate limit (`rate_limited`) carries Retry-After; `index_backpressure` carries `retryable: true` and committed nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -853,7 +892,7 @@
             }
           },
           "408": {
-            "description": "The Helix Cloud query exceeded its wall-clock limit.",
+            "description": "The statement exceeded its deadline: 30 seconds on a local server (`query_deadline_exceeded`), or the Helix Cloud query time limit (`query_timeout`). A write that waits for durability also returns 408, once applied, if its WAL upload exceeds 30 seconds. A write may have committed: read the state back before resending.",
             "content": {
               "application/json": {
                 "schema": {
@@ -882,8 +921,26 @@
               }
             }
           },
+          "415": {
+            "description": "A Helix Cloud gateway refused a Content-Encoding other than gzip or identity (`unsupported_content_encoding`).",
+            "headers": {
+              "Accept-Encoding": {
+                "description": "The content coding the gateway accepts.",
+                "schema": {
+                  "const": "gzip"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
           "429": {
-            "description": "Cypher resource limit exceeded (inspect details.detail), Helix Cloud rate limit exceeded, or index_backpressure.",
+            "description": "Branch on `error`: a Cypher resource limit (`resource_limit`; inspect details.detail) fails again when resent unchanged and carries no retryable; a Helix Cloud rate limit (`rate_limited`) carries Retry-After; `index_backpressure` carries `retryable: true` and committed nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1051,7 +1108,7 @@
             }
           },
           "408": {
-            "description": "The Helix Cloud query exceeded its wall-clock limit.",
+            "description": "Planning exceeded its deadline: 30 seconds on a local server (`query_deadline_exceeded`), or the Helix Cloud query time limit (`query_timeout`).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1070,8 +1127,26 @@
               }
             }
           },
+          "415": {
+            "description": "A Helix Cloud gateway refused a Content-Encoding other than gzip or identity (`unsupported_content_encoding`).",
+            "headers": {
+              "Accept-Encoding": {
+                "description": "The content coding the gateway accepts.",
+                "schema": {
+                  "const": "gzip"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CypherError"
+                }
+              }
+            }
+          },
           "429": {
-            "description": "Cypher resource limit exceeded (inspect details.detail), Helix Cloud rate limit exceeded, or index_backpressure.",
+            "description": "Branch on `error`: a Cypher resource limit (`resource_limit`; inspect details.detail) fails again when resent unchanged and carries no retryable; a Helix Cloud rate limit (`rate_limited`) carries Retry-After; `index_backpressure` carries `retryable: true` and committed nothing.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1125,7 +1200,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Helix Cloud cluster API key. Local servers do not require this credential by default."
+        "description": "Helix Cloud cluster API key. Local servers have no authentication and ignore it."
       }
     },
     "parameters": {
@@ -1153,7 +1228,7 @@
         "name": "X-Helix-Require-Writer",
         "in": "header",
         "required": false,
-        "description": "Reject the request unless it reaches a writer-capable server.",
+        "description": "Require the writer. A local server that is not a writer rejects the request with 503 `writer_mode_required`; a Helix Cloud gateway routes the request to the writer instead of a reader.",
         "schema": {
           "type": "boolean",
           "default": false
@@ -1163,7 +1238,7 @@
         "name": "X-Helix-Await-Durable",
         "in": "header",
         "required": false,
-        "description": "Omit it or send true, on write requests only, and success means the write is durable. Send false to acknowledge a write once it is applied on the writer, before its WAL upload; a crash before that upload loses it.",
+        "description": "Omit it or send true, on write requests only, and success means the write is durable. Send false to acknowledge a write once it is applied on the writer, before its WAL upload; a crash before that upload loses it. A Helix Cloud gateway rejects false on a write with 400 `invalid_request`.",
         "schema": {
           "type": "boolean"
         }
@@ -1221,7 +1296,7 @@
         }
       },
       "RequestTimeout": {
-        "description": "The query exceeded its deadline (`query_deadline_exceeded`), or a Helix Cloud query exceeded its wall-clock limit. A write may have committed.",
+        "description": "The query exceeded a deadline: `query_deadline_exceeded` from the engine, or `query_timeout` from a Helix Cloud wall-clock limit. A local server applies no execution deadline to /v2/query, but a write that waits for durability returns 408, once applied, if its WAL upload exceeds 30 seconds. A write may have committed: read the state back before resending.",
         "content": {
           "application/json": {
             "schema": {
@@ -1254,8 +1329,30 @@
           }
         }
       },
+      "UnsupportedContentEncoding": {
+        "description": "The Helix Cloud gateway refused a Content-Encoding other than gzip or identity.",
+        "headers": {
+          "Accept-Encoding": {
+            "description": "The content coding the gateway accepts.",
+            "schema": {
+              "const": "gzip"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/QueryError"
+            },
+            "example": {
+              "error": "unsupported_content_encoding",
+              "msg": "Content-Encoding must be gzip or identity"
+            }
+          }
+        }
+      },
       "RateLimited": {
-        "description": "The Helix Cloud gateway rate limit was exceeded, or the database rejected a request with `index_backpressure`: a write because a vector or text index already retains its maximum unpublished work, or a whole-index strong search whose answer lies behind more than 800 unpublished changes (eventual and prefiltered searches are never rejected this way), or a strong text search that would analyze more unpublished text in its partition than its bound allows (512 MiB of analysis by default), or a strong vector search that would score more unpublished vector work than its bound allows (by default the index's retained-byte limit, which writes reach first). Eventual searches are never rejected for unpublished text or vector work. Backpressure rejects the whole request (writes before commit) and is marked `retryable`.",
+        "description": "Branch on `error`. `rate_limited`: the Helix Cloud gateway rate limit was exceeded; wait for Retry-After. `query_memory_limit_exceeded`: the query exceeded its memory budget; it fails again when resent unchanged and carries no retryable. `index_backpressure` (`retryable: true`): the database rejected a write because a vector or text index already retains its maximum unpublished work, or a whole-index strong search whose answer lies behind more than 800 unpublished changes (eventual and prefiltered searches are never rejected this way), or a strong text search that would analyze more unpublished text in its partition than its bound allows (512 MiB of analysis by default), or a strong vector search that would score more unpublished vector work than its bound allows (by default the index's retained-byte limit, which writes reach first). Eventual searches are never rejected for unpublished text or vector work. Backpressure rejects the whole request (writes before commit).",
         "headers": {
           "Retry-After": {
             "description": "Delay before retrying, when supplied by the gateway.",
@@ -1670,9 +1767,7 @@
         "description": "Returned variables keyed by the names listed in the batch returns array.",
         "additionalProperties": true,
         "example": {
-          "node_count": [
-            42
-          ]
+          "node_count": 42
         }
       },
       "QueryError": {
@@ -1690,6 +1785,10 @@
           "msg": {
             "type": "string",
             "description": "Human-readable diagnostic message."
+          },
+          "retryable": {
+            "type": "boolean",
+            "description": "Present only when the code's failure class settles it: true for a retryable conflict (409) and `index_backpressure` (429), which committed nothing; false for a conflict with the database's state (409), such as `unique_constraint_violation`, and for an unknown write outcome (503). Absence is not permission to retry."
           }
         },
         "additionalProperties": false,
@@ -1712,10 +1811,17 @@
           },
           "mode": {
             "type": "string",
+            "enum": [
+              "reader",
+              "writer"
+            ],
             "description": "Configured database mode."
           },
           "index_runtime": {
             "type": "string",
+            "enum": [
+              "ready"
+            ],
             "description": "Stable index-runtime readiness code."
           },
           "blocked_index_entity_count": {
@@ -2099,6 +2205,7 @@
       "CypherRequest": {
         "type": "object",
         "additionalProperties": false,
+        "description": "Unknown fields are rejected with invalid_query_json, as is a body nested more than 127 levels deep.",
         "required": [
           "query"
         ],
@@ -2227,11 +2334,11 @@
             "$ref": "#/components/schemas/CypherErrorDetails"
           },
           "retryable": {
-            "const": false,
-            "description": "Present for a native uncertain commit outcome. Do not retry the modifying statement automatically."
+            "type": "boolean",
+            "description": "Present only on native-envelope bodies, which have no details, when the code's failure class settles it: true for `transaction_conflict`, `request_read_view_changed`, `stale_index_generation` and `index_backpressure`; false for a conflict with the database's state, such as `unique_constraint_violation`, and for an uncertain commit outcome. Do not retry a modifying statement automatically on false."
           }
         },
-        "description": "Query errors include details. Request, storage, and transaction errors retain the native envelope without details. An uncertain commit returns retryable:false; other missing retryable values are not permission to retry."
+        "description": "Query errors include details and never retryable. Request, storage, and transaction errors retain the native envelope without details, including its optional retryable. An uncertain commit returns retryable:false; a missing retryable is not permission to retry."
       },
       "CypherExplainedOperator": {
         "type": "object",
@@ -2375,6 +2482,7 @@
       "SqlRequest": {
         "type": "object",
         "additionalProperties": false,
+        "description": "Unknown fields are rejected with invalid_query_json, as is a body nested more than 127 levels deep.",
         "required": [
           "query"
         ],

@@ -14,7 +14,7 @@ where the engine runs, where data is stored, and who operates it.
 | Mode | Best for | Interface | Storage | Availability |
 | --- | --- | --- | --- | --- |
 | Helix Cloud | Production services with managed operations | HTTPS | Managed object storage | Highly available |
-| Local server | Development, production-shaped testing, and self-hosting | HTTP | Memory or S3-compatible storage | Single node |
+| Local server | Development, production-shaped testing, and self-hosting on a trusted network | HTTP, without authentication or TLS | Memory, a local directory, or S3-compatible storage | Single node |
 | Embedded | In-process applications and local tools | Native SDK call | Memory, disk, or object storage | In process |
 
 ## Helix Cloud
@@ -27,13 +27,22 @@ deployments; BYOC is coming soon.
 
 The local server runs the standalone HelixDB container on your own machine or
 infrastructure. It exposes the same `POST /v2/query` interface as Helix Cloud, which
-makes it the default development target: code written against it works unchanged in
-Cloud.
+makes it the default development target: the same queries run unchanged in Cloud.
+Only the client configuration changes: Cloud needs an API key and a database ID, or a
+database-specific endpoint URL.
+
+<Warning>
+The local server has no authentication or TLS, and `helix start` publishes its port
+on every host interface. Self-host it only on a trusted network, behind a proxy that
+terminates TLS and authenticates requests. See [Secure the server](/database/helix-db/start-here/local-development/local-server#secure-the-server).
+</Warning>
 
 ## Embedded
 
-Embedded clients open the engine inside your process and skip HTTP entirely. Rust,
-TypeScript, and Python ship embedded runtimes; the Go SDK is currently HTTP-only.
+Embedded clients open the engine inside your process and skip HTTP entirely.
+TypeScript and Python ship embedded runtime packages. Rust needs a git dependency,
+because the crates.io release lacks the `embedded` feature. Go has no embedded
+runtime. See [Embedded database](/database/helix-db/start-here/local-development/embedded-database#install).
 
 ## Which should I use?
 

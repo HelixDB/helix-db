@@ -159,8 +159,12 @@ stored.
 ## Read an API source
 
 Pieces reach the source's table at its next sync, about a minute after they arrive, on
-every plan. The source's page lists its recent sends, its fields with the type each
-first had, its table and its documents, and how full it is.
+every plan. Each sync rewrites the whole table, so syncs are at least a minute plus 10
+minutes per million rows apart: a source of 2,000,000 rows syncs at most every 21
+minutes.
+
+The source's page lists its recent sends, its fields with the type each first had, its
+table and its documents, and how full it is.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/data/api-source.png" alt="The Order lines API source: its recent sends, its details with capacity, and its fields order_id, customer, product, quantity, unit_price and currency" />

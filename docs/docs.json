@@ -176,6 +176,7 @@
                 ]
               },
               "database/helix-db/query-guides/filtering",
+              "database/helix-db/query-guides/ordering-and-pagination",
               "database/helix-db/query-guides/projections",
               "database/helix-db/query-guides/parameters",
               "database/helix-db/query-guides/advanced",
@@ -231,6 +232,7 @@
             "pages": [
               "foundry/start-here/introduction",
               "foundry/start-here/quickstart",
+              "foundry/start-here/sample-company",
               "foundry/start-here/workspaces-and-navigation"
             ]
           },
@@ -259,7 +261,7 @@
             ]
           },
           {
-            "group": "Ask",
+            "group": "Analyst",
             "pages": [
               "foundry/ask/ask-questions"
             ]
@@ -299,6 +301,7 @@
               "cli/workflows/local",
               "cli/workflows/helix_cloud",
               "cli/configuration",
+              "cli/scripting",
               "cli/troubleshooting"
             ]
           },
@@ -1021,6 +1024,18 @@
       "destination": "/database/helix-db/query-guides/filtering"
     },
     {
+      "source": "/pagination",
+      "destination": "/database/helix-db/query-guides/ordering-and-pagination"
+    },
+    {
+      "source": "/ordering",
+      "destination": "/database/helix-db/query-guides/ordering-and-pagination"
+    },
+    {
+      "source": "/order-by",
+      "destination": "/database/helix-db/query-guides/ordering-and-pagination"
+    },
+    {
       "source": "/projections",
       "destination": "/database/helix-db/query-guides/projections"
     },
@@ -1353,6 +1368,14 @@
       "destination": "/cli/configuration"
     },
     {
+      "source": "/cli/ci",
+      "destination": "/cli/scripting"
+    },
+    {
+      "source": "/cli/json",
+      "destination": "/cli/scripting"
+    },
+    {
       "source": "/hql",
       "destination": "/legacy/hql"
     },
@@ -1567,6 +1590,18 @@
     {
       "source": "/foundry/ask",
       "destination": "/foundry/ask/ask-questions"
+    },
+    {
+      "source": "/foundry/analyst",
+      "destination": "/foundry/ask/ask-questions"
+    },
+    {
+      "source": "/foundry/sample",
+      "destination": "/foundry/start-here/sample-company"
+    },
+    {
+      "source": "/foundry/sample-company",
+      "destination": "/foundry/start-here/sample-company"
     },
     {
       "source": "/foundry/ontologies/documents",

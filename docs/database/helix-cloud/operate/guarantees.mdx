@@ -77,6 +77,10 @@ are read-only and refresh according to the underlying reader lifecycle.
 
 ## Cloud availability
 
-Cloud availability and recovery depend on the purchased deployment topology. Contact
-[founders@helix-db.com](mailto:founders@helix-db.com) for current redundancy and SLA
-terms instead of assuming a topology from the SDK contract.
+Each Helix Cloud cluster runs one writer and two readers. If the writer fails, Helix
+promotes a reader and fences the old writer. Writes wait up to 90 seconds for the new
+writer, then fail with a retryable `503` `failover_wait_unavailable`; a write caught
+mid-flight returns `503` `write_outcome_unknown` and must be reconciled. Reads continue on
+the readers. See [Writer failover](/database/helix-cloud/start-here/architecture#writer-failover).
+
+Contact [founders@helix-db.com](mailto:founders@helix-db.com) for current SLA terms.

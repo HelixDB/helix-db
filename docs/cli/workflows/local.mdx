@@ -7,7 +7,7 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb:v0.0.16` container and exposes the standalone server at `POST /v2/query`. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb` server container and exposes the standalone server at `POST /v2/query`. Each instance pins its image tag in `helix.toml` (`v0.0.16` for CLI 3.7.0). By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -143,11 +143,13 @@ helix cypher dev --file examples/users.cypher
 # Tail container logs in another shell
 helix logs dev --follow
 
-# Stop and restart from a clean state
+# Restart the container: in-memory data is wiped, disk and S3 data are kept
 helix restart dev
 ```
 
-`helix restart` fails if the container has been removed; run `helix start` to create it again.
+`helix restart` fails if the container has been removed; run `helix start` to create it again. To
+start a disk-mode instance empty, run `helix prune <instance>`, which deletes its data, then
+`helix start <instance>`.
 
 ## Multiple local instances
 
@@ -163,7 +165,13 @@ helix start staging
 helix status
 ```
 
-Each instance is isolated by container name and host port. Disk-mode instances also get their own SeaweedFS container, network, and volume, and disk-mode and S3 instances their own disk-cache volume.
+Each instance is isolated by container name and host port. `helix add local` always defaults to port `6969`, so pass `--port` for every additional instance. Disk-mode instances also get their own SeaweedFS container, network, and volume, and disk-mode and S3 instances their own disk-cache volume.
+
+## Upgrading the server image
+
+`helix update` updates the CLI, not your instances' server image. `helix doctor <instance>` names
+the new CLI's tag; then run `helix start dev --image-version v0.0.16 --persist` (an in-memory
+instance starts empty). See [Image pinning](/cli/configuration#image-pinning).
 
 ## Browsing the graph
 
@@ -202,13 +210,15 @@ helix logs dev --follow      # stream
 A request JSON file must contain:
 
 - `request_type`: lowercase `"read"` or `"write"`.
-- `query_name` (optional): top-level operational name for logs and query diagnostics. Missing or
-  `null` falls back to `__dynamic__`.
+- `query_name` (optional): top-level operational name for logs and query diagnostics. May be
+  omitted or `null`.
 - `query`: exactly one `read` or `write` batch with `entries[]` and `returns[]`.
 - `parameters` and `parameter_types` (optional): named values and their declared types.
 
 Each entry contains one nested operation-tree `root`; source operations appear at the
-innermost input. See [`helix query`](/cli/command-reference/query) for the request shape.
+innermost input. See [Request shape](/cli/command-reference/query#request-shape) for an example and
+the [HTTP API request envelope](/database/helix-db/query-guides/http-api#request-envelope) for every
+field.
 
 ## Next steps
 

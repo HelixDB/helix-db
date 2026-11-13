@@ -10,7 +10,7 @@ The `helix` CLI scaffolds projects, runs local HelixDB instances, sends queries,
 manages Helix Cloud resources. Local commands need only Docker or Podman; Cloud
 commands also need a Helix Cloud account.
 
-## Local quickstart
+## Install
 
 macOS and Linux:
 
@@ -24,7 +24,63 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
-Then:
+Both install the latest GitHub release over any older `helix`. Check with `helix --version`; update
+later with `helix update`.
+
+<AccordionGroup>
+  <Accordion title="Install locations and options (macOS and Linux)">
+    The script installs `~/.local/bin/helix` and, for bash, zsh, or fish, appends a `PATH` line to
+    `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish` if that file exists and lacks it. Restart
+    the shell afterwards. Pass options after `bash -s --`:
+
+    | Option | Effect |
+    | --- | --- |
+    | `-d`, `--dir <DIR>` | Install into `DIR`, without editing `PATH`. |
+    | `-s`, `--system` | Install into `/usr/local/bin`; run it as `sudo bash -s -- --system`. |
+    | `-f`, `--force` | Reinstall even when the latest version is already installed. |
+
+    ```bash
+    curl -sSL "https://install.helix-db.com" | bash -s -- --dir "$HOME/bin"
+    ```
+
+    It always installs the latest release.
+  </Accordion>
+  <Accordion title="Install locations and options (Windows)">
+    The script installs `%LOCALAPPDATA%\Helix\bin\helix.exe` on x86-64 Windows and adds it to your user
+    `PATH`; open a new PowerShell afterwards. To pass options, run it as a script block:
+
+    ```powershell
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1))) -Version v3.7.0 -NoPathUpdate
+    ```
+
+    | Option | Effect |
+    | --- | --- |
+    | `-InstallDir <DIR>` | Install into `DIR`. |
+    | `-Version <vX.Y.Z>` | Install this release instead of the latest. |
+    | `-Force` | Reinstall even when that version is already installed. |
+    | `-NoPathUpdate` | Leave the user `PATH` unchanged. |
+  </Accordion>
+  <Accordion title="Pin a version in CI">
+    Release tags are `v<version>`, with one binary per platform: `helix-x86_64-unknown-linux-gnu`,
+    `helix-aarch64-unknown-linux-gnu`, `helix-x86_64-apple-darwin`, `helix-aarch64-apple-darwin`, and
+    `helix-x86_64-pc-windows-msvc.exe`. On macOS and Linux, download the binary; on Windows, use
+    `-Version`.
+
+    ```bash
+    version=v3.7.0
+    target=x86_64-unknown-linux-gnu
+    mkdir -p "$HOME/.local/bin"
+    curl -fsSL -o "$HOME/.local/bin/helix" \
+      "https://github.com/HelixDB/helix-db/releases/download/$version/helix-$target"
+    chmod +x "$HOME/.local/bin/helix"
+    export PATH="$HOME/.local/bin:$PATH"
+    ```
+
+    See [Scripting and CI](/cli/scripting) for JSON output and exit codes.
+  </Accordion>
+</AccordionGroup>
+
+## Local quickstart
 
 ```bash
 mkdir my-helix-app && cd my-helix-app
@@ -47,20 +103,23 @@ Claude Code → OpenAI Codex → OpenCode → Cursor Agent.
 helix auth login
 mkdir my-cloud-app && cd my-cloud-app
 helix init cloud
-helix query production --file request.json
+helix query production -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
 ```
 
-`helix init cloud` picks your workspace, project, and database, using the only one of each or
-asking you to choose, and links them in `helix.toml`. Later Cloud commands in the directory, such
-as `helix database` or `helix logs`, need no IDs or flags.
+`helix init cloud` picks your workspace, project, and database (the only one of each, or asks) and
+links them in `helix.toml` as the `production` instance. It writes no example request: `-e` builds
+one from TypeScript and needs Node.js 20+ and npm, or pass a JSON
+[request file](/cli/command-reference/query#request-shape) with `--file`. Later Cloud commands in
+the directory, such as `helix database` or `helix logs production`, need no IDs or flags.
 
-Cloud commands use only the rotating WorkOS session. Query execution goes through the backend broker
-and requires an independent `database.query.read` or `database.query.write` grant. The CLI does not
-need a gateway URL, application key, service credential, or sync step.
+Cloud commands use only your rotating WorkOS session; there is no gateway URL, application key,
+service credential, or sync step. Queries go through the backend broker and need
+`database.query.read` or `database.query.write` on the database's project.
 
-When a command cannot choose a resource on its own, pass it by ID, slug, or name, for example
-`--project <project>` or `tenant:<id>`. Stable links live only in the current project's
-`helix.toml`. See [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
+When a command cannot choose a resource, pass it by ID, slug, or name, for example
+`helix database list --project <project>` or `helix query tenant:<id> --file request.json`. Links
+live only in the project's `helix.toml`. See
+[Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
 
 <CardGroup cols={2}>
   <Card title="Local workflow" href="/cli/workflows/local">Run and query a local instance</Card>

@@ -39,7 +39,7 @@ Run `helix add` with no subcommand in a terminal to choose interactively.
 
 | Flag | Description | Default |
 | --- | --- | --- |
-| `--port <PORT>` | Host port for the instance. | `6969` |
+| `--port <PORT>` | Host port for the instance. Not checked against other instances, and two instances on one port cannot run at once, so pass it for each additional instance. | `6969` |
 | `--disk` | Use on-disk storage backed by a CLI-managed SeaweedFS container. Cannot be combined with `--storage-uri`. | Off (in-memory) |
 | `--storage-uri <URI>` | Use an S3 or S3-compatible bucket and prefix, for example `s3://bucket/prefix/`. | — |
 | `--s3-region <REGION>` | Region for S3 storage. | — |
@@ -57,6 +57,8 @@ Run `helix add` with no subcommand in a terminal to choose interactively.
 ## Behavior
 
 - Fails if an instance with the same name already exists in `helix.toml`.
+- `add local` pins the CLI's default `image` and `tag` in the new table; see [Image pinning](/cli/configuration#image-pinning).
+- Rewrites `helix.toml`, removing its comments; see [Commands that rewrite helix.toml](/cli/configuration#commands-that-rewrite-the-file).
 - Without a subcommand, the CLI prompts for the instance type in a terminal and fails in non-interactive shells.
 - `--s3-region`, `--s3-endpoint-url`, and `--s3-allow-http` require `--storage-uri`.
 - `add cloud` uses the WorkOS session and resolves the database as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).

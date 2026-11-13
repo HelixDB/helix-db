@@ -7,7 +7,7 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Helix Cloud runs a dedicated writer and horizontally scalable readers behind a routing
+Helix Cloud runs one writer and two readers behind a routing
 gateway. Applications send the same dynamic operation-tree request used in local and
 embedded modes, or a Cypher or SQL statement to `POST /v2/cypher` or
 `POST /v2/sql`, which the gateway routes by whether the statement writes.
@@ -26,47 +26,45 @@ gateway
                     object storage
 ```
 
+A read goes to the writer only when it sets `X-Helix-Require-Writer: true`. With no reader
+available, a read fails with `503` `backend_unavailable` rather than moving to the writer. See
+[Architecture](/database/helix-cloud/start-here/architecture).
+
 ## Connect and send a request
 
-{/* client-setup: no JSON representation */}
-<CodeGroup>
+Copy the endpoint and database ID from the database's **Connect** panel in the dashboard,
+and create an API key. Send the database ID in `X-Helix-Database-Id` with every request;
+without it, a shared (GA) gateway returns `400` `tenant_id_required`, and a dedicated
+cluster returns `403` `forbidden` for a database key.
 
-```rust Rust
-let client = helix_db::Client::new(Some("https://cluster.helix-db.com"))?
-    .with_api_key(Some("hx_your_api_key"));
-```
+The TypeScript SDK (`@helix-db/helix-db` 3.2.0 and later) sends the header after
+`withDatabaseId`:
+
+{/* single-sdk-examples: TypeScript */}
+<CodeGroup>
 
 ```ts TypeScript
 const client = Client
-  .server("https://cluster.helix-db.com")
-  .withApiKey("hx_your_api_key");
-```
-
-```go Go
-client, err := helix.NewClient(
-	"https://cluster.helix-db.com",
-	helix.WithAPIKey("hx_your_api_key"),
-)
-```
-
-```python Python
-client = Client(
-    "https://cluster.helix-db.com",
-    api_key="hx_your_api_key",
-)
+  .server("<endpoint>")
+  .withApiKey("hx_your_api_key")
+  .withDatabaseId("<database-id>");
 ```
 
 </CodeGroup>
 
-These SDK examples target a database-specific cluster-mode gateway URL. Such an
-endpoint authenticates the API key but rejects `X-Helix-Database-Id` and
-`X-Helix-Tenant-Id`. A GA shared gateway instead requires
-`X-Helix-Database-Id`. The TypeScript SDK (`@helix-db/helix-db` 3.2.0 and
-later) sends it after `client.withDatabaseId("<database-id>")`. The published
-Python, Rust, and Go SDKs do not expose that selection header, so use the
-direct HTTP contract for GA shared-gateway requests from those languages.
+The released Rust (3.0.0), Python (0.3.4), and Go (v0.3.1) SDKs do not send the header; from
+those languages, call the HTTP API directly:
 
-Each client sends the same operation-tree request body:
+```bash
+curl "<endpoint>/v2/query" \
+  --header "Authorization: Bearer $HELIX_API_KEY" \
+  --header "X-Helix-Database-Id: <database-id>" \
+  --header "Content-Type: application/json" \
+  --data @request.json
+```
+
+An endpoint that serves a single database rejects the header with `400`
+`tenant_id_not_allowed`; omit it there. `request.json` holds the operation-tree body the SDKs send:
 
 ```json JSON
 {
@@ -106,16 +104,21 @@ MATCH (user {username: 'Alice'})
 RETURN id(user) AS `$id`
 ```
 
-`query_name` is optional diagnostic metadata. The query itself remains entirely inside
-the request; there is no route deployment step.
+`query_name` is optional diagnostic metadata that names the query in
+[query insights](#monitor-queries). The query itself remains entirely inside the request;
+there is no route deployment step.
 
 ## Routing controls
 
-SDK request builders expose advanced server-only controls:
+SDK request builders expose advanced server-only controls, sent as headers:
 
-- Require execution on the writer.
-- Require a warm read.
-- Choose whether a write waits for durability.
+- **Send a read to the writer** (`X-Helix-Require-Writer: true`) to read your own
+  committed writes immediately. See
+  [read-after-write](/database/helix-cloud/operate/guarantees#readers-and-read-after-write).
+- **Warm caches without returning a result** (`X-Helix-Warm: true`). See
+  [Query warming](#query-warming).
+- **Wait for durability** (`X-Helix-Await-Durable`). Helix Cloud writes always wait, and a
+  write that sends `false` returns `400` `invalid_request`.
 
 Embedded clients reject these controls because they describe distributed routing.
 
@@ -126,17 +129,27 @@ eligible database backend without returning the query result. The gateway return
 `204 No Content` after at least one backend succeeds, including when another target
 fails. If every target fails, the normal deterministic error response is returned.
 
-Managed clusters target database pods that are ready, running, routable, and not
-quarantined. Add `X-Helix-Require-Writer: true` to target only the authoritative
-writer. Authentication, [request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits),
+Warming targets every database process that is currently serving, the writer included.
+Add `X-Helix-Require-Writer: true` to target only the writer. Authentication, [request rate limits](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits),
 retries, and the normal query timeout still apply before and during fanout.
 
-Warming populates the storage, vector, and text caches touched by the read; it does
+Warming populates the storage and vector caches touched by the read; it does
 not create a separate result cache. `X-Helix-Warm: true` or `1` enables warming;
 `false` or `0` leaves the request on the ordinary query path. Invalid values and
 warm write requests return `400 Bad Request`; writes are rejected before backend
 execution. A managed cluster with no eligible warming target returns
 `503 Service Unavailable`.
+
+## Monitor queries
+
+Give each query a stable `query_name`. Query insights group runs by name; unnamed queries
+group only with identical query JSON, so inlining different values splits them into separate
+entries.
+
+Users signed in to the [Helix Cloud MCP](/database/helix-cloud/connect/mcp) can read the
+same data with `helix_get_query_insights`, `helix_get_query_latency` (latency percentiles,
+including p99), `helix_list_query_recommendations`, and `helix_get_database_usage` (hourly
+or daily read and write counts).
 
 ## Next steps
 

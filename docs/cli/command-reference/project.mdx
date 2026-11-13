@@ -13,12 +13,16 @@ Cloud only.
 ## Usage
 
 ```bash
-helix project [list] [--workspace <workspace>]
+helix project
+helix project list [--workspace <workspace>]
 helix project get [PROJECT] [--workspace <workspace>]
 helix project create <NAME> [--slug <slug>] [--workspace <workspace>] [--link]
 helix project delete [PROJECT] [--workspace <workspace>] [--yes]
 helix project link [PROJECT] [--workspace <workspace>]
 ```
+
+Bare `helix project` lists projects with the defaults below. Flags go after the subcommand:
+`helix project list --workspace <workspace>`, not `helix project --workspace <workspace>`.
 
 ## Subcommands
 
@@ -51,7 +55,8 @@ helix project link [PROJECT] [--workspace <workspace>]
 
 - Arguments and defaults resolve as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution). A project slug or name without `--workspace` is searched for in every workspace you can access.
 - `list` marks the project linked in `helix.toml`.
-- `link` writes `[project] id` and `workspace_id` to the current project's `helix.toml`. It keeps the local `[project] name`, which names local containers, and creates no global selection state. It ignores an existing link, so it can relink a directory.
+- `link` and `create --link` need a `helix.toml` with at least one instance (run `helix init local` first). They write `[project] id` and `workspace_id`, rewriting the file and dropping its comments (see [Commands that rewrite helix.toml](/cli/configuration#commands-that-rewrite-the-file)). They keep the local `[project] name`, which names local containers, and create no global selection state. `link` ignores an existing link, so it can relink a directory.
+- `get` and `list --json` show each project's `id`, which `helix service-credential --grant` needs.
 - `delete` asks for confirmation in a terminal. Without one, or with `--json`, it fails before any request unless you pass `--yes`. It deletes the named or linked project only; it never picks a workspace's only project on its own. With `--json` it prints `{"deleted":{"kind":"project","id":"..."}}`.
 - `project update` is not supported.
 
@@ -60,6 +65,9 @@ helix project link [PROJECT] [--workspace <workspace>]
 ```bash
 # List projects in the linked or only workspace
 helix project
+
+# List projects in another workspace
+helix project list --workspace <workspace>
 
 # Create a project and link this directory to it
 helix project create "Demo App" --link

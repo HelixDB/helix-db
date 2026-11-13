@@ -33,6 +33,7 @@ irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.p
 ```
 
 If the CLI is already installed, run [`helix update`](/cli/command-reference/update).
+It updates the CLI only; an existing project keeps the image `tag` in its `helix.toml`.
 
   </Step>
   <Step title="Create a local project">
@@ -47,7 +48,8 @@ helix init local
 
 `helix init local` creates:
 
-- `helix.toml` with one local instance named `dev` on port `6969`.
+- `helix.toml` with one local instance named `dev` on port `6969`, pinned to the
+  CLI's default image tag.
 - `.helix/` for CLI-managed instance state.
 - `.gitignore` entries for `.helix/`, `.env`, `target/`, and `*.log`.
 - `AGENTS.md` with the current CLI workflow for coding agents.
@@ -72,8 +74,13 @@ and waits for the database health check before it returns.
 
 <Warning>
 The default storage mode is in-memory. Stopping the instance removes its data.
-Use `helix start dev --disk` when you need local persistence.
+To keep data, create the project with `helix init local --disk`, or start an existing
+instance with `--disk --persist`. `--disk` alone applies to one run only.
 </Warning>
+
+The server has no authentication, and the CLI publishes its port on every network
+interface.
+On a shared network, see [Secure the server](/database/helix-db/start-here/local-development/local-server#secure-the-server).
 
   </Step>
   <Step title="Run the generated query">

@@ -11,15 +11,15 @@ asynchronous and includes existing data through a durable backfill.
 
 ## Index families
 
-| Family | Use |
-| --- | --- |
-| Equality | Exact property matches |
-| Unique equality | Exact matches plus uniqueness enforcement |
-| Range ascending | Ordered comparisons and ascending scans |
-| Range descending | Descending-first ordered scans |
+| Family | Entities | Use |
+| --- | --- | --- |
+| Equality | Nodes and edges | `eq` and `isIn` matches |
+| Unique equality | Nodes only | Equality matches, plus at most one node per value |
+| Range, ascending or descending | Nodes and edges | `gt`, `gte`, `lt`, `lte`, and `between` comparisons, and sorted reads |
 
-Definitions include the entity kind, label, property, and range direction where
-applicable.
+A definition names the entity kind, label, and property, plus `unique` (node equality
+only) or the range direction. A label and property can hold one equality index and one
+range index, but not both range directions.
 
 ## Create an equality index
 
@@ -155,18 +155,41 @@ helix.ReadQuery("index_operation").
 operation carries a `blocker_code` and does not resume on its own. Fix the cause, then
 run `retry_index_operation` (`retryIndexOperation`) as a write with the same
 `operation_id`, or `abort_index_operation` (`abortIndexOperation`) to discard the build.
-While the build is in flight, repeating the same CREATE returns `existing_operation`
-with the same `operation_id` instead of starting another build. Once the index is
-active, it returns `already_active` without an `operation_id`. After an abort finishes,
-it starts a new build with a new `operation_id`.
 
-## Query indexed data
+Repeating the same CREATE:
 
-Use `nWithLabelWhere("User", SourcePredicate.eq("status", "active"))` (or the
-language-equivalent snake_case builder) for index push-down, then project the required
-fields. The read must be scoped to the index's label: a source predicate without a label
-scans every node. A `.where(...)` directly after `nWithLabel("User")` is pushed down to
-the index too; later in a traversal it filters a possibly larger intermediate stream.
+| Existing index | Result |
+| --- | --- |
+| Building | `existing_operation` with the same `operation_id` |
+| Active | `already_active`, no `operation_id` |
+| Aborted or dropped | A new build with a new `operation_id` |
+| Still aborting or dropping | Fails with `index_busy`; retry once that finishes |
+| Building or active with a different `unique` flag or range direction | Fails with `index_definition_conflict`; drop it first |
+
+The two failures apply even with `createIndexIfNotExists`.
+
+## Which predicates use an index
+
+Only a label-scoped source reads an index:
+`nWithLabelWhere("User", SourcePredicate.eq("status", "active"))` (or the
+language-equivalent builder), or a `.where(...)` directly after `nWithLabel("User")`. A
+source predicate without a label scans every node.
+
+| Predicate | Index |
+| --- | --- |
+| `eq`, `isIn` with a literal list or a parameter, `compare` with `Eq` | Equality, or for literal values a range index when the property has no equality index |
+| `gt`, `gte`, `lt`, `lte`, `between` with a literal or parameter bound | Range |
+| `neq`, `not`, `startsWith`, `endsWith`, `contains`, `isNull`, `hasKey` | Never (scanned) |
+| A comparison between two properties | Never |
+
+- `and` intersects the index reads of its indexable parts and tests the rest row by row.
+- `or` uses indexes only when every branch is indexable, and only one `or` per `and`.
+- A range index also serves `orderBy` without sorting; see
+  [Ordering and pagination](/database/helix-db/query-guides/ordering-and-pagination#sorting-cost).
+- A `.where(...)` after a traversal step, such as `out("FOLLOWS")`, with `eq` or `isIn`
+  on an equality-indexed node property reads the matching IDs from the index once per
+  request and checks each streamed node against them. Range predicates and
+  `eq(property, null)` there are tested row by row.
 
 Cypher and [SQL](/database/helix-db/query-guides/sql#indexes-and-performance)
 statements use these indexes automatically, without naming them. An equality or
@@ -183,7 +206,108 @@ Explain the statement to see which index the plan reads. See
 [Cypher indexes and performance](/database/helix-db/query-guides/cypher#indexes-and-performance)
 for the conditions that keep an index in use.
 
+On a server, `GET /v2/diagnostics` lists recent queries that need an index
+(`queries.missing_indexes`) and unbounded scans (`queries.unbounded_scans`).
+
+## Range indexes
+
+Create an ascending range index on `Post.created_at`:
+
+<CodeGroup>
+
+```rust Rust
+write_batch()
+    .var_as(
+        "index",
+        g().create_index_if_not_exists(IndexSpec::node_range("Post", "created_at")),
+    )
+    .returning(["index"]);
+```
+
+```ts TypeScript
+writeBatch()
+  .varAs(
+    "index",
+    g().createIndexIfNotExists(IndexSpec.nodeRange("Post", "created_at")),
+  )
+  .returning(["index"]);
+```
+
+```go Go
+helix.WriteQuery("create_post_created_at_index").
+	VarAs(
+		"index",
+		helix.G().CreateIndexIfNotExists(
+			helix.NodeRangeIndex("Post", "created_at"),
+		),
+	).
+	Returning("index")
+```
+
+```python Python
+(
+    write_batch()
+    .var_as(
+        "index",
+        g().create_index_if_not_exists(
+            IndexSpec.node_range("Post", "created_at")
+        ),
+    )
+    .returning(["index"])
+)
+```
+
+```json JSON
+{
+  "request_type": "write",
+  "query_name": "create_post_created_at_index",
+  "query": {
+    "write": {
+      "entries": [{
+        "query": {
+          "name": "index",
+          "root": {
+            "create_index": {
+              "spec": {
+                "node_range": {
+                  "label": "Post",
+                  "property": "created_at",
+                  "direction": "asc"
+                }
+              },
+              "if_not_exists": true
+            }
+          }
+        }
+      }],
+      "returns": ["index"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+Use `nodeRangeDesc` / `node_range_desc` (`NodeRangeDescIndex` in Go) for a descending
+index, and `edgeRange` / `edge_range` (`EdgeRangeIndex`) for edges. Native queries read
+an ascending index backwards for a descending sort; Cypher and SQL read only in the
+index's direction, so match their `ORDER BY`.
+
+## Indexed values
+
+| Index | Indexed | Not indexed | Rejected |
+| --- | --- | --- | --- |
+| Equality | Booleans, numbers, date-times, strings, bytes, and typed arrays | A missing property, `null`, and `NaN` | Generic arrays and objects |
+| Range | Numbers, date-times, and strings | A missing property | `null`, booleans, bytes, arrays, objects, and `NaN` |
+
+Numbers sort before date-times, and date-times before strings. A rejected value fails the
+write, and existing rows holding one block a build. `eq(property, null)` scans the label.
+
 ## Unique indexes
+
+Create one with `nodeUniqueEquality` / `node_unique_equality`
+(`NodeUniqueEqualityIndex` in Go). Any number of nodes may have the property missing,
+`null`, or `NaN`, since those are not indexed.
 
 A unique index checks writes from the moment its build starts: a write that would
 duplicate a value the index already holds fails with `unique_constraint_violation`,

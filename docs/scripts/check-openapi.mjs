@@ -115,6 +115,7 @@ const expectedQueryStatuses = [
   '408',
   '409',
   '413',
+  '415',
   '429',
   '500',
   '503',
@@ -133,6 +134,7 @@ const expectedQueryResponseRefs = {
   408: 'RequestTimeout',
   409: 'Conflict',
   413: 'PayloadTooLarge',
+  415: 'UnsupportedContentEncoding',
   429: 'RateLimited',
   500: 'InternalError',
   503: 'Unavailable',
@@ -157,6 +159,7 @@ for (const name of [
   'RequestTimeout',
   'Conflict',
   'PayloadTooLarge',
+  'UnsupportedContentEncoding',
   'RateLimited',
   'InternalError',
   'Unavailable',
@@ -199,10 +202,10 @@ if (
 // /v2/query. Gateway failures use the native {error,msg} envelope, which
 // CypherError admits.
 for (const [route, request, response, statuses] of [
-  ['/v2/cypher', 'CypherRequest', 'CypherResponse', '200,204,400,401,402,403,404,408,409,413,429,500,503'],
-  ['/v2/cypher/explain', 'CypherRequest', 'CypherExplanation', '200,204,400,401,402,403,408,413,429,500,503'],
-  ['/v2/sql', 'SqlRequest', 'CypherResponse', '200,204,400,401,402,403,404,408,409,413,429,500,503'],
-  ['/v2/sql/explain', 'SqlRequest', 'CypherExplanation', '200,204,400,401,402,403,408,413,429,500,503'],
+  ['/v2/cypher', 'CypherRequest', 'CypherResponse', '200,204,400,401,402,403,404,408,409,413,415,429,500,503'],
+  ['/v2/cypher/explain', 'CypherRequest', 'CypherExplanation', '200,204,400,401,402,403,408,413,415,429,500,503'],
+  ['/v2/sql', 'SqlRequest', 'CypherResponse', '200,204,400,401,402,403,404,408,409,413,415,429,500,503'],
+  ['/v2/sql/explain', 'SqlRequest', 'CypherExplanation', '200,204,400,401,402,403,408,413,415,429,500,503'],
 ]) {
   const operation = spec.paths?.[route]?.post;
   if (JSON.stringify(operation?.servers) !== JSON.stringify(queryOperation?.servers)) {

@@ -15,7 +15,7 @@ Bootstrap a first HelixDB app for a coding agent. `helix chef` installs agent co
 helix chef
 ```
 
-`helix cook` is an alias for `helix chef`. The command takes no flags — it is fully interactive (and falls back to sensible defaults when run without a TTY).
+`helix cook` is an alias for `helix chef`. The command takes no flags — it is fully interactive (and falls back to sensible defaults when run without a TTY). It refuses `--json`.
 
 <Note>
 `helix chef` uses `npx`, so **Node.js/npm must be on `PATH`** for the skills and docs-MCP install, and it needs **Docker or Podman running** to start the local database. It is intended for local development inside a coding-agent environment.
@@ -24,8 +24,8 @@ helix chef
 ## Behavior
 
 1. Installs the Helix skills (`npx skills add HelixDB/skills`) and docs MCP.
-2. Initializes a local project (`helix init local`) with a `dev` instance on port `6969`, then starts it in-memory.
-3. Writes `HELIX_CHEF_PROMPT.md` (your build intent, or a Personal CRM default) and, for the default build, starter query files under `examples/` — then seeds the data.
+2. Initializes a local project (`helix init local`) in `~/my-first-helix-project` by default, with a `dev` instance on port `6969`, then starts it in-memory.
+3. Writes `HELIX_CHEF_PROMPT.md` (your build intent, or a Personal CRM default), `DESIGN.md` (the agent's UI styling guide) and, for the default build, starter query files under `examples/` — then seeds the data.
 4. Detects an installed coding agent (Claude Code → OpenAI Codex → OpenCode → Cursor Agent), asks for a permission mode, and launches it against the build prompt.
 5. Opens the generated app at `http://localhost:3000` once the agent's frontend is running.
 

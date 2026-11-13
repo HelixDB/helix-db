@@ -149,7 +149,9 @@ The native request options apply to Cypher too:
 | Skip the durability wait (writes) | `.should_await_durability(false)` | `.shouldAwaitDurability(false)` | `helix.AwaitDurability(false)` | `await_durability=False` | `X-Helix-Await-Durable: false` |
 
 Writes wait for durability by default. Skipping the wait returns once the write is applied
-on the writer, so a crash before its WAL upload loses it.
+on the writer, so a crash before its WAL upload loses it. See
+[execution headers](/database/helix-db/query-guides/http-api#execution-headers) for how
+local servers and Helix Cloud handle each option.
 
 Rust and TypeScript set options on `request_builder()` / `requestBuilder()` before
 `.cypher(...)`; Go and Python pass them to `Cypher` and `cypher`. A warm-only read
@@ -216,9 +218,9 @@ plan = client.explain_cypher(
 | Area | Supported |
 | --- | --- |
 | Reading patterns | `MATCH` and `OPTIONAL MATCH`; fixed-length directed and undirected relationships; several patterns in one clause; repeated variables; named paths such as `p = (a)-[:KNOWS]->(b)` |
-| Row clauses | `WHERE`, `WITH`, `RETURN`, aliases, `DISTINCT`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT` |
+| Row clauses | `WHERE`, `WITH`, `RETURN`, `RETURN *` and `WITH *`, aliases, `DISTINCT`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT` |
 | Writing | `CREATE`; property and map `SET` (`=` and `+=`); property `REMOVE`; `DELETE`; `DETACH DELETE` |
-| Expressions | Parameters; scalar, list, and map literals; property and index access; arithmetic; comparisons and comparison chains; `AND`, `OR`, `XOR`, `NOT`; `IS NULL` and `IS NOT NULL`; `IN`; `STARTS WITH`, `ENDS WITH`, `CONTAINS`; label tests such as `n:User`; simple and searched `CASE` |
+| Expressions | Parameters; scalar, list, and map literals; property and index access; list slices such as `xs[1..3]`; arithmetic; comparisons (`<>` or `!=` for inequality) and comparison chains; `AND`, `OR`, `XOR`, `NOT`; `IS NULL` and `IS NOT NULL`; `IN`; `STARTS WITH`, `ENDS WITH`, `CONTAINS`; label tests such as `n:User`; simple and searched `CASE` |
 | Graph and list functions | `id`, `type`, `labels`, `properties`, `keys`, `exists` (for properties), `size`, `length`, `nodes`, `relationships`, `head`, `last`, `range`, `reverse` |
 | Scalar functions | `coalesce`, `abs`, `toString`, `toInteger` (and `toInt`), `toFloat`, `toBoolean`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
 | Aggregation | `count` (including `count(*)`), `sum`, `avg`, `min`, `max`, `collect`, each with `DISTINCT` arguments |
@@ -260,18 +262,21 @@ before anything runs, with the error category `unsupported_feature` and the
 | List comprehensions | `[x IN list \| x * 2]` | `list_comprehension` |
 | Pattern comprehensions | `[(a)-->(b) \| b.name]` | `pattern_comprehension` |
 | Patterns used as predicates | `WHERE (a)-[:KNOWS]->(b)` | `pattern_expression` |
-| Quantified list predicates | `any(...)`, `all(...)`, `none(...)`, `single(...)` | `quantified_list_expression` |
+| Quantified list predicates and `reduce` | `any(...)`, `all(...)`, `none(...)`, `single(...)`, `reduce(...)` | `quantified_list_expression` |
 | `FOREACH` | `FOREACH (x IN list \| CREATE (:N {v: x}))` | `foreach` |
 | `LOAD CSV` | `LOAD CSV FROM 'file:///data.csv' AS row` | `load_csv` |
 | Schema commands | `DROP INDEX person_name` | `schema_ddl` |
 | Namespaced functions | `apoc.text.join(...)`, `db.labels()` | `namespaced_function` |
-| Other built-in functions, including temporal, spatial, and most math and string functions | `sqrt(x)`, `round(x)`, `date()`, `point(...)`, `split(s, ',')`, `replace(s, 'a', 'b')` | `function` (the message names the function) |
+| Other built-in functions, including temporal, spatial, and most math and string functions | `sqrt(x)`, `round(x)`, `date()`, `point(...)`, `split(s, ',')`, `replace(s, 'a', 'b')`, `startNode(r)`, `endNode(r)`, `tail(xs)` | `function` (the message names the function) |
 | More than one label on a node | `CREATE (n:Admin:User)` | `multiple_node_labels` |
 | Adding or removing labels | `SET n:Admin`, `REMOVE n:Admin` | `label_mutation` |
 | Creating a node without exactly one label | `CREATE (n)` | `node_label_required` |
 | A parameter map in a `CREATE` pattern | `CREATE (n:User $props)` | `pattern_parameter_map` |
 | Property names beginning with `$` | ``CREATE (n:User {`$secret`: 1})`` | `reserved_property_name` |
 | Several statements in one request | `RETURN 1; RETURN 2` | `multiple_statements` |
+
+Instead of `MERGE`, [upsert with a unique index](#upsert-without-merge). Instead of
+`FOREACH`, [`UNWIND` a list parameter](#load-and-fetch-in-batches).
 
 Some of these fail as ordinary compile errors instead:
 
@@ -285,7 +290,10 @@ Some of these fail as ordinary compile errors instead:
 - A parameter map in a `MATCH` pattern, such as `MATCH (n:User $props)`, is a
   `syntax_error` (`invalid_parameter_use`). Write the properties as a map literal,
   such as `{email: $email}`.
-- An unrecognized function name is a `syntax_error` (`unknown_function`).
+- An unrecognized function name is a `syntax_error` (`unknown_function`). That
+  includes `elementId()`; use `id()`.
+- Regular-expression matching with `=~` is a `syntax_error` (`unexpected_syntax`).
+  Use `STARTS WITH`, `ENDS WITH`, or `CONTAINS`.
 - A statement that is also invalid openCypher reports the standard error, such as
   `variable_already_bound` for a `CREATE` that redeclares a variable.
 
@@ -344,6 +352,36 @@ SET p += {age: 31, nickname: null}
 RETURN properties(p) AS person
 ```
 
+### Upsert without MERGE
+
+To create a node, or update it if it exists, let a
+[unique index](/database/helix-db/query-guides/secondary-indexes#unique-indexes) decide:
+
+1. Create a unique equality index on the key property, such as `email` on `User`.
+2. Send the `CREATE`:
+
+   ```cypher
+   CREATE (u:User {email: $email, name: $name})
+   RETURN id(u) AS id
+   ```
+
+3. On `409 unique_constraint_violation`, the node exists and nothing was written.
+   Update it instead:
+
+   ```cypher
+   MATCH (u:User {email: $email})
+   SET u += {name: $name}
+   RETURN id(u) AS id
+   ```
+
+4. If the update returns no rows, the node was deleted in between; go back to step 2.
+
+Without a unique index, concurrent `CREATE`s, or reading first and creating when nothing
+matched, add duplicates. An [`UNWIND`](#load-and-fetch-in-batches) batch fails as a
+whole on its first duplicate, so to upsert a batch, `MATCH` its keys first, `CREATE` the
+missing rows, and update the rest; the index still rejects a row another client created
+meanwhile.
+
 ## Functions, aggregation, and grouping
 
 - `toInteger()` and `toInt()` convert decimal strings exactly, including
@@ -385,7 +423,8 @@ in the statement; explain shows which one was chosen.
   stops reading as soon as a `LIMIT` is satisfied.
 - `ORDER BY` on a range-indexed property in the index's direction, with a range
   bound and a `LIMIT`, reads the index in order instead of sorting.
-- `id(n) = $id` and `id(n) IN $ids` read those nodes directly.
+- `id(n) = $id` and `id(n) IN [7, 9, 12]` (a literal list) read those nodes directly;
+  a list parameter does not. See [fetch many nodes](#fetch-many-nodes).
 - An equality against an earlier variable, as in
   `UNWIND $ids AS k MATCH (u:User {uid: k})`, looks up the index once per row.
 - An expansion only reads the relationship types it names, so
@@ -400,20 +439,84 @@ Comparisons, string predicates, label and null tests, and their `AND`, `OR`,
 `XOR`, and `NOT` combinations over literals, parameters, variables, and properties
 qualify. Arithmetic and function calls keep the label scan.
 
+## Load and fetch in batches
+
+Send many rows as one list parameter and `UNWIND` it. A request is one transaction,
+so each batch is written entirely or not at all:
+
+```json
+{
+  "query": "UNWIND $rows AS row CREATE (p:Person {email: row.email, name: row.name, age: row.age})",
+  "parameters": {
+    "rows": [
+      { "email": "ada@example.com", "name": "Ada", "age": 36 },
+      { "email": "grace@example.com", "name": "Grace", "age": 45 }
+    ]
+  }
+}
+```
+
+Size each batch within the [limits](#limits): the request body, query memory, and
+200,000 values per parameter, where each list item, map, and map value counts (a
+three-property row counts four). Vector and text indexes also cap the queued index work
+per transaction (`index_operation_batch_too_large`). A few thousand small rows per
+request stays well inside them. Parallel batches can conflict; resend a `409` with
+`retryable: true` unchanged.
+
+### Fetch many nodes
+
+Only a literal list of IDs reads nodes directly. A list parameter (`id(n) IN $ids`)
+or an ID from a variable (`UNWIND $ids AS i MATCH (n) WHERE id(n) = i`) scans the
+label, or every node when the pattern has no label. Write the IDs into the statement:
+
+```cypher
+MATCH (n:Person)
+WHERE id(n) IN [7, 9, 12]
+RETURN n
+```
+
+Build that list only from integers your code has checked, never from raw input.
+Each ID adds about two tokens to the statement's 200,000-token budget.
+
+To fetch by an indexed property, `UNWIND` the keys; each row is one index lookup, at
+any list length:
+
+```cypher
+UNWIND $emails AS email
+MATCH (u:User {email: email})
+RETURN u
+```
+
+`WHERE u.email IN $emails` reads the index too, but only for up to 64 values; a
+longer list scans the label.
+
 ## Limits
 
-| Limit | Value |
-| --- | --- |
-| Request body | 16 MiB on a local server; 2 MiB on Helix Cloud (`413 payload_too_large`) |
-| Response body | 16 MiB |
-| Query time | 30 seconds by default on a local server; the database's query time limit on Helix Cloud |
-| Expression nesting | 48 levels (`expression_depth`); a chain of one operator, such as `a OR b OR c`, counts as one level |
-| Memory, result size, and list sizes | Per-query budgets (`memory_limit`, `result_limit`, `collection_limit`) |
+| Limit | Value | `details.detail` |
+| --- | --- | --- |
+| Request body | 16 MiB on a local server (`400 invalid_request_body`); 2 MiB on Helix Cloud after gzip decoding (`413 payload_too_large`) | None |
+| JSON nesting in the request body | 127 levels (`400 invalid_query_json`) | None |
+| Statement text | 16 MiB | `query_too_large` |
+| Tokens in the statement | 200,000 | `too_many_tokens` |
+| Variables; plan operators | 4,096; 4,096 | `too_many_bindings`; `plan_size` |
+| Clauses | 4,096 (a `syntax_error`) | `invalid_statement` |
+| Expression nesting and size | 48 levels and 200,000 terms per expression | `expression_depth` |
+| Parameter size | 48 levels and 200,000 values per parameter | `value_depth` |
+| Query memory, including parameters | 256 MiB | `memory_limit` |
+| Items in a built list or a `DISTINCT` aggregate | 1,000,000 | `collection_limit` |
+| Response body | 16 MiB | `result_limit` |
+| Query time | 30 seconds on a local server; the database's query time limit on Helix Cloud (`408`) | None |
+
+`AND`, `OR`, and `XOR` chains count as one nesting level at any length; every other
+operator adds one, so `a + b + c + ...` fails at about 48 terms. Compute such values in
+the application and pass them as parameters.
 
 A statement that exceeds a budget fails with `resource_limit` (HTTP `429`)
 instead of returning a truncated result, and a write that fails this way commits
-nothing. `UNWIND range(...)` streams its values, while `range()` in an
-expression builds the whole list first.
+nothing. Reduce the work rather than retrying; see
+[HTTP 429](/database/helix-db/query-guides/error-handling#failure-classes).
+`UNWIND range(...)` streams its values, while `range()` in an expression builds the
+whole list first.
 
 ## Errors
 

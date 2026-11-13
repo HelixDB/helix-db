@@ -31,6 +31,7 @@ helix restart [INSTANCE]
 
 - Restarts the existing container with its current image and container settings. It never pulls an image or creates a replacement container.
 - If the container has been removed (for example after `helix stop` or `helix prune`), the command fails. Use [`helix start`](/cli/command-reference/start) to create a container.
+- Loads `.env` like `helix start`, but the container keeps the environment it was created with, including S3 credentials; run `helix start` to apply new values.
 - Readiness is checked with `GET /healthz` on the container's published port, including a temporary `helix start --port` override.
 - Default local data is in-memory and is wiped by every restart. Disk-mode instances keep data in their local SeaweedFS volume, and S3 data is never deleted.
 - `restart` takes no overrides. To change the image, port, or storage mode, use `helix start`, adding `--persist` to save the change.

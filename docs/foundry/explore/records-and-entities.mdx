@@ -55,19 +55,43 @@ breaks).
 
 Every page here reads one load. Use the **Load** picker to read another; links between
 pages keep it. **Ask about this** asks a question about the record in a drawer; see
-[Ask](/foundry/ask/ask-questions#ask-about-a-record).
+[the Analyst](/foundry/ask/ask-questions#ask-about-a-record).
 
 **Derived** shows only for a version with rules. Its facts are worked out when the page
 reads them and are never stored; one too costly to work out says so.
 
 ## Settle a review
 
-Owners and admins settle a review in **Needs review** on an entity's page or a
-document's, while it reads the current load: link a name to the record it means or mark
-it **Not in data**, keep one of the values documents disagree on, or replace a table's
-value with one a document states. A decision applies from the next load, so load again
-to see it; a value chosen over a table's holds in every later load, even after the
-table changes. **Saved decisions** lists the decisions, and removing one also applies
+**Needs review**, on an entity's page or a document's, lists what the load couldn't
+settle by itself, as a card per item, grouped by reason with a count and what it means,
+such as **Names something that
+isn't in your data**, **Could mean more than one entity**, **The model wasn't sure** or
+**A relationship the ontology doesn't have**. Owners and admins settle them while
+the page reads the current load; on another load, a card says **Open the current load to
+settle this review**.
+
+| On a card | What it does | When it applies |
+| --- | --- | --- |
+| **Approve** a claim held for a person to check | Writes the link the document's sentence states | This load at once, and later loads. If a name in it still needs review, the first load after that name is settled writes it. |
+| **Reject** a held claim | Writes nothing, and takes the card out of Needs review | This load and later ones |
+| **Keep value**, or **Replace the table's value with** one a document states | Keeps one of the values documents disagree on, or overrides a table's value | This load at once, and later loads. A chosen value holds even after the table changes; a document dated after your decision still wins. |
+| **Link this name to** a record, or **Not in data** | Settles which record a name means, or that none does | From the next load. Load again to see it. |
+
+A link that holds one value, such as a contract's single customer, says on its card what
+an approval replaces. Approve those one at a time.
+
+On a group:
+
+- **Approve all (N)**, on held claims, writes every claim it can at once; any it can't
+  stays held, with its card saying why. It leaves out claims of a link that holds one
+  value.
+- **Add these links**, on **A relationship the ontology doesn't have**, opens
+  [Generate](/foundry/ontologies/generate-and-version#generate-a-draft) with a goal
+  asking for the links those reviews suggest. The new version waits for your review;
+  the current one stays until you choose otherwise.
+
+**Saved decisions** lists every decision. Removing one undoes it: a value leaves the
+current load at once, a rejected claim is listed again, and a name decision is undone
 from the next load.
 
 ## Next steps

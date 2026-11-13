@@ -26,13 +26,34 @@ top-level step arrays.
    `query.write` batch.
 3. Confirm every nested operation uses `root` or `input` and snake_case wire tags.
 
+## Local server error messages
+
+A local server returns these messages. Branch on `error` in code; the wording can
+change.
+
+| `msg` starts with | `error`, status | Cause and fix |
+| --- | --- | --- |
+| `x-helix-warm is only valid for read requests` | `invalid_request_option`, 400 | `X-Helix-Warm` on a write, including a writing Cypher or SQL statement. Drop the header. |
+| `x-helix-await-durable is only valid for write requests` | `invalid_request_option`, 400 | `X-Helix-Await-Durable: true` on a read or explain. Drop the header. |
+| `request requires a writer but this server is read-only` | `writer_mode_required`, 503 | `X-Helix-Require-Writer` reached a reader. Send it to the writer. |
+| `mutating Cypher requires a writer` | `access_mode_error`, 503 | A writing Cypher or SQL statement reached a reader. Send it to the writer. |
+| `failed to read request body` | `invalid_request_body`, 400 | Body over 16 MiB. Split it; Helix Cloud stops at 2 MiB with `413 payload_too_large`. |
+| ``unknown field `params` `` | `invalid_query_json`, 400 | Misspelled body field. Cypher takes `query`, `parameters`, and `query_name`; SQL adds `mappings`. |
+| Any JSON parse error, for a gzipped body | `invalid_query_json`, 400 | Local servers do not decode `Content-Encoding: gzip`. Send plain JSON. |
+| `integer parameter exceeds signed 64-bit range` | `invalid_query_json`, 400 | JSON integer above 9223372036854775807 (signed 64-bit). Send larger values as strings. |
+| ``cannot be mixed with `?` placeholders`` | `syntax_error`, 400 | SQL mixes `?` and numbered placeholders such as `$1`. Use one style. |
+| `missing parameter $name` | `parameter_missing`, 400 | A used parameter was not sent. In SQL, a `parameters` list binds only `?` and numbered placeholders; send an object for `:name`. |
+
+Over gRPC, the request options are named `warm_only` and `await_durable` in the
+same messages.
+
 ## Response is missing expected data
 
 Only names listed in `returns` are present in the response. Confirm the traversal was
 assigned with `varAs` or `var_as`, then add that name to `returning`.
 
-If a ranked field such as `$distance` is needed after another traversal, project it
-before leaving the hit stream.
+If a ranked field such as `$distance` is needed after another traversal, `bind` the hit;
+see [Keep search scores after traversing](/database/helix-db/query-guides/projections#keep-search-scores-after-traversing).
 
 ## Index operation is blocked
 
@@ -70,18 +91,35 @@ options are also rejected in embedded mode because no routing gateway is present
 
 ## Request returns HTTP 409
 
-Branch on `retryable`. A 409 with `retryable: true` (`transaction_conflict`,
-`request_read_view_changed` or `stale_index_generation`) means the request could
-not commit against current state. Retry the entire idempotent transaction with
-bounded backoff. Do not retry only part of a multi-mutation request.
+Nothing committed. Branch on `retryable`:
 
-A 409 with `retryable: false` conflicts with the database's state and committed
-nothing, for example `unique_constraint_violation` when another node already
-owns a unique value. Resending it unchanged fails again: choose another value
-or update the existing node.
+| `retryable` | Cause | Fix |
+| --- | --- | --- |
+| `true`: `transaction_conflict`, `request_read_view_changed`, `stale_index_generation` | The request could not commit against current state. | Resend the whole request with bounded backoff, never only part of a multi-mutation request. Re-read first if you built it from an earlier read. |
+| `false`, such as `unique_constraint_violation` | It conflicts with the database's state, such as another node owning a unique value. | Choose another value or update the existing node; resent unchanged, it fails again. To upsert, see [upsert without MERGE](/database/helix-db/query-guides/cypher#upsert-without-merge). |
 
-For non-idempotent business actions, attach an application-level idempotency key or
-read the latest state before deciding whether to resubmit.
+## Write returns HTTP 408 after 30 seconds
+
+**Symptoms:** writes fail with `query_deadline_exceeded` after about 30 seconds,
+often all at once.
+
+**Cause:** the WAL upload to object storage took over 30 seconds. The write is already
+applied on the writer and may still become durable once storage recovers.
+
+**Fix:** read the state back before resending, and check that the server can
+[reach its storage](#local-server-cannot-reach-storage).
+
+Cypher and SQL statements also return this code after 30 seconds of execution;
+`POST /v2/query` has no other local deadline.
+
+## Request returns `resource_limit`
+
+**Cause:** a Cypher or SQL statement exceeded the per-query budget named in
+`details.detail` (HTTP 429); `query_memory_limit_exceeded` is the same for
+`POST /v2/query`. Nothing was written, and retrying unchanged fails the same way.
+
+**Fix:** add `LIMIT`, return fewer or smaller values, or split a batch. See
+[Cypher limits](/database/helix-db/query-guides/cypher#limits).
 
 ## Request returns `index_backpressure`
 
@@ -145,6 +183,9 @@ check [HelixDB status](https://status.helix-db.com) and include the response cod
 timestamp, and database identifier when contacting support.
 
 ## Local server cannot reach storage
+
+**Symptoms:** writes return HTTP 408 `query_deadline_exceeded` after about 30
+seconds.
 
 For S3-compatible local storage:
 

@@ -34,7 +34,7 @@ helix metrics <SUBCOMMAND>
 ## Behavior
 
 - The setting is saved in `~/.helix/metrics.toml` (or `$HELIX_HOME/metrics.toml`).
-- `full` asks for an email address in a terminal and validates it before saving. Without a terminal, or with `--json`, it reads the address from stdin, one line at a time, until a valid one arrives.
+- `full` asks for an email address in a terminal and validates it before saving. Without a terminal, or with `--json`, it reads lines from piped stdin until a valid address arrives, for example `echo you@example.com | helix metrics full --json`; if stdin is a terminal, it fails and asks you to pipe the address.
 - Local instances started by the CLI receive the same telemetry level.
 - `DO_NOT_TRACK` set to anything but empty, `0`, `false` or `no` turns telemetry off for the CLI and the instances it starts, whatever the saved level.
 - `HELIX_TELEMETRY_LEVEL` sets the level of a server or embedded database: `full`, `basic` (or `on`, `true`, `yes`, `1`) or `off` (or `false`, `no`, `0`).

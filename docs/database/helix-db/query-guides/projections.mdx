@@ -8,20 +8,21 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 Projection operations turn a traversal stream into the response shape your application
-needs. They are terminal: a projection finishes that traversal entry.
+needs. They are terminal: no step can follow a projection.
 
 ## Choose a projection
 
 | Intent | Operation |
 | --- | --- |
-| Selected fields | `valueMap` / `value_map` |
+| Selected fields | `valueMap` / `value_map` (`ValueMapAll` in Go for every field) |
 | Renamed or computed fields | `project` |
 | Correlated row fields | `projectBindings` / `project_bindings` |
-| Scalar values | `id`, `label`, `values` |
-| Aggregates | `count`, `sum`, `min`, `max`, `mean`, `groupCount` |
-
-Virtual fields include `$id`, `$label`, `$from`, `$to`, `$distance`, and `$score`
-where the preceding operation provides them.
+| Present fields only, dropping rows that have none | `values` |
+| IDs or labels | `id`, `label` |
+| Edge properties with endpoints | `edgeProperties` / `edge_properties` |
+| Count or existence | `count`, `exists` |
+| Groups | `group`, `groupCount` / `group_count` |
+| Sum, minimum, maximum, mean | `aggregateBy` / `aggregate_by` with `AggregateFunction` |
 
 ## Rename fields
 
@@ -111,6 +112,114 @@ FROM User u
 ```
 
 </CodeGroup>
+
+## Field rules
+
+| Virtual field | Exists on |
+| --- | --- |
+| `$id`, `$label` | Every node and edge |
+| `$from`, `$to` | Edges: the source and target node IDs. `$from.name` or `$to.name` reads an endpoint property; in `project`, build those with `Projection.fromEndpoint` and `Projection.toEndpoint` (`ProjectFromEndpoint`, `ProjectToEndpoint` in Go). |
+| `$distance`, `$score` | Search hits, until the traversal moves to another element |
+
+- `valueMap` with no list returns every stored property plus `$id` and `$label`, never
+  `$from`, `$to`, `$distance`, or `$score`; list those to return them.
+- `valueMap([...])` returns the listed keys that are present; a row with none returns `{}`.
+- `values([...])` is the same, but drops rows with none of the keys.
+- `project` omits a property the row does not have. An expression that reads a missing
+  property sees `null`.
+
+## Computed fields
+
+Pass expression projections to `project` to compute fields. This request returns each
+line item's `sku` and `price` times `quantity`:
+
+<CodeGroup>
+
+```rust Rust
+g().n_with_label("LineItem").project(vec![
+    Projection::property("sku", "sku"),
+    Projection::expr("total", Expr::prop("price").mul(Expr::prop("quantity"))),
+])
+```
+
+```ts TypeScript
+g().nWithLabel("LineItem").project([
+  PropertyProjection.new("sku"),
+  ExprProjection.new("total", Expr.prop("price").mul(Expr.prop("quantity"))),
+])
+```
+
+```go Go
+helix.G().NWithLabel("LineItem").Project(
+	helix.ProjectProp("sku"),
+	helix.ProjectExpr("total", helix.ExprProp("price").Mul(helix.ExprProp("quantity"))),
+)
+```
+
+```python Python
+g().n_with_label("LineItem").project([
+    PropertyProjection.new("sku"),
+    ExprProjection.new("total", Expr.prop("price").mul(Expr.prop("quantity"))),
+])
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "line_item_totals",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "items",
+          "root": {
+            "project": {
+              "input": {
+                "nodes_where": {
+                  "predicate": {
+                    "eq": {
+                      "left": { "property": "$label" },
+                      "right": { "constant": { "string": "LineItem" } }
+                    }
+                  }
+                }
+              },
+              "projections": [
+                { "property": { "source": "sku", "alias": "sku" } },
+                {
+                  "expr": {
+                    "alias": "total",
+                    "expr": {
+                      "mul": {
+                        "left": { "property": "price" },
+                        "right": { "property": "quantity" }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }],
+      "returns": ["items"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+Expressions read a property (`Expr.prop`), a literal (`Expr.val`), a parameter
+(`Expr.param`), the element ID (`Expr.id`), or the current time (`Expr.timestamp` in
+epoch milliseconds). They combine with `add`, `sub`, `mul`, `div`, `modulo` (`Mod` in
+Go), and `neg`. `Expr.case` picks the first branch whose predicate matches, or `null`
+without an else branch.
+
+- `add`, `sub`, `mul`, and `div` always return an `f64`, so `1 + 2` returns `3.0`.
+- A missing, `null`, or non-numeric operand fails the whole query with `invalid_query`.
+  Filter those rows out first, for example with `isNotNull`.
+- `modulo` takes integers only and fails on a zero divisor.
 
 ## Project correlated bindings
 
@@ -401,16 +510,283 @@ Cypher has no `UNION` (see the
 Cypher tab gives each `union` branch its own row through `UNWIND`, runs that branch as
 an `OPTIONAL MATCH`, and drops rows where the branch found nothing.
 
+## Keep search scores after traversing
+
+`$distance` and `$score` are gone once the traversal leaves the hit, and a projection
+cannot run first because it ends the traversal. Bind the hit and read the score from the
+binding. This request returns the ten closest documents with distance and author:
+
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as(
+        "hits",
+        g().vector_search_nodes("Doc", "embedding", vec![0.1, 0.8, 0.2], 10, None)
+            .bind("doc")
+            .out(Some("AUTHORED_BY"))
+            .project_bindings(vec![
+                BindingProjection::binding("doc", "$id", "doc_id"),
+                BindingProjection::binding("doc", "$distance", "distance"),
+                BindingProjection::current("name", "author"),
+            ]),
+    )
+    .returning(["hits"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs(
+    "hits",
+    g()
+      .vectorSearchNodes("Doc", "embedding", [0.1, 0.8, 0.2], 10, null)
+      .bind("doc")
+      .out("AUTHORED_BY")
+      .projectBindings([
+        BindingProjection.binding("doc", "$id", "doc_id"),
+        BindingProjection.binding("doc", "$distance", "distance"),
+        BindingProjection.current("name", "author"),
+      ]),
+  )
+  .returning(["hits"]);
+```
+
+```go Go
+helix.ReadQuery("docs_with_authors").
+	VarAs(
+		"hits",
+		helix.G().
+			VectorSearchNodes("Doc", "embedding", []float32{0.1, 0.8, 0.2}, 10).
+			Bind("doc").
+			Out("AUTHORED_BY").
+			ProjectBindings(
+				helix.ProjectNamedBinding("doc", "$id", "doc_id"),
+				helix.ProjectNamedBinding("doc", "$distance", "distance"),
+				helix.ProjectCurrentBinding("name", "author"),
+			),
+	).
+	Returning("hits")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as(
+        "hits",
+        g()
+        .vector_search_nodes("Doc", "embedding", [0.1, 0.8, 0.2], 10)
+        .bind("doc")
+        .out("AUTHORED_BY")
+        .project_bindings(
+            [
+                BindingProjection.binding("doc", "$id", "doc_id"),
+                BindingProjection.binding("doc", "$distance", "distance"),
+                BindingProjection.current("name", "author"),
+            ]
+        ),
+    )
+    .returning(["hits"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "docs_with_authors",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "hits",
+          "root": {
+            "project_bindings": {
+              "input": {
+                "out": {
+                  "input": {
+                    "bind": {
+                      "input": {
+                        "vector_search_nodes": {
+                          "label": "Doc",
+                          "property": "embedding",
+                          "query_vector": { "value": { "f32_array": [0.1, 0.8, 0.2] } },
+                          "k": { "literal": 10 }
+                        }
+                      },
+                      "name": "doc"
+                    }
+                  },
+                  "label": "AUTHORED_BY"
+                }
+              },
+              "projections": [
+                {
+                  "property": {
+                    "target": { "binding": "doc" },
+                    "source": "$id",
+                    "alias": "doc_id"
+                  }
+                },
+                {
+                  "property": {
+                    "target": { "binding": "doc" },
+                    "source": "$distance",
+                    "alias": "distance"
+                  }
+                },
+                {
+                  "property": {
+                    "target": "current",
+                    "source": "name",
+                    "alias": "author"
+                  }
+                }
+              ],
+              "distinct": false
+            }
+          }
+        }
+      }],
+      "returns": ["hits"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+The same pattern keeps `$score` from a text search.
+
+Each row pairs one hit with one author, so a document with no `AUTHORED_BY` edge
+produces no row. To keep it, bind the author in an optional step,
+`optional(sub().out("AUTHORED_BY").bind("author"))`, and project
+`BindingProjection.binding("author", "name", "author")`; the document then comes back
+without an `author` field. Do not use `current` here: with no author, the current
+element is still the document, so `current("name", ...)` returns the document's `name`.
+
 ## Aggregate
 
-Append `count()` to a filtered traversal and return that named entry; aggregation runs
-inside the transaction instead of materializing every row in the client.
+Aggregates run inside the transaction. This request counts orders per status and sums
+their totals:
+
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as("by_status", g().n_with_label("Order").group_count("status"))
+    .var_as(
+        "revenue",
+        g().n_with_label("Order").aggregate_by(AggregateFunction::Sum, "total"),
+    )
+    .returning(["by_status", "revenue"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs("by_status", g().nWithLabel("Order").groupCount("status"))
+  .varAs("revenue", g().nWithLabel("Order").aggregateBy(AggregateFunction.Sum, "total"))
+  .returning(["by_status", "revenue"]);
+```
+
+```go Go
+helix.ReadQuery("order_stats").
+	VarAs("by_status", helix.G().NWithLabel("Order").GroupCount("status")).
+	VarAs("revenue", helix.G().NWithLabel("Order").AggregateBy(helix.AggregateSum, "total")).
+	Returning("by_status", "revenue")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as("by_status", g().n_with_label("Order").group_count("status"))
+    .var_as(
+        "revenue",
+        g().n_with_label("Order").aggregate_by(AggregateFunction.SUM, "total"),
+    )
+    .returning(["by_status", "revenue"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "order_stats",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "by_status",
+            "root": {
+              "group_count": {
+                "input": {
+                  "nodes_where": {
+                    "predicate": {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "Order" } }
+                      }
+                    }
+                  }
+                },
+                "property": "status"
+              }
+            }
+          }
+        },
+        {
+          "query": {
+            "name": "revenue",
+            "root": {
+              "aggregate_by": {
+                "input": {
+                  "nodes_where": {
+                    "predicate": {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "Order" } }
+                      }
+                    }
+                  }
+                },
+                "function": "sum",
+                "property": "total"
+              }
+            }
+          }
+        }
+      ],
+      "returns": ["by_status", "revenue"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+The response holds `"by_status": [{"status": "paid", "count": 12}, {"status": "refunded", "count": 2}]`
+and `"revenue": [{"total_Sum": 1840.5}]`.
+
+| Terminal | Returns | On an empty stream |
+| --- | --- | --- |
+| `count()` | A number | `0` |
+| `exists()` | `true` or `false` | `false` |
+| `id()`, `label()` | A list of IDs or labels | `[]` |
+| `group(property)` | One object per value: the property, `count`, and `ids` | `[]` |
+| `groupCount(property)` | One object per value: the property and `count` | `[]` |
+| `aggregateBy(function, property)` | One object keyed by property and function, such as `total_Sum` or `score_Mean`, with an `f64` value | `0.0` for every function |
+
+- Groups come back sorted by value. Rows without the property form a `null` group.
+- `aggregateBy` reads `i64`, `f64`, and `f32` values and numeric strings, and skips
+  everything else, so `AggregateFunction.Count` counts numeric values, not rows. Use
+  `count()` to count rows.
+- `Min` and `Max` with no numeric values return `0.0`, like a real zero. Check `count()`
+  when that matters.
 
 ## Keep responses small
 
 - Project only fields the caller uses.
-- Project `$distance` before traversing away from a search hit if the score is needed
-  later.
+- Bind a search hit before traversing away from it if the response needs its score; see
+  [Keep search scores after traversing](#keep-search-scores-after-traversing).
 - Use aggregates in the engine instead of returning full rows for client-side counting.
 - Add `distinct` only when duplicate elimination is semantically required.
 

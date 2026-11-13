@@ -1,6 +1,6 @@
 ---
 title: "Helix Foundry limits"
-description: "Every Helix Foundry limit in one place: syncs, API sources, documents, generations, loads, questions, spending, the Helix MCP and reads"
+description: "Every Helix Foundry limit in one place: syncs, API sources, documents, generations, loads, Analyst questions, spending, the Helix MCP and reads"
 sidebarTitle: "Limits"
 pageType: "Reference"
 ---
@@ -20,7 +20,10 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Syncs running per connection | 1 |
 | Size of an S3 connection's tables, per sync | 20 GB |
 | PostHog event history | 1 to 365 days, 30 by default |
+| GitHub review history | 1 to 365 days, 90 by default |
 | GitHub repositories | Up to 100 when none are named |
+| Slack history | 1 to 365 days, 90 by default |
+| Google Workspace past events | 1 to 365 days, 90 by default, and 30 days ahead |
 | Documents a connection keeps, per set | The newest 1,000 |
 | Your folders in the Connectors explorer | 50, at the root, holding connections only |
 | Folder name | 120 characters |
@@ -40,6 +43,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Per workspace, per UTC day | 200,000 pieces and 1 GiB of data |
 | Rows per source | 2,000,000, and 2 GiB |
 | Sync after a send | About a minute |
+| Time between a source's syncs | At least 1 minute, plus 10 minutes per million rows of its table |
 | Pieces read by entity extraction | The newest 500 |
 | Extraction no person started | $5 a month per source, $20 a month per workspace |
 
@@ -68,6 +72,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Documents the agent reads | Up to 5 of the newest in each set |
 | Attempts per generation | 3 |
 | Spend per attempt | $5 |
+| Monthly spend cap | None; not shown in [Usage](/foundry/workspace/usage#generations) |
 | Generations running per ontology | 1 |
 | Generations and version edits per workspace | 10 an hour |
 
@@ -81,7 +86,7 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Loads kept per ontology | 5: the current one and the four newest others |
 | Loads or extracts running per ontology | 1 |
 
-## Ask
+## Analyst
 
 | Limit | Value |
 | --- | --- |
@@ -92,6 +97,12 @@ The limits Foundry applies, by area. Each guide explains what happens when you r
 | Spend per workspace, per month | $15, apart from loads' |
 | Questions per member or agent key reading through [sources](/foundry/workspace/access), per hour | 10 |
 | Spend per member or agent key reading through sources, per month | $10 |
+
+## Workflows
+
+| Limit | Value |
+| --- | --- |
+| Run assessments' spend per workspace, per month | $20 |
 
 ## Helix MCP
 
