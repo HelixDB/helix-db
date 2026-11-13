@@ -1,6 +1,6 @@
 ---
 title: 'Architecture'
-description: "How the Helix Cloud gateway, writer, readers, caches, and object storage serve reads and writes"
+description: "How the Helix Cloud gateway, writer, readers, caches, and object storage serve reads and writes, and what happens when the writer fails"
 pageType: "Concept"
 ---
 
@@ -9,9 +9,10 @@ pageType: "Concept"
 import { EnterpriseDiagram } from "/snippets/database-diagram.jsx"
 import { architectureDiagram } from "/snippets/diagrams.jsx"
 
-Helix Cloud runs as a single writer node and multiple reader nodes behind a routing gateway. Reads
-scale horizontally. Writes are serialized through a dedicated writer process to maintain a simple
-consistency model.
+Each Helix Cloud cluster runs one writer and two readers behind a routing gateway. The
+writer commits every write, the readers serve reads, and object storage holds the data.
+Shared-plan databases share a regional cluster; a dedicated cluster serves only your
+databases.
 
 Helix Cloud is a fundamentally different architecture and database compared to the open-source v1
 version of HelixDB. That version used LMDB, which was limited to sequential writes and could only handle
@@ -22,33 +23,54 @@ storage that can handle concurrent writes to the writer node and allows for virt
 
 ## Gateway
 
-The gateway is the entry point for all client traffic. It authenticates each request via Bearer
-token, accepts the inline query payload, and routes it: mutations always go to the writer,
-read-only queries are distributed across the readers and the writer.
+The gateway is the entry point for all client traffic. It authenticates each request's API
+key, applies the [request rate limit](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+on shared plans, and routes the request:
 
-For high availability, deploy at least three gateway instances per cluster. Smaller fleets work for
-non-HA or test workloads but are not recommended for production.
+- Writes go to the writer.
+- Reads go to a reader. A read goes to the writer only when it sets
+  `X-Helix-Require-Writer: true`.
+
+Helix runs several gateway replicas for each cluster.
 
 ## Writer
 
 A single writer process handles all mutations. The writer supports concurrent write transactions
 through MVCC (multi-version concurrency control), allowing multiple writes to execute in parallel
-without blocking each other. Serializing the commit path through one process eliminates distributed
-coordination and simplifies the consistency model. The writer batches mutations for throughput and
-persists them durably to object storage before acknowledging.
+without blocking each other. Serializing the commit path through one process keeps the consistency
+model simple. The writer batches mutations for throughput and persists them durably to object
+storage before acknowledging.
 
-The writer also serves read-only queries. It maintains its own SSD and in-memory cache, giving it
-the most up-to-date view of the data. Reads routed to the writer see committed writes immediately,
-with no snapshot refresh delay.
+The writer serves a read only when the request sets `X-Helix-Require-Writer: true`. Such a read
+sees every committed write immediately, with no snapshot refresh delay.
 
 ## Readers
 
-Readers serve all read-only queries. They are stateless with respect to writes and can be added
-or removed without coordination. Each reader maintains a local SSD and in-memory cache populated
-from object storage.
+Each cluster has two readers, and they serve every other read. Each reader keeps its own memory
+and SSD cache, filled from object storage, and sees a new write once it refreshes to a snapshot
+that contains it. See [read-after-write](/database/helix-cloud/operate/guarantees#readers-and-read-after-write).
 
-Reader scaling is automatic. As query load increases, new readers are provisioned. As load
-decreases, excess readers are removed. This keeps cost proportional to actual query volume.
+The number of readers is fixed; it does not grow with load. The gateway retries a read that a
+reader fails transiently, but when no reader is available the read fails with `503`
+`backend_unavailable` instead of moving to the writer. Retry it with backoff. Contact
+[founders@helix-db.com](mailto:founders@helix-db.com) if your workload needs more read capacity.
+
+## Writer failover
+
+Helix elects the writer through a lease and fences a replaced writer, so it cannot commit
+after its replacement takes over. If the writer fails, Helix promotes a healthy reader. While
+that happens:
+
+- Writes wait for the new writer, for up to 90 seconds. If none is ready in time, the gateway
+  returns `503` `failover_wait_unavailable` without sending the write. Retry after its
+  `Retry-After`.
+- A write that was already sent when the writer changed returns `503` `write_outcome_unknown`.
+  It may have committed, so reconcile before you resubmit it. See
+  [Timed-out writes](/database/helix-cloud/operate/error-handling#timed-out-writes).
+- Reads continue on the readers.
+
+If Helix detects more than one possible writer, it stops routing writes until it has fenced
+them. Reads continue in the meantime.
 
 ## Object storage
 
@@ -59,23 +81,23 @@ effectively unbounded.
 
 ## Cache hierarchy
 
-Each process (writer and readers) maintains local cache tiers for the data and indexes it serves.
+Each process (writer and readers) caches the data it reads:
 
-- **In-memory cache.** Fastest access. Holds the most frequently accessed graph data, vector
-  search state, and hot text-search generations. Bounded by available RAM.
-- **SSD cache.** Larger capacity, lower cost per byte. Holds warm graph data, vector data, and
-  reusable text-search artifacts. Reads from SSD are significantly faster than reads from object
-  storage.
+- **In-memory cache.** Fastest access. Holds the hottest storage blocks and vector search
+  state. Bounded by available RAM.
+- **SSD cache.** Larger capacity, lower cost per byte. Holds warm storage blocks and object
+  storage files. Reads from SSD are significantly faster than reads from object storage.
 
-Graph, vector, and text workloads use specialized cache paths so hot working sets do not fully
-contend with one another. On cold start, caches warm progressively as queries execute; for
-predictable latency from the first query, caches (including text index generations) can be
-pre-warmed.
+Text search reads its index through the same storage caches; Helix Cloud does not keep a
+separate text-search cache. On cold start, caches warm as queries execute. To warm them before
+traffic arrives, send reads with
+[`X-Helix-Warm: true`](/database/helix-cloud/start-here/working-with-enterprise#query-warming).
 
 ## Read path
 
-1. A read request arrives at the gateway and is routed to a reader or the writer.
-2. The reader resolves a consistent snapshot from object storage metadata.
+1. A read request arrives at the gateway and goes to a reader, or to the writer when it sets
+   `X-Helix-Require-Writer: true`.
+2. The process resolves a consistent snapshot from object storage metadata.
 3. Data is read from the in-memory cache, SSD cache, or object storage (in that order).
 4. The query executes against the snapshot and returns results.
 

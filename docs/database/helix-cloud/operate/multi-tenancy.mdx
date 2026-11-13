@@ -34,9 +34,12 @@ a namespace-level partition of the cluster's storage:
   cannot name or change it, so no query predicate is needed for this isolation. See
   [HTTP API authentication](/database/helix-db/query-guides/http-api#authentication).
 
-Databases that share a cluster still share its compute, caches, and object storage. A
-database-specific cluster-mode endpoint serves the cluster's own unscoped database and rejects
-the database header.
+Databases that share a cluster still share its writer, two readers, caches, and object
+storage. An endpoint that serves a single database rejects the database header with
+`tenant_id_not_allowed`.
+
+Deleting a database revokes its API keys but does not immediately erase its stored data; see
+[Deleting a database](/database/helix-cloud/operate/security#deleting-a-database).
 
 Create a tenant database with [`helix database create`](/cli/command-reference/database), using
 `--plan` for a shared plan or `--cluster` for a dedicated cluster.
@@ -52,7 +55,7 @@ and filter every query on it so each request only sees its own tenant's data. Th
 mechanism as any property-based filtering: secondary indexes make the lookup fast, and snapshot
 isolation keeps concurrent tenants from interfering.
 
-The model stays shared infrastructure throughout — one writer fleet, one reader fleet, shared caches
+The model stays shared infrastructure throughout — one writer, the same two readers, shared caches
 and secondary indexes. When search results also need isolating, vector and text search can use
 [tenant-partitioned indexes](#tenant-partitioned-search-indexes).
 
@@ -183,8 +186,6 @@ Cypher statements follow the same rule, since request headers select only the da
   is enforced by the query layer, not by network or infrastructure boundaries.
 - **Shared infrastructure.** All tenants share the same writer, readers, caches, and object
   storage. No per-tenant provisioning, no per-tenant scaling configuration.
-- **Uniform scaling.** Reader auto-scaling responds to aggregate query load across all tenants.
-  A spike from one tenant benefits from the same scaling that serves all others.
 - **Index efficiency.** Equality indexes on the tenant property resolve tenant-scoped queries
   without scanning unrelated data.
 - **Full flexibility.** The application layer decides how tenancy is modeled, scoped, and
@@ -211,21 +212,20 @@ for the cross-language index definition.
 
 ### Text indexes
 
-Text indexes provide the same model for full-text search. The tenant property still means the
-property name used to read the partition value from each record. Current text index validation
-requires that property name to be `tenant_id`, so Helix maintains a separate text index for each
-distinct `tenant_id` value. This keeps tenant-scoped full-text search working sets smaller and
-allows local text-search caches to track active tenants more closely. Tenant-partitioned text
-indexes are the preferred way to isolate full-text search results when that behavior is required.
+Text indexes provide the same model for full-text search. The tenant property is the name of the
+property Helix reads the partition value from on each record; any property name works, and
+`tenant_id` is only a convention. Helix maintains a separate text index for each distinct value,
+which keeps tenant-scoped full-text search working sets smaller. Tenant-partitioned text indexes
+are the preferred way to isolate full-text search results when that behavior is required.
 
-Pass `tenant_id` as the partition property when creating the text index, then pass
+Pass the tenant property (for example `tenant_id`) when creating the text index, then pass
 the request's tenant value to the text-search builder. See
 [text indexes](/database/helix-db/query-guides/text-indexes) for the cross-language definition.
 
 ## Considerations
 
-- **Noisy neighbors.** Tenants share compute and cache, so a high-volume tenant can affect others'
-  latency. The [Helix Cloud request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+- **Noisy neighbors.** Tenants share compute and cache, and a cluster's read capacity is fixed,
+  so a high-volume tenant can affect others' latency. The [Helix Cloud request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
   is shared by the whole database. Monitor per-tenant query volume and apply a
   separate application-side limiter when many application tenants use that database.
 - **Shared search semantics.** Secondary indexes remain shared. Tenant-scoped vector and text
@@ -236,6 +236,7 @@ the request's tenant value to the text-search builder. See
 
 When application tenants need storage-level isolation, give each one its own
 [tenant database](#storage-level-isolation-tenant-databases) instead of a `tenant_id` property.
-For workloads that require infrastructure-level isolation (regulatory compliance, data residency,
-or dedicated-resource SLAs), contact us at [founders@helix-db.com](mailto:founders@helix-db.com)
-about dedicated clusters.
+For workloads that require infrastructure-level isolation (regulatory compliance or
+dedicated-resource SLAs), contact us at [founders@helix-db.com](mailto:founders@helix-db.com)
+about dedicated clusters. Every cluster currently runs in
+[`us-east-1`](/database/helix-cloud/operate/limits#regions).

@@ -8,13 +8,14 @@ pageType: "Tutorial"
 <div className="flex flex-wrap gap-2"><Badge color="green" size="sm">Tutorial</Badge></div>
 
 Use Helix Cloud to create a workspace, choose a monthly plan shared by its
-databases, provision a database, and create API keys.
+databases, provision a database, and create API keys. Helix Cloud runs in the AWS
+`us-east-1` (N. Virginia) region.
 
 <Steps>
   <Step title="Sign in">
-    Open the [Helix Cloud dashboard](https://helix-db.com/login) and select
-    **GitHub Login**. When prompted, enter the one-time verification code from
-    the email sent by WorkOS.
+    Open the [Helix Cloud dashboard](https://helix-db.com/login) and sign in
+    with GitHub or with your email and password. When prompted, enter the
+    one-time verification code from the email sent by WorkOS.
 
     <Frame>
       <img src="/images/helix-cloud/dashboard/01-login.png" alt="Helix Cloud login page with the GitHub Login button" />
@@ -44,10 +45,11 @@ databases, provision a database, and create API keys.
   </Step>
 
   <Step title="Copy the connection details">
-    Wait for the database status to become **Active**, then open it. In
-    **Connect**, copy the endpoint and database ID. To connect an application
-    directly to the gateway, use **API Keys** to explicitly create a read-only
-    or read-write key and copy its value when it is shown once.
+    Open the database. In **Connect**, copy the endpoint and database ID. To
+    connect an application directly to the gateway, use **API Keys** to
+    explicitly create a read-only or read-write key and copy its value when it
+    is shown once. A new key takes a few seconds to reach the gateway, so a
+    request sent right away can return `401`; retry after a few seconds.
 
     <Frame>
       <img src="/images/helix-cloud/dashboard/04-database-details.png" alt="Active database details page with connection details, workspace plan, API keys, and query insights" />

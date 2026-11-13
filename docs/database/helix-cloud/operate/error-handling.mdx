@@ -33,21 +33,22 @@ database engine behind it use the same envelope; see the
 | HTTP | `error`                  | Typical `msg`                                                               | Meaning                                                                   | Retry guidance                                                           |
 | ---: | ------------------------ | --------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 |  400 | `invalid_query_json`     | `parse error: <decoder diagnostic>`                                         | The request body is not valid query JSON.                                 | Fix the request.                                                         |
-|  400 | `invalid_request`        | A request-specific diagnostic                                               | A required header or request option is missing, malformed, or invalid.    | Fix the request.                                                         |
+|  400 | `invalid_request`        | A request-specific diagnostic                                               | A required header or request option is missing, malformed, or invalid. See [other `400` causes](#other-responses). | Fix the request.                                                         |
 |  400 | `tenant_id_required`     | `x-helix-tenant-id or x-helix-database-id is required in GA mode`           | A Cloud request did not identify its database.                            | Use the correct database-scoped Cloud endpoint and configuration.        |
 |  400 | `tenant_id_not_allowed`  | `x-helix-tenant-id and x-helix-database-id are not allowed in cluster mode` | A tenant/database header was sent to an endpoint that does not accept it. | Remove the header or use the correct endpoint.                           |
 |  400 | `active_text_mutation_limit_exceeded` | `db error: Active text mutation exceeds <resource>: observed <usage>, limit <bound>. This is a hard per-document limit; shorten the indexed text.` | One indexed text document exceeds a hard per-document admission limit; graph changes are not committed. | Shorten the text before retrying; see [Limits](/database/helix-cloud/operate/limits#active-text-mutation-admission). |
-|  401 | `unauthorized`           | `unauthorized`                                                              | The supplied API key is unknown or no longer active.                      | Refresh or replace the key.                                              |
-|  402 | `tenant_disabled`        | `tenant query processing is disabled because credit is exhausted`           | Query processing is disabled because the tenant has exhausted its credit. | Resolve the account state before retrying.                               |
-|  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation.                       | Use a key with the required permission.                                  |
+|  401 | `unauthorized`           | `unauthorized`                                                              | The supplied API key is unknown or no longer active.                      | Refresh or replace the key. A key created in the last few seconds may not be active yet; retry briefly. |
+|  402 | `tenant_disabled`        | `queries for this database are paused; check the workspace's billing status` | Queries for this database are paused by a billing gate, such as no active plan, an overdue payment, or a used-up quota or credit balance. | Resolve the workspace's billing state before retrying.                   |
+|  403 | `forbidden`              | `forbidden`                                                                 | The key is valid but cannot perform this operation, for example a write with a read-only key, or a database key sent without its database ID or for another database. | Use a key with the required permission and send its database ID.         |
 |  408 | `query_timeout`          | `query exceeded its wall-clock limit`                                       | The query exceeded its wall-clock limit.                                  | Reconcile timed-out writes before considering a retry.                   |
 |  409 | `transaction_conflict`   | The database's conflict diagnostic                                          | A concurrent write prevented the transaction from committing. The body includes `"retryable": true`. | Retry the whole idempotent transaction with bounded backoff.             |
-|  413 | `payload_too_large`      | `request body exceeds the maximum allowed size`                             | The query request exceeds the gateway body-size limit.                    | Reduce the request size.                                                 |
+|  413 | `payload_too_large`      | `request body exceeds the maximum allowed size`                             | The request body exceeds 2 MiB after decompression; see [Limits](/database/helix-cloud/operate/limits#request-size-compression-and-timeouts). | Reduce the request size.                                                 |
+|  415 | `unsupported_content_encoding` | `Content-Encoding must be gzip or identity`                           | The request body uses a `Content-Encoding` other than `gzip`, `x-gzip`, or `identity`. | Send the body uncompressed or gzipped.                                   |
 |  429 | `rate_limited`           | `rate limit exceeded`                                                       | The database's request bucket has no token available.                     | Honor `Retry-After`; see [Limits](/database/helix-cloud/operate/limits). |
 |  500 | `internal_error`         | An internal or backend diagnostic                                           | An unexpected gateway or backend error occurred.                          | Retry only if the operation is safe; contact support if persistent.      |
-|  503 | `backend_unavailable`    | `Backend unavailable`                                                       | No eligible database backend is currently available.                      | Retry with bounded exponential backoff and jitter.                       |
+|  503 | `backend_unavailable`    | `Backend unavailable`                                                       | No eligible database backend is currently available, for example no reader for a read. | Retry with bounded exponential backoff and jitter.                       |
 |  503 | `rate_limit_unavailable` | `tenant rate limit is unavailable`                                          | The gateway cannot make a safe rate-limit decision.                       | Retry with bounded exponential backoff and jitter.                       |
-|  503 | `failover_wait_unavailable` | `managed writer transition wait is unavailable`                          | A write arrived during a writer transition that the gateway could not wait out, so it did not send the write. | Honor `Retry-After` (1 second), then retry.                              |
+|  503 | `failover_wait_unavailable` | `managed writer transition wait is unavailable`                          | A write arrived during a writer transition that the gateway could not wait out (it waits up to 90 seconds), so it did not send the write. | Honor `Retry-After` (1 second), then retry.                              |
 |  503 | `write_outcome_unknown`  | `write outcome is unknown; the operation was not replayed`                  | The gateway sent a write but cannot tell whether it committed, for example because its deadline passed or the writer changed. The body includes `"retryable": false`. | Do not resubmit automatically. Reconcile first; see [Timed-out writes](#timed-out-writes). |
 
 The text in `msg` can include request-specific details. The `error` values and
@@ -58,6 +59,25 @@ Database engine failures pass through with the engine's code and its
 for example HTTP 409 `unique_constraint_violation` with `"retryable": false` when
 another node already owns a unique value. The gateway reports a failed write as
 `write_outcome_unknown` only when the engine cannot prove it committed nothing.
+
+## Other responses
+
+- **Unknown paths** return `404` with an empty body. Check the URL and route.
+- **`400` `invalid_request`** also covers:
+  - a missing or malformed `Authorization` header (`missing or malformed authorization header`);
+  - a malformed or repeated `X-Helix-Database-Id` or `X-Helix-Tenant-Id` header, which
+    currently reports the same authorization-header message;
+  - any `Idempotency-Key` header, which the gateway does not support;
+  - `X-Helix-Await-Durable: false` on a write, because Helix Cloud writes always wait for
+    durability.
+- **`429`** carries one of three codes. Branch on `error`:
+  - `rate_limited`: the database's [request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+    is empty. Honor `Retry-After`.
+  - `index_backpressure`: a vector or text index holds too much unpublished work. The body
+    includes `"retryable": true`; retry with bounded backoff. See the
+    [query error reference](/database/helix-db/query-guides/error-handling).
+  - `resource_limit`: a Cypher statement exceeded a per-query budget. Resending it fails
+    again; see [Cypher errors](#cypher-errors).
 
 ## Cypher errors
 
@@ -152,8 +172,9 @@ if errors.As(err, &helixErr) &&
 An HTTP `408` cancels the gateway's wait, but a write can race with durable
 commit. A write that the gateway already sent to the writer returns `503` with
 `write_outcome_unknown` and `"retryable": false` instead. In both cases, treat the
-outcome as unknown. Reconcile using an application identity or idempotency key
-before submitting the write again.
+outcome as unknown. Reconcile using an identity stored in your data, such as a unique ID
+property written with the record, before submitting the write again. The gateway rejects
+an `Idempotency-Key` HTTP header with `400`, so the identity must live in the data.
 
 ## Migration from the previous shape
 
