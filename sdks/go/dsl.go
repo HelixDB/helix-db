@@ -3047,10 +3047,12 @@ func queryDateTime(value any) (string, error) {
 			return "", ErrInvalidDateTimeParameter
 		}
 		return dt.RFC3339()
-	case int64:
-		return DateTimeFromMillis(v).RFC3339()
-	case int:
-		return DateTimeFromMillis(int64(v)).RFC3339()
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		millis, err := queryI64(v)
+		if err != nil {
+			return "", ErrInvalidDateTimeParameter
+		}
+		return DateTimeFromMillis(millis).RFC3339()
 	default:
 		return "", ErrInvalidDateTimeParameter
 	}
