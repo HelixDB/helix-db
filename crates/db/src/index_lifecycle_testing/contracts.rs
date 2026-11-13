@@ -1461,12 +1461,13 @@ async fn run_create_batch_durability() {
     db.close().await.expect("create batch writer closes");
 }
 
-/// Proves the automatic worker claims each operation in its own task: with six
-/// secondary slots, empty builds step side by side instead of one claim per
-/// WAL upload, and every build converges without a worker failure or restart.
+/// Proves the automatic worker claims each operation in its own task: with
+/// eight secondary slots, sixteen empty builds created in one batch step side
+/// by side instead of one claim per WAL upload, and every build converges
+/// without a worker failure or restart.
 async fn run_concurrent_claim_convergence() {
     let concurrency =
-        IndexLifecycleConcurrency::try_new(6, 6, 1, 1).expect("six secondary slots validate");
+        IndexLifecycleConcurrency::try_new(8, 8, 1, 1).expect("eight secondary slots validate");
     let db = HelixDB::open_for_index_lifecycle_testing(
         HelixDbSource::InMemory {
             database: "index-lifecycle-concurrent-claims".to_string(),
@@ -1480,25 +1481,34 @@ async fn run_concurrent_claim_convergence() {
     .expect("concurrent claim writer opens");
     let controller = LifecycleTestController::new();
     let scope = DataScope::LegacyUnscoped;
-    let mut operations = Vec::with_capacity(12);
-    for ordinal in 0..12 {
-        let definition: ValidatedDynamicIndexDefinition =
-            SecondaryIndexDefinition::node_equality(format!("ConcurrentClaim{ordinal}"), "value")
-                .expect("concurrent claim secondary validates")
-                .try_into()
-                .expect("concurrent claim secondary converts");
-        let IndexDdlReceipt::Accepted { operation_id, .. } = controller
-            .create_index(&db, scope, definition, ir::IndexCreateMode::ErrorIfExists)
-            .await
-            .expect("concurrent claim build is accepted")
-        else {
-            panic!("a fresh concurrent claim build must enqueue");
-        };
-        operations.push(operation_id);
-    }
-    for operation_id in operations {
+    let names: Vec<String> = (0..16).map(|ordinal| format!("i{ordinal}")).collect();
+    let write = names
+        .iter()
+        .enumerate()
+        .fold(helix_ast::batch::write_batch(), |batch, (ordinal, name)| {
+            batch.var_as(
+                name,
+                helix_ast::traversal::g().create_index_if_not_exists(
+                    helix_ast::index::IndexSpec::node_equality(
+                        format!("ConcurrentClaim{ordinal}"),
+                        "value",
+                    ),
+                ),
+            )
+        })
+        .returning(names.clone());
+    let receipts = db
+        .query(helix_ast::query::QueryRequest::write(write))
+        .await
+        .expect("concurrent claim batch commits");
+    for name in &names {
+        let operation = receipts[name]["operation_id"]
+            .as_str()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .and_then(|id| crate::index_lifecycle::IndexOperationId::new(id).ok())
+            .expect("every create enqueues a build");
         assert!(matches!(
-            wait_for_automatic_terminal(&db, scope, operation_id).await,
+            wait_for_automatic_terminal(&db, scope, operation).await,
             IndexOperationStatus::Succeeded { .. }
         ));
     }
@@ -1507,9 +1517,9 @@ async fn run_concurrent_claim_convergence() {
         .expect("automatic metrics snapshot is available")
         .worker;
     // Claims made one at a time in the dispatch loop, each waiting for its own
-    // WAL upload, never let more than two or three steps overlap.
+    // WAL upload, never let more than about three steps overlap.
     assert!(
-        worker.max_secondary_in_flight >= 4,
+        worker.max_secondary_in_flight >= 6,
         "claims must commit side by side: {worker:?}"
     );
     assert_eq!(

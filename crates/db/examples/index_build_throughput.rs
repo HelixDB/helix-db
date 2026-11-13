@@ -1,7 +1,7 @@
 //! How long one tenant's first batch of index builds takes, by worker concurrency.
 //!
 //! Opens a fresh disk-backed writer, creates the index set one Helix Foundry
-//! load asks for (113 equality and range indexes, 10 text indexes partitioned
+//! load asks for (112 equality and range indexes, 10 text indexes partitioned
 //! by `foundry_part`) on an empty tenant in one write batch, then polls every
 //! operation until each has succeeded. Prints when each finished.
 //!
@@ -179,8 +179,9 @@ async fn run(root: &std::path::Path, run: usize) -> Result<()> {
         }
     };
 
-    // Labels carry the run, so a server's earlier runs never leave them built.
-    let specs = foundry_specs(&format!("R{run}"));
+    // Labels carry the process and the run, so no earlier run, in this
+    // process or another against the same server, left them built.
+    let specs = foundry_specs(&format!("P{}R{run}", std::process::id()));
     let names: Vec<String> = (0..specs.len()).map(|i| format!("i{i}")).collect();
     let write = specs
         .iter()
