@@ -460,6 +460,24 @@ assert.throws(
   /only valid for read requests/,
 );
 assert.throws(() => QueryRequest.read(readBatch()).withSearchConsistency("sometimes" as SearchConsistency), /unknown search consistency/);
+for (const input of [1_776_000_000_000, 1_776_000_000_000n, DateTime.fromMillis(1_776_000_000_000), "2026-04-12T15:20:00+02:00"]) {
+  const typed = parsed(QueryRequest.read(readBatch()).withTypedParameter("created_after", QueryParamType.dateTime(), input));
+  const schema = parsed(readQuery(params).toQueryRequest(params, { tenant_id: "acme", limit: 1n, created_after: input, labels: {} }));
+  assert.equal(typed.parameters.created_after, "2026-04-12T13:20:00.000Z");
+  assert.equal(typed.parameters.created_after, schema.parameters.created_after);
+}
+assert.deepEqual(
+  parsed(
+    QueryRequest.read(readBatch()).withTypedParameter("window", QueryParamType.array(QueryParamType.dateTime()), [
+      0,
+      DateTime.fromMillis(1),
+    ]),
+  ).parameters.window,
+  ["1970-01-01T00:00:00.000Z", "1970-01-01T00:00:00.001Z"],
+);
+for (const input of [true, {}, null, 1.5]) {
+  assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("t", QueryParamType.dateTime(), input), TypeError);
+}
 assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("flag", QueryParamType.bool(), 1), /must be boolean/);
 assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("bytes", QueryParamType.bytes(), "AQID"), QueryError);
 assert.throws(

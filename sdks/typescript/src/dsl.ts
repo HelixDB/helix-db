@@ -303,6 +303,13 @@ function dateTimeToRfc3339(value: DateTime, path: string): string {
   return date.toISOString();
 }
 
+function dateTimeParamToRfc3339(value: unknown, path: string): string {
+  if (value instanceof DateTime) return dateTimeToRfc3339(value, path);
+  if (typeof value === "string") return dateTimeToRfc3339(DateTime.parseRfc3339(value), path);
+  if (typeof value === "number" || typeof value === "bigint") return dateTimeToRfc3339(DateTime.fromMillis(value), path);
+  throw new TypeError(`parameter '${path}' must be an RFC3339 string, DateTime, or millisecond timestamp`);
+}
+
 class I64Literal {
   constructor(readonly value: number | bigint) {}
 }
@@ -2930,15 +2937,8 @@ function convertParamValue(schema: ParamSchema, value: unknown, path: string): J
     case "String":
       if (typeof value !== "string") throw new TypeError(`parameter '${path}' must be string`);
       return value;
-    case "DateTime": {
-      const dt =
-        value instanceof DateTime
-          ? value
-          : typeof value === "string"
-            ? DateTime.parseRfc3339(value)
-            : DateTime.fromMillis(value as number | bigint);
-      return dateTimeToRfc3339(dt, path);
-    }
+    case "DateTime":
+      return dateTimeParamToRfc3339(value, path);
     case "Bytes":
       throw QueryError.unsupportedBytes(path);
     case "Value":
@@ -2996,8 +2996,7 @@ function normalizeTypedQueryValue(type: QueryParamType, value: JsonValue, path: 
       if (typeof value !== "string") throw new TypeError(`parameter '${path}' must be string`);
       return value;
     case "DateTime":
-      if (typeof value !== "string") throw new TypeError(`parameter '${path}' must be an RFC3339 string`);
-      return dateTimeToRfc3339(DateTime.parseRfc3339(value), path);
+      return dateTimeParamToRfc3339(value, path);
     case "Bytes":
       throw QueryError.unsupportedBytes(path);
     case "Value":
