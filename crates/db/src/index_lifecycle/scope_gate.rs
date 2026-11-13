@@ -174,6 +174,7 @@ pub(crate) struct IndexScopeGates {
     catalogs: Mutex<HashMap<DataScope, CatalogGate>>,
     catalog_refreshes: Mutex<HashMap<DataScope, Weak<AsyncMutex<()>>>>,
     publications: Mutex<HashMap<super::queue::QueueTarget, Weak<AsyncMutex<()>>>>,
+    build_steps: Mutex<HashMap<DataScope, Weak<AsyncMutex<()>>>>,
 }
 
 impl IndexScopeGates {
@@ -232,6 +233,13 @@ impl IndexScopeGates {
     }
 
     /// Acquires the permit `gate` names for one operation step.
+    ///
+    /// Gated steps of one scope first queue on the scope's build-step gate,
+    /// so at most one waits for the fair mutation gate at a time: graph
+    /// transactions, which take it shared, queue behind one step's exclusive
+    /// wait however many of the scope's builds run. Nothing waits for the
+    /// build-step gate while holding a scope gate, so it adds no lock cycle.
+    /// The tuple drops the scope permit before the build-step gate.
     pub(crate) async fn step_permit(
         &self,
         scope: DataScope,
@@ -239,8 +247,14 @@ impl IndexScopeGates {
     ) -> Box<dyn super::outbox::IndexOperationStepPermit> {
         match gate {
             StepGate::None => Box::new(()),
-            StepGate::WriteFence => Box::new(self.write_fence_permit(scope).await),
-            StepGate::Lifecycle => Box::new(self.lifecycle_permit(scope).await),
+            StepGate::WriteFence => {
+                let queued = self.build_step_gate(scope).lock_owned().await;
+                Box::new((self.write_fence_permit(scope).await, queued))
+            }
+            StepGate::Lifecycle => {
+                let queued = self.build_step_gate(scope).lock_owned().await;
+                Box::new((self.lifecycle_permit(scope).await, queued))
+            }
         }
     }
 
@@ -321,6 +335,20 @@ impl IndexScopeGates {
             .clone()
     }
 
+    fn build_step_gate(&self, scope: DataScope) -> Arc<AsyncMutex<()>> {
+        let mut gates = self
+            .build_steps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(gate) = gates.get(&scope).and_then(Weak::upgrade) else {
+            gates.retain(|_, gate| gate.strong_count() != 0);
+            let gate = Arc::new(AsyncMutex::new(()));
+            gates.insert(scope, Arc::downgrade(&gate));
+            return gate;
+        };
+        gate
+    }
+
     fn catalog_refresh_gate(&self, scope: DataScope) -> Arc<AsyncMutex<()>> {
         let mut gates = self
             .catalog_refreshes
@@ -385,6 +413,60 @@ mod tests {
         drop(catalog);
         drop(waiting.await.expect("catalog-change waiter joins"));
         drop(mutation);
+    }
+
+    /// Gated build steps of one scope queue on its build-step gate, so a
+    /// graph write that arrives behind several of them waits for one step's
+    /// exclusive turn, not for all of them: the fair mutation gate only ever
+    /// holds one step's wait.
+    #[tokio::test]
+    async fn graph_writes_wait_behind_one_queued_build_step() {
+        let gates = Arc::new(IndexScopeGates::default());
+        let scope = DataScope::LegacyUnscoped;
+        let settle = Duration::from_millis(20);
+        let writing = gates.mutation_permit(scope).await;
+        let (acquired, mut acquisitions) = tokio::sync::mpsc::unbounded_channel();
+        let mut releases = Vec::new();
+        for step in 0..3 {
+            let (release, released) = tokio::sync::oneshot::channel::<()>();
+            releases.push(release);
+            let (gates, acquired) = (Arc::clone(&gates), acquired.clone());
+            tokio::spawn(async move {
+                let permit = gates.step_permit(scope, StepGate::WriteFence).await;
+                acquired.send(step).expect("the test awaits acquisitions");
+                let _ = released.await;
+                drop(permit);
+            });
+        }
+        tokio::time::sleep(settle).await;
+        let next_write = {
+            let gates = Arc::clone(&gates);
+            tokio::spawn(async move { gates.mutation_permit(scope).await })
+        };
+        tokio::time::sleep(settle).await;
+        drop(writing);
+        let first = acquisitions.recv().await.expect("one step takes the fence");
+        tokio::time::sleep(settle).await;
+        assert!(
+            !next_write.is_finished(),
+            "the step holding the fence excludes writes"
+        );
+        releases
+            .remove(first)
+            .send(())
+            .expect("the step awaits its release");
+        let write = tokio::time::timeout(Duration::from_secs(1), next_write)
+            .await
+            .expect("the write is next, not behind every queued step")
+            .expect("the write joins");
+        assert!(
+            acquisitions.try_recv().is_err(),
+            "no other step holds the fence while the write runs"
+        );
+        drop(write);
+        for release in releases {
+            let _ = release.send(());
+        }
     }
 
     /// Each step gate excludes exactly what its holder needs: none nothing,
