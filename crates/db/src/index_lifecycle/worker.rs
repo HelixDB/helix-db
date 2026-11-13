@@ -320,12 +320,19 @@ impl InFlightTask {
                     Ok(Some(claimed)) => claimed,
                     Err(error) if !error.is_transaction_conflict() => return Err(error),
                     // Another claim or step moved the operation first, or won a
-                    // serializable conflict with this claim: nothing committed,
-                    // and the queue offers the operation again.
-                    Ok(None) | Err(_) => {
+                    // serializable conflict with this claim: nothing committed.
+                    // It counts as work, because the operation may still be
+                    // eligible: a task that did none lets the dispatcher idle
+                    // (up to `IDLE_DELAY`) before the queue is scanned again.
+                    lost => {
+                        tracing::debug!(
+                            operation_id = %eligible.record.operation_id().as_uuid(),
+                            conflict = lost.is_err(),
+                            "index operation claim lost; the queue offers it again"
+                        );
                         #[cfg(feature = "index-lifecycle-testing")]
                         lifecycle_metrics.observe_worker_claim_conflict();
-                        break 'operation (None, false);
+                        break 'operation (None, true);
                     }
                 };
                 #[cfg(feature = "index-lifecycle-testing")]
@@ -1110,4 +1117,143 @@ async fn schedule_operation_task(
 
 fn now_unix_millis() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::{Db, DbTransaction};
+
+    use super::*;
+    use crate::config::{SearchIndexBackfillLimits, SecondaryIndexDefinition};
+    use crate::encoding::v2::keys::scope::DataScope;
+    use crate::index_lifecycle::{
+        IndexGenerationId, IndexId, IndexOperationExecutionState, IndexOperationKind,
+        IndexOperationProgress, IndexOperationRecord, IndexOperationRevision, IndexRecordV2,
+        IndexRevision, NoCursorProgress, OperationCounters, PhysicalGeneration,
+        SecondaryBuildProgress, SecondaryBuildStage, ValidatedDynamicIndexDefinition,
+    };
+
+    /// A driver for a task whose claim is lost before any step.
+    struct NeverSteps;
+
+    #[async_trait]
+    impl IndexOperationDriver for NeverSteps {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn step(
+            &self,
+            _db: &Db,
+            _transaction: &DbTransaction,
+            _scope: DataScope,
+            _operation: &IndexOperationRecord,
+            _limits: SearchIndexBatchLimits,
+        ) -> Result<outbox::IndexOperationStepExecution> {
+            unreachable!("a lost claim never steps")
+        }
+    }
+
+    /// A task whose claim finds the operation already moved commits nothing
+    /// and still reports work, so the dispatcher scans the queue again
+    /// instead of counting it as an idle lane and sleeping for `IDLE_DELAY`.
+    #[tokio::test]
+    async fn a_lost_claim_counts_as_work() {
+        let db = Arc::new(
+            Db::builder("worker-lost-claim", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let definition = ValidatedDynamicIndexDefinition::try_from(
+            SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
+        )
+        .unwrap();
+        let operation_id = IndexOperationId::from_bytes([7; 16]).unwrap();
+        let index = IndexRecordV2::building(
+            IndexId::initial(),
+            definition,
+            IndexRevision::initial(),
+            PhysicalGeneration::Secondary {
+                generation: IndexGenerationId::initial(),
+            },
+            operation_id,
+        )
+        .unwrap();
+        let operation = IndexOperationRecord::try_new(
+            operation_id,
+            index.index_id(),
+            index.identity().clone(),
+            index.state().generation(),
+            index.revision(),
+            IndexOperationRevision::initial(),
+            IndexOperationKind::Build,
+            IndexOperationFamily::Secondary,
+            IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+                SecondaryBuildStage::Activate(NoCursorProgress {
+                    counters: OperationCounters::default(),
+                }),
+            )),
+            0,
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None,
+            },
+        )
+        .unwrap();
+        outbox::enqueue_operation(
+            &db,
+            DataScope::LegacyUnscoped,
+            outbox::ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let epoch = WriterEpoch::from_bytes([4; 16]).unwrap();
+        let OperationPointerObservation::Eligible(eligible) =
+            outbox::observe_operation_pointer(&db, operation_id, epoch, 0)
+                .await
+                .unwrap()
+        else {
+            panic!("a queued operation is eligible");
+        };
+        // Another claim moves the operation after the dispatcher observed it.
+        outbox::claim_operation(
+            &db,
+            &eligible,
+            epoch,
+            ClaimSequence::new(1).unwrap(),
+            0,
+            ClaimPermission::Normal,
+        )
+        .await
+        .unwrap()
+        .expect("the first claim wins");
+        let permits = WorkerPermits::new(IndexLifecycleConcurrency::default());
+        let task = InFlightTask::Operation {
+            target: operation_id,
+            claim: Box::new(PendingClaim {
+                eligible,
+                writer_epoch: epoch,
+                sequence: ClaimSequence::new(2).unwrap(),
+                permission: ClaimPermission::Normal,
+            }),
+            driver: Arc::new(NeverSteps),
+            limits: SearchIndexBackfillLimits::default().batch(),
+            _permits: permits
+                .try_operation(IndexOperationFamily::Secondary)
+                .expect("a secondary slot is free"),
+            #[cfg(feature = "index-lifecycle-testing")]
+            lifecycle_metrics: Arc::new(
+                crate::index_lifecycle_testing::AutomaticLifecycleMetrics::new(),
+            ),
+        };
+        let completion = task.execute(db).await.unwrap();
+        assert!(completion.did_work);
+        assert_eq!(completion.delay_millis, None);
+    }
 }
