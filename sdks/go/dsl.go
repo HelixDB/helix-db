@@ -153,7 +153,7 @@ func (d DateTime) RFC3339() (string, error) {
 }
 
 func dateTimeFromTime(t time.Time) DateTime {
-	return DateTime{millis: t.UTC().UnixNano() / int64(time.Millisecond)}
+	return DateTime{millis: t.UnixMilli()}
 }
 
 type PropertyValue struct {
