@@ -1,6 +1,6 @@
 ---
 title: "Workspaces and navigation"
-description: "Sign in to Helix Foundry, choose or create a workspace, and find your way with the sidebar, the section panels, search and themes"
+description: "Sign in to Helix Foundry, choose or create a workspace, find your way with the sidebar, the section panels, search and themes, and see which emails Foundry sends"
 sidebarTitle: "Workspaces and navigation"
 pageType: "Guide"
 ---
@@ -38,35 +38,42 @@ workspace starts on Foundry Free.
 To switch later, use the workspace menu at the top of the sidebar. Foundry remembers
 the workspace you chose in this browser.
 
-A workspace without an ontology opens on **Create your first ontology**, which connects
-data and uploads documents in place. Until its first ontology exists, the sidebar holds
-only the workspace menu and your account, and Settings is open for the plan.
+A workspace without an ontology opens on **Get started**: try the
+[sample company](/foundry/start-here/sample-company), hand the setup to your agent, or
+create the [first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology)
+from your own data. Until the workspace has an ontology, the sidebar holds only the
+workspace menu, **Get started** and your account, with no search or Settings link; the
+account menu offers **Plan & billing**, usage, the theme and **Sign out**. Members see
+**This workspace isn't set up yet** until an owner or admin creates one.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/start-here/onboarding.png" alt="A new workspace on Create your first ontology, with Set up with your agent and the Name step" />
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/onboarding.png" alt="A new workspace on Get started, with the sample company card and Or start with your own" />
 </Frame>
 
-## The main page: Ask
+## The main page: Analyst
 
-Foundry opens on [Ask](/foundry/ask/ask-questions), on the ontology you last opened,
-or the newest. Ask your data a question there, or pick a suggestion; the **Ontology**
-picker at the top opens another ontology. Select **helixfoundry** at the top of the
-sidebar to come back to it from anywhere.
+Foundry opens on the [Analyst](/foundry/ask/ask-questions), on the ontology you last
+opened, or the newest. Ask your data a question there, or pick a suggestion; the
+**Ontology** picker at the top opens another ontology. Select **helixfoundry** at the
+top of the sidebar to come back to it from anywhere.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/start-here/home.png" alt="Ask, Foundry's main page: What do you want to know about Customer contracts? with suggested questions, beside the sidebar with Ask, Ontologies, Explorer and Connectors, two threads under New thread, and the month's questions spend" />
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/home.png" alt="The Analyst, Foundry's main page: What do you want to know about Customer contracts? with suggested questions, beside the sidebar with Analyst, Ontologies, Explorer and Connectors, and two threads under New thread" />
 </Frame>
 
 ## The sidebar
 
 The sidebar is on every page. From the top:
 
-- **helixfoundry**, which opens Ask, and the search button.
+- **helixfoundry**, which opens the Analyst, and the search button.
 - The workspace menu, to switch workspaces.
-- The sections, by name: **Ask**, **Ontologies**, **Explorer** and **Connectors**.
-- What the open section adds below them. For Ask, **New thread** and the ontology's
-  threads, with what the workspace has spent on questions this month at the foot.
+- The sections, by name: **Analyst**, **Ontologies**, **Explorer** and **Connectors**.
+- What the open section adds below them. For the Analyst, **New thread** and the
+  ontology's threads.
 - Your account menu, and **Settings**.
+
+A member [restricted to some sources](/foundry/workspace/access#restricted-members) sees
+only **Analyst**, **Ontologies** and **Explorer**, with no search or Settings.
 
 Three sections have a second panel, beside the sidebar:
 
@@ -107,7 +114,7 @@ the workspace's plan, this month's [usage](/foundry/workspace/usage), the theme 
 browser.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/start-here/account-menu.png" alt="The account menu with Settings, Members, Plan & billing, Usage with this month's spend on loads, API sources and questions, the theme choices and Sign out" />
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/account-menu.png" alt="The account menu with Settings, Members, Plan & billing, Usage with this month's spend on loads, API sources, questions and run assessments, the theme choices and Sign out" />
 </Frame>
 
 ## Workspace settings
@@ -115,12 +122,28 @@ browser.
 **Settings** → **General** shows the workspace's name, address, region and your role.
 Rename or delete a workspace in the Helix dashboard; Foundry shares it with Helix Cloud.
 Settings also holds [AI models](/foundry/workspace/ai-models),
-[Members](/foundry/workspace/members-and-roles) and
-[Plan & billing](/foundry/workspace/plans-and-billing).
+[Members](/foundry/workspace/members-and-roles),
+[Access](/foundry/workspace/access),
+[Plan & billing](/foundry/workspace/plans-and-billing) and
+[People enrichment](/foundry/workspace/data-handling#people-enrichment).
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/workspace/settings.png" alt="Settings, General tab, with the workspace's name, address, region, role and ID" />
 </Frame>
+
+## Emails from Foundry
+
+Foundry emails you about your own work, from Helix:
+
+| Email | When |
+| --- | --- |
+| **… is ready to ask** | Your workspace's [first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology) was drafted and loaded. If the load stopped at the month's budget, it says some documents weren't read. |
+| **… couldn't be drafted**, **… couldn't be loaded** | Your first ontology's draft or its load failed. It says why, and links to the ontology to try again. |
+| **…'s first draft is ready** | Your first ontology was drafted but not loaded, so the draft waits for your review. |
+| **Try Foundry on your own data** | A day after you ran the [sample company](/foundry/start-here/sample-company), if the workspace still has no data of its own. At most once. |
+
+Invitations to a workspace come from Helix; see
+[Members and roles](/foundry/workspace/members-and-roles#invite-people).
 
 ## Next steps
 

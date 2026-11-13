@@ -47,19 +47,26 @@ For agents that should know Foundry's tools well, add Helix's agent skills:
 npx skills add HelixDB/skills
 ```
 
-`helix-foundry-mcp` covers reading and asking, and `helix-foundry-actions-mcp` the
-changes and their confirmations.
+`helix-foundry-onboarding` walks the agent through setting up a workspace's first
+ontology with you; `helix-foundry-mcp` covers reading and asking; and `helix-foundry-actions-mcp`
+the changes and their confirmations. To add only the setup skill:
+
+```bash
+npx skills add HelixDB/skills --skill helix-foundry-onboarding
+```
 
 ### Set up a workspace with your agent
 
-A new workspace opens on its first ontology's steps. **Set up with your agent**, at the
-top of that page and on an unfinished ontology's overview, copies a prompt for Claude
-Code, Codex or another agent with the Helix MCP. It says how to connect the MCP, where
-the workspace's setup stands, and the steps left, and the agent asks you before each
-change it makes.
+A new workspace opens on **Get started**. Under **Or start with your own**, **Set up
+with your agent** is chosen first: **Copy prompt** copies a prompt for Claude Code, Codex
+or another agent with the Helix MCP. **Set up with your agent** on an unfinished
+ontology's overview does the same from where that ontology stands. The prompt says how
+to connect the MCP, where the workspace's setup stands, and the steps left; it has the
+agent follow the `helix-foundry-onboarding` skill when it has it, and the agent asks you
+before each change it makes.
 
 <Frame>
-  <img src="https://assets.helix-db.com/docs/foundry/start-here/onboarding.png" alt="A new workspace's Create your first ontology page, with Set up with your agent and its Copy prompt above the steps" />
+  <img src="https://assets.helix-db.com/docs/foundry/start-here/onboarding.png" alt="A new workspace's Get started page: the sample company card, then Or start with your own with Set up with your agent chosen and its Copy prompt" />
 </Frame>
 
 ## What your agent can read
@@ -73,18 +80,18 @@ change it makes.
 | `helix_foundry_list_connectors`, `helix_foundry_list_connector_kinds`, `helix_foundry_list_syncs`, `helix_foundry_get_sync` | The workspace's connections and their syncs, and the kinds of source it can add |
 | `helix_foundry_read_guide` | Foundry's own guide to these tools |
 
-Reading a load, through the graph or through Ask, needs **Query read** on the
+Reading a load, through the graph or through the Analyst, needs **Query read** on the
 database's Helix project, as on the website.
 
 ## Ask questions
 
 `helix_foundry_ask` asks an ontology's load a question in plain language, as
-[Ask](/foundry/ask/ask-questions) does, and waits up to 25 seconds for the answer. A
+the [Analyst](/foundry/ask/ask-questions) does, and waits up to 25 seconds for the answer. A
 longer question carries on: the agent follows it with `helix_foundry_get_question`, reads
 its steps with `helix_foundry_list_question_events`, and stops it with
 `helix_foundry_cancel_question`. `helix_foundry_list_questions` lists the ontology's
 questions. Questions asked through the MCP count against the same hourly limit and
-monthly budget as Ask's.
+monthly budget as the Analyst's.
 
 ## Changes, with a confirmation
 
@@ -96,7 +103,7 @@ are about to do and ask before they execute it.
 
 | Operation | Does |
 | --- | --- |
-| `create_ontology` | Creates an ontology on a Helix database, with its first draft |
+| `create_ontology` | Creates an ontology on an existing Helix database, or on a new one in a project the agent names or creates. The agent finds them with `helix_list_projects` and `helix_list_databases`. |
 | `generate_ontology` | Asks Foundry's agent for a new draft, from the tables, API sources and document sets you choose |
 | `revise_version` | Applies edits to a version as a new version, or previews them with `dry_run` |
 | `set_current_version` | Makes a version current |
@@ -112,6 +119,23 @@ project rights, a sync or generation already running, the
 [workspace's hourly generations](/foundry/reference/limits#generations), or the month's
 spending caps. Making a version current is refused if someone moved the current
 version since the agent read it.
+
+## Workflows
+
+A workflow is an agent's task over one ontology, such as answering support tickets.
+Each run of it records the agent's request, every read, question, send and upload it
+makes for that request, and its answer, so you can see what the ontology gave the
+agent. Runs show on the ontology's **Workflows** page, with an assessment of how much
+the ontology helped, which uses AI models and counts toward the month's
+[Run assessments](/foundry/workspace/usage) cap.
+
+| Tool | Does |
+| --- | --- |
+| `helix_foundry_create_workflow` | Creates a workflow. Owners and admins only, signed in; they can also select **New workflow** on the Workflows page. |
+| `helix_foundry_list_workflows` | Lists an ontology's workflows. |
+| `helix_foundry_start_workflow_run` | Starts a run when the agent takes on a request. The agent passes its id as `workflow_run_id` to the read, ask, send and upload tools while it works. |
+| `helix_foundry_finish_workflow_run` | Finishes a run with the agent's answer. |
+| `helix_foundry_get_workflow_run` | Reads a run and the calls it recorded. |
 
 ## Connectors stay on the website
 
@@ -162,7 +186,7 @@ goes wrong. Each caller can send 20 an hour, of up to 4,096 bytes each.
   <Card title="API sources" icon="code" href="/foundry/data/api-sources">
     Send your app's or agent's data to Foundry.
   </Card>
-  <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
-    What Ask reads, and its limits.
+  <Card title="Ask the Analyst" icon="comments" href="/foundry/ask/ask-questions">
+    What the Analyst reads, and its limits.
   </Card>
 </CardGroup>

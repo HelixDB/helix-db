@@ -7,9 +7,11 @@ pageType: "Reference"
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-Foundry reads ten kinds of source, and takes data your apps and agents send to an
+Foundry reads thirteen kinds of source, and takes data your apps and agents send to an
 [API source](/foundry/data/api-sources). Apps sync every table their credential can
-read; databases and Amazon S3 sync the tables you choose. Every credential only needs
+read; databases and Amazon S3 sync the tables you choose. Granola, Slack, Notion and
+Google Workspace also keep text as [documents](/foundry/data/documents), in document
+sets of their own, which loads read with AI models. Every credential only needs
 read access, and every plan offers every kind: plans differ in
 [how often they sync](/foundry/data/connect-data#syncs-on-a-schedule).
 
@@ -22,6 +24,9 @@ read access, and every plan offers every kind: plans differ in
 | [Linear](#linear) | Personal API key (`lin_api_`) | Teams, projects, cycles, issues and comments |
 | [Cal.com](#cal-com) | API key (`cal_live_`) | Bookings, attendees, event types and schedules |
 | [Granola](#granola) | API key (`grn_`) | Meeting notes and attendees, kept as documents too |
+| [Slack](#slack) | An app's bot token (`xoxb-`) | Channels, members and messages, each channel's days kept as documents too |
+| [Notion](#notion) | Internal integration secret (`ntn_`) | Pages, databases and people, each page kept as a document too |
+| [Google Workspace](#google-workspace) | Service account JSON key with domain-wide delegation | Drive files, calendars, events and people, each Google Doc kept as a document too |
 | [PostgreSQL](#postgresql) | Database user and password | The tables you choose |
 | [MySQL](#mysql) | Database user and password | The tables you choose |
 | [Amazon S3](#amazon-s3) | IAM role, or an access key | Parquet, JSON and CSV files as tables |
@@ -88,7 +93,7 @@ classic token (`ghp_…`) with the `repo` scope works too.
 | Field | Notes |
 | --- | --- |
 | Repositories | Optional: one `owner/name` per line. Blank syncs every repository the token can read, up to 100. |
-| Review history (days) | 1 to 365: how far back pull request reviews are read. |
+| Review history (days) | 1 to 365, 90 by default: how far back pull request reviews are read. |
 
 Syncs `repositories`, `users`, `labels`, `milestones`, `issues`, `pull_requests`,
 `issue_comments` and `pull_request_reviews`. Foundry never reads code.
@@ -134,6 +139,87 @@ long: reading one into an ontology costs several times what a note does.
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/data/granola-form.png" alt="The Granola form with its steps, the API key field and the Transcripts option" />
 </Frame>
+
+## Slack
+
+Foundry reads Slack through an app you create in your Slack workspace, with a bot token.
+
+1. Open [your apps in Slack](https://api.slack.com/apps), select **Create New App** and
+   choose **From scratch**. Name it "Helix Foundry" and pick your workspace.
+2. Under **OAuth & Permissions**, add the Bot Token Scopes `channels:read` and
+   `channels:history` for public channels, `groups:read` and `groups:history` for
+   private ones, and `users:read` and `users:read.email` to name people.
+3. Select **Install to Workspace** and copy the **Bot User OAuth Token** (`xoxb-…`).
+4. Invite the app to each channel to sync, public or private, with
+   `/invite @Helix Foundry`.
+
+Foundry reads only the channels the app is in. Without a kind of channel's history
+scope, that kind's messages aren't read. Direct messages are never read, and a user
+token (`xoxp-`) isn't accepted, because it would read as its person.
+
+| Field | Notes |
+| --- | --- |
+| Bot token | Required. |
+| Days of history | 1 to 365, 90 by default: how many days of messages are kept. |
+
+Syncs `users`, `channels`, `channel_members`, `messages` (top-level messages and thread
+broadcasts) and `channel_days`. Foundry also keeps each finished UTC day of each channel
+as a Markdown document, in a **Conversations** document set of the connection's own:
+the day's messages in time order, each thread's replies beneath the message that
+started it, and people named by their Slack name. Replies show only in those
+documents, so replies to a thread started before the kept days are left out.
+
+## Notion
+
+Foundry reads Notion through an internal integration.
+
+1. Open [Integrations in Notion](https://www.notion.so/profile/integrations), select
+   **New integration** and make an **Internal** one named "Helix Foundry" for your
+   workspace.
+2. Under **Capabilities**, keep **Read content** only, and choose **Read user
+   information including email addresses**.
+3. Copy the **Internal Integration Secret** (`ntn_…`).
+4. Share each page or database to sync with the integration, from its **•••** menu →
+   **Connections**. Sharing a page shares the pages under it.
+
+Paste the secret under **Integration secret**.
+
+Syncs `pages`, every page shared with the integration, database rows included; a table
+of its own for each shared database, named after its title, with a column per
+property; and `users`, when the integration can read user information. Foundry also
+keeps each shared page as a Markdown document, in a **Pages** document set of the
+connection's own.
+
+## Google Workspace
+
+Foundry reads Google Workspace with a service account that acts as one of your users,
+through domain-wide delegation.
+
+1. In the [Google Cloud console](https://console.cloud.google.com/iam-admin/serviceaccounts),
+   create a service account and add a JSON key under its **Keys**. In its project,
+   enable the Google Drive API, Google Calendar API and Admin SDK API.
+2. In the [Admin console](https://admin.google.com), open **Security** → **Access and
+   data control** → **API controls** → **Manage domain-wide delegation**, and add the
+   service account's client ID with these scopes:
+
+   ```text
+   https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/calendar.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly
+   ```
+
+3. Paste the JSON key, and an admin's email under **Acts as**.
+
+| Field | Notes |
+| --- | --- |
+| Service account JSON key | Required. |
+| Acts as | Required: the email of the Workspace user Foundry reads as. |
+| Days of past events | 1 to 365, 90 by default. Events are read from then to 30 days ahead. |
+
+Foundry reads Drive and Calendar as the **Acts as** user: the files and calendars they
+can see. Syncs `files` from Drive, `calendars`, `calendar_events` and `event_attendees`
+from Calendar, and `users` from the directory. Each API is read with its own scope, so a
+scope you didn't delegate leaves out only its tables, and the test names them. Foundry
+also keeps each Google Doc the user can open and download as a Markdown document, in a
+**Docs** document set of the connection's own; images are left out.
 
 ## PostgreSQL
 

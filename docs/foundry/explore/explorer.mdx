@@ -9,7 +9,9 @@ pageType: "Guide"
 
 The Explorer draws what a load wrote into the ontology's database: its records and how
 they connect. It reads the database with your session and never writes to it. Switch
-to **Records** in the bar at the top to read the same data as tables.
+to **Records** in the bar at the top to read the same data as tables. A member
+[restricted to some sources](/foundry/workspace/access#restricted-members) has no graph:
+the Explorer opens Records for them.
 
 <Frame caption="Load, then search the graph and read a type as records.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/explore/load-and-explore-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/explore/load-and-explore.webm"></video>
@@ -53,13 +55,10 @@ inspector names its load.
 
 ## Choose a load
 
-The **Load** picker reads another load of the ontology. Links between the Explorer,
-Records, a record's page and a document keep the load you chose. The **Ontology**
-picker beside it opens another ontology's Explorer; **Explorer** in the sidebar opens the
-ontology you last opened.
-
-**Other data** shows what no load wrote: data the database held already, or that your
-own applications write. It is hidden while you read a load, and listed below the labels.
+The **Load** picker reads another load of the ontology. Every view reads one load at a
+time; links between the Explorer, Records, a record's page and a document keep the load
+you chose. The **Ontology** picker beside it opens another ontology's Explorer;
+**Explorer** in the sidebar opens the ontology you last opened.
 
 ## Show Foundry's own records
 
@@ -85,7 +84,8 @@ its side.
 
 | The Explorer says | What to do |
 | --- | --- |
-| **No ontologies yet** | The workspace has no ontology. Owners and admins select **Create an ontology**. |
+| **Nothing shared with you yet** | You're [restricted to some sources](/foundry/workspace/access#restricted-members) and hold none yet. An owner or admin shares them. A workspace with no ontology opens on [Get started](/foundry/start-here/quickstart) instead. |
+| **You don't have read access to this database** | Reading the graph needs **Query read** on the database's Helix project. An owner or admin grants it; see [Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read). |
 | **Nothing loaded yet** | The ontology has no load. Owners and admins select **Load data**, which opens the Load dialog, or, while no version is current, **Finish setting up**, which opens the ontology's overview. Records and an entity's page say the same. |
 | The database is starting | A database created in the last few minutes may not answer yet. The Explorer opens by itself once it answers. |
 | **Queries are paused** | The workspace's Helix plan doesn't allow queries now. **Choose a plan**, or **Open Helix billing**, opens billing in the Helix dashboard. |
@@ -98,7 +98,7 @@ Members see the same messages, without the buttons.
   <Card title="Records and entities" icon="table" href="/foundry/explore/records-and-entities">
     Read each type as a table, and a record's page.
   </Card>
-  <Card title="Ask questions" icon="comments" href="/foundry/ask/ask-questions">
+  <Card title="Ask the Analyst" icon="comments" href="/foundry/ask/ask-questions">
     Ask the graph questions in plain language.
   </Card>
 </CardGroup>
