@@ -279,8 +279,7 @@
               "foundry/workspace/access",
               "foundry/workspace/plans-and-billing",
               "foundry/workspace/ai-models",
-              "foundry/workspace/usage",
-              "foundry/workspace/data-handling"
+              "foundry/workspace/usage"
             ]
           },
           {
@@ -1603,14 +1602,6 @@
     {
       "source": "/foundry/sample-company",
       "destination": "/foundry/start-here/sample-company"
-    },
-    {
-      "source": "/foundry/data-handling",
-      "destination": "/foundry/workspace/data-handling"
-    },
-    {
-      "source": "/foundry/privacy",
-      "destination": "/foundry/workspace/data-handling"
     },
     {
       "source": "/foundry/ontologies/documents",

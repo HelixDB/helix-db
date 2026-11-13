@@ -118,7 +118,6 @@ Full walkthrough: https://docs.helix-db.com/database/helix-db/start-here/quickst
 - [Plans and billing](https://docs.helix-db.com/foundry/workspace/plans-and-billing): Compare Helix Foundry Free, Pro and Max, which differ in how often connectors sync, upgrade a workspace, switch tiers, cancel, resume and manage payment, and see the Helix Cloud plan your ontologies' databases use — Page type: Guide
 - [AI models](https://docs.helix-db.com/foundry/workspace/ai-models): Choose where a Helix Foundry workspace's drafts, document reads and questions run: the default, or your own Anthropic API key on Pro or Max — Page type: Guide
 - [Usage and spending caps](https://docs.helix-db.com/foundry/workspace/usage): See what a Helix Foundry workspace has spent on AI this month, on loads, API sources, questions and workflow run assessments, against each monthly cap, and how generations are capped — Page type: Guide
-- [How Helix Foundry handles your data](https://docs.helix-db.com/foundry/workspace/data-handling): What Helix Foundry sends to AI models and when, what the drafting agent reads, where synced data and documents are stored, what deleting removes, People enrichment, and the website's product analytics — Page type: Reference
 
 ## Reference
 - [Helix Foundry limits](https://docs.helix-db.com/foundry/reference/limits): Every Helix Foundry limit in one place: syncs, API sources, documents, generations, loads, Analyst questions, spending, the Helix MCP and reads — Page type: Reference
