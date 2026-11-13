@@ -157,8 +157,10 @@ pub(crate) async fn create_index_operation_from_current_source_with_control(
         mode,
         initial_progress,
         VectorPhysicalSelection::Allocate,
-        durability,
-        execution_control,
+        CreateCommit {
+            durability,
+            execution_control,
+        },
     )
     .await
 }
@@ -180,8 +182,10 @@ pub(crate) async fn create_legacy_vector_adoption_operation(
         helix_planner::ir::IndexCreateMode::IfNotExists,
         InitialBuildProgress::legacy_vector(),
         VectorPhysicalSelection::AdoptLegacy(physical_index_id),
-        CommitDurability::Durable,
-        &execution_control,
+        CreateCommit {
+            durability: CommitDurability::Durable,
+            execution_control: &execution_control,
+        },
     )
     .await
 }
@@ -203,8 +207,10 @@ async fn create_index_operation_in_transaction(
         mode,
         initial_progress,
         VectorPhysicalSelection::Allocate,
-        CommitDurability::Durable,
-        execution_control,
+        CreateCommit {
+            durability: CommitDurability::Durable,
+            execution_control,
+        },
     )
     .await
 }
@@ -215,10 +221,14 @@ enum VectorPhysicalSelection {
     AdoptLegacy(VectorPhysicalIndexId),
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one create's whole transaction context, passed by every enqueue path"
-)]
+/// How one create commits: returning once as durable as `durability` asks,
+/// unless `execution_control` stops it first.
+#[derive(Clone, Copy)]
+struct CreateCommit<'a> {
+    durability: CommitDurability,
+    execution_control: &'a execution_control::ExecutionControl,
+}
+
 async fn create_index_operation_in_transaction_with_physical(
     transaction: DbTransaction,
     scope: DataScope,
@@ -226,10 +236,9 @@ async fn create_index_operation_in_transaction_with_physical(
     mode: helix_planner::ir::IndexCreateMode,
     initial_progress: InitialBuildProgress,
     vector_physical: VectorPhysicalSelection,
-    durability: CommitDurability,
-    execution_control: &execution_control::ExecutionControl,
+    commit: CreateCommit<'_>,
 ) -> Result<IndexDdlReceipt> {
-    execution_control.check()?;
+    commit.execution_control.check()?;
     let family = operation_family(definition.family());
     if initial_progress.family() != family {
         return Err(HelixDbError::InvariantViolation(
@@ -360,10 +369,7 @@ async fn create_index_operation_in_transaction_with_physical(
     outbox::stage_operation(&transaction, scope, expected, &next_index, &operation).await?;
     failpoints::trip(IndexOutboxFailpoint::DdlEnqueueAfterStaging)?;
     transaction
-        .commit_with_options(&slatedb::config::WriteOptions {
-            await_durable: durability == CommitDurability::Durable,
-            ..slatedb::config::WriteOptions::default()
-        })
+        .commit_with_options(&commit.durability.write_options())
         .await
         .map_err(HelixDbError::from_storage_commit)?;
     Ok(IndexDdlReceipt::Accepted {
