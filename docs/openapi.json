@@ -2205,7 +2205,7 @@
       "CypherRequest": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Unknown fields are rejected with invalid_query_json, as is a body nested more than 128 levels deep.",
+        "description": "Unknown fields are rejected with invalid_query_json, as is a body nested more than 127 levels deep.",
         "required": [
           "query"
         ],
@@ -2482,7 +2482,7 @@
       "SqlRequest": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Unknown fields are rejected with invalid_query_json, as is a body nested more than 128 levels deep.",
+        "description": "Unknown fields are rejected with invalid_query_json, as is a body nested more than 127 levels deep.",
         "required": [
           "query"
         ],

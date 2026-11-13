@@ -142,7 +142,8 @@ not indexed. A write fails when the indexed property holds:
 Existing records with such values block a build instead; see
 [Troubleshoot index operations](/database/helix-db/query-guides/troubleshooting#index-operation-is-blocked).
 A query vector must have the index dimension too. An empty query vector, or one with
-`NaN` or infinite components, fails with `invalid_query`.
+`NaN` or infinite components, fails with `invalid_search_input` when it is a literal and
+`invalid_query` when it comes from a parameter.
 
 ## Search an index
 

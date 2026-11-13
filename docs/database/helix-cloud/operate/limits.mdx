@@ -156,8 +156,8 @@ for the new writer; see [Writer failover](/database/helix-cloud/start-here/archi
 - **Requests.** Send `Content-Encoding: gzip` with a gzipped body. `x-gzip` and `identity`
   are also accepted; any other coding returns `415` `unsupported_content_encoding`. The 2 MiB
   limit applies to the decompressed body.
-- **Responses.** Send `Accept-Encoding: gzip` to receive gzipped responses. Bodies of 32
-  bytes or less are sent uncompressed.
+- **Responses.** Send `Accept-Encoding: gzip` to receive gzipped responses. Bodies under 32
+  bytes are sent uncompressed.
 
 ## Regions
 

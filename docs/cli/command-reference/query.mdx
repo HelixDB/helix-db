@@ -64,7 +64,7 @@ nodes:
 | --- | --- |
 | `request_type` | Required. Lowercase `"read"` or `"write"`. Selects read or write execution, and must match the batch under `query`. |
 | `query` | Required. Exactly one `read` or `write` batch with `entries[]` and `returns[]`. Each entry names one operation tree whose innermost input is a source operation. |
-| `query_name` | Optional name for logs and query diagnostics. Missing or `null` becomes `__dynamic__`. |
+| `query_name` | Optional name for logs and query diagnostics. May be omitted or `null`. |
 | `parameters`, `parameter_types` | Optional named values and their declared types. |
 
 The CLI checks only `request_type` and the presence of `query`; the server validates the rest. See the

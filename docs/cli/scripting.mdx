@@ -65,7 +65,7 @@ stderr.
 | `helix` | `{"version":"<cli version>"}` |
 | `init` | `{"project":"<name>","config":"<path to helix.toml>"}` |
 | `add local` | `{"instance":"<name>"}` |
-| `add cloud` | `{"instance":"<name>","database":"tenant:<id>"}` |
+| `add cloud` | `{"instance":"<name>","database":"tenant:<id>"}`, or `cluster:<id>` for a dedicated cluster |
 | `delete` | `{"deleted":"<instance>"}` |
 | `start` | `{"instance":"dev","url":"http://localhost:6969","container":"<container>"}` |
 | `stop` | `instance`, `wasRunning`, `explorerStopped`, and `explorerError` when the Explorer could not be removed |
@@ -89,10 +89,11 @@ stderr.
 | `metrics full`, `basic`, `off` | `{"level":"<level>"}` |
 | `metrics status` | `{"level":"basic","userId":null,"lastUpdated":<unix seconds>}` |
 | `skills update` | `{"updated":true}` |
-| `update` | `{"version":"<version>","updated":true}` |
+| `update` | `{"version":"<version>","updated":true}`, or `"updated":false` when already on that version |
 
-Cloud results are the API's JSON field for field; `--json` adds nothing the human view resolved, such
-as a project's workspace. Cloud lists follow pagination up to 50 pages of 200 items, then fail with
+Cloud results are the API's JSON field for field, except that `database list` and `database get` add
+`"kind"` (`"dedicated"` or `"tenant"`) to each database; `--json` adds nothing the human view
+resolved, such as a project's workspace. Cloud lists follow pagination up to 50 pages of 200 items, then fail with
 `more than 50 pages; narrow the request`.
 
 These commands have no JSON result:

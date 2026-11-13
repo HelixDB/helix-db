@@ -13,7 +13,7 @@ the runtime validates every value before execution and reuses a stable query sha
 SDK helpers on this page send typed requests.
 
 A request can also omit `parameter_types`. Each value then takes its type from its JSON
-encoding: a whole number is an `i64`, any other number an `f64`, and strings, booleans,
+encoding: a whole number that fits in an `i64` is an `i64`, any other number an `f64`, and strings, booleans,
 arrays, objects, and `null` keep their JSON type. Cypher and SQL requests work this way.
 One request cannot mix typed and untyped parameters.
 

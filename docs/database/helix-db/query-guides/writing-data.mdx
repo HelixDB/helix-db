@@ -348,8 +348,10 @@ request = query.to_query_request(
 
 </CodeGroup>
 
-- The parameter must be an array of objects. Any other value fails with
-  `invalid_query`, and an empty array runs the body zero times.
+- The parameter must be an array of objects. Declared as one, as here, any other value
+  fails type validation before the query runs (`invalid_query_json` over HTTP); an
+  untyped value that is not an array of objects fails with `invalid_query`. An empty
+  array runs the body zero times.
 - Variables are not scoped to an iteration: `user` holds only the last row's result after
   the loop. This request returns nothing for that reason.
 - Every row commits in the same transaction. Split very large imports into several

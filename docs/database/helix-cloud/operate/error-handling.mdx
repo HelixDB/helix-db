@@ -62,7 +62,8 @@ another node already owns a unique value. The gateway reports a failed write as
 
 ## Other responses
 
-- **Unknown paths** return `404` with an empty body. Check the URL and route.
+- **Unknown paths** return `403` `forbidden` to a database API key, not `404`, and `400`
+  `invalid_request` without an `Authorization` header. Check the URL and route.
 - **`400` `invalid_request`** also covers:
   - a missing or malformed `Authorization` header (`missing or malformed authorization header`);
   - a malformed or repeated `X-Helix-Database-Id` or `X-Helix-Tenant-Id` header, which
@@ -70,7 +71,7 @@ another node already owns a unique value. The gateway reports a failed write as
   - any `Idempotency-Key` header, which the gateway does not support;
   - `X-Helix-Await-Durable: false` on a write, because Helix Cloud writes always wait for
     durability.
-- **`429`** carries one of three codes. Branch on `error`:
+- **`429`** carries one of four codes. Branch on `error`:
   - `rate_limited`: the database's [request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
     is empty. Honor `Retry-After`.
   - `index_backpressure`: a vector or text index holds too much unpublished work. The body
@@ -78,6 +79,8 @@ another node already owns a unique value. The gateway reports a failed write as
     [query error reference](/database/helix-db/query-guides/error-handling).
   - `resource_limit`: a Cypher statement exceeded a per-query budget. Resending it fails
     again; see [Cypher errors](#cypher-errors).
+  - `query_memory_limit_exceeded`: a query exceeded its memory budget. Resending it fails
+    again; reduce the data it retains.
 
 ## Cypher errors
 

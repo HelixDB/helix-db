@@ -102,9 +102,10 @@ Required when `storage = "s3"`, and an error with any other storage mode.
 | `endpoint_url` | string | Not set | Endpoint of an S3-compatible store. Must start with `http://` or `https://`. |
 | `allow_http` | boolean | `false` | Allow plain HTTP to the endpoint. An `http://` `endpoint_url` allows it too. |
 
-S3 credentials never go in `helix.toml`. `helix start` and `helix restart` load `.env` from the
-project root, then pass `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
-`AWS_PROFILE`, `AWS_REGION`, and `AWS_DEFAULT_REGION` from the environment into the container.
+S3 credentials never go in `helix.toml`. `helix start` loads `.env` from the project root, then
+passes `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`,
+`AWS_REGION`, and `AWS_DEFAULT_REGION` from the environment into the container it creates.
+`helix restart` keeps the values the container was created with; run `helix start` to apply new ones.
 
 ### `[enterprise.<name>]`
 

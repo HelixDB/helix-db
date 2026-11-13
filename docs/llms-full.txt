@@ -2901,8 +2901,10 @@ request = query.to_query_request(
 }
 ```
 
-- The parameter must be an array of objects. Any other value fails with
-  `invalid_query`, and an empty array runs the body zero times.
+- The parameter must be an array of objects. Declared as one, as here, any other value
+  fails type validation before the query runs (`invalid_query_json` over HTTP); an
+  untyped value that is not an array of objects fails with `invalid_query`. An empty
+  array runs the body zero times.
 - Variables are not scoped to an iteration: `user` holds only the last row's result after
   the loop. This request returns nothing for that reason.
 - Every row commits in the same transaction. Split very large imports into several
@@ -3844,7 +3846,7 @@ source predicate without a label scans every node.
 
 | Predicate | Index |
 | --- | --- |
-| `eq`, `isIn` with a literal list or a parameter, `compare` with `Eq` | Equality, or a range index when the property has no equality index |
+| `eq`, `isIn` with a literal list or a parameter, `compare` with `Eq` | Equality, or for literal values a range index when the property has no equality index |
 | `gt`, `gte`, `lt`, `lte`, `between` with a literal or parameter bound | Range |
 | `neq`, `not`, `startsWith`, `endsWith`, `contains`, `isNull`, `hasKey` | Never; the rows are scanned and tested |
 | A comparison between two properties | Never |
@@ -4129,7 +4131,8 @@ not indexed. A write fails when the indexed property holds:
 Existing records with such values block a build instead; see
 [Troubleshoot index operations](/database/helix-db/query-guides/troubleshooting#index-operation-is-blocked).
 A query vector must have the index dimension too. An empty query vector, or one with
-`NaN` or infinite components, fails with `invalid_query`.
+`NaN` or infinite components, fails with `invalid_search_input` when it is a literal and
+`invalid_query` when it comes from a parameter.
 
 ## Search an index
 
@@ -5636,7 +5639,7 @@ Use this page when a response must come back in a stable order, one page at a ti
 | Intent | Rust and Python | TypeScript | Go |
 | --- | --- | --- | --- |
 | Sort by one property | `order_by(property, order)` | `orderBy` | `OrderBy` |
-| Sort by several properties | `order_by_multiple([(property, order), ...])` | `orderByMultiple` | `OrderByMultiple(helix.Ordering{...}, ...)` |
+| Sort by several properties | `order_by_multiple` with a list of `(property, order)` pairs | `orderByMultiple` | `OrderByMultiple(helix.Ordering{...}, ...)` |
 | Keep the first `n` rows | `limit(n)` | `limit` | `Limit` |
 | Drop the first `n` rows | `skip(n)` | `skip` | `Skip` |
 | Keep rows from `start` up to, but not including, `end` | `range(start, end)` | `range` | `Range` |
@@ -5805,8 +5808,8 @@ in order when all of these hold:
 
 - The sort uses one property: `orderBy`, not `orderByMultiple`.
 - The traversal starts from a label-scoped source that filters the same property with
-  `gt`, `gte`, `lt`, `lte`, or `between`. An `eq` qualifies when the property has a
-  range index and no equality index.
+  `gt`, `gte`, `lt`, `lte`, or `between`. An `eq` with a literal value qualifies when the
+  property has a range index and no equality index.
 - `orderBy` follows that source directly, with only filters in between.
 
 A native query reads an ascending index backwards for a descending sort, so one index
@@ -6727,7 +6730,7 @@ the runtime validates every value before execution and reuses a stable query sha
 SDK helpers on this page send typed requests.
 
 A request can also omit `parameter_types`. Each value then takes its type from its JSON
-encoding: a whole number is an `i64`, any other number an `f64`, and strings, booleans,
+encoding: a whole number that fits in an `i64` is an `i64`, any other number an `f64`, and strings, booleans,
 arrays, objects, and `null` keep their JSON type. Cypher and SQL requests work this way.
 One request cannot mix typed and untyped parameters.
 
@@ -7944,7 +7947,7 @@ longer list scans the label.
 | Limit | Value | `details.detail` |
 | --- | --- | --- |
 | Request body | 16 MiB on a local server; 2 MiB on Helix Cloud after gzip decoding (`413 payload_too_large`) | None |
-| JSON nesting in the request body | 128 levels (`400 invalid_query_json`) | None |
+| JSON nesting in the request body | 127 levels (`400 invalid_query_json`) | None |
 | Statement text | 16 MiB | `query_too_large` |
 | Tokens in the statement | 200,000 | `too_many_tokens` |
 | Variables; plan operators | 4,096; 4,096 | `too_many_bindings`; `plan_size` |
@@ -8617,7 +8620,7 @@ Local HelixDB accepts encoded request bodies up to 16 MiB. The Helix Cloud
 gateway accepts up to 2 MiB. Keep requests at or below 2 MiB when the same
 client must work against both environments. A `POST /v2/query` body may nest
 JSON arrays and objects at most 255 levels deep, including under keys the
-server ignores, and a Cypher or SQL body at most 128 levels; a deeper body
+server ignores, and a Cypher or SQL body at most 127 levels; a deeper body
 fails with `invalid_query_json`.
 
 ### Compression
@@ -10630,8 +10633,8 @@ for the new writer; see [Writer failover](/database/helix-cloud/start-here/archi
 - **Requests.** Send `Content-Encoding: gzip` with a gzipped body. `x-gzip` and `identity`
   are also accepted; any other coding returns `415` `unsupported_content_encoding`. The 2 MiB
   limit applies to the decompressed body.
-- **Responses.** Send `Accept-Encoding: gzip` to receive gzipped responses. Bodies of 32
-  bytes or less are sent uncompressed.
+- **Responses.** Send `Accept-Encoding: gzip` to receive gzipped responses. Bodies under 32
+  bytes are sent uncompressed.
 
 ## Regions
 
@@ -10818,7 +10821,8 @@ another node already owns a unique value. The gateway reports a failed write as
 
 ## Other responses
 
-- **Unknown paths** return `404` with an empty body. Check the URL and route.
+- **Unknown paths** return `403` `forbidden` to a database API key, not `404`, and `400`
+  `invalid_request` without an `Authorization` header. Check the URL and route.
 - **`400` `invalid_request`** also covers:
   - a missing or malformed `Authorization` header (`missing or malformed authorization header`);
   - a malformed or repeated `X-Helix-Database-Id` or `X-Helix-Tenant-Id` header, which
@@ -10826,7 +10830,7 @@ another node already owns a unique value. The gateway reports a failed write as
   - any `Idempotency-Key` header, which the gateway does not support;
   - `X-Helix-Await-Durable: false` on a write, because Helix Cloud writes always wait for
     durability.
-- **`429`** carries one of three codes. Branch on `error`:
+- **`429`** carries one of four codes. Branch on `error`:
   - `rate_limited`: the database's [request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
     is empty. Honor `Retry-After`.
   - `index_backpressure`: a vector or text index holds too much unpublished work. The body
@@ -10834,6 +10838,8 @@ another node already owns a unique value. The gateway reports a failed write as
     [query error reference](/database/helix-db/query-guides/error-handling).
   - `resource_limit`: a Cypher statement exceeded a per-query budget. Resending it fails
     again; see [Cypher errors](#cypher-errors).
+  - `query_memory_limit_exceeded`: a query exceeded its memory budget. Resending it fails
+    again; reduce the data it retains.
 
 ## Cypher errors
 
@@ -13176,9 +13182,11 @@ product analytics service:
 
 - page views, with the IDs in each address masked, and without page titles;
 - Foundry's own events, such as a step of setup shown or a connection created, whose
-  properties never include a name, an ID, an email, a question, a goal or a file name;
-- page performance and errors, with the page's address as it is, links followed out of
-  the site, and the label of an element clicked repeatedly or without effect;
+  own properties never include a name, an ID, an email, a question, a goal or a file
+  name;
+- page performance and errors, with the page's address as it is, an error's message,
+  links followed out of the site, and the label of an element clicked repeatedly or
+  without effect;
 - session replays, which mask all page text and everything typed, record no images, no
   graph and no embedded PDF, and leave out your account, the members list and payment
   forms.
@@ -14026,9 +14034,10 @@ Required when `storage = "s3"`, and an error with any other storage mode.
 | `endpoint_url` | string | Not set | Endpoint of an S3-compatible store. Must start with `http://` or `https://`. |
 | `allow_http` | boolean | `false` | Allow plain HTTP to the endpoint. An `http://` `endpoint_url` allows it too. |
 
-S3 credentials never go in `helix.toml`. `helix start` and `helix restart` load `.env` from the
-project root, then pass `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
-`AWS_PROFILE`, `AWS_REGION`, and `AWS_DEFAULT_REGION` from the environment into the container.
+S3 credentials never go in `helix.toml`. `helix start` loads `.env` from the project root, then
+passes `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`,
+`AWS_REGION`, and `AWS_DEFAULT_REGION` from the environment into the container it creates.
+`helix restart` keeps the values the container was created with; run `helix start` to apply new ones.
 
 ### `[enterprise.<name>]`
 
@@ -14193,7 +14202,7 @@ stderr.
 | `helix` | `{"version":"<cli version>"}` |
 | `init` | `{"project":"<name>","config":"<path to helix.toml>"}` |
 | `add local` | `{"instance":"<name>"}` |
-| `add cloud` | `{"instance":"<name>","database":"tenant:<id>"}` |
+| `add cloud` | `{"instance":"<name>","database":"tenant:<id>"}`, or `cluster:<id>` for a dedicated cluster |
 | `delete` | `{"deleted":"<instance>"}` |
 | `start` | `{"instance":"dev","url":"http://localhost:6969","container":"<container>"}` |
 | `stop` | `instance`, `wasRunning`, `explorerStopped`, and `explorerError` when the Explorer could not be removed |
@@ -14217,10 +14226,11 @@ stderr.
 | `metrics full`, `basic`, `off` | `{"level":"<level>"}` |
 | `metrics status` | `{"level":"basic","userId":null,"lastUpdated":<unix seconds>}` |
 | `skills update` | `{"updated":true}` |
-| `update` | `{"version":"<version>","updated":true}` |
+| `update` | `{"version":"<version>","updated":true}`, or `"updated":false` when already on that version |
 
-Cloud results are the API's JSON field for field; `--json` adds nothing the human view resolved, such
-as a project's workspace. Cloud lists follow pagination up to 50 pages of 200 items, then fail with
+Cloud results are the API's JSON field for field, except that `database list` and `database get` add
+`"kind"` (`"dedicated"` or `"tenant"`) to each database; `--json` adds nothing the human view
+resolved, such as a project's workspace. Cloud lists follow pagination up to 50 pages of 200 items, then fail with
 `more than 50 pages; narrow the request`.
 
 These commands have no JSON result:
@@ -14682,7 +14692,7 @@ Run `helix add` with no subcommand in a terminal to choose interactively.
 - `add local` defaults to port `6969` even when another instance already uses it; two instances on one port cannot run at the same time. Pass `--port` for each additional local instance.
 - `add local` writes the CLI's default `image` and `tag` into the new table, pinning that server image; see [Image pinning](/cli/configuration#image-pinning).
 - Rewrites `helix.toml`, which removes its comments; see [Commands that rewrite helix.toml](/cli/configuration#commands-that-rewrite-the-file).
-- With `--json`, prints `{"instance":"<name>"}`, plus `"database":"tenant:<id>"` for `add cloud`.
+- With `--json`, prints `{"instance":"<name>"}`, plus `"database":"tenant:<id>"` (or `cluster:<id>`) for `add cloud`.
 - Without a subcommand, the CLI prompts for the instance type in a terminal and fails in non-interactive shells.
 - `--s3-region`, `--s3-endpoint-url`, and `--s3-allow-http` require `--storage-uri`.
 - `add cloud` uses the WorkOS session and resolves the database as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
@@ -15908,7 +15918,7 @@ nodes:
 | --- | --- |
 | `request_type` | Required. Lowercase `"read"` or `"write"`. Selects read or write execution, and must match the batch under `query`. |
 | `query` | Required. Exactly one `read` or `write` batch with `entries[]` and `returns[]`. Each entry names one operation tree whose innermost input is a source operation. |
-| `query_name` | Optional name for logs and query diagnostics. Missing or `null` becomes `__dynamic__`. |
+| `query_name` | Optional name for logs and query diagnostics. May be omitted or `null`. |
 | `parameters`, `parameter_types` | Optional named values and their declared types. |
 
 The CLI checks only `request_type` and the presence of `query`; the server validates the rest. See the
@@ -16043,7 +16053,7 @@ helix restart [INSTANCE]
 
 - Restarts the existing container with its current image and container settings. It never pulls an image or creates a replacement container.
 - If the container has been removed (for example after `helix stop` or `helix prune`), the command fails. Use [`helix start`](/cli/command-reference/start) to create a container.
-- Loads `.env` from the project root first, like `helix start`.
+- Loads `.env` from the project root first, like `helix start`, but the container keeps the environment it was created with, including S3 credentials; run `helix start` to apply new values.
 - Readiness is checked with `GET /healthz` on the container's published port, including a temporary `helix start --port` override.
 - Default local data is in-memory and is wiped by every restart. Disk-mode instances keep data in their local SeaweedFS volume, and S3 data is never deleted.
 - `restart` takes no overrides. To change the image, port, or storage mode, use `helix start`, adding `--persist` to save the change.

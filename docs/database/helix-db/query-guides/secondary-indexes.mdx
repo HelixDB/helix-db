@@ -177,7 +177,7 @@ source predicate without a label scans every node.
 
 | Predicate | Index |
 | --- | --- |
-| `eq`, `isIn` with a literal list or a parameter, `compare` with `Eq` | Equality, or a range index when the property has no equality index |
+| `eq`, `isIn` with a literal list or a parameter, `compare` with `Eq` | Equality, or for literal values a range index when the property has no equality index |
 | `gt`, `gte`, `lt`, `lte`, `between` with a literal or parameter bound | Range |
 | `neq`, `not`, `startsWith`, `endsWith`, `contains`, `isNull`, `hasKey` | Never; the rows are scanned and tested |
 | A comparison between two properties | Never |

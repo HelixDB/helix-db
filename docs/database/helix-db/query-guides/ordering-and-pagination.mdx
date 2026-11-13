@@ -15,7 +15,7 @@ Use this page when a response must come back in a stable order, one page at a ti
 | Intent | Rust and Python | TypeScript | Go |
 | --- | --- | --- | --- |
 | Sort by one property | `order_by(property, order)` | `orderBy` | `OrderBy` |
-| Sort by several properties | `order_by_multiple([(property, order), ...])` | `orderByMultiple` | `OrderByMultiple(helix.Ordering{...}, ...)` |
+| Sort by several properties | `order_by_multiple` with a list of `(property, order)` pairs | `orderByMultiple` | `OrderByMultiple(helix.Ordering{...}, ...)` |
 | Keep the first `n` rows | `limit(n)` | `limit` | `Limit` |
 | Drop the first `n` rows | `skip(n)` | `skip` | `Skip` |
 | Keep rows from `start` up to, but not including, `end` | `range(start, end)` | `range` | `Range` |
@@ -188,8 +188,8 @@ in order when all of these hold:
 
 - The sort uses one property: `orderBy`, not `orderByMultiple`.
 - The traversal starts from a label-scoped source that filters the same property with
-  `gt`, `gte`, `lt`, `lte`, or `between`. An `eq` qualifies when the property has a
-  range index and no equality index.
+  `gt`, `gte`, `lt`, `lte`, or `between`. An `eq` with a literal value qualifies when the
+  property has a range index and no equality index.
 - `orderBy` follows that source directly, with only filters in between.
 
 A native query reads an ascending index backwards for a descending sort, so one index

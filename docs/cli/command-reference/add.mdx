@@ -60,7 +60,7 @@ Run `helix add` with no subcommand in a terminal to choose interactively.
 - `add local` defaults to port `6969` even when another instance already uses it; two instances on one port cannot run at the same time. Pass `--port` for each additional local instance.
 - `add local` writes the CLI's default `image` and `tag` into the new table, pinning that server image; see [Image pinning](/cli/configuration#image-pinning).
 - Rewrites `helix.toml`, which removes its comments; see [Commands that rewrite helix.toml](/cli/configuration#commands-that-rewrite-the-file).
-- With `--json`, prints `{"instance":"<name>"}`, plus `"database":"tenant:<id>"` for `add cloud`.
+- With `--json`, prints `{"instance":"<name>"}`, plus `"database":"tenant:<id>"` (or `cluster:<id>`) for `add cloud`.
 - Without a subcommand, the CLI prompts for the instance type in a terminal and fails in non-interactive shells.
 - `--s3-region`, `--s3-endpoint-url`, and `--s3-allow-http` require `--storage-uri`.
 - `add cloud` uses the WorkOS session and resolves the database as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
