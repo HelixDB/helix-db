@@ -9,7 +9,8 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 The published `helix-db` 3.0.0 crate provides the query DSL, request types, async
-HTTP client, native graph helpers, and a feature-gated embedded client.
+HTTP client, and native graph helpers. The embedded client is not part of the
+crates.io release; see [Embedded runtime](#embedded-runtime).
 
 <Note>
 The package is published as `helix-db` and imported as `helix_db`.
@@ -64,8 +65,12 @@ let request = find_users("acme".to_string(), 25)?;
 let response: serde_json::Value = client.query(request).send().await?;
 ```
 
-Use `.with_api_key(Some("hx_..."))` for Helix Cloud. Request-builder options can
-require the writer, require a warm read, or control durability waiting.
+For Helix Cloud, add `.with_api_key(Some("<cluster-api-key>"))` and use a
+database-specific gateway URL. The 3.0.0 crate cannot send the `X-Helix-Database-Id`
+header that a shared gateway requires; see
+[Authentication](/database/helix-db/query-guides/http-api#authentication).
+Request-builder options can require the writer, require a warm read, or control
+durability waiting.
 
 ## Build without the macro
 
@@ -80,27 +85,23 @@ let request = QueryRequest::read(
 
 ## Embedded runtime
 
-Enable the `embedded` feature:
+The crates.io release has no `embedded` feature, so depend on the repository instead.
+This replaces a crates.io `helix-db` dependency:
 
 ```bash
-cargo add helix-db --features embedded
+cargo add helix-db --git https://github.com/HelixDB/helix-db --tag v3.7.0 --features embedded
 ```
 
-See [Embedded database](/database/helix-db/start-here/local-development/embedded-database)
+This builds the engine from source, and its SDK is newer than 3.0.0. See
+[Embedded database](/database/helix-db/start-here/local-development/embedded-database)
 for storage, cache, and handle configuration.
 
 ## Verify
 
-Rust SDK crate docs are doctests, and the public `#[query]` README journeys are
-compile-tested as examples:
-
-```bash
-cargo test --manifest-path sdks/rust/Cargo.toml --lib
-cargo test --manifest-path sdks/rust/Cargo.toml --doc
-cargo check --manifest-path sdks/rust/Cargo.toml --example basic_query
-cargo check --manifest-path sdks/rust/Cargo.toml --example readme_sdk_query
-cargo check --manifest-path sdks/rust/Cargo.toml --example readme_macros_query
-```
+Start a local instance as described in
+[Get started](/database/helix-db/start-here/quickstart), then run the Execute example
+from your project and print `response`. A new database returns an empty `users`
+array.
 
 ## Next steps
 

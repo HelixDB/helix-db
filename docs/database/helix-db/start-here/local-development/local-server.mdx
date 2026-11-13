@@ -12,6 +12,13 @@ It supports Linux on amd64 and arm64.
 It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
 
+<Warning>
+The standalone server has no authentication and no TLS. `helix start` publishes its
+port on every network interface of the host, so anyone who can reach that port can
+read and write all of its data. See [Secure the server](#secure-the-server) before you
+run it anywhere other people's machines can reach.
+</Warning>
+
 ## Choose storage
 
 | Mode | Persistence | Use when |
@@ -40,14 +47,16 @@ Then, in your shell:
 ```bash
 mkdir my-helix-app
 cd my-helix-app
-helix init local --name dev # add --disk to make persistence the project default
-helix start dev             # add --disk to persist this instance
+helix init local --name dev # add --disk to make disk storage the project default
+helix start dev             # add --disk --persist to switch an existing project to disk
 ```
 
 The standalone server accepts queries at `http://localhost:6969/v2/query`.
 
 For an existing project, set `tag = "v0.0.16"` in its `[local.dev]` block in
-`helix.toml` before starting it. An explicitly saved tag overrides the CLI default.
+`helix.toml` before starting it. `helix init` saves the CLI's default tag at the time,
+and a saved tag overrides the CLI default, so `helix update` alone does not move an
+existing project to a newer image.
 
 <Warning>
 The first time v0.0.10 or later opens a persisted database, it upgrades the index storage
@@ -60,8 +69,15 @@ helix query dev \
   -e 'readBatch().varAs("count", g().nWithLabel("User").count()).returning(["count"])'
 ```
 
+`helix query -e` evaluates a TypeScript expression, so it needs Node.js 20 or later
+and npm. On first use it installs the `@helix-db/helix-db` package for the CLI. Pass a
+JSON request with `--file` instead to skip Node.js.
+
 <Warning>
 The default mode is in-memory. `helix stop` and `helix restart` discard its data.
+`helix start dev --disk` uses disk storage for that run only: the next plain
+`helix start dev` starts in memory again, so the data seems gone. Add `--persist` to
+save disk storage in `helix.toml`.
 </Warning>
 
 ## Use an existing object store
@@ -111,9 +127,12 @@ Memory mode is selected by leaving both `HELIX_DATA_DIR` and `S3_BUCKET` unset:
 
 ```bash
 docker run --rm --name helixdb \
-  -p 6969:8080 \
+  -p 127.0.0.1:6969:8080 \
   ghcr.io/helixdb/helixdb:v0.0.16
 ```
+
+`-p 127.0.0.1:6969:8080` publishes the port on the host's loopback interface only. See
+[Secure the server](#secure-the-server).
 
 The standalone server exposes liveness and readiness checks:
 
@@ -128,6 +147,39 @@ S3-compatible storage and is interpreted as a real bucket name. Setting
 `HELIX_DATA_DIR` and `S3_BUCKET` together causes startup to fail.
 </Warning>
 
+## Endpoints
+
+| Route | Purpose |
+| --- | --- |
+| `POST /v2/query` | Run a native operation-tree request. See the [HTTP API](/database/helix-db/query-guides/http-api) |
+| `POST /v2/cypher`, `POST /v2/cypher/explain` | Run or explain a [Cypher](/database/helix-db/query-guides/cypher) statement |
+| `POST /v2/sql`, `POST /v2/sql/explain` | Run or explain a [SQL](/database/helix-db/query-guides/sql) statement |
+| `GET /v2/diagnostics` | Read-only setup checks, rendered by [`helix doctor`](/cli/command-reference/doctor) |
+| `GET /healthz`, `GET /readyz` | Liveness and readiness |
+
+The server also runs queries, Cypher and SQL over gRPC (the `helixdb.server.v1.HelixDbServer`
+service) on `HELIX_GRPC_ADDR`. The image sets it to `127.0.0.1:8081`, which only
+processes inside the container can reach. To call gRPC from outside, set
+`HELIX_GRPC_ADDR=0.0.0.0:8081` and publish port 8081.
+
+## Secure the server
+
+The standalone server has no authentication and no TLS: any client that reaches its
+HTTP port can read and write every record.
+
+- Publish the port on loopback only, as the `docker run` and Compose examples on this
+  page do (`-p 127.0.0.1:6969:8080`).
+- `helix start` publishes the port on every network interface of the host. On a
+  machine that other devices can reach, block the port with a firewall, or run the
+  image directly with a loopback port.
+- To serve other machines, put a reverse proxy in front of the server that terminates
+  TLS and authenticates every request, and expose only the proxy.
+- Inside the container, `HELIX_HTTP_ADDR` (default `0.0.0.0:8080`) and
+  `HELIX_GRPC_ADDR` (default `127.0.0.1:8081` in the image) choose the listen
+  addresses.
+
+For managed authentication and TLS, use [Helix Cloud](/database/helix-cloud/start-here/using-the-cloud).
+
 ## Run with native directory persistence
 
 Set `HELIX_DATA_DIR` to a mounted directory inside the container:
@@ -135,7 +187,7 @@ Set `HELIX_DATA_DIR` to a mounted directory inside the container:
 ```bash
 docker volume create helixdb-data
 docker run --rm --name helixdb \
-  -p 6969:8080 \
+  -p 127.0.0.1:6969:8080 \
   -e HELIX_DATA_DIR=/var/lib/helix \
   --mount type=volume,source=helixdb-data,target=/var/lib/helix \
   ghcr.io/helixdb/helixdb:v0.0.16
@@ -203,7 +255,13 @@ services:
       seaweedfs:
         condition: service_healthy
     ports:
-      - "6969:8080"
+      - "127.0.0.1:6969:8080"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - helix-cache:/var/cache/helix
     environment:
       S3_BUCKET: helix-db
       S3_REGION: us-east-1
@@ -230,11 +288,13 @@ configs:
 
 volumes:
   seaweedfs-data:
+  helix-cache:
 ```
 
 Inline `configs` content needs Docker Compose 2.23.1 or later. The SeaweedFS
 container is not published to the host. Change the example credentials in all
-three places if you expose it.
+three places if you expose it. The `helix-cache` volume and the open-file limit are
+what S3 mode's [local disk cache](#add-a-local-disk-cache) needs.
 
 Run `docker compose down` to replace the HelixDB container without deleting
 the SeaweedFS data. `docker compose down -v` deletes the persisted database.
@@ -264,6 +324,10 @@ SeaweedFS 4.09 or later enforce both.
 | `HELIX_STRONG_TEXT_SEARCH_MAX_ANALYSIS_BYTES` | Most unpublished text, in analysis bytes, one `strong` text search includes per partition before it fails with `index_backpressure`; defaults to 512 MiB (536,870,912). See [Search consistency](/database/helix-db/query-guides/search-consistency#searches-behind-unpublished-changes) |
 | `HELIX_WAL_FLUSH_INTERVAL_MS` | Milliseconds between WAL uploads, from 1 to 60000; defaults to 100. A durable write waits for the next upload, so a lower value cuts write latency, and each interval with new writes costs one object-store PUT |
 | `HELIX_SST_COMPRESSION` | Block codec of the files the server writes: `none` (the default) or `zstd`. Existing files stay readable after a change, and compaction rewrites them with the new codec |
+| `HELIX_HTTP_ADDR` | HTTP listen address inside the container; defaults to `0.0.0.0:8080` |
+| `HELIX_GRPC_ADDR` | gRPC listen address; the image sets `127.0.0.1:8081`, reachable only inside the container |
+| `RUST_LOG` | Log filter; the image sets `server=info,db=info,slatedb=info` |
+| `HELIX_TELEMETRY_LEVEL`, `DO_NOT_TRACK` | Telemetry level and opt-out. See [Telemetry](#telemetry) |
 
 The endpoint must be reachable from inside the container; container `localhost` is not
 the host machine. `DB_PATH` is a logical prefix, not the storage directory. To use
@@ -289,7 +353,8 @@ The disk cache needs v0.0.7 or later, and the v0.0.6 image and earlier ignore th
 sudo mkdir -p /data/helix-cache
 sudo chown 65532:65532 /data/helix-cache
 docker run --rm --name helixdb \
-  -p 6969:8080 \
+  -p 127.0.0.1:6969:8080 \
+  --ulimit nofile=65536:65536 \
   -e S3_BUCKET=my-bucket \
   -e S3_REGION=eu-west-2 \
   -e HELIX_DISK_CACHE_DIR=/var/cache/helix \
@@ -298,9 +363,9 @@ docker run --rm --name helixdb \
   ghcr.io/helixdb/helixdb:v0.0.16
 ```
 
-In Compose, add a volume at `/var/cache/helix` to the `helix` service. A new
-named volume mounted there is already writable; a bind mount must be owned by
-`65532:65532`. When running as another user or outside the image, set
+In Compose, mount a volume at `/var/cache/helix` on the `helix` service, as the
+SeaweedFS example does. A new named volume mounted there is already writable; a bind
+mount must be owned by `65532:65532`. When running as another user or outside the image, set
 `HELIX_DISK_CACHE_DIR` to a directory that user can write. With a read-only root
 filesystem, mount a writable volume (for example a tmpfs or `emptyDir`) at the cache
 directory. Use one cache directory per running server and per database; changing
@@ -376,11 +441,34 @@ other than `65532`), and room for the 8 GiB default unless `HELIX_DISK_CACHE_BYT
 is set.
 </Warning>
 
+## Telemetry
+
+The server sends usage telemetry at the `basic` level by default: each query's shape
+with every value redacted, its latency and outcome, the first word of the caller's
+`User-Agent`, and pseudonymous installation and deployment IDs. No parameters,
+results, IP addresses, or repository or bucket names are stored. Containers started
+by `helix start` use the CLI's level, which
+[`helix metrics`](/cli/command-reference/metrics) sets.
+
+To turn it off when you run the image directly, set `HELIX_TELEMETRY_LEVEL=off`:
+
+```bash
+docker run --rm --name helixdb \
+  -p 127.0.0.1:6969:8080 \
+  -e HELIX_TELEMETRY_LEVEL=off \
+  ghcr.io/helixdb/helixdb:v0.0.16
+```
+
+`DO_NOT_TRACK` set to anything but empty, `0`, `false` or `no` also turns telemetry
+off, whatever the level, in image v0.0.16 and later and in CLI 3.7.0 and later.
+
 ## Stop or inspect
 
 ```bash
 helix status
 helix logs dev
+helix doctor dev   # check storage, caches, memory and index use
+helix explorer dev # browse the graph in the local Explorer
 helix stop dev
 ```
 

@@ -12,13 +12,14 @@ writer or read-only handle against memory, disk, or S3-compatible object storage
 
 ## Install
 
-Install the SDK and its embedded runtime package.
+Install the SDK and its embedded runtime.
 
 {/* package-install: no JSON representation */}
 <CodeGroup>
 
 ```bash Rust
-cargo add helix-db --features embedded
+# crates.io helix-db 3.0.0 has no `embedded` feature, so build it from the repository.
+cargo add helix-db --git https://github.com/HelixDB/helix-db --tag v3.7.0 --features embedded
 ```
 
 ```bash TypeScript
@@ -26,7 +27,8 @@ npm install @helix-db/helix-db @helix-db/helix-db-embedded
 ```
 
 ```bash Go
-go get github.com/helixdb/helix-db/sdks/go
+# Not available: Go v0.3.1 ships no embedded runtime.
+# NewEmbeddedClient and NewEmbeddedReaderClient return ErrNativeBindingsUnavailable.
 ```
 
 ```bash Python
@@ -34,6 +36,16 @@ python -m pip install helix-db helix-db-embedded
 ```
 
 </CodeGroup>
+
+- **Rust** compiles the engine from source, so use a current stable toolchain. The
+  `v3.7.0` tag is the CLI release that defaults to server image v0.0.16. The SDK at
+  that tag is newer than the crates.io 3.0.0 release that the
+  [Rust SDK guide](/database/helix-db/start-here/sdk-setup/rust-project-setup) describes.
+- **Go** v0.3.1 does not distribute embedded execution. The embedded constructors
+  compile, but they work only when the module is built with the `helixdb_uniffi`
+  build tag against generated UniFFI Go bindings and a native `helixdb_uniffi`
+  library, and neither is published. Use the Go HTTP client with a
+  [local server](/database/helix-db/start-here/local-development/local-server) instead.
 
 ## Open a writer
 
@@ -59,6 +71,7 @@ const client = await Client.embedded({
 ```
 
 ```go Go
+// Go v0.3.1 returns ErrNativeBindingsUnavailable; see Install.
 client, err := helix.NewEmbeddedClient(
 	helix.DiskSource{Root: "/data/helix", Database: "app"},
 )
@@ -112,6 +125,13 @@ const client = await Client.embedded({
 
 </CodeGroup>
 
+Object storage reads its credentials from the standard `AWS_*` environment variables,
+such as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, and its
+endpoint from `AWS_ENDPOINT` when the source sets none. Unlike the server, it has no
+local disk cache by default: once a vector index outgrows memory, each graph hop that
+misses the cache waits on its own object-store request. Give object storage with a
+vector index a [hybrid cache](#configure-caches).
+
 ## Configure caches
 
 Cache configuration is optional and fixed when the handle opens. Local defaults are
@@ -138,6 +158,7 @@ bounded disk caches:
 | --- | --- |
 | Memory | Uses in-memory database caches |
 | Hybrid | Adds bounded disk caches with explicit paths and byte budgets |
+| Vector memory only | Turns off the storage and full-text caches and keeps only vector memory |
 
 {/* single-sdk-examples: TypeScript */}
 <CodeGroup>
@@ -169,7 +190,24 @@ const client = await Client.embedded(
 );
 ```
 
+```ts Vector memory only
+const client = await Client.embedded(
+  { kind: "disk", root: "/data/helix", database: "app" },
+  {
+    vectorMemoryBytes: 512 * 1024 * 1024,
+    mode: { kind: "vectorMemoryOnly" },
+  },
+);
+```
+
 </CodeGroup>
+
+Python takes the same settings as
+`cache=EmbeddedCacheConfig(vector_memory_bytes=..., mode=MemoryCache())` on
+`Client.embedded` and `Client.embedded_reader`, with `HybridCache(...)` and
+`VectorMemoryOnly()` as the other modes. Rust takes a full `DbConfig` in
+`Client::open_with_config` and `Client::open_reader_with_config`: start from
+`HelixDbSource::embedded_default_config()` and replace its cache.
 
 Cache byte budgets bound those caches. They are not a hard cap on total process RSS;
 requests and index work can allocate transient memory.
@@ -201,6 +239,7 @@ const reader = await Client.embeddedReader({
 ```
 
 ```go Go
+// Go v0.3.1 returns ErrNativeBindingsUnavailable; see Install.
 reader, err := helix.NewEmbeddedReaderClient(
 	helix.DiskSource{Root: "/data/helix", Database: "app"},
 )
@@ -221,10 +260,31 @@ reader = Client.embedded_reader(Disk("/data/helix", "app"))
 
 - Use the same `QueryRequest` and response contract as server mode.
 - Writer handles can execute read and write requests.
-- Server routing options such as writer-only, warm-only, API headers, and durability
-  headers are rejected because there is no gateway.
+- Per-request server options (writer-only, warm-only, and durability waits) fail with
+  an `InvalidRequest` error because there is no server. API-key and database-ID
+  settings are ignored.
 - Reopen the same disk or object-storage source to retain canonical data across process
   lifetimes.
+
+## Writers and readers
+
+- Open one writer per database at a time, across every process. Opening another writer
+  on the same source fences the first: the first handle's writes then fail, for
+  example with `writer_fenced_commit_outcome_unknown`, which means that commit may or
+  may not have landed.
+- Read-only handles can open the same disk or object-storage database alongside the
+  writer, in the same or other processes. A reader sees a write only once it is durable
+  in storage and the reader has refreshed, so it can lag behind the writer.
+
+## Telemetry
+
+Embedded databases send the same `basic` usage telemetry as the
+[local server](/database/helix-db/start-here/local-development/local-server#telemetry)
+by default. They read the level that [`helix metrics`](/cli/command-reference/metrics)
+saves for the user. Set `HELIX_TELEMETRY_LEVEL=off` in the process environment to turn
+it off. Rust builds from the `v3.7.0` tag also turn it off when `DO_NOT_TRACK` is set
+to anything but empty, `0`, `false` or `no`; the published TypeScript and Python
+embedded packages (0.3.3) predate `DO_NOT_TRACK` support.
 
 ## Next steps
 
