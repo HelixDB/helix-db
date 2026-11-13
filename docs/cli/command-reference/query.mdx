@@ -19,8 +19,59 @@ helix query [INSTANCE] -e '<typescript-expression>'
 helix query [INSTANCE] --ts-file <query.ts>
 ```
 
-Exactly one input is required. The envelope must include lowercase `request_type` (`read` or `write`)
-and `query`. Query bundles are not supported.
+Exactly one input is required. Query bundles are not supported.
+
+## Request shape
+
+A `--file` or `--body` request is one JSON object, the same envelope the server accepts at
+`POST /v2/query`. `helix init local` writes this one to `examples/request.json`; it counts `User`
+nodes:
+
+```json
+{
+  "request_type": "read",
+  "query_name": "node_count",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "node_count",
+            "root": {
+              "count": {
+                "input": {
+                  "nodes_where": {
+                    "predicate": {
+                      "eq": {
+                        "left": { "property": "$label" },
+                        "right": { "constant": { "string": "User" } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "returns": ["node_count"]
+    }
+  }
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `request_type` | Required. Lowercase `"read"` or `"write"`. Selects read or write execution, and must match the batch under `query`. |
+| `query` | Required. Exactly one `read` or `write` batch with `entries[]` and `returns[]`. Each entry names one operation tree whose innermost input is a source operation. |
+| `query_name` | Optional name for logs and query diagnostics. Missing or `null` becomes `__dynamic__`. |
+| `parameters`, `parameter_types` | Optional named values and their declared types. |
+
+The CLI checks only `request_type` and the presence of `query`; the server validates the rest. See the
+[request envelope](/database/helix-db/query-guides/http-api#request-envelope) for every field, and
+[Reading data](/database/helix-db/query-guides/reading-data) and
+[Writing data](/database/helix-db/query-guides/writing-data) for the operations. The `-e` and
+`--ts-file` inputs build this JSON from the TypeScript SDK's builders instead.
 
 ## Arguments
 
@@ -73,8 +124,13 @@ Cloud queries use the WorkOS session and go through the broker — the Helix Clo
 that forwards CLI queries to your database. The CLI never calls the Cloud gateway (the database
 endpoint that applications reach with an application key) directly.
 
-- `read` uses the backend read-query RPC and requires `database.query.read`.
-- `write` uses the backend write-query RPC and requires `database.query.write`.
+- `read` posts to `/v1/databases:query-read` and requires the `database.query.read` permission on the
+  database's project.
+- `write` posts to `/v1/databases:query-write` and requires `database.query.write`.
+- The body is `{"database":{"tenantId":"<id>"},"queryJson":"<base64 request>"}`, with `clusterId` for
+  a dedicated cluster. The CLI decodes the reply's `responseJson` and `statusCode`. The Helix Cloud API
+  accepts only WorkOS sessions here, so service credentials and application keys cannot use this path;
+  see [Run in CI](/cli/scripting#helix-cloud).
 - The backend rejects an operation/envelope mismatch before gateway dispatch.
 - No database key, custom auth header, or direct gateway URL is accepted.
 - A mutation is never retried after dispatch, timeout, or ambiguous transport failure.
@@ -82,8 +138,9 @@ endpoint that applications reach with an application key) directly.
 
 ### TypeScript input
 
-- `-e` and `--ts-file` need Node.js 20+. The expression must evaluate to a `readBatch()` or `writeBatch()` builder.
-- On first use, the CLI installs the pinned `@helix-db/helix-db` SDK into the Helix cache directory (override with `HELIX_CACHE_DIR`). No running instance is needed to build the request.
+- `-e` and `--ts-file` need Node.js 20+ on `PATH`. The expression must evaluate to a `readBatch()` or `writeBatch()` builder.
+- On first use, the CLI runs `npm install` for the pinned `@helix-db/helix-db@3.1.0` SDK into `ts-runtime/` under the Helix cache directory (override with `HELIX_CACHE_DIR`). That first run needs npm and access to the npm registry; later runs reuse the install. No running instance is needed to build the request.
+- Without Node.js the command fails with `Node.js is required to run TypeScript queries`, and without npm on the first run with `npm is required to install the TypeScript query runtime`. Pass a JSON request with `--file` or `--body` instead.
 
 ### Output
 

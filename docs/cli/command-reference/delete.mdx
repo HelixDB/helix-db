@@ -30,10 +30,12 @@ helix delete <INSTANCE> [OPTIONS]
 
 ## Behavior
 
-- For local instances, Helix-owned containers, networks, disk-mode and disk-cache volumes, and the per-instance directory under `.helix/` are deleted.
+- For local instances, Helix-owned containers, networks, disk-mode and disk-cache volumes, and the per-instance directory under `.helix/` are deleted. Container cleanup errors are ignored: with Docker or Podman stopped, the instance still leaves `helix.toml` but its volumes stay. Start the runtime and run `helix prune <instance>` to remove them; it works for an instance no longer in `helix.toml`.
 - For Helix Cloud instances, only the `[enterprise.<name>]` block in `helix.toml` is removed — the database itself is untouched.
 - Remote S3 object-store data is not deleted.
-- The CLI refuses to delete the last instance in `helix.toml`; add a replacement first.
+- The CLI refuses to delete the last instance in `helix.toml` (`Cannot delete the final instance '<instance>'`); add a replacement first.
+- Rewrites `helix.toml`, which removes its comments; see [Commands that rewrite helix.toml](/cli/configuration#commands-that-rewrite-the-file).
+- With `--json`, prints `{"deleted":"<instance>"}`.
 - In a TTY, `helix delete` prints a warning and asks for confirmation. Without a TTY, or with `--json`, it refuses to run without `--yes`:
 
   ```text

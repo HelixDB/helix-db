@@ -300,6 +300,7 @@
               "cli/workflows/local",
               "cli/workflows/helix_cloud",
               "cli/configuration",
+              "cli/scripting",
               "cli/troubleshooting"
             ]
           },
@@ -1364,6 +1365,14 @@
     {
       "source": "/helix.toml",
       "destination": "/cli/configuration"
+    },
+    {
+      "source": "/cli/ci",
+      "destination": "/cli/scripting"
+    },
+    {
+      "source": "/cli/json",
+      "destination": "/cli/scripting"
     },
     {
       "source": "/hql",

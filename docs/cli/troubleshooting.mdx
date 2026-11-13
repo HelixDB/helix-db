@@ -1,46 +1,191 @@
 ---
 title: "CLI troubleshooting"
-description: "Recover local and WorkOS-authenticated Cloud CLI operations"
+description: "Fix the helix CLI's common errors for projects, local instances, queries, and Helix Cloud"
 pageType: "Troubleshooting"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="orange" size="sm">Troubleshooting</Badge></div>
 
-## Authentication required
+Each section starts with the error the CLI prints. Most errors also print a `hint:` line with the
+fix; with `--json` the same fields arrive as one JSON object on stderr.
 
-Run `helix auth login`. The CLI refreshes a nearly expired session automatically
-through the Helix Cloud API. It retries once only when the API rejects the expired
-token before running the command; a normal authorization denial or any failure after
-the command runs is not retried.
+## Project and helix.toml
 
-Old credential/config fields are intentionally rejected. Remove legacy user/admin keys, arbitrary
-authorization headers, gateway URLs, and query-key fields. Service credentials and application keys
-cannot be used to log the CLI in.
+### `no helix.toml found`
 
-## Ambiguous Cloud target
+The command searched from the current directory up to the filesystem root. Run it inside the project,
+or create a project with `helix init local` or `helix init cloud`.
+
+### `failed to parse helix.toml at <path>`
+
+The `caused by:` line names the line and problem. Common causes:
+
+- TOML syntax, such as an unquoted string.
+- `unknown field` in `[project]` or `[enterprise.<name>]`. These tables reject keys the CLI does not
+  know, including removed ones such as gateway URLs and query auth settings. Delete the key.
+- An `[enterprise.<name>] database` that is not `tenant:<id>` or `cluster:<id>`.
+- An invalid `tag`, `pull`, `storage`, or `container_runtime` value.
+
+See [Project file](/cli/configuration#project-file) for every key.
+
+### `at least one instance must be defined in <path>`
+
+Every command except `helix add` needs an instance. Add one with `helix add local --name dev` or
+`helix add cloud --name production`.
+
+### `local instance '<name>' uses s3 storage but has no [local.<name>.s3] config`
+
+`storage = "s3"` needs a `[local.<name>.s3]` table with at least `bucket`. The opposite,
+`has s3 config but storage is not set to "s3"`, means the table is there but `storage` is not `"s3"`.
+
+### `instance '<name>' not found in helix.toml`
+
+Instance names come only from `helix.toml`; run `helix status` to list them. A Cloud database's name or
+slug is not an instance name: link it with `helix add cloud --name <name> --database <database>`, or
+pass `tenant:<id>` to `helix query`, `helix shell`, or `helix doctor`.
+
+### My data is gone after `helix stop`
+
+The instance ran in memory. Check the `ENDPOINT` column of `helix status`: it ends in `(memory)`,
+`(disk)`, or `(s3)`. A misspelled key in a `[local.<name>]` table, such as `storge = "disk"`, is ignored
+without a warning, so the instance keeps the in-memory default. Fix the key, or run
+`helix start <instance> --disk --persist`.
+
+## Local instances
+
+### `Docker is not installed` or `Docker is not running`
+
+When the daemon is down, local commands first try to start it: Docker Desktop, Colima, OrbStack,
+or `podman machine` on macOS, and `systemctl start docker` on Linux. If that fails, start it by
+hand and run the command again. The hint names the install or start command for your platform. To use
+Podman, set `container_runtime = "podman"` under `[project]`. Restricted sandboxes and CI runners
+without root often cannot run containers.
+
+### `Failed to start <container>` with `port is already allocated`
+
+Another container or process uses the instance's port. `helix add local` defaults to port `6969`
+without checking your other instances. Run `helix status` to find the clash, then pick a free port:
+
+```bash
+helix start staging --port 7070 --persist
+```
+
+### `local Helix did not become ready in time`
+
+The container started but did not answer `GET /healthz` within about 30 seconds. Read
+`helix logs <instance>`, then run `helix doctor <instance>`.
+
+### `cannot reach Helix instance '<name>' at http://localhost:<port>/v2/query`
+
+Nothing listens on that port. Run `helix start <instance>` and check it with `helix status <instance>`.
+For a server on another host or port, pass `--host` and `--port`.
+
+### `no default query target` or `no default local instance`
+
+The project has several instances, none named `dev`, and the CLI cannot prompt. Pass the instance
+name; the error lists the candidates.
+
+### `Cannot delete the final instance '<name>'`
+
+`helix delete` keeps at least one instance in `helix.toml`. Add the replacement with `helix add` first.
+
+### Volumes left after `helix delete`
+
+`helix delete` ignores container cleanup errors, so with Docker or Podman stopped it removes the
+instance from `helix.toml` but leaves its volumes. Start the runtime and run `helix prune <instance>`;
+it works for an instance that is no longer in `helix.toml`.
+
+### `Cypher CLI requests currently require a local instance`
+
+`helix cypher` sends to local instances only. Send Cypher to Helix Cloud with an SDK or
+`POST /v2/cypher`.
+
+## Queries
+
+### `Node.js is required to run TypeScript queries`
+
+`-e` and `--ts-file` need Node.js 20+. The first run also needs npm and access to the npm registry
+(`npm is required to install the TypeScript query runtime`). Install Node.js, or pass a JSON request
+with `--file` or `--body`.
+
+### `query request must include request_type`
+
+A `--file` or `--body` request needs a lowercase `request_type` of `read` or `write` and a `query`
+batch. See [Request shape](/cli/command-reference/query#request-shape).
+
+### `query failed with HTTP <status>`
+
+The server rejected the request; the `caused by:` line holds its error body. See
+[Error handling](/database/helix-db/query-guides/error-handling) for the error codes.
+
+## Helix Cloud
+
+### `not logged in to Helix Cloud`
+
+There is no valid session in `~/.helix/credentials` (or `$HELIX_HOME/credentials`). Run
+`helix auth login`. A Cloud `helix query` reports
+the same problem as `read credentials <path>. Run 'helix auth login' to create a WorkOS session.`
+
+The CLI refreshes a nearly expired session automatically and retries once only when the API rejects
+the expired token before running the command. If the refresh itself fails, log in again.
+
+### `obsolete or invalid Cloud credentials at <path>; API-key credentials are not supported`
+
+It can also appear as the `caused by:` line of `not logged in to Helix Cloud`. The credential file
+was written by an older CLI or edited by hand. Run `helix auth login`, which replaces it. Do not edit the file; application keys and service credentials cannot log the CLI in.
+
+### `logging in needs an interactive terminal`
+
+`helix auth login` needs a terminal on stdin and stderr, and refuses `--json`. There is no
+unattended login; see [Run in CI](/cli/scripting#run-in-ci).
+
+### `bind the WorkOS callback listener on port 8765`
+
+Browser logins receive the sign-in on `127.0.0.1:8765`. Another `helix auth login`, or another
+program, holds that port. Close it and try again. On a remote machine, see
+[Log in over SSH](/cli/command-reference/auth#log-in-over-ssh).
+
+### `refusing to send a password over an unencrypted connection`
+
+`helix auth login password` runs only when `CLOUD_AUTHORITY` is `https://` or on this machine. Unset
+`CLOUD_AUTHORITY`, or use a browser method such as `helix auth login sso`.
+
+### `unexpected argument '--project' found`
+
+Flags belong to the subcommand. Write `helix database list --project <project>`, not
+`helix database --project <project>`.
+
+### Ambiguous Cloud target
 
 Without a terminal, or with `--json`, the CLI cannot prompt, so it fails and lists the candidates.
 Pass one by ID, slug, or name, for example `--workspace <workspace>`, `--project <project>`, or a
 database as `tenant:<id>`. If a name matches several resources, use the ID or slug instead.
-Alternatively run `helix project link` and `helix add cloud` to persist stable project/database
-linkage in `helix.toml`.
+Alternatively run `helix project link` and `helix add cloud` to persist stable project and database
+links in `helix.toml`.
 
-## Confirmation required
+### `this action needs confirmation`
 
-Destructive Cloud commands fail with `this action needs confirmation` when they cannot prompt. Re-run
-with `--yes` after checking the target.
+Destructive Cloud commands fail this way when they cannot prompt. Re-run with `--yes` after checking
+the target.
 
-## Query permission denied
+### Query permission denied
 
-Project `read`/`write` does not grant database-data access. Ask an owner/admin to grant independent
-`query_read` and, if required, `query_write` for the selected project. Members default to neither.
+A Cloud query fails with HTTP `403`. Project `read`/`write` access does not include database data.
+Ask an owner or admin to grant you `database.query.read`, and `database.query.write` for writes, on
+the project that owns the database. Members have neither by default.
 
-## Local connection refused
+### `--plan is required for a shared tenant database`
 
-Run `helix start <instance>`, verify with `helix status <instance>`, or pass local-only `--host` and
-`--port` overrides.
+`helix database create` needs `--plan <code>` without a terminal. List the codes with
+`helix api get /v1/workspace-plans`, or pass `--cluster <cluster>` for a dedicated cluster.
 
-## Cloud logs
+### `more than 50 pages; narrow the request`
 
-Cloud `--follow` is not supported. Use an RFC 3339 `--start`/`--end` range or omit both for the last
-hour of query errors.
+Cloud lists stop after 10,000 items. Pass `--project` or `--workspace` to list fewer, or a narrower
+`--start`/`--end` window for `helix logs`.
+
+### Cloud logs
+
+`Cloud logs cannot be followed`: omit `--follow` and use an RFC 3339 `--start`/`--end` range, or omit
+both for the last hour of query errors. `--start and --end only apply to Cloud instances`: local logs
+take only `--follow`.

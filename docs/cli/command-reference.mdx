@@ -29,7 +29,7 @@ They never accept or store application database keys or service credentials.
 | [`helix stop`](/cli/command-reference/stop) | Local | Stop a local instance and remove its containers |
 | [`helix restart`](/cli/command-reference/restart) | Local | Restart a local instance |
 | [`helix status`](/cli/command-reference/status) | Local, Cloud | Inspect runtime or database status |
-| [`helix doctor`](/cli/command-reference/doctor) | Local, Cloud | Check an instance's setup and recent queries' index use |
+| [`helix doctor`](/cli/command-reference/doctor) | Local | Check a local or self-hosted server's setup and recent queries' index use. A Cloud database only gets the CLI version check. |
 | [`helix logs`](/cli/command-reference/logs) | Local, Cloud | Follow local logs or list Cloud query errors |
 | [`helix query`](/cli/command-reference/query) | Local, Cloud | Execute one v3 JSON/SDK query |
 | [`helix cypher`](/cli/command-reference/cypher) | Local | Execute or explain one Cypher statement |
@@ -61,7 +61,7 @@ They never accept or store application database keys or service credentials.
 
 ## Global options
 
-These flags work with every command.
+These flags work with every command, except `-V`, which works only as `helix --version`.
 
 | Flag | Description |
 | --- | --- |
@@ -76,21 +76,48 @@ These flags work with every command.
 - stdout carries only the command's result: tables, detail views, query results, one-time tokens, or the `--json` payload. It is always safe to pipe.
 - stderr carries everything else: progress sessions, spinners, warnings, hints, and errors.
 - Destructive Cloud commands (`project delete`, `database delete`, `database key revoke`, `service-credential revoke`) ask for confirmation in a terminal. Without one, or with `--json`, they fail before any request unless you pass `-y`/`--yes`. They never act on an "only candidate" they were not told about: the target must be named, linked in `helix.toml`, or picked in a terminal.
-- Commands whose output is a live terminal session have no JSON result and refuse `--json`: `chef`, `start --foreground`, local `logs`, and `skills install` / `skills list`.
+- Commands that need a terminal refuse `--json`: `auth login`, `chef`, `start --foreground`, local `logs`, and `skills install` / `skills list`. `feedback` accepts `--json` but prints nothing on stdout.
 
-With `--json`, a failed command prints one JSON object on stderr and exits with status `1`, or `2`
-for invalid arguments. Only `message` is always present:
+A command exits `0` on success, `1` when it runs and fails, and `2` for invalid arguments, with or
+without `--json`. With `--json`, a failure prints one JSON object on stderr; only `message` is always
+present:
 
 ```json
 {"error":{"message":"...","context":"...","caused_by":"...","hint":"...","candidates":[{"id":"...","name":"..."}]}}
 ```
 
+`helix doctor` exits `1` when a check fails, and `helix shell` exits `0` even when requests fail. See
+[Scripting and CI](/cli/scripting) for every command's `--json` payload.
+
+## Targets and resolution
+
+Instance names come from `helix.toml`. Helix Cloud resources (workspaces, projects, clusters, and
+databases) have their own IDs, slugs, and names, which commands resolve through the Helix Cloud API.
+The two are separate namespaces: `helix query production` looks for an instance named `production`
+in `helix.toml`, while `helix database get orders` looks for a Cloud database named `orders`.
+
+| Command | `INSTANCE` accepts | When omitted |
+| --- | --- | --- |
+| `start`, `stop`, `restart`, `explorer` | A local instance | `dev`, then the only local instance, then a picker in a terminal |
+| `query`, `shell`, `doctor` | Any instance, or a typed `tenant:<id>` / `cluster:<id>` Cloud database, which needs no `helix.toml` | `dev`, then the only instance, then a picker in a terminal |
+| `logs` | Any instance | Same as `query` |
+| `cypher` | A local instance | Same as `query`; a Cloud instance fails |
+| `status` | Any instance | Every instance; never prompts |
+| `prune` | A local instance | A picker in a terminal; otherwise pass `--all` |
+| `delete` | Any instance; required | — |
+
+`logs`, `status`, `cypher`, and `explorer` do not accept typed `tenant:<id>` / `cluster:<id>`
+targets: add the database to `helix.toml` with `helix add cloud` first. Without a terminal, a command
+that cannot pick a default fails with `no default query target` or `no default local instance` and
+lists the instances.
+
 ## Cloud resource resolution
 
-Cloud commands never require raw IDs. Workspace, project, cluster, and database arguments are
-optional and accept an ID, slug, or display name, matched in that order (names are
-case-insensitive). Databases also accept `tenant:<id>` and `cluster:<id>`. Application keys and
-service credentials are passed by ID or name.
+Workspace, project, cluster, and database arguments are optional and accept an ID, slug, or display
+name, matched in that order (names are case-insensitive). Databases also accept `tenant:<id>` and
+`cluster:<id>`. Application keys and service credentials are passed by ID or name. The exception is
+`helix service-credential --grant`, which sends its project ID to the API as given; find the ID with
+`helix project get <project>`.
 
 An omitted resource resolves to:
 
@@ -108,8 +135,11 @@ a terminal; pickers only fill in arguments you left out. A resource passed by ID
 (for example the workspace of a project found in a listing), `--json` does not add it.
 
 There is no global or persisted workspace or project selection. A group run without a subcommand
-lists its resources, so `helix project` is the same as `helix project list`. Lists follow API
-pagination.
+lists its resources with the defaults above, so `helix project` is the same as `helix project list`.
+Flags such as `--workspace` and `--project` belong to the subcommand: write
+`helix database list --project <project>`, not `helix database --project <project>`, which fails as
+an unexpected argument. Lists follow API pagination up to 50 pages of 200 items, then fail and ask
+you to narrow the request.
 
 ## Removed and unsupported commands
 

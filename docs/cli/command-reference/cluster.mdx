@@ -13,10 +13,14 @@ cluster. Cloud only; these commands are read-only.
 ## Usage
 
 ```bash
-helix cluster [list] [--workspace <workspace>] [--project <project>]
+helix cluster
+helix cluster list [--workspace <workspace>] [--project <project>]
 helix cluster get [CLUSTER] [--workspace <workspace>] [--project <project>]
 helix cluster indexes [CLUSTER] [--workspace <workspace>] [--project <project>]
 ```
+
+Bare `helix cluster` lists clusters with the defaults below. Flags go after the subcommand:
+`helix cluster list --project <project>`, not `helix cluster --project <project>`.
 
 ## Subcommands
 

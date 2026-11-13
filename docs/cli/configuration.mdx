@@ -1,41 +1,214 @@
 ---
 title: "CLI configuration"
-description: "Project linkage and WorkOS session files"
+description: "helix.toml keys and validation, image pinning, CLI state files, and environment variables"
 pageType: "Reference"
 ---
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-The CLI reads project configuration from `helix.toml` and its WorkOS session from
-`~/.helix/credentials`. There is no user-global workspace selection file.
+The CLI reads a project's instances from `helix.toml`, keeps your Helix Cloud session and its own
+state under the Helix home directory (`~/.helix`), and reads a few environment variables. There is no
+user-global workspace or project selection.
+
+## Project file
+
+`helix init` writes `helix.toml` at the project root. Every other command finds it by walking up from
+the current directory to the filesystem root, so you can run commands from any subdirectory. Without
+one, commands fail with `no helix.toml found`.
+
+A project with two local instances, one of them on S3 storage, and a linked Cloud database:
 
 ```toml
 [project]
-name = "example"
+name = "my-app"
 queries = "db"
 container_runtime = "docker"
-id = "project_123"          # stable optional Cloud link
-workspace_id = "ws_123"     # stable optional Cloud link
+id = "<project-id>"
+workspace_id = "<workspace-id>"
 
 [local.dev]
 port = 6969
+image = "ghcr.io/helixdb/helixdb"
+tag = "v0.0.16"
+
+[local.staging]
+port = 7070
+image = "ghcr.io/helixdb/helixdb"
+tag = "v0.0.16"
+storage = "s3"
+
+[local.staging.s3]
+bucket = "my-bucket"
+prefix = "staging/"
+region = "eu-west-2"
 
 [enterprise.production]
-database = "tenant:tenant_123"
-project_id = "project_123"  # optional stable link
-workspace_id = "ws_123"     # optional stable link
+database = "tenant:<tenant-id>"
+workspace_id = "<workspace-id>"
+project_id = "<project-id>"
 ```
 
-Cloud `database` accepts only `tenant:<id>` or `cluster:<id>`. A physical shared cluster is not a
-database target. Unknown Cloud fields are rejected. In particular, gateway URLs, query auth headers,
-query auth environment variables, source snapshots, sync metadata, and query bundles are invalid.
+The file has exactly these tables:
 
-`helix init cloud`, `helix add cloud`, and `helix project link` write `[project] id` and
-`workspace_id`. Cloud commands run in the project then default to that project and its linked
-databases. An explicit argument (ID, slug, or name) always wins; without a link, a command uses the
-only candidate, prompts in a terminal, or fails and lists the candidates. See
-[Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
+- `[project]`, required.
+- `[local.<name>]`, one per local instance.
+- `[enterprise.<name>]`, one per linked Helix Cloud database. `helix init cloud` and
+  `helix add cloud` write this table; there is no `[cloud.<name>]` table.
 
-The strict credential file stores only `access_token`, rotating `refresh_token`, `expires_at`, and
-`email`. It is written atomically with mode `0600`. Do not edit it or put application keys or service
-credentials in it.
+Every command except `helix add` needs at least one local or Cloud instance.
+
+### Instance names
+
+The `<name>` in `[local.<name>]` and `[enterprise.<name>]` is the instance name you pass to commands
+such as `helix start dev` or `helix query production`. A name has 1 to 32 characters, using only ASCII
+letters, digits, `-`, and `_`. `helix add` refuses a name that either table already uses.
+
+Instance names live only in `helix.toml`. They are separate from the names and slugs of Helix Cloud
+resources, so an instance named `production` can link a Cloud database named `orders`. See
+[Targets and resolution](/cli/command-reference#targets-and-resolution).
+
+### `[project]`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `name` | string | Required. `helix init` writes the directory name. | Project name. Must not be empty. Names local containers, networks, and volumes (`helix-<name>-<instance>`), so renaming it orphans existing ones. `helix project link` never changes it. |
+| `container_runtime` | `"docker"` or `"podman"` | `"docker"` | Binary used for local instances. |
+| `queries` | string (path) | `"db"` | Written by the CLI. No current command reads it. |
+| `id` | string | Not set | Linked Helix Cloud project ID. Written by `helix init cloud`, `helix add cloud`, `helix project link`, and `helix project create --link`. |
+| `workspace_id` | string | Not set | Workspace of the linked project. Written with `id`. |
+
+Cloud commands run in the project default to the project in `id`. Without `id`, they use the
+`project_id` of the `[enterprise.*]` tables when all of them name the same project.
+
+### `[local.<name>]`
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `port` | integer | `6969` | Host port published to the container's port `8080`. `helix add local` and `helix init local` do not check whether another instance already uses it. |
+| `image` | string | `"ghcr.io/helixdb/helixdb"` | Server image repository, without a tag. Set it to run a custom build. |
+| `tag` | string | The CLI's default image tag (`v0.0.16` for CLI 3.7.0) | A tag of 1 to 128 characters (letters, digits, `_`, `.`, `-`; not starting with `.` or `-`), or `sha256:` followed by 64 lowercase hex digits to pin a digest. `latest` pulls on every start. See [Image pinning](#image-pinning). |
+| `pull` | `"always"`, `"missing"`, or `"never"` | `always` for `latest`, `missing` for any other tag | When to pull the server image. An explicit value also applies to the disk-mode SeaweedFS image, which otherwise uses `missing`. `always` requires a successful pull; `never` requires a cached image. |
+| `storage` | `"memory"`, `"disk"`, or `"s3"` | `"memory"` | `memory` loses data when the container stops or restarts. `disk` keeps it in a CLI-managed SeaweedFS volume. `s3` uses the bucket in `[local.<name>.s3]`. |
+
+### `[local.<name>.s3]`
+
+Required when `storage = "s3"`, and an error with any other storage mode.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `bucket` | string | Required | Bucket name. Must not be empty. |
+| `prefix` | string | `"db/"` | Key prefix for this instance's data. Must not be empty. A leading `/` is dropped and a trailing `/` added. |
+| `region` | string | `"us-east-1"` | Bucket region. Must not be empty. |
+| `endpoint_url` | string | Not set | Endpoint of an S3-compatible store. Must start with `http://` or `https://`. |
+| `allow_http` | boolean | `false` | Allow plain HTTP to the endpoint. An `http://` `endpoint_url` allows it too. |
+
+S3 credentials never go in `helix.toml`. `helix start` and `helix restart` load `.env` from the
+project root, then pass `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+`AWS_PROFILE`, `AWS_REGION`, and `AWS_DEFAULT_REGION` from the environment into the container.
+
+### `[enterprise.<name>]`
+
+A link to a Helix Cloud database. It stores stable IDs only.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `database` | string | Required | `tenant:<id>` for a tenant database or `cluster:<id>` for a dedicated cluster. The ID has 1 to 128 characters: letters, digits, `-`, and `_`. A shared cluster is not a database target. |
+| `project_id` | string | Not set | Project that owns the database. Written by the CLI. |
+| `workspace_id` | string | Not set | Workspace that owns the project. Written by the CLI. |
+
+Gateway URLs, application keys, query auth headers or environment variables, sync metadata, and query
+bundles have no key here.
+
+### Unknown keys
+
+| Section | Unknown key or table |
+| --- | --- |
+| Top level, `[project]`, `[enterprise.<name>]` | Rejected: commands fail with `failed to parse helix.toml at <path>` and `unknown field`. |
+| `[local.<name>]`, `[local.<name>.s3]` | Ignored without a warning. |
+
+<Warning>
+A misspelled key in a `[local.<name>]` table is ignored. `storge = "disk"` leaves the instance on its
+default in-memory storage, so its data is lost when it stops. Check the storage mode in the
+`ENDPOINT` column of `helix status`.
+</Warning>
+
+### Commands that rewrite the file
+
+`helix add`, `helix delete`, `helix start --persist`, `helix project link`, and
+`helix project create --link` rewrite the whole file from what the CLI parsed. A rewrite:
+
+- removes every comment;
+- writes keys in the CLI's order, and may reorder the instance tables;
+- drops unknown keys in `[local.*]` tables;
+- writes defaults explicitly, including `queries`, `container_runtime`, `image`, and `tag`.
+
+Keep notes about the configuration somewhere other than `helix.toml`, and review the diff after one of
+these commands.
+
+### Image pinning
+
+`helix init local` and `helix add local` write the CLI's current default `image` and `tag` into
+`helix.toml`. Each instance stays on that tag after `helix update`; only instances you add later get
+the new CLI's default. An instance without a `tag` key follows the CLI's default until a command
+rewrites the file, which then writes that default.
+
+To move an instance to the image the current CLI ships with:
+
+<Steps>
+  <Step title="Find the tag">
+    With the instance running, run `helix doctor <instance>`. Its `runtime.image` check reports
+    `pins an older server image` and names the tag this CLI ships with.
+  </Step>
+  <Step title="Start on the new tag and save it">
+    ```bash
+    helix start dev --image-version v0.0.16 --persist
+    ```
+
+    `helix start` replaces the container, so an in-memory instance starts empty. `--persist` writes
+    the new `tag` to `[local.dev]`. You can also edit `tag` by hand and run `helix start dev`.
+  </Step>
+</Steps>
+
+Use `tag = "latest"` to track the newest published image; it is pulled on every start.
+
+## Helix home
+
+The CLI keeps its own state in `~/.helix` (`%USERPROFILE%\.helix` on Windows), or in `$HELIX_HOME`
+when that is set and not empty.
+
+| Path | Contents |
+| --- | --- |
+| `credentials` | Your WorkOS session: `access_token`, rotating `refresh_token`, `expires_at`, and `email`. Written atomically, mode `0600` in a `0700` directory on macOS and Linux. Do not edit it, and never put application keys or service credentials in it. |
+| `credentials.lock` | Lock that serializes session refreshes across concurrent `helix` processes. |
+| `metrics.toml` | Telemetry level and pseudonymous IDs. See [`helix metrics`](/cli/command-reference/metrics). |
+| `update_cache.toml` | Result of the last CLI update check, repeated at most once every 24 hours. |
+| `skills_cache.toml` | Result of the last Helix agent skills update check. |
+| `ts-runtime/` | The TypeScript SDK that `helix query -e` and `--ts-file` install on first use. Stored under `$HELIX_CACHE_DIR` instead when that is set. |
+
+In a project, `.helix/<instance>/` holds per-instance state. `helix init` adds `.helix/` and `.env` to
+`.gitignore`.
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `HELIX_HOME` | Directory for all CLI state listed in [Helix home](#helix-home). Use a separate one per CI job or test. |
+| `HELIX_CACHE_DIR` | Directory for the TypeScript query runtime. Defaults to the Helix home. |
+| `HELIX_NO_UPDATE_CHECK` | Set to any value, even `0`, to skip the CLI and skills update checks. Each check calls GitHub with a timeout of up to 10 seconds, at most once a day, before the command runs. `--json` runs skip these checks; `helix doctor` still looks up the latest release for its `cli.version` check unless this is set. `HELIX_DISABLE_UPDATE_CHECK` does the same. |
+| `NO_COLOR` | Set to any value to turn off colored output. Output that is not a terminal is never colored. `CLICOLOR=0` also turns colors off, and `CLICOLOR_FORCE=1` forces them on. |
+| `CLOUD_AUTHORITY` | Helix Cloud API host the CLI talks to. Leave it unset to use Helix Cloud. A host without a scheme gets `https://`, or `http://` for `localhost` and `127.0.0.1`. |
+| `HELIX_EXPLORER_IMAGE` | Image `helix explorer` runs when `--image` is not passed. |
+| `DO_NOT_TRACK` | Any value except empty, `0`, `false`, or `no` turns telemetry off for the CLI and the local instances it starts. |
+| `HELIX_TELEMETRY_ENDPOINT` | Endpoint for CLI telemetry. The CLI also passes it to the local instances it starts. |
+| `HELIX_DEPLOYMENT_ID`, `HELIX_CLUSTER_ID` | Passed to the local instances the CLI starts, where they label telemetry. |
+| `HELIX_TELEMETRY_LEVEL`, `HELIX_TELEMETRY_INSTALLATION_ID`, `HELIX_TELEMETRY_USER_ID` | Read by a HelixDB server or embedded database, not by the CLI. The CLI sets them on the local instances it starts from `metrics.toml`. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, `AWS_DEFAULT_REGION` | Passed into local instances that use S3 storage. |
+| `DOCKER_HOST`, `DOCKER_CONTEXT` | Select the Docker endpoint. When the daemon is down, the CLI reads them to decide whether to start Docker Desktop, Colima, or OrbStack. |
+| `HOME` (`USERPROFILE` on Windows) | Home directory for `~/.helix` and the default `helix chef` project, `~/my-first-helix-project`. |
+| `XDG_STATE_HOME` | Where the CLI also looks for the `skills` CLI lockfile when it checks whether the Helix agent skills are installed. |
+
+## Related
+
+- [Scripting and CI](/cli/scripting): JSON output, exit codes, and non-interactive use.
+- [`helix start`](/cli/command-reference/start): one-off overrides and `--persist`.
+- [Targets and resolution](/cli/command-reference#targets-and-resolution): how commands pick instances and Cloud resources.
