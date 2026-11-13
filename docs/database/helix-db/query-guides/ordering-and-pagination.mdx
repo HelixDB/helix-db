@@ -20,14 +20,14 @@ Use this page when a response must come back in a stable order, one page at a ti
 | Drop the first `n` rows | `skip(n)` | `skip` | `Skip` |
 | Keep rows from `start` up to, but not including, `end` | `range(start, end)` | `range` | `Range` |
 
-The order is `Order::Asc` or `Order::Desc` in Rust, `Order.Asc` or `Order.Desc` in
-TypeScript, `helix.OrderAsc` or `helix.OrderDesc` in Go, and `Order.ASC` or
-`Order.DESC` in Python.
+Order values: `Order::Asc` / `Order::Desc` (Rust), `Order.Asc` / `Order.Desc`
+(TypeScript), `helix.OrderAsc` / `helix.OrderDesc` (Go), `Order.ASC` / `Order.DESC`
+(Python).
 
 ## Sort and page a stream
 
-This request sorts posts newest first and returns the second page of 20. `created_at`
-holds epoch milliseconds:
+This request returns the second page of 20 posts, newest first. `created_at` holds
+epoch milliseconds:
 
 <CodeGroup>
 
@@ -145,47 +145,42 @@ LIMIT 20 OFFSET 20
 
 </CodeGroup>
 
-`range(20, 40)` is half-open: it skips 20 rows and keeps the next 20, the same as
-`skip(20)` followed by `limit(20)`.
+`range(20, 40)` is the same as `skip(20)` followed by `limit(20)`.
 
 ## Ordering rules
 
 These rules describe native queries.
 
-- A row without the sort property sorts first in ascending order and last in
-  descending order. A stored `null` is a value: it sorts after missing values and
-  before every other value.
-- Values of different types sort by type first: `null`, booleans, numbers, date-times,
-  strings, bytes, arrays, then objects. `i64`, `f64`, and `f32` values compare by
-  numeric value. Strings compare byte by byte, so the order is case-sensitive and
-  `"Zoe"` sorts before `"adam"`. Descending order reverses the whole sequence.
-- Rows with equal sort keys come back in ascending element ID order, in both
-  directions, so repeating a request returns the same order.
-- `orderByMultiple` compares the first key, then uses the next key to break ties.
-- `$id` is a valid sort key. So are `$distance` and `$score` while each row is still
-  on its search hit: filter steps keep them, and a step to another element drops them.
-  A search already returns hits in rank order.
-- `orderBy` after `bind` is rejected with `invalid_after_bind_operation`.
+- A row without the sort property sorts first ascending and last descending. A stored
+  `null` sorts after missing values and before every other value.
+- Mixed types sort by type: `null`, booleans, numbers, date-times, strings, bytes,
+  arrays, then objects. `i64`, `f64`, and `f32` compare by numeric value. Strings
+  compare byte by byte, so the order is case-sensitive: `"Zoe"` sorts before `"adam"`.
+  Descending reverses the whole sequence.
+- Equal sort keys come back in ascending element ID order in both directions, so a
+  repeated request returns the same order.
+- `orderByMultiple` breaks ties on each key with the next key.
+- `$id` is a valid sort key. So are `$distance` and `$score` until a step moves to
+  another element (filter steps keep them). A search already returns hits in rank order.
+- `orderBy` after `bind` fails with `invalid_after_bind_operation`.
 
 ## Bounds
 
 - `limit`, `skip`, and `range` take a non-negative literal or a bare `i64` parameter. A
   negative parameter value fails the query.
-- A literal `range` whose end is less than its start is rejected when the request is
-  planned. A parameter range like that returns no rows.
+- A literal `range` whose end is less than its start is rejected at planning; a
+  parameter range like that returns no rows.
 - A `skip` or `range` start past the end of the stream returns no rows.
 
 ## Sorting cost
 
-`orderBy` reads its whole input before it returns the first row, even when a `limit`
-follows it, so sorting a large label holds every row in memory for the request. A deep
-page costs as much as the sort: `range(10000, 10020)` sorts every row, then discards
-the first 10,000.
+`orderBy` reads its whole input, holding every row in memory, before it returns the
+first row, even when a `limit` follows. A deep page costs a full sort:
+`range(10000, 10020)` sorts every row, then discards the first 10,000.
 
 A [range index](/database/helix-db/query-guides/secondary-indexes#range-indexes) on the
-sort property removes the sort. The index returns rows already in order, and a
-following `limit` stops the scan after that many rows. A native query reads the index
-in order when all of these hold:
+sort property removes the sort: rows come back in index order, and a following `limit`
+stops the scan early. A native query reads the index in order only when:
 
 - The sort uses one property: `orderBy`, not `orderByMultiple`.
 - The traversal starts from a label-scoped source that filters the same property with
@@ -194,14 +189,14 @@ in order when all of these hold:
 - `orderBy` follows that source directly, with only filters in between.
 
 A native query reads an ascending index backwards for a descending sort, so one index
-serves both directions. Cypher and SQL read a range index only in its own direction;
-see [Cypher indexes and performance](/database/helix-db/query-guides/cypher#indexes-and-performance).
+serves both directions. Cypher and SQL read it only in its own direction; see
+[Cypher indexes and performance](/database/helix-db/query-guides/cypher#indexes-and-performance).
 
 ## Page with a range index
 
-Keyset pagination asks for the rows after the last one the client saw, instead of
+Keyset pagination asks for the rows after the last one the client saw instead of
 skipping rows. With an active range index on `Post.created_at`, this request reads at
-most 20 index entries, however deep the page:
+most 20 index entries at any page depth:
 
 <CodeGroup>
 
@@ -321,11 +316,11 @@ helix.ReadQuery("posts_before").
 
 </CodeGroup>
 
-Send the last row's `created_at` as the bound for the next page, in practice as a typed
-[parameter](/database/helix-db/query-guides/parameters). The bound must have the same
-type as the stored values, because comparisons across types are false. `lt` skips every
-row that ties with the bound, so sort on a property whose values are unique, or
-rows that share the last timestamp are lost between pages.
+- Send the last row's `created_at` as the next page's bound, usually as a typed
+  [parameter](/database/helix-db/query-guides/parameters).
+- The bound must have the stored values' type; comparisons across types are false.
+- `lt` skips every row that ties with the bound, so sort on a unique property, or rows
+  that share the last timestamp are lost between pages.
 
 ## Next steps
 

@@ -64,13 +64,12 @@ instance in non-interactive shells.
 
 - Fails if `helix.toml` already exists in the project directory.
 - Creates `.helix/` for instance state and adds `.helix/`, `.env`, `target/`, and `*.log` to `.gitignore` when missing.
-- `init local` also writes `examples/request.json` and an `AGENTS.md` (never overwriting an existing one), and warns if Docker or Podman is unavailable. It pins the CLI's default server `image` and `tag` in `[local.<name>]`; see [Image pinning](/cli/configuration#image-pinning).
-- `init cloud` writes neither `examples/request.json` nor `AGENTS.md`. Write a request as described in [Request shape](/cli/command-reference/query#request-shape), or use `helix query -e`.
+- `init local` also writes `examples/request.json` and an `AGENTS.md` (never overwriting an existing one), and warns if Docker or Podman is unavailable. It pins the CLI's default `image` and `tag`; see [Image pinning](/cli/configuration#image-pinning).
+- `init cloud` writes neither `examples/request.json` nor `AGENTS.md`. Write a [request](/cli/command-reference/query#request-shape) or use `helix query -e`.
 - Cloud init authenticates through the WorkOS session and resolves workspace, then project, then database as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution). It ignores the link of any enclosing project.
 - Cloud init writes `[project] id` and `workspace_id` along with the `[enterprise.<name>]` link, so later Cloud commands in the directory need no flags.
 - It stores stable linkage only. It has no gateway URL (database endpoint) or query-auth options.
-- The skills install runs `npx skills add HelixDB/skills -g` and `npx add-mcp`, so skills land in your global agent directories rather than the project. Use [`helix skills install --project`](/cli/command-reference/skills) for a project install. If the install fails, the project is still created and the CLI prints a warning.
-- With `--json`, prints `{"project":"<name>","config":"<path to helix.toml>"}`.
+- The skills install runs `npx skills add HelixDB/skills -g` and `npx add-mcp`, so skills land in your global agent directories. For a project install, use [`helix skills install --project`](/cli/command-reference/skills). If the install fails, the project is still created with a warning.
 
 ## Examples
 

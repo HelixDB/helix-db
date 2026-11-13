@@ -9,33 +9,37 @@ pageType: "Reference"
 
 {/* Privacy and legal review pending: every statement on this page describes product behavior and must be signed off before publishing. */}
 
-This page describes what Foundry does with the data you connect, upload and ask about:
-which tasks send it to AI models, what the agent that drafts ontologies can read, where
-Foundry stores it, what deleting removes, and what the website records about how you
-use it.
+What Foundry does with the data you connect, upload and ask about.
+
+## Where your data goes
+
+| Data | Where it goes |
+| --- | --- |
+| Synced table snapshots, uploaded documents, connections' documents and what Foundry reads from them | Stored by Helix on Amazon Web Services, in the us-east-1 (N. Virginia) region |
+| What loads write | The ontology's Helix database, in the workspace's region, which **Settings** → **General** shows. Helix Cloud runs workspaces in us-east-1. |
+| Connection credentials | Stored encrypted. Foundry never shows a stored credential again. |
+| What the [AI tasks](#what-foundry-sends-to-ai-models) send | Anthropic's Claude models, through Helix, by default. On Foundry Pro or Max, an owner can run the tasks on the workspace's own Anthropic API key instead; the calls then go to that Anthropic account. **Settings** → [AI models](/foundry/workspace/ai-models) shows which applies. |
+| Work emails and LinkedIn URLs of people in your tables, while [People enrichment](#people-enrichment) is on | context.dev |
+| How you use the website | [Databuddy](#product-analytics) |
+
+Foundry only reads your sources: connections need read access, and database users need
+`SELECT` only.
 
 ## What Foundry sends to AI models
 
 Foundry uses AI models for five tasks. Everything else, including syncing, reading
 tables into a load, the Explorer and Records, runs without them.
 
-| Task | What is sent to the model | When |
+| Task | Sent to the model | When |
 | --- | --- | --- |
-| [Drafting a version](/foundry/ontologies/generate-and-version) | The goal, and what the [drafting agent](#the-drafting-agent) reads of the generation's tables and documents while it drafts | Each generation you or your agent start, and each of its retry attempts |
-| Titling a generation | The generation's goal | Each generation with a goal |
-| [Reading documents into a load](/foundry/data/documents#how-ontologies-read-documents) | The text of each document in the sets the version reads, to find the names and facts it holds and to check them. This includes connections' documents, such as Slack conversations, Notion pages and Google Docs, and API source pieces read by entity extraction. | Each load and [refresh](/foundry/ontologies/load-data#automatic-refreshes), and as documents arrive in a set the current load reads. Text read before with the same models isn't sent again. |
+| [Drafting a version](/foundry/ontologies/generate-and-version) | The goal, and what the [drafting agent](#the-drafting-agent) reads of the generation's tables and documents while it drafts | Each generation you or your agent start, and each retry attempt |
+| Titling a generation | The goal | Each generation with a goal |
+| [Reading documents into a load](/foundry/data/documents#how-ontologies-read-documents) | The text of each document in the sets the version reads, to find and check the names and facts it holds. This includes connections' documents, such as Slack conversations, Notion pages and Google Docs, and API source pieces read by entity extraction. | Each load and [refresh](/foundry/ontologies/load-data#automatic-refreshes), and as documents arrive in a set the current load reads. Text read before with the same models isn't sent again. |
 | [Answering a question](/foundry/ask/ask-questions) | The question, the thread's earlier questions and answers, and what each step reads from the load: records, facts, document quotes and query results | Each question you or your agent ask |
 | [Assessing a workflow run](/foundry/agents/helix-mcp#workflows) | The run's request, the calls it recorded and the agent's answer | Each run that finishes, within the month's cap |
 
-The buttons that copy a prompt for your own agent, such as **Copy prompt** and **Copy
+Buttons that copy a prompt for your own agent, such as **Copy prompt** and **Copy
 prompt for your agent**, only copy text to your clipboard; Foundry sends nothing itself.
-
-### Which models
-
-By default these tasks run on Anthropic's Claude models, through Helix. On Foundry Pro
-or Max, an owner can run them on the workspace's own Anthropic API key instead; the
-calls then go to that Anthropic account. **Settings** →
-[AI models](/foundry/workspace/ai-models) shows which applies.
 
 ## The drafting agent
 
@@ -51,19 +55,7 @@ agent gets:
 The agent reads and queries these while it drafts, including to check the draft's rules
 against your data, and any of what it reads may be sent to the AI model. It reads the
 copies Foundry already holds: it doesn't connect to your sources, and it never writes to
-them or to your Helix databases. Each attempt stops at $5 of model use; see
-[Usage](/foundry/workspace/usage#generations).
-
-## Where your data is stored
-
-| Data | Where |
-| --- | --- |
-| Synced table snapshots, uploaded documents, connections' documents and what Foundry reads from them | Stored by Helix on Amazon Web Services, in the us-east-1 (N. Virginia) region |
-| What loads write | The ontology's Helix database, in the workspace's region, which **Settings** → **General** shows. Helix Cloud runs workspaces in us-east-1. |
-| Connection credentials | Stored encrypted. Foundry never shows a stored credential again. |
-
-Foundry only reads your sources: connections need read access, and database users need
-`SELECT` only.
+them or to your Helix databases.
 
 ## What deleting removes
 
@@ -75,22 +67,24 @@ Foundry only reads your sources: connections need read access, and database user
 | An ontology | Its versions and loads, and, in the background, everything its loads wrote into the database. The database, its other data and the workspace's documents stay. |
 | A workflow | Its runs and what they recorded. |
 
-Each sync replaces a table's snapshot; Foundry deletes the replaced one in the
-background once no load needs it. Foundry never deletes a Helix database: delete one in
-the Helix dashboard.
+- Each sync replaces a table's snapshot; Foundry deletes the replaced one in the
+  background once no load needs it.
+- Foundry never deletes a Helix database: delete one in the Helix dashboard.
 
 ## People enrichment
 
 People enrichment looks up public work profiles of the people in your tables: their
-current title, location and work history. It needs Foundry Pro or Max, and only an owner
-can allow it, under **Settings** → **People enrichment**, with a monthly credit cap.
+current title, location and work history.
 
-While it's on, Helix sends the work emails and LinkedIn URLs of people in your tables to
-context.dev to find public professional profiles, and stores the matches. Loads add the
-profiles to the people they describe, and you can share them as a source under
-[Access](/foundry/workspace/access). Turning it off stops the lookups and deletes the
-stored profiles; enriched values are removed as each ontology reloads, in loads Helix
-starts.
+- **Who turns it on**: it needs Foundry Pro or Max, and only an owner can allow it,
+  under **Settings** → **People enrichment**, with a monthly credit cap.
+- **What it sends**: while it's on, Helix sends the work emails and LinkedIn URLs of
+  people in your tables to context.dev to find public professional profiles, and stores
+  the matches.
+- **Where profiles go**: loads add the profiles to the people they describe, and you
+  can share them as a source under [Access](/foundry/workspace/access).
+- **Turning it off**: stops the lookups and deletes the stored profiles; enriched values
+  are removed as each ontology reloads, in loads Helix starts.
 
 <Note>
   Helix has paused lookups for now. The page says so, and loads still apply profiles

@@ -8,8 +8,7 @@ pageType: "Guide"
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
 Projection operations turn a traversal stream into the response shape your application
-needs. They are terminal: a projection finishes that traversal entry, and no step can
-follow it.
+needs. They are terminal: no step can follow a projection.
 
 ## Choose a projection
 
@@ -116,25 +115,23 @@ FROM User u
 
 ## Field rules
 
-- Virtual fields: `$id` and `$label` exist on every node and edge. On an edge, `$from` and
-  `$to` are its source and target node IDs, and `$from.name` or `$to.name` reads a
-  property of that endpoint; `Projection.fromEndpoint` and `Projection.toEndpoint`
-  (`ProjectFromEndpoint`, `ProjectToEndpoint` in Go) build those inside `project`.
-  `$distance` and `$score` exist on search hits until the traversal moves to another
-  element.
-- `valueMap` with no list returns every stored property plus `$id` and `$label`. It
-  never adds `$from`, `$to`, `$distance`, or `$score`; list them to return them.
-- `valueMap([...])` returns the listed keys that are present. A row with none of them
-  returns `{}`.
-- `values([...])` returns one object per row with the listed keys that are present, and
-  drops rows that have none of them.
+| Virtual field | Exists on |
+| --- | --- |
+| `$id`, `$label` | Every node and edge |
+| `$from`, `$to` | Edges: the source and target node IDs. `$from.name` or `$to.name` reads an endpoint property; in `project`, build those with `Projection.fromEndpoint` and `Projection.toEndpoint` (`ProjectFromEndpoint`, `ProjectToEndpoint` in Go). |
+| `$distance`, `$score` | Search hits, until the traversal moves to another element |
+
+- `valueMap` with no list returns every stored property plus `$id` and `$label`, never
+  `$from`, `$to`, `$distance`, or `$score`; list those to return them.
+- `valueMap([...])` returns the listed keys that are present; a row with none returns `{}`.
+- `values([...])` is the same, but drops rows with none of the keys.
 - `project` omits a property the row does not have. An expression that reads a missing
   property sees `null`.
 
 ## Computed fields
 
-Pass expression projections to `project` to compute a field from the row. This request
-returns each line item's `sku` and its `price` times `quantity`:
+Pass expression projections to `project` to compute fields. This request returns each
+line item's `sku` and `price` times `quantity`:
 
 <CodeGroup>
 
@@ -215,8 +212,8 @@ g().n_with_label("LineItem").project([
 
 Expressions read a property (`Expr.prop`), a literal (`Expr.val`), a parameter
 (`Expr.param`), the element ID (`Expr.id`), or the current time (`Expr.timestamp` in
-epoch milliseconds). They combine with `add`, `sub`, `mul`, `div`, `modulo`, and `neg`
-(`Mod` in Go), and `Expr.case` picks the first branch whose predicate matches, or `null`
+epoch milliseconds). They combine with `add`, `sub`, `mul`, `div`, `modulo` (`Mod` in
+Go), and `neg`. `Expr.case` picks the first branch whose predicate matches, or `null`
 without an else branch.
 
 - `add`, `sub`, `mul`, and `div` always return an `f64`, so `1 + 2` returns `3.0`.
@@ -515,10 +512,9 @@ an `OPTIONAL MATCH`, and drops rows where the branch found nothing.
 
 ## Keep search scores after traversing
 
-`$distance` and `$score` belong to the search hit, so they are gone once the traversal
-moves to another element, and a projection cannot run first because it ends the
-traversal. Bind the hit instead and read the score from the binding. This request
-returns each of the ten closest documents with its distance and author:
+`$distance` and `$score` are gone once the traversal leaves the hit, and a projection
+cannot run first because it ends the traversal. Bind the hit and read the score from the
+binding. This request returns the ten closest documents with distance and author:
 
 <CodeGroup>
 
@@ -658,18 +654,18 @@ helix.ReadQuery("docs_with_authors").
 
 </CodeGroup>
 
-The same pattern keeps `$score` from a text search. Each row pairs one hit with one
-author, so a document with no `AUTHORED_BY` edge produces no row. To keep it, bind the
-author inside an optional step, as in `optional(sub().out("AUTHORED_BY").bind("author"))`,
-and project `BindingProjection.binding("author", "name", "author")`; such a document then
-comes back without an `author` field. Keep `current` out of it: when the optional step
-finds no author, the current element is still the document, so `current("name", ...)`
-would return the document's own `name`.
+The same pattern keeps `$score` from a text search.
+
+A document with no `AUTHORED_BY` edge produces no row. To keep it, bind the author in an
+optional step, `optional(sub().out("AUTHORED_BY").bind("author"))`, and project
+`BindingProjection.binding("author", "name", "author")`; the document then comes back
+without an `author` field. Do not use `current` here: with no author, the current
+element is still the document, so `current("name", ...)` returns the document's `name`.
 
 ## Aggregate
 
-Aggregates run inside the transaction instead of returning every row to the client.
-This request counts orders per status and sums their totals:
+Aggregates run inside the transaction. This request counts orders per status and sums
+their totals:
 
 <CodeGroup>
 
@@ -776,14 +772,14 @@ and `"revenue": [{"total_Sum": 1840.5}]`.
 | `id()`, `label()` | A list of IDs or labels | `[]` |
 | `group(property)` | One object per value: the property, `count`, and `ids` | `[]` |
 | `groupCount(property)` | One object per value: the property and `count` | `[]` |
-| `aggregateBy(function, property)` | One object whose key joins the property and function, such as `total_Sum` or `score_Mean`, with an `f64` value | `0.0` for every function |
+| `aggregateBy(function, property)` | One object keyed by property and function, such as `total_Sum` or `score_Mean`, with an `f64` value | `0.0` for every function |
 
 - Groups come back sorted by value. Rows without the property form a `null` group.
-- `aggregateBy` reads `i64`, `f64`, and `f32` values and strings that parse as numbers.
-  It skips missing, `null`, boolean, and other values, so `AggregateFunction.Count`
-  counts numeric values, not rows. Use `count()` to count rows.
-- `Min` and `Max` of no numeric values return `0.0`, the same as a real zero. Check
-  `count()` when that difference matters.
+- `aggregateBy` reads `i64`, `f64`, and `f32` values and numeric strings, and skips
+  everything else, so `AggregateFunction.Count` counts numeric values, not rows. Use
+  `count()` to count rows.
+- `Min` and `Max` with no numeric values return `0.0`, like a real zero. Check `count()`
+  when that matters.
 
 ## Keep responses small
 

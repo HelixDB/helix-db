@@ -62,8 +62,8 @@ not apply this bucket.
 | Startup | 10 requests per second | 20 requests |
 | Growth | 20 requests per second | 40 requests |
 
-Database-specific overrides can change the sustained rate and burst capacity; the query
-attempt budget still comes from the plan. The values assigned to your database take
+Database-specific overrides can change the sustained rate and burst capacity, but not the
+query attempt budget, which comes from the plan. The values assigned to your database take
 precedence over its plan limits. Each admitted query request costs one token from one shared
 bucket per Cloud database.
 
@@ -142,20 +142,19 @@ bucket was exhausted.
 | Whole request | 5 minutes, including gateway retries | 3 minutes |
 | Request rate | [Token bucket per database](#helix-cloud-request-rate-limits) | Not limited |
 
-A larger request body returns `413` `payload_too_large`; split the write or move large
-values out of the request. A request that runs past its time limit returns `408`
-`query_timeout`. Page large reads with limits instead of returning everything at once.
+A larger body returns `413` `payload_too_large`; split the write or move large values out of
+the request. A request past its time limit returns `408` `query_timeout`. Page large reads with
+limits.
 
-The gateway retries a read that fails transiently on a reader for up to 90 seconds, with
-backoff from 100 ms up to 1 second, and always within the request's time limit. It never
-replays a write it has already sent. During a writer failover, a write waits up to 90 seconds
-for the new writer; see [Writer failover](/database/helix-cloud/start-here/architecture#writer-failover).
+The gateway retries a read that fails transiently on a reader for up to 90 seconds (backoff from
+100 ms to 1 second), within the request's time limit. It never replays a write it has sent.
+During [writer failover](/database/helix-cloud/start-here/architecture#writer-failover), writes
+wait up to 90 seconds for the new writer.
 
 ### Compression
 
 - **Requests.** Send `Content-Encoding: gzip` with a gzipped body. `x-gzip` and `identity`
-  are also accepted; any other coding returns `415` `unsupported_content_encoding`. The 2 MiB
-  limit applies to the decompressed body.
+  are also accepted; any other coding returns `415` `unsupported_content_encoding`.
 - **Responses.** Send `Accept-Encoding: gzip` to receive gzipped responses. Bodies under 32
   bytes are sent uncompressed.
 

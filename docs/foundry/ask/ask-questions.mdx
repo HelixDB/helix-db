@@ -7,10 +7,10 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-The **Analyst** answers questions about an ontology's load in plain language, and is
-Foundry's main page: Foundry opens on it. Foundry's agent reads the load from the
-ontology's database step by step, and its answer cites each record, table row, quote
-and rule it used, so you can open every one.
+The **Analyst**, Foundry's main page, answers questions about an ontology's load in
+plain language. Foundry's agent reads the load from the ontology's database step by
+step, and its answer cites each record, table row, quote and rule it used, so you can
+open every one.
 
 <Frame caption="Ask a question, follow its steps, read the sourced answer, then follow up.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/ask/ask-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/ask/ask.webm"></video>
@@ -38,8 +38,8 @@ While the ontology has no load, a new thread says **Nothing loaded yet** in plac
 composer, with **Load data** or, while no version is current, **Finish setting up**.
 
 A workspace with no ontology opens on [Get started](/foundry/start-here/quickstart)
-instead. A member [restricted to some sources](/foundry/workspace/access) who holds none
-yet sees **Nothing shared with you yet**.
+instead. A [restricted member](/foundry/workspace/access) who holds no sources yet sees
+**Nothing shared with you yet**.
 
 ## Read an answer
 
@@ -54,11 +54,10 @@ with the composer pinned at the bottom.
 - **The answer** is plain text with numbered citations, then **Sources**: each record,
   fact, derived fact, table row, document quote, rule break or step it cites. Select one
   to open it: an entity's page, the row's table, the quote in its document, or the step.
-- **Results** of the queries it ran show as a figure, a chart or a table, read from the
-  result's shape: a count or a total is one figure; groups are bars, or a line over
-  dates; rows are a table. A chart has **Chart** and **Table** to switch between them.
-  Tables sort by any column, show their first rows with **Show all … rows** for the
-  rest, and link each record they name to its page.
+- **Results** of its queries show by their shape: a count or a total as one figure,
+  groups as bars (or a line over dates), rows as a table. **Chart** and **Table** switch
+  a chart between the two. Tables sort by any column, link each record they name to its
+  page, and show their first rows, with **Show all … rows** for the rest.
 
 While a question runs, **Cancel** stops it.
 
@@ -82,15 +81,15 @@ it.
 
 ## Getting into production
 
-Above the conversation, the **Getting into production** card has two steps from trying
+The **Getting into production** card, above the conversation, takes you from trying
 Foundry to your own app or agent querying an ontology:
 
-1. **Create an ontology**: done once the workspace has an ontology of its own, not only
-   the [sample company's](/foundry/start-here/sample-company). Owners and admins get
-   **New ontology** here.
+1. **Create an ontology**: done once the workspace has one of its own, not only the
+   [sample company's](/foundry/start-here/sample-company). Owners and admins get **New
+   ontology** here.
 2. **Query it through the Helix MCP**: **Copy prompt** copies a prompt for Claude Code,
-   Codex or another agent. It adds the [Helix MCP](/foundry/agents/helix-mcp), queries
-   this ontology and helps wire it into your app.
+   Codex or another agent to add the [Helix MCP](/foundry/agents/helix-mcp), query this
+   ontology and help wire it into your app.
 
 Select the card's head to minimise it; this browser remembers. Members reading through
 [shared sources](/foundry/workspace/access) don't see it.
@@ -113,8 +112,8 @@ its thread.
 
 ## Limits and spending
 
-The Analyst uses AI models: it sends your question, and what each step reads from the
-load, to the workspace's [AI models](/foundry/workspace/ai-models). Questions have their
+The Analyst sends your question, and what each step reads from the load, to the
+workspace's [AI models](/foundry/workspace/ai-models). Questions have their
 own monthly budget, apart from loads'; [Usage](/foundry/workspace/usage) shows both.
 Your agent can ask too, through the [Helix MCP](/foundry/agents/helix-mcp#ask-questions),
 within the same limits.
@@ -131,9 +130,9 @@ within the same limits.
 
 Anyone in the workspace who can read the ontology's database: members need **Query
 read** on the database's Helix project, or sources shared with them under
-[Access](/foundry/workspace/access). New members have neither; see
-[Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read). The
-Analyst only reads the load; it never writes to the database.
+[Access](/foundry/workspace/access). New members have neither
+([Members and roles](/foundry/workspace/members-and-roles#what-new-members-can-read)).
+The Analyst only reads the load; it never writes to the database.
 
 ## Next steps
 

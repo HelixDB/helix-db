@@ -6,10 +6,9 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Use the CLI to sign in to Helix Cloud, link a project to a Cloud database, and run
-queries against it. You need a Helix Cloud account and at least one database; see
-[Get started with Helix Cloud](/database/helix-cloud/start-here/using-the-cloud), or
-[move a local project to Helix Cloud](#move-a-local-project-to-helix-cloud) to create one from the CLI.
+Sign in to Helix Cloud, link a project to a Cloud database, and query it. You need a Helix Cloud
+account and a database: see [Get started with Helix Cloud](/database/helix-cloud/start-here/using-the-cloud),
+or create one from the CLI as in [Move a local project to Helix Cloud](#move-a-local-project-to-helix-cloud).
 
 <Steps>
   <Step title="Authenticate with WorkOS">
@@ -26,9 +25,9 @@ queries against it. You need a Helix Cloud account and at least one database; se
     helix init cloud
     ```
 
-    The CLI picks your workspace, project, and database: it uses the only one of each or
-    asks you to choose. It writes the project and a `production` database link to
-    `helix.toml`. To link another database later, run `helix add cloud --name <name>`.
+    The CLI picks your workspace, project, and database (the only one of each, or asks) and
+    writes the project and a `production` database link to `helix.toml`. Link another database
+    later with `helix add cloud --name <name>`.
   </Step>
   <Step title="Run a query through the broker">
     ```bash
@@ -36,9 +35,8 @@ queries against it. You need a Helix Cloud account and at least one database; se
     helix shell production
     ```
 
-    `helix init cloud` writes no example request. `-e` needs Node.js 20+ and npm; to send JSON
-    instead, write a request file as described in
-    [Request shape](/cli/command-reference/query#request-shape) and pass it with `--file`.
+    `helix init cloud` writes no example request. `-e` needs Node.js 20+ and npm; for JSON, pass a
+    [request file](/cli/command-reference/query#request-shape) with `--file`.
   </Step>
   <Step title="Inspect the linked resources">
     ```bash
@@ -47,15 +45,13 @@ queries against it. You need a Helix Cloud account and at least one database; se
     helix logs production
     ```
 
-    Inside a linked project, Cloud commands default to its project and databases, so
-    they need no IDs.
+    Inside a linked project, Cloud commands default to its project and databases.
   </Step>
 </Steps>
 
-Pass a resource by ID, slug, or name when you want a different one, for example
-`helix database list --project <project>` or `helix query tenant:<id> --file request.json`. Flags
-go after the subcommand. In scripts, add `--json` for machine-readable output; commands then never
-prompt. See [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
+To use a different resource, pass it by ID, slug, or name after the subcommand, for example
+`helix database list --project <project>` or `helix query tenant:<id> --file request.json`. With
+`--json`, commands never prompt. See [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
 
 ## Move a local project to Helix Cloud
 
@@ -68,40 +64,38 @@ Starting from a project created with `helix init local`:
     helix project create "My App" --link
     ```
 
-    `--link` writes `[project] id` and `workspace_id` to this directory's `helix.toml` and keeps the
-    local instances. To use an existing Cloud project instead, run `helix project link <project>`.
+    `--link` writes `[project] id` and `workspace_id` to `helix.toml` and keeps the local instances.
+    For an existing Cloud project, run `helix project link <project>` instead.
   </Step>
   <Step title="Create a database">
     ```bash
     helix database create orders --plan <plan-code>
     ```
 
-    This creates a tenant database in the linked project and prints its default read-write
-    application key once on stdout; store it in a secrets manager for your application. The CLI
-    requires `--plan` for a shared database and prompts for it in a terminal; list the plan codes with
-    `helix api get /v1/workspace-plans`. Pass `--cluster <cluster>` instead to create the database on
-    a dedicated cluster.
+    Creates a tenant database in the linked project and prints its default read-write application
+    key once on stdout; store it in a secrets manager. A shared database needs `--plan` (prompted
+    in a terminal); list codes with `helix api get /v1/workspace-plans`. For a dedicated cluster,
+    pass `--cluster <cluster>` instead.
   </Step>
   <Step title="Add it to helix.toml">
     ```bash
     helix add cloud --name production --database orders
     ```
 
-    This writes an `[enterprise.production]` table with the database's `tenant:<id>` target.
+    Writes an `[enterprise.production]` table with the database's `tenant:<id>` target.
   </Step>
   <Step title="Query it">
     ```bash
     helix query production --file examples/request.json
     ```
 
-    The Cloud database starts empty. The CLI does not copy local data, so replay your write requests
-    against `production`.
+    The Cloud database starts empty; the CLI does not copy local data. Replay your writes against
+    `production`.
   </Step>
   <Step title="Connect your application">
-    Applications reach the database through its gateway with an application key, not through the
-    CLI's session. `helix database get orders --json` prints the gateway host as
-    `connectionEndpoint`. Create more keys with `helix database key create --access read-only` or
-    `read-write`. See [Connect to Helix Cloud](/database/helix-cloud/start-here/working-with-enterprise)
+    Applications call the database's gateway with an application key, not the CLI session.
+    `helix database get orders --json` prints the gateway host as `connectionEndpoint`. Create more
+    keys with `helix database key create --access read-only` or `read-write`. See [Connect to Helix Cloud](/database/helix-cloud/start-here/working-with-enterprise)
     and [HTTP API authentication](/database/helix-db/query-guides/http-api#authentication).
   </Step>
 </Steps>
@@ -113,23 +107,20 @@ Starting from a project created with `helix init local`:
 - Cloud queries go through the Helix Cloud backend (the broker), not directly to the
   database gateway. The broker forwards each authorized request with its own gateway
   credentials, which the CLI never receives.
-- Reads require the `database.query.read` permission and writes require
-  `database.query.write`. Both are granted per project, on the project that owns the database.
-  Project-management access does not imply query access.
+- Reads need `database.query.read` and writes `database.query.write`, granted on the project
+  that owns the database. Project-management access does not imply query access.
 - Owners and admins have both query permissions by default. Members have neither unless
   explicitly granted.
 - Local queries are unaffected and run without authentication.
 
 ## Keys and credentials are not logins
 
-- `helix database key` creates application keys for your own services that call the
-  gateway directly.
-- `helix service-credential` manages credentials for headless agents on the MCP endpoint.
-  MCP tool access follows the credential's project grants, and these sessions do not
-  get Cloud discovery or observability tools.
+- `helix database key` creates application keys for your services to call the gateway directly.
+- `helix service-credential` manages credentials for headless agents on the MCP endpoint, limited
+  to their project grants and without Cloud discovery or observability tools.
 
-Neither can be used to sign in to the CLI, so the CLI's Cloud commands do not run unattended. See
-[Run in CI](/cli/scripting#run-in-ci) for what a CI job can use instead.
+Neither logs the CLI in, so its Cloud commands cannot run unattended. See
+[Run in CI](/cli/scripting#run-in-ci) for what CI can use instead.
 
 ## Next steps
 

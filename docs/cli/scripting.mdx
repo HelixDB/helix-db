@@ -6,8 +6,8 @@ pageType: "Reference"
 
 <div className="flex flex-wrap gap-2"><Badge color="gray" size="sm">Reference</Badge></div>
 
-What a script or CI job can rely on when it runs `helix`: where output goes, the `--json` payload of
-each command, exit codes, and which parts of Helix Cloud an unattended job can reach.
+What scripts and CI jobs can rely on: output streams, each command's `--json` payload, exit codes,
+and what an unattended job can reach in Helix Cloud.
 
 ```bash
 export HELIX_NO_UPDATE_CHECK=1
@@ -19,16 +19,15 @@ helix stop dev --json
 
 ## Output
 
-- stdout carries only the command's result. stderr carries progress, warnings, hints, and errors.
-- `--json` prints the result as one compact JSON value and a newline on stdout, and nothing else there.
-  It never prompts and skips the startup update checks. It cannot be combined with `--quiet` or
-  `--verbose`.
-- When stdin or stderr is not a terminal, or with `--json`, commands never prompt. Where they would,
-  they use a default (`dev`, or the only candidate) or fail and list the candidates.
-- When they cannot prompt, destructive commands (`delete`, `prune --all`, `project delete`,
-  `database delete`, `database key revoke`, `service-credential revoke`) fail before doing anything
-  unless you pass `-y`/`--yes`. `prune <instance>` never asks.
-- Set `NO_COLOR=1` to drop colors from a terminal. Output that is not a terminal is never colored.
+- stdout carries only the result; stderr carries progress, warnings, hints, and errors.
+- `--json` prints one compact JSON value and a newline on stdout, nothing else. It never prompts,
+  skips the startup update checks, and conflicts with `--quiet` and `--verbose`.
+- Without a terminal on stdin or stderr, or with `--json`, commands never prompt: they use a default
+  (`dev`, or the only candidate) or fail and list the candidates.
+- Destructive commands (`delete`, `prune --all`, `project delete`, `database delete`,
+  `database key revoke`, `service-credential revoke`) that cannot prompt fail before acting unless
+  you pass `-y`/`--yes`. `prune <instance>` never asks.
+- Output that is not a terminal is never colored; `NO_COLOR=1` drops colors in a terminal.
 - Set `HELIX_NO_UPDATE_CHECK=1` so the first command of the day does not wait up to 10 seconds on
   GitHub. See [Environment variables](/cli/configuration#environment-variables).
 
@@ -42,21 +41,20 @@ helix stop dev --json
 
 The codes are the same with and without `--json`. Exceptions:
 
-- `helix doctor` prints its whole report, then exits `1` when any check fails. Warnings alone exit `0`.
-- `helix shell` prints the error of a failed request and keeps reading, then exits `0` at end of
-  input. Use one `helix query` per request when each result must set the exit code.
+- `helix doctor` prints its whole report, then exits `1` if any check fails; warnings alone exit `0`.
+- `helix shell` prints a failed request's error, keeps reading, and exits `0` at end of input. Use
+  one `helix query` per request when each result must set the exit code.
 - `helix stop` exits `0` when the instance was not running, and `helix prune <instance>` when there
   was nothing to remove.
 
-With `--json`, an error is one JSON object on stderr. Only `message` is always present; `candidates`
-lists what you can pass when the CLI could not choose:
+With `--json`, an error is one JSON object on stderr; without it, the same error prints as text.
+Only `message` is always present. `candidates` lists what you can pass when the CLI could not choose:
 
 ```json
 {"error":{"message":"no default query target","hint":"pass an instance name, or cluster:<id> / tenant:<id>","candidates":[{"id":"preview","name":"preview"},{"id":"production","name":"production"}]}}
 ```
 
-The other fields are `context` and `caused_by`. Without `--json`, the same error prints as text on
-stderr.
+The other fields are `context` and `caused_by`.
 
 ## JSON results
 
@@ -91,9 +89,9 @@ stderr.
 | `skills update` | `{"updated":true}` |
 | `update` | `{"version":"<version>","updated":true}`, or `"updated":false` when already on that version |
 
-Cloud results are the API's JSON field for field, except that `database list` and `database get` add
-`"kind"` (`"dedicated"` or `"tenant"`) to each database; `--json` adds nothing the human view
-resolved, such as a project's workspace. Cloud lists follow pagination up to 50 pages of 200 items, then fail with
+Cloud results are the API's JSON field for field. Only `database list` and `database get` add
+`"kind"` (`"dedicated"` or `"tenant"`); owners the human view resolves, such as a project's
+workspace, are not added. Cloud lists follow pagination up to 50 pages of 200 items, then fail with
 `more than 50 pages; narrow the request`.
 
 These commands have no JSON result:
@@ -112,18 +110,16 @@ These commands have no JSON result:
 
 ### Local instances
 
-Local commands need only Docker or Podman and no login, so they run in CI as they do on your machine.
-Give each job its own CLI state with `HELIX_HOME="$(mktemp -d)"`. Use `--disk` or S3 storage when data
-must survive a restart; in-memory data does not.
+Local commands need only Docker or Podman, no login, so they run in CI as on your machine. Give each
+job its own CLI state with `HELIX_HOME="$(mktemp -d)"`. In-memory data does not survive a restart;
+use `--disk` or S3 storage when it must.
 
 ### Helix Cloud
 
-The CLI has no unattended login. `helix auth login` needs an interactive terminal and fails in CI, and
-neither a service credential nor an application key can log the CLI in. Cloud commands such as
-`helix query production`, `helix database`, and `helix api` therefore belong on a developer machine.
-Do not copy your personal session file into CI.
-
-From an unattended job, use one of these instead:
+The CLI has no unattended login: `helix auth login` needs an interactive terminal, and neither a
+service credential nor an application key can log the CLI in. Run Cloud commands such as
+`helix query production`, `helix database`, and `helix api` on a developer machine, and do not copy
+your session file into CI. From an unattended job, use:
 
 | Need | Use |
 | --- | --- |
@@ -138,24 +134,17 @@ curl -sS "https://<gateway-host>/v2/query" \
   --data @examples/request.json
 ```
 
-`helix database get <database> --json` prints the gateway host as `connectionEndpoint`, and the
-dashboard's database page shows it too. Create the key once on your machine with
+`helix database get <database> --json` prints the gateway host as `connectionEndpoint`; the
+dashboard's database page shows it too. Create the key once with
 `helix database key create --access read-only` and store it as a CI secret.
 
 A service credential:
 
-- can use only the MCP query and administration tools that its project grants allow;
-- cannot list workspaces, projects, or databases, so pass it a `tenant:<id>` or `cluster:<id>` target
-  from your configuration;
-- cannot call the Helix Cloud API that the CLI uses, so `helix api`, `helix query` for a Cloud
-  instance, and the other Cloud commands are not available to it;
+- can use only the MCP query and administration tools its project grants allow;
+- cannot list workspaces, projects, or databases, so give it a `tenant:<id>` or `cluster:<id>` target;
+- cannot call the Helix Cloud API the CLI uses, so it cannot run `helix api`, a Cloud `helix query`,
+  or other Cloud commands;
 - cannot create, change, or revoke service credentials.
-
-For reference, `helix query` sends a Cloud request to the Helix Cloud API with your WorkOS session:
-`POST /v1/databases:query-read` (or `:query-write`) with
-`{"database":{"tenantId":"<id>"},"queryJson":"<base64 request>"}` (`clusterId` for a dedicated
-cluster), and decodes `responseJson` and `statusCode` from the reply. That API accepts only WorkOS
-sessions.
 
 ## Related
 

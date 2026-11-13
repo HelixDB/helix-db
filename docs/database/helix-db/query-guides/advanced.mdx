@@ -16,11 +16,11 @@ branching operations; use `g()` only for a top-level traversal entry.
 | --- | --- |
 | `optional(sub)` | For each row, the branch's output, or the row itself when the branch returns nothing |
 | `union(subs)` | For each row, the output of every branch in order, without deduplication |
-| `choose(predicate, then, else)` | Runs `then` on the rows that match and `else` on the rest. Without `else`, rows that do not match are dropped. The output is every `then` row followed by every `else` row, not input order. |
+| `choose(predicate, then, else)` | `then` on matching rows, `else` on the rest (dropped without `else`). Output is all `then` rows, then all `else` rows, not input order. |
 | `coalesce(subs)` | For each row, the output of the first branch that returns anything |
 | `repeat(config)` | Runs a sub-traversal repeatedly; see [Repeat a traversal](#repeat-a-traversal) |
 
-`choose` and `repeat` are rejected after `bind` with `invalid_after_bind_operation`.
+`choose` and `repeat` fail after `bind` with `invalid_after_bind_operation`.
 
 ## Retain row-local values
 
@@ -163,9 +163,9 @@ conditions test for an empty result (`varEmpty`), a minimum size (`varMinSize`),
 the previous entry (`prevNotEmpty`). The first entry in a batch cannot depend on a
 previous result.
 
-When the condition is false, the entry does not run and its variable holds an empty
-result. It returns `[]`, even for an entry that ends in `count()` or `exists()`, and
-later entries that read it see no rows. A write batch uses the same conditions to
+When the condition is false, the entry does not run: it returns `[]`, even if it ends in
+`count()` or `exists()`, and later entries that read it see no rows. Write batches use
+the same conditions to
 [create or update a node](/database/helix-db/query-guides/writing-data#create-or-update-a-node).
 
 Cypher has no batch conditions. In the Cypher tab, the second `MATCH` runs once for
@@ -309,9 +309,8 @@ In Go, the configuration builders are `helix.Repeat(sub)`, `WithTimes`, `UntilPr
 `EmitBefore`, `EmitAfter`, `EmitAll`, `EmitIf`, and `WithMaxDepth`.
 
 - **Stopping.** `times(n)` runs the body `n` times. `until(predicate)` stops the whole
-  loop after the first pass in which any row matches; it is not a per-row stop, and the
-  body always runs at least once. With neither, the loop runs until a pass returns no
-  rows.
+  loop, not single rows, after the first pass in which any row matches; the body always
+  runs at least once. With neither, the loop runs until a pass returns no rows.
 - **Depth cap.** `maxDepth` defaults to 100 and stops the loop without an error. With
   `times`, the loop runs at most `min(times, maxDepth)` passes. `times(0)` and
   `maxDepth(0)` fail with `invalid_repeat_count`.
@@ -499,12 +498,11 @@ The response holds the IDs from source to target, such as `"path": [12, 40, 7]`.
 - Rust `shortest_path(source, target, max_depth)` follows outgoing edges of any label;
   `shortest_path_with` adds a label and a direction (`Out`, `In`, or `Both`). The other
   SDKs take the label and direction as options.
-- The search is breadth-first and returns node IDs only, no edges. It visits neighbors
-  in ascending ID order, so ties resolve the same way every time.
+- The search is breadth-first and visits neighbors in ascending ID order, so ties
+  resolve the same way every time. It returns no edges.
 - The maximum depth is required; `0` fails with `invalid_shortest_path_count`.
-- Each endpoint must resolve to at most one node. More than one fails with
-  `invalid_query`. An endpoint that resolves to no node, or no path within the depth,
-  returns `[]`.
+- Each endpoint must resolve to at most one node; more fails with `invalid_query`. An
+  endpoint with no node, or no path within the depth, returns `[]`.
 - It starts and ends the traversal, so no step can follow it.
 
 ## Loop over a parameter

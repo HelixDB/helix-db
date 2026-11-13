@@ -22,9 +22,8 @@ endpoint at
 
 For headless access, configure a scoped service credential as a bearer token in the client's secure
 credential configuration. Use the unified endpoint, grant only the required project permissions,
-and capture the one-time token in a secrets manager. Service credentials authenticate this
-endpoint only: they are not a CLI login method, and they do not authenticate direct gateway
-requests, which need an application API key.
+and capture the one-time token in a secrets manager. Service credentials authenticate only this
+endpoint: not the CLI, and not direct gateway requests, which need an application API key.
 
 Do not put WorkOS tokens, application keys, service-credential tokens, or confirmation tokens in
 source control, agent instruction files, or query payloads.
@@ -42,9 +41,9 @@ Use `https://mcp.helix-db.com/mcp` for every identity. The former separate query
 MCP endpoints are retired. OAuth tokens must target the unified resource audience.
 
 Service credentials require `query-read`/`query-write` grants for data access and
-`project-read`/`project-write` grants for customer administration. These are independent permissions,
-but each write grant requires its read grant: `query-write` needs `query-read`, and `project-write`
-needs `project-read`.
+`project-read`/`project-write` grants for customer administration. These are independent, but
+each write grant needs its read grant (`query-write` needs `query-read`; `project-write` needs
+`project-read`).
 See [service credentials](/cli/command-reference/service-credential) for creation and revocation.
 Application database keys do not authenticate MCP.
 
@@ -65,11 +64,11 @@ Human user sessions expose these read-only Cloud tools subject to their permissi
 - `helix_get_cluster_health`
 
 Agent registrations do not receive these Cloud inspection tools. They receive
-`helix_get_started`, which creates or returns the registration's one-month Helix sandbox. A
-successful call returns `status: "ready"` and a `tenant:<id>` database target. `helix_get_started`
-requires both the `database.query.read` and `database.query.write` scopes, and it is rate-limited
-per registration and per source address; back off when it returns `resource_exhausted`. An agent
-can then use only its sandbox tenant and the scopes granted to its registration.
+`helix_get_started`, which creates or returns the registration's one-month Helix sandbox and, on
+success, returns `status: "ready"` and a `tenant:<id>` database target. It requires both the
+`database.query.read` and `database.query.write` scopes and is rate-limited per registration and
+per source address; back off on `resource_exhausted`. The agent can then use only its sandbox
+tenant and its registration's scopes.
 
 ### Query tools
 
@@ -92,9 +91,8 @@ Query tool limits:
 - An MCP request body is limited to 1 MiB, which bounds `query_json`.
 - A query result above 32 MiB fails with `resource_exhausted`; it is not truncated. Page large
   reads with limits.
-- MCP waits up to 3 minutes for a query result. Queries go through the database's gateway, so
-  its [request rate limits and timeouts](/database/helix-cloud/operate/limits), often shorter,
-  also apply.
+- MCP waits up to 3 minutes for a query result. The gateway's
+  [request rate limits and timeouts](/database/helix-cloud/operate/limits), often shorter, also apply.
 
 ## Customer administration tools
 
@@ -116,15 +114,13 @@ introspection, execution polling/cancellation, and project update are not expose
 
 ## Foundry and feedback tools
 
-Human users and service credentials with Helix Foundry access also receive `helix_foundry_*`
-tools to list, read, and ask Foundry ontologies. Foundry changes use the same one-time
-confirmation, through `helix_prepare_foundry_operation` and `helix_execute_foundry_operation`.
-See [Use Foundry from your agent](/foundry/agents/helix-mcp) for the tools and who can call
-each one.
+Human users and service credentials with Helix Foundry access also get `helix_foundry_*` tools
+to list, read, and ask Foundry ontologies. Foundry changes use the same one-time confirmation,
+through `helix_prepare_foundry_operation` and `helix_execute_foundry_operation`. See
+[Use Foundry from your agent](/foundry/agents/helix-mcp) for each tool and who can call it.
 
-Every identity except a Foundry send token receives `helix_feedback`, which sends the Helix team
-a bug, a missing capability, or a confusing result. Each caller can send 20 an hour, up to
-4,096 bytes each.
+Every identity except a Foundry send token gets `helix_feedback`, which reports a bug, a missing
+capability, or a confusing result to the Helix team: 20 an hour per caller, up to 4,096 bytes each.
 
 ## First query through MCP
 

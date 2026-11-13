@@ -26,15 +26,15 @@ gateway
                     object storage
 ```
 
-A read goes to the writer instead only when it sets `X-Helix-Require-Writer: true`. When no
-reader is available, a read fails with `503` `backend_unavailable` rather than moving to the
-writer. See [Architecture](/database/helix-cloud/start-here/architecture).
+A read goes to the writer only when it sets `X-Helix-Require-Writer: true`. With no reader
+available, a read fails with `503` `backend_unavailable` rather than moving to the writer. See
+[Architecture](/database/helix-cloud/start-here/architecture).
 
 ## Connect and send a request
 
 Copy the endpoint and database ID from the database's **Connect** panel in the dashboard,
-and create an API key. Send the database ID with every request in `X-Helix-Database-Id`.
-Without it, a shared (GA) gateway returns `400` `tenant_id_required`, and a dedicated
+and create an API key. Send the database ID in `X-Helix-Database-Id` with every request;
+without it, a shared (GA) gateway returns `400` `tenant_id_required`, and a dedicated
 cluster returns `403` `forbidden` for a database key.
 
 The TypeScript SDK (`@helix-db/helix-db` 3.2.0 and later) sends the header after
@@ -52,8 +52,8 @@ const client = Client
 
 </CodeGroup>
 
-The released Rust (3.0.0), Python (0.3.4), and Go (v0.3.1) SDKs do not send the database
-ID header. From those languages, call the HTTP API directly:
+The released Rust (3.0.0), Python (0.3.4), and Go (v0.3.1) SDKs do not send the header; from
+those languages, call the HTTP API directly:
 
 ```bash
 curl "<endpoint>/v2/query" \
@@ -64,9 +64,7 @@ curl "<endpoint>/v2/query" \
 ```
 
 An endpoint that serves a single database rejects the header with `400`
-`tenant_id_not_allowed`; leave it off there.
-
-`request.json` holds the operation-tree request body, the same body the SDKs send:
+`tenant_id_not_allowed`; omit it there. `request.json` holds the operation-tree body the SDKs send:
 
 ```json JSON
 {
@@ -114,7 +112,7 @@ there is no route deployment step.
 
 SDK request builders expose advanced server-only controls, sent as headers:
 
-- **Send a read to the writer** (`X-Helix-Require-Writer: true`), to read your own
+- **Send a read to the writer** (`X-Helix-Require-Writer: true`) to read your own
   committed writes immediately. See
   [read-after-write](/database/helix-cloud/operate/guarantees#readers-and-read-after-write).
 - **Warm caches without returning a result** (`X-Helix-Warm: true`). See
@@ -145,8 +143,8 @@ execution. A managed cluster with no eligible warming target returns
 ## Monitor queries
 
 Give each query a stable `query_name`. Query insights group runs by name; unnamed queries
-group only with identical query JSON, so queries that inline different values appear as
-separate entries.
+group only with identical query JSON, so inlining different values splits them into separate
+entries.
 
 Users signed in to the [Helix Cloud MCP](/database/helix-cloud/connect/mcp) can read the
 same data with `helix_get_query_insights`, `helix_get_query_latency` (latency percentiles,

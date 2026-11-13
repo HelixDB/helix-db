@@ -7,7 +7,7 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Local development runs the prebuilt `ghcr.io/helixdb/helixdb` server container and exposes the standalone server at `POST /v2/query`. `helix init local` and `helix add local` pin the CLI's current image tag (`v0.0.16` for CLI 3.7.0) in `helix.toml`, so an instance keeps its tag until you change it. By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
+Local development runs the prebuilt `ghcr.io/helixdb/helixdb` server container and exposes the standalone server at `POST /v2/query`. Each instance pins its image tag in `helix.toml` (`v0.0.16` for CLI 3.7.0). By default, storage is in-memory. Use `--disk` when you want persistent local data backed by a CLI-managed SeaweedFS volume.
 
 ## Prerequisites
 
@@ -165,19 +165,13 @@ helix start staging
 helix status
 ```
 
-Each instance is isolated by container name and host port. `helix add local` defaults to port `6969` without checking the other instances, so pass `--port` for every additional instance; two instances on one port cannot run at once. Disk-mode instances also get their own SeaweedFS container, network, and volume, and disk-mode and S3 instances their own disk-cache volume.
+Each instance is isolated by container name and host port. `helix add local` always defaults to port `6969`, so pass `--port` for every additional instance. Disk-mode instances also get their own SeaweedFS container, network, and volume, and disk-mode and S3 instances their own disk-cache volume.
 
 ## Upgrading the server image
 
-`helix update` updates the CLI, not the server image your instances run. Each instance keeps the `tag`
-in its `[local.<instance>]` table. To move one to the image the new CLI ships with, run
-`helix doctor <instance>` while it runs to see the tag, then:
-
-```bash
-helix start dev --image-version v0.0.16 --persist
-```
-
-The new container starts empty in in-memory mode. See [Image pinning](/cli/configuration#image-pinning).
+`helix update` updates the CLI, not your instances' server image. `helix doctor <instance>` names
+the new CLI's tag; then run `helix start dev --image-version v0.0.16 --persist` (an in-memory
+instance starts empty). See [Image pinning](/cli/configuration#image-pinning).
 
 ## Browsing the graph
 

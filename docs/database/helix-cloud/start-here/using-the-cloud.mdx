@@ -46,10 +46,9 @@ databases, provision a database, and create API keys. Helix Cloud runs in the AW
 
   <Step title="Copy the connection details">
     Open the database. In **Connect**, copy the endpoint and database ID. To
-    connect an application directly to the gateway, use **API Keys** to
-    explicitly create a read-only or read-write key and copy its value when it
-    is shown once. A new key takes a few seconds to reach the gateway, so a
-    request sent right away can return `401`; retry after a few seconds.
+    connect an application directly to the gateway, create a read-only or
+    read-write key in **API Keys** and copy its value, which is shown once. A
+    new key can return `401` for its first few seconds; retry shortly.
 
     <Frame>
       <img src="/images/helix-cloud/dashboard/04-database-details.png" alt="Active database details page with connection details, workspace plan, API keys, and query insights" />

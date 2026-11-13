@@ -38,24 +38,22 @@ first. Owners and admins can do every step.
   </Step>
 
   <Step title="Choose how to start">
-    A workspace without an ontology opens on **Get started**. It offers:
+    A workspace without an ontology opens on **Get started**:
 
-    - **Start with a sample company**: **See it on a sample company (1 min)** builds an
-      ontology from a made-up company's data and answers a question about it. See
-      [Try the sample company](/foundry/start-here/sample-company).
-    - **Or start with your own**, with a toggle:
-      - **Set up with your agent**, the default: **Copy prompt** copies a prompt for
+    - **Start with a sample company**: **See it on a sample company (1 min)** runs
+      Foundry on a [made-up company's data](/foundry/start-here/sample-company).
+    - **Or start with your own**, a toggle:
+      - **Set up with your agent** (the default): **Copy prompt** copies a prompt for
         Claude Code, Codex or another agent with the
-        [Helix MCP](/foundry/agents/helix-mcp#set-up-a-workspace-with-your-agent),
-        which then does the steps below with you.
-      - **Use my own data**: select **Continue** to do the steps below yourself.
+        [Helix MCP](/foundry/agents/helix-mcp#set-up-a-workspace-with-your-agent) to do
+        the steps below with you.
+      - **Use my own data**: **Continue** lets you do them yourself.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/start-here/onboarding.png" alt="Get started: the Start with a sample company card, then Or start with your own with the Set up with your agent and Use my own data toggle" />
     </Frame>
 
-    The rest of this tutorial follows **Use my own data**. The page that opens, **Your
-    first ontology**, has three steps.
+    This tutorial follows **Use my own data**, which opens **Your first ontology**.
   </Step>
 
   <Step title="Connect your data or upload documents">
@@ -82,31 +80,24 @@ first. Owners and admins can do every step.
 
   <Step title="Describe what you want to understand">
     Optionally, under **What do you want to understand?**, write the questions you want
-    to answer, in your words. Select **Continue**, or **Skip** to leave it empty.
+    to answer. Select **Continue**, or **Skip**.
   </Step>
 
   <Step title="Create it">
-    The last step says what happens next; select **Create and generate**. Foundry:
-
-    1. names the ontology after what it drafts from, such as "Stripe and Contracts";
-    2. creates a new Helix database for it, named the same, in the workspace's first
-       Helix project, or in a new project named after the workspace;
-    3. has its agent draft a first version;
-    4. makes that draft current and loads it into the database as soon as it's ready;
-    5. emails you when you can ask it questions.
-
-    The generation's page opens and follows the draft. You can leave it: the draft and
-    the load carry on, and the email links to the ontology. If the draft or its load
-    fails, the email says why, with a link to try again.
+    Select **Create and generate**. Foundry names the ontology, creates a new Helix
+    database for it, drafts a first version, makes it current and loads it. It emails
+    you when you can ask it questions, or says why if the draft or load failed. See
+    [Create your first ontology](/foundry/ontologies/create-an-ontology#create-your-first-ontology).
+    You can leave the generation's page meanwhile.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/ontology/new-ontology-review.png" alt="Your first ontology at its Review and create step, saying Foundry creates the ontology on a new Helix database, drafts it, makes it current, loads it and emails you, with Create and generate" />
     </Frame>
 
     <Note>
-      The new database uses the workspace's Helix Cloud plan. A workspace created in
-      Foundry gets one free; see
-      [Plans and billing](/foundry/workspace/plans-and-billing#the-helix-cloud-plan-for-databases).
+      The database uses the workspace's
+      [Helix Cloud plan](/foundry/workspace/plans-and-billing#the-helix-cloud-plan-for-databases);
+      a workspace created in Foundry gets one free.
     </Note>
   </Step>
 
@@ -131,8 +122,8 @@ first. Owners and admins can do every step.
   </Step>
 </Steps>
 
-Your first ontology's draft was made current without a review. To see what it holds,
-open it under **Ontologies**: its overview shows its types and links. To change it,
+Your first draft was made current without a review: open the ontology under
+**Ontologies** to see its types and links. To change it,
 [generate](/foundry/ontologies/generate-and-version#generate-a-draft) or
 [edit](/foundry/ontologies/generate-and-version#edit-a-version) a new version; you
 review every later version before you make it current.

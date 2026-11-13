@@ -60,20 +60,20 @@ Helix project, which owners and admins have.
 
 ## What new members can read
 
-A new member sees the workspace's connections, documents, ontologies, versions and loads,
-but has no **Query read** on any Helix project. Until they get it, they can't use the
-Analyst, the Explorer, Records, entity pages or a document's text in an ontology, which
-all read what a load wrote into a database: those pages say **You don't have read
-access to this database** or **You can't read this ontology's database**.
+A new member sees the workspace's connections, documents, ontologies, versions and
+loads, but has no **Query read** on any Helix project. Until they get read access, pages
+that read what loads wrote (the Analyst, the Explorer, Records, entity pages and a
+document's text in an ontology) say **You don't have read access to this database** or
+**You can't read this ontology's database**.
 
-An owner or admin gives a member read access in one of two ways:
+An owner or admin grants read access in one of two ways:
 
-- **Query read on the project**, in the [Helix dashboard](https://helix-db.com/login):
-  open the workspace's members and give the member **Query read** on the Helix project
-  that holds the ontology's database. They then read every ontology on that project's
-  databases, whole. Owners and admins have it on every project.
-- **Sources**, in Foundry under **Settings** → [Access](/foundry/workspace/access): they
-  then read the part of each ontology those sources hold, and nothing else.
+| Grant | Where | The member then reads |
+| --- | --- | --- |
+| **Query read** on the Helix project that holds the ontology's database | [Helix dashboard](https://helix-db.com/login), under the workspace's members | Every ontology on that project's databases, whole |
+| Sources | Foundry, **Settings** → [Access](/foundry/workspace/access) | The part of each ontology those sources hold, and nothing else |
+
+Owners and admins have **Query read** on every project.
 
 An agent you connect through the [Helix MCP](/foundry/agents/helix-mcp) acts with your
 role and rights: it can do only what the table allows you, and it never adds connections,

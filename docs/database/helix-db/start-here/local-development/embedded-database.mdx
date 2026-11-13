@@ -27,8 +27,7 @@ npm install @helix-db/helix-db @helix-db/helix-db-embedded
 ```
 
 ```bash Go
-# Not available: Go v0.3.1 ships no embedded runtime.
-# NewEmbeddedClient and NewEmbeddedReaderClient return ErrNativeBindingsUnavailable.
+# Not available: Go v0.3.1 ships no embedded runtime. See below.
 ```
 
 ```bash Python
@@ -37,15 +36,13 @@ python -m pip install helix-db helix-db-embedded
 
 </CodeGroup>
 
-- **Rust** compiles the engine from source, so use a current stable toolchain. The
-  `v3.7.0` tag is the CLI release that defaults to server image v0.0.16. The SDK at
-  that tag is newer than the crates.io 3.0.0 release that the
-  [Rust SDK guide](/database/helix-db/start-here/sdk-setup/rust-project-setup) describes.
-- **Go** v0.3.1 does not distribute embedded execution. The embedded constructors
-  compile, but they work only when the module is built with the `helixdb_uniffi`
-  build tag against generated UniFFI Go bindings and a native `helixdb_uniffi`
-  library, and neither is published. Use the Go HTTP client with a
-  [local server](/database/helix-db/start-here/local-development/local-server) instead.
+- **Rust** compiles the engine from source; use a current stable toolchain. `v3.7.0` is
+  the CLI release that defaults to image v0.0.16. Its SDK is newer than the crates.io
+  3.0.0 release the [Rust SDK guide](/database/helix-db/start-here/sdk-setup/rust-project-setup)
+  describes.
+- **Go** v0.3.1 publishes no native bindings: `NewEmbeddedClient` and
+  `NewEmbeddedReaderClient` return `ErrNativeBindingsUnavailable`. Use the Go HTTP
+  client with a [local server](/database/helix-db/start-here/local-development/local-server).
 
 ## Open a writer
 
@@ -125,12 +122,11 @@ const client = await Client.embedded({
 
 </CodeGroup>
 
-Object storage reads its credentials from the standard `AWS_*` environment variables,
-such as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, and its
-endpoint from `AWS_ENDPOINT` when the source sets none. Unlike the server, it has no
-local disk cache by default: once a vector index outgrows memory, each graph hop that
-misses the cache waits on its own object-store request. Give object storage with a
-vector index a [hybrid cache](#configure-caches).
+Object storage reads credentials from the standard `AWS_*` variables
+(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), and its endpoint
+from `AWS_ENDPOINT` when the source sets none. Unlike the server, it has no disk cache
+by default, so once a vector index outgrows memory, each graph hop that misses the
+cache waits on an object-store request. Give it a [hybrid cache](#configure-caches).
 
 ## Configure caches
 
@@ -202,12 +198,12 @@ const client = await Client.embedded(
 
 </CodeGroup>
 
-Python takes the same settings as
-`cache=EmbeddedCacheConfig(vector_memory_bytes=..., mode=MemoryCache())` on
-`Client.embedded` and `Client.embedded_reader`, with `HybridCache(...)` and
-`VectorMemoryOnly()` as the other modes. Rust takes a full `DbConfig` in
-`Client::open_with_config` and `Client::open_reader_with_config`: start from
-`HelixDbSource::embedded_default_config()` and replace its cache.
+- **Python:** pass `cache=EmbeddedCacheConfig(vector_memory_bytes=..., mode=MemoryCache())`
+  to `Client.embedded` or `Client.embedded_reader`. The other modes are
+  `HybridCache(...)` and `VectorMemoryOnly()`.
+- **Rust:** pass a full `DbConfig` to `Client::open_with_config` or
+  `Client::open_reader_with_config`. Start from
+  `HelixDbSource::embedded_default_config()` and replace its cache.
 
 Cache byte budgets bound those caches. They are not a hard cap on total process RSS;
 requests and index work can allocate transient memory.
@@ -260,31 +256,28 @@ reader = Client.embedded_reader(Disk("/data/helix", "app"))
 
 - Use the same `QueryRequest` and response contract as server mode.
 - Writer handles can execute read and write requests.
-- Per-request server options (writer-only, warm-only, and durability waits) fail with
-  an `InvalidRequest` error because there is no server. API-key and database-ID
-  settings are ignored.
+- Per-request server options (writer-only, warm-only, durability waits) fail with
+  `InvalidRequest`. API-key and database-ID settings are ignored.
 - Reopen the same disk or object-storage source to retain canonical data across process
   lifetimes.
 
 ## Writers and readers
 
-- Open one writer per database at a time, across every process. Opening another writer
-  on the same source fences the first: the first handle's writes then fail, for
-  example with `writer_fenced_commit_outcome_unknown`, which means that commit may or
-  may not have landed.
-- Read-only handles can open the same disk or object-storage database alongside the
-  writer, in the same or other processes. A reader sees a write only once it is durable
-  in storage and the reader has refreshed, so it can lag behind the writer.
+- Open one writer per database at a time, across all processes. A second writer on the
+  same source fences the first, whose writes then fail, for example with
+  `writer_fenced_commit_outcome_unknown`: that commit may or may not have landed.
+- Read-only handles can open the same database alongside the writer, in any process.
+  A reader sees a write only once it is durable and the reader has refreshed, so it
+  can lag behind the writer.
 
 ## Telemetry
 
-Embedded databases send the same `basic` usage telemetry as the
-[local server](/database/helix-db/start-here/local-development/local-server#telemetry)
-by default. They read the level that [`helix metrics`](/cli/command-reference/metrics)
-saves for the user. Set `HELIX_TELEMETRY_LEVEL=off` in the process environment to turn
-it off. Rust builds from the `v3.7.0` tag also turn it off when `DO_NOT_TRACK` is set
-to anything but empty, `0`, `false` or `no`; the published TypeScript and Python
-embedded packages (0.3.3) predate `DO_NOT_TRACK` support.
+Embedded databases send the same `basic` telemetry as the
+[local server](/database/helix-db/start-here/local-development/local-server#telemetry),
+at the level [`helix metrics`](/cli/command-reference/metrics) saves for the user.
+Set `HELIX_TELEMETRY_LEVEL=off` in the process environment to turn it off.
+`DO_NOT_TRACK` also works in Rust builds from `v3.7.0`, but not in the published
+TypeScript and Python embedded packages (0.3.3).
 
 ## Next steps
 

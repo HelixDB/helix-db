@@ -13,10 +13,9 @@ It exposes the same operation-tree request contract used by Helix Cloud at
 `POST /v2/query`; gateway-only Cloud features are not included.
 
 <Warning>
-The standalone server has no authentication and no TLS. `helix start` publishes its
-port on every network interface of the host, so anyone who can reach that port can
-read and write all of its data. See [Secure the server](#secure-the-server) before you
-run it anywhere other people's machines can reach.
+The server has no authentication or TLS, and `helix start` publishes its port on every
+host interface. Read [Secure the server](#secure-the-server) before running it where
+other machines can reach it.
 </Warning>
 
 ## Choose storage
@@ -53,10 +52,9 @@ helix start dev             # add --disk --persist to switch an existing project
 
 The standalone server accepts queries at `http://localhost:6969/v2/query`.
 
-For an existing project, set `tag = "v0.0.16"` in its `[local.dev]` block in
-`helix.toml` before starting it. `helix init` saves the CLI's default tag at the time,
-and a saved tag overrides the CLI default, so `helix update` alone does not move an
-existing project to a newer image.
+`helix init` saves the CLI's default image tag in `helix.toml`, and a saved tag wins,
+so `helix update` alone does not upgrade an existing project. Set `tag = "v0.0.16"` in
+its `[local.dev]` block before starting it.
 
 <Warning>
 The first time v0.0.10 or later opens a persisted database, it upgrades the index storage
@@ -69,15 +67,14 @@ helix query dev \
   -e 'readBatch().varAs("count", g().nWithLabel("User").count()).returning(["count"])'
 ```
 
-`helix query -e` evaluates a TypeScript expression, so it needs Node.js 20 or later
-and npm. On first use it installs the `@helix-db/helix-db` package for the CLI. Pass a
-JSON request with `--file` instead to skip Node.js.
+`-e` evaluates a TypeScript expression and needs Node.js 20+ and npm; the first run
+installs `@helix-db/helix-db` for the CLI. To skip Node.js, pass a JSON request with
+`--file`.
 
 <Warning>
-The default mode is in-memory. `helix stop` and `helix restart` discard its data.
-`helix start dev --disk` uses disk storage for that run only: the next plain
-`helix start dev` starts in memory again, so the data seems gone. Add `--persist` to
-save disk storage in `helix.toml`.
+The default mode is in-memory: `helix stop` and `helix restart` discard its data.
+`--disk` alone applies to one run, and the next plain `helix start dev` is in memory
+again. Add `--persist` to save disk storage in `helix.toml`.
 </Warning>
 
 ## Use an existing object store
@@ -131,7 +128,7 @@ docker run --rm --name helixdb \
   ghcr.io/helixdb/helixdb:v0.0.16
 ```
 
-`-p 127.0.0.1:6969:8080` publishes the port on the host's loopback interface only. See
+The `127.0.0.1:` prefix publishes the port on host loopback only; see
 [Secure the server](#secure-the-server).
 
 The standalone server exposes liveness and readiness checks:
@@ -157,26 +154,21 @@ S3-compatible storage and is interpreted as a real bucket name. Setting
 | `GET /v2/diagnostics` | Read-only setup checks, rendered by [`helix doctor`](/cli/command-reference/doctor) |
 | `GET /healthz`, `GET /readyz` | Liveness and readiness |
 
-The server also runs queries, Cypher and SQL over gRPC (the `helixdb.server.v1.HelixDbServer`
-service) on `HELIX_GRPC_ADDR`. The image sets it to `127.0.0.1:8081`, which only
-processes inside the container can reach. To call gRPC from outside, set
-`HELIX_GRPC_ADDR=0.0.0.0:8081` and publish port 8081.
+Queries, Cypher and SQL also run over gRPC (`helixdb.server.v1.HelixDbServer`) on
+`HELIX_GRPC_ADDR`, which the image binds to container-only `127.0.0.1:8081`. To call
+gRPC from outside, set `HELIX_GRPC_ADDR=0.0.0.0:8081` and publish port 8081.
 
 ## Secure the server
 
-The standalone server has no authentication and no TLS: any client that reaches its
-HTTP port can read and write every record.
+The server has no authentication and no TLS: any client that reaches its HTTP port can
+read and write every record.
 
-- Publish the port on loopback only, as the `docker run` and Compose examples on this
-  page do (`-p 127.0.0.1:6969:8080`).
-- `helix start` publishes the port on every network interface of the host. On a
-  machine that other devices can reach, block the port with a firewall, or run the
-  image directly with a loopback port.
-- To serve other machines, put a reverse proxy in front of the server that terminates
-  TLS and authenticates every request, and expose only the proxy.
-- Inside the container, `HELIX_HTTP_ADDR` (default `0.0.0.0:8080`) and
-  `HELIX_GRPC_ADDR` (default `127.0.0.1:8081` in the image) choose the listen
-  addresses.
+- Publish the port on loopback only (`-p 127.0.0.1:6969:8080`), as this page's
+  `docker run` and Compose examples do.
+- `helix start` publishes the port on every host interface. On a reachable machine,
+  firewall the port or run the image directly on loopback.
+- To serve other machines, expose only a reverse proxy that terminates TLS and
+  authenticates every request.
 
 For managed authentication and TLS, use [Helix Cloud](/database/helix-cloud/start-here/using-the-cloud).
 
@@ -293,8 +285,8 @@ volumes:
 
 Inline `configs` content needs Docker Compose 2.23.1 or later. The SeaweedFS
 container is not published to the host. Change the example credentials in all
-three places if you expose it. The `helix-cache` volume and the open-file limit are
-what S3 mode's [local disk cache](#add-a-local-disk-cache) needs.
+three places if you expose it. The `helix-cache` volume and `nofile` limit are for
+S3 mode's [local disk cache](#add-a-local-disk-cache).
 
 Run `docker compose down` to replace the HelixDB container without deleting
 the SeaweedFS data. `docker compose down -v` deletes the persisted database.
@@ -443,24 +435,18 @@ is set.
 
 ## Telemetry
 
-The server sends usage telemetry at the `basic` level by default: each query's shape
-with every value redacted, its latency and outcome, the first word of the caller's
-`User-Agent`, and pseudonymous installation and deployment IDs. No parameters,
-results, IP addresses, or repository or bucket names are stored. Containers started
-by `helix start` use the CLI's level, which
-[`helix metrics`](/cli/command-reference/metrics) sets.
+The server sends `basic` usage telemetry by default: each query's shape with every
+value redacted, its latency and outcome, the first word of the caller's `User-Agent`,
+and pseudonymous installation, project and deployment IDs. It stores no parameters, results,
+IP addresses, or repository or bucket names.
 
-To turn it off when you run the image directly, set `HELIX_TELEMETRY_LEVEL=off`:
+To turn it off:
 
-```bash
-docker run --rm --name helixdb \
-  -p 127.0.0.1:6969:8080 \
-  -e HELIX_TELEMETRY_LEVEL=off \
-  ghcr.io/helixdb/helixdb:v0.0.16
-```
-
-`DO_NOT_TRACK` set to anything but empty, `0`, `false` or `no` also turns telemetry
-off, whatever the level, in image v0.0.16 and later and in CLI 3.7.0 and later.
+- With `helix start`, run [`helix metrics off`](/cli/command-reference/metrics);
+  containers use the CLI's level.
+- Running the image directly, add `-e HELIX_TELEMETRY_LEVEL=off`.
+- Set `DO_NOT_TRACK` to anything but empty, `0`, `false` or `no` (image v0.0.16 and
+  CLI 3.7.0 and later). It overrides the level.
 
 ## Stop or inspect
 

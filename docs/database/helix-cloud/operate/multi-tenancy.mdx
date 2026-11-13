@@ -212,9 +212,8 @@ for the cross-language index definition.
 
 ### Text indexes
 
-Text indexes provide the same model for full-text search. The tenant property is the name of the
-property Helix reads the partition value from on each record; any property name works, and
-`tenant_id` is only a convention. Helix maintains a separate text index for each distinct value,
+Text indexes work the same way for full-text search. The tenant property can be any property
+name; `tenant_id` is only a convention. Helix keeps a separate text index for each distinct value,
 which keeps tenant-scoped full-text search working sets smaller. Tenant-partitioned text indexes
 are the preferred way to isolate full-text search results when that behavior is required.
 
@@ -224,8 +223,8 @@ the request's tenant value to the text-search builder. See
 
 ## Considerations
 
-- **Noisy neighbors.** Tenants share compute and cache, and a cluster's read capacity is fixed,
-  so a high-volume tenant can affect others' latency. The [Helix Cloud request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
+- **Noisy neighbors.** Tenants share compute and cache, and read capacity is fixed, so a
+  high-volume tenant can affect others' latency. The [Helix Cloud request bucket](/database/helix-cloud/operate/limits#helix-cloud-request-rate-limits)
   is shared by the whole database. Monitor per-tenant query volume and apply a
   separate application-side limiter when many application tenants use that database.
 - **Shared search semantics.** Secondary indexes remain shared. Tenant-scoped vector and text

@@ -14,31 +14,30 @@ Traversal operations consume the current stream and produce the next stream.
 | `out(label)` | Destination nodes of outgoing edges |
 | `in(label)` | Source nodes of incoming edges |
 | `both(label)` | Adjacent nodes in either direction |
-| `outE(label)` / `inE(label)` / `bothE(label)` | The outgoing, incoming, or all edges themselves |
+| `outE(label)` / `inE(label)` / `bothE(label)` | The outgoing, incoming, or all edges |
 | `outN()` | From an edge to its target node |
 | `inN()` | From an edge to its source node |
 | `otherN()` | From an edge to the endpoint the traversal did not come from |
 | `dedup()` | Remove duplicate results, keeping the first |
 
-The label is optional. Rust takes `Some("FOLLOWS")` or `None`, and the Rust and Python
-incoming step is `in_`.
+The label is optional. Rust takes `Some("FOLLOWS")` or `None`; Rust and Python spell
+the incoming step `in_`.
 
-These steps work with named results, paths, and per-row values:
+Steps for named results, paths, and per-row values:
 
 | Operation | Result |
 | --- | --- |
-| `as(name)` / `store(name)` | Save the current stream under `name` and pass it on unchanged (`as_` in Rust and Python) |
-| `select(name)` | Replace the current stream with the stream saved under `name` |
-| `inject(name)` | Append the stream saved under `name` to the current stream, or start from it |
+| `as(name)` / `store(name)` | Save the stream under `name` and pass it on unchanged (`as_` in Rust and Python) |
+| `select(name)` | Replace the stream with the one saved under `name` |
+| `inject(name)` | Append the stream saved under `name`, or start from it |
 | `bind(name)` | Keep the current element on each row; see below |
 | `path()` | Return each row's path of visited elements with the row |
 | `simplePath()` | Drop rows whose path visits an element twice |
 | `withSack(value)`, `sackSet(property)`, `sackAdd(property)`, `sackGet()` | Start a per-row value, set it from a property, add a numeric property to it, and return it with the row |
-| `fold()` / `unfold()` | Collect the stream into one value, and expand it back into rows |
+| `fold()` / `unfold()` | Collect the stream into one value; expand it back into rows |
 
-Rows that carry a visible path or sack return
-`{"current": ..., "bindings": ..., "path": ..., "sack": ...}` instead of `{"$id": ...}`
-when the entry ends without a projection.
+Without a projection, rows with a visible path or sack return
+`{"current": ..., "bindings": ..., "path": ..., "sack": ...}` instead of `{"$id": ...}`.
 
 ## Follow a named result
 
@@ -318,19 +317,20 @@ RETURN s.name AS service, w.name AS workload
 </CodeGroup>
 
 Bindings are row-local, so each row pairs a workload with the service that reached it
-rather than joining unrelated paths. After `bind`, end the traversal with
-`projectBindings` or `projectDistinctBindings`: `valueMap`, `project`, `values`, `id`,
-`label`, `edgeProperties`, `orderBy`, `repeat`, and `choose` are rejected with
-`invalid_after_bind_operation`, and write batches cannot use `bind`. Cypher pattern variables, such as `s` in the
+rather than joining unrelated paths. Cypher pattern variables, such as `s` in the
 Cypher tab, stay bound for the whole row in the same way, so the statement needs no
 `bind` step. Branches can bind optional values and coalesce
 them during projection; see [Project correlated bindings](/database/helix-db/query-guides/projections#project-correlated-bindings).
 
+After `bind`, end the traversal with `projectBindings` or `projectDistinctBindings`.
+`valueMap`, `project`, `values`, `id`, `label`, `edgeProperties`, `orderBy`, `repeat`,
+and `choose` fail with `invalid_after_bind_operation`. Write batches cannot use `bind`.
+
 ## Branch traversals in Go
 
-`sub()` starts a branch for `optional`, `union`, `coalesce`, `choose`, and `repeat`. Go's
-`helix.Sub()` offers only `Out`, `In`, `Both`, `Where`, `Limit`, `Count`, and `Bind`.
-For any other step, build the branch from a traversal's steps, as in
+Go's [branch](/database/helix-db/query-guides/advanced#branching-operations) builder
+`helix.Sub()` offers only `Out`, `In`, `Both`, `Where`, `Limit`, `Count`, and `Bind`. For
+any other step, build the branch from a traversal's steps:
 `helix.SubTraversalFromSteps(helix.G().OutE("WROTE").OutN().Steps())`.
 
 ## Avoid accidental path growth

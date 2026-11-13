@@ -24,31 +24,30 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1 | iex
 ```
 
-Both installers download the latest release from GitHub and replace an older `helix`. Run
-`helix --version` to check, and `helix update` to update later.
+Both install the latest GitHub release over any older `helix`. Check with `helix --version`; update
+later with `helix update`.
 
 <AccordionGroup>
   <Accordion title="Install locations and options (macOS and Linux)">
-    The script installs `~/.local/bin/helix`. For bash, zsh, or fish it appends a `PATH` line to
-    `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish` when that file exists and lacks the line;
-    restart the shell afterwards. Pass options after `bash -s --`:
+    The script installs `~/.local/bin/helix` and, for bash, zsh, or fish, appends a `PATH` line to
+    `~/.bashrc`, `~/.zshrc`, or `~/.config/fish/config.fish` if that file exists and lacks it. Restart
+    the shell afterwards. Pass options after `bash -s --`:
 
     | Option | Effect |
     | --- | --- |
-    | `-d`, `--dir <DIR>` | Install into `DIR`. The script does not edit `PATH` for a custom directory. |
-    | `-s`, `--system` | Install into `/usr/local/bin`. Needs write access there, so run it with `sudo bash -s -- --system`. |
+    | `-d`, `--dir <DIR>` | Install into `DIR`, without editing `PATH`. |
+    | `-s`, `--system` | Install into `/usr/local/bin`; run it as `sudo bash -s -- --system`. |
     | `-f`, `--force` | Reinstall even when the latest version is already installed. |
 
     ```bash
     curl -sSL "https://install.helix-db.com" | bash -s -- --dir "$HOME/bin"
     ```
 
-    The script always installs the latest release.
+    It always installs the latest release.
   </Accordion>
   <Accordion title="Install locations and options (Windows)">
-    The script installs `%LOCALAPPDATA%\Helix\bin\helix.exe` and adds that directory to your user
-    `PATH`; open a new PowerShell afterwards. It supports x86-64 Windows. To pass options, run the
-    script as a script block:
+    The script installs `%LOCALAPPDATA%\Helix\bin\helix.exe` on x86-64 Windows and adds it to your user
+    `PATH`; open a new PowerShell afterwards. To pass options, run it as a script block:
 
     ```powershell
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/HelixDB/helix-db/main/crates/cli/install.ps1))) -Version v3.7.0 -NoPathUpdate
@@ -62,10 +61,10 @@ Both installers download the latest release from GitHub and replace an older `he
     | `-NoPathUpdate` | Leave the user `PATH` unchanged. |
   </Accordion>
   <Accordion title="Pin a version in CI">
-    Release tags are `v<version>`, and each release has one binary per platform:
-    `helix-x86_64-unknown-linux-gnu`, `helix-aarch64-unknown-linux-gnu`, `helix-x86_64-apple-darwin`,
-    `helix-aarch64-apple-darwin`, and `helix-x86_64-pc-windows-msvc.exe`. On macOS and Linux, download
-    the binary directly; on Windows, use `-Version`.
+    Release tags are `v<version>`, with one binary per platform: `helix-x86_64-unknown-linux-gnu`,
+    `helix-aarch64-unknown-linux-gnu`, `helix-x86_64-apple-darwin`, `helix-aarch64-apple-darwin`, and
+    `helix-x86_64-pc-windows-msvc.exe`. On macOS and Linux, download the binary; on Windows, use
+    `-Version`.
 
     ```bash
     version=v3.7.0
@@ -107,20 +106,19 @@ helix init cloud
 helix query production -e 'readBatch().varAs("c", g().nWithLabel("User").count()).returning(["c"])'
 ```
 
-`helix init cloud` picks your workspace, project, and database, using the only one of each or
-asking you to choose, and links them in `helix.toml` as the `production` instance. It writes no
-example request: `-e` builds one from a TypeScript expression and needs Node.js 20+ and npm. To send
-JSON instead, write a request file as described in [Request shape](/cli/command-reference/query#request-shape)
-and pass it with `--file`. Later Cloud commands in the directory, such as `helix database` or
-`helix logs production`, need no IDs or flags.
+`helix init cloud` picks your workspace, project, and database (the only one of each, or asks) and
+links them in `helix.toml` as the `production` instance. It writes no example request: `-e` builds
+one from TypeScript and needs Node.js 20+ and npm, or pass a JSON
+[request file](/cli/command-reference/query#request-shape) with `--file`. Later Cloud commands in
+the directory, such as `helix database` or `helix logs production`, need no IDs or flags.
 
-Cloud commands use only the rotating WorkOS session. Query execution goes through the backend broker
-and requires the `database.query.read` or `database.query.write` permission on the database's
-project. The CLI does not need a gateway URL, application key, service credential, or sync step.
+Cloud commands use only your rotating WorkOS session; there is no gateway URL, application key,
+service credential, or sync step. Queries go through the backend broker and need
+`database.query.read` or `database.query.write` on the database's project.
 
-When a command cannot choose a resource on its own, pass it by ID, slug, or name, for example
-`helix database list --project <project>` or `helix query tenant:<id> --file request.json`. Stable
-links live only in the current project's `helix.toml`. See
+When a command cannot choose a resource, pass it by ID, slug, or name, for example
+`helix database list --project <project>` or `helix query tenant:<id> --file request.json`. Links
+live only in the project's `helix.toml`. See
 [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution).
 
 <CardGroup cols={2}>

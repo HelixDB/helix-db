@@ -14,11 +14,11 @@ vector, and text workloads with strong transactional guarantees. These choices h
 | Area                                 | Details                                                                                                                                |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
 | **Durable storage**                  | All data persists in object storage. No risk of data loss from local disk failure. Storage capacity scales independently of compute.   |
-| **Read and write separation**        | Reads run on two readers, apart from the writer, so read traffic stays off the process that commits writes unless a read asks for the writer. |
+| **Read and write separation**        | Reads run on two readers, so read traffic stays off the writer unless a read asks for it. |
 | **Serializable transactions**       | Every query runs against a stable snapshot with ACID semantics by default.                                                             |
 | **Mixed graph, vector, and text workloads** | Graph traversals, vector search, and full-text search execute in the same transaction, against the same snapshot. No need to stitch together separate systems for those workloads. |
 | **Cost efficiency at scale**         | Object storage is significantly cheaper per GB than local SSDs or in-memory stores. Large datasets remain affordable.                  |
-| **Managed failover**                 | One writer commits every write, so there is no multi-writer consensus to run. Helix elects the writer, fences a failed one, and promotes a reader for you. |
+| **Managed failover**                 | One writer means no multi-writer consensus to run. Helix fences a failed writer and promotes a reader for you. |
 
 ## Not optimal for
 
@@ -40,9 +40,8 @@ durability and cost characteristics are superior.
 cost of write throughput being bounded by a single node. In practice, batching and the high
 throughput of the writer process make this sufficient for most workloads.
 
-**Fixed topology.** Every cluster runs the same writer and two readers, which keeps failover
-predictable: a reader is in place to promote when the writer fails. The tradeoff is that read capacity does
-not grow on its own with load.
+**Fixed topology.** Every cluster runs one writer and two readers, so a reader is always ready to
+promote when the writer fails. The tradeoff is that read capacity does not grow with load.
 
 **Dynamic query model.** Queries travel inline with each request, so there is no deploy step and
 ad-hoc queries are fully supported. The tradeoff is the small per-request cost of deserializing the

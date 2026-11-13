@@ -150,10 +150,9 @@ The native request options apply to SQL too:
 | Skip the durability wait (writes) | `.should_await_durability(false)` | `.shouldAwaitDurability(false)` | `helix.AwaitDurability(false)` | `await_durability=False` | `X-Helix-Await-Durable: false` |
 
 Writes wait for durability by default. Skipping the wait returns once the write is applied
-on the writer, so a crash before its WAL upload loses it. Helix Cloud rejects a write
-that skips the wait with `400 invalid_request`. Running on the writer fails with
-`503 writer_mode_required` on a local server that is not a writer; Helix Cloud sends the
-statement to the writer instead.
+on the writer, so a crash before its WAL upload loses it. See
+[execution headers](/database/helix-db/query-guides/http-api#execution-headers) for how
+local servers and Helix Cloud handle each option.
 
 Rust and TypeScript set options on `request_builder()` / `requestBuilder()` before
 `.sql(...)`; Go and Python pass them to `SQL` and `sql`. Embedded clients reject
@@ -459,10 +458,10 @@ floats, nodes, relationships, and paths.
 
 A statement that uses `?` cannot also use numbered placeholders, since `?` takes
 those numbers; mixing them fails with `syntax_error` (`invalid_parameter`). A
-list binds only `?` and numbered placeholders, so a `:name` placeholder with a
-list of `parameters` fails with `parameter_missing`. `IN (?)` binds a list
-parameter. Labels, relationship types, and column names are part of the
-statement, so keep values in parameters.
+`parameters` list binds only `?` and numbered placeholders, so `:name` with a list
+fails with `parameter_missing`. `IN (?)` binds a list parameter. Labels,
+relationship types, and column names are part of the statement, so keep values in
+parameters.
 
 ## Writes and transactions
 
@@ -491,9 +490,9 @@ RETURNING p.age
 
 ### Upsert without ON CONFLICT
 
-`ON CONFLICT`, `REPLACE`, and the other upsert forms are rejected. Let a
+Upsert forms such as `ON CONFLICT` are rejected. Let a
 [unique index](/database/helix-db/query-guides/secondary-indexes#unique-indexes) on the
-key column decide instead, as in the
+key column decide, as in the
 [Cypher recipe](/database/helix-db/query-guides/cypher#upsert-without-merge):
 
 1. Create a unique equality index on the key property, such as `email` on `Person`.
@@ -503,8 +502,8 @@ key column decide instead, as in the
    INSERT INTO Person (email, name) VALUES (:email, :name)
    ```
 
-3. If it fails with HTTP `409` and `error` is `unique_constraint_violation`, the row
-   already exists and nothing was written. Update it instead:
+3. On `409 unique_constraint_violation`, the row exists and nothing was written.
+   Update it instead:
 
    ```sql
    UPDATE Person p SET name = :name WHERE p.email = :email
@@ -513,8 +512,8 @@ key column decide instead, as in the
 
 4. If the update returns no rows, the row was deleted in between; go back to step 2.
 
-A multi-row `INSERT` fails as a whole on its first duplicate, so for a batch,
-select the existing keys first, insert the missing rows, and update the rest.
+A multi-row `INSERT` fails as a whole on its first duplicate, so for a batch, select
+the existing keys first, insert the missing rows, and update the rest.
 
 ## Indexes and performance
 

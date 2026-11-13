@@ -13,9 +13,9 @@ your application's language:
 
 | SDK | Package | HTTP client | Embedded runtime |
 | --- | --- | --- | --- |
-| Rust | `helix-db` (imported as `helix_db`) | Async | Yes, with the `embedded` feature from a git dependency; the crates.io release has no `embedded` feature |
+| Rust | `helix-db` (imported as `helix_db`) | Async | Yes, with the `embedded` feature from a git dependency (not on crates.io) |
 | TypeScript | `@helix-db/helix-db` (ESM, Node.js 20+) | Async | Yes, with `@helix-db/helix-db-embedded` |
-| Go | `github.com/helixdb/helix-db/sdks/go` | Yes | No: the embedded constructors return `ErrNativeBindingsUnavailable` |
+| Go | `github.com/helixdb/helix-db/sdks/go` | Yes | No |
 | Python | `helix-db` (imported as `helixdb`, Python 3.10+) | Sync and async | Yes, with `helix-db-embedded` |
 
 See [Embedded database](/database/helix-db/start-here/local-development/embedded-database#install)

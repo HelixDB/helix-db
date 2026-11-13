@@ -84,13 +84,11 @@ helix.WriteQuery("create_doc_text_index").
 </CodeGroup>
 
 Pass a tenant property as the final argument to partition the index by tenant. Any
-property name works. Once the index exists, a write that stores the indexed text on a
-record without a tenant value, or with a `null` one, fails with
-`invalid_index_source_data`. See
+property name works. Once the index exists, writing indexed text on a record whose
+tenant value is missing or `null` fails with `invalid_index_source_data`. See
 [tenant-partitioned search indexes](/database/helix-cloud/operate/multi-tenancy#tenant-partitioned-search-indexes).
 
-The index becomes queryable only after its build activates. Until then, a search that
-names it fails with `index_not_found`.
+Until its build activates, searching the index fails with `index_not_found`.
 
 ## Search an index
 
@@ -181,27 +179,23 @@ Hits arrive best match first, ordered by BM25 `$score` descending and then by ID
 index. For a tenant-partitioned index, pass the tenant value as the final argument.
 
 `$score` exists only on the hit stream: a step to another element drops it, and a
-projection ends the traversal. To return it after traversing away, `bind` the hit and
-read it with `projectBindings`; see
+projection ends the traversal. To keep it, `bind` the hit and read it with
+`projectBindings`; see
 [Keep search scores after traversing](/database/helix-db/query-guides/projections#keep-search-scores-after-traversing).
 
 ## How text matches
 
 The index and the query text go through the same analyzer:
 
-- Text splits into runs of Unicode letters and digits, and each run is lowercased.
-  Everything else, including punctuation and hyphens, separates terms, so
-  `"Graph-DB v2"` becomes `graph`, `db`, and `v2`.
-- There is no stemming and no stopword list: `running` does not match `run`, and `the`
-  is a term like any other.
-- Query terms are deduplicated and combined with OR, so a document matches when it
-  contains any term. BM25 ranks documents with more, rarer terms higher, using fixed
-  parameters `k1` 1.2 and `b` 0.75.
-- There are no phrase, prefix, wildcard, or fuzzy queries. `"consensus protocol"`
-  matches documents with either word, adjacent or not.
-- An empty query fails with `invalid_search_input`, or `invalid_query` when it comes
-  from a parameter. A query with no letters or digits, such as `"---"`, returns no
-  hits.
+- Terms are lowercased runs of Unicode letters and digits; everything else, including
+  punctuation and hyphens, separates them. `"Graph-DB v2"` becomes `graph`, `db`, `v2`.
+- No stemming or stopwords: `running` does not match `run`, and `the` is a term.
+- Query terms are deduplicated and ORed: a document matches if it contains any term.
+  BM25 (fixed `k1` 1.2, `b` 0.75) ranks more and rarer terms higher.
+- No phrase, prefix, wildcard, or fuzzy queries: `"consensus protocol"` matches either
+  word, adjacent or not.
+- An empty query fails with `invalid_search_input` as a literal and `invalid_query` as a
+  parameter. A query with no letters or digits, such as `"---"`, returns no hits.
 
 To combine keyword and semantic ranking, see
 [Combine vector and text search](/database/helix-db/query-guides/vector-indexes#combine-vector-and-text-search).

@@ -122,14 +122,14 @@ property name works. A record without the tenant property is not indexed. See
 [tenant-partitioned search indexes](/database/helix-cloud/operate/multi-tenancy#tenant-partitioned-search-indexes).
 
 Creation returns a receipt before the backfill over existing data finishes. The index
-becomes queryable only after validation and atomic activation. Until then, a search that
-names it fails with `index_not_found`, as does a search of an index that does not exist.
+becomes queryable only after validation and atomic activation. Until then, searching it
+fails with `index_not_found`, as for a missing index.
 
 ## Stored vectors
 
-An indexed property accepts an `f32` array, an `f64` array, an `i64` array, or a generic
-array of numbers; every value is converted to `f32`. A record without the property is
-not indexed. A write fails when the indexed property holds:
+An indexed property accepts `f32`, `f64`, or `i64` arrays, or a generic array of
+numbers, converted to `f32`. A record without the property is not indexed. A write fails
+when the property holds:
 
 | Value | Error |
 | --- | --- |
@@ -141,9 +141,8 @@ not indexed. A write fails when the indexed property holds:
 
 Existing records with such values block a build instead; see
 [Troubleshoot index operations](/database/helix-db/query-guides/troubleshooting#index-operation-is-blocked).
-A query vector must have the index dimension too. An empty query vector, or one with
-`NaN` or infinite components, fails with `invalid_search_input` when it is a literal and
-`invalid_query` when it comes from a parameter.
+An empty query vector, or one with `NaN` or infinite components, fails with
+`invalid_search_input` as a literal and `invalid_query` as a parameter.
 
 ## Search an index
 
@@ -235,8 +234,8 @@ edge index. For a tenant-partitioned index, pass the tenant value as the final
 argument.
 
 `$distance` exists only on the hit stream: a step to another element drops it, and a
-projection ends the traversal. To return it after traversing away, `bind` the hit and
-read it with `projectBindings`; see
+projection ends the traversal. To keep it, `bind` the hit and read it with
+`projectBindings`; see
 [Keep search scores after traversing](/database/helix-db/query-guides/projections#keep-search-scores-after-traversing).
 
 `k` must be at least 1: a literal `0` fails with `invalid_search_result_count`, and a
@@ -252,8 +251,8 @@ parameter `k` of `0` or less fails with `invalid_query`.
 | Euclidean | Squared Euclidean distance, with no square root | `0` and up |
 | Manhattan | Sum of absolute component differences | `0` and up |
 
-Take the square root of a Euclidean `$distance` to get the straight-line distance, and
-compute `1 - 2 × $distance` to get the cosine similarity.
+Straight-line distance is the square root of a Euclidean `$distance`; cosine similarity
+is `1 - 2 × $distance`.
 
 ## Index structure
 
@@ -267,17 +266,15 @@ To rank only the nodes or edges a traversal reaches, such as documents a user ma
 access, search within the traversal instead of the whole index. See
 [Prefiltered search](/database/helix-db/query-guides/prefiltering#vector-prefiltering).
 
-Search the whole index when every record of the label is a valid answer. Prefilter when
-only some records are: filtering whole-index hits afterwards drops results and can leave
-fewer than `k`. A small candidate set is also
-[ranked exactly](/database/helix-db/query-guides/prefiltering#how-it-works), while a
-whole-index search is approximate.
+Prefilter when only some records are valid answers: filtering whole-index hits
+afterwards can leave fewer than `k`. Prefiltering also
+[ranks a small candidate set exactly](/database/helix-db/query-guides/prefiltering#how-it-works).
 
 ## Combine vector and text search
 
-HelixDB has no operator that fuses vector and BM25 rankings. Run both searches as
-entries of one read batch, which reads one snapshot, and merge the two ranked lists in
-your application, for example with reciprocal rank fusion:
+HelixDB has no operator that fuses vector and BM25 rankings. Run both searches in one
+read batch (one snapshot) and merge the ranked lists in your application, for example
+with reciprocal rank fusion:
 
 <CodeGroup>
 
@@ -401,8 +398,7 @@ helix.ReadQuery("hybrid_docs").
 
 </CodeGroup>
 
-`$distance` and `$score` use different scales, so fuse by rank rather than by adding the
-raw values.
+Fuse by rank, not raw values: `$distance` and `$score` use different scales.
 
 ## Search consistency
 
@@ -423,7 +419,6 @@ bound from the surrounding plan can lower it. Prefiltered searches have their ow
 - Writes made while an index builds are queued and published after it activates;
   strong searches include them as soon as the index is active. Until then they count
   toward [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
-- Malformed source vectors can block the operation.
 - A new generation remains hidden until validation and activation succeed.
 - Dropping an index is also a durable lifecycle operation.
 

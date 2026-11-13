@@ -30,12 +30,12 @@ membership → ranking → top k**.
 - Output IDs are a deduplicated subset of the input IDs.
 - Each selected row keeps its bindings, path, and sack, with `$distance` (vector) or
   `$score` (text) attached.
-- Candidates without the indexed property, and candidates in another tenant partition
-  than the tenant value passed, are dropped without an error.
-- An empty candidate stream returns no hits before the runtime checks of the tenant
-  value, the query vector or text, and a parameter `k`. Checks made when the request is
-  planned still apply: a missing or inactive index fails with `index_not_found`, and a
-  tenant value for an index without tenants fails with `invalid_search_tenant`.
+- Candidates without the indexed property, or outside the passed tenant's partition, are
+  dropped without an error.
+- An empty candidate stream returns no hits without checking the tenant value, query
+  vector or text, or a parameter `k`. Plan-time checks still apply: a missing or
+  inactive index fails with `index_not_found`, and a tenant value on an index without
+  tenants fails with `invalid_search_tenant`.
 - A tenant-partitioned index requires a tenant value; a non-empty candidate stream
   without one fails with `invalid_query`.
 
@@ -243,12 +243,11 @@ request = query.to_query_request(
 
 </CodeGroup>
 
-Exact membership means every returned hit is in the traversal's set. Ranking is exact
-only for small sets: the engine compares every candidate embedding when there are at
-most 800 candidates, or at most 8,192 whose vectors total at most 24 MiB (candidates ×
-dimension × 4 bytes). For a larger set it walks the HNSW graph restricted to the
-candidates, which is approximate like a whole-index search. Candidates whose indexed
-vector changed in an unpublished write are left out of that count.
+Membership is always exact; ranking is exact only for small sets. The engine compares
+every candidate embedding when there are at most 800 candidates, or at most 8,192 whose
+vectors total at most 24 MiB (candidates × dimension × 4 bytes). Candidates whose indexed
+vector changed in an unpublished write are left out of that count. Larger sets walk the
+HNSW graph restricted to the candidates, which is approximate.
 
 ## Full-text search prefiltering
 
@@ -495,8 +494,7 @@ removed the value.
 - Create a compatible index for the candidate label and property. Vector queries must
   match the index dimension exactly.
 - Pass the same tenant value as the index when it is tenant-partitioned.
-- `bind` a ranked hit before traversing away from it if the response needs its
-  `$distance` or `$score`; see
+- To return `$distance` or `$score` after traversing away from a hit, `bind` it; see
   [Keep search scores after traversing](/database/helix-db/query-guides/projections#keep-search-scores-after-traversing).
 - Bound the candidate traversal when its size can grow without application limits.
 

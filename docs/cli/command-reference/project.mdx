@@ -55,10 +55,9 @@ Bare `helix project` lists projects with the defaults below. Flags go after the 
 
 - Arguments and defaults resolve as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution). A project slug or name without `--workspace` is searched for in every workspace you can access.
 - `list` marks the project linked in `helix.toml`.
-- `link` and `create --link` need an existing `helix.toml` with at least one instance; create one with `helix init local` first. They write `[project] id` and `workspace_id` and rewrite the file, which drops its comments (see [Commands that rewrite helix.toml](/cli/configuration#commands-that-rewrite-the-file)). They keep the local `[project] name`, which names local containers, and create no global selection state. `link` ignores an existing link, so it can relink a directory.
+- `link` and `create --link` need a `helix.toml` with at least one instance (run `helix init local` first). They write `[project] id` and `workspace_id`, rewriting the file and dropping its comments (see [Commands that rewrite helix.toml](/cli/configuration#commands-that-rewrite-the-file)). They keep the local `[project] name`, which names local containers, and create no global selection state. `link` ignores an existing link, so it can relink a directory.
 - `get` and `list --json` show each project's `id`, which `helix service-credential --grant` needs.
 - `delete` asks for confirmation in a terminal. Without one, or with `--json`, it fails before any request unless you pass `--yes`. It deletes the named or linked project only; it never picks a workspace's only project on its own. With `--json` it prints `{"deleted":{"kind":"project","id":"..."}}`.
-- With `--json`, `link` prints `{"project":{...},"config":"<path to helix.toml>"}`, and `list`, `get`, and `create` print the Helix Cloud API's JSON.
 - `project update` is not supported.
 
 ## Examples

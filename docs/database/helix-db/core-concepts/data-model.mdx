@@ -80,10 +80,12 @@ An edge can also connect a node to itself, which is useful for relationships suc
 ## Indexes
 
 An index is an optional access path over a node or edge label and a top-level property.
-Its definition also contains family-specific settings: uniqueness for node equality
-indexes, sort direction for range indexes, dimensions and distance metric for vector
-indexes, and, for vector and text indexes, an optional tenant property that partitions
-the index by tenant.
+Its definition also holds family-specific settings:
+
+- Node equality indexes: uniqueness.
+- Range indexes: sort direction.
+- Vector indexes: dimensions and distance metric.
+- Vector and text indexes: an optional tenant property that partitions the index.
 
 ```mermaid
 %%{init: {'flowchart': {'defaultRenderer': 'elk'}}}%%
@@ -117,10 +119,9 @@ Indexes may target nodes or edges and are scoped by label and property. They do 
 change the canonical graph data. Creating one starts an asynchronous backfill over
 existing data; the index becomes visible only after validation and atomic activation.
 
-Vector and text indexes also take later writes asynchronously. A write commits its
-graph change together with a queued index operation, and a background index worker
-publishes it into the index shortly afterwards. Searches are `strong` by default, so
-they include committed work that is not yet published; see
+Vector and text indexes apply later writes asynchronously: a write commits with a
+queued index operation, and a background worker publishes it shortly after. Searches
+are `strong` by default, so they include committed but unpublished work. See
 [Search consistency](/database/helix-db/query-guides/search-consistency) for `eventual`
 searches and index backpressure.
 
@@ -143,9 +144,9 @@ query examples.
   zero.
 - `$id` and `$label` expose identity and label in queries. `$label` cannot be assigned
   through an ordinary property map.
-- Node and edge labels are fixed when the element is created. No operation relabels
-  one, and Cypher `SET n:Label` is not supported. To change a label, create a new
-  element with the new label and remove the old one.
+- Node and edge labels are fixed at creation: no operation relabels them, and Cypher
+  `SET n:Label` is not supported. To change a label, create a new element and remove
+  the old one.
 - Current secondary, text, and vector indexes require top-level properties, and object
   and heterogeneous-array values cannot be indexed.
 - Uniqueness is available on node equality indexes only; there is no unique edge index.

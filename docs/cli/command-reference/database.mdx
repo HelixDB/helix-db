@@ -26,8 +26,8 @@ helix database key revoke <KEY> [--database <database>] [--yes]
 ```
 
 Every subcommand also accepts `--workspace` and `--project`, after the subcommand:
-`helix database list --project <project>` works, `helix database --project <project>` fails as an
-unexpected argument. Bare `helix database` lists the linked or only project's databases.
+`helix database list --project <project>`, not `helix database --project <project>`. Bare
+`helix database` lists the linked or only project's databases.
 
 ## Subcommands
 
@@ -69,13 +69,12 @@ unexpected argument. Bare `helix database` lists the linked or only project's da
 
 - Arguments and defaults resolve as described in [Cloud resource resolution](/cli/command-reference#cloud-resource-resolution). When `helix.toml` links several databases, the CLI picks among them in a terminal.
 - `list` includes dedicated clusters and tenants in the project and marks linked databases; shared clusters are not listed.
-- `create` always creates a tenant database, either on a shared plan (`--plan`) or inside a dedicated cluster (`--cluster`). A shared database uses the workspace's plan, so the workspace needs an active plan.
+- `create` always creates a tenant database, either on a shared plan (`--plan`) or inside a dedicated cluster (`--cluster`). A shared database needs an active workspace plan.
 - Creating a database creates a default read-write application key and prints its raw token once on stdout. With `--json`, the full create response, including the token, is printed instead. The session-authenticated CLI never stores or uses the key.
 - Additional key creation is explicit, and each new raw token is also printed once. `key create` prints only the token on stdout, so you can capture it in a script.
 - Application keys are for software that calls the gateway (the Cloud database endpoint your application connects to) directly. `get --json` prints a tenant's gateway host as `connectionEndpoint`. See [Run in CI](/cli/scripting#helix-cloud).
 - `delete` and `key revoke` ask for confirmation in a terminal. Without one, or with `--json`, they fail before any request unless you pass `--yes`. `delete` removes the named or linked database only; it never picks a project's only database on its own.
 - `delete` removes tenant databases only. Dedicated-cluster create/delete lifecycle is not supported by this CLI.
-- With `--json`, `delete` prints `{"deleted":{"kind":"tenant","id":"..."}}` and `key revoke` prints `{"revoked":{"kind":"key","id":"..."}}`. The other subcommands print the Helix Cloud API's JSON.
 
 ## Examples
 

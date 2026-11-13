@@ -46,11 +46,11 @@ code and `msg` for the readable message:
 }
 ```
 
-When the code's [class](#failure-classes) settles it, the envelope also carries a
-boolean `retryable`. The response never adds a separate `code` field. A non-JSON
-response from an older proxy or intermediary is still exposed by each SDK as
-readable details with no code, and an unknown path or method returns an empty
-`404` or `405`.
+The envelope also carries a boolean `retryable` when the code's
+[class](#failure-classes) settles it. The response never adds a separate `code`
+field. A non-JSON response from an older proxy or intermediary is still exposed
+by each SDK as readable details with no code. An unknown path or method returns
+an empty `404` or `405`.
 
 ## Failure classes
 
@@ -83,14 +83,14 @@ unchanged. A conflict with the database's state, such as
 `unique_constraint_violation` (`retryable: false`), fails again until that
 state changes: choose another value or reconcile first.
 
-HTTP 429 also has more than one cause, and only some are transient. Generic HTTP
-clients often retry every 429; turn that off and branch on `error`:
+HTTP 429 has several causes, and only some are transient. Turn off generic HTTP
+client retries on 429 and branch on `error`:
 
 | `error` | Source | What to do |
 | --- | --- | --- |
 | `rate_limited` | Helix Cloud gateway | Wait for `Retry-After`, then resend |
 | `index_backpressure` | Database engine; `retryable: true` | Resend unchanged with bounded backoff |
-| `resource_limit`, `query_memory_limit_exceeded` | A per-query budget | Do not retry; the same request fails again. Reduce the work |
+| `resource_limit`, `query_memory_limit_exceeded` | A per-query budget | Reduce the work; resent unchanged, it fails again |
 
 An index-management request with several create, drop, retry or abort
 operations commits each operation as it runs. If a later operation fails, the
@@ -131,7 +131,7 @@ envelope, its `retryable` field, and the codes below.
 | `entity_not_found` | A statement read a node or relationship it had deleted (`deleted_entity_access`). | 400 | After fixing the statement |
 | `constraint_verification_failed` | A plain `DELETE` targeted a node that still has relationships (`delete_connected_node`). | 400 | After using `DETACH DELETE` or removing the relationships |
 | `resource_limit` | A per-query budget was exceeded, for example `memory_limit`, `result_limit`, `collection_limit`, or `expression_depth`; the [Cypher limits](/database/helix-db/query-guides/cypher#limits) list them all. | 429 | Not unchanged; reduce the work. Distinct from the gateway's `rate_limited` |
-| `access_mode_error` | A modifying statement reached a reader (`writer_required`). Over HTTP and gRPC, a modifying statement sent as warm-only fails earlier with `invalid_request_option` (400). | 503 | On the writer |
+| `access_mode_error` | A modifying statement reached a reader (`writer_required`). Sent as warm-only over HTTP or gRPC, it fails earlier with `invalid_request_option` (400). | 503 | On the writer |
 | `internal_planner_error` | The planner broke one of its own invariants. | 500 | No automatic retry |
 
 The [Cypher guide](/database/helix-db/query-guides/cypher#what-is-not-supported) lists
@@ -229,12 +229,11 @@ code from exception text.
 - `index_backpressure` (HTTP 429) rejects the whole request before it takes
   effect and carries `retryable: true`. Retry it unchanged with bounded backoff;
   see [index backpressure](/database/helix-db/query-guides/search-consistency#index-backpressure).
-  The other 429 codes differ: `rate_limited` waits for `Retry-After`, and a
-  resource limit fails again unchanged.
-- A 408 on a write does not mean it failed. A write that waits for durability
-  waits at most 30 seconds for its WAL upload, then fails with
-  `query_deadline_exceeded` although it is already applied and may still become
-  durable. Read the state back before resending.
+  Other 429 codes are not all transient; see the [429 table](#failure-classes).
+- A 408 on a write does not mean it failed. A write that awaits durability
+  waits at most 30 seconds for its WAL upload, then returns
+  `query_deadline_exceeded` although it is applied and may still become durable.
+  Read the state back before resending.
 - Availability and lifecycle failures should be retried only after the named
   condition changes. Validation and planning failures require a corrected
   request or schema/index configuration.

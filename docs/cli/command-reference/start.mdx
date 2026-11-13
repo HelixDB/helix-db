@@ -43,7 +43,7 @@ helix start [INSTANCE] [OPTIONS]
 
 ## Behavior
 
-- Runs the `image` and `tag` from `[local.<instance>]`. `helix init local` and `helix add local` write the CLI's default there (`ghcr.io/helixdb/helixdb` and `v0.0.16` for CLI 3.7.0), so an instance keeps its tag after `helix update` until you change it; see [Image pinning](/cli/configuration#image-pinning). `--image-version` and `--pull` override the tag and pull policy for this run.
+- Runs the `image` and `tag` pinned in `[local.<instance>]` (`ghcr.io/helixdb/helixdb` and `v0.0.16` for CLI 3.7.0), which stay after `helix update`; see [Image pinning](/cli/configuration#image-pinning). `--image-version` and `--pull` override the tag and pull policy for this run.
 - `always` requires a successful pull, `missing` uses a cached image when available, and `never` fails if the image is not cached. A failed pull never silently falls back to an older cached image.
 - All required images are resolved before overrides are saved or containers are replaced, so a failed resolution leaves `helix.toml` unchanged. Helix and disk-mode dependencies start by their resolved immutable image IDs.
 - The disk-mode SeaweedFS image defaults to `missing` unless a pull policy is explicitly configured.
@@ -52,7 +52,7 @@ helix start [INSTANCE] [OPTIONS]
 - Default storage is in-memory. Passing `--disk` starts a SeaweedFS S3 sidecar (`ghcr.io/chrislusf/seaweedfs:4.47`, pinned by digest) that creates the `helix-db` bucket, waits up to 60 seconds for the bucket to accept signed requests, and runs `helixdb` with S3-compatible storage environment variables.
 - With `--disk` or S3 storage, the server caches data on disk in a per-instance `helix-<project>-<instance>-cache` volume mounted at `/var/cache/helix`. The CLI sets its budget (`HELIX_DISK_CACHE_BYTES`) to 64 MiB in disk mode, where SeaweedFS already keeps the data on your machine, and to 1 GiB for an S3 bucket.
 - `--s3-region`, `--s3-endpoint-url`, and `--s3-allow-http` require `--storage-uri`, unless the instance already uses S3 storage; then they override its saved S3 settings for this run.
-- Replaces an existing container for the instance, so restarting an in-memory instance this way starts it empty.
+- Replaces any existing container for the instance, so an in-memory instance starts empty.
 - The CLI loads `.env` from the project root before starting. For S3 storage, it passes any `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, and `AWS_DEFAULT_REGION` values from the environment into the container.
 - Background mode (`-d`, `--restart unless-stopped`) waits up to ~30 seconds for `GET /healthz` readiness and prints the URL and container name when ready. Progress goes to stderr.
 - Foreground mode (`--rm`) streams the container's stdout/stderr until Ctrl-C, then removes the container.

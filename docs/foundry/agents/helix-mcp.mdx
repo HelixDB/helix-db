@@ -47,9 +47,13 @@ For agents that should know Foundry's tools well, add Helix's agent skills:
 npx skills add HelixDB/skills
 ```
 
-`helix-foundry-onboarding` walks the agent through setting up a workspace's first
-ontology with you; `helix-foundry-mcp` covers reading and asking; and `helix-foundry-actions-mcp`
-the changes and their confirmations. To add only the setup skill:
+| Skill | Covers |
+| --- | --- |
+| `helix-foundry-onboarding` | Setting up a workspace's first ontology with you |
+| `helix-foundry-mcp` | Reading and asking |
+| `helix-foundry-actions-mcp` | Changes and their confirmations |
+
+To add only the setup skill:
 
 ```bash
 npx skills add HelixDB/skills --skill helix-foundry-onboarding
@@ -57,12 +61,13 @@ npx skills add HelixDB/skills --skill helix-foundry-onboarding
 
 ### Set up a workspace with your agent
 
-A new workspace opens on **Get started**. Under **Or start with your own**, **Set up
+On a new workspace's **Get started** page, under **Or start with your own**, **Set up
 with your agent** is chosen first: **Copy prompt** copies a prompt for Claude Code, Codex
 or another agent with the Helix MCP. **Set up with your agent** on an unfinished
-ontology's overview does the same from where that ontology stands. The prompt says how
-to connect the MCP, where the workspace's setup stands, and the steps left; it has the
-agent follow the `helix-foundry-onboarding` skill when it has it, and the agent asks you
+ontology's overview does the same from where that ontology stands.
+
+The prompt says how to connect the MCP, where setup stands and the steps left, and has
+the agent follow the `helix-foundry-onboarding` skill if it has it. The agent asks you
 before each change it makes.
 
 <Frame>
@@ -123,10 +128,10 @@ version since the agent read it.
 ## Workflows
 
 A workflow is an agent's task over one ontology, such as answering support tickets.
-Each run of it records the agent's request, every read, question, send and upload it
-makes for that request, and its answer, so you can see what the ontology gave the
-agent. Runs show on the ontology's **Workflows** page, with an assessment of how much
-the ontology helped, which uses AI models and counts toward the month's
+Each run records the agent's request, every read, question, send and upload it makes
+for it, and its answer, so you can see what the ontology gave the agent. Runs show on
+the ontology's **Workflows** page with an assessment of how much the ontology helped,
+which uses AI models and counts toward the month's
 [Run assessments](/foundry/workspace/usage) cap.
 
 | Tool | Does |

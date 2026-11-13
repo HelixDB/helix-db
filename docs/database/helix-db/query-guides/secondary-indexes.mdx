@@ -17,10 +17,9 @@ asynchronous and includes existing data through a durable backfill.
 | Unique equality | Nodes only | Equality matches, plus at most one node per value |
 | Range, ascending or descending | Nodes and edges | `gt`, `gte`, `lt`, `lte`, and `between` comparisons, and sorted reads |
 
-A definition names the entity kind, label, and property, plus `unique` for a node
-equality index and the direction for a range index. Edge equality and range indexes have
-no unique form. One label and property can hold one equality index and one range index,
-but not an ascending and a descending range index at once.
+A definition names the entity kind, label, and property, plus `unique` (node equality
+only) or the range direction. A label and property can hold one equality index and one
+range index, but not both range directions.
 
 ## Create an equality index
 
@@ -156,21 +155,22 @@ helix.ReadQuery("index_operation").
 operation carries a `blocker_code` and does not resume on its own. Fix the cause, then
 run `retry_index_operation` (`retryIndexOperation`) as a write with the same
 `operation_id`, or `abort_index_operation` (`abortIndexOperation`) to discard the build.
-While the build is in flight, repeating the same CREATE returns `existing_operation`
-with the same `operation_id` instead of starting another build. Once the index is
-active, it returns `already_active` without an `operation_id`. After an abort or drop
-finishes, it starts a new build with a new `operation_id`.
 
-A CREATE fails instead, even with `createIndexIfNotExists`, when:
+Repeating the same CREATE:
 
-- the index is still aborting or dropping: `index_busy`. Retry once that finishes.
-- a building or active index on the same label and property has a different `unique`
-  flag or range direction: `index_definition_conflict`. Drop it first to change the
-  definition.
+| Existing index | Result |
+| --- | --- |
+| Building | `existing_operation` with the same `operation_id` |
+| Active | `already_active`, no `operation_id` |
+| Aborted or dropped | A new build with a new `operation_id` |
+| Still aborting or dropping | Fails with `index_busy`; retry once that finishes |
+| Building or active with a different `unique` flag or range direction | Fails with `index_definition_conflict`; drop it first |
+
+The two failures apply even with `createIndexIfNotExists`.
 
 ## Which predicates use an index
 
-Read through an index with a label-scoped source:
+Only a label-scoped source reads an index:
 `nWithLabelWhere("User", SourcePredicate.eq("status", "active"))` (or the
 language-equivalent builder), or a `.where(...)` directly after `nWithLabel("User")`. A
 source predicate without a label scans every node.
@@ -179,21 +179,17 @@ source predicate without a label scans every node.
 | --- | --- |
 | `eq`, `isIn` with a literal list or a parameter, `compare` with `Eq` | Equality, or for literal values a range index when the property has no equality index |
 | `gt`, `gte`, `lt`, `lte`, `between` with a literal or parameter bound | Range |
-| `neq`, `not`, `startsWith`, `endsWith`, `contains`, `isNull`, `hasKey` | Never; the rows are scanned and tested |
+| `neq`, `not`, `startsWith`, `endsWith`, `contains`, `isNull`, `hasKey` | Never (scanned) |
 | A comparison between two properties | Never |
 
-`and` intersects the index reads of its indexable parts and tests the rest row by row.
-`or` uses indexes only when every branch is indexable. The planner can use one `or` per
-`and`.
-
-A range index can also serve `orderBy` without sorting; see
-[Ordering and pagination](/database/helix-db/query-guides/ordering-and-pagination#sorting-cost).
-
-A `.where(...)` after a traversal step, such as `out("FOLLOWS")`, cannot change how the
-traversal starts. When it holds an `eq` or `isIn` on an equality-indexed node property,
-the engine reads the matching node IDs from the index once per request and checks each
-streamed node against that set. Range predicates and `eq(property, null)` are tested
-row by row instead.
+- `and` intersects the index reads of its indexable parts and tests the rest row by row.
+- `or` uses indexes only when every branch is indexable, and only one `or` per `and`.
+- A range index also serves `orderBy` without sorting; see
+  [Ordering and pagination](/database/helix-db/query-guides/ordering-and-pagination#sorting-cost).
+- A `.where(...)` after a traversal step, such as `out("FOLLOWS")`, with `eq` or `isIn`
+  on an equality-indexed node property reads the matching IDs from the index once per
+  request and checks each streamed node against them. Range predicates and
+  `eq(property, null)` there are tested row by row.
 
 Cypher and [SQL](/database/helix-db/query-guides/sql#indexes-and-performance)
 statements use these indexes automatically, without naming them. An equality or
@@ -210,14 +206,12 @@ Explain the statement to see which index the plan reads. See
 [Cypher indexes and performance](/database/helix-db/query-guides/cypher#indexes-and-performance)
 for the conditions that keep an index in use.
 
-On a server, `GET /v2/diagnostics` reports recent queries that would benefit from an
-index in its `queries.missing_indexes` check, and queries that scan without a bound in
-`queries.unbounded_scans`.
+On a server, `GET /v2/diagnostics` lists recent queries that need an index
+(`queries.missing_indexes`) and unbounded scans (`queries.unbounded_scans`).
 
 ## Range indexes
 
-A range index keeps values in order, so it serves comparisons and sorted reads. This
-request creates an ascending range index on `Post.created_at`:
+Create an ascending range index on `Post.created_at`:
 
 <CodeGroup>
 
@@ -296,8 +290,8 @@ helix.WriteQuery("create_post_created_at_index").
 
 Use `nodeRangeDesc` / `node_range_desc` (`NodeRangeDescIndex` in Go) for a descending
 index, and `edgeRange` / `edge_range` (`EdgeRangeIndex`) for edges. Native queries read
-an ascending index backwards for a descending sort. Cypher and SQL read an index only in
-its own direction, so create the direction their `ORDER BY` uses.
+an ascending index backwards for a descending sort; Cypher and SQL read only in the
+index's direction, so match their `ORDER BY`.
 
 ## Indexed values
 
@@ -306,15 +300,14 @@ its own direction, so create the direction their `ORDER BY` uses.
 | Equality | Booleans, numbers, date-times, strings, bytes, and typed arrays | A missing property, `null`, and `NaN` | Generic arrays and objects |
 | Range | Numbers, date-times, and strings | A missing property | `null`, booleans, bytes, arrays, objects, and `NaN` |
 
-Numbers sort before date-times, and date-times before strings. A write that stores a
-rejected value in an indexed property fails, and existing rows with such values block a
-build. Because `null` is not in an equality index, `eq(property, null)` scans the label.
+Numbers sort before date-times, and date-times before strings. A rejected value fails the
+write, and existing rows holding one block a build. `eq(property, null)` scans the label.
 
 ## Unique indexes
 
 Create one with `nodeUniqueEquality` / `node_unique_equality`
-(`NodeUniqueEqualityIndex` in Go). It allows any number of nodes whose property is
-missing, `null`, or `NaN`, because those values are not indexed.
+(`NodeUniqueEqualityIndex` in Go). Any number of nodes may have the property missing,
+`null`, or `NaN`, since those are not indexed.
 
 A unique index checks writes from the moment its build starts: a write that would
 duplicate a value the index already holds fails with `unique_constraint_violation`,

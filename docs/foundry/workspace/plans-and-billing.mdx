@@ -9,8 +9,8 @@ pageType: "Guide"
 
 Each workspace has one Foundry plan, billed monthly and separately from Helix Cloud.
 Owners and admins change it in **Settings** → **Plan & billing**; members see which plan
-the workspace holds. The Helix databases your ontologies load into run on the
-workspace's [Helix Cloud plan](#the-helix-cloud-plan-for-databases) instead.
+the workspace holds. Your ontologies' Helix databases run on the workspace's
+[Helix Cloud plan](#the-helix-cloud-plan-for-databases) instead.
 
 | | Free | Pro | Max |
 | --- | --- | --- | --- |
@@ -33,8 +33,8 @@ plan.
 
 <Steps>
   <Step title="Choose a tier">
-    Select **Upgrade**, or **Choose Pro** or **Choose Max** on a plan's card. Choose
-    **Pro** or **Max**, and add a promotion code if you have one.
+    Select **Upgrade**, or **Choose Pro** or **Choose Max** on a plan's card. Pick the
+    tier, and add a promotion code if you have one.
 
     <Frame>
       <img src="https://assets.helix-db.com/docs/foundry/workspace/upgrade.png" alt="The Upgrade Foundry dialog with Pro selected and a promotion code field" />
@@ -80,22 +80,25 @@ offers **Update payment method**; cancelling and switching wait until it's paid.
 
 ## The Helix Cloud plan for databases
 
-An ontology loads into a Helix database, and a database on Helix's shared cluster needs
-a Helix Cloud plan on the workspace. That plan is separate from the Foundry plan, and
-its billing is in the [Helix dashboard](https://helix-db.com/login).
+Ontologies load into Helix databases, and a database on Helix's shared cluster needs a
+Helix Cloud plan on the workspace. It's separate from the Foundry plan, and billed in
+the [Helix dashboard](https://helix-db.com/login).
 
-A workspace created in Foundry comes with Helix Cloud's **Idea** plan, free for 12
-months, without a card. A workspace that has never had a Helix Cloud plan, such as one
-Foundry made before this offer, gets the same the first time Foundry creates a database
-for it. Each workspace gets it once.
+- A workspace created in Foundry comes with Helix Cloud's **Idea** plan, free for 12
+  months, without a card.
+- A workspace that has never had a Helix Cloud plan, such as one Foundry made before
+  this offer, gets the same the first time Foundry creates a database for it.
+- Each workspace gets it once.
 
-Foundry links to Helix billing, with **Open Helix billing**, only when a new database
-can't be created: the workspace's Helix plan has ended, or the workspace signed up
-through the Helix website, which has its own offer. The
+When the free months end, choose a Helix Cloud plan in the Helix dashboard. Without an
+active plan, Foundry can't create databases, and the Explorer may say queries are
+paused.
+
+Foundry offers **Open Helix billing** only when a new database can't be created: the
+workspace's Helix plan has ended, or the workspace signed up through the Helix website,
+which has its own offer. The
 [Explorer](/foundry/explore/explorer#when-theres-nothing-to-read) links there too when
-the plan has paused queries. When the free months end, choose a Helix Cloud plan in
-the Helix dashboard: without an active plan, Foundry can't create databases, and the
-Explorer may say queries are paused.
+the plan has paused queries.
 
 ## Next steps
 

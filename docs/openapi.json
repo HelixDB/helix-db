@@ -4,7 +4,7 @@
     "title": "HelixDB HTTP API",
     "version": "2.0.0",
     "summary": "Execute operation-tree and Cypher queries against HelixDB",
-    "description": "The v2 operation-tree query contract and the Cypher execution and read-only planning contract are available on local servers and Helix Cloud gateways. Local servers have no authentication. A Helix Cloud gateway decodes gzip request bodies (`Content-Encoding: gzip` or `x-gzip`) and applies its 2 MiB limit after decoding, refuses any other coding with 415, and gzips responses when the request sends `Accept-Encoding: gzip`; local servers neither decode nor compress. The health operations describe a local server: a Helix Cloud gateway serves `GET /health` and `GET /readyz` without authentication instead, with bodies this document does not describe. An unknown path or method returns an empty 404 or 405.",
+    "description": "The v2 operation-tree query contract and the Cypher execution and read-only planning contract are available on local servers and Helix Cloud gateways. Local servers have no authentication. A Helix Cloud gateway decodes `Content-Encoding: gzip` or `x-gzip` request bodies and applies its 2 MiB limit after decoding, refuses other codings with 415, and gzips responses for `Accept-Encoding: gzip`; local servers do neither. The health operations describe a local server; a gateway instead serves unauthenticated `GET /health` and `GET /readyz`, whose bodies this document does not describe. An unknown path or method returns an empty 404 or 405.",
     "termsOfService": "https://www.helix-db.com/terms",
     "contact": {
       "name": "HelixDB",
@@ -48,7 +48,7 @@
       "post": {
         "operationId": "executeQuery",
         "summary": "Execute a HelixDB query",
-        "description": "Executes one read or write batch. request_type must match the closed read or write variant under query. Local servers accept request bodies up to 16 MiB and apply no execution deadline; a write that waits for durability still returns 408 when its WAL upload takes longer than 30 seconds. Helix Cloud gateways accept request bodies up to 2 MiB after gzip decoding.",
+        "description": "Executes one read or write batch. request_type must match the closed read or write variant under query. Local servers accept request bodies up to 16 MiB and apply no execution deadline; a write that waits for durability still returns 408 if its WAL upload exceeds 30 seconds. Helix Cloud gateways accept request bodies up to 2 MiB after gzip decoding.",
         "x-helix-request-body-limits": {
           "localBytes": 16777216,
           "helixCloudBytes": 2097152
@@ -462,7 +462,7 @@
             }
           },
           "408": {
-            "description": "The statement exceeded its deadline: 30 seconds on a local server (`query_deadline_exceeded`), or the Helix Cloud query time limit (`query_timeout`). A write that waits for durability also returns 408, after it is applied, when its WAL upload takes longer than 30 seconds. A write may have committed: read the state back before resending.",
+            "description": "The statement exceeded its deadline: 30 seconds on a local server (`query_deadline_exceeded`), or the Helix Cloud query time limit (`query_timeout`). A write that waits for durability also returns 408, once applied, if its WAL upload exceeds 30 seconds. A write may have committed: read the state back before resending.",
             "content": {
               "application/json": {
                 "schema": {
@@ -492,7 +492,7 @@
             }
           },
           "415": {
-            "description": "A Helix Cloud gateway refused a request body whose Content-Encoding is not gzip or identity (`unsupported_content_encoding`). The response names gzip in Accept-Encoding.",
+            "description": "A Helix Cloud gateway refused a Content-Encoding other than gzip or identity (`unsupported_content_encoding`).",
             "headers": {
               "Accept-Encoding": {
                 "description": "The content coding the gateway accepts.",
@@ -693,7 +693,7 @@
             }
           },
           "415": {
-            "description": "A Helix Cloud gateway refused a request body whose Content-Encoding is not gzip or identity (`unsupported_content_encoding`). The response names gzip in Accept-Encoding.",
+            "description": "A Helix Cloud gateway refused a Content-Encoding other than gzip or identity (`unsupported_content_encoding`).",
             "headers": {
               "Accept-Encoding": {
                 "description": "The content coding the gateway accepts.",
@@ -892,7 +892,7 @@
             }
           },
           "408": {
-            "description": "The statement exceeded its deadline: 30 seconds on a local server (`query_deadline_exceeded`), or the Helix Cloud query time limit (`query_timeout`). A write that waits for durability also returns 408, after it is applied, when its WAL upload takes longer than 30 seconds. A write may have committed: read the state back before resending.",
+            "description": "The statement exceeded its deadline: 30 seconds on a local server (`query_deadline_exceeded`), or the Helix Cloud query time limit (`query_timeout`). A write that waits for durability also returns 408, once applied, if its WAL upload exceeds 30 seconds. A write may have committed: read the state back before resending.",
             "content": {
               "application/json": {
                 "schema": {
@@ -922,7 +922,7 @@
             }
           },
           "415": {
-            "description": "A Helix Cloud gateway refused a request body whose Content-Encoding is not gzip or identity (`unsupported_content_encoding`). The response names gzip in Accept-Encoding.",
+            "description": "A Helix Cloud gateway refused a Content-Encoding other than gzip or identity (`unsupported_content_encoding`).",
             "headers": {
               "Accept-Encoding": {
                 "description": "The content coding the gateway accepts.",
@@ -1128,7 +1128,7 @@
             }
           },
           "415": {
-            "description": "A Helix Cloud gateway refused a request body whose Content-Encoding is not gzip or identity (`unsupported_content_encoding`). The response names gzip in Accept-Encoding.",
+            "description": "A Helix Cloud gateway refused a Content-Encoding other than gzip or identity (`unsupported_content_encoding`).",
             "headers": {
               "Accept-Encoding": {
                 "description": "The content coding the gateway accepts.",
@@ -1296,7 +1296,7 @@
         }
       },
       "RequestTimeout": {
-        "description": "The query exceeded a deadline: `query_deadline_exceeded` from the engine, or `query_timeout` when a Helix Cloud query exceeded its wall-clock limit. A local server applies no execution deadline to /v2/query, but a write that waits for durability returns 408, after it is applied, when its WAL upload takes longer than 30 seconds. A write may have committed: read the state back before resending.",
+        "description": "The query exceeded a deadline: `query_deadline_exceeded` from the engine, or `query_timeout` from a Helix Cloud wall-clock limit. A local server applies no execution deadline to /v2/query, but a write that waits for durability returns 408, once applied, if its WAL upload exceeds 30 seconds. A write may have committed: read the state back before resending.",
         "content": {
           "application/json": {
             "schema": {
@@ -1330,7 +1330,7 @@
         }
       },
       "UnsupportedContentEncoding": {
-        "description": "The Helix Cloud gateway refused a request body whose Content-Encoding is not gzip or identity. The response names gzip in Accept-Encoding.",
+        "description": "The Helix Cloud gateway refused a Content-Encoding other than gzip or identity.",
         "headers": {
           "Accept-Encoding": {
             "description": "The content coding the gateway accepts.",

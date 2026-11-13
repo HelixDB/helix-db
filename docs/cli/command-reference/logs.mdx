@@ -21,7 +21,7 @@ helix logs [CLOUD_INSTANCE] [--start <RFC3339>] [--end <RFC3339>]
 
 | Argument | Description |
 | --- | --- |
-| `INSTANCE` | Instance name from `helix.toml`; a typed `tenant:<id>` / `cluster:<id>` is not accepted, so link a Cloud database with `helix add cloud` first. If omitted, the CLI uses `dev`, then the only instance, then a picker in a terminal; otherwise it fails and lists the instances. |
+| `INSTANCE` | Instance name from `helix.toml`, not a typed `tenant:<id>` / `cluster:<id>`; link a Cloud database with `helix add cloud` first. If omitted, the CLI uses `dev`, then the only instance, then a picker in a terminal; otherwise it fails and lists the instances. |
 
 ## Options
 

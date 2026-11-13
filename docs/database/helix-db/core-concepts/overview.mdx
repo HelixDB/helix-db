@@ -574,9 +574,8 @@ Rust's `#[query]` macro rewrites the function to return
 TypeScript and Python convert a batch with `toQueryRequest` / `to_query_request`,
 and Go's `WriteQuery(name)` took the name up front.
 
-`query_name` is optional diagnostic metadata for logs and query diagnostics. It does
-not create a stored endpoint or deploy anything, and a request without one runs the
-same way.
+`query_name` is optional metadata for logs and query diagnostics. It does not create
+a stored endpoint or deploy anything; a request without one runs the same way.
 
 ## 7. Run it
 
@@ -612,7 +611,7 @@ response = Client("http://localhost:6969").query(request)
 ```
 
 ```bash CLI
-# Save the JSON tab from "The whole query" as write_users.json first.
+# Save the JSON tab from "The whole query" as write_users.json.
 helix query dev --file write_users.json
 ```
 
@@ -638,9 +637,9 @@ The shape of each value depends on how its entry ended:
 | `friends` | `value_map`, a terminal projection | One object per row containing the selected properties |
 
 Node and edge IDs are unsigned 64-bit integers, and projected properties come back as
-plain JSON values rather than the tagged form used in the request. Date-times come
-back as RFC 3339 strings in UTC with millisecond precision, such as
-`"2026-07-24T09:30:00.000Z"`, and bytes as arrays of numbers from 0 to 255.
+plain JSON values rather than the tagged form used in the request. Date-times are
+RFC 3339 UTC strings with millisecond precision, such as `"2026-07-24T09:30:00.000Z"`,
+and bytes are arrays of numbers from 0 to 255.
 
 Returning a raw stream is rarely what a caller wants. End an entry with the terminal that
 produces the shape you need — each of these replaces `valueMap` on the `friends` entry:
@@ -654,8 +653,8 @@ produces the shape you need — each of these replaces `valueMap` on the `friend
 | `project(…)` | One object per row with named fields |
 
 A declared return keeps its JSON type when it matches nothing. When its entry is
-skipped, because it is a conditional entry whose condition is false, row streams and
-scalars differ:
+skipped (a conditional entry whose condition is false), row streams and scalars
+differ:
 
 | Return | Matched rows or none | Entry skipped |
 | --- | --- | --- |

@@ -20,8 +20,8 @@ with its database and a dot for the status of its last load. The open ontology's
 holds its pages: **Overview**, which also lists its schema versions and data loads,
 **Documents**, with how many it reads and the sets they're in, and **Workflows**, the
 runs your agents record through the [Helix MCP](/foundry/agents/helix-mcp#workflows).
-Owners and admins create an ontology with **+** in the panel's head. From eight ontologies, a filter finds one by
-name or database.
+Owners and admins create an ontology with **+** in the panel's head. From eight
+ontologies, a filter finds one by name or database.
 
 <Frame>
   <img src="https://assets.helix-db.com/docs/foundry/ontology/ontologies.png" alt="The Ontologies panel listing Customer contracts on the contracts database, open on its pages, and Renewals on the subscriptions database" />
@@ -32,60 +32,41 @@ the first one.
 
 ## Create your first ontology
 
-A workspace without an ontology opens on **Get started**, where owners and admins choose
-how to start: the [sample company](/foundry/start-here/sample-company), **Set up with
-your agent**, which hands the steps to your agent through the
-[Helix MCP](/foundry/agents/helix-mcp#set-up-a-workspace-with-your-agent), or **Use my
-own data**. **Use my own data**, then **Continue**, opens **Your first ontology**. The
-workspace's first ontology of its own is made the same way after the sample, from
-**New ontology**.
+A workspace without an ontology opens on [Get started](/foundry/start-here/quickstart).
+There, owners and admins select **Use my own data**, then **Continue**, to open **Your
+first ontology**. After the [sample company](/foundry/start-here/sample-company), the
+workspace's first ontology of its own starts the same way from **New ontology**.
 
-It has three steps, one at a time: each step you finish shrinks to a line saying what
-you chose, with **Edit** to change it. Select **Continue** to go on, or **Skip** on the
-optional goal.
+It has three steps, one at a time:
 
-<Steps>
-  <Step title="Connect your data or upload documents">
-    What Foundry's agent drafts from, as in [Create another
-    ontology](#create-another-ontology): tables, API sources, documents, or any mix.
-  </Step>
-
-  <Step title="Goal (optional)">
-    Under **What do you want to understand?**, the questions you want to answer, in your
-    words, up to 2,000 characters.
-  </Step>
-
-  <Step title="Review and create">
-    The step says what happens next. Select **Create and generate**.
-  </Step>
-</Steps>
+1. **Connect your data or upload documents**, as [below](#create-another-ontology).
+2. **Goal (optional)**: under **What do you want to understand?**, the questions you
+   want to answer, up to 2,000 characters. **Skip** leaves it empty.
+3. **Review and create** says what happens next. Select **Create and generate**.
 
 You don't name the ontology or choose its database. Foundry:
 
 - names it after what it drafts from, such as "Stripe and Contracts", or "Stripe, Shop,
   Contracts, and 2 more" for more than three sources;
-- creates a new Helix database named the same, on Helix's shared cluster, in the
-  workspace's first Helix project, or in a new project named after the workspace;
+- creates a [new Helix database](#a-new-database) named the same, on Helix's shared
+  cluster, in the workspace's first Helix project, or in a new project named after the
+  workspace;
 - has its agent draft a first version, then makes the draft current and loads it as
   soon as it is stored, without a review;
 - emails you when you can ask it questions, or if the draft or the load failed.
 
-The generation's page opens and says **Foundry loads it when it's drafted**. You can
-leave the page; once the draft is stored it says **Drafted version 1, now current** while
-the load runs. Later versions wait for your review, as for any ontology.
-
-<Note>
-  The database uses the workspace's Helix Cloud plan. A workspace created in Foundry
-  gets one free; see
-  [Plans and billing](/foundry/workspace/plans-and-billing#the-helix-cloud-plan-for-databases).
-</Note>
+The generation's page says **Foundry loads it when it's drafted**, then **Drafted
+version 1, now current** while the load runs. You can leave the page. Later versions
+wait for your review, as for any ontology.
 
 ## Create another ontology
 
 Select **New ontology**, or **+** in the Ontologies panel's head. The page walks through
-five steps, one at a time, as above. Your choices are kept in the browser tab until you
-create the ontology or select **Cancel**, and the step is in the page's address, so
-going back or reloading keeps your place.
+five steps, one at a time: each step you finish shrinks to a line saying what you chose,
+with **Edit** to change it. Select **Continue** to go on, or **Skip** on the optional
+goal. Your choices are kept in the browser tab until you create the ontology or select
+**Cancel**, and the step is in the page's address, so going back or reloading keeps your
+place.
 
 <Frame caption="Create an ontology step by step, with its first draft.">
   <video controls muted playsInline preload="none" poster="https://assets.helix-db.com/docs/foundry/ontology/create-an-ontology-poster.png" className="w-full" src="https://assets.helix-db.com/docs/foundry/ontology/create-an-ontology.webm"></video>
@@ -131,7 +112,7 @@ going back or reloading keeps your place.
     **New API source** makes an API source in place. **Upload documents** uploads files
     into **General** or the oldest set, and the upload button on a set's row uploads
     into that set; the set the files went into is then chosen. The
-    [sample company's](/foundry/start-here/sample-company) connection and set are never
+    [sample company's](/foundry/start-here/sample-company) connection and set aren't
     offered.
 
     <Frame>
@@ -165,19 +146,18 @@ why, with **Try again**, which opens Generate with your choices.
 
 ## A new database
 
-A new database comes with a first API key. Foundry never keeps or shows its token;
-right after you create the ontology, the page says so once and links to the
-database's keys in the Helix dashboard, where you can revoke it or make your own.
-
-A new database takes a few minutes to start. Until it answers, the ontology's pages say
-it is starting and read it again by themselves, and a load waits for it.
-
-Creating a database needs a Helix Cloud plan on the workspace. A workspace that never
-had one gets one free the first time it creates a database; see
-[Plans and billing](/foundry/workspace/plans-and-billing#the-helix-cloud-plan-for-databases).
-A workspace whose Helix plan has ended, or one that signed up through the Helix
-website, says **A new database needs a Helix plan** at the review step instead, with
-**Open Helix billing** and, for an ontology after the first, **Use an existing one**.
+- **Its API key**: a new database comes with a first API key. Foundry never keeps or
+  shows its token; right after you create the ontology, the page says so once and links
+  to the database's keys in the Helix dashboard, where you can revoke it or make your
+  own.
+- **Starting**: it takes a few minutes to start. Until it answers, the ontology's pages
+  say it is starting and read it again by themselves, and a load waits for it.
+- **Plan**: it needs a
+  [Helix Cloud plan](/foundry/workspace/plans-and-billing#the-helix-cloud-plan-for-databases)
+  on the workspace, free the first time for a workspace that never had one. If the
+  workspace's Helix plan has ended, or it signed up through the Helix website, the
+  review step says **A new database needs a Helix plan**, with **Open Helix billing**
+  and, for an ontology after the first, **Use an existing one**.
 
 ## The overview
 
