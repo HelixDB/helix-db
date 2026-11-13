@@ -184,6 +184,12 @@ positive byte count; an embedded database sets the bounds with
 `IndexOperationQueueTuning::with_strong_text_search_max_analysis_bytes` and
 `IndexOperationQueueTuning::with_strong_vector_search_max_pending_bytes`.
 
+These two bounds are the only index queue settings a server reads. The other limits on
+this page are fixed on a server: the backpressure limits, the 8 MiB per-write cap, the
+64 MiB text publication budget, and the per-document text limits. An embedded database
+can change them through `DbConfig`. The 128 MiB `eventual` budget and the 800-result
+limit cannot be changed.
+
 A `strong` text search includes every unpublished document of its partition to keep
 BM25 statistics exact, and each document is charged as the index worker charges it: its
 bytes plus about 280 bytes per indexed word. 512 MiB is about 44,000 unpublished documents of 40 words, or about 8 MB
@@ -205,6 +211,8 @@ publications to bring a backlog back under the bound.
   Raise the limits or the bound, or search `eventual`. Rewriting or deleting such a
   document also clears it once replacing or removing its published version fits the
   lowered limits, which a document published under much larger limits may never do.
+  Only an embedded database can change the text limits; a server can raise only the
+  bound.
 
 The text bound also caps the analyses the server keeps for reuse, and `strong` text
 searches analyze unpublished text one at a time, so however many run at once they hold
@@ -223,8 +231,8 @@ bytes. By default a search may score as much as its index may retain, the
 [retained-byte limit](#index-backpressure) of 1,000,000,000 bytes: about 160,000
 pending vectors of 1,536 dimensions. That limit also counts every superseded change, so
 writes fail with `index_backpressure` before such searches do. Only lowering the limit
-below work already admitted, or a blocked build's repair write admitted past it, leaves
-more behind a search. A search behind more than its bound fails with a retryable
+below work already admitted, which only an embedded database can do, or a blocked
+build's repair write admitted past it, leaves more behind a search. A search behind more than its bound fails with a retryable
 `index_backpressure` error (`pending_vector_bytes`) until the index worker publishes
 enough of it. Self-hosted servers can set a lower bound, which caps the CPU
 time of each search, with `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES`. Within the
@@ -248,13 +256,16 @@ index past either limit fails before commit with `index_backpressure`: HTTP 429 
 `retryable: true` and no `Retry-After` header, or gRPC `ResourceExhausted`. Nothing
 from the rejected request commits. Retry the unchanged request with bounded backoff and
 jitter; it succeeds once the index worker has published enough of the backlog, or,
-while the index is building, once the index activates.
+while the index is building, once the index activates. A server always uses these
+limits; an embedded database sets them with `IndexOperationQueueTuning::with_max_retained_bytes`
+and `with_max_members`, passed to `DbConfig::with_index_operation_queue_tuning`.
 
 A single write that exceeds either limit on its own, or stages more than 8 MiB of
 queued work for one index, can never be admitted, nor can a text search in a write
 batch whose own documents exceed the `strong` text search bound. Either fails with
-the non-retryable `index_operation_batch_too_large` error (HTTP 400) instead; split it
-into smaller writes. See the
+the non-retryable `index_operation_batch_too_large` error (HTTP 400) instead, whose
+response omits the `retryable` field rather than setting it to `false`; split it into
+smaller writes. See the
 [query error reference](/database/helix-db/query-guides/error-handling) for both codes.
 
 ## Index builds

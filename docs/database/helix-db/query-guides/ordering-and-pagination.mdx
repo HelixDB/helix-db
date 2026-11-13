@@ -1,0 +1,338 @@
+---
+title: "Ordering and pagination"
+description: "Sort traversal streams and page through them with limit, skip, range, and range indexes"
+sidebarTitle: "Ordering and pagination"
+pageType: "Guide"
+---
+
+<div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
+
+Sort a stream with `orderBy` and cut it into pages with `limit`, `skip`, and `range`.
+Use this page when a response must come back in a stable order, one page at a time.
+
+## Operations
+
+| Intent | Rust and Python | TypeScript | Go |
+| --- | --- | --- | --- |
+| Sort by one property | `order_by(property, order)` | `orderBy` | `OrderBy` |
+| Sort by several properties | `order_by_multiple([(property, order), ...])` | `orderByMultiple` | `OrderByMultiple(helix.Ordering{...}, ...)` |
+| Keep the first `n` rows | `limit(n)` | `limit` | `Limit` |
+| Drop the first `n` rows | `skip(n)` | `skip` | `Skip` |
+| Keep rows from `start` up to, but not including, `end` | `range(start, end)` | `range` | `Range` |
+
+The order is `Order::Asc` or `Order::Desc` in Rust, `Order.Asc` or `Order.Desc` in
+TypeScript, `helix.OrderAsc` or `helix.OrderDesc` in Go, and `Order.ASC` or
+`Order.DESC` in Python.
+
+## Sort and page a stream
+
+This request sorts posts newest first and returns the second page of 20. `created_at`
+holds epoch milliseconds:
+
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as(
+        "posts",
+        g()
+            .n_with_label("Post")
+            .order_by("created_at", Order::Desc)
+            .range(20, 40)
+            .value_map(Some(vec!["$id", "title", "created_at"])),
+    )
+    .returning(["posts"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs(
+    "posts",
+    g()
+      .nWithLabel("Post")
+      .orderBy("created_at", Order.Desc)
+      .range(20, 40)
+      .valueMap(["$id", "title", "created_at"]),
+  )
+  .returning(["posts"]);
+```
+
+```go Go
+helix.ReadQuery("recent_posts").
+	VarAs(
+		"posts",
+		helix.G().
+			NWithLabel("Post").
+			OrderBy("created_at", helix.OrderDesc).
+			Range(20, 40).
+			ValueMap("$id", "title", "created_at"),
+	).
+	Returning("posts")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as(
+        "posts",
+        g()
+        .n_with_label("Post")
+        .order_by("created_at", Order.DESC)
+        .range(20, 40)
+        .value_map(["$id", "title", "created_at"]),
+    )
+    .returning(["posts"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "recent_posts",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "posts",
+          "root": {
+            "value_map": {
+              "input": {
+                "range": {
+                  "input": {
+                    "order_by": {
+                      "input": {
+                        "nodes_where": {
+                          "predicate": {
+                            "eq": {
+                              "left": { "property": "$label" },
+                              "right": { "constant": { "string": "Post" } }
+                            }
+                          }
+                        }
+                      },
+                      "property": "created_at",
+                      "order": "desc"
+                    }
+                  },
+                  "start": { "literal": 20 },
+                  "end": { "literal": 40 }
+                }
+              },
+              "properties": ["$id", "title", "created_at"]
+            }
+          }
+        }
+      }],
+      "returns": ["posts"]
+    }
+  }
+}
+```
+
+```cypher Cypher
+MATCH (p:Post)
+RETURN id(p) AS id, p.title AS title, p.created_at AS created_at
+ORDER BY created_at DESC
+SKIP 20 LIMIT 20
+```
+
+```sql SQL
+SELECT id(p) AS id, p.title AS title, p.created_at AS created_at
+FROM Post p
+ORDER BY created_at DESC
+LIMIT 20 OFFSET 20
+```
+
+</CodeGroup>
+
+`range(20, 40)` is half-open: it skips 20 rows and keeps the next 20, the same as
+`skip(20)` followed by `limit(20)`.
+
+## Ordering rules
+
+These rules describe native queries.
+
+- A row without the sort property sorts first in ascending order and last in
+  descending order. A stored `null` is a value: it sorts after missing values and
+  before every other value.
+- Values of different types sort by type first: `null`, booleans, numbers, date-times,
+  strings, bytes, arrays, then objects. `i64`, `f64`, and `f32` values compare by
+  numeric value. Strings compare byte by byte, so the order is case-sensitive and
+  `"Zoe"` sorts before `"adam"`. Descending order reverses the whole sequence.
+- Rows with equal sort keys come back in ascending element ID order, in both
+  directions, so repeating a request returns the same order.
+- `orderByMultiple` compares the first key, then uses the next key to break ties.
+- `$id` is a valid sort key. `$distance` and `$score` exist only directly after a
+  search, which already returns hits in rank order.
+- `orderBy` after `bind` is rejected with `invalid_after_bind_operation`.
+
+## Bounds
+
+- `limit`, `skip`, and `range` take a non-negative literal or a bare `i64` parameter. A
+  negative parameter value fails the query.
+- A literal `range` whose end is less than its start is rejected when the request is
+  planned. A parameter range like that returns no rows.
+- A `skip` or `range` start past the end of the stream returns no rows.
+
+## Sorting cost
+
+`orderBy` reads its whole input before it returns the first row, even when a `limit`
+follows it, so sorting a large label holds every row in memory for the request. A deep
+page costs as much as the sort: `range(10000, 10020)` sorts every row, then discards
+the first 10,000.
+
+A [range index](/database/helix-db/query-guides/secondary-indexes#range-indexes) on the
+sort property removes the sort. The index returns rows already in order, and a
+following `limit` stops the scan after that many rows. A native query reads the index
+in order when all of these hold:
+
+- The sort uses one property: `orderBy`, not `orderByMultiple`.
+- The traversal starts from a label-scoped source that filters the same property with
+  `gt`, `gte`, `lt`, `lte`, or `between`. An `eq` qualifies when the property has a
+  range index and no equality index.
+- `orderBy` follows that source directly, with only filters in between.
+
+A native query reads an ascending index backwards for a descending sort, so one index
+serves both directions. Cypher and SQL read a range index only in its own direction;
+see [Cypher indexes and performance](/database/helix-db/query-guides/cypher#indexes-and-performance).
+
+## Page with a range index
+
+Keyset pagination asks for the rows after the last one the client saw, instead of
+skipping rows. With an active range index on `Post.created_at`, this request reads at
+most 20 index entries, however deep the page:
+
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as(
+        "posts",
+        g()
+            .n_with_label_where(
+                "Post",
+                SourcePredicate::lt("created_at", 1_793_525_400_000_i64),
+            )
+            .order_by("created_at", Order::Desc)
+            .limit(20)
+            .value_map(Some(vec!["$id", "title", "created_at"])),
+    )
+    .returning(["posts"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs(
+    "posts",
+    g()
+      .nWithLabelWhere("Post", SourcePredicate.lt("created_at", 1793525400000))
+      .orderBy("created_at", Order.Desc)
+      .limit(20)
+      .valueMap(["$id", "title", "created_at"]),
+  )
+  .returning(["posts"]);
+```
+
+```go Go
+helix.ReadQuery("posts_before").
+	VarAs(
+		"posts",
+		helix.G().
+			NWithLabelWhere("Post", helix.SourceLt("created_at", int64(1793525400000))).
+			OrderBy("created_at", helix.OrderDesc).
+			Limit(20).
+			ValueMap("$id", "title", "created_at"),
+	).
+	Returning("posts")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as(
+        "posts",
+        g()
+        .n_with_label_where(
+            "Post", SourcePredicate.lt("created_at", 1793525400000)
+        )
+        .order_by("created_at", Order.DESC)
+        .limit(20)
+        .value_map(["$id", "title", "created_at"]),
+    )
+    .returning(["posts"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "posts_before",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "posts",
+          "root": {
+            "value_map": {
+              "input": {
+                "limit": {
+                  "input": {
+                    "order_by": {
+                      "input": {
+                        "nodes_where": {
+                          "predicate": {
+                            "and": {
+                              "predicates": [
+                                {
+                                  "eq": {
+                                    "left": { "property": "$label" },
+                                    "right": { "constant": { "string": "Post" } }
+                                  }
+                                },
+                                {
+                                  "lt": {
+                                    "left": { "property": "created_at" },
+                                    "right": { "constant": { "i64": 1793525400000 } }
+                                  }
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      },
+                      "property": "created_at",
+                      "order": "desc"
+                    }
+                  },
+                  "count": { "literal": 20 }
+                }
+              },
+              "properties": ["$id", "title", "created_at"]
+            }
+          }
+        }
+      }],
+      "returns": ["posts"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+Send the last row's `created_at` as the bound for the next page, in practice as a typed
+[parameter](/database/helix-db/query-guides/parameters). The bound must have the same
+type as the stored values, because comparisons across types are false. `lt` skips every
+row that ties with the bound, so sort on a property whose values are unique, or
+rows that share the last timestamp are lost between pages.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Secondary indexes" icon="gauge-high" href="/database/helix-db/query-guides/secondary-indexes">
+    Create the range index that serves ordered reads.
+  </Card>
+  <Card title="Filtering" icon="filter" href="/database/helix-db/query-guides/filtering">
+    Narrow the stream before you sort it.
+  </Card>
+</CardGroup>

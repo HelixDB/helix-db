@@ -14,11 +14,13 @@ branching operations; use `g()` only for a top-level traversal entry.
 
 | Operation | Behavior |
 | --- | --- |
-| `optional(sub)` | Keep the input when the branch has no result |
-| `union(subs)` | Concatenate results from every branch |
-| `choose(predicate, then, else)` | Select one branch |
-| `coalesce(subs)` | Use the first non-empty branch |
-| `repeat(sub, config)` | Apply a traversal with an explicit bound |
+| `optional(sub)` | For each row, the branch's output, or the row itself when the branch returns nothing |
+| `union(subs)` | For each row, the output of every branch in order, without deduplication |
+| `choose(predicate, then, else)` | Runs `then` on the rows that match and `else` on the rest. Without `else`, rows that do not match are dropped. The output is every `then` row followed by every `else` row, not input order. |
+| `coalesce(subs)` | For each row, the output of the first branch that returns anything |
+| `repeat(config)` | Runs a sub-traversal repeatedly; see [Repeat a traversal](#repeat-a-traversal) |
+
+`choose` and `repeat` are rejected after `bind` with `invalid_after_bind_operation`.
 
 ## Retain row-local values
 
@@ -161,15 +163,363 @@ conditions test for an empty result (`varEmpty`), a minimum size (`varMinSize`),
 the previous entry (`prevNotEmpty`). The first entry in a batch cannot depend on a
 previous result.
 
+When the condition is false, the entry does not run and its variable holds an empty
+result. It returns `[]`, even for an entry that ends in `count()` or `exists()`, and
+later entries that read it see no rows. A write batch uses the same conditions to
+[create or update a node](/database/helix-db/query-guides/writing-data#create-or-update-a-node).
+
 Cypher has no batch conditions. In the Cypher tab, the second `MATCH` runs once for
 each user the first one finds, so the statement returns no rows when the user does
 not exist.
+
+## Repeat a traversal
+
+`repeat` runs a sub-traversal on its own output. This request finds users up to three
+`FOLLOWS` hops from Alice:
+
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as(
+        "reachable",
+        g().n_with_label_where("User", SourcePredicate::eq("username", "alice"))
+            .repeat(RepeatConfig::new(sub().out(Some("FOLLOWS"))).times(3).emit_after())
+            .dedup()
+            .limit(100)
+            .value_map(Some(vec!["$id", "username"])),
+    )
+    .returning(["reachable"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs(
+    "reachable",
+    g()
+      .nWithLabelWhere("User", SourcePredicate.eq("username", "alice"))
+      .repeat(RepeatConfig.new(sub().out("FOLLOWS")).times(3).emitAfter())
+      .dedup()
+      .limit(100)
+      .valueMap(["$id", "username"]),
+  )
+  .returning(["reachable"]);
+```
+
+```go Go
+helix.ReadQuery("reachable_users").
+	VarAs(
+		"reachable",
+		helix.G().
+			NWithLabelWhere("User", helix.SourceEq("username", "alice")).
+			Repeat(helix.Repeat(helix.Sub().Out("FOLLOWS")).WithTimes(3).EmitAfter()).
+			Dedup().
+			Limit(100).
+			ValueMap("$id", "username"),
+	).
+	Returning("reachable")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as(
+        "reachable",
+        g()
+        .n_with_label_where("User", SourcePredicate.eq("username", "alice"))
+        .repeat(RepeatConfig.new(sub().out("FOLLOWS")).times(3).emit_after())
+        .dedup()
+        .limit(100)
+        .value_map(["$id", "username"]),
+    )
+    .returning(["reachable"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "reachable_users",
+  "query": {
+    "read": {
+      "entries": [{
+        "query": {
+          "name": "reachable",
+          "root": {
+            "value_map": {
+              "input": {
+                "limit": {
+                  "input": {
+                    "dedup": {
+                      "input": {
+                        "repeat": {
+                          "input": {
+                            "nodes_where": {
+                              "predicate": {
+                                "and": {
+                                  "predicates": [
+                                    {
+                                      "eq": {
+                                        "left": { "property": "$label" },
+                                        "right": { "constant": { "string": "User" } }
+                                      }
+                                    },
+                                    {
+                                      "eq": {
+                                        "left": { "property": "username" },
+                                        "right": { "constant": { "string": "alice" } }
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          },
+                          "config": {
+                            "traversal": {
+                              "root": {
+                                "out": { "input": "context", "label": "FOLLOWS" }
+                              }
+                            },
+                            "times": 3,
+                            "emit": "after",
+                            "max_depth": 100
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "count": { "literal": 100 }
+                }
+              },
+              "properties": ["$id", "username"]
+            }
+          }
+        }
+      }],
+      "returns": ["reachable"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+In Go, the configuration builders are `helix.Repeat(sub)`, `WithTimes`, `UntilPred`,
+`EmitBefore`, `EmitAfter`, `EmitAll`, `EmitIf`, and `WithMaxDepth`.
+
+- **Stopping.** `times(n)` runs the body `n` times. `until(predicate)` stops the whole
+  loop after the first pass in which any row matches; it is not a per-row stop, and the
+  body always runs at least once. With neither, the loop runs until a pass returns no
+  rows.
+- **Depth cap.** `maxDepth` defaults to 100 and stops the loop without an error. With
+  `times`, the loop runs at most `min(times, maxDepth)` passes. `times(0)` and
+  `maxDepth(0)` fail with `invalid_repeat_count`.
+- **No deduplication.** Each pass works on every row the previous pass produced, so
+  cycles revisit nodes and the row count can grow with each hop. Add `dedup()` after the
+  repeat, and keep the depth small on dense graphs.
+
+| Emit mode | Returns, for `times(2)` on the chain `a → b → c` |
+| --- | --- |
+| None (default) | Only the last pass: `[c]`. If a pass returns no rows, the result is `[]`. |
+| `emitBefore()` | The input and every pass except the last: `[a, b]` |
+| `emitAfter()` | Every pass, without the input: `[b, c]` |
+| `emitAll()` | Both of the above: `[a, b, b, c]` |
+| `emitIf(predicate)` | Like `emitAfter()`, keeping only rows that match |
+
+## Find a shortest path
+
+`shortestPath` / `shortest_path` returns the node IDs on one unweighted shortest path.
+This request finds a path between two users over `FOLLOWS` edges in either direction:
+
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as(
+        "alice",
+        g().n_with_label_where("User", SourcePredicate::eq("username", "alice")),
+    )
+    .var_as(
+        "bob",
+        g().n_with_label_where("User", SourcePredicate::eq("username", "bob")),
+    )
+    .var_as(
+        "path",
+        g().shortest_path_with(
+            NodeRef::var("alice"),
+            NodeRef::var("bob"),
+            Some("FOLLOWS"),
+            ShortestPathDirection::Both,
+            6,
+        ),
+    )
+    .returning(["path"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs("alice", g().nWithLabelWhere("User", SourcePredicate.eq("username", "alice")))
+  .varAs("bob", g().nWithLabelWhere("User", SourcePredicate.eq("username", "bob")))
+  .varAs(
+    "path",
+    g().shortestPath(NodeRef.var("alice"), NodeRef.var("bob"), 6, {
+      label: "FOLLOWS",
+      direction: ShortestPathDirection.Both,
+    }),
+  )
+  .returning(["path"]);
+```
+
+```go Go
+helix.ReadQuery("follow_path").
+	VarAs("alice", helix.G().NWithLabelWhere("User", helix.SourceEq("username", "alice"))).
+	VarAs("bob", helix.G().NWithLabelWhere("User", helix.SourceEq("username", "bob"))).
+	VarAs(
+		"path",
+		helix.G().ShortestPath(helix.NodeVar("alice"), helix.NodeVar("bob"), 6, helix.ShortestPathOptions{
+			Label:     "FOLLOWS",
+			Direction: helix.ShortestPathBoth,
+		}),
+	).
+	Returning("path")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as(
+        "alice",
+        g().n_with_label_where("User", SourcePredicate.eq("username", "alice")),
+    )
+    .var_as(
+        "bob",
+        g().n_with_label_where("User", SourcePredicate.eq("username", "bob")),
+    )
+    .var_as(
+        "path",
+        g().shortest_path(
+            NodeRef.var("alice"),
+            NodeRef.var("bob"),
+            6,
+            label="FOLLOWS",
+            direction=ShortestPathDirection.BOTH,
+        ),
+    )
+    .returning(["path"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "follow_path",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "alice",
+            "root": {
+              "nodes_where": {
+                "predicate": {
+                  "and": {
+                    "predicates": [
+                      {
+                        "eq": {
+                          "left": { "property": "$label" },
+                          "right": { "constant": { "string": "User" } }
+                        }
+                      },
+                      {
+                        "eq": {
+                          "left": { "property": "username" },
+                          "right": { "constant": { "string": "alice" } }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "query": {
+            "name": "bob",
+            "root": {
+              "nodes_where": {
+                "predicate": {
+                  "and": {
+                    "predicates": [
+                      {
+                        "eq": {
+                          "left": { "property": "$label" },
+                          "right": { "constant": { "string": "User" } }
+                        }
+                      },
+                      {
+                        "eq": {
+                          "left": { "property": "username" },
+                          "right": { "constant": { "string": "bob" } }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "query": {
+            "name": "path",
+            "root": {
+              "shortest_path": {
+                "source": { "var": "alice" },
+                "target": { "var": "bob" },
+                "label": "FOLLOWS",
+                "direction": "both",
+                "max_depth": 6
+              }
+            }
+          }
+        }
+      ],
+      "returns": ["path"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+The response holds the IDs from source to target, such as `"path": [12, 40, 7]`.
+
+- Rust `shortest_path(source, target, max_depth)` follows outgoing edges of any label;
+  `shortest_path_with` adds a label and a direction (`Out`, `In`, or `Both`). The other
+  SDKs take the label and direction as options.
+- The search is breadth-first and returns node IDs only, no edges. It visits neighbors
+  in ascending ID order, so ties resolve the same way every time.
+- The maximum depth is required; `0` fails with `invalid_shortest_path_count`.
+- Each endpoint must resolve to at most one node. More than one fails with
+  `invalid_query`. An endpoint that resolves to no node, or no path within the depth,
+  returns `[]`.
+- It starts and ends the traversal, so no step can follow it.
+
+## Loop over a parameter
+
+`forEachParam` / `for_each_param` runs a batch body once per object in an array
+parameter, in read and write batches. See
+[Insert many rows](/database/helix-db/query-guides/writing-data#insert-many-rows).
 
 ## Bound recursive work
 
 Recursive and fan-out operations must have application-level bounds. Prefer explicit
 depth, candidate, and response limits. A response `limit` does not necessarily bound
-all work performed before that operation.
+all work performed before that operation: `orderBy` reads its whole input, and each
+`repeat` pass works on the whole previous pass. With an emit mode, rows a pass emits can
+satisfy a later `limit` before the next pass starts.
 
 ## Next steps
 

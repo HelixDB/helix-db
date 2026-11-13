@@ -31,6 +31,7 @@ const CORE_MULTI_SDK_PAGES = [
   "database/helix-db/query-guides/search-consistency",
   "database/helix-db/query-guides/traversals",
   "database/helix-db/query-guides/filtering",
+  "database/helix-db/query-guides/ordering-and-pagination",
   "database/helix-db/query-guides/projections",
   "database/helix-db/query-guides/parameters",
   "database/helix-db/query-guides/error-handling",

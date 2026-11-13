@@ -9,27 +9,39 @@ pageType: "Guide"
 
 HelixDB filters in two places:
 
-- A **source predicate** such as `nWhere` / `n_where` selects the initial candidates.
-  It is eligible for index push-down, so filter here whenever you can.
+- A **source predicate** such as `nWithLabelWhere` / `n_with_label_where` selects the
+  initial candidates. Scoped to a label, it can read a
+  [secondary index](/database/helix-db/query-guides/secondary-indexes#which-predicates-use-an-index),
+  so filter here whenever you can.
 - **`.where(...)`** filters the current stream at any later point in a traversal, for
   example after following an edge.
 
-Both accept the same predicates. To restrict vector or full-text search to a
-candidate set, see [Filter search candidates](#filter-search-candidates).
+Both accept the same predicates: `SourcePredicate` is another name for `Predicate` in
+every SDK, and Go's `Source…` constructors build the same values as its `Pred…`
+constructors. To restrict vector or full-text search to a candidate set, see
+[Filter search candidates](#filter-search-candidates). To sort and page the result, see
+[Ordering and pagination](/database/helix-db/query-guides/ordering-and-pagination).
 
-## Common predicates
+## Predicates
 
-| Intent | Builder |
-| --- | --- |
-| Equality | `eq(property, value)` |
-| Comparison | `gt`, `gte`, `lt`, `lte` |
-| Inclusive range | `between` |
-| Set membership | `isIn` / `is_in` |
-| Property exists | `hasKey` / `has_key` |
-| Prefix | `startsWith` / `starts_with` |
-| Boolean composition | `and`, `or`, `not` |
+| Intent | Rust | TypeScript | Python | Go |
+| --- | --- | --- | --- | --- |
+| Equal, not equal | `eq`, `neq` | `eq`, `neq` | `eq`, `neq` | `PredEq`, `PredNeq` |
+| Compare | `gt`, `gte`, `lt`, `lte` | `gt`, `gte`, `lt`, `lte` | `gt`, `gte`, `lt`, `lte` | `PredGt`, `PredGte`, `PredLt`, `PredLte` |
+| Inclusive range | `between` | `between` | `between` | `PredBetween` |
+| Set membership | `is_in`, `is_in_param` | `isIn`, `isInParam` | `is_in`, `is_in_param` | `PredIsIn` |
+| Property exists | `has_key` | `hasKey` | `has_key` | `PredHasKey` |
+| Null or missing; present and not null | `is_null`, `is_not_null` | `isNull`, `isNotNull` | `is_null`, `is_not_null` | `PredIsNull`, `PredIsNotNull` |
+| Prefix, suffix, substring | `starts_with`, `ends_with`, `contains`, `contains_param` | `startsWith`, `endsWith`, `contains`, `containsParam` | `starts_with`, `ends_with`, `contains`, `contains_param` | `PredStartsWith`, `PredEndsWith`, `PredContains`, `PredContainsExpr` |
+| Compare two expressions | `compare` | `compare` | `compare` | `PredCompare` |
+| Boolean composition | `and`, `or`, `not` | `and`, `or`, `not` | `and_`, `or_`, `not_` | `PredAnd`, `PredOr`, `PredNot` |
 
-Values can be literals or typed parameter expressions.
+Comparison builders take a literal or a typed parameter expression. `startsWith`,
+`endsWith`, and `contains` take literal strings only; use `containsParam`
+(`PredContainsExpr` in Go) for a parameter substring. `isIn` takes a literal list; use
+`isInParam` for a list parameter, or pass the parameter to `PredIsIn` in Go. `compare`
+takes an expression on each side, so it can compare two properties, as in
+`compare(Expr.prop("spent"), CompareOp.Gt, Expr.prop("budget"))`.
 
 ## Filter a stream
 
@@ -123,6 +135,42 @@ WHERE u.score >= 100
 
 </CodeGroup>
 
+## Null, missing, and type rules
+
+- A missing property reads as `null`. `eq(property, null)` and `isNull` match both a
+  missing property and a stored `null`. `isNotNull` matches neither. `hasKey` matches a
+  stored `null` but not a missing property.
+- `neq` and `not` match rows where the property is missing, so
+  `neq("status", "archived")` also returns nodes without a `status`. Add
+  `isNotNull("status")` to exclude them.
+- A comparison between values of different types is false: a string never equals or
+  orders against a number, and a date-time never equals a string. `neq` across types
+  is therefore true.
+- `i64`, `f64`, and `f32` values compare by exact numeric value, so `5` equals `5.0`. A
+  stored `f32` keeps its widened value, so `f32` `0.1` does not equal `f64` `0.1`.
+- `between` includes both bounds and is false when the minimum exceeds the maximum.
+- `startsWith`, `endsWith`, and `contains` are case-sensitive and match string values
+  only. `contains` tests for a substring, not for an element of an array.
+- `isIn` compares each list element with the same rules as `eq`.
+
+## Filter steps
+
+These steps are shorthand for common predicates:
+
+| Step | Rust and Python | TypeScript | Go | Keeps |
+| --- | --- | --- | --- | --- |
+| Property equals a literal | `has(property, value)` | `has` | `Has` | Rows where `eq(property, value)` holds |
+| Label | `has_label(label)` | `hasLabel` | `HasLabel` | Elements with that label |
+| Property exists | `has_key(property)` | `hasKey` | `HasKey` | Elements that store the property, even as `null` |
+| In an earlier result | `within(name)` | `within` | `Within` | Rows whose current element is in the named entry's result |
+| Not in an earlier result | `without(name)` | `without` | `Without` | Rows whose current element is not in the named entry's result |
+| Edge-named filters | `edge_has(property, value)`, `edge_has_label(label)` | `edgeHas`, `edgeHasLabel` | `EdgeHas`, `EdgeHasLabel` | The same as `has` and `hasLabel` on the current element |
+
+`within` and `without` match nodes and edges by kind and ID, so a node never matches an
+edge. On a node stream, `edgeHas` tests the node, not the edge that reached it. To
+filter by an edge property, step onto the edges and back, as in
+`outE("FOLLOWS").where(Predicate.gte("since", "2026-01-01")).outN()`.
+
 ## Filter search candidates
 
 To restrict vector or full-text search to a candidate set, build the traversal that
@@ -141,6 +189,9 @@ See [Full-text search prefiltering](/database/helix-db/query-guides/prefiltering
 ## Next steps
 
 <CardGroup cols={2}>
+  <Card title="Ordering and pagination" icon="arrow-down-wide-short" href="/database/helix-db/query-guides/ordering-and-pagination">
+    Sort the filtered stream and return it one page at a time.
+  </Card>
   <Card title="Typed parameters" icon="sliders" href="/database/helix-db/query-guides/parameters">
     Move request-specific filter values out of the AST.
   </Card>

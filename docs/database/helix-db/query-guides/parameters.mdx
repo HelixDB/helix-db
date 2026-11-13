@@ -7,9 +7,15 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Parameters separate request-specific values from the operation tree. A request carries
-both `parameters` and `parameter_types`, allowing the runtime to validate values before
-execution and reuse a stable query shape.
+Parameters separate request-specific values from the operation tree. A typed request
+carries both `parameters` and `parameter_types`, which must name the same parameters, so
+the runtime validates every value before execution and reuses a stable query shape. The
+SDK helpers on this page send typed requests.
+
+A request can also omit `parameter_types`. Each value then takes its type from its JSON
+encoding: a whole number is an `i64`, any other number an `f64`, and strings, booleans,
+arrays, objects, and `null` keep their JSON type. Cypher and SQL requests work this way.
+One request cannot mix typed and untyped parameters.
 
 ## Define and bind parameters
 
@@ -189,8 +195,11 @@ placeholders instead, `parameters` is a list bound in written order. See
 - `string`
 - `date_time`
 - `bytes`
-- generic property `value`
-- typed objects and arrays
+- generic property `value`, which accepts any JSON value
+- `object`, sent as `"object"` with no element type. An element type passed to
+  `param.object(...)` in TypeScript or Python is checked only by that SDK, and Go's
+  `ParamObject` rejects one.
+- arrays of any family, sent as `{ "array": "<element type>" }`
 
 Query JSON cannot represent bytes, and no SDK provides a byte request encoder. Every SDK rejects a
 bytes parameter with an `UnsupportedBytesParameter` error when it serializes the request, so bytes

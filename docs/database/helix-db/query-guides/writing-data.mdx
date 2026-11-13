@@ -7,8 +7,10 @@ pageType: "Guide"
 
 <div className="flex flex-wrap gap-2"><Badge color="blue" size="sm">Guide</Badge></div>
 
-Mutations require a write batch. The SDK type prevents a mutating traversal from being
-placed in a read batch.
+Mutations require a write batch. Rust and TypeScript reject a mutating traversal in a
+read batch at compile time. Go records `ErrWriteTraversalInReadBatch` and returns it when
+the request is validated or serialized, and Python raises `TypeError` when the entry is
+added. The server also rejects a read request that contains a mutation.
 
 ## Create two nodes and an edge
 
@@ -161,22 +163,382 @@ VALUES (?, ?, '2026-07-24');
 
 </CodeGroup>
 
+## How addN and addE work
+
+- `addN` at the start of a traversal creates one node. After a stream, it creates one
+  node per input row.
+- `addE(label, to, properties)` creates one edge from every current node to every
+  target node, so two sources and three targets create six edges. It returns the new
+  edges, so `count()` after it counts edges. The Rust, TypeScript, and Python SDKs type
+  that result as a node stream even though it holds edges.
+- Edges are never deduplicated. Running the same `addE` twice creates parallel edges
+  with different IDs.
+- An empty source stream creates nothing. When the sources are not empty, a target
+  reference that resolves to no nodes fails with `invalid_query`, and a target ID that
+  does not exist fails with `node_not_found`.
+
 ## Other mutations
 
-| Intent | Operation |
-| --- | --- |
-| Replace or add a property | `setProperty` / `set_property` |
-| Remove a property | `removeProperty` / `remove_property` |
-| Remove current nodes or edges | `drop` |
-| Remove a specific edge | `dropEdge`, `dropEdgeLabeled`, `dropEdgeById` |
-| Create an index | `createIndexIfNotExists` |
-| Drop an index | `dropIndex` |
+| Intent | Operation | Behavior |
+| --- | --- | --- |
+| Replace or add a property | `setProperty` / `set_property` | Returns the input rows. Setting `null` stores `null`; it does not remove the property. |
+| Remove a property | `removeProperty` / `remove_property` | Returns the input rows. Removing a missing property does nothing. |
+| Delete nodes or edges | `drop` | Returns nothing. Deleting a node also deletes its edges. |
+| Delete every outgoing edge to target nodes | `dropEdge` / `drop_edge` | Deletes every edge from each current node to each target, across all labels and parallel edges. Returns nothing. |
+| Delete outgoing edges with one label | `dropEdgeLabeled` / `drop_edge_labeled` | Like `dropEdge`, limited to one label. |
+| Delete edges by ID | `dropEdgeById` / `drop_edge_by_id` (`DropEdgeByID` in Go) | An ID that does not exist is skipped. Returns nothing. |
+| Create an index | `createIndexIfNotExists` | See [Secondary indexes](/database/helix-db/query-guides/secondary-indexes). |
+| Drop an index | `dropIndex` | Starts a durable drop operation. |
+
+## Insert many rows
+
+Send the rows as one array-of-objects parameter and run a batch body once per row with
+`forEachParam` / `for_each_param`. Inside the body, each field of the current row is a
+parameter, so `PropertyInput.param("email")` reads that row's `email`:
+
+<CodeGroup>
+
+```rust Rust
+use std::collections::BTreeMap;
+
+let row = |email: &str, name: &str| {
+    QueryValue::Object(BTreeMap::from([
+        ("email".to_string(), QueryValue::String(email.to_string())),
+        ("name".to_string(), QueryValue::String(name.to_string())),
+    ]))
+};
+
+let request = QueryRequest::write(write_batch().for_each_param(
+    "rows",
+    write_batch().var_as(
+        "user",
+        g().add_n(
+            "User",
+            vec![
+                ("email", PropertyInput::param("email")),
+                ("name", PropertyInput::param("name")),
+            ],
+        ),
+    ),
+))
+.with_query_name("import_users")
+.with_typed_parameter(
+    "rows",
+    QueryParamType::Array(Box::new(QueryParamType::Object)),
+    QueryValue::Array(vec![
+        row("alice@example.com", "Alice"),
+        row("bob@example.com", "Bob"),
+    ]),
+)?;
+```
+
+```ts TypeScript
+const params = defineParams({ rows: param.array(param.object()) });
+
+const query = writeBatch().forEachParam(
+  "rows",
+  writeBatch().varAs(
+    "user",
+    g().addN("User", {
+      email: PropertyInput.param("email"),
+      name: PropertyInput.param("name"),
+    }),
+  ),
+);
+
+const request = query.toQueryRequest(
+  params,
+  {
+    rows: [
+      { email: "alice@example.com", name: "Alice" },
+      { email: "bob@example.com", name: "Bob" },
+    ],
+  },
+  { queryName: "import_users" },
+);
+```
+
+```go Go
+q := helix.WriteQuery("import_users")
+q.ParamArray("rows", []any{
+	map[string]any{"email": "alice@example.com", "name": "Alice"},
+	map[string]any{"email": "bob@example.com", "name": "Bob"},
+}, helix.ParamTypeObject())
+
+request := q.
+	ForEachParam("rows", helix.Write().VarAs("user", helix.G().AddN("User", helix.Props{
+		helix.Prop("email", helix.ExprParam("email")),
+		helix.Prop("name", helix.ExprParam("name")),
+	}))).
+	Returning()
+```
+
+```python Python
+params = define_params({"rows": param.array(param.object())})
+
+query = write_batch().for_each_param(
+    "rows",
+    write_batch().var_as(
+        "user",
+        g().add_n(
+            "User",
+            {
+                "email": PropertyInput.param("email"),
+                "name": PropertyInput.param("name"),
+            },
+        ),
+    ),
+)
+
+request = query.to_query_request(
+    params,
+    {
+        "rows": [
+            {"email": "alice@example.com", "name": "Alice"},
+            {"email": "bob@example.com", "name": "Bob"},
+        ]
+    },
+    query_name="import_users",
+)
+```
+
+```json JSON
+{
+  "request_type": "write",
+  "query_name": "import_users",
+  "query": {
+    "write": {
+      "entries": [
+        {
+          "for_each": {
+            "param": "rows",
+            "body": [
+              {
+                "query": {
+                  "name": "user",
+                  "root": {
+                    "add_n": {
+                      "label": "User",
+                      "properties": [
+                        ["email", { "expr": { "param": "email" } }],
+                        ["name", { "expr": { "param": "name" } }]
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "returns": []
+    }
+  },
+  "parameters": {
+    "rows": [
+      { "email": "alice@example.com", "name": "Alice" },
+      { "email": "bob@example.com", "name": "Bob" }
+    ]
+  },
+  "parameter_types": {
+    "rows": { "array": "object" }
+  }
+}
+```
+
+</CodeGroup>
+
+- The parameter must be an array of objects. Any other value fails with
+  `invalid_query`, and an empty array runs the body zero times.
+- Variables are not scoped to an iteration: `user` holds only the last row's result after
+  the loop. This request returns nothing for that reason.
+- Every row commits in the same transaction. Split very large imports into several
+  requests, and keep each write within the
+  [index backpressure limits](/database/helix-db/query-guides/search-consistency#index-backpressure)
+  when the label has vector or text indexes.
+
+## Create or update a node
+
+To upsert, read the node by its key, then add two conditional entries: one creates the
+node when the read is empty, the other updates it when the read found it.
+
+<CodeGroup>
+
+```rust Rust
+write_batch()
+    .var_as(
+        "existing",
+        g().n_with_label_where("User", SourcePredicate::eq("email", "alice@example.com")),
+    )
+    .var_as_if(
+        "created",
+        BatchCondition::VarEmpty("existing".to_string()),
+        g().add_n("User", vec![("email", "alice@example.com"), ("name", "Alice")]),
+    )
+    .var_as_if(
+        "updated",
+        BatchCondition::VarNotEmpty("existing".to_string()),
+        g().n(NodeRef::var("existing")).set_property("name", "Alice"),
+    )
+    .returning(["created", "updated"]);
+```
+
+```ts TypeScript
+writeBatch()
+  .varAs(
+    "existing",
+    g().nWithLabelWhere("User", SourcePredicate.eq("email", "alice@example.com")),
+  )
+  .varAsIf(
+    "created",
+    BatchCondition.varEmpty("existing"),
+    g().addN("User", { email: "alice@example.com", name: "Alice" }),
+  )
+  .varAsIf(
+    "updated",
+    BatchCondition.varNotEmpty("existing"),
+    g().n(NodeRef.var("existing")).setProperty("name", "Alice"),
+  )
+  .returning(["created", "updated"]);
+```
+
+```go Go
+helix.WriteQuery("upsert_user").
+	VarAs(
+		"existing",
+		helix.G().NWithLabelWhere("User", helix.SourceEq("email", "alice@example.com")),
+	).
+	VarAsIf(
+		"created",
+		helix.VarEmpty("existing"),
+		helix.G().AddN("User", helix.Props{
+			helix.Prop("email", "alice@example.com"),
+			helix.Prop("name", "Alice"),
+		}),
+	).
+	VarAsIf(
+		"updated",
+		helix.VarNotEmpty("existing"),
+		helix.G().N(helix.NodeVar("existing")).SetProperty("name", "Alice"),
+	).
+	Returning("created", "updated")
+```
+
+```python Python
+(
+    write_batch()
+    .var_as(
+        "existing",
+        g().n_with_label_where(
+            "User", SourcePredicate.eq("email", "alice@example.com")
+        ),
+    )
+    .var_as_if(
+        "created",
+        BatchCondition.var_empty("existing"),
+        g().add_n("User", {"email": "alice@example.com", "name": "Alice"}),
+    )
+    .var_as_if(
+        "updated",
+        BatchCondition.var_not_empty("existing"),
+        g().n(NodeRef.var("existing")).set_property("name", "Alice"),
+    )
+    .returning(["created", "updated"])
+)
+```
+
+```json JSON
+{
+  "request_type": "write",
+  "query_name": "upsert_user",
+  "query": {
+    "write": {
+      "entries": [
+        {
+          "query": {
+            "name": "existing",
+            "root": {
+              "nodes_where": {
+                "predicate": {
+                  "and": {
+                    "predicates": [
+                      {
+                        "eq": {
+                          "left": { "property": "$label" },
+                          "right": { "constant": { "string": "User" } }
+                        }
+                      },
+                      {
+                        "eq": {
+                          "left": { "property": "email" },
+                          "right": { "constant": { "string": "alice@example.com" } }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "query": {
+            "name": "created",
+            "root": {
+              "add_n": {
+                "label": "User",
+                "properties": [
+                  ["email", { "value": { "string": "alice@example.com" } }],
+                  ["name", { "value": { "string": "Alice" } }]
+                ]
+              }
+            },
+            "condition": { "var_empty": "existing" }
+          }
+        },
+        {
+          "query": {
+            "name": "updated",
+            "root": {
+              "set_property": {
+                "input": { "nodes": { "reference": { "var": "existing" } } },
+                "name": "name",
+                "value": { "value": { "string": "Alice" } }
+              }
+            },
+            "condition": { "var_not_empty": "existing" }
+          }
+        }
+      ],
+      "returns": ["created", "updated"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+Exactly one of `created` and `updated` runs; the skipped entry returns `[]`. Back the
+key with a [unique index](/database/helix-db/query-guides/secondary-indexes#unique-indexes)
+(`nodeUniqueEquality("User", "email")`). It makes the lookup an index read, and it stops
+two concurrent upserts of the same key from both creating a node: the request that
+loses fails with `unique_constraint_violation` or a retryable `transaction_conflict`,
+and a retry takes the update branch.
 
 ## Transaction behavior
 
-All entries in the write batch commit or roll back together. Reads inside the batch can
-refer to earlier mutations through named variables. Do not retry a write automatically
-unless the full request is safe to replay.
+A write batch of graph mutations commits or rolls back as one transaction: if any entry
+fails, nothing from the request commits. Reads inside the batch can refer to earlier
+mutations through named variables. Do not retry a write automatically unless the full
+request is safe to replay.
+
+Index management follows different rules:
+
+- A request cannot mix graph mutations with index operations (`createIndexIfNotExists`,
+  `dropIndex`, `retryIndexOperation`, `abortIndexOperation`). Such a request fails
+  before anything commits. `getIndexOperation` can share a request with graph writes.
+- A request with several index operations commits each one on its own, so a failure
+  after the first leaves the earlier operations committed.
 
 Cypher has no batch type: the server detects that a statement writes and runs it in one
 transaction, so the Cypher tab's three `CREATE` clauses also commit or roll back

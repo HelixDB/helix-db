@@ -117,11 +117,32 @@ helix.WriteQuery("create_doc_vector_index").
 
 </CodeGroup>
 
-Pass a tenant property as the final argument to partition the index by tenant. See
+Pass a tenant property as the final argument to partition the index by tenant. Any
+property name works. A record without the tenant property is not indexed. See
 [tenant-partitioned search indexes](/database/helix-cloud/operate/multi-tenancy#tenant-partitioned-search-indexes).
 
 Creation returns a receipt before the backfill over existing data finishes. The index
-becomes queryable only after validation and atomic activation.
+becomes queryable only after validation and atomic activation. Until then, a search that
+names it fails with `index_not_found`, as does a search of an index that does not exist.
+
+## Stored vectors
+
+An indexed property accepts an `f32` array, an `f64` array, an `i64` array, or a generic
+array of numbers; every value is converted to `f32`. A record without the property is
+not indexed. A write fails when the indexed property holds:
+
+| Value | Error |
+| --- | --- |
+| A different number of components than the index dimension | `invalid_vector_dimension` |
+| `NaN`, infinity, or an `f64` too large for `f32` | `invalid_vector_component` |
+| All zeros, in a cosine index | `zero_norm_cosine_vector` |
+| A component large enough to overflow the Euclidean or Manhattan distance | `vector_component_magnitude_exceeded` |
+| Any other type, including `null` | `invalid_query` |
+
+Existing records with such values block a build instead; see
+[Troubleshoot index operations](/database/helix-db/query-guides/troubleshooting#index-operation-is-blocked).
+A query vector must have the index dimension too. An empty query vector, or one with
+`NaN` or infinite components, fails with `invalid_query`.
 
 ## Search an index
 
@@ -212,14 +233,175 @@ Hits arrive closest first, ordered by `$distance` and then by ID. Use
 edge index. For a tenant-partitioned index, pass the tenant value as the final
 argument.
 
-`$distance` exists only on the hit stream. Project it before traversing away from a
-hit if the response needs it.
+`$distance` exists only on the hit stream: a step to another element drops it, and a
+projection ends the traversal. To return it after traversing away, `bind` the hit and
+read it with `projectBindings`; see
+[Keep search scores after traversing](/database/helix-db/query-guides/projections#keep-search-scores-after-traversing).
+
+`k` must be at least 1: a literal `0` fails with `invalid_search_result_count`, and a
+parameter `k` of `0` or less fails with `invalid_query`.
+
+## Distance values
+
+`$distance` is lower for closer vectors under every metric:
+
+| Metric | `$distance` | Range |
+| --- | --- | --- |
+| Cosine | `(1 - cosine similarity) / 2` | `0` (same direction) to `1` (opposite) |
+| Euclidean | Squared Euclidean distance, with no square root | `0` and up |
+| Manhattan | Sum of absolute component differences | `0` and up |
+
+Take the square root of a Euclidean `$distance` to get the straight-line distance, and
+compute `1 - 2 × $distance` to get the cosine similarity.
+
+## Index structure
+
+Vector indexes are HNSW graphs with fixed settings: `m` 16 (32 on the bottom layer),
+`ef_construction` 200, and a search `ef` of `max(k, 100)`. Queries cannot change them.
+Results are approximate, so a whole-index search can miss a true nearest neighbor.
 
 ## Prefilter with a traversal
 
 To rank only the nodes or edges a traversal reaches, such as documents a user may
 access, search within the traversal instead of the whole index. See
 [Prefiltered search](/database/helix-db/query-guides/prefiltering#vector-prefiltering).
+
+Search the whole index when every record of the label is a valid answer. Prefilter when
+only some records are: filtering whole-index hits afterwards drops results and can leave
+fewer than `k`. A small candidate set is also
+[ranked exactly](/database/helix-db/query-guides/prefiltering#how-it-works), while a
+whole-index search is approximate.
+
+## Combine vector and text search
+
+HelixDB has no operator that fuses vector and BM25 rankings. Run both searches as
+entries of one read batch, which reads one snapshot, and merge the two ranked lists in
+your application, for example with reciprocal rank fusion:
+
+<CodeGroup>
+
+```rust Rust
+read_batch()
+    .var_as(
+        "semantic",
+        g().vector_search_nodes("Doc", "embedding", vec![0.1, 0.8, 0.2], 20, None)
+            .value_map(Some(vec!["$id", "$distance"])),
+    )
+    .var_as(
+        "keyword",
+        g().text_search_nodes("Doc", "body", "consensus protocol", 20, None)
+            .value_map(Some(vec!["$id", "$score"])),
+    )
+    .returning(["semantic", "keyword"]);
+```
+
+```ts TypeScript
+readBatch()
+  .varAs(
+    "semantic",
+    g()
+      .vectorSearchNodes("Doc", "embedding", [0.1, 0.8, 0.2], 20, null)
+      .valueMap(["$id", "$distance"]),
+  )
+  .varAs(
+    "keyword",
+    g()
+      .textSearchNodes("Doc", "body", "consensus protocol", 20, null)
+      .valueMap(["$id", "$score"]),
+  )
+  .returning(["semantic", "keyword"]);
+```
+
+```go Go
+helix.ReadQuery("hybrid_docs").
+	VarAs(
+		"semantic",
+		helix.G().
+			VectorSearchNodes("Doc", "embedding", []float32{0.1, 0.8, 0.2}, 20).
+			ValueMap("$id", "$distance"),
+	).
+	VarAs(
+		"keyword",
+		helix.G().
+			TextSearchNodes("Doc", "body", "consensus protocol", 20).
+			ValueMap("$id", "$score"),
+	).
+	Returning("semantic", "keyword")
+```
+
+```python Python
+(
+    read_batch()
+    .var_as(
+        "semantic",
+        g()
+        .vector_search_nodes("Doc", "embedding", [0.1, 0.8, 0.2], 20)
+        .value_map(["$id", "$distance"]),
+    )
+    .var_as(
+        "keyword",
+        g()
+        .text_search_nodes("Doc", "body", "consensus protocol", 20)
+        .value_map(["$id", "$score"]),
+    )
+    .returning(["semantic", "keyword"])
+)
+```
+
+```json JSON
+{
+  "request_type": "read",
+  "query_name": "hybrid_docs",
+  "query": {
+    "read": {
+      "entries": [
+        {
+          "query": {
+            "name": "semantic",
+            "root": {
+              "value_map": {
+                "input": {
+                  "vector_search_nodes": {
+                    "label": "Doc",
+                    "property": "embedding",
+                    "query_vector": { "value": { "f32_array": [0.1, 0.8, 0.2] } },
+                    "k": { "literal": 20 }
+                  }
+                },
+                "properties": ["$id", "$distance"]
+              }
+            }
+          }
+        },
+        {
+          "query": {
+            "name": "keyword",
+            "root": {
+              "value_map": {
+                "input": {
+                  "text_search_nodes": {
+                    "label": "Doc",
+                    "property": "body",
+                    "query_text": { "value": { "string": "consensus protocol" } },
+                    "k": { "literal": 20 }
+                  }
+                },
+                "properties": ["$id", "$score"]
+              }
+            }
+          }
+        }
+      ],
+      "returns": ["semantic", "keyword"]
+    }
+  }
+}
+```
+
+</CodeGroup>
+
+`$distance` and `$score` use different scales, so fuse by rank rather than by adding the
+raw values.
 
 ## Search consistency
 
@@ -247,8 +429,8 @@ bound from the surrounding plan can lower it. Prefiltered searches have their ow
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Project search results" icon="table-columns" href="/database/helix-db/query-guides/projections">
-    Preserve ranked hit metadata before continuing a traversal.
+  <Card title="Project search results" icon="table-columns" href="/database/helix-db/query-guides/projections#keep-search-scores-after-traversing">
+    Keep ranked hit metadata while a traversal continues.
   </Card>
   <Card title="Text indexes" icon="align-left" href="/database/helix-db/query-guides/text-indexes">
     Rank string properties with BM25 keyword search.
