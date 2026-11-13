@@ -1205,6 +1205,40 @@ func TestIndexLifecycleResponseDecoders(t *testing.T) {
 	}
 }
 
+func TestDateTimeParameterAcceptsEveryIntegerWidth(t *testing.T) {
+	// ParamI64 and ParamF64 accept every Go integer width (#1032); epoch-millis
+	// datetime parameters must too, through both insertion paths.
+	const want = "1970-01-01T00:00:00.005Z"
+	values := []any{int(5), int8(5), int16(5), int32(5), int64(5), uint(5), uint8(5), uint16(5), uint32(5), uint64(5)}
+	for _, value := range values {
+		convenience := NewReadQueryRequest(Read())
+		convenience.ParamDateTime("t", value)
+		typed := NewReadQueryRequest(Read())
+		typed.WithTypedParameter("t", ParamTypeDateTime(), value)
+		for _, request := range []*QueryRequest{convenience, typed} {
+			body, err := MarshalRequest(request)
+			if err != nil {
+				t.Fatalf("%T: %v", value, err)
+			}
+			if !strings.Contains(string(body), `"t":"`+want+`"`) {
+				t.Fatalf("%T: unexpected body %s", value, body)
+			}
+		}
+	}
+
+	for _, value := range []any{uint64(math.MaxUint64), true, 1.5} {
+		convenience := NewReadQueryRequest(Read())
+		convenience.ParamDateTime("t", value)
+		typed := NewReadQueryRequest(Read())
+		typed.WithTypedParameter("t", ParamTypeDateTime(), value)
+		for _, request := range []*QueryRequest{convenience, typed} {
+			if err := request.Validate(); !errors.Is(err, ErrInvalidDateTimeParameter) {
+				t.Fatalf("%T(%v): expected ErrInvalidDateTimeParameter, got %v", value, value, err)
+			}
+		}
+	}
+}
+
 func TestDateTimeAndPropertyValueConversions(t *testing.T) {
 	parsed, err := ParseDateTimeRFC3339("2025-02-03T04:05:06.123456789Z")
 	if err != nil {
