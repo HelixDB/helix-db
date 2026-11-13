@@ -1,5 +1,6 @@
+use crate::cloud::model::Database;
 use crate::cloud::model::Named as _;
-use crate::cloud::resolve::{Link, ResolvedDatabase, Scope};
+use crate::cloud::resolve::{Link, Owner, ResolvedDatabase, Scope};
 use crate::config::{
     EnterpriseInstanceConfig, HelixConfig, LocalInstanceConfig, LocalStorageMode, S3StorageConfig,
 };
@@ -34,18 +35,6 @@ pub async fn run(
         ));
     }
 
-    fs::create_dir_all(&project_dir)?;
-    fs::create_dir_all(project_dir.join(".helix"))?;
-    // Canonicalize so `--path .` or `..` names the project after the real
-    // directory rather than falling back to the default.
-    let project_name = dunce::canonicalize(&project_dir)?
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("helix-project")
-        .to_string();
-
-    let mut config = HelixConfig::default_config(&project_name);
-
     let target = match target {
         Some(target) => target,
         None if prompts::is_interactive() => prompts::select_init_target()?,
@@ -64,7 +53,10 @@ pub async fn run(
     // top-level one when both are present.
     let skills = target.skills_override().or(skills);
 
-    let next_steps = match target {
+    // Validate the name and flags, and resolve the cloud database, before
+    // touching the filesystem, so a rejected init leaves no project directory
+    // or `.helix/` behind.
+    let target = match target {
         InitTarget::Local {
             name,
             port,
@@ -76,13 +68,10 @@ pub async fn run(
             // Surface a missing/stopped container runtime before we write any files,
             // so the user can react before the project is scaffolded.
             crate::setup::warn_if_container_runtime_unavailable();
-            let instance_name = name.clone();
-            config.local.clear();
-            let local_config = local_instance_config(port, disk, &s3)?;
-            config.local.insert(name, local_config);
-            write_example_request(&project_dir)?;
-            write_agents_md(&project_dir, &instance_name)?;
-            local_next_steps(&instance_name)
+            ResolvedTarget::Local {
+                config: local_instance_config(port, disk, &s3)?,
+                name,
+            }
         }
         InitTarget::Enterprise {
             name,
@@ -92,17 +81,52 @@ pub async fn run(
             ..
         } => {
             validate_name(&name)?;
-            let instance_name = name.clone();
             // A new project never inherits the link of a project it sits in.
             let scope = Scope::new(Link::default()).await?;
             let ResolvedDatabase { database, owner } = scope
                 .database(database.as_deref(), &ScopeArgs { workspace, project })
                 .await?;
+            ResolvedTarget::Enterprise {
+                name,
+                database,
+                owner,
+            }
+        }
+    };
+
+    fs::create_dir_all(&project_dir)?;
+    fs::create_dir_all(project_dir.join(".helix"))?;
+    // Canonicalize so `--path .` or `..` names the project after the real
+    // directory rather than falling back to the default.
+    let project_name = dunce::canonicalize(&project_dir)?
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("helix-project")
+        .to_string();
+
+    let mut config = HelixConfig::default_config(&project_name);
+
+    let next_steps = match target {
+        ResolvedTarget::Local {
+            name,
+            config: local_config,
+        } => {
+            config.local.clear();
+            config.local.insert(name.clone(), local_config);
+            write_example_request(&project_dir)?;
+            write_agents_md(&project_dir, &name)?;
+            local_next_steps(&name)
+        }
+        ResolvedTarget::Enterprise {
+            name,
+            database,
+            owner,
+        } => {
             config.local.clear();
             config.project.id = Some(owner.project_id.clone());
             config.project.workspace_id = Some(owner.workspace_id.clone());
             config.enterprise.insert(
-                name,
+                name.clone(),
                 EnterpriseInstanceConfig {
                     database: database.reference(),
                     workspace_id: Some(owner.workspace_id),
@@ -114,7 +138,7 @@ pub async fn run(
                 database.label(),
                 database.reference()
             ));
-            enterprise_next_steps(&instance_name)
+            enterprise_next_steps(&name)
         }
     };
 
@@ -130,6 +154,21 @@ pub async fn run(
         &serde_json::json!({"project": project_name, "config": config_path}),
         |_| Ok(()),
     )
+}
+
+/// An init target whose name and flags are validated and whose cloud database
+/// is resolved, so the project directory is only created once scaffolding can
+/// succeed.
+enum ResolvedTarget {
+    Local {
+        name: String,
+        config: LocalInstanceConfig,
+    },
+    Enterprise {
+        name: String,
+        database: Database,
+        owner: Owner,
+    },
 }
 
 /// Rejects a `--name`/`-n` the interactive prompt (`prompts::input_name`) would
