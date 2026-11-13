@@ -176,10 +176,10 @@ func I64Array(v ...int64) PropertyValue {
 	return PropertyValue{kind: "I64Array", value: append([]int64(nil), v...)}
 }
 func F64Array(v ...float64) PropertyValue {
-	return PropertyValue{kind: "F64Array", value: append([]float64(nil), v...)}
+	return propertyFloatArray("F64Array", append([]float64(nil), v...))
 }
 func F32Array(v ...float32) PropertyValue {
-	return PropertyValue{kind: "F32Array", value: append([]float32(nil), v...)}
+	return propertyFloatArray("F32Array", append([]float32(nil), v...))
 }
 func StringArray(v ...string) PropertyValue {
 	return PropertyValue{kind: "StringArray", value: append([]string(nil), v...)}
@@ -216,6 +216,15 @@ func propertyFloat[T ~float32 | ~float64](kind string, v T) PropertyValue {
 	f := float64(v)
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return PropertyValue{kind: kind, err: errors.New("helix: non-finite float")}
+	}
+	return PropertyValue{kind: kind, value: v}
+}
+
+func propertyFloatArray[T ~float32 | ~float64](kind string, v []T) PropertyValue {
+	for _, f := range v {
+		if math.IsNaN(float64(f)) || math.IsInf(float64(f), 0) {
+			return PropertyValue{kind: kind, err: errors.New("helix: non-finite float")}
+		}
 	}
 	return PropertyValue{kind: kind, value: v}
 }
