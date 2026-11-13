@@ -1205,6 +1205,66 @@ func TestIndexLifecycleResponseDecoders(t *testing.T) {
 	}
 }
 
+func TestDateTimeFromTimeOutsideUnixNanoRange(t *testing.T) {
+	// time.Time.UnixNano is undefined outside 1677-09-21..2262-04-11, and
+	// integer division truncates toward zero. Both used to corrupt the stored
+	// instant silently; conversion must keep the exact (floored) millisecond.
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"0001-01-01T00:00:00.000Z", "0001-01-01T00:00:00.000Z"},
+		{"1677-01-01T00:00:00.000Z", "1677-01-01T00:00:00.000Z"},
+		{"2262-12-31T23:59:59.999Z", "2262-12-31T23:59:59.999Z"},
+		{"2300-01-01T00:00:00.000Z", "2300-01-01T00:00:00.000Z"},
+		{"9999-12-31T23:59:59.999Z", "9999-12-31T23:59:59.999Z"},
+		{"1969-12-31T23:59:59.9995Z", "1969-12-31T23:59:59.999Z"},
+	}
+	for _, tc := range cases {
+		parsed, err := ParseDateTimeRFC3339(tc.input)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.input, err)
+		}
+		got, err := parsed.RFC3339()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.input, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s: got %s want %s", tc.input, got, tc.want)
+		}
+	}
+
+	instant := time.Date(2300, time.January, 1, 0, 0, 0, 0, time.UTC)
+	gotValue, err := PropertyValueOf(instant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantValue, err := PropertyValueOf(DateTimeFromMillis(instant.Unix() * 1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotProperty, err := json.Marshal(gotValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProperty, err := json.Marshal(wantValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotProperty) != string(wantProperty) {
+		t.Fatalf("time.Time property value: got %s want %s", gotProperty, wantProperty)
+	}
+	request := NewReadQueryRequest(Read())
+	request.ParamDateTime("t", instant)
+	body, err := MarshalRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"t":"2300-01-01T00:00:00.000Z"`) {
+		t.Fatalf("time.Time parameter serialized to the wrong instant: %s", body)
+	}
+}
+
 func TestDateTimeAndPropertyValueConversions(t *testing.T) {
 	parsed, err := ParseDateTimeRFC3339("2025-02-03T04:05:06.123456789Z")
 	if err != nil {
