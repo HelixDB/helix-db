@@ -171,9 +171,9 @@ durability waits on reads are rejected with `400 Bad Request`.
   that does not exist.
 - `408` reports an exceeded deadline: `query_deadline_exceeded` from the engine
   or `query_timeout` from a Helix Cloud gateway. Locally, `POST /v2/query` has no
-  execution deadline and Cypher and SQL have 30 seconds, but a write also returns
-  `408` after waiting 30 seconds for its WAL upload. A write may still be applied:
-  [read the state back](/database/helix-db/query-guides/error-handling#stability-and-retry-rules)
+  execution deadline and Cypher and SQL have 30 seconds. A write that awaits
+  durability returns `408` after 30 seconds without its WAL upload, although it is
+  already applied: [read the state back](/database/helix-db/query-guides/error-handling#stability-and-retry-rules)
   before resending.
 - `409` reports a conflict that committed nothing; branch on `retryable`. With
   `true` (such as `transaction_conflict`), resend with bounded backoff. With

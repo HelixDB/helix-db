@@ -53,8 +53,9 @@ than moving to the writer; retry with backoff. Contact
 
 ## Writer failover
 
-If the writer fails, Helix promotes a healthy reader and fences the old writer so it cannot
-commit after the new one takes over. Meanwhile:
+Helix elects the writer through a lease. If the writer fails, Helix promotes a healthy
+reader and fences the old writer so it cannot commit after the new one takes over.
+Meanwhile:
 
 - Writes wait up to 90 seconds for the new writer. If none is ready, the gateway returns `503`
   `failover_wait_unavailable` without sending the write; retry after its `Retry-After`.

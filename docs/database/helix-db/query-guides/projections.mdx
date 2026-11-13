@@ -656,8 +656,9 @@ helix.ReadQuery("docs_with_authors").
 
 The same pattern keeps `$score` from a text search.
 
-A document with no `AUTHORED_BY` edge produces no row. To keep it, bind the author in an
-optional step, `optional(sub().out("AUTHORED_BY").bind("author"))`, and project
+Each row pairs one hit with one author, so a document with no `AUTHORED_BY` edge
+produces no row. To keep it, bind the author in an optional step,
+`optional(sub().out("AUTHORED_BY").bind("author"))`, and project
 `BindingProjection.binding("author", "name", "author")`; the document then comes back
 without an `author` field. Do not use `current` here: with no author, the current
 element is still the document, so `current("name", ...)` returns the document's `name`.

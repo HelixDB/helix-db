@@ -244,7 +244,7 @@ Only the client configuration changes: Cloud needs an API key and a database ID,
 database-specific endpoint URL.
 
 The local server has no authentication or TLS, and `helix start` publishes its port
-on every host interface. Self-host it only on a trusted network or behind a proxy that
+on every host interface. Self-host it only on a trusted network, behind a proxy that
 terminates TLS and authenticates requests. See [Secure the server](/database/helix-db/start-here/local-development/local-server#secure-the-server).
 
 ## Embedded
@@ -817,7 +817,8 @@ Object storage reads credentials from the standard `AWS_*` variables
 (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), and its endpoint
 from `AWS_ENDPOINT` when the source sets none. Unlike the server, it has no disk cache
 by default, so once a vector index outgrows memory, each graph hop that misses the
-cache waits on an object-store request. Give it a [hybrid cache](#configure-caches).
+cache waits on an object-store request. Give object storage with a vector index a
+[hybrid cache](#configure-caches).
 
 ## Configure caches
 
@@ -1439,7 +1440,7 @@ Have a feature request? [Let us know on Discord](https://discord.com/invite/2stg
 Page type: Reference
 
 - **Durable requests time out after 30 s.** While the object store is unreachable, durable writes and native no-op requests fail with `query_deadline_exceeded` (HTTP 408) instead of hanging. The commit may still have happened, so reconcile before you resend. Index definition changes still wait without a limit.
-- **Faster bulk inserts:** 1.6–2.3x as many nodes per second with 8 clients and 8 indexes. p99 at 8 clients rose from about 0.5 s to 1.1–3.1 s.
+- **Faster bulk inserts:** 1.6–2.3x as many nodes per second in an in-process insert with 8 clients and 8 indexes. p99 at 8 clients rose from about 0.5 s to 1.1–3.1 s.
 - **Shorter pause when a secondary index activates:** the longest write gap during a 600K-row build fell from 11.9 s to 1.3 s.
 - **Responses are serialized without copying the returned rows.**
 - **Telemetry:** the server, embedded runtime and CLI turn telemetry off when `DO_NOT_TRACK` is anything but empty, `0`, `false` or `no`. `HELIX_TELEMETRY_LEVEL` also accepts `on`/`true`/`yes`/`1` for `basic` and `false`/`no`/`0` for `off`. `basic` now sends pseudonymous project and deployment IDs and a per-session query count; see [`helix metrics`](/cli/command-reference/metrics).
@@ -1450,7 +1451,7 @@ Page type: Reference
 - **Writes that send `true` no longer flush twice**, which stalled writers under load: from about 60 to 1,200 vector writes per second with 128 clients on S3.
 - **`HELIX_WAL_FLUSH_INTERVAL_MS`** sets the milliseconds between WAL uploads, 1–60000 (default 100). Durable writes wait for the next upload, so a lower value cuts their latency and costs more object-store PUTs.
 - **`HELIX_SST_COMPRESSION`** sets the codec of new storage files: `none` (default) or `zstd`. Either setting reads both, but once `zstd` is on, v0.0.14 and earlier cannot read the data.
-- **Index builds no longer stall reads:** from about 66K to 205K reads per second during a 300K-row build. Builds take longer, since they share the machine with live traffic.
+- **Index builds no longer stall reads:** from about 66K to 205K reads per second during a 300K-row build with 32 readers and 4 writers. Builds take longer, since they share the machine with live traffic.
 - **Duplicates are rejected while a unique index builds.** A write that duplicates a value the build already indexed fails with `unique_constraint_violation` (409). Before, it was accepted and the build then blocked on it.
 - **A filter that combines a unique equality with other conditions reads one row:** five guarded claims over 1M jobs went from about 34 s to 35 ms.
 - **A large index publication no longer freezes the server** (for about 1.6 s).
@@ -1479,7 +1480,7 @@ Page type: Reference
 - **[`helix doctor`](/cli/command-reference/doctor) and `GET /v2/diagnostics`** check a server's storage, S3 bucket region, disk cache, memory, index publication, and recent queries' index use.
 - **Local disk storage (`HELIX_DATA_DIR`) fsyncs every write**, with no durable-write throughput loss in testing. Before, a write acknowledged as durable could sit in the page cache, so a crash or a full host disk could leave a database that would not open.
 - **Disk storage deletes old manifest and compaction files again.**
-- **Secondary index builds finish under sustained writes.** Before, a build could stay in catch-up while writes kept arriving, and equality lookups kept scanning their label meanwhile.
+- **Secondary index builds finish under sustained writes.** Before, a build could stay in catch-up while writes kept arriving, so equality lookups kept scanning their label and each write batch got slower.
 - **Faster writes** to busy labels, hub nodes and low-cardinality equality values, and to requests that add edges node by node.
 - **Typed Cypher relationship patterns start from relationship-label bitmaps.**
 - **Embedded readers reopened on the same disk root stop leaking file descriptors**, and a writer and its readers share one disk cache.
@@ -6542,8 +6543,9 @@ helix.ReadQuery("docs_with_authors").
 
 The same pattern keeps `$score` from a text search.
 
-A document with no `AUTHORED_BY` edge produces no row. To keep it, bind the author in an
-optional step, `optional(sub().out("AUTHORED_BY").bind("author"))`, and project
+Each row pairs one hit with one author, so a document with no `AUTHORED_BY` edge
+produces no row. To keep it, bind the author in an optional step,
+`optional(sub().out("AUTHORED_BY").bind("author"))`, and project
 `BindingProjection.binding("author", "name", "author")`; the document then comes back
 without an `author` field. Do not use `current` here: with no author, the current
 element is still the document, so `current("name", ...)` returns the document's `name`.
@@ -8676,9 +8678,9 @@ durability waits on reads are rejected with `400 Bad Request`.
   that does not exist.
 - `408` reports an exceeded deadline: `query_deadline_exceeded` from the engine
   or `query_timeout` from a Helix Cloud gateway. Locally, `POST /v2/query` has no
-  execution deadline and Cypher and SQL have 30 seconds, but a write also returns
-  `408` after waiting 30 seconds for its WAL upload. A write may still be applied:
-  [read the state back](/database/helix-db/query-guides/error-handling#stability-and-retry-rules)
+  execution deadline and Cypher and SQL have 30 seconds. A write that awaits
+  durability returns `408` after 30 seconds without its WAL upload, although it is
+  already applied: [read the state back](/database/helix-db/query-guides/error-handling#stability-and-retry-rules)
   before resending.
 - `409` reports a conflict that committed nothing; branch on `retryable`. With
   `true` (such as `transaction_conflict`), resend with bounded backoff. With
@@ -9716,8 +9718,9 @@ than moving to the writer; retry with backoff. Contact
 
 ## Writer failover
 
-If the writer fails, Helix promotes a healthy reader and fences the old writer so it cannot
-commit after the new one takes over. Meanwhile:
+Helix elects the writer through a lease. If the writer fails, Helix promotes a healthy
+reader and fences the old writer so it cannot commit after the new one takes over.
+Meanwhile:
 
 - Writes wait up to 90 seconds for the new writer. If none is ready, the gateway returns `503`
   `failover_wait_unavailable` without sending the write; retry after its `Retry-After`.
@@ -11559,7 +11562,8 @@ You need a Slack app in your workspace and its bot token.
 2. Under **OAuth & Permissions**, add the Bot Token Scopes `channels:read` and
    `channels:history` (public channels), `groups:read` and `groups:history` (private
    channels), and `users:read` and `users:read.email` (people's names).
-3. Select **Install to Workspace** and copy the **Bot User OAuth Token** (`xoxb-…`).
+3. Select **Install to Workspace**, copy the **Bot User OAuth Token** (`xoxb-…`) and
+   paste it under **Bot token**.
 4. Invite the app to each channel to sync, public or private, with
    `/invite @Helix Foundry`.
 
@@ -11927,7 +11931,7 @@ There, owners and admins select **Use my own data**, then **Continue**, to open 
 first ontology**. After the [sample company](/foundry/start-here/sample-company), the
 workspace's first ontology of its own starts the same way from **New ontology**.
 
-It has three steps, one at a time:
+It has three steps, one at a time; each finished step shrinks to a line with **Edit**:
 
 1. **Connect your data or upload documents**, as [below](#create-another-ontology).
 2. **Goal (optional)**: under **What do you want to understand?**, the questions you
@@ -12348,7 +12352,8 @@ reads them and are never stored; one too costly to work out says so.
 ## Settle a review
 
 **Needs review**, on an entity's page or a document's, lists what the load couldn't
-settle by itself, as a card per item, grouped by reason, such as **Names something that
+settle by itself, as a card per item, grouped by reason with a count and what it means,
+such as **Names something that
 isn't in your data**, **Could mean more than one entity**, **The model wasn't sure** or
 **A relationship the ontology doesn't have**. Owners and admins settle them while
 the page reads the current load; on another load, a card says **Open the current load to

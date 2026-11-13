@@ -126,7 +126,8 @@ Object storage reads credentials from the standard `AWS_*` variables
 (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), and its endpoint
 from `AWS_ENDPOINT` when the source sets none. Unlike the server, it has no disk cache
 by default, so once a vector index outgrows memory, each graph hop that misses the
-cache waits on an object-store request. Give it a [hybrid cache](#configure-caches).
+cache waits on an object-store request. Give object storage with a vector index a
+[hybrid cache](#configure-caches).
 
 ## Configure caches
 

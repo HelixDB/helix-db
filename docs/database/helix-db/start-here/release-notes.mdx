@@ -15,7 +15,7 @@ pageType: "Reference"
   }}
 >
 - **Durable requests time out after 30 s.** While the object store is unreachable, durable writes and native no-op requests fail with `query_deadline_exceeded` (HTTP 408) instead of hanging. The commit may still have happened, so reconcile before you resend. Index definition changes still wait without a limit.
-- **Faster bulk inserts:** 1.6–2.3x as many nodes per second with 8 clients and 8 indexes. p99 at 8 clients rose from about 0.5 s to 1.1–3.1 s.
+- **Faster bulk inserts:** 1.6–2.3x as many nodes per second in an in-process insert with 8 clients and 8 indexes. p99 at 8 clients rose from about 0.5 s to 1.1–3.1 s.
 - **Shorter pause when a secondary index activates:** the longest write gap during a 600K-row build fell from 11.9 s to 1.3 s.
 - **Responses are serialized without copying the returned rows.**
 - **Telemetry:** the server, embedded runtime and CLI turn telemetry off when `DO_NOT_TRACK` is anything but empty, `0`, `false` or `no`. `HELIX_TELEMETRY_LEVEL` also accepts `on`/`true`/`yes`/`1` for `basic` and `false`/`no`/`0` for `off`. `basic` now sends pseudonymous project and deployment IDs and a per-session query count; see [`helix metrics`](/cli/command-reference/metrics).
@@ -34,7 +34,7 @@ pageType: "Reference"
 - **Writes that send `true` no longer flush twice**, which stalled writers under load: from about 60 to 1,200 vector writes per second with 128 clients on S3.
 - **`HELIX_WAL_FLUSH_INTERVAL_MS`** sets the milliseconds between WAL uploads, 1–60000 (default 100). Durable writes wait for the next upload, so a lower value cuts their latency and costs more object-store PUTs.
 - **`HELIX_SST_COMPRESSION`** sets the codec of new storage files: `none` (default) or `zstd`. Either setting reads both, but once `zstd` is on, v0.0.14 and earlier cannot read the data.
-- **Index builds no longer stall reads:** from about 66K to 205K reads per second during a 300K-row build. Builds take longer, since they share the machine with live traffic.
+- **Index builds no longer stall reads:** from about 66K to 205K reads per second during a 300K-row build with 32 readers and 4 writers. Builds take longer, since they share the machine with live traffic.
 - **Duplicates are rejected while a unique index builds.** A write that duplicates a value the build already indexed fails with `unique_constraint_violation` (409). Before, it was accepted and the build then blocked on it.
 - **A filter that combines a unique equality with other conditions reads one row:** five guarded claims over 1M jobs went from about 34 s to 35 ms.
 - **A large index publication no longer freezes the server** (for about 1.6 s).
@@ -79,7 +79,7 @@ pageType: "Reference"
 - **[`helix doctor`](/cli/command-reference/doctor) and `GET /v2/diagnostics`** check a server's storage, S3 bucket region, disk cache, memory, index publication, and recent queries' index use.
 - **Local disk storage (`HELIX_DATA_DIR`) fsyncs every write**, with no durable-write throughput loss in testing. Before, a write acknowledged as durable could sit in the page cache, so a crash or a full host disk could leave a database that would not open.
 - **Disk storage deletes old manifest and compaction files again.**
-- **Secondary index builds finish under sustained writes.** Before, a build could stay in catch-up while writes kept arriving, and equality lookups kept scanning their label meanwhile.
+- **Secondary index builds finish under sustained writes.** Before, a build could stay in catch-up while writes kept arriving, so equality lookups kept scanning their label and each write batch got slower.
 - **Faster writes** to busy labels, hub nodes and low-cardinality equality values, and to requests that add edges node by node.
 - **Typed Cypher relationship patterns start from relationship-label bitmaps.**
 - **Embedded readers reopened on the same disk root stop leaking file descriptors**, and a writer and its readers share one disk cache.
