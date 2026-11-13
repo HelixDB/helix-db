@@ -2354,14 +2354,14 @@ produces the shape you need — each of these replaces `valueMap` on the `friend
 | `exists()` | `true` |
 | `project(…)` | One object per row with named fields |
 
-A declared return keeps its JSON type when it matches nothing. When its entry is
-skipped (a conditional entry whose condition is false), row streams and scalars
-differ:
+A declared return keeps its JSON type when it matches nothing:
 
 | Return | Matched rows or none | Entry skipped |
 | --- | --- | --- |
 | Row stream, including `n(<one id>)`, `limit(1)`, `fold` and mutations | Array, `[]` when empty | `[]` |
-| Scalar terminal, such as `count()` or `exists()` | Scalar, such as `0` or `false` | The whole request fails with `invalid_query` (`return variable … is not bound`) |
+| Scalar terminal, such as `count()` or `exists()` | Scalar, such as `0` or `false` | `[]` |
+
+An entry is skipped when it is a conditional entry whose condition is false.
 
 An empty `returns` declaration returns `{}` because it declares no response keys.
 
@@ -5777,8 +5777,10 @@ serves both directions. Cypher and SQL read it only in its own direction; see
 ## Page with a range index
 
 Keyset pagination asks for the rows after the last one the client saw instead of
-skipping rows. With an active range index on `Post.created_at`, this request reads at
-most 20 index entries at any page depth:
+skipping rows. With an active range index on `Post.created_at`, this request stops
+once it has 20 rows, at any page depth. The limit bounds rows kept, not index entries
+read: a descending read resolves each group of equal `created_at` values whole, so many
+posts sharing one timestamp cost more reads:
 
 ```rust Rust
 read_batch()
@@ -8704,8 +8706,8 @@ Local servers and Helix Cloud gateways return
 code's [failure class](/database/helix-db/query-guides/error-handling#failure-classes)
 settles it (409, `index_backpressure` and an unknown write outcome). Clients
 should branch on `error` and treat `msg` as diagnostic text. An oversized Cloud
-request uses `payload_too_large` as its stable error code. An unknown path or
-method returns an empty `404` or `405` instead of this envelope. See the
+request uses `payload_too_large` as its stable error code. On a local server, an
+unknown path or method returns an empty `404` or `405` instead of this envelope. See the
 [query error reference](/database/helix-db/query-guides/error-handling) for engine
 error codes and retry guidance, and
 [Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling) for

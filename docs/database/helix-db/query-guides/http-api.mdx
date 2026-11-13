@@ -197,8 +197,8 @@ Local servers and Helix Cloud gateways return
 code's [failure class](/database/helix-db/query-guides/error-handling#failure-classes)
 settles it (409, `index_backpressure` and an unknown write outcome). Clients
 should branch on `error` and treat `msg` as diagnostic text. An oversized Cloud
-request uses `payload_too_large` as its stable error code. An unknown path or
-method returns an empty `404` or `405` instead of this envelope. See the
+request uses `payload_too_large` as its stable error code. On a local server, an
+unknown path or method returns an empty `404` or `405` instead of this envelope. See the
 [query error reference](/database/helix-db/query-guides/error-handling) for engine
 error codes and retry guidance, and
 [Helix Cloud gateway errors](/database/helix-cloud/operate/error-handling) for

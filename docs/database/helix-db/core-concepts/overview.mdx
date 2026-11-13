@@ -652,14 +652,14 @@ produces the shape you need — each of these replaces `valueMap` on the `friend
 | `exists()` | `true` |
 | `project(…)` | One object per row with named fields |
 
-A declared return keeps its JSON type when it matches nothing. When its entry is
-skipped (a conditional entry whose condition is false), row streams and scalars
-differ:
+A declared return keeps its JSON type when it matches nothing:
 
 | Return | Matched rows or none | Entry skipped |
 | --- | --- | --- |
 | Row stream, including `n(<one id>)`, `limit(1)`, `fold` and mutations | Array, `[]` when empty | `[]` |
-| Scalar terminal, such as `count()` or `exists()` | Scalar, such as `0` or `false` | The whole request fails with `invalid_query` (`return variable … is not bound`) |
+| Scalar terminal, such as `count()` or `exists()` | Scalar, such as `0` or `false` | `[]` |
+
+An entry is skipped when it is a conditional entry whose condition is false.
 
 An empty `returns` declaration returns `{}` because it declares no response keys.
 

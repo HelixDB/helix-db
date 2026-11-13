@@ -195,8 +195,10 @@ serves both directions. Cypher and SQL read it only in its own direction; see
 ## Page with a range index
 
 Keyset pagination asks for the rows after the last one the client saw instead of
-skipping rows. With an active range index on `Post.created_at`, this request reads at
-most 20 index entries at any page depth:
+skipping rows. With an active range index on `Post.created_at`, this request stops
+once it has 20 rows, at any page depth. The limit bounds rows kept, not index entries
+read: a descending read resolves each group of equal `created_at` values whole, so many
+posts sharing one timestamp cost more reads:
 
 <CodeGroup>
 

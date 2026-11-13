@@ -4,7 +4,7 @@
     "title": "HelixDB HTTP API",
     "version": "2.0.0",
     "summary": "Execute operation-tree and Cypher queries against HelixDB",
-    "description": "The v2 operation-tree query contract and the Cypher execution and read-only planning contract are available on local servers and Helix Cloud gateways. Local servers have no authentication. A Helix Cloud gateway decodes `Content-Encoding: gzip` or `x-gzip` request bodies and applies its 2 MiB limit after decoding, refuses other codings with 415, and gzips responses for `Accept-Encoding: gzip`; local servers do neither. The health operations describe a local server; a gateway instead serves unauthenticated `GET /health` and `GET /readyz`, whose bodies this document does not describe. An unknown path or method returns an empty 404 or 405.",
+    "description": "The v2 operation-tree query contract and the Cypher execution and read-only planning contract are available on local servers and Helix Cloud gateways. Local servers have no authentication. A Helix Cloud gateway decodes `Content-Encoding: gzip` or `x-gzip` request bodies and applies its 2 MiB limit after decoding, refuses other codings with 415, and gzips responses for `Accept-Encoding: gzip`; local servers do neither. The health operations describe a local server; a gateway instead serves unauthenticated `GET /health` and `GET /readyz`, whose bodies this document does not describe. On a local server, an unknown path or method returns an empty 404 or 405; Helix Cloud gateways answer unknown paths with 403 forbidden for a database key, or 400 invalid_request without authorization.",
     "termsOfService": "https://www.helix-db.com/terms",
     "contact": {
       "name": "HelixDB",
