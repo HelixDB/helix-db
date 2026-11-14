@@ -263,19 +263,21 @@ impl<'db> Interpreter<'db> {
             )
             .await;
         // Index DDL commits applied, so its request waits for durability
-        // once for all of it, failed or not, as each DDL used to wait. The
-        // wait covers every visible write: a DDL that changed nothing commits
-        // nothing, and its receipt may rest on a racing DDL's applied record.
-        // Like a graph write's, it is bounded by the durable wait limit, not
-        // the request deadline: the creates are applied, and a deadline that
-        // cut the wait short would lose their receipts.
+        // once for all of it, failed or not, as each DDL used to wait, and
+        // as that wait was, within the request's deadline and the durable
+        // wait limit. It covers every visible write: a DDL that changed
+        // nothing commits nothing, and its receipt may rest on a racing DDL's
+        // applied record.
         let result = match request_mode {
             RequestExecutionMode::IndexDdl => {
-                let durable = crate::execution_control::ExecutionControl::from_timeout(
-                    self.ctx.durable_wait_limit,
-                )
-                .run(self.ctx.db.await_visible_writes_durable())
-                .await;
+                let durable = self
+                    .ctx
+                    .execution_control
+                    .run_within(
+                        self.ctx.durable_wait_limit,
+                        self.ctx.db.await_visible_writes_durable(),
+                    )
+                    .await;
                 result.and_then(|value| durable.map(|()| value))
             }
             RequestExecutionMode::Read | RequestExecutionMode::GraphWrite => result,
