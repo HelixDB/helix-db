@@ -78,33 +78,32 @@ impl<'db> ExecutionContext<'db> {
         let properties = names.as_ref().iter().collect::<Vec<_>>();
         // Small selections stay linear. Dotted and system names need the
         // resolver's path and endpoint precedence rather than a flat lookup.
-        let mut selection = (!rows.is_empty()
+        let flat = !rows.is_empty()
             && properties.len() >= 4
             && properties
                 .iter()
-                .all(|name| !name.as_ref().contains('.') && !name.as_ref().starts_with('$')))
-        .then(|| view::Selection::new(names.as_ref().iter().map(AsRef::as_ref)));
+                .all(|name| !name.as_ref().contains('.') && !name.as_ref().starts_with('$'));
+        let mut selection = None;
         let mut scalars = Vec::new();
         for batch in rows.chunks(RECORD_BATCH_ROWS) {
             let mut resolver = eval::RowValueResolver::new(self);
             resolver.prefetch_rows(batch, &properties).await?;
             for row in batch {
                 self.check_execution_deadline()?;
-                let object = match selection
-                    .as_mut()
-                    .filter(|_| row.virtual_properties.is_empty())
-                {
-                    Some(selection) => resolver.flat_row_values(row, names, selection).await?,
-                    None => {
-                        let mut object = BTreeMap::new();
-                        for name in names.as_ref() {
-                            self.check_execution_deadline()?;
-                            if let Some(value) = resolver.row_property(row, name).await? {
-                                object.insert(name.as_ref().to_string(), value);
-                            }
+                let object = if flat && row.virtual_properties.is_empty() {
+                    let selection = selection.get_or_insert_with(|| {
+                        view::Selection::new(names.as_ref().iter().map(AsRef::as_ref))
+                    });
+                    resolver.flat_row_values(row, names, selection).await?
+                } else {
+                    let mut object = BTreeMap::new();
+                    for name in names.as_ref() {
+                        self.check_execution_deadline()?;
+                        if let Some(value) = resolver.row_property(row, name).await? {
+                            object.insert(name.as_ref().to_string(), value);
                         }
-                        object
                     }
+                    object
                 };
                 if !object.is_empty() {
                     scalars.push(ExecutionScalar::Object(object));
