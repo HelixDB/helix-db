@@ -2233,16 +2233,24 @@ impl HelixDB {
         mode: ir::IndexCreateMode,
     ) -> Result<index_lifecycle::IndexDdlReceipt> {
         let execution_control = execution_control::ExecutionControl::unlimited();
-        self.enqueue_index_create_with_control(scope, spec, mode, &execution_control)
-            .await
+        self.enqueue_index_create_with_control(
+            scope,
+            spec,
+            mode,
+            transaction::CommitDurability::Durable,
+            &execution_control,
+        )
+        .await
     }
 
-    /// Enqueues one request-owned CREATE at its exact durable commit boundary.
+    /// Enqueues one request-owned CREATE, returning once its commit is as
+    /// durable as `durability` asks.
     pub(crate) async fn enqueue_index_create_with_control(
         &self,
         scope: DataScope,
         spec: &ir::IndexDdlCreateSpec,
         mode: ir::IndexCreateMode,
+        durability: transaction::CommitDurability,
         execution_control: &execution_control::ExecutionControl,
     ) -> Result<index_lifecycle::IndexDdlReceipt> {
         let definition = runtime_catalog::dynamic_index_definition_from_create_spec(spec)?;
@@ -2265,6 +2273,7 @@ impl HelixDB {
                 scope,
                 definition,
                 mode,
+                durability,
                 execution_control,
             )
             .await?;

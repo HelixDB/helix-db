@@ -19,9 +19,10 @@ use slatedb::object_store::ObjectStore;
 use slatedb::IsolationLevel;
 
 use crate::config::{
-    SearchIndexBackfillLimits, SearchIndexBatchLimits, SecondaryIndexDefinition,
-    SecondaryIndexLifecycleBatchRows, SecondaryIndexLifecycleTuning, TextAnalyzerKind,
-    TextElementType, TextIndexDefinition, VectorElementType, VectorIndexDefinition,
+    IndexLifecycleConcurrency, IndexLifecycleThroughputTuning, SearchIndexBackfillLimits,
+    SearchIndexBatchLimits, SecondaryIndexDefinition, SecondaryIndexLifecycleBatchRows,
+    SecondaryIndexLifecycleTuning, TextAnalyzerKind, TextElementType, TextIndexDefinition,
+    VectorElementType, VectorIndexDefinition,
 };
 use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::{encode_properties, Property};
@@ -63,6 +64,7 @@ pub(super) async fn run() {
     run_create_drop_state_matrix().await;
     run_building_drop_stage_matrix().await;
     run_scope_isolation().await;
+    run_create_batch_durability().await;
 }
 
 /// Runs retry-safe concurrent lifecycle races.
@@ -72,6 +74,7 @@ pub(super) async fn run_races() {
     run_activation_and_drop_serialization().await;
     run_active_drop_and_mutation_serialization().await;
     run_automatic_worker_convergence().await;
+    run_concurrent_claim_convergence().await;
 }
 
 /// Proves two consecutive errors preserve one recoverable family checkpoint.
@@ -1400,6 +1403,131 @@ async fn run_automatic_worker_convergence() {
         assert_identity_hidden(&db, scope, &definition).await;
         db.close().await.expect("automatic lifecycle writer closes");
     }
+}
+
+/// Proves a batch of index creates returns only once every create is durable,
+/// though each commits applied: the request waits for one WAL upload at its
+/// end. No worker runs, so nothing else commits after the batch.
+async fn run_create_batch_durability() {
+    let db = HelixDB::open_for_index_lifecycle_testing(
+        HelixDbSource::InMemory {
+            database: "index-lifecycle-create-batch-durability".to_string(),
+        },
+        contract_config(),
+        LifecycleTestScheduling::Explicit,
+    )
+    .await
+    .expect("create batch writer opens");
+    let names: Vec<String> = (0..8).map(|ordinal| format!("i{ordinal}")).collect();
+    let write = names
+        .iter()
+        .enumerate()
+        .fold(helix_ast::batch::write_batch(), |batch, (ordinal, name)| {
+            batch.var_as(
+                name,
+                helix_ast::traversal::g().create_index_if_not_exists(
+                    helix_ast::index::IndexSpec::node_equality(
+                        format!("DurableCreate{ordinal}"),
+                        "value",
+                    ),
+                ),
+            )
+        })
+        .returning(names.clone());
+    let receipts = db
+        .query(helix_ast::query::QueryRequest::write(write))
+        .await
+        .expect("create batch commits");
+    assert!(
+        names
+            .iter()
+            .all(|name| receipts[name]["operation_id"].is_string()),
+        "every create enqueues a build: {receipts}"
+    );
+    let crate::HelixStorage::Writer(writer) = db.storage() else {
+        panic!("the create batch runs on a writer");
+    };
+    let visible = writer
+        .db()
+        .snapshot()
+        .await
+        .expect("writer snapshot opens")
+        .seq();
+    let durable = writer.db().subscribe().borrow().durable_seq;
+    assert!(
+        durable >= visible,
+        "the batch returned at durable sequence {durable}, before visible {visible}"
+    );
+    db.close().await.expect("create batch writer closes");
+}
+
+/// Proves the automatic worker claims each operation in its own task: with
+/// eight secondary slots, sixteen empty builds created in one batch step side
+/// by side instead of one claim per WAL upload, and every build converges
+/// without a worker failure or restart.
+async fn run_concurrent_claim_convergence() {
+    let concurrency =
+        IndexLifecycleConcurrency::try_new(8, 8, 1, 1).expect("eight secondary slots validate");
+    let db = HelixDB::open_for_index_lifecycle_testing(
+        HelixDbSource::InMemory {
+            database: "index-lifecycle-concurrent-claims".to_string(),
+        },
+        DbConfig::new().with_index_lifecycle_throughput_tuning(
+            IndexLifecycleThroughputTuning::new(Default::default(), concurrency),
+        ),
+        LifecycleTestScheduling::Automatic,
+    )
+    .await
+    .expect("concurrent claim writer opens");
+    let controller = LifecycleTestController::new();
+    let scope = DataScope::LegacyUnscoped;
+    let names: Vec<String> = (0..16).map(|ordinal| format!("i{ordinal}")).collect();
+    let write = names
+        .iter()
+        .enumerate()
+        .fold(helix_ast::batch::write_batch(), |batch, (ordinal, name)| {
+            batch.var_as(
+                name,
+                helix_ast::traversal::g().create_index_if_not_exists(
+                    helix_ast::index::IndexSpec::node_equality(
+                        format!("ConcurrentClaim{ordinal}"),
+                        "value",
+                    ),
+                ),
+            )
+        })
+        .returning(names.clone());
+    let receipts = db
+        .query(helix_ast::query::QueryRequest::write(write))
+        .await
+        .expect("concurrent claim batch commits");
+    for name in &names {
+        let operation = receipts[name]["operation_id"]
+            .as_str()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .and_then(|id| crate::index_lifecycle::IndexOperationId::new(id).ok())
+            .expect("every create enqueues a build");
+        assert!(matches!(
+            wait_for_automatic_terminal(&db, scope, operation).await,
+            IndexOperationStatus::Succeeded { .. }
+        ));
+    }
+    let worker = controller
+        .automatic_metrics(&db)
+        .expect("automatic metrics snapshot is available")
+        .worker;
+    // Claims made one at a time in the dispatch loop, each waiting for its own
+    // WAL upload, never let more than about three steps overlap.
+    assert!(
+        worker.max_secondary_in_flight >= 6,
+        "claims must commit side by side: {worker:?}"
+    );
+    assert_eq!(
+        (worker.failures, worker.panics, worker.restarts),
+        (0, 0, 0),
+        "{worker:?}"
+    );
+    db.close().await.expect("concurrent claim writer closes");
 }
 
 /// Polls one automatic operation with a fixed parallel-suite timeout.

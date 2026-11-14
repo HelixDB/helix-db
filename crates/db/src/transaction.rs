@@ -36,6 +36,16 @@ pub(crate) enum CommitDurability {
     Applied,
 }
 
+impl CommitDurability {
+    /// SlateDB's write options for a commit that returns as this asks.
+    pub(crate) fn write_options(self) -> slatedb::config::WriteOptions {
+        slatedb::config::WriteOptions {
+            await_durable: self == Self::Durable,
+            ..slatedb::config::WriteOptions::default()
+        }
+    }
+}
+
 /// Longest a request waits for a commit, its own or one its response rests on,
 /// to become durable.
 ///
@@ -126,12 +136,7 @@ impl Owned {
             #[cfg(test)]
                 reads: _,
         } = self;
-        let result = raw
-            .commit_with_options(&slatedb::config::WriteOptions {
-                await_durable: durability == CommitDurability::Durable,
-                ..slatedb::config::WriteOptions::default()
-            })
-            .await;
+        let result = raw.commit_with_options(&durability.write_options()).await;
         drop(merges);
         drop(tracking);
         result

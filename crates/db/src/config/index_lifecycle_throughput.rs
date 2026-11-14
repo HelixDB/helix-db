@@ -24,10 +24,17 @@ use std::num::NonZeroUsize;
 
 const DEFAULT_SCAN_READ_AHEAD_BYTES: usize = 256 * 1024;
 const DEFAULT_SCAN_FETCH_TASKS: usize = 4;
-const DEFAULT_TOTAL_OPERATION_TASKS: usize = 2;
-const DEFAULT_SECONDARY_TASKS: usize = 2;
+// Secondary steps are mostly durable commits, so tasks overlap their WAL
+// uploads: one tenant's first 122 empty builds take 24 s with eight and 54 s
+// with two (`examples/index_build_throughput.rs`). More vector or text tasks
+// did not help. Every family lane and the queued-publication lane (one task per
+// vector and text task) fits in the total at once, so secondary work never
+// holds the permits vector, text or publication need.
+const DEFAULT_SECONDARY_TASKS: usize = 8;
 const DEFAULT_VECTOR_TASKS: usize = 1;
 const DEFAULT_TEXT_TASKS: usize = 1;
+const DEFAULT_TOTAL_OPERATION_TASKS: usize =
+    DEFAULT_SECONDARY_TASKS + 2 * (DEFAULT_VECTOR_TASKS + DEFAULT_TEXT_TASKS);
 
 /// Invalid runtime throughput policy rejected before lifecycle work starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,8 +245,8 @@ mod tests {
         assert_eq!(tuning.scan().read_ahead_bytes().get(), 256 * 1024);
         assert_eq!(tuning.scan().max_fetch_tasks().get(), 4);
         assert!(!tuning.scan().cache_admission_enabled());
-        assert_eq!(tuning.concurrency().total_operation_tasks().get(), 2);
-        assert_eq!(tuning.concurrency().secondary_tasks().get(), 2);
+        assert_eq!(tuning.concurrency().total_operation_tasks().get(), 12);
+        assert_eq!(tuning.concurrency().secondary_tasks().get(), 8);
         assert_eq!(tuning.concurrency().vector_tasks().get(), 1);
         assert_eq!(tuning.concurrency().text_tasks().get(), 1);
     }

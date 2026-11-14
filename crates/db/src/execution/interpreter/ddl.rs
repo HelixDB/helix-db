@@ -3,6 +3,8 @@
 //! Status/control operations point-read or mutate the retained operation in
 //! the execution scope. Family CREATE/DROP crosses the DB-owned capability and
 //! canonical-definition boundary before atomically enqueueing durable work.
+//! CREATE commits applied: its request waits once, at its end, for every DDL
+//! it ran to be durable, so a batch of creates waits for one WAL upload.
 
 use super::*;
 
@@ -61,6 +63,7 @@ impl<'db> ExecutionContext<'db> {
                         self.tenant_scope,
                         spec,
                         *mode,
+                        crate::transaction::CommitDurability::Applied,
                         &self.execution_control,
                     )
                     .await?;

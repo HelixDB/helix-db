@@ -200,7 +200,8 @@ impl<'db> Interpreter<'db> {
 
     /// Selects when this request's graph commits return.
     ///
-    /// Reads never commit, and index DDL always commits durably.
+    /// Reads never commit, and an index DDL request always returns once its
+    /// DDL is durable.
     pub(crate) const fn with_commit_durability(
         mut self,
         durability: crate::transaction::CommitDurability,
@@ -261,6 +262,26 @@ impl<'db> Interpreter<'db> {
                 plan.execution_program(),
             )
             .await;
+        // Index DDL commits applied, so its request waits for durability
+        // once for all of it, failed or not, as each DDL used to wait, and
+        // as that wait was, within the request's deadline and the durable
+        // wait limit. It covers every visible write: a DDL that changed
+        // nothing commits nothing, and its receipt may rest on a racing DDL's
+        // applied record.
+        let result = match request_mode {
+            RequestExecutionMode::IndexDdl => {
+                let durable = self
+                    .ctx
+                    .execution_control
+                    .run_within(
+                        self.ctx.durable_wait_limit,
+                        self.ctx.db.await_visible_writes_durable(),
+                    )
+                    .await;
+                result.and_then(|value| durable.map(|()| value))
+            }
+            RequestExecutionMode::Read | RequestExecutionMode::GraphWrite => result,
+        };
         if let Err(err) = result {
             self.ctx.abort_request_write_scope();
             return Err(err);
