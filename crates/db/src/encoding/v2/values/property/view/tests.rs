@@ -270,3 +270,41 @@ fn unaligned_rows_reuse_released_copies_and_aligned_rows_never_copy() {
     access(&unaligned, &mut scratch).unwrap();
     assert_eq!(scratch.as_slice(), unaligned.as_ref());
 }
+
+#[test]
+fn nested_values_follow_the_full_decoders_map_order() {
+    let properties = [Property::new(
+        "meta",
+        PropertyValue::Object(BTreeMap::from([
+            ("aaa".into(), PropertyValue::I64(1)),
+            ("bbb".into(), PropertyValue::I64(2)),
+            ("ccc".into(), PropertyValue::I64(3)),
+        ])),
+    )];
+    let encoded = encode_properties(&properties);
+    let key = encoded
+        .windows(3)
+        .position(|bytes| bytes == b"bbb")
+        .unwrap();
+    // These edits retain valid archives but leave keys duplicated or out of
+    // order. Validation accepts both, and deserialization inserts in traversal
+    // order. A search that assumes sorted unique archived keys would differ.
+    for replacement in [b"aaa", b"zzz"] {
+        let mut bytes = encoded.to_vec();
+        bytes[key..key + replacement.len()].copy_from_slice(replacement);
+        for offset in 0..PROPERTY_ALIGNMENT * 2 {
+            let data = placed(&bytes, offset);
+            let decoded = decode_properties(&data).unwrap();
+            let PropertyValue::Object(values) = &decoded[0].value else {
+                panic!("meta is an object");
+            };
+            let row = Row::new(data, &mut Buffers::default()).unwrap();
+            for name in ["aaa", "bbb", "ccc", "zzz"] {
+                assert_eq!(
+                    row.value(&format!("meta.{name}")).unwrap(),
+                    values.get(name).cloned()
+                );
+            }
+        }
+    }
+}

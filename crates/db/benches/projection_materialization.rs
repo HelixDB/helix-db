@@ -6,6 +6,9 @@
 
 #![recursion_limit = "256"]
 
+#[path = "projection_materialization/nested.rs"]
+mod nested;
+
 use std::sync::OnceLock;
 
 use db::{HelixDB, HelixDbSource};

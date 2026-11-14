@@ -125,14 +125,14 @@ impl<'ctx, 'db> RowValueResolver<'ctx, 'db> {
                 let Some(row) = self.element_row(&ElementRef::Node(endpoint_id)).await? else {
                     return Ok(None);
                 };
-                property_value(row, path)
+                Ok(row.value(path)?)
             }
             PropertySource::Known(value) => Ok(value),
             PropertySource::Record(element) => {
                 let Some(row) = self.element_row(element).await? else {
                     return Ok(None);
                 };
-                property_value(row, property.as_ref())
+                Ok(row.value(property.as_ref())?)
             }
         }
     }
@@ -522,40 +522,4 @@ fn edge_endpoint_property(path: &str) -> Option<(EdgeEndpoint, &str)> {
             path.strip_prefix("$to.")
                 .map(|path| (EdgeEndpoint::To, path))
         })
-}
-
-/// The value at `path`: the first property named exactly `path`, otherwise
-/// a dotted walk from the first property named by its first segment through
-/// nested objects. Only the value read is deserialized.
-fn property_value(row: &view::Row, path: &str) -> Result<Option<DbPropertyValue>> {
-    match row.value(path)? {
-        Some(value) => Ok(Some(value)),
-        None => nested_property_value(row, path),
-    }
-}
-
-fn nested_property_value(row: &view::Row, path: &str) -> Result<Option<DbPropertyValue>> {
-    if !path.contains('.') {
-        return Ok(None);
-    }
-    let mut segments = path.split('.');
-    let Some(first) = segments.next().filter(|first| !first.is_empty()) else {
-        return Ok(None);
-    };
-    let Some(mut value) = row.value(first)? else {
-        return Ok(None);
-    };
-    for segment in segments {
-        if segment.is_empty() {
-            return Ok(None);
-        }
-        let DbPropertyValue::Object(mut values) = value else {
-            return Ok(None);
-        };
-        let Some(next) = values.remove(segment) else {
-            return Ok(None);
-        };
-        value = next;
-    }
-    Ok(Some(value))
 }

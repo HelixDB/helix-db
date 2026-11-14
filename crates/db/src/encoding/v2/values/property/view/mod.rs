@@ -21,7 +21,7 @@ use rkyv::{rancor, util::AlignedVec};
 
 use super::{
     property::{ArchivedProperty, Property},
-    property_value::PropertyValue,
+    property_value::{ArchivedPropertyValue, PropertyValue},
     row::PROPERTY_ALIGNMENT,
 };
 use crate::encoding::error::EncodingError;
@@ -171,13 +171,44 @@ impl Row {
         unsafe { rkyv::access_unchecked::<rkyv::Archived<Vec<Property>>>(bytes) }.as_slice()
     }
 
-    /// The value of the first property named `name`, deserialized alone.
-    pub(crate) fn value(&self, name: &str) -> Result<Option<PropertyValue>, EncodingError> {
-        self.properties()
+    /// The first property named exactly `path`, otherwise a dotted walk from
+    /// the first property named by its first segment through nested objects.
+    /// Only the selected value is deserialized. Empty segments and non-object
+    /// intermediates have no value.
+    pub(crate) fn value(&self, path: &str) -> Result<Option<PropertyValue>, EncodingError> {
+        let properties = self.properties();
+        let value = properties
             .iter()
-            .find(|property| property.name.as_str() == name)
-            .map(|property| {
-                rkyv::deserialize::<PropertyValue, rancor::Error>(&property.value)
+            .find(|property| property.name.as_str() == path)
+            .map(|property| &property.value)
+            .or_else(|| {
+                let (first, rest) = path
+                    .split_once('.')
+                    .filter(|(first, _)| !first.is_empty())?;
+                let mut value = &properties
+                    .iter()
+                    .find(|property| property.name.as_str() == first)?
+                    .value;
+                for segment in rest.split('.') {
+                    if segment.is_empty() {
+                        return None;
+                    }
+                    let ArchivedPropertyValue::Object(values) = value else {
+                        return None;
+                    };
+                    // Validation checks layout, not key order or uniqueness. As
+                    // in the full decoder, the last entry in traversal order wins.
+                    value = values
+                        .iter()
+                        .filter(|(key, _)| key.as_str() == segment)
+                        .map(|(_, value)| value)
+                        .last()?;
+                }
+                Some(value)
+            });
+        value
+            .map(|value| {
+                rkyv::deserialize::<PropertyValue, rancor::Error>(value)
                     .map_err(|error| EncodingError::Rkyv(error.to_string()))
             })
             .transpose()
