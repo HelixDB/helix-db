@@ -16,6 +16,8 @@
 //! nesting and reports its own errors, so rows it rejects or reports
 //! differently would no longer fail exactly as `decode_properties` does.
 
+use std::ops::ControlFlow;
+
 use bytes::Bytes;
 use rkyv::{rancor, util::AlignedVec};
 
@@ -196,13 +198,20 @@ impl Row {
                     let ArchivedPropertyValue::Object(values) = value else {
                         return None;
                     };
-                    // Validation checks layout, not key order or uniqueness. As
-                    // in the full decoder, the last entry in traversal order wins.
-                    value = values
-                        .iter()
-                        .filter(|(key, _)| key.as_str() == segment)
-                        .map(|(_, value)| value)
-                        .last()?;
+                    // Match the full decoder's traversal, including missing
+                    // children and duplicate or out-of-order keys accepted by
+                    // validation. The last matching entry wins.
+                    let mut selected = None;
+                    values.visit(|key, value| {
+                        if key.as_str() == segment {
+                            selected = Some(std::ptr::from_ref(value));
+                        }
+                        ControlFlow::<()>::Continue(())
+                    });
+                    // SAFETY: The visitor supplied a reference into this row's
+                    // validated, immutable archive. The row still owns those
+                    // bytes, and neither the visit nor this walk changes them.
+                    value = unsafe { &*selected? };
                 }
                 Some(value)
             });
