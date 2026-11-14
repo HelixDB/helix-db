@@ -2,7 +2,7 @@
 //!
 //! Wide nodes (scalar fields, a long text body and an embedding) are read by
 //! queries that need only one or two fields: a filtered count, a filtered
-//! single-field projection and an unfiltered single-field projection. Full
+//! single-field projection and unfiltered single- and multi-field projections. Full
 //! row materialization is measured alongside so that reading every field
 //! cannot regress unnoticed. Graph creation and planning happen once outside
 //! measurement; each sample executes only the planned read.

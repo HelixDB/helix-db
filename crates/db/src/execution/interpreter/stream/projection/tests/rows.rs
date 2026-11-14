@@ -74,6 +74,76 @@ async fn stream_projection_terminal_and_property_shapes_are_explicit() {
 }
 
 #[tokio::test]
+async fn values_share_name_resolution_without_sharing_row_values() {
+    let db = test_support::open_db("values-shared-name-resolution").await;
+    let wide = test_support::add_node_with_properties(
+        &db,
+        "User",
+        vec![
+            ("first", PropertyValue::I64(1)),
+            ("second", PropertyValue::I64(2)),
+            ("third", PropertyValue::I64(3)),
+            ("fourth", PropertyValue::I64(4)),
+            (
+                "nested",
+                PropertyValue::object([("field", PropertyValue::I64(5))]),
+            ),
+            ("nested.field", PropertyValue::I64(6)),
+        ],
+    )
+    .await;
+    let small =
+        test_support::add_node_with_properties(&db, "User", vec![("first", PropertyValue::I64(7))])
+            .await;
+    let edge = test_support::add_edge(&db, wide, small, "KNOWS").await;
+    let rows = vec![
+        ExecutionRow::current(ElementRef::Node(wide)),
+        ExecutionRow::current_with_virtual_properties(
+            ElementRef::Node(wide),
+            RowVirtualProperties::from_one(name("fourth"), DbPropertyValue::I64(40)),
+        ),
+        ExecutionRow::current(ElementRef::Node(small)),
+        ExecutionRow::empty(),
+        ExecutionRow::current(ElementRef::Node(u64::MAX)),
+        ExecutionRow::current(ElementRef::Edge(edge)),
+        ExecutionRow::current(ElementRef::Node(wide)),
+    ];
+    // Both the shared scan and its row-local/path fallbacks must match ordinary
+    // property resolution. The same selection crosses missing and smaller rows.
+    for names in [
+        vec!["fourth", "third", "first", "second"],
+        vec!["first", "second", "third", "absent"],
+        vec!["first", "second", "nested.field", "nested.missing"],
+        vec!["$id", "$from.first", "$to.first", "fourth"],
+        vec!["first"],
+    ] {
+        let names = property_names(names);
+        let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
+        let mut expected = Vec::new();
+        for row in &rows {
+            let mut object = BTreeMap::new();
+            for name in names.as_ref() {
+                if let Some(value) = ctx.row_property(row, name).await.unwrap() {
+                    object.insert(name.as_ref().to_string(), value);
+                }
+            }
+            if !object.is_empty() {
+                expected.push(ExecutionScalar::Object(object));
+            }
+        }
+        assert_eq!(
+            ctx.project(
+                ExecutionValue::Stream(rows.clone()),
+                &ir::ProjectionPlan::Values(names)
+            )
+            .await
+            .unwrap(),
+            ExecutionValue::Scalars(expected),
+        );
+    }
+}
+
+#[tokio::test]
 async fn value_map_all_reads_stored_node_properties() {
     let db = test_support::open_db("projection-value-map-all").await;
     let ada = test_support::add_node_with_properties(
@@ -843,8 +913,9 @@ async fn corrupt_property_blob_errors_propagate_through_materializers() {
     let mut ctx = ExecutionContext::new(&db, context::ParamBindings::default());
     let row = || ExecutionRow::current(ElementRef::Node(id));
 
-    for projection in [
+    let projections = [
         ir::ProjectionPlan::Values(property_names(vec!["first"])),
+        ir::ProjectionPlan::Values(property_names(vec!["first", "second", "third", "fourth"])),
         ir::ProjectionPlan::ValueMap(ir::PropertySelection::All),
         ir::ProjectionPlan::ValueMap(ir::PropertySelection::Selected(property_names(vec![
             "first",
@@ -862,15 +933,16 @@ async fn corrupt_property_blob_errors_propagate_through_materializers() {
             dedup: ir::ProjectionDedupMode::All,
         },
         ir::ProjectionPlan::Label,
-    ] {
+    ];
+    for projection in &projections {
         assert!(matches!(
-            ctx.project(ExecutionValue::Stream(vec![row()]), &projection)
+            ctx.project(ExecutionValue::Stream(vec![row()]), projection)
                 .await,
             Err(HelixDbError::Encoding(_))
         ));
     }
 
-    assert_projection_reads(&ctx, 6, 6, 0);
+    assert_projection_reads(&ctx, projections.len(), projections.len(), 0);
 }
 
 #[tokio::test]
