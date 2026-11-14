@@ -45,6 +45,10 @@ pub enum EncodingError {
     #[error("Canonical equality digest does not match canonical bytes")]
     CanonicalEqualityDigestMismatch,
 
+    /// A label is longer than any label index key can hold.
+    #[error("Label is {len} bytes, longer than the {maximum}-byte label index bound")]
+    LabelTooLong { len: usize, maximum: usize },
+
     /// Invalid range index direction
     #[error("Invalid range index direction: {0}")]
     InvalidRangeIndexDirection(u8),

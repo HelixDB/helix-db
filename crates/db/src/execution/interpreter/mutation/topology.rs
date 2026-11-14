@@ -12,10 +12,8 @@ use helix_planner::relational::allocation;
 #[cfg(test)]
 use slatedb::DbTransaction;
 
-use crate::encoding::indexes::label::{EdgeLabelKey, EdgeLabelNeighborKey};
-use crate::encoding::indexes::{
-    hash_property_name, hash_property_value, EdgeDirection, PropertyIndexKey,
-};
+use crate::encoding::indexes::label;
+use crate::encoding::indexes::{EdgeDirection, PropertyIndexKey};
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::{AdjacencyKey, DataKey, DataKeyKind, EdgePairIndexKey};
 use crate::encoding::v2::values::adjacency as edges;
@@ -28,12 +26,13 @@ use crate::transaction::merges;
 use membership::Change as MembershipMutation;
 
 /// Logical identity for one shared bitmap row. Physical keys are encoded once
-/// when the coalesced epoch is flushed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// when the coalesced epoch is flushed. Label rows are keyed by the exact
+/// label, so two labels never share a row.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum BitmapRow {
     NodeLabel {
         scope: DataScope,
-        label_hash: [u8; 8],
+        label: label::SharedLabel,
     },
     EdgePair {
         scope: DataScope,
@@ -44,46 +43,43 @@ enum BitmapRow {
         scope: DataScope,
         direction: EdgeDirection,
         node: u64,
-        label_hash: [u8; 8],
+        label: label::SharedLabel,
     },
     GlobalEdgeLabel {
         scope: DataScope,
-        label_hash: [u8; 8],
+        label: label::SharedLabel,
     },
 }
 
 impl BitmapRow {
-    fn key(self) -> DataKey<'static> {
+    fn key(&self) -> DataKey<'_> {
         match self {
-            Self::NodeLabel { scope, label_hash } => DataKey::Data {
-                scope,
-                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
-                    crate::encoding::indexes::equality::EqualityIndexKey::new(
-                        hash_property_name("$label"),
-                        label_hash,
-                    ),
+            Self::NodeLabel { scope, label } => DataKey::Data {
+                scope: *scope,
+                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(
+                    label::NodeLabelKey::new(label.identity()),
                 )),
             },
             Self::EdgePair { scope, from, to } => DataKey::Data {
-                scope,
-                kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(from, to)),
+                scope: *scope,
+                kind: DataKeyKind::EdgePairIndex(EdgePairIndexKey::new(*from, *to)),
             },
             Self::EdgeLabelNeighbor {
                 scope,
                 direction,
                 node,
-                label_hash,
+                label,
             } => DataKey::Data {
-                scope,
+                scope: *scope,
                 kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-                    EdgeLabelNeighborKey::new(direction, node, label_hash),
+                    label::EdgeLabelNeighborKey::new(*direction, *node, label.identity()),
                 )),
             },
-            Self::GlobalEdgeLabel { scope, label_hash } => DataKey::Data {
-                scope,
-                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-                    label_hash,
-                ))),
+            Self::GlobalEdgeLabel { scope, label } => DataKey::Data {
+                scope: *scope,
+                kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(
+                    label::EdgeLabelKey::new(label.identity()),
+                )),
             },
         }
     }
@@ -124,6 +120,10 @@ impl AdjacencyDelta {
 struct TopologyMutationBatch {
     bitmaps: BTreeMap<BitmapRow, membership::Delta>,
     adjacency: BTreeMap<(DataScope, u64), AdjacencyDelta>,
+    /// Each label this epoch touches, allocated once and shared by its rows.
+    labels: BTreeSet<label::SharedLabel>,
+    /// Heap bytes of the interned labels.
+    label_bytes: usize,
     // Field order keeps collection admission alive until its maps are dropped.
     memory: Option<query_resources::Reservation>,
 }
@@ -132,11 +132,23 @@ impl std::fmt::Debug for TopologyMutationBatch {
         f.debug_struct("TopologyMutationBatch")
             .field("bitmaps", &self.bitmaps)
             .field("adjacency", &self.adjacency)
+            .field("labels", &self.labels)
             .finish_non_exhaustive()
     }
 }
 impl TopologyMutationBatch {
     fn admit_rows(&mut self, bitmaps: usize, adjacency: usize) -> Result<()> {
+        self.admit(bitmaps, adjacency, self.labels.len(), self.label_bytes)
+    }
+
+    /// Admits the collection maps at the proposed sizes before any grows.
+    fn admit(
+        &mut self,
+        bitmaps: usize,
+        adjacency: usize,
+        labels: usize,
+        label_bytes: usize,
+    ) -> Result<()> {
         let Some(memory) = &mut self.memory else {
             return Ok(());
         };
@@ -151,7 +163,38 @@ impl TopologyMutationBatch {
         } else {
             allocation::btree_bytes::<(DataScope, u64), AdjacencyDelta>(adjacency)
         };
-        memory.resize(bitmap_bytes.saturating_add(adjacency_bytes))
+        let label_map_bytes = if labels == 0 {
+            0
+        } else {
+            allocation::btree_bytes::<label::SharedLabel, ()>(labels)
+        };
+        memory.resize(
+            bitmap_bytes
+                .saturating_add(adjacency_bytes)
+                .saturating_add(label_map_bytes)
+                .saturating_add(label_bytes),
+        )
+    }
+
+    /// The epoch's shared copy of `label`, admitting its one allocation
+    /// before making it.
+    fn label(&mut self, label: label::LabelIdentity<'_>) -> Result<label::SharedLabel> {
+        let Some(shared) = self.labels.get(label.label()) else {
+            let label_bytes = self
+                .label_bytes
+                .saturating_add(label::SharedLabel::allocation_bytes(label));
+            self.admit(
+                self.bitmaps.len(),
+                self.adjacency.len(),
+                self.labels.len() + 1,
+                label_bytes,
+            )?;
+            let shared = label::SharedLabel::new(label);
+            self.labels.insert(shared.clone());
+            self.label_bytes = label_bytes;
+            return Ok(shared);
+        };
+        Ok(shared.clone())
     }
 }
 
@@ -235,11 +278,11 @@ impl TopologyMutationRuntime {
         label: &str,
         node_id: u64,
     ) -> Result<()> {
+        let label = self
+            .collecting_batch()?
+            .label(label::LabelIdentity::new(label)?)?;
         self.record_bitmap(
-            BitmapRow::NodeLabel {
-                scope,
-                label_hash: hash_property_value(label),
-            },
+            BitmapRow::NodeLabel { scope, label },
             node_id,
             MembershipMutation::Present,
         )
@@ -252,11 +295,13 @@ impl TopologyMutationRuntime {
         label: &str,
         node_id: u64,
     ) -> Result<()> {
+        // No exact row holds a label too long for any key, so none has it to remove.
+        let Ok(label) = label::LabelIdentity::new(label) else {
+            return Ok(());
+        };
+        let label = self.collecting_batch()?.label(label)?;
         self.record_bitmap(
-            BitmapRow::NodeLabel {
-                scope,
-                label_hash: hash_property_value(label),
-            },
+            BitmapRow::NodeLabel { scope, label },
             node_id,
             MembershipMutation::Absent,
         )
@@ -301,12 +346,15 @@ impl TopologyMutationRuntime {
         label: &str,
         edge_id: u64,
     ) -> Result<()> {
+        let label = self
+            .collecting_batch()?
+            .label(label::LabelIdentity::new(label)?)?;
         self.record_bitmap(
             BitmapRow::EdgeLabelNeighbor {
                 scope,
                 direction: EdgeDirection::Out,
                 node: from,
-                label_hash: hash_property_value(label),
+                label: label.clone(),
             },
             to,
             MembershipMutation::Present,
@@ -316,16 +364,13 @@ impl TopologyMutationRuntime {
                 scope,
                 direction: EdgeDirection::In,
                 node: to,
-                label_hash: hash_property_value(label),
+                label: label.clone(),
             },
             from,
             MembershipMutation::Present,
         )?;
         self.record_bitmap(
-            BitmapRow::GlobalEdgeLabel {
-                scope,
-                label_hash: hash_property_value(label),
-            },
+            BitmapRow::GlobalEdgeLabel { scope, label },
             edge_id,
             MembershipMutation::Present,
         )
@@ -338,11 +383,13 @@ impl TopologyMutationRuntime {
         label: &str,
         edge_id: u64,
     ) -> Result<()> {
+        // No exact row holds a label too long for any key, so none has it to remove.
+        let Ok(label) = label::LabelIdentity::new(label) else {
+            return Ok(());
+        };
+        let label = self.collecting_batch()?.label(label)?;
         self.record_bitmap(
-            BitmapRow::GlobalEdgeLabel {
-                scope,
-                label_hash: hash_property_value(label),
-            },
+            BitmapRow::GlobalEdgeLabel { scope, label },
             edge_id,
             MembershipMutation::Absent,
         )
@@ -356,12 +403,17 @@ impl TopologyMutationRuntime {
         to: u64,
         label: &str,
     ) -> Result<()> {
+        // No exact row holds a label too long for any key, so none has it to remove.
+        let Ok(label) = label::LabelIdentity::new(label) else {
+            return Ok(());
+        };
+        let label = self.collecting_batch()?.label(label)?;
         self.record_bitmap(
             BitmapRow::EdgeLabelNeighbor {
                 scope,
                 direction: EdgeDirection::Out,
                 node: from,
-                label_hash: hash_property_value(label),
+                label: label.clone(),
             },
             to,
             MembershipMutation::Absent,
@@ -371,7 +423,7 @@ impl TopologyMutationRuntime {
                 scope,
                 direction: EdgeDirection::In,
                 node: to,
-                label_hash: hash_property_value(label),
+                label,
             },
             from,
             MembershipMutation::Absent,
@@ -503,6 +555,9 @@ impl TopologyMutationRuntime {
         let TopologyMutationBatch {
             bitmaps,
             adjacency,
+            // Rows share their labels' allocations, so the index can go.
+            labels: _,
+            label_bytes: _,
             mut memory,
         } = batch;
         let count = bitmaps
@@ -607,12 +662,9 @@ impl TopologyMutationRuntime {
 pub(super) fn node_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
-            crate::encoding::indexes::equality::EqualityIndexKey::new(
-                hash_property_name("$label"),
-                hash_property_value(label),
-            ),
-        )),
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(label::NodeLabelKey::new(
+            label::LabelIdentity::new(label).unwrap(),
+        ))),
     }
     .to_bytes()
 }
@@ -636,7 +688,11 @@ pub(super) fn edge_label_neighbor_key(
     DataKey::Data {
         scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabelNeighbor(
-            EdgeLabelNeighborKey::new(direction, node, hash_property_value(label)),
+            label::EdgeLabelNeighborKey::new(
+                direction,
+                node,
+                label::LabelIdentity::new(label).unwrap(),
+            ),
         )),
     }
     .to_bytes()
@@ -646,8 +702,8 @@ pub(super) fn edge_label_neighbor_key(
 pub(super) fn global_edge_label_key(scope: DataScope, label: &str) -> Bytes {
     DataKey::Data {
         scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-            hash_property_value(label),
+        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(label::EdgeLabelKey::new(
+            label::LabelIdentity::new(label).unwrap(),
         ))),
     }
     .to_bytes()

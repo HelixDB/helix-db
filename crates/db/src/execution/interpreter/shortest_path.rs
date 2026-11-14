@@ -336,7 +336,7 @@ mod tests {
                                 indexes::label::EdgeLabelNeighborKey::new(
                                     index_direction,
                                     7,
-                                    indexes::hash_property_value(label.as_ref()),
+                                    indexes::label::LabelIdentity::new(label.as_ref()).unwrap(),
                                 ),
                             ),
                         ),

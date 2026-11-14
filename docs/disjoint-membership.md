@@ -39,7 +39,7 @@ passes a busy node when it addresses that node by ID.
 
 ## Storage contract
 
-The current and maximum supported index storage version is **5**. Canonical
+The current and maximum supported index storage version is **6**. Canonical
 values and the existing `HLXRBM2` / `HLXADJ2` membership-delta codecs are unchanged.
 WAL replay, partial merging, and compaction must retain support for those operands.
 The membership deltas themselves need no index rebuild or storage migration.
@@ -57,13 +57,38 @@ writer. Recovery-only managed failover reports `WriterMigrationRequired` for a
 version-4 store instead of upgrading it. Binaries that support at most version 4
 refuse an upgraded store, so a rollback needs a backup taken before the upgrade.
 
-New databases initialize at version 5. Versions after 5 return the existing
+Version 6 marks stores whose label index rows are keyed by the exact label (its
+big-endian `u16` byte length followed by its UTF-8 bytes) instead of the label's
+64-bit hash. An embedded or controlled-migration writer migrates a version-5 store
+during open, after the blocking startup migrations and before it serves any graph
+write. It copies each node label, edge label, and edge-label neighbor row to its
+exact key, leaving every hash row in place, and publishes version 6 in one commit
+once every scope is copied. A row is named by its lowest live member whose label
+hashes to it; live members whose labels hash elsewhere are stale leftovers of a
+label change and are not copied, and a highest such member with a different label
+(two labels sharing a hash) fails the open closed. Until publication readers of
+any version-5-capable binary keep reading complete hash rows, and a failed or
+interrupted copy leaves an ordinary version-5 store that older binaries still
+open. Each copy batch records its last row and the open's SlateDB writer epoch:
+the next writer open resumes after it when that epoch is its own predecessor's,
+and otherwise, since another writer (possibly an older binary) may have changed
+the hash rows, clears the partial copy and copies again. After publication
+readers read only exact rows, and the background migration worker deletes the
+hash rows while the writer serves, one tuned batch per step beside the other
+background migrations, resuming after the last deleted row; with the worker
+disabled they stay until a step is taken. Recovery-only managed failover reports
+`WriterMigrationRequired` for a version-5 store. Binaries that support at most version 5 refuse a version-6
+store, so a rollback after publication needs a backup taken before the upgrade.
+Labels longer than the label index bound are rejected as invalid queries.
+
+New databases initialize at version 6. Versions after 6 return the existing
 unsupported-version error on reader, embedded-writer, and managed-failover open;
 startup must not lower or remove their marker. Managed bootstrap still refuses
 any nonempty store before version dispatch. The
 retired activation key tag `0x0C` and value tag `0x08` are not reused. Malformed
 metadata checks, managed-writer fencing, and existing version-2/3 equality
-migrations (which now publish version 5 directly) remain in place.
+migrations (which publish version 5, after which the same open runs the label
+identity migration to version 6) remain in place.
 
 The change does not alter cascade ordering, intermediate topology flushes,
 `drop_nodes`, token containers, or SlateDB.

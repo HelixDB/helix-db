@@ -978,14 +978,16 @@ mod tests {
                 put_v3_equality_entry(&db, &handle, "shared", 1).await;
                 put_v3_equality_entry(&db, &handle, "other", 2).await;
                 put_v4_equality_bitmap(&db, &handle, "shared", [3]).await;
+                // The label row as a current store files it, and as a V2/V3
+                // store does: the `$label` equality row.
                 db.put(
                     DataKey::Data {
                         scope: handle.scope(),
                         kind: DataKeyKind::PropertyIndex(
-                            crate::encoding::indexes::PropertyIndexKey::Equality(
-                                crate::encoding::indexes::equality::EqualityIndexKey::new(
-                                    crate::encoding::indexes::hash_property_name("$label"),
-                                    crate::encoding::indexes::hash_property_value("User"),
+                            crate::encoding::indexes::PropertyIndexKey::NodeLabel(
+                                crate::encoding::indexes::label::NodeLabelKey::new(
+                                    crate::encoding::indexes::label::LabelIdentity::new("User")
+                                        .unwrap(),
                                 ),
                             ),
                         ),
@@ -997,6 +999,17 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                let transaction = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+                for id in 1..=5 {
+                    crate::search::add_to_legacy_node_label_index_scoped(
+                        &transaction,
+                        "User",
+                        id,
+                        handle.scope(),
+                    )
+                    .unwrap();
+                }
+                transaction.commit().await.unwrap();
                 let label = UnindexedLabel {
                     scope: handle.scope(),
                     kind: IndexElementKind::Node,
@@ -1010,7 +1023,8 @@ mod tests {
                         unindexed_label_rows(
                             &db,
                             label,
-                            Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                            ReaderStorageCompatibility::LegacyEqualityUnion,
+                            Some(&handle),
                             None,
                             reads,
                             &|| Ok(()),
@@ -1026,7 +1040,8 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
-                        Some((&handle, ReaderStorageCompatibility::Current)),
+                        ReaderStorageCompatibility::Current,
+                        Some(&handle),
                         None,
                         LabelLaneReads::Concurrent,
                         &|| Ok(()),
@@ -1042,7 +1057,8 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
-                        Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                        ReaderStorageCompatibility::LegacyEqualityUnion,
+                        Some(&handle),
                         Some(&wide),
                         LabelLaneReads::Concurrent,
                         &|| Ok(()),
@@ -1059,7 +1075,8 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
-                        Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                        ReaderStorageCompatibility::LegacyEqualityUnion,
+                        Some(&handle),
                         Some(&small),
                         LabelLaneReads::Concurrent,
                         &|| Ok(()),
@@ -1076,6 +1093,7 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
+                        ReaderStorageCompatibility::Current,
                         None,
                         None,
                         LabelLaneReads::Concurrent,
@@ -1093,7 +1111,8 @@ mod tests {
                     unindexed_label_rows(
                         &db,
                         label,
-                        Some((&handle, ReaderStorageCompatibility::LegacyEqualityUnion)),
+                        ReaderStorageCompatibility::LegacyEqualityUnion,
+                        Some(&handle),
                         None,
                         LabelLaneReads::Sequential,
                         &expired,

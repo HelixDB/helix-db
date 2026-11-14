@@ -3,37 +3,54 @@ use crate::encoding::v2::values::property::encode_properties;
 use crate::index_lifecycle::secondary::tests as fixture;
 
 /// Writes the label bitmap of `handle`'s label holding `ids`, as graph writes
-/// maintain it; null and unencodable lookups read only these label rows.
+/// maintain it under both the current exact key and the hash key a store
+/// before label identity reads; null and unencodable lookups read only these
+/// label rows.
 async fn put_label_rows(
     db: &slatedb::Db,
     handle: &ActiveIndexHandle,
     ids: impl IntoIterator<Item = u64>,
 ) {
+    use crate::encoding::indexes::label::{EdgeLabelKey, LabelIdentity, NodeLabelKey};
+    use crate::encoding::indexes::PropertyIndexKey;
+
     let definition = handle.secondary_definition().unwrap();
     let label = definition.label().as_str();
-    let index = match definition.element_kind() {
-        IndexElementKind::Node => crate::encoding::indexes::PropertyIndexKey::Equality(
-            crate::encoding::indexes::equality::EqualityIndexKey::new(
-                crate::encoding::indexes::hash_property_name("$label"),
-                crate::encoding::indexes::hash_property_value(label),
-            ),
-        ),
-        IndexElementKind::Edge => crate::encoding::indexes::PropertyIndexKey::EdgeLabel(
-            crate::encoding::indexes::label::EdgeLabelKey::new(
-                crate::encoding::indexes::hash_property_value(label),
-            ),
-        ),
+    let identity = LabelIdentity::new(label).unwrap();
+    let ids = ids.into_iter().collect::<roaring::RoaringTreemap>();
+    let exact = match definition.element_kind() {
+        IndexElementKind::Node => PropertyIndexKey::NodeLabel(NodeLabelKey::new(identity)),
+        IndexElementKind::Edge => PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(identity)),
     };
     db.put(
         crate::encoding::v2::keys::DataKey::Data {
             scope: handle.scope(),
-            kind: crate::encoding::v2::keys::DataKeyKind::PropertyIndex(index),
+            kind: crate::encoding::v2::keys::DataKeyKind::PropertyIndex(exact),
         }
         .to_bytes(),
-        crate::search::encode_roaring_treemap(&ids.into_iter().collect()),
+        crate::search::encode_roaring_treemap(&ids),
     )
     .await
     .unwrap();
+    let transaction = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+    for id in &ids {
+        match definition.element_kind() {
+            IndexElementKind::Node => crate::search::add_to_legacy_node_label_index_scoped(
+                &transaction,
+                label,
+                id,
+                handle.scope(),
+            ),
+            IndexElementKind::Edge => crate::search::add_to_legacy_global_edge_label_index_scoped(
+                &transaction,
+                label,
+                id,
+                handle.scope(),
+            ),
+        }
+        .unwrap();
+    }
+    transaction.commit().await.unwrap();
 }
 
 #[tokio::test]

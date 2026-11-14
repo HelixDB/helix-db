@@ -51,27 +51,108 @@ fn metadata_or_migration_required(
 ///
 /// Adding a storage migration does not make it reader-compatible. A future
 /// migration must add a new variant and exhaustively define its read behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Variants are ordered oldest first: a store only ever moves forward, so an
+/// open reader's compatibility only ever advances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ReaderStorageCompatibility {
+    /// V2/V3 non-unique equality entries are unioned with V4 equality bitmaps,
+    /// and label rows are hash-keyed as for [`Self::LegacyLabelHash`].
+    LegacyEqualityUnion,
+    /// Label index rows are read under their retired hash keys: the writer
+    /// has not published the label identity migration, so exact rows may be
+    /// absent or an incomplete copy.
+    LegacyLabelHash,
     /// All physical reads use the current storage format.
     Current,
-    /// V2/V3 non-unique equality entries are unioned with V4 equality bitmaps.
-    LegacyEqualityUnion,
 }
 
 impl ReaderStorageCompatibility {
-    /// Accepts the only monotonic compatibility transition for an open reader.
-    pub(crate) fn advance(self, observed: Self) -> Result<Self> {
-        match (self, observed) {
-            (Self::Current, Self::Current) | (Self::LegacyEqualityUnion, Self::Current) => {
-                Ok(Self::Current)
-            }
-            (Self::LegacyEqualityUnion, Self::LegacyEqualityUnion) => Ok(Self::LegacyEqualityUnion),
-            (Self::Current, Self::LegacyEqualityUnion) => Err(HelixDbError::MigrationRequired {
-                reason: "reader storage compatibility moved backwards from current to legacy"
-                    .to_string(),
-            }),
+    /// The read layout of a store at `version`, a version this binary supports.
+    ///
+    /// Versions from EQUALITY_BITMAPS share one equality layout, so a current
+    /// reader also serves a store its writer has not upgraded yet. Label rows
+    /// are read by their hash keys until the writer publishes LABEL_IDENTITY.
+    pub(crate) fn of_version(version: IndexStorageVersion) -> Self {
+        if version < IndexStorageVersion::EQUALITY_BITMAPS {
+            Self::LegacyEqualityUnion
+        } else if version < IndexStorageVersion::LABEL_IDENTITY {
+            Self::LegacyLabelHash
+        } else {
+            Self::Current
         }
+    }
+}
+
+/// The compatibility an open reader has observed, by snapshot sequence.
+///
+/// A store only moves forward, so a later snapshot never has an older
+/// layout. Requests observe concurrently and out of snapshot order: one that
+/// took its snapshot before the writer published a migration may report after
+/// one that took it after. So a backwards move is one between two snapshots,
+/// not two reports: a snapshot at or after one seen with a newer layout, yet
+/// with an older one.
+#[derive(Debug)]
+pub(crate) struct ObservedReaderCompatibility {
+    /// The lowest and highest snapshot sequence each layout was seen at.
+    seen: std::collections::BTreeMap<ReaderStorageCompatibility, (u64, u64)>,
+}
+
+impl ObservedReaderCompatibility {
+    /// Records the compatibility a reader validated as it opened, before any
+    /// request snapshot, so every request snapshot is at or after it.
+    pub(crate) fn opened(compatibility: ReaderStorageCompatibility) -> Self {
+        Self {
+            seen: std::collections::BTreeMap::from([(compatibility, (0, 0))]),
+        }
+    }
+
+    /// Records `compatibility` for a snapshot at `sequence`, failing if the
+    /// store moved backwards between it and a snapshot observed before.
+    pub(crate) fn observe(
+        &mut self,
+        compatibility: ReaderStorageCompatibility,
+        sequence: u64,
+    ) -> Result<()> {
+        let older_seen_later = self
+            .seen
+            .range(..compatibility)
+            .find(|(_, (_, highest))| *highest >= sequence);
+        let newer_seen_earlier = self
+            .seen
+            .range((
+                std::ops::Bound::Excluded(compatibility),
+                std::ops::Bound::Unbounded,
+            ))
+            .find(|(_, (lowest, _))| *lowest <= sequence);
+        older_seen_later
+            .or(newer_seen_earlier)
+            .map_or(Ok(()), |(other, _)| {
+                Err(HelixDbError::MigrationRequired {
+                    reason: format!(
+                        "reader storage compatibility moved backwards: {compatibility:?} at \
+                         sequence {sequence} disagrees with {other:?} seen at another sequence"
+                    ),
+                })
+            })?;
+        self.seen
+            .entry(compatibility)
+            .and_modify(|(lowest, highest)| {
+                *lowest = (*lowest).min(sequence);
+                *highest = (*highest).max(sequence);
+            })
+            .or_insert((sequence, sequence));
+        Ok(())
+    }
+
+    /// The newest compatibility observed.
+    #[cfg(test)]
+    pub(crate) fn newest(&self) -> ReaderStorageCompatibility {
+        *self
+            .seen
+            .keys()
+            .next_back()
+            .expect("a reader observes its compatibility as it opens")
     }
 }
 
@@ -95,37 +176,25 @@ pub(crate) async fn require_reader_bootstrap_or_legacy(
         let progress =
             crate::migrations::storage_schema_progress(reader, DataScope::LegacyUnscoped).await?;
         let cleanup_ready = crate::migrations::index_storage_v4_cleanup_ready(reader).await?;
-        if bootstrap == ValidatedReaderBootstrap::LegacyEqualityUnion && cleanup_ready {
+        if bootstrap == ReaderStorageCompatibility::LegacyEqualityUnion && cleanup_ready {
             return Err(HelixDbError::MigrationRequired {
                 reason: "index storage V4 cleanup is marked complete beside legacy storage"
                     .to_string(),
             });
         }
-        return match (bootstrap, progress, tenant_envelope_ready) {
+        return match (progress, tenant_envelope_ready) {
+            (crate::migrations::StorageSchemaProgress::Complete, true) => Ok(bootstrap),
             (
-                ValidatedReaderBootstrap::LegacyEqualityUnion,
-                crate::migrations::StorageSchemaProgress::Complete,
-                true,
-            ) => Ok(ReaderStorageCompatibility::LegacyEqualityUnion),
-            (
-                ValidatedReaderBootstrap::Current,
-                crate::migrations::StorageSchemaProgress::Complete,
-                true,
-            ) => Ok(ReaderStorageCompatibility::Current),
-            (
-                ValidatedReaderBootstrap::Current | ValidatedReaderBootstrap::LegacyEqualityUnion,
                 crate::migrations::StorageSchemaProgress::NotStarted
                 | crate::migrations::StorageSchemaProgress::GraphReady
                 | crate::migrations::StorageSchemaProgress::IndexReady,
                 _,
             )
-            | (
-                ValidatedReaderBootstrap::Current | ValidatedReaderBootstrap::LegacyEqualityUnion,
-                crate::migrations::StorageSchemaProgress::Complete,
-                false,
-            ) => Err(HelixDbError::WriterMigrationRequired {
-                requirement: WriterMigrationRequirement::IncompleteStorageSchema,
-            }),
+            | (crate::migrations::StorageSchemaProgress::Complete, false) => {
+                Err(HelixDbError::WriterMigrationRequired {
+                    requirement: WriterMigrationRequirement::IncompleteStorageSchema,
+                })
+            }
         };
     }
     if logical.is_some() || vector.is_some() {
@@ -166,21 +235,16 @@ pub(crate) async fn require_reader_bootstrap_or_legacy(
             requirement: WriterMigrationRequirement::IncompleteStorageSchema,
         })
     } else {
-        Ok(ReaderStorageCompatibility::Current)
+        // A store no V2 writer has opened still files labels under hash keys.
+        Ok(ReaderStorageCompatibility::LegacyLabelHash)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValidatedReaderBootstrap {
-    Current,
-    LegacyEqualityUnion,
 }
 
 fn validate_bootstrap_values(
     marker: &[u8],
     logical: Option<&[u8]>,
     vector: Option<&[u8]>,
-) -> Result<ValidatedReaderBootstrap> {
+) -> Result<ReaderStorageCompatibility> {
     let IndexV2MetadataValue::StorageVersion(version) =
         metadata_or_migration_required(marker, "storage marker")?
     else {
@@ -226,13 +290,7 @@ fn validate_bootstrap_values(
             reason: "V2 allocator record contains the wrong value kind".to_string(),
         });
     }
-    // Versions from EQUALITY_BITMAPS through MAX_SUPPORTED share one layout, so a
-    // current reader also serves a version-4 store its writer has not upgraded yet.
-    Ok(if version < IndexStorageVersion::EQUALITY_BITMAPS {
-        ValidatedReaderBootstrap::LegacyEqualityUnion
-    } else {
-        ValidatedReaderBootstrap::Current
-    })
+    Ok(ReaderStorageCompatibility::of_version(version))
 }
 
 /// Loads and key/value-cross-validates every canonical record for one scope.
@@ -1147,8 +1205,10 @@ mod tests {
     use crate::migrations::startup::bootstrap_writer;
 
     #[test]
-    fn storage_versions_with_v4_equality_are_current() {
-        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0005);
+    fn storage_versions_map_to_their_reader_compatibility() {
+        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0006);
+        assert_eq!(IndexStorageVersion::LABEL_IDENTITY.get(), 0x0006);
+        assert_eq!(IndexStorageVersion::OPERATION_QUEUES.get(), 0x0005);
         assert_eq!(IndexStorageVersion::EQUALITY_BITMAPS.get(), 0x0004);
         let logical = encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
             LogicalIndexIdWatermark {
@@ -1166,17 +1226,21 @@ mod tests {
         assert_eq!(
             validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
                 .expect("storage with V4 equality encoding is accepted"),
-            ValidatedReaderBootstrap::Current
+            ReaderStorageCompatibility::Current
         );
-        // A writer that has not yet upgraded a version-4 store leaves it readable.
-        let version_four = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
+        // A writer that has not yet published the label identity migration
+        // leaves version-4 and version-5 stores readable through hash label rows.
+        for pre_label in [
             IndexStorageVersion::EQUALITY_BITMAPS,
-        ));
-        assert_eq!(
-            validate_bootstrap_values(&version_four, Some(&logical), Some(&vector))
-                .expect("version four shares the current layout"),
-            ValidatedReaderBootstrap::Current
-        );
+            IndexStorageVersion::OPERATION_QUEUES,
+        ] {
+            let marker = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(pre_label));
+            assert_eq!(
+                validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
+                    .expect("pre-label versions share the current equality layout"),
+                ReaderStorageCompatibility::LegacyLabelHash
+            );
+        }
         for legacy in [0x0002, 0x0003] {
             let marker = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(
                 IndexStorageVersion::new(legacy).unwrap(),
@@ -1184,36 +1248,58 @@ mod tests {
             assert_eq!(
                 validate_bootstrap_values(&marker, Some(&logical), Some(&vector))
                     .expect("only versions two and three have explicit reader compatibility"),
-                ValidatedReaderBootstrap::LegacyEqualityUnion
+                ReaderStorageCompatibility::LegacyEqualityUnion
             );
         }
     }
 
     #[test]
-    fn reader_storage_compatibility_only_advances_monotonically() {
-        assert_eq!(
-            ReaderStorageCompatibility::LegacyEqualityUnion
-                .advance(ReaderStorageCompatibility::LegacyEqualityUnion)
-                .unwrap(),
-            ReaderStorageCompatibility::LegacyEqualityUnion
-        );
-        assert_eq!(
-            ReaderStorageCompatibility::LegacyEqualityUnion
-                .advance(ReaderStorageCompatibility::Current)
-                .unwrap(),
-            ReaderStorageCompatibility::Current
-        );
-        assert_eq!(
-            ReaderStorageCompatibility::Current
-                .advance(ReaderStorageCompatibility::Current)
-                .unwrap(),
-            ReaderStorageCompatibility::Current
-        );
-        assert!(matches!(
-            ReaderStorageCompatibility::Current
-                .advance(ReaderStorageCompatibility::LegacyEqualityUnion),
-            Err(HelixDbError::MigrationRequired { .. })
-        ));
+    fn reader_storage_compatibility_only_moves_forward_between_snapshots() {
+        use ReaderStorageCompatibility::{Current, LegacyEqualityUnion, LegacyLabelHash};
+        let ordered = [LegacyEqualityUnion, LegacyLabelHash, Current];
+        for (index, opened) in ordered.into_iter().enumerate() {
+            for (other, observed) in ordered.into_iter().enumerate() {
+                let mut seen = ObservedReaderCompatibility::opened(opened);
+                let result = seen.observe(observed, 10);
+                if other < index {
+                    assert!(matches!(
+                        result,
+                        Err(HelixDbError::MigrationRequired { .. })
+                    ));
+                    assert_eq!(seen.newest(), opened);
+                } else {
+                    result.unwrap();
+                    assert_eq!(seen.newest(), observed);
+                }
+            }
+        }
+
+        // A request whose snapshot predates the publication may report after
+        // one whose snapshot follows it.
+        let mut seen = ObservedReaderCompatibility::opened(LegacyLabelHash);
+        seen.observe(Current, 20).unwrap();
+        seen.observe(LegacyLabelHash, 19).unwrap();
+        seen.observe(LegacyLabelHash, 12).unwrap();
+        seen.observe(Current, 25).unwrap();
+        assert_eq!(seen.newest(), Current);
+        // Not at or after a snapshot that already saw the newer layout.
+        for sequence in [20, 21] {
+            assert!(matches!(
+                seen.observe(LegacyLabelHash, sequence),
+                Err(HelixDbError::MigrationRequired { .. })
+            ));
+        }
+        // Nor a newer layout at or before a snapshot that saw an older one.
+        let mut seen = ObservedReaderCompatibility::opened(LegacyEqualityUnion);
+        seen.observe(LegacyLabelHash, 30).unwrap();
+        for sequence in [29, 30] {
+            assert!(matches!(
+                seen.observe(Current, sequence),
+                Err(HelixDbError::MigrationRequired { .. })
+            ));
+        }
+        seen.observe(Current, 31).unwrap();
+        assert_eq!(seen.newest(), Current);
     }
 
     #[test]
@@ -1244,8 +1330,8 @@ mod tests {
         assert!(matches!(
             validate_bootstrap_values(&marker, None, None),
             Err(HelixDbError::UnsupportedIndexStorageVersion {
-                found: 0x0006,
-                supported: 0x0005,
+                found: 0x0007,
+                supported: 0x0006,
             })
         ));
     }
@@ -1290,7 +1376,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_writer_preflight_preserves_every_byte() {
-        for rejected_state in ["malformed", "partial", "v1", "v6"] {
+        for rejected_state in ["malformed", "partial", "v1", "v7"] {
             let db = Db::builder(
                 format!("writer-preflight-preserves-{rejected_state}"),
                 Arc::new(InMemory::new()),
@@ -1332,8 +1418,8 @@ mod tests {
                 "v1" => {
                     put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0001).unwrap()).await;
                 }
-                "v6" => {
-                    put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0006).unwrap()).await;
+                "v7" => {
+                    put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0007).unwrap()).await;
                 }
                 _ => unreachable!(),
             }
@@ -1398,7 +1484,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             decode_metadata_value(&marker).unwrap(),
-            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
+            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::OPERATION_QUEUES)
         );
         db.close().await.unwrap();
     }
@@ -1646,7 +1732,7 @@ mod tests {
             .expect("writer publishes the bootstrap marker");
         assert_eq!(
             decode_metadata_value(&marker).unwrap(),
-            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
+            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::OPERATION_QUEUES)
         );
         assert!(crate::migrations::index_storage_v4_cleanup_ready(&db)
             .await
@@ -1854,7 +1940,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             decode_metadata_value(&marker).unwrap(),
-            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
+            IndexV2MetadataValue::StorageVersion(IndexStorageVersion::OPERATION_QUEUES)
         );
     }
 }

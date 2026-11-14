@@ -911,19 +911,17 @@ mod tests {
     #[test]
     fn tenant_key_prefixes_edge_label_index_key() {
         let tenant = TenantId::from_ulid_str("0000000000000000000000000B").expect("valid tenant");
-        let label_hash = [5, 6, 7, 8, 9, 10, 11, 12];
+        let label = crate::encoding::indexes::label::LabelIdentity::new("FOLLOWS").unwrap();
         let encoded = DataKey::Data {
             scope: DataScope::Tenant(tenant),
-            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(
-                label_hash,
-            ))),
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::EdgeLabel(EdgeLabelKey::new(label))),
         }
         .to_bytes();
 
         let mut expected = vec![scope::TENANT_KEY_PREFIX];
         expected.extend_from_slice(&tenant.as_u128().to_be_bytes());
-        expected.extend_from_slice(&[0x03, 0x04]);
-        expected.extend_from_slice(&label_hash);
+        expected.extend_from_slice(&[0x03, 0x12]);
+        label.encode_into(&mut expected);
 
         assert_eq!(encoded.as_ref(), expected.as_slice());
     }

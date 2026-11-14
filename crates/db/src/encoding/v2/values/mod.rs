@@ -8,6 +8,7 @@ pub(crate) mod edge_endpoints;
 mod global;
 pub(crate) mod id_allocation;
 pub mod indexes;
+pub(crate) mod label_migration;
 mod lifecycle;
 pub mod property;
 

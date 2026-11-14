@@ -9,6 +9,7 @@
 
 pub(crate) mod background;
 mod indexes;
+pub(crate) use indexes::label_identity::migrate_label_identity;
 pub(crate) mod startup;
 mod tenant;
 mod vector_properties;
@@ -3898,10 +3899,12 @@ async fn maintain_current_edge_rows(
     add_adjacency(txn, scope, from, to, EdgeAdjacencyDirection::Out)?;
     add_adjacency(txn, scope, to, from, EdgeAdjacencyDirection::In)?;
 
+    // The label identity migration later in this open copies these rows to
+    // their exact keys, with every other hash-keyed label row of the store.
     let properties = properties.unwrap_or(&[]);
     if let Some(label) = label_of(properties) {
-        search::add_to_edge_label_index_scoped(txn, from, to, label, scope)?;
-        search::add_to_global_edge_label_index_scoped(txn, label, edge_id, scope)?;
+        search::add_to_legacy_edge_label_index_scoped(txn, from, to, label, scope)?;
+        search::add_to_legacy_global_edge_label_index_scoped(txn, label, edge_id, scope)?;
     }
     Ok(())
 }

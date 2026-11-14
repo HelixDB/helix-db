@@ -2758,10 +2758,11 @@ async fn dynamic_equality_ignores_legacy_bitmaps_while_builtin_label_scan_remain
     for key in [
         DataKey::Data {
             scope: DataScope::LegacyUnscoped,
-            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
-                hash_property_name("$label"),
-                hash_property_value("User"),
-            ))),
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::NodeLabel(
+                crate::encoding::indexes::label::NodeLabelKey::new(
+                    crate::encoding::indexes::label::LabelIdentity::new("User").unwrap(),
+                ),
+            )),
         }
         .to_bytes(),
         DataKey::Data {

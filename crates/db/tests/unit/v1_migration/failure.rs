@@ -113,9 +113,8 @@ async fn seed(
                 ]),
             )
             .expect("unique source row stages");
-        crate::search::add_to_equality_index_scoped(
+        crate::search::add_to_legacy_node_label_index_scoped(
             &transaction,
-            "$label",
             UNIQUE_LABEL,
             node_id,
             DataScope::LegacyUnscoped,
@@ -449,9 +448,8 @@ async fn seed_range_failure(
             encoded.clone(),
         )
         .expect("range failure source row stages");
-    crate::search::add_to_equality_index_scoped(
+    crate::search::add_to_legacy_node_label_index_scoped(
         &transaction,
-        "$label",
         RANGE_FAILURE_LABEL,
         node_id,
         DataScope::LegacyUnscoped,

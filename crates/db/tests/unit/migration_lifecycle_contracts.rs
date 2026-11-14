@@ -138,7 +138,7 @@ fn global(key: GlobalKey) -> Bytes {
     IndexKey::Global { kind: key }.to_bytes()
 }
 
-async fn assert_current_storage_version(reader: &(impl DbReadOps + Sync)) {
+async fn assert_storage_version(reader: &(impl DbReadOps + Sync), expected: IndexStorageVersion) {
     let marker = reader
         .get(global(GlobalKey::StorageVersion))
         .await
@@ -146,7 +146,7 @@ async fn assert_current_storage_version(reader: &(impl DbReadOps + Sync)) {
         .expect("storage marker exists");
     assert_eq!(
         decode_metadata_value(&marker).expect("storage marker decodes"),
-        IndexV2MetadataValue::StorageVersion(IndexStorageVersion::CURRENT)
+        IndexV2MetadataValue::StorageVersion(expected)
     );
 }
 
@@ -2095,7 +2095,8 @@ pub(crate) async fn run_migration_contracts() {
     crate::migrations::startup::bootstrap_writer(&tuple)
         .await
         .expect("tuple-only writer bootstrap commits");
-    assert_current_storage_version(&tuple).await;
+    // The label identity migration publishes the current version later in the open.
+    assert_storage_version(&tuple, IndexStorageVersion::OPERATION_QUEUES).await;
     tuple.close().await.expect("tuple-only database closes");
     assert_reader_migration_gate(&tuple_database, Arc::clone(&tuple_store), false).await;
     let tuple_recovered = HelixDB::open_with_object_store_for_migration_parity(
@@ -2220,7 +2221,7 @@ pub(crate) async fn run_migration_contracts() {
     )
     .await
     .expect("all persisted legacy definitions migrate");
-    assert_current_storage_version(migrated.inner_db().as_ref()).await;
+    assert_storage_version(migrated.inner_db().as_ref(), IndexStorageVersion::CURRENT).await;
     assert_legacy_catalog_empty(&migrated).await;
     crate::index_lifecycle::repository::require_reader_bootstrap_or_legacy(
         migrated.inner_db().as_ref(),

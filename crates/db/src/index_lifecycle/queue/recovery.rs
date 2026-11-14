@@ -55,39 +55,61 @@ pub(crate) async fn read_queue(
     Ok(Some(queue))
 }
 
-/// Discovers every data scope with at least one stored row.
-#[cfg(any(test, feature = "async-index-benchmark"))]
+/// Discovers every data scope with at least one stored row, in key order.
 pub(crate) async fn discover_scopes(reader: &(impl DbReadOps + Sync)) -> Result<Vec<DataScope>> {
-    use std::ops::Bound;
-
     let mut scopes = vec![DataScope::LegacyUnscoped];
-    let mut next = Some(TenantId::from_u128(0));
-    while let Some(tenant) = next {
-        let mut start = Vec::new();
-        DataScope::Tenant(tenant).encode_key_prefix(&mut start);
-        let mut rows = reader
-            .scan((
-                Bound::Included(Bytes::from(start)),
-                Bound::Excluded(Bytes::from_static(&[TENANT_KEY_PREFIX + 1])),
-            ))
-            .await?;
-        let Some(row) = rows.next().await? else {
-            break;
-        };
-        let Some((found, _)) = DataScope::strip_tenant_envelope(&row.key) else {
-            return Err(HelixDbError::IndexCatalogCorruption(
-                "tenant discovery encountered an invalid envelope".to_string(),
-            ));
-        };
-        if found < tenant {
-            return Err(HelixDbError::InvariantViolation(
-                "tenant discovery did not advance".to_string(),
-            ));
-        }
-        scopes.push(DataScope::Tenant(found));
-        next = found.as_u128().checked_add(1).map(TenantId::from_u128);
+    while let Some(scope) = next_scope(
+        reader,
+        *scopes
+            .last()
+            .expect("discovery starts at the unscoped scope"),
+    )
+    .await?
+    {
+        scopes.push(scope);
     }
     Ok(scopes)
+}
+
+/// The data scope after `scope` in key order with at least one stored row:
+/// the unscoped scope is first, then every tenant by ID. One seek.
+pub(crate) async fn next_scope(
+    reader: &(impl DbReadOps + Sync),
+    scope: DataScope,
+) -> Result<Option<DataScope>> {
+    use std::ops::Bound;
+
+    let first = match scope {
+        DataScope::LegacyUnscoped => TenantId::from_u128(0),
+        DataScope::Tenant(tenant) => {
+            let Some(next) = tenant.as_u128().checked_add(1) else {
+                return Ok(None);
+            };
+            TenantId::from_u128(next)
+        }
+    };
+    let mut start = Vec::new();
+    DataScope::Tenant(first).encode_key_prefix(&mut start);
+    let mut rows = reader
+        .scan((
+            Bound::Included(Bytes::from(start)),
+            Bound::Excluded(Bytes::from_static(&[TENANT_KEY_PREFIX + 1])),
+        ))
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let Some((found, _)) = DataScope::strip_tenant_envelope(&row.key) else {
+        return Err(HelixDbError::IndexCatalogCorruption(
+            "tenant discovery encountered an invalid envelope".to_string(),
+        ));
+    };
+    if found < first {
+        return Err(HelixDbError::InvariantViolation(
+            "tenant discovery did not advance".to_string(),
+        ));
+    }
+    Ok(Some(DataScope::Tenant(found)))
 }
 
 /// Loads every durable outstanding operation into the ledger.

@@ -280,7 +280,7 @@ async fn typed_expansion_reads_local_indexes_and_checks_parallel_relationship_ty
         kind: keys::DataKeyKind::PropertyIndex(
             crate::encoding::indexes::PropertyIndexKey::EdgeLabel(
                 crate::encoding::indexes::label::EdgeLabelKey::new(
-                    crate::encoding::indexes::hash_property_value("FOLLOWS"),
+                    crate::encoding::indexes::label::LabelIdentity::new("FOLLOWS").unwrap(),
                 ),
             ),
         ),

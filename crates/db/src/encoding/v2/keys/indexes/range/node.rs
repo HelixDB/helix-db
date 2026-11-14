@@ -173,6 +173,7 @@ impl<'a> RangeIndexKey<'a> {
             IndexPrefix::Range(direction) => direction,
             IndexPrefix::Equality
             | IndexPrefix::EdgeEquality
+            | IndexPrefix::NodeLabel
             | IndexPrefix::EdgeLabel
             | IndexPrefix::EdgeLabelNeighbor(_)
             | IndexPrefix::EdgeRange(..)

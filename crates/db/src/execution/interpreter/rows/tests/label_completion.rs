@@ -40,10 +40,10 @@ async fn label_completion_preserves_stale_owner_filtering_scopes_paths_and_windo
                     keys::DataKey::Data {
                         scope,
                         kind: keys::DataKeyKind::PropertyIndex(
-                            keys::indexes::PropertyIndexKey::Equality(
-                                keys::indexes::equality::EqualityIndexKey::new(
-                                    keys::indexes::hash_property_name("$label"),
-                                    keys::indexes::hash_property_value(label),
+                            keys::indexes::PropertyIndexKey::NodeLabel(
+                                crate::encoding::indexes::label::NodeLabelKey::new(
+                                    crate::encoding::indexes::label::LabelIdentity::new(label)
+                                        .unwrap(),
                                 ),
                             ),
                         ),
@@ -206,10 +206,9 @@ async fn label_completion_preserves_corruption_errors_and_mutation_rollback() {
         .put(
             keys::DataKey::Data {
                 scope: keys::DataScope::LegacyUnscoped,
-                kind: keys::DataKeyKind::PropertyIndex(keys::indexes::PropertyIndexKey::Equality(
-                    keys::indexes::equality::EqualityIndexKey::new(
-                        keys::indexes::hash_property_name("$label"),
-                        keys::indexes::hash_property_value("N"),
+                kind: keys::DataKeyKind::PropertyIndex(keys::indexes::PropertyIndexKey::NodeLabel(
+                    crate::encoding::indexes::label::NodeLabelKey::new(
+                        crate::encoding::indexes::label::LabelIdentity::new("N").unwrap(),
                     ),
                 )),
             }

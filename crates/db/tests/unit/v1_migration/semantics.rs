@@ -349,9 +349,8 @@ async fn seed_semantic_rows(
                 encode_properties(&node_properties),
             )
             .expect("semantic V1 node row stages");
-        crate::search::add_to_equality_index_scoped(
+        crate::search::add_to_legacy_node_label_index_scoped(
             &transaction,
-            "$label",
             seed.node_label,
             node_id,
             DataScope::LegacyUnscoped,
@@ -377,14 +376,14 @@ async fn seed_semantic_rows(
                 encode_properties(&edge_properties),
             )
             .expect("semantic V1 edge property row stages");
-        crate::search::add_to_global_edge_label_index_scoped(
+        crate::search::add_to_legacy_global_edge_label_index_scoped(
             &transaction,
             seed.edge_label,
             edge_id,
             DataScope::LegacyUnscoped,
         )
         .expect("semantic V1 global edge label row stages");
-        crate::search::add_to_edge_label_index_scoped(
+        crate::search::add_to_legacy_edge_label_index_scoped(
             &transaction,
             seed.node_base,
             seed.node_base + 1,
