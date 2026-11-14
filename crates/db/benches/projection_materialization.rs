@@ -31,6 +31,7 @@ struct ProjectionFixture {
     db: HelixDB,
     node_plan: ExecutablePlan,
     edge_plan: ExecutablePlan,
+    endpoint_plan: ExecutablePlan,
 }
 
 impl ProjectionFixture {
@@ -39,12 +40,13 @@ impl ProjectionFixture {
             .enable_all()
             .build()
             .expect("benchmark runtime starts");
-        let (db, node_plan, edge_plan) = runtime.block_on(seed_and_plan());
+        let (db, node_plan, edge_plan, endpoint_plan) = runtime.block_on(seed_and_plan());
         Self {
             runtime,
             db,
             node_plan,
             edge_plan,
+            endpoint_plan,
         }
     }
 }
@@ -54,7 +56,7 @@ fn fixture() -> &'static ProjectionFixture {
     FIXTURE.get_or_init(ProjectionFixture::new)
 }
 
-async fn seed_and_plan() -> (HelixDB, ExecutablePlan, ExecutablePlan) {
+async fn seed_and_plan() -> (HelixDB, ExecutablePlan, ExecutablePlan, ExecutablePlan) {
     let db = HelixDB::open(HelixDbSource::InMemory {
         database: "projection-materialization-bench".to_string(),
     })
@@ -145,12 +147,25 @@ async fn seed_and_plan() -> (HelixDB, ExecutablePlan, ExecutablePlan) {
             ]),
         )
         .returning(["rows"]);
+    let endpoint_query = read_batch()
+        .var_as(
+            "rows",
+            g().e(EdgeRef::all())
+                .values(vec!["$from.external_id", "$to.external_id"]),
+        )
+        .returning(["rows"]);
     let planner_context = db.planner_context(ParamBindings::default());
     let node_plan =
         planning::plan_read_batch(&node_query, &planner_context).expect("node projection plans");
     let edge_plan =
         planning::plan_read_batch(&edge_query, &planner_context).expect("edge projection plans");
 
+    let endpoint_plan = planning::plan_read_batch(&endpoint_query, &planner_context)
+        .expect("endpoint projection plans");
+
+    db.execute(&endpoint_plan, ParamBindings::default())
+        .await
+        .expect("endpoint projection warms");
     db.execute(&node_plan, ParamBindings::default())
         .await
         .expect("node projection warms");
@@ -158,7 +173,7 @@ async fn seed_and_plan() -> (HelixDB, ExecutablePlan, ExecutablePlan) {
         .await
         .expect("edge projection warms");
 
-    (db, node_plan, edge_plan)
+    (db, node_plan, edge_plan, endpoint_plan)
 }
 
 #[divan::bench(threads = 1)]
@@ -191,6 +206,23 @@ fn edges(bencher: divan::Bencher<'_, '_>) {
                         .execute(&fixture.edge_plan, ParamBindings::default()),
                 )
                 .expect("edge projection executes"),
+        )
+    });
+}
+
+#[divan::bench(threads = 1)]
+fn endpoint_properties(bencher: divan::Bencher<'_, '_>) {
+    let fixture = fixture();
+    bencher.bench_local(|| {
+        divan::black_box(
+            fixture
+                .runtime
+                .block_on(
+                    fixture
+                        .db
+                        .execute(&fixture.endpoint_plan, ParamBindings::default()),
+                )
+                .expect("endpoint projection executes"),
         )
     });
 }
