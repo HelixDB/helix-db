@@ -16,6 +16,8 @@
 //! nesting and reports its own errors, so rows it rejects or reports
 //! differently would no longer fail exactly as `decode_properties` does.
 
+use std::collections::HashMap;
+
 use bytes::Bytes;
 use rkyv::{rancor, util::AlignedVec};
 
@@ -117,6 +119,26 @@ enum Storage {
     Copied(Scratch),
 }
 
+/// Query-owned lookup slots, reused for each row of a multi-field projection.
+///
+/// Only names and stored positions are kept, never references into a row. The
+/// caller supplies distinct names in projection order.
+pub(crate) struct Selection<'n> {
+    names: HashMap<&'n str, usize, foldhash::fast::RandomState>,
+    positions: Vec<Option<usize>>,
+}
+
+impl<'n> Selection<'n> {
+    pub(crate) fn new(names: impl ExactSizeIterator<Item = &'n str>) -> Self {
+        let positions = vec![None; names.len()];
+        let names = names
+            .enumerate()
+            .map(|(index, name)| (name, index))
+            .collect();
+        Self { names, positions }
+    }
+}
+
 impl Row {
     /// Validates `data`, copying it into a buffer taken from `buffers` only
     /// when it is not aligned. Fails exactly when
@@ -176,11 +198,37 @@ impl Row {
         self.properties()
             .iter()
             .find(|property| property.name.as_str() == name)
-            .map(|property| {
-                rkyv::deserialize::<PropertyValue, rancor::Error>(&property.value)
-                    .map_err(|error| EncodingError::Rkyv(error.to_string()))
-            })
+            .map(deserialize_value)
             .transpose()
+    }
+
+    /// Resolve the selected names together, retaining the first stored match.
+    /// Stops once every name is found; missing names scan to the end. Values
+    /// are deserialized lazily, in projection order, just as with `value`.
+    pub(crate) fn selected_values<'a>(
+        &'a self,
+        selection: &'a mut Selection<'_>,
+    ) -> impl Iterator<Item = Result<Option<PropertyValue>, EncodingError>> + 'a {
+        selection.positions.fill(None);
+        let mut remaining = selection.names.len();
+        let properties = self.properties();
+        for (position, property) in properties.iter().enumerate() {
+            let Some(&index) = selection.names.get(property.name.as_str()) else {
+                continue;
+            };
+            if selection.positions[index].is_none() {
+                selection.positions[index] = Some(position);
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        selection.positions.iter().map(move |position| {
+            position
+                .map(|position| deserialize_value(&properties[position]))
+                .transpose()
+        })
     }
 
     /// Every property, exactly as [`super::decode_properties`] returns them.
@@ -195,6 +243,11 @@ impl Row {
         };
         buffers.0.push(copy);
     }
+}
+
+fn deserialize_value(property: &ArchivedProperty) -> Result<PropertyValue, EncodingError> {
+    rkyv::deserialize::<PropertyValue, rancor::Error>(&property.value)
+        .map_err(|error| EncodingError::Rkyv(error.to_string()))
 }
 
 fn deserialize_property(property: &ArchivedProperty) -> Result<Property, EncodingError> {

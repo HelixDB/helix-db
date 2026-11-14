@@ -105,8 +105,26 @@ proptest! {
             matches!(copy.0, Storage::Copied(_)),
             !data.is_empty()
         );
+        let names = full.iter().map(|property| property.name.as_str())
+            .chain(["missing", ""]).collect::<std::collections::BTreeSet<_>>()
+            .into_iter().collect::<Vec<_>>();
+        let mut selection = Selection::new(names.iter().copied());
         for row in [row, copy] {
             prop_assert!(same(&row.decode().unwrap(), &full));
+            for (name, actual) in names.iter().zip(row.selected_values(&mut selection)) {
+                match (actual.unwrap(), row.value(name).unwrap()) {
+                    (Some(actual), Some(expected)) => {
+                        prop_assert!(actual.same_v1_representation(&expected));
+                    }
+                    (None, None) => {}
+                    (actual, expected) => prop_assert!(false, "{name}: {actual:?} vs {expected:?}"),
+                }
+            }
+            // Reuse after a partially consumed lookup, then on a smaller row
+            // with none of the earlier fields. No stored positions may escape.
+            drop(row.selected_values(&mut selection).next());
+            let empty = Row::new(Bytes::new(), &mut Buffers::default()).unwrap();
+            prop_assert!(empty.selected_values(&mut selection).all(|value| value.unwrap().is_none()));
             for name in full
                 .iter()
                 .map(|property| property.name.as_str())
