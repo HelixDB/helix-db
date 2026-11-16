@@ -236,7 +236,6 @@ impl Job {
         report
     }
 
-    #[cfg(test)]
     pub(crate) fn is_completed(&self) -> bool {
         matches!(self, Self::Completed { .. })
     }
@@ -544,7 +543,10 @@ async fn execute(
     crate::query_service::execute_query_on_scoped_observed::<serde_json::Value>(
         db,
         request,
-        crate::query_service::QueryMode::Execute,
+        // Conversions and progress rows share one ordered WAL, so a progress
+        // row never becomes durable without the conversions before it, and a
+        // lost tail only replays batches whose guards no longer match.
+        crate::query_service::QueryMode::ExecuteWithoutDurableWait,
         scope,
         Default::default(),
         None,
@@ -744,7 +746,21 @@ pub(crate) async fn process_once(db: &HelixDB, tuning: MigrationTuning) -> Resul
             .await?
         }
     };
-    store.put(job_key(), encode_json(&next)?).await?;
+    // Batches do not wait for the WAL upload (see `execute`); completion does,
+    // so a finished job stays finished.
+    let durability = if next.is_completed() {
+        crate::transaction::CommitDurability::Durable
+    } else {
+        crate::transaction::CommitDurability::Applied
+    };
+    store
+        .put_with_options(
+            job_key(),
+            encode_json(&next)?,
+            &slatedb::config::PutOptions::default(),
+            &durability.write_options(),
+        )
+        .await?;
     match &next {
         Job::Completed { report } => tracing::info!(
             converted_values = report.converted_values,
