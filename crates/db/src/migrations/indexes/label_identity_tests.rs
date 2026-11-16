@@ -2185,6 +2185,7 @@ async fn background_label_steps_leave_foreground_writes_room_under_a_slow_store(
             let started = Instant::now();
             while crate::migrations::background::process_background_step(
                 &writer,
+                &std::sync::Weak::new(),
                 MigrationTuning::default(),
                 crate::migrations::background::BackgroundMigrations::LabelIdentity,
                 &mut session,

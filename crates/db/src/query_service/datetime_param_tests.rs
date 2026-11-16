@@ -279,7 +279,12 @@ async fn typed_datetime_params_match_equality_and_enforce_uniqueness_by_instant(
         "at",
         "2025-12-31T19:00:00-05:00",
     );
-    db.query(duplicate)
+    let error = db
+        .query(duplicate)
         .await
         .expect_err("the same instant violates the unique index");
+    assert!(
+        matches!(error, crate::HelixDbError::UniqueConstraintViolation { .. }),
+        "{error:?}"
+    );
 }
