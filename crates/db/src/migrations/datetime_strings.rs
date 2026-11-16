@@ -454,12 +454,23 @@ async fn detect(
     for (property, entry) in tracked {
         match entry.verdict {
             Verdict::Convertible => candidates.push(property),
-            Verdict::Skipped(reason) if entry.rfc3339_strings > 0 => report.skip(SkippedProperty {
-                scope,
-                property,
-                reason,
-                rfc3339_strings: entry.rfc3339_strings,
-            }),
+            Verdict::Skipped(reason) if entry.rfc3339_strings > 0 => {
+                tracing::warn!(
+                    scope = ?scope,
+                    element = ?property.element,
+                    label = %property.label,
+                    property = %property.name,
+                    reason = ?reason,
+                    rfc3339_strings = entry.rfc3339_strings,
+                    "datetime string migration leaves a property with RFC3339 strings as stored"
+                );
+                report.skip(SkippedProperty {
+                    scope,
+                    property,
+                    reason,
+                    rfc3339_strings: entry.rfc3339_strings,
+                });
+            }
             Verdict::Datetimes | Verdict::Skipped(_) => {}
         }
     }
