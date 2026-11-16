@@ -173,6 +173,7 @@ fn query_parameter_ids(value: &QueryValue, param: &ir::NonEmptyString) -> Result
         | QueryValue::I64(_)
         | QueryValue::F64(_)
         | QueryValue::F32(_)
+        | QueryValue::DateTime(_)
         | QueryValue::String(_)
         | QueryValue::Object(_) => Err(HelixDbError::Query(format!(
             "parameter `{param}` must be an integer id or array of integer ids"

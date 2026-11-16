@@ -1241,6 +1241,9 @@ fn visit_query_value(value: &QueryValue, coverage: &mut FixtureCoverage) {
         QueryValue::F32(_) => {
             coverage.query_values.insert("F32");
         }
+        QueryValue::DateTime(_) => {
+            coverage.query_values.insert("DateTime");
+        }
         QueryValue::String(_) => {
             coverage.query_values.insert("String");
         }

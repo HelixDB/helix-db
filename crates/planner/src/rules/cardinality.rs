@@ -730,6 +730,7 @@ fn query_property_value(value: &query::QueryValue) -> Result<value::PropertyValu
         query::QueryValue::I64(value) => Ok(value::PropertyValue::I64(*value)),
         query::QueryValue::F64(value) => Ok(value::PropertyValue::F64(*value)),
         query::QueryValue::F32(value) => Ok(value::PropertyValue::F32(*value)),
+        query::QueryValue::DateTime(value) => Ok(value::PropertyValue::DateTime(*value)),
         query::QueryValue::String(value) => Ok(value::PropertyValue::String(value.clone())),
         query::QueryValue::Array(_) | query::QueryValue::Object(_) => {
             Err(rejection("unsupported_planning_equality_parameter"))

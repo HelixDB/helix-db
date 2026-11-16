@@ -204,6 +204,7 @@ fn query_parameter_frames(
             | QueryValue::I64(_)
             | QueryValue::F64(_)
             | QueryValue::F32(_)
+            | QueryValue::DateTime(_)
             | QueryValue::String(_)
             | QueryValue::Array(_) => Err(HelixDbError::Query(format!(
                 "foreach batch entry expected `{param}` items to be objects"
