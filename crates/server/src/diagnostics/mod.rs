@@ -322,8 +322,8 @@ fn durability(storage: &StorageConfig, db_path: &str) -> Check {
             "Data is kept in memory only",
             Outcome::Warn {
                 detail: "In-memory storage loses every write when the server stops.".into(),
-                fix: "Set S3_BUCKET or GCS_BUCKET (with a local disk cache) or HELIX_DATA_DIR \
-                      for durable storage. A local CLI instance persists with `helix start <instance> --disk`."
+                fix: "Set S3_BUCKET, GCS_BUCKET or AZURE_CONTAINER_NAME (with a local disk \
+                      cache) or HELIX_DATA_DIR for durable storage. A local CLI instance persists with `helix start <instance> --disk`."
                     .into(),
             },
         ),
@@ -352,6 +352,15 @@ fn durability(storage: &StorageConfig, db_path: &str) -> Check {
                     detail: format!("gs://{name}/{db_path}."),
                 },
             ),
+            db::ObjectStorageBucket::Azure { account, container } => Check::new(
+                CheckId::StorageDurability,
+                "Data is stored in Azure Blob Storage",
+                Outcome::Pass {
+                    detail: format!(
+                        "Container {container} in storage account {account}, under {db_path}."
+                    ),
+                },
+            ),
         },
     }
 }
@@ -364,7 +373,9 @@ fn data_device(root: &Path, backing: &Backing) -> Check {
             "HELIX_DATA_DIR is on a RAM-backed filesystem",
             Outcome::Fail {
                 detail: format!("{root} is on {filesystem}: its data is lost when the host restarts."),
-                fix: "Point HELIX_DATA_DIR at a persistent volume, or use S3 or GCS storage.".into(),
+                fix: "Point HELIX_DATA_DIR at a persistent volume, or use object storage (S3, \
+                      GCS or Azure)."
+                    .into(),
             },
         ),
         Backing::ContainerLayer { filesystem } => Check::new(
@@ -386,8 +397,8 @@ fn data_device(root: &Path, backing: &Backing) -> Check {
                     "{root} is on {filesystem}: every read and write crosses the network, and \
                      some network filesystems do not support the locks the server takes."
                 ),
-                fix: "Use a local or block-storage volume, or S3 storage with a disk cache on \
-                      local NVMe."
+                fix: "Use a local or block-storage volume, or object storage with a disk cache \
+                      on local NVMe."
                     .into(),
             },
         ),

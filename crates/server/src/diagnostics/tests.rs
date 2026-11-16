@@ -242,6 +242,7 @@ fn durability_warns_only_for_memory_storage() {
     assert_eq!(status(&memory), "warn");
     assert!(fix(&memory).unwrap().contains("S3_BUCKET"));
     assert!(fix(&memory).unwrap().contains("GCS_BUCKET"));
+    assert!(fix(&memory).unwrap().contains("AZURE_CONTAINER_NAME"));
 
     let disk = durability(
         &StorageConfig::Disk {
@@ -285,6 +286,23 @@ fn durability_warns_only_for_memory_storage() {
     assert_eq!(status(&gcs), "pass");
     assert_eq!(gcs.summary, "Data is stored in GCS");
     assert_eq!(detail(&gcs), "gs://launch/tenant/.");
+
+    let azure = durability(
+        &StorageConfig::ObjectStorage {
+            bucket: db::ObjectStorageBucket::Azure {
+                account: "acme".into(),
+                container: "launch".into(),
+            },
+            cache: Box::new(cache(directory.path(), true)),
+        },
+        "tenant/",
+    );
+    assert_eq!(status(&azure), "pass");
+    assert_eq!(azure.summary, "Data is stored in Azure Blob Storage");
+    assert_eq!(
+        detail(&azure),
+        "Container launch in storage account acme, under tenant/."
+    );
 }
 
 #[test]
@@ -1027,46 +1045,55 @@ async fn s3_storage_reports_cache_checks_without_contacting_aws() {
     db.close().await.unwrap();
 }
 
-/// GCS storage runs the storage and cache checks but none of the S3 ones,
-/// whose remedies name AWS.
+/// GCS and Azure storage run the storage and cache checks but none of the S3
+/// ones, whose remedies name AWS.
 #[tokio::test]
-async fn gcs_storage_reports_cache_checks_without_s3_checks() {
-    let directory = tempfile::tempdir().unwrap();
-    let db = Arc::new(
-        db::HelixDB::open(db::HelixDbSource::InMemory {
-            database: "diagnostics-gcs".into(),
-        })
-        .await
-        .unwrap(),
-    );
-    let storage = StorageConfig::ObjectStorage {
-        bucket: db::ObjectStorageBucket::Gcs {
+async fn gcs_and_azure_storage_report_cache_checks_without_s3_checks() {
+    for bucket in [
+        db::ObjectStorageBucket::Gcs {
             name: "launch".into(),
         },
-        cache: Box::new(cache(directory.path(), false)),
-    };
-    let report = get_report(crate::http::router(ServerState::new(
-        Arc::clone(&db),
-        None,
-        storage,
-    )))
-    .await;
-    assert_eq!(
-        ids(&report),
-        [
-            "storage.durability",
-            "cache.device",
-            "cache.space",
-            "cache.warm",
-            "resources.memory",
-            "indexes.publication",
-            "queries.missing_indexes",
-            "queries.unbounded_scans",
-        ]
-    );
-    assert_eq!(find(&report, "storage.durability")["status"], "pass");
-    assert_eq!(find(&report, "cache.warm")["status"], "warn");
-    db.close().await.unwrap();
+        db::ObjectStorageBucket::Azure {
+            account: "acme".into(),
+            container: "launch".into(),
+        },
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            db::HelixDB::open(db::HelixDbSource::InMemory {
+                database: "diagnostics-object-storage".into(),
+            })
+            .await
+            .unwrap(),
+        );
+        let storage = StorageConfig::ObjectStorage {
+            bucket: bucket.clone(),
+            cache: Box::new(cache(directory.path(), false)),
+        };
+        let report = get_report(crate::http::router(ServerState::new(
+            Arc::clone(&db),
+            None,
+            storage,
+        )))
+        .await;
+        assert_eq!(
+            ids(&report),
+            [
+                "storage.durability",
+                "cache.device",
+                "cache.space",
+                "cache.warm",
+                "resources.memory",
+                "indexes.publication",
+                "queries.missing_indexes",
+                "queries.unbounded_scans",
+            ],
+            "{bucket:?}"
+        );
+        assert_eq!(find(&report, "storage.durability")["status"], "pass");
+        assert_eq!(find(&report, "cache.warm")["status"], "warn");
+        db.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
