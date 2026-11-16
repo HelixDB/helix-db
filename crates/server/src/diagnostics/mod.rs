@@ -219,7 +219,7 @@ async fn gather(storage: &StorageConfig, db: &db::HelixDB) -> Facts {
     let filesystem = tokio::task::spawn_blocking(move || {
         let data = match &blocking_storage {
             StorageConfig::Disk { root, .. } => Some((root.clone(), backing::classify(root))),
-            StorageConfig::Memory | StorageConfig::S3 { .. } => None,
+            StorageConfig::Memory | StorageConfig::ObjectStorage { .. } => None,
         };
         let cache = blocking_storage.hybrid_cache().map(|cache| {
             #[cfg(unix)]
@@ -230,9 +230,16 @@ async fn gather(storage: &StorageConfig, db: &db::HelixDB) -> Facts {
         });
         (data, cache)
     });
+    // The region and latency checks name AWS remedies, so only S3 runs them.
     let s3 = async {
-        let StorageConfig::S3 {
-            bucket, endpoint, ..
+        let StorageConfig::ObjectStorage {
+            bucket:
+                db::ObjectStorageBucket::S3 {
+                    name: bucket,
+                    endpoint,
+                    ..
+                },
+            ..
         } = storage
         else {
             return None;
@@ -286,7 +293,7 @@ pub(crate) async fn report(state: &ServerState) -> Report {
         cache.map(|(cache, (backing, _))| cache_device(cache.root(), backing)),
         cache.map(|(cache, (_, shortfall))| cache_space(cache, shortfall, &cache_stats)),
         match storage {
-            StorageConfig::S3 { cache, .. } => Some(cache_warm(cache)),
+            StorageConfig::ObjectStorage { cache, .. } => Some(cache_warm(cache)),
             StorageConfig::Memory | StorageConfig::Disk { .. } => None,
         },
         Some(memory(
@@ -315,8 +322,8 @@ fn durability(storage: &StorageConfig, db_path: &str) -> Check {
             "Data is kept in memory only",
             Outcome::Warn {
                 detail: "In-memory storage loses every write when the server stops.".into(),
-                fix: "Set S3_BUCKET (with a local disk cache) or HELIX_DATA_DIR for durable \
-                      storage. A local CLI instance persists with `helix start <instance> --disk`."
+                fix: "Set S3_BUCKET or GCS_BUCKET (with a local disk cache) or HELIX_DATA_DIR \
+                      for durable storage. A local CLI instance persists with `helix start <instance> --disk`."
                     .into(),
             },
         ),
@@ -327,18 +334,25 @@ fn durability(storage: &StorageConfig, db_path: &str) -> Check {
                 detail: format!("HELIX_DATA_DIR is {}.", root.display()),
             },
         ),
-        StorageConfig::S3 {
-            bucket, endpoint, ..
-        } => Check::new(
-            CheckId::StorageDurability,
-            "Data is stored in S3",
-            Outcome::Pass {
-                detail: match endpoint {
-                    Some(endpoint) => format!("s3://{bucket}/{db_path} through {endpoint}."),
-                    None => format!("s3://{bucket}/{db_path}."),
+        StorageConfig::ObjectStorage { bucket, .. } => match bucket {
+            db::ObjectStorageBucket::S3 { name, endpoint, .. } => Check::new(
+                CheckId::StorageDurability,
+                "Data is stored in S3",
+                Outcome::Pass {
+                    detail: match endpoint {
+                        Some(endpoint) => format!("s3://{name}/{db_path} through {endpoint}."),
+                        None => format!("s3://{name}/{db_path}."),
+                    },
                 },
-            },
-        ),
+            ),
+            db::ObjectStorageBucket::Gcs { name } => Check::new(
+                CheckId::StorageDurability,
+                "Data is stored in GCS",
+                Outcome::Pass {
+                    detail: format!("gs://{name}/{db_path}."),
+                },
+            ),
+        },
     }
 }
 
@@ -350,7 +364,7 @@ fn data_device(root: &Path, backing: &Backing) -> Check {
             "HELIX_DATA_DIR is on a RAM-backed filesystem",
             Outcome::Fail {
                 detail: format!("{root} is on {filesystem}: its data is lost when the host restarts."),
-                fix: "Point HELIX_DATA_DIR at a persistent volume, or use S3 storage.".into(),
+                fix: "Point HELIX_DATA_DIR at a persistent volume, or use S3 or GCS storage.".into(),
             },
         ),
         Backing::ContainerLayer { filesystem } => Check::new(

@@ -33,6 +33,7 @@ pub const PROJECT_ID_ENV: &str = "HELIX_TELEMETRY_PROJECT_ID";
 
 const PROJECT_DOMAIN: &[u8] = b"helix-telemetry-project-v1";
 const DEPLOYMENT_DOMAIN: &[u8] = b"helix-telemetry-deployment-v1";
+const GCS_DEPLOYMENT_DOMAIN: &[u8] = b"helix-telemetry-deployment-gcs-v1";
 const CONTAINER_MARKERS: [&str; 2] = ["/.dockerenv", "/run/.containerenv"];
 
 /// CI service a process runs in, detected from the variable it always sets.
@@ -216,6 +217,23 @@ impl DeploymentId {
         endpoint
             .is_none()
             .then(|| Self(domain_digest(DEPLOYMENT_DOMAIN, [bucket, database])))
+    }
+
+    /// Derives an ID from Google Cloud Storage, whose bucket names are
+    /// globally unique. It is hashed in its own domain, so a GCS bucket never
+    /// shares an ID with an S3 bucket of the same name.
+    ///
+    /// ```
+    /// use helix_metrics::attribution::DeploymentId;
+    ///
+    /// let id = DeploymentId::for_gcs("acme-data", "db/");
+    /// assert_eq!(id, DeploymentId::for_gcs("acme-data", "db/"));
+    /// assert_ne!(id, DeploymentId::for_gcs("acme-data", "other/"));
+    /// assert_ne!(Some(id), DeploymentId::for_s3("acme-data", "db/", None));
+    /// ```
+    #[must_use]
+    pub fn for_gcs(bucket: &str, database: &str) -> Self {
+        Self(domain_digest(GCS_DEPLOYMENT_DOMAIN, [bucket, database]))
     }
 
     #[must_use]

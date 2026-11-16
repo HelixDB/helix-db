@@ -72,6 +72,12 @@ For S3 or an S3-compatible service, set `S3_BUCKET`, credentials through the sta
 | `AWS_ALLOW_HTTP` | Set to `true` or `1` only for a trusted plain-HTTP endpoint. |
 | `DB_PATH` | Logical database prefix inside the selected store; defaults to `db/`. |
 
+For Google Cloud Storage, set `GCS_BUCKET`. Credentials come from
+`GOOGLE_SERVICE_ACCOUNT` (a key file), `GOOGLE_SERVICE_ACCOUNT_KEY` (the key's JSON) or
+`GOOGLE_APPLICATION_CREDENTIALS`, else from the GCE metadata server, which serves GKE
+Workload Identity. The server talks to GCS through its own API, not its S3-compatible
+endpoint, whose conditional writes do not give SlateDB the fencing it needs.
+
 `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` sets the most unpublished vector work,
 in bytes, that one `strong` vector search scores exactly before it fails with the
 retryable `index_backpressure` (`pending_vector_bytes`). It defaults to each index's
@@ -116,14 +122,14 @@ the client's retry loop (`io`), and SlateDB's own metrics (`storage`).
 Subtract two samples to measure a window. `io` bytes are request/response
 body bytes seen by the client, not network-wire bytes.
 
-`HELIX_DATA_DIR` and `S3_BUCKET` are mutually exclusive. Credentials are runtime-only and are never baked into the image. S3 storage always caches on local disk; see [Disk cache](#disk-cache).
+Set at most one of `HELIX_DATA_DIR`, `S3_BUCKET` and `GCS_BUCKET`. Credentials are runtime-only and are never baked into the image. S3 and GCS storage always cache on local disk; see [Disk cache](#disk-cache).
 
-Leave both variables unset for memory storage. Bind mounts and existing volumes
+Leave all three variables unset for memory storage. Bind mounts and existing volumes
 must be writable by the container's `65532:65532` user and group.
 
 ### Disk cache
 
-With S3 storage the server always caches SlateDB blocks, object-store SST parts and
+With S3 or GCS storage the server always caches SlateDB blocks, object-store SST parts and
 full-text splits in memory and on local disk, ideally NVMe, in `/var/cache/helix`
 unless `HELIX_DISK_CACHE_DIR` names another directory. There is no memory-only S3
 mode: vector indexes on S3 need the disk tier, because once the HNSW graph

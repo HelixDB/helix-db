@@ -124,7 +124,9 @@ use slatedb::db_cache::{
 };
 #[cfg(test)]
 use slatedb::object_store::memory::InMemory;
-use slatedb::object_store::{aws::AmazonS3Builder, local::LocalFileSystem, ObjectStore};
+use slatedb::object_store::{
+    aws::AmazonS3Builder, gcp::GoogleCloudStorageBuilder, local::LocalFileSystem, ObjectStore,
+};
 use slatedb::{CacheTarget, Db, DbCacheManagerOps, DbMetadataOps, DbReader};
 use tokio::sync::{oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
@@ -371,56 +373,93 @@ pub enum HelixDbSource {
         /// Logical database path inside the local object store.
         database: String,
     },
-    /// S3-compatible object storage.
+    /// Remote object storage: an S3 or GCS bucket.
     ObjectStorage {
-        /// Logical database path inside the object store.
+        /// Logical database path inside the bucket.
         database: String,
+        /// The bucket and the service that holds it.
+        bucket: ObjectStorageBucket,
+    },
+}
+
+/// The bucket an [`HelixDbSource::ObjectStorage`] database lives in, and the
+/// service that holds it.
+///
+/// Both services give SlateDB what its single-writer fencing needs: create-only
+/// puts, compare-and-swap overwrites of GC boundary files, and strongly
+/// consistent listings. GCS is reached through its own API, never its
+/// S3-compatible endpoint, which does not offer the same conditional writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ObjectStorageBucket {
+    /// Amazon S3, or an S3-compatible server at `endpoint`. Credentials come
+    /// from the standard AWS environment variables, web identity, or instance
+    /// metadata.
+    S3 {
         /// Bucket name.
-        bucket: String,
-        /// Region.
+        name: String,
+        /// Bucket region.
         region: String,
-        /// Optional endpoint for S3-compatible local storage.
+        /// Endpoint of an S3-compatible server; `None` for AWS S3.
         endpoint: Option<String>,
-        /// Whether HTTP endpoints are allowed.
+        /// Whether a plain-HTTP endpoint is allowed.
         allow_http: bool,
+    },
+    /// Google Cloud Storage. Credentials come from `GOOGLE_SERVICE_ACCOUNT`,
+    /// `GOOGLE_SERVICE_ACCOUNT_KEY` or `GOOGLE_APPLICATION_CREDENTIALS`, else
+    /// from the GCE metadata server, which serves GKE Workload Identity.
+    /// `GOOGLE_BASE_URL` replaces the API endpoint, for an emulator.
+    Gcs {
+        /// Bucket name.
+        name: String,
     },
 }
 
 impl HelixDbSource {
     /// Telemetry deployment ID derived from this source's storage.
     ///
-    /// Only AWS S3 storage has one: its bucket names are globally unique,
-    /// while memory, disk and custom S3 endpoints reuse the same names across
-    /// unrelated users.
+    /// Only AWS S3 and GCS storage have one: their bucket names are globally
+    /// unique, while memory, disk and custom S3 endpoints reuse the same names
+    /// across unrelated users. An S3 and a GCS bucket with the same name give
+    /// different IDs.
     ///
     /// ```
-    /// use db::HelixDbSource;
+    /// use db::{HelixDbSource, ObjectStorageBucket};
     ///
     /// let s3 = |endpoint: Option<&str>| HelixDbSource::ObjectStorage {
     ///     database: "db/".to_string(),
-    ///     bucket: "acme-data".to_string(),
-    ///     region: "us-east-2".to_string(),
-    ///     endpoint: endpoint.map(str::to_string),
-    ///     allow_http: false,
+    ///     bucket: ObjectStorageBucket::S3 {
+    ///         name: "acme-data".to_string(),
+    ///         region: "us-east-2".to_string(),
+    ///         endpoint: endpoint.map(str::to_string),
+    ///         allow_http: false,
+    ///     },
     /// };
     /// assert!(s3(None).telemetry_deployment_id().is_some());
     /// assert!(s3(Some("http://seaweedfs:8333")).telemetry_deployment_id().is_none());
+    /// let gcs = HelixDbSource::ObjectStorage {
+    ///     database: "db/".to_string(),
+    ///     bucket: ObjectStorageBucket::Gcs { name: "acme-data".to_string() },
+    /// };
+    /// assert!(gcs.telemetry_deployment_id().is_some());
+    /// assert_ne!(gcs.telemetry_deployment_id(), s3(None).telemetry_deployment_id());
     /// let memory = HelixDbSource::InMemory { database: "db/".to_string() };
     /// assert!(memory.telemetry_deployment_id().is_none());
     /// ```
     #[must_use]
     pub fn telemetry_deployment_id(&self) -> Option<helix_metrics::attribution::DeploymentId> {
         match self {
-            Self::ObjectStorage {
-                database,
-                bucket,
-                endpoint,
-                ..
-            } => helix_metrics::attribution::DeploymentId::for_s3(
-                bucket,
-                database,
-                endpoint.as_deref(),
-            ),
+            Self::ObjectStorage { database, bucket } => match bucket {
+                ObjectStorageBucket::S3 { name, endpoint, .. } => {
+                    helix_metrics::attribution::DeploymentId::for_s3(
+                        name,
+                        database,
+                        endpoint.as_deref(),
+                    )
+                }
+                ObjectStorageBucket::Gcs { name } => Some(
+                    helix_metrics::attribution::DeploymentId::for_gcs(name, database),
+                ),
+            },
             Self::InMemory { .. } | Self::InMemoryToken { .. } | Self::Disk { .. } => None,
         }
     }
@@ -464,23 +503,36 @@ impl HelixDbSource {
                     Arc::new(LocalFileSystem::new_with_prefix(root)?.with_fsync(true));
                 (database, object_store)
             }
-            Self::ObjectStorage {
-                database,
-                bucket,
-                region,
-                endpoint,
-                allow_http,
-            } => {
-                let mut builder = AmazonS3Builder::from_env()
-                    .with_bucket_name(bucket)
-                    .with_region(region)
-                    .with_allow_http(allow_http);
-                if let Some(endpoint) = endpoint {
-                    builder = builder.with_endpoint(endpoint);
-                }
-                #[cfg(feature = "async-index-benchmark")]
-                let builder = builder.with_http_connector(benchmark::io::Connector::default());
-                (database, Arc::new(builder.build()?))
+            Self::ObjectStorage { database, bucket } => {
+                let object_store: Arc<dyn ObjectStore> = match bucket {
+                    ObjectStorageBucket::S3 {
+                        name,
+                        region,
+                        endpoint,
+                        allow_http,
+                    } => {
+                        let builder = AmazonS3Builder::from_env()
+                            .with_bucket_name(name)
+                            .with_region(region)
+                            .with_allow_http(allow_http);
+                        let builder = match endpoint {
+                            Some(endpoint) => builder.with_endpoint(endpoint),
+                            None => builder,
+                        };
+                        #[cfg(feature = "async-index-benchmark")]
+                        let builder =
+                            builder.with_http_connector(benchmark::io::Connector::default());
+                        Arc::new(builder.build()?)
+                    }
+                    ObjectStorageBucket::Gcs { name } => {
+                        let builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(name);
+                        #[cfg(feature = "async-index-benchmark")]
+                        let builder =
+                            builder.with_http_connector(benchmark::io::Connector::default());
+                        Arc::new(builder.build()?)
+                    }
+                };
+                (database, object_store)
             }
         };
         Ok((path, object_store, gc_boundary_files))
@@ -4723,12 +4775,30 @@ mod tests {
 
         let object_storage = HelixDbSource::ObjectStorage {
             database: "remote-defaults".to_string(),
-            bucket: "bucket".to_string(),
-            region: "region".to_string(),
-            endpoint: None,
-            allow_http: false,
+            bucket: ObjectStorageBucket::S3 {
+                name: "bucket".to_string(),
+                region: "region".to_string(),
+                endpoint: None,
+                allow_http: false,
+            },
         }
         .embedded_default_config();
+        let gcs = HelixDbSource::ObjectStorage {
+            database: "remote-defaults".to_string(),
+            bucket: ObjectStorageBucket::Gcs {
+                name: "bucket".to_string(),
+            },
+        }
+        .embedded_default_config();
+        // Every object storage service keeps the remote profile.
+        assert_eq!(
+            gcs.slate().to_writer_settings(None).flush_interval,
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            gcs.cache().vector_memory().budget().bytes(),
+            Some(256 * 1024 * 1024)
+        );
         assert_eq!(
             object_storage
                 .slate()
@@ -4777,10 +4847,18 @@ mod tests {
         };
         let object_storage = || HelixDbSource::ObjectStorage {
             database: "object-storage-gc".to_owned(),
-            bucket: "test-bucket".to_owned(),
-            region: "us-east-1".to_owned(),
-            endpoint: Some("http://127.0.0.1:9000".to_owned()),
-            allow_http: true,
+            bucket: ObjectStorageBucket::S3 {
+                name: "test-bucket".to_owned(),
+                region: "us-east-1".to_owned(),
+                endpoint: Some("http://127.0.0.1:9000".to_owned()),
+                allow_http: true,
+            },
+        };
+        let gcs = || HelixDbSource::ObjectStorage {
+            database: "gcs-gc".to_owned(),
+            bucket: ObjectStorageBucket::Gcs {
+                name: "test-bucket".to_owned(),
+            },
         };
         let memory = || HelixDbSource::InMemory {
             database: "memory-gc".to_owned(),
@@ -4791,6 +4869,7 @@ mod tests {
         let defaults = DbConfig::new();
         assert_eq!(boundary_files(disk(), &defaults), Some(false));
         assert_eq!(boundary_files(object_storage(), &defaults), Some(true));
+        assert_eq!(boundary_files(gcs(), &defaults), Some(true));
         assert_eq!(boundary_files(memory(), &defaults), Some(true));
         let embedded_disk = disk().embedded_default_config();
         assert_eq!(boundary_files(disk(), &embedded_disk), Some(false));
@@ -4811,6 +4890,7 @@ mod tests {
             boundary_files(object_storage(), &gc_config(false)),
             Some(false)
         );
+        assert_eq!(boundary_files(gcs(), &gc_config(false)), Some(false));
 
         // Without a garbage collector there is nothing to turn off.
         let no_gc = DbConfig::new().with_slate_settings(slatedb::Settings {
@@ -4936,16 +5016,32 @@ mod tests {
 
     #[test]
     fn object_storage_source_is_constructed_without_io() {
-        let (path, _store, _) = HelixDbSource::ObjectStorage {
+        let (path, store, _) = HelixDbSource::ObjectStorage {
             database: "facade-object-storage".into(),
-            bucket: "test-bucket".into(),
-            region: "us-east-1".into(),
-            endpoint: Some("http://127.0.0.1:9000".into()),
-            allow_http: true,
+            bucket: ObjectStorageBucket::S3 {
+                name: "test-bucket".into(),
+                region: "us-east-1".into(),
+                endpoint: Some("http://127.0.0.1:9000".into()),
+                allow_http: true,
+            },
         }
         .into_parts()
         .expect("object storage source builds without a request");
         assert_eq!(path, "facade-object-storage");
+        assert_eq!(store.to_string(), "AmazonS3(test-bucket)");
+
+        // The GCS client resolves credentials on its first request, so it
+        // builds without any in the environment.
+        let (path, store, _) = HelixDbSource::ObjectStorage {
+            database: "facade-gcs".into(),
+            bucket: ObjectStorageBucket::Gcs {
+                name: "test-bucket".into(),
+            },
+        }
+        .into_parts()
+        .expect("GCS source builds without a request");
+        assert_eq!(path, "facade-gcs");
+        assert_eq!(store.to_string(), "GoogleCloudStorage(test-bucket)");
     }
 
     #[tokio::test]

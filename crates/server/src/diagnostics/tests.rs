@@ -241,6 +241,7 @@ fn durability_warns_only_for_memory_storage() {
     let memory = durability(&StorageConfig::Memory, "db/");
     assert_eq!(status(&memory), "warn");
     assert!(fix(&memory).unwrap().contains("S3_BUCKET"));
+    assert!(fix(&memory).unwrap().contains("GCS_BUCKET"));
 
     let disk = durability(
         &StorageConfig::Disk {
@@ -254,11 +255,13 @@ fn durability_warns_only_for_memory_storage() {
 
     let s3 = |endpoint: Option<&str>| {
         durability(
-            &StorageConfig::S3 {
-                bucket: "launch".into(),
-                region: "us-east-1".into(),
-                endpoint: endpoint.map(str::to_owned),
-                allow_http: false,
+            &StorageConfig::ObjectStorage {
+                bucket: db::ObjectStorageBucket::S3 {
+                    name: "launch".into(),
+                    region: "us-east-1".into(),
+                    endpoint: endpoint.map(str::to_owned),
+                    allow_http: false,
+                },
                 cache: Box::new(cache(directory.path(), true)),
             },
             "tenant/",
@@ -269,6 +272,19 @@ fn durability_warns_only_for_memory_storage() {
         detail(&s3(Some("http://seaweedfs:8333"))),
         "s3://launch/tenant/ through http://seaweedfs:8333."
     );
+
+    let gcs = durability(
+        &StorageConfig::ObjectStorage {
+            bucket: db::ObjectStorageBucket::Gcs {
+                name: "launch".into(),
+            },
+            cache: Box::new(cache(directory.path(), true)),
+        },
+        "tenant/",
+    );
+    assert_eq!(status(&gcs), "pass");
+    assert_eq!(gcs.summary, "Data is stored in GCS");
+    assert_eq!(detail(&gcs), "gs://launch/tenant/.");
 }
 
 #[test]
@@ -972,13 +988,15 @@ async fn s3_storage_reports_cache_checks_without_contacting_aws() {
         .await
         .unwrap(),
     );
-    let storage = StorageConfig::S3 {
-        bucket: "launch".into(),
-        region: "us-east-1".into(),
-        // A custom endpoint skips the AWS region lookup; latency is
-        // probed through the database's own (in-memory) store.
-        endpoint: Some("http://127.0.0.1:9".into()),
-        allow_http: true,
+    let storage = StorageConfig::ObjectStorage {
+        bucket: db::ObjectStorageBucket::S3 {
+            name: "launch".into(),
+            region: "us-east-1".into(),
+            // A custom endpoint skips the AWS region lookup; latency is
+            // probed through the database's own (in-memory) store.
+            endpoint: Some("http://127.0.0.1:9".into()),
+            allow_http: true,
+        },
         cache: Box::new(cache(directory.path(), false)),
     };
     let report = get_report(crate::http::router(ServerState::new(
@@ -1006,6 +1024,48 @@ async fn s3_storage_reports_cache_checks_without_contacting_aws() {
     assert_eq!(find(&report, "storage.s3_latency")["status"], "pass");
     assert_eq!(find(&report, "cache.warm")["status"], "warn");
     assert_ne!(find(&report, "cache.space")["status"], "fail");
+    db.close().await.unwrap();
+}
+
+/// GCS storage runs the storage and cache checks but none of the S3 ones,
+/// whose remedies name AWS.
+#[tokio::test]
+async fn gcs_storage_reports_cache_checks_without_s3_checks() {
+    let directory = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        db::HelixDB::open(db::HelixDbSource::InMemory {
+            database: "diagnostics-gcs".into(),
+        })
+        .await
+        .unwrap(),
+    );
+    let storage = StorageConfig::ObjectStorage {
+        bucket: db::ObjectStorageBucket::Gcs {
+            name: "launch".into(),
+        },
+        cache: Box::new(cache(directory.path(), false)),
+    };
+    let report = get_report(crate::http::router(ServerState::new(
+        Arc::clone(&db),
+        None,
+        storage,
+    )))
+    .await;
+    assert_eq!(
+        ids(&report),
+        [
+            "storage.durability",
+            "cache.device",
+            "cache.space",
+            "cache.warm",
+            "resources.memory",
+            "indexes.publication",
+            "queries.missing_indexes",
+            "queries.unbounded_scans",
+        ]
+    );
+    assert_eq!(find(&report, "storage.durability")["status"], "pass");
+    assert_eq!(find(&report, "cache.warm")["status"], "warn");
     db.close().await.unwrap();
 }
 
