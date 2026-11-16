@@ -208,6 +208,19 @@ In Go, `ParamDateTime` and typed `date_time` parameters accept `helix.DateTime`,
 RFC3339 string, or an `int`/`int64` epoch-millisecond value. The SDK normalizes each value to UTC
 RFC3339 with millisecond precision.
 
+A `date_time` parameter (or an array of them) is sent as an RFC3339 string and becomes a datetime
+on the server: UTC epoch milliseconds, with any offset applied and sub-millisecond digits dropped.
+It is stored, compared, and indexed exactly like a datetime literal or `now()`, so
+`2026-06-01T09:00:00+09:00` and `2026-06-01T00:00:00Z` are equal and range filters order by
+instant. Responses render datetimes as `YYYY-MM-DDTHH:MM:SS.sssZ`. Only a declared `date_time`
+turns a string into a datetime: an untyped parameter, a `value` or `string` parameter, and the
+fields of an `object` parameter (including `forEachParam` rows) keep RFC3339 text as a string.
+
+Before this, `date_time` parameters were stored as their raw strings. A writer that opens such data
+converts it once in the background: each property whose every value is a datetime or an RFC3339
+string with at most millisecond precision becomes datetimes, and any other property is left as
+stored and named in the server log.
+
 ## Query names
 
 `query_name` is optional diagnostic metadata. It does not create a stored endpoint.
