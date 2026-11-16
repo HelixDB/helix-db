@@ -3071,11 +3071,6 @@ impl HelixDB {
     /// Complete the elected shutdown even when its original waiter is dropped.
     async fn finish_close(&self) -> Result<()> {
         let result = async {
-            // The migration worker writes through the query path, so it stops
-            // before commits are sealed rather than failing against them.
-            if let Some(worker) = self.inner.migration_worker.lock().await.take() {
-                worker.stop().await;
-            }
             // Started commits own mutation permits and cache fences even if their
             // request was dropped. Finish them before closing shared resources.
             self.inner.commit_completions.seal_and_wait().await;
@@ -3087,6 +3082,9 @@ impl HelixDB {
                 .take();
             if let Some(runtime) = self.inner.query_metrics_runtime.lock().await.take() {
                 runtime.shutdown().await;
+            }
+            if let Some(worker) = self.inner.migration_worker.lock().await.take() {
+                worker.stop().await;
             }
             if let Some(worker) = self.inner.index_worker.lock().await.take() {
                 worker.stop().await;

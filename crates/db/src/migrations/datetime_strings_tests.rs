@@ -558,6 +558,7 @@ fn job_state_round_trips_through_json() {
             skipped_properties: Vec::new(),
             unlisted_skipped_properties: 0,
             skipped_scopes: vec![ScopeCursor::Unscoped],
+            undecodable_rows: 2,
         },
     };
     let encoded = encode_json(&job).unwrap();
@@ -606,4 +607,26 @@ fn verdicts_follow_every_value_kind() {
     );
     assert_eq!(parse_millis("1969-12-31T23:59:59.999Z"), Some(Ok(-1)));
     assert_eq!(parse_millis("2026-01-01"), None);
+}
+
+#[tokio::test]
+async fn an_undecodable_row_is_reported_without_stalling_the_job() {
+    let db = open(1024).await;
+    let u = DataScope::LegacyUnscoped;
+    add_node(
+        &db,
+        u,
+        "Event",
+        vec![("name", s("a")), ("at", s("2026-01-01T00:00:00Z"))],
+    )
+    .await;
+    let mut corrupt = KeyPrefix::NodeProperty.as_slice().to_vec();
+    corrupt.extend_from_slice(&999_u64.to_be_bytes());
+    db.inner_db()
+        .put(&corrupt, b"not an rkyv property row")
+        .await
+        .unwrap();
+    let report = run_to_completion(&db).await;
+    assert_eq!(report.undecodable_rows, 1, "{report:?}");
+    assert_eq!(report.converted_values, 1);
 }

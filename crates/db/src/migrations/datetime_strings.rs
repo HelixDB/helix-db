@@ -169,6 +169,8 @@ pub(crate) struct Report {
     pub(crate) unlisted_skipped_properties: u64,
     /// Scopes skipped for exceeding [`MAX_TRACKED_PROPERTIES`].
     pub(crate) skipped_scopes: Vec<ScopeCursor>,
+    /// Rows whose properties failed to decode, left as stored.
+    pub(crate) undecodable_rows: u64,
 }
 
 impl Report {
@@ -302,7 +304,7 @@ async fn read_rows(
     scope: DataScope,
     element: Element,
     resume_after: Option<&[u8]>,
-    limit: usize,
+    tuning: MigrationTuning,
 ) -> Result<Vec<(Bytes, Bytes)>> {
     let prefix = Key::data_prefix(scope, Bytes::from_static(element.logical_prefix()));
     let resume_after = resume_after
@@ -312,11 +314,16 @@ async fn read_rows(
     let mut iter = store
         .scan(scan_bounds_for_prefix(&prefix, resume_after.as_ref()))
         .await?;
-    let mut rows = Vec::with_capacity(limit);
-    while rows.len() < limit {
+    let mut rows = Vec::with_capacity(tuning.batch_rows().get());
+    let mut bytes = 0_usize;
+    // At least one row per batch, however large, so the job always advances.
+    while rows.len() < tuning.batch_rows().get()
+        && (rows.is_empty() || bytes < tuning.batch_bytes().get())
+    {
         let Some(kv) = iter.next().await? else {
             break;
         };
+        bytes = bytes.saturating_add(kv.key.len() + kv.value.len());
         rows.push((kv.key, kv.value));
     }
     Ok(rows)
@@ -387,18 +394,19 @@ async fn detect(
     tuning: MigrationTuning,
 ) -> Result<Job> {
     let data_scope = scope.data_scope();
-    let rows = read_rows(
-        store,
-        data_scope,
-        element,
-        resume_after.as_deref(),
-        tuning.batch_rows().get(),
-    )
-    .await?;
+    let rows = read_rows(store, data_scope, element, resume_after.as_deref(), tuning).await?;
     let mut tracked = properties.into_iter().collect::<BTreeMap<_, _>>();
     for (key, value) in &rows {
-        let Some((_, row)) = decode_row(data_scope, element, key, value)? else {
-            continue;
+        // A row that cannot decode is reported and left alone rather than
+        // retried forever, which would stall every later scope.
+        let row = match decode_row(data_scope, element, key, value) {
+            Ok(Some((_, row))) => row,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(scope = ?scope, %error, "datetime string migration skips an undecodable row");
+                report.undecodable_rows = report.undecodable_rows.saturating_add(1);
+                continue;
+            }
         };
         let Some(label) = label_of(&row) else {
             continue;
@@ -530,7 +538,8 @@ fn conversion_request(element: Element, rows: &[RowConversion]) -> QueryRequest 
                             .where_(guard)
                             .set_property(property, value),
                         |traversal, (property, value)| traversal.set_property(property, value),
-                    ),
+                    )
+                    .count(),
                 ),
                 Element::Edge => batch.var_as(
                     name.as_str(),
@@ -539,7 +548,8 @@ fn conversion_request(element: Element, rows: &[RowConversion]) -> QueryRequest 
                             .where_(guard)
                             .set_property(property, value),
                         |traversal, (property, value)| traversal.set_property(property, value),
-                    ),
+                    )
+                    .count(),
                 ),
             }
         });
@@ -569,14 +579,14 @@ async fn execute(
 }
 
 /// Values rewritten by a conversion response: each row's string count when
-/// its guarded traversal matched.
+/// its guarded traversal matched (counted 1, not 0).
 fn converted_values(response: &serde_json::Value, rows: &[RowConversion]) -> u64 {
     rows.iter()
         .enumerate()
         .filter(|(index, _)| {
             response[format!("r{index}")]
-                .as_array()
-                .is_some_and(|matched| !matched.is_empty())
+                .as_u64()
+                .is_some_and(|matched| matched > 0)
         })
         .map(|(_, row)| row.values.len() as u64)
         .sum()
@@ -597,14 +607,7 @@ async fn convert(
     tuning: MigrationTuning,
 ) -> Result<Job> {
     let data_scope = scope.data_scope();
-    let rows = read_rows(
-        store,
-        data_scope,
-        element,
-        resume_after.as_deref(),
-        tuning.batch_rows().get(),
-    )
-    .await?;
+    let rows = read_rows(store, data_scope, element, resume_after.as_deref(), tuning).await?;
     let Some((last, _)) = rows.last() else {
         if element == Element::Node {
             return Ok(Job::Running {
@@ -623,7 +626,8 @@ async fn convert(
     let lookup = candidates.iter().collect::<BTreeSet<_>>();
     let mut conversions = Vec::new();
     for (key, value) in &rows {
-        let Some((id, row)) = decode_row(data_scope, element, key, value)? else {
+        // Detect already reported undecodable rows.
+        let Ok(Some((id, row))) = decode_row(data_scope, element, key, value) else {
             continue;
         };
         let Some(label) = label_of(&row) else {
@@ -764,13 +768,10 @@ pub(crate) async fn process_once(db: &HelixDB, tuning: MigrationTuning) -> Resul
     } else {
         crate::transaction::CommitDurability::Applied
     };
-    store
-        .put_with_options(
-            job_key(),
-            encode_json(&next)?,
-            &slatedb::config::PutOptions::default(),
-            &durability.write_options(),
-        )
+    let transaction = store.begin(slatedb::IsolationLevel::Snapshot).await?;
+    crate::transaction::Mutation::put(&transaction, job_key(), encode_json(&next)?)?;
+    transaction
+        .commit_with_options(&durability.write_options())
         .await?;
     match &next {
         Job::Completed { report } => tracing::info!(
