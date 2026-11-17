@@ -2530,7 +2530,9 @@ async fn scan_source(
     let mut exhausted = true;
     let mut scratch = property::view::Scratch::new();
 
-    'scan_rows: while batch_entities < limits.max_entities().get() {
+    // The label source takes at most `max_entities` ids, so its end ends
+    // the step.
+    'scan_rows: loop {
         let row = match rows.next().await? {
             crate::index_lifecycle::label_source::LabelRead::Row(row) => row,
             crate::index_lifecycle::label_source::LabelRead::Exhausted => break,
@@ -2809,10 +2811,6 @@ async fn scan_source(
         statistics_batch.push(statistics)?;
         cursor = Some(complete_cursor);
     }
-    if batch_entities == limits.max_entities().get() {
-        exhausted = false;
-    }
-
     let counters = OperationCounters {
         entities: checked_add(
             progress.counters.entities,

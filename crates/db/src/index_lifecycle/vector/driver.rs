@@ -2805,7 +2805,9 @@ async fn scan_source<D: Distance>(
     let mut cursor = progress.cursor.clone();
     let mut exhausted = true;
     let mut scratch = view::Scratch::new();
-    while accounting.can_read_another() {
+    // The label source takes at most `max_entities` ids, so its end ends the
+    // step.
+    loop {
         let row = match rows.next().await? {
             crate::index_lifecycle::label_source::LabelRead::Row(row) => row,
             crate::index_lifecycle::label_source::LabelRead::Exhausted => break,
@@ -2914,9 +2916,6 @@ async fn scan_source<D: Distance>(
             lifecycle_bytes,
         )?;
         cursor = Some(complete_cursor);
-    }
-    if !accounting.can_read_another() {
-        exhausted = false;
     }
     let vector_planning = accounting.planning_usage(build_session.stats());
     let (counters, single_vector_output_bytes) = accounting.finish_with_max()?;

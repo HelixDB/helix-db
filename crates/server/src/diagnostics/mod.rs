@@ -34,8 +34,9 @@
 //!
 //! An [`Audit`] reads stored data rather than the setup, so it runs only
 //! when a request names it (`GET /v2/diagnostics?audit=labels`) and adds its
-//! check after the others. It changes nothing either, and leaves the block
-//! cache to queries.
+//! check after the others. It changes nothing either, leaves the block cache
+//! to queries, and runs one at a time: requests that arrive while one runs
+//! share its check ([`AuditFlight`]).
 
 mod aws;
 mod backing;
@@ -219,6 +220,34 @@ impl FactCache {
     }
 }
 
+/// The newest label audit's check and when it finished. Audits run one at a
+/// time, and a request that waited while one ran takes its check, so
+/// concurrent requests read the store once.
+#[derive(Default)]
+pub(crate) struct AuditFlight(tokio::sync::Mutex<Option<(tokio::time::Instant, Check)>>);
+
+impl AuditFlight {
+    /// The check of an audit that finished after `asked`, or the one `audit`
+    /// yields.
+    async fn get(
+        &self,
+        asked: tokio::time::Instant,
+        audit: impl std::future::Future<Output = Check>,
+    ) -> Check {
+        let mut last = self.0.lock().await;
+        let shared = last
+            .as_ref()
+            .filter(|(finished, _)| *finished >= asked)
+            .map(|(_, check)| check.clone());
+        let Some(check) = shared else {
+            let check = audit.await;
+            *last = Some((tokio::time::Instant::now(), check.clone()));
+            return check;
+        };
+        check
+    }
+}
+
 /// Gathers the [`Facts`] for `storage`: filesystem facts on a blocking
 /// thread, network probes concurrently, each bounded by its own timeout.
 async fn gather(storage: &StorageConfig, db: &db::HelixDB) -> Facts {
@@ -290,6 +319,7 @@ pub(crate) enum Audit {
 /// Runs every check that applies to `state`'s storage, then `audit` when
 /// one is asked for.
 pub(crate) async fn report(state: &ServerState, audit: Option<Audit>) -> Report {
+    let asked = tokio::time::Instant::now();
     let storage = state.storage();
     let db = state.db();
     let facts = state.diagnostic_facts().get(gather(storage, db)).await;
@@ -323,10 +353,19 @@ pub(crate) async fn report(state: &ServerState, audit: Option<Audit>) -> Report 
         Some(missing_indexes(&insights)),
         Some(unbounded_scans(&insights)),
         match audit {
-            Some(Audit::Labels) => Some(label_bitmaps(
-                db.audit_label_bitmaps(db::encoding::v2::keys::scope::DataScope::LegacyUnscoped)
+            Some(Audit::Labels) => Some(
+                state
+                    .label_audits()
+                    .get(asked, async {
+                        label_bitmaps(
+                            db.audit_label_bitmaps(
+                                db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                            )
+                            .await,
+                        )
+                    })
                     .await,
-            )),
+            ),
             None => None,
         },
     ]

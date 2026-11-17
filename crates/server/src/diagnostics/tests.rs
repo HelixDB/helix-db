@@ -1123,7 +1123,53 @@ async fn the_label_bitmap_audit_runs_only_when_asked_for() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+            .unwrap();
+    assert_eq!(body["error"], "invalid_request_option", "{body}");
     db.close().await.unwrap();
+}
+
+/// Audits run one at a time, and requests that waited while one ran share
+/// its check rather than reading the store again; a request after it ended
+/// runs its own.
+#[tokio::test]
+async fn concurrent_label_audits_read_the_store_once() {
+    async fn audited(
+        runs: &std::sync::atomic::AtomicU32,
+        wait: impl std::future::Future<Output = ()>,
+    ) -> Check {
+        runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        wait.await;
+        label_bitmaps(Ok(db::index_lifecycle::LabelBitmapAudit::default()))
+    }
+    let flight = AuditFlight::default();
+    let runs = std::sync::atomic::AtomicU32::new(0);
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let asked = tokio::time::Instant::now();
+    let first = flight.get(
+        asked,
+        audited(&runs, async { released.await.expect("the audit is released") }),
+    );
+    let second = async {
+        tokio::task::yield_now().await;
+        flight
+            .get(asked, audited(&runs, std::future::ready(())))
+            .await
+    };
+    let releasing = async {
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        release.send(()).expect("the first audit waits");
+    };
+    let (first, second, ()) = tokio::join!(first, second, releasing);
+    assert_eq!(first, second);
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let later = tokio::time::Instant::now() + Duration::from_secs(1);
+    flight
+        .get(later, audited(&runs, std::future::ready(())))
+        .await;
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

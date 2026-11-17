@@ -3729,7 +3729,10 @@ any other step, build the branch from a traversal's steps:
 Page type: Guide
 
 Secondary indexes narrow node or edge sources by property. Index creation is
-asynchronous and includes existing data through a durable backfill.
+asynchronous and includes existing data through a durable backfill. A backfill
+(of a secondary, text, or vector index) reads only the rows of its label, through
+the label's membership set, so its time follows the label's size rather than the
+graph's.
 
 ## Index families
 

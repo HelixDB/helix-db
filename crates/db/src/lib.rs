@@ -2401,7 +2401,8 @@ impl HelixDB {
     ) -> Result<index_lifecycle::LabelBitmapAudit> {
         match self.storage() {
             HelixStorage::Reader(reader) => {
-                index_lifecycle::label_audit::audit(reader.as_ref(), scope).await
+                let snapshot = reader.snapshot().await?;
+                index_lifecycle::label_audit::audit(snapshot.as_ref(), scope).await
             }
             HelixStorage::Writer(writer) => {
                 let snapshot = writer.db().snapshot().await?;
