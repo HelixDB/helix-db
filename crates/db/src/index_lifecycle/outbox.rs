@@ -531,9 +531,12 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
         limits: SearchIndexBatchLimits,
     ) -> Result<IndexOperationStepExecution>;
 
-    /// Applies disposable runtime cleanup only after the staged step is durable.
+    /// Applies disposable runtime cleanup once the staged step committed.
     ///
-    /// This hook must not write database state. Its default is intentionally a
+    /// It runs after every progressed, blocked or completed step, including a
+    /// driver failure recorded as a blocker; a progressed step's commit is
+    /// applied but may not be durable yet. This hook must not write database
+    /// state. Its default is intentionally a
     /// no-op; vector cleanup uses it to forget a process-local retirement fence
     /// only after the canonical `Dropped` transition has committed, and vector
     /// builds use it to retain planning state the committed step returned.
@@ -1310,7 +1313,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         Err(error) => {
             prepared.discard().await?;
             if driver_failed {
-                return record_driver_failure(db, claimed, error, now_unix_millis, started)
+                return record_driver_failure(db, claimed, driver, error, now_unix_millis, started)
                     .await
                     .map(ExecutedOperationStep::released);
             }
@@ -1398,9 +1401,12 @@ pub(crate) async fn execute_claimed_step_with_evidence(
 /// Records failures only after failed preparation and staging have been discarded.
 /// The exact claim is rechecked in a fresh serializable transaction so a stale
 /// worker cannot block an operation that another writer or an abort has advanced.
+/// A failure recorded as a blocker reaches the driver's
+/// [`IndexOperationDriver::after_commit`] like any other blocked step.
 async fn record_driver_failure(
     db: &Db,
     claimed: &ClaimedOperation,
+    driver: &dyn IndexOperationDriver,
     error: HelixDbError,
     now_unix_millis: u64,
     started: Instant,
@@ -1458,6 +1464,15 @@ async fn record_driver_failure(
         )?;
         transaction.delete(global_operation_key(next.operation_id()))?;
         transaction.commit().await?;
+        driver
+            .after_commit(
+                claimed.scope,
+                &index,
+                &claimed.record,
+                CommittedOperationStep::Blocked,
+                None,
+            )
+            .await;
         CommittedOperationStep::Blocked
     };
     Ok(CommittedOperationStepEvidence {
@@ -2208,6 +2223,8 @@ mod tests {
     struct FailingDriver {
         mode: FailureMode,
         probe_key: Bytes,
+        /// Outcomes [`IndexOperationDriver::after_commit`] saw.
+        committed: std::sync::Mutex<Vec<CommittedOperationStep>>,
     }
 
     #[async_trait]
@@ -2241,6 +2258,17 @@ mod tests {
                 ));
             }
             Ok(Box::new(()))
+        }
+
+        async fn after_commit(
+            &self,
+            _scope: DataScope,
+            _index: &IndexRecordV2,
+            _operation: &IndexOperationRecord,
+            committed: CommittedOperationStep,
+            _state: Option<CommittedStepState>,
+        ) {
+            self.committed.lock().unwrap().push(committed);
         }
 
         async fn step(
@@ -2373,19 +2401,31 @@ mod tests {
             .unwrap();
             let probe_key = scoped_index_key(scope, &index);
             let before = db.get(&probe_key).await.unwrap();
+            let driver = FailingDriver {
+                mode,
+                probe_key: probe_key.clone(),
+                committed: std::sync::Mutex::default(),
+            };
             let result = execute_claimed_step(
                 &db,
                 &claimed,
-                &FailingDriver {
-                    mode,
-                    probe_key: probe_key.clone(),
-                },
+                &driver,
                 SearchIndexBackfillLimits::default().batch(),
                 0,
             )
             .await
             .unwrap();
             assert_eq!(result, expected);
+            assert_eq!(
+                *driver.committed.lock().unwrap(),
+                match expected {
+                    CommittedOperationStep::Blocked => vec![CommittedOperationStep::Blocked],
+                    CommittedOperationStep::Progressed
+                    | CommittedOperationStep::TransientFailure
+                    | CommittedOperationStep::Completed => Vec::new(),
+                },
+                "a failure recorded as a blocker reaches the driver like a blocked step"
+            );
             assert_eq!(
                 db.get(probe_key).await.unwrap(),
                 before,
@@ -2483,11 +2523,16 @@ mod tests {
                 slatedb::CloseReason::Fenced,
             )),
         ] {
-            assert!(
-                record_driver_failure(&db, &claimed, error, 0, Instant::now())
-                    .await
-                    .is_err()
-            );
+            assert!(record_driver_failure(
+                &db,
+                &claimed,
+                &StaticDriver(IndexOperationStepResult::TransientFailure),
+                error,
+                0,
+                Instant::now()
+            )
+            .await
+            .is_err());
             assert_eq!(
                 db.get(scoped_operation_key(scope, operation.operation_id()))
                     .await
@@ -2506,6 +2551,7 @@ mod tests {
             record_driver_failure(
                 &db,
                 &claimed,
+                &StaticDriver(IndexOperationStepResult::TransientFailure),
                 corruption("stale failure"),
                 0,
                 Instant::now()
@@ -3646,6 +3692,7 @@ mod tests {
                 &FailingDriver {
                     mode: FailureMode::StorageUnavailable,
                     probe_key: Bytes::from_static(b"outbox-commit-conflict-probe"),
+                    committed: std::sync::Mutex::default(),
                 },
             ),
             (
@@ -3654,6 +3701,7 @@ mod tests {
                 &FailingDriver {
                     mode: FailureMode::Conflict,
                     probe_key: Bytes::from_static(b"outbox-commit-conflict-probe"),
+                    committed: std::sync::Mutex::default(),
                 },
             ),
         ];

@@ -55,8 +55,8 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result, SecondaryIndexValueError};
 use crate::index_lifecycle::outbox::{
-    IndexOperationDriver, IndexOperationStepExecution, IndexOperationStepPermit,
-    IndexOperationStepResult, PreparedIndexOperationStep,
+    CommittedOperationStep, CommittedStepState, IndexOperationDriver, IndexOperationStepExecution,
+    IndexOperationStepPermit, IndexOperationStepResult, PreparedIndexOperationStep,
 };
 use crate::index_lifecycle::repository::ReaderStorageCompatibility;
 use crate::index_lifecycle::work::{
@@ -1449,6 +1449,29 @@ impl IndexOperationDriver for SecondaryIndexDriver {
             )),
         }?;
         Ok(IndexOperationStepExecution::new(result))
+    }
+
+    /// Drops a blocked build's delta ledger: the build waits for a retry or
+    /// an abort, while writes would keep growing a ledger nothing observes.
+    /// A retried build starts again from one scan of its prefix.
+    async fn after_commit(
+        &self,
+        scope: DataScope,
+        _index: &IndexRecordV2,
+        operation: &IndexOperationRecord,
+        committed: CommittedOperationStep,
+        _state: Option<CommittedStepState>,
+    ) {
+        if committed != CommittedOperationStep::Blocked {
+            return;
+        }
+        self.scope_gates
+            .delta_ledgers()
+            .forget(delta_ledger::DeltaGeneration {
+                scope,
+                index_id: operation.index_id(),
+                generation: operation.generation(),
+            });
     }
 }
 
@@ -9945,6 +9968,95 @@ mod tests {
             "{:?}",
             blocked.execution_state()
         );
+        db.close().await.expect("secondary test database closes");
+    }
+
+    /// A build blocked in catch-up drops its delta ledger, so writes while it
+    /// waits for a retry grow nothing; the retried build starts again from
+    /// one scan and converges to the source.
+    #[tokio::test]
+    async fn a_blocked_build_drops_its_ledger() {
+        let db = test_db("secondary-ledger-blocked").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_unique_equality("User", "email")
+                .expect("unique definition"),
+        );
+        let mut sources = BTreeMap::new();
+        for entity_id in 0..3 {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 3).await;
+        let ledger = delta_ledger::DeltaGeneration {
+            scope,
+            index_id,
+            generation,
+        };
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
+        // A writer that predates write-time uniqueness leaves a duplicate.
+        let duplicate = sources[&2].clone();
+        legacy_building_write(
+            &db,
+            &driver,
+            scope,
+            &definition,
+            index_id,
+            generation,
+            1,
+            &sources[&1],
+            &duplicate,
+        )
+        .await;
+        sources.insert(1, duplicate);
+        // Catch-up observes the duplicate's delta through a new ledger and
+        // its gated drain blocks on it.
+        assert_eq!(
+            drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Blocked
+        );
+        assert!(matches!(
+            read_operation(&db, scope, operation_id)
+                .await
+                .expect("blocked operation is readable")
+                .expect("blocked operation exists")
+                .execution_state(),
+            IndexOperationExecutionState::Blocked(
+                IndexOperationBlocker::UniquenessViolation { .. }
+            )
+        ));
+        assert_eq!(driver.scope_gates.delta_ledgers().snapshot(ledger), None);
+
+        let repaired = user_properties("repaired-1@example.com");
+        mutate_source(
+            &db,
+            &driver,
+            scope,
+            IndexElementKind::Node,
+            1,
+            &sources[&1],
+            &repaired,
+        )
+        .await
+        .expect("the duplicate is repaired while the build is blocked");
+        sources.insert(1, repaired);
+        assert_eq!(
+            driver.scope_gates.delta_ledgers().snapshot(ledger),
+            None,
+            "writes to a blocked build grow no ledger"
+        );
+        crate::index_lifecycle::outbox::retry_operation(&db, scope, operation_id)
+            .await
+            .expect("the blocked build retries at its checkpoint");
+        assert_eq!(
+            drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
         db.close().await.expect("secondary test database closes");
     }
 

@@ -33,8 +33,18 @@
 //!
 //! The ledger lives only in memory. A restarted process, or a generation
 //! whose ledger was dropped, starts again from one scan of the whole prefix.
+//!
+//! # Memory
+//!
+//! A ledger lives from its generation's first observation until activation,
+//! a block, an abort or cleanup drops it, and each key costs about two
+//! hundred bytes. One ledger is dropped once it holds more than
+//! [`LEDGER_CAPACITY`] keys, and the largest are dropped while all of them
+//! together hold more than [`LEDGERS_CAPACITY`], so a database handle never
+//! holds more than about 50 MB of ledgers. Dropping one only costs its
+//! generation one scan of its prefix.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{btree_map, BTreeMap, HashMap};
 use std::ops::Bound;
 
 use bytes::Bytes;
@@ -51,10 +61,16 @@ use crate::index_lifecycle::{IndexGenerationId, IndexId};
 /// Observations read at most a few batches past the reach they count to, and
 /// verified keys leave the ledger once a drain deletes them, so a ledger
 /// grows past this only while writes add deltas much faster than the build
-/// drains them. Each key costs about a hundred bytes.
+/// drains them, or while its build waits for a worker.
 pub(super) const LEDGER_CAPACITY: usize = 1 << 16;
 
-/// Delta keys one multi-get verifies.
+/// Keys every ledger of one database handle may hold together before the
+/// largest are dropped, about 50 MB.
+pub(super) const LEDGERS_CAPACITY: usize = 4 * LEDGER_CAPACITY;
+
+/// Delta keys one multi-get verifies, and the most keys an observation
+/// copies out of the ledgers per lock: writers of every scope record under
+/// the same lock, so a large ledger is never copied in one hold.
 const VERIFY_CHUNK: usize = 1024;
 
 /// The building generation one ledger covers.
@@ -117,7 +133,6 @@ struct Observation {
     /// Keys recorded at or after this sequence were recorded after the
     /// observation began.
     began: u64,
-    candidates: Vec<Bytes>,
     unobserved: Unobserved,
 }
 
@@ -126,6 +141,39 @@ struct LedgerState {
     /// Orders records against observations; also numbers ledgers.
     next_sequence: u64,
     ledgers: HashMap<DeltaGeneration, Ledger>,
+    /// Keys across every ledger; at most [`LEDGERS_CAPACITY`] between calls.
+    keys: usize,
+}
+
+impl LedgerState {
+    /// Drops `generation`'s ledger, if any.
+    fn remove(&mut self, generation: &DeltaGeneration) {
+        let Some(ledger) = self.ledgers.remove(generation) else {
+            return;
+        };
+        self.keys -= ledger.keys.len();
+    }
+
+    /// Drops `generation`'s ledger if it outgrew [`LEDGER_CAPACITY`], then
+    /// the largest ledgers until all fit [`LEDGERS_CAPACITY`] together.
+    fn bound(&mut self, generation: &DeltaGeneration) {
+        if self
+            .ledgers
+            .get(generation)
+            .is_some_and(|ledger| ledger.keys.len() > LEDGER_CAPACITY)
+        {
+            self.remove(generation);
+        }
+        while self.keys > LEDGERS_CAPACITY {
+            let largest = *self
+                .ledgers
+                .iter()
+                .max_by_key(|(_, ledger)| ledger.keys.len())
+                .map(|(generation, _)| generation)
+                .expect("ledgers hold every counted key");
+            self.remove(&largest);
+        }
+    }
 }
 
 /// Every building secondary generation's ledger in one process.
@@ -190,36 +238,34 @@ impl DeltaLedgers {
             return;
         }
         let mut state = self.state.lock();
-        let LedgerState {
-            next_sequence,
-            ledgers,
-        } = &mut *state;
-        let sequence = *next_sequence;
-        *next_sequence = next_sequence.saturating_add(1);
+        let sequence = state.next_sequence;
+        state.next_sequence = sequence.saturating_add(1);
         for (generation, key) in staged.0 {
+            let LedgerState { ledgers, keys, .. } = &mut *state;
             let Some(ledger) = ledgers.get_mut(&generation) else {
                 continue;
             };
-            ledger.keys.insert(key, sequence);
-            if ledger.keys.len() > LEDGER_CAPACITY {
-                ledgers.remove(&generation);
+            if ledger.keys.insert(key, sequence).is_none() {
+                *keys += 1;
             }
+            state.bound(&generation);
         }
     }
 
     /// Drops `generation`'s ledger; its next observation scans the whole
     /// prefix again.
     pub(super) fn forget(&self, generation: DeltaGeneration) {
-        self.state.lock().ledgers.remove(&generation);
+        self.state.lock().remove(&generation);
     }
 
     /// Observes `generation`'s pending deltas outside any transaction, until
     /// they exceed `reach` or all are read, and advances its ledger.
     ///
     /// Creates the ledger on first use. The ledger's keys are verified by
-    /// point reads in key order, and the unobserved rest is scanned; deltas
-    /// the scan reads join the ledger, which then covers the prefix through
-    /// the last of them, or all of it once the scan reaches the end.
+    /// point reads in key order, a chunk at a time, and the unobserved rest
+    /// is scanned; deltas the scan reads join the ledger, which then covers
+    /// the prefix through the last of them, or all of it once the scan
+    /// reaches the end.
     pub(super) async fn observe(
         &self,
         db: &slatedb::Db,
@@ -230,17 +276,23 @@ impl DeltaLedgers {
         let observation = self.begin(generation);
         let mut observed = ObservedBacklog::default();
         let mut absent = Vec::new();
-        for chunk in observation.candidates.chunks(VERIFY_CHUNK) {
-            if observed.reached(limits, reach) {
+        let mut verified = None::<Bytes>;
+        while !observed.reached(limits, reach) {
+            let chunk = self.candidates(
+                &observation,
+                verified.as_ref().map_or(Bound::Unbounded, Bound::Excluded),
+            );
+            let Some(last) = chunk.last().cloned() else {
                 break;
-            }
-            let values = db.multi_get(chunk).await?;
-            for (key, value) in chunk.iter().zip(values) {
+            };
+            let values = db.multi_get(&chunk).await?;
+            for (key, value) in chunk.into_iter().zip(values) {
                 match value {
-                    Some(value) => observed.insert(key.clone(), value),
-                    None => absent.push(key.clone()),
+                    Some(value) => observed.insert(key, value),
+                    None => absent.push(key),
                 }
             }
+            verified = Some(last);
         }
         let mut scanned = Vec::new();
         let mut advanced = observation.unobserved.clone();
@@ -281,12 +333,13 @@ impl DeltaLedgers {
     }
 
     /// Opens an observation of `generation`, creating its ledger on first
-    /// use: the keys to verify, and where the scan of the rest starts.
+    /// use, and notes where the scan of the unobserved rest starts.
     fn begin(&self, generation: DeltaGeneration) -> Observation {
         let mut state = self.state.lock();
         let LedgerState {
             next_sequence,
             ledgers,
+            ..
         } = &mut *state;
         let ledger = ledgers.entry(generation).or_insert_with(|| {
             let id = *next_sequence;
@@ -303,9 +356,31 @@ impl DeltaLedgers {
             generation,
             ledger: ledger.id,
             began,
-            candidates: ledger.keys.keys().cloned().collect(),
             unobserved: ledger.unobserved.clone(),
         }
+    }
+
+    /// The next [`VERIFY_CHUNK`] keys of `observation`'s ledger after
+    /// `after`, in key order; none once that ledger was dropped.
+    ///
+    /// The ledger is read as it stands, so keys recorded since the
+    /// observation began are verified too, and keys another observation
+    /// forgot are skipped: those were read absent after their last record.
+    fn candidates(&self, observation: &Observation, after: Bound<&Bytes>) -> Vec<Bytes> {
+        let state = self.state.lock();
+        let Some(ledger) = state
+            .ledgers
+            .get(&observation.generation)
+            .filter(|ledger| ledger.id == observation.ledger)
+        else {
+            return Vec::new();
+        };
+        ledger
+            .keys
+            .range::<Bytes, _>((after, Bound::Unbounded))
+            .take(VERIFY_CHUNK)
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     /// Applies what `observation` read: the keys it read `absent`, the delta
@@ -327,7 +402,7 @@ impl DeltaLedgers {
         advanced: Unobserved,
     ) {
         let mut state = self.state.lock();
-        let LedgerState { ledgers, .. } = &mut *state;
+        let LedgerState { ledgers, keys, .. } = &mut *state;
         let Some(current) = ledgers
             .get_mut(&observation.generation)
             .filter(|current| current.id == observation.ledger)
@@ -341,17 +416,20 @@ impl DeltaLedgers {
                 .is_some_and(|recorded| *recorded < observation.began)
             {
                 current.keys.remove(&key);
+                *keys -= 1;
             }
         }
         for key in scanned {
-            current.keys.entry(key).or_insert(observation.began);
+            let btree_map::Entry::Vacant(vacant) = current.keys.entry(key) else {
+                continue;
+            };
+            vacant.insert(observation.began);
+            *keys += 1;
         }
         if current.unobserved == observation.unobserved {
             current.unobserved = advanced;
         }
-        if current.keys.len() > LEDGER_CAPACITY {
-            ledgers.remove(&observation.generation);
-        }
+        state.bound(&observation.generation);
     }
 
     /// The keys `generation`'s ledger holds and where its unobserved rest
@@ -370,6 +448,22 @@ impl DeltaLedgers {
                 },
             )
         })
+    }
+
+    /// The keys every ledger holds, checked against the running count.
+    #[cfg(test)]
+    fn key_count(&self) -> usize {
+        let state = self.state.lock();
+        assert_eq!(
+            state.keys,
+            state
+                .ledgers
+                .values()
+                .map(|ledger| ledger.keys.len())
+                .sum::<usize>(),
+            "the running key count matches the ledgers"
+        );
+        state.keys
     }
 }
 
@@ -653,5 +747,107 @@ mod tests {
         assert_eq!(ledgers.snapshot(generation()), None);
         record(&ledgers, [2]);
         assert_eq!(ledgers.snapshot(generation()), None);
+    }
+
+    /// Observations copy ledger keys a chunk at a time, so writers of other
+    /// scopes never wait on a copy of a whole ledger, and they verify every
+    /// key of a ledger far larger than one chunk, including keys recorded
+    /// after they began.
+    #[tokio::test]
+    async fn observations_copy_and_verify_large_ledgers_a_chunk_at_a_time() {
+        let db = super::super::tests::test_db("delta-ledger-chunks").await;
+        let ledgers = DeltaLedgers::default();
+        let limits = SearchIndexBackfillLimits::default().batch();
+        let entities = u64::try_from(2 * VERIFY_CHUNK + 5).expect("fits");
+        for entity_id in 0..entities {
+            put_delta(&db, entity_id).await;
+        }
+        assert_eq!(
+            observe(&ledgers, &db, limits, Reach::Complete).await,
+            keys(0..entities)
+        );
+
+        let observation = ledgers.begin(generation());
+        let first = ledgers.candidates(&observation, Bound::Unbounded);
+        assert_eq!(first, keys(0..1024), "one lock copies one chunk");
+        record(&ledgers, [entities + 1]);
+        let rest = std::iter::successors(Some(first), |chunk| {
+            let after = chunk.last()?;
+            Some(ledgers.candidates(&observation, Bound::Excluded(after)))
+                .filter(|next| !next.is_empty())
+        })
+        .skip(1)
+        .collect::<Vec<_>>();
+        assert!(rest.iter().all(|chunk| chunk.len() <= VERIFY_CHUNK));
+        assert_eq!(
+            rest.concat(),
+            keys((1024..entities).chain([entities + 1])),
+            "a key recorded after the observation began is verified too"
+        );
+        ledgers.finish(observation, Vec::new(), Vec::new(), Unobserved::Nothing);
+
+        for entity_id in (0..entities).step_by(2) {
+            delete_delta(&db, entity_id).await;
+        }
+        let pending = keys((1..entities).step_by(2));
+        assert_eq!(
+            observe(&ledgers, &db, limits, Reach::Complete).await,
+            pending
+        );
+        assert_eq!(ledgers.snapshot(generation()), Some((pending, None)));
+        assert_eq!(ledgers.key_count(), VERIFY_CHUNK + 2);
+        db.close().await.expect("test database closes");
+    }
+
+    /// All ledgers of one handle together stay within [`LEDGERS_CAPACITY`]:
+    /// growing past it drops the largest ledger, whatever generation grew.
+    #[test]
+    fn every_ledger_together_stays_within_the_handle_capacity() {
+        let ledgers = DeltaLedgers::default();
+        let generations = (1..=5)
+            .map(|index| DeltaGeneration {
+                index_id: IndexId::new(index).expect("positive index id"),
+                ..generation()
+            })
+            .collect::<Vec<_>>();
+        for generation in &generations {
+            let observation = ledgers.begin(*generation);
+            ledgers.finish(observation, Vec::new(), Vec::new(), Unobserved::Nothing);
+        }
+        let fill = |generation: DeltaGeneration, entity_ids: std::ops::Range<u64>| {
+            let mut staged = StagedBuildDeltas::default();
+            entity_ids.for_each(|entity_id| staged.push(generation, delta_key(entity_id)));
+            ledgers.record(staged);
+        };
+        let full = u64::try_from(LEDGER_CAPACITY).expect("fits");
+        fill(generations[0], 0..full);
+        fill(generations[1], 0..full - 1);
+        fill(generations[2], 0..full - 1);
+        fill(generations[3], 0..full - 1);
+        fill(generations[4], 0..3);
+        assert_eq!(ledgers.key_count(), LEDGERS_CAPACITY);
+        assert!(generations
+            .iter()
+            .all(|generation| ledgers.snapshot(*generation).is_some()));
+
+        fill(generations[4], 3..4);
+        assert_eq!(
+            ledgers.snapshot(generations[0]),
+            None,
+            "the largest ledger is dropped"
+        );
+        assert!(generations[1..]
+            .iter()
+            .all(|generation| ledgers.snapshot(*generation).is_some()));
+        assert_eq!(ledgers.key_count(), LEDGERS_CAPACITY + 1 - LEDGER_CAPACITY);
+
+        // Forgetting and observing keep the running count exact.
+        ledgers.forget(generations[1]);
+        let observation = ledgers.begin(generations[4]);
+        ledgers.finish(observation, keys(0..2), Vec::new(), Unobserved::Nothing);
+        assert_eq!(
+            ledgers.key_count(),
+            LEDGERS_CAPACITY + 1 - 2 * LEDGER_CAPACITY + 1 - 2
+        );
     }
 }
