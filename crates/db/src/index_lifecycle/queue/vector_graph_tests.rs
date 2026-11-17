@@ -49,13 +49,13 @@ use std::sync::Arc;
 
 use slatedb::IsolationLevel;
 
-use super::lifecycle_tests::{create, pause_when, scanned, set_tenant, wait_terminal};
+use super::lifecycle_tests::{create_held, pause_when, scanned, set_tenant, wait_terminal};
 use super::overlay_tests::{add, delete, update, vector_search, write};
 use super::publication::{PublicationOutcome, QueuePublisher};
 use super::soak_tests::{
     assert_vector_graph, env_or, partition, vector_namespaces, History, Namespace, Rng,
 };
-use super::tests::{open, publisher_with_limits, queue, queued, target};
+use super::tests::{open, publisher_with_limits, queue, queued};
 use super::QueueTarget;
 use crate::config::{
     DbConfig, IndexOperationQueueTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits,
@@ -390,9 +390,8 @@ async fn run(
         metric,
         Some("tenant"),
     );
-    let operation = create(&db, spec).await;
-    let target = target(&db, QueueFamily::Vector).await;
-    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 6).await;
+    let (operation, target, held) = create_held(&db, spec, QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 6).await;
     for _ in 0..6 {
         model.apply(&db, &mut rng).await;
     }
