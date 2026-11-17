@@ -212,7 +212,9 @@ A `date_time` parameter (or an array of them) is sent as an RFC3339 string and b
 on the server: UTC epoch milliseconds, with any offset applied and sub-millisecond digits dropped.
 It is stored, compared, and indexed exactly like a datetime literal or `now()`, so
 `2026-06-01T09:00:00+09:00` and `2026-06-01T00:00:00Z` are equal and range filters order by
-instant. Responses render datetimes as `YYYY-MM-DDTHH:MM:SS.sssZ`. Only a declared `date_time`
+instant. Responses render datetimes as `YYYY-MM-DDTHH:MM:SS.sssZ`, and
+[Cypher](/database/helix-db/query-guides/cypher#datetimes) and SQL read and render them the same
+way. Only a declared `date_time`
 turns a string into a datetime: an untyped parameter, a `value` or `string` parameter, and the
 fields of an `object` parameter (including `forEachParam` rows) keep RFC3339 text as a string.
 

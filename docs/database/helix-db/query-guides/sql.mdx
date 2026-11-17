@@ -401,10 +401,17 @@ must be a literal, since a computed one fails. `TRIM`, `LTRIM`, and `RTRIM`
 remove all surrounding whitespace, as Cypher's do, not only spaces. Other names
 pass through, so the [Cypher profile](/database/helix-db/query-guides/cypher#what-is-supported)
 decides which functions run. Some renames land on Cypher functions outside the
-profile and are rejected (`function`): `CURRENT_TIMESTAMP` and `NOW()` become
-`localdatetime()`, `CURRENT_DATE` `date()`, `CURRENT_TIME` `localtime()`, `ln`
-`log`, `ceiling` `ceil`, `random` `rand`, and `stddev` `stDev`. Pass the current
-time as a parameter instead.
+profile and are rejected (`function`): `CURRENT_DATE` becomes `date()`,
+`CURRENT_TIME` `localtime()`, `ln` `log`, `ceiling` `ceil`, `random` `rand`,
+and `stddev` `stDev`.
+
+Timestamps are Cypher's [UTC datetimes](/database/helix-db/query-guides/cypher#datetimes).
+`CURRENT_TIMESTAMP` and `NOW()` become `datetime()`, the statement's clock. A
+`TIMESTAMP '2026-06-01 09:00:00'` literal is a datetime, read as UTC unless the
+text has an offset, so it can bound a range index; text other than RFC 3339, a
+date and time, or a date is rejected (`sql_construct`). `CAST(x AS TIMESTAMP)`
+becomes `datetime(x)`, which, unlike the other casts, fails on text it cannot
+read. `DATE` and `TIME` literals are not supported.
 
 ## What is not supported
 
