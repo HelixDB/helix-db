@@ -232,7 +232,14 @@ async fn build_random_graph(
     // Rows above the bound write after the build's cut: a build leaves them
     // to their deltas, which this graph never has.
     for above in upper + 1..upper + 20 {
-        put_source(&db, scope, kind, above, &labelled(label, "late@example.com")).await;
+        put_source(
+            &db,
+            scope,
+            kind,
+            above,
+            &labelled(label, "late@example.com"),
+        )
+        .await;
     }
     let transaction = db
         .begin(IsolationLevel::Snapshot)
@@ -260,7 +267,11 @@ async fn build_random_graph(
     let mut claim_sequence = 1;
     let (scan_steps, end) =
         drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
-    assert_eq!(end, CommittedOperationStep::Completed, "{kind:?} seed {seed_value}");
+    assert_eq!(
+        end,
+        CommittedOperationStep::Completed,
+        "{kind:?} seed {seed_value}"
+    );
     assert!(scan_steps >= 1);
     sources.retain(|&id, _| id <= upper);
     assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources).await;
@@ -283,9 +294,8 @@ async fn an_edge_build_resumes_after_a_retired_pair_key_cursor() {
         put_source(&db, scope, edge, id, &properties).await;
         sources.insert(id, properties);
     }
-    let definition = validated(
-        SecondaryIndexDefinition::edge_equality("FOLLOWS", "email").expect("definition"),
-    );
+    let definition =
+        validated(SecondaryIndexDefinition::edge_equality("FOLLOWS", "email").expect("definition"));
     let ValidatedDynamicIndexDefinition::Secondary(secondary) = &definition else {
         unreachable!("secondary fixture")
     };
@@ -318,9 +328,17 @@ async fn an_edge_build_resumes_after_a_retired_pair_key_cursor() {
             .begin(IsolationLevel::SerializableSnapshot)
             .await
             .expect("step begins");
-        let result = scan_source(&db, &transaction, scope, &operation, secondary, &progress, limits)
-            .await
-            .expect("the step stages");
+        let result = scan_source(
+            &db,
+            &transaction,
+            scope,
+            &operation,
+            secondary,
+            &progress,
+            limits,
+        )
+        .await
+        .expect("the step stages");
         transaction.commit().await.expect("the step commits");
         steps += 1;
         match progressed_stage(&result) {
@@ -333,9 +351,7 @@ async fn an_edge_build_resumes_after_a_retired_pair_key_cursor() {
     assert_eq!(steps, 4);
     let expected = sources
         .iter()
-        .filter(|(id, properties)| {
-            **id > 17 && properties[0].value.as_str() == Some("FOLLOWS")
-        })
+        .filter(|(id, properties)| **id > 17 && properties[0].value.as_str() == Some("FOLLOWS"))
         .map(|(id, _)| *id)
         .collect::<BTreeSet<_>>();
     assert_eq!(expected.len(), 16);

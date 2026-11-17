@@ -4716,9 +4716,13 @@ mod tests {
         )
         .expect("step limits validate");
         for label in labels {
-            let runtime =
-                VectorIndexDefinition::new_node(label, "embedding", 3, VectorDistanceMetric::Euclidean)
-                    .expect("vector definition validates");
+            let runtime = VectorIndexDefinition::new_node(
+                label,
+                "embedding",
+                3,
+                VectorDistanceMetric::Euclidean,
+            )
+            .expect("vector definition validates");
             let definition = ValidatedDynamicIndexDefinition::Vector(
                 ValidatedVectorIndexDefinition::try_from_runtime(&runtime)
                     .expect("V2 vector definition validates"),
