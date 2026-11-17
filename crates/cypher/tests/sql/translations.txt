@@ -896,3 +896,33 @@ SELECT q.name FROM Person p
 
 SELECT p.name FROM Person p, Person p
 => error: syntax_error variable_already_bound
+
+# HelixDB: a TIMESTAMP literal is a UTC datetime, CURRENT_TIMESTAMP the statement clock
+SELECT e.seq FROM Event e WHERE e.at >= TIMESTAMP '2024-01-01 10:00:00' AND e.at < CURRENT_TIMESTAMP
+=> MATCH (e:Event) WHERE e.at >= datetime('2024-01-01T10:00:00.000Z') AND e.at < datetime() RETURN e.seq
+
+# HelixDB: a time zone in a TIMESTAMP literal is applied, then normalized to UTC
+SELECT TIMESTAMP WITH TIME ZONE '2024-01-01T10:00:00+02:00', TIMESTAMP '2024-01-01'
+=> RETURN datetime('2024-01-01T08:00:00.000Z'), datetime('2024-01-01T00:00:00.000Z')
+
+# HelixDB: casts to TIMESTAMP and NOW() are Cypher's datetime
+SELECT CAST(e.at AS TIMESTAMP), CAST('2024-01-01T00:00:00+02:00' AS TIMESTAMP), NOW() FROM Event e
+=> MATCH (e:Event) RETURN datetime(e.at), datetime('2024-01-01T00:00:00+02:00'), datetime()
+
+# HelixDB: an unreadable TIMESTAMP literal fails translation
+SELECT TIMESTAMP 'yesterday'
+=> error: argument_error invalid_datetime
+
+# HelixDB: a cast of unreadable text fails when the translation compiles
+SELECT CAST('yesterday' AS TIMESTAMP)
+=> RETURN datetime('yesterday')
+!! argument_error invalid_datetime
+
+# HelixDB: dates and times of day have no type yet
+SELECT CURRENT_DATE
+=> RETURN date()
+!! unsupported_feature function
+
+# HelixDB: date literals have no type yet
+SELECT DATE '2024-01-01'
+=> error: unsupported_feature sql_construct
