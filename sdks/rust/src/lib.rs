@@ -1543,11 +1543,52 @@ mod tests {
             declared_and_reparsed(&q_rows(Vec::new()).unwrap(), "rows"),
             QueryParamType::Array(Box::new(QueryParamType::Object))
         );
-        // One array declares one row type, so rows that need different ones
-        // fail instead of sending a datetime as text.
+        // A datetime column that is null in some rows is declared nullable,
+        // so the other rows still store datetimes.
+        let nullable_row = fields(vec![
+            (
+                "at",
+                QueryParamType::Nullable(Box::new(QueryParamType::DateTime)),
+            ),
+            ("name", QueryParamType::Value),
+        ]);
+        let nullable_at = QueryParamType::Array(Box::new(nullable_row.clone()));
+        for rows in [
+            vec![row("a", Some(0)), row("b", None)],
+            vec![row("a", None), row("b", Some(0)), row("c", None)],
+        ] {
+            let request = q_rows(rows).unwrap();
+            assert_eq!(declared_and_reparsed(&request, "rows"), nullable_at);
+        }
+        // An empty array fits any element type, in either order.
+        let tagged = |tags: Vec<PropertyValue>| {
+            let mut row = row("a", Some(0));
+            row.insert("tags".to_string(), PropertyValue::array(tags));
+            row
+        };
+        let tagged_type = QueryParamType::Array(Box::new(fields(vec![
+            ("at", QueryParamType::DateTime),
+            ("name", QueryParamType::Value),
+            (
+                "tags",
+                QueryParamType::Array(Box::new(QueryParamType::DateTime)),
+            ),
+        ])));
+        for rows in [
+            vec![tagged(Vec::new()), tagged(vec![PropertyValue::DateTime(1)])],
+            vec![tagged(vec![PropertyValue::DateTime(1)]), tagged(Vec::new())],
+        ] {
+            let request = q_rows(rows).unwrap();
+            assert_eq!(declared_and_reparsed(&request, "rows"), tagged_type);
+        }
+        // Rows needing declarations no one type holds fail instead of
+        // sending a datetime as text, naming the rows before them.
+        let mut text = row("b", None);
+        text.insert("at".to_string(), PropertyValue::from("2026-07-28"));
         assert!(matches!(
-            q_rows(vec![row("a", Some(0)), row("b", None)]),
-            Err(QueryError::ParameterTypeMismatch { path, .. }) if path == "rows[1]"
+            q_rows(vec![row("a", Some(0)), row("c", None), text]),
+            Err(QueryError::ParameterTypeMismatch { path, expected, .. })
+                if path == "rows[2]" && expected == nullable_row
         ));
         let mut extra = row("c", Some(0));
         extra.insert("seen".to_string(), PropertyValue::DateTime(0));

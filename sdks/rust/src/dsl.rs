@@ -91,95 +91,169 @@ pub mod __private {
     /// datetimes inside an untyped `value` or `object` declaration is declared
     /// with the narrowest type that keeps each one a datetime: objects with
     /// their fields (`value` for fields without datetimes) and arrays with
-    /// their one element type. A value holding no datetime keeps `declared`.
+    /// one element type that fits every element. A position holding a
+    /// datetime in some elements and `null` in others is declared
+    /// `{"nullable": ...}`, and an empty array fits any element type. A value
+    /// holding no datetime keeps `declared`.
     ///
     /// # Errors
     ///
-    /// [`crate::QueryError::ParameterTypeMismatch`] for an array whose
-    /// elements need different declarations, such as rows with different
-    /// fields or a datetime in one row and `null` in another, since one array
-    /// declares one element type.
+    /// [`crate::QueryError::ParameterTypeMismatch`] at the first array element
+    /// no single element type fits together with the elements before it, such
+    /// as rows with different fields, or a datetime in one row and text in
+    /// another.
     pub fn declared_type(
         declared: crate::QueryParamType,
         value: &crate::QueryValue,
         name: &str,
     ) -> Result<crate::QueryParamType, crate::QueryError> {
+        /// What a value needs from its declaration, joined across the
+        /// elements of an array.
+        #[derive(Debug, PartialEq)]
+        enum Shape<'v> {
+            /// The elements of an empty array, which fit any declaration.
+            Unconstrained,
+            /// `null`, which fits `value` and any nullable type.
+            Null,
+            /// A value without datetimes, which `value` keeps as sent.
+            Plain,
+            DateTime,
+            Array(Box<Shape<'v>>),
+            Object(BTreeMap<&'v str, Shape<'v>>),
+            /// `null` in some elements and this shape in the others.
+            Nullable(Box<Shape<'v>>),
+        }
         #[derive(Clone, Copy)]
         enum Segment<'v> {
             Index(usize),
             Field(&'v str),
         }
-        fn datetime_type<'v>(
+        /// The declaration a shape needs, or `None` when it holds no datetime.
+        fn lower(shape: &Shape<'_>) -> Option<crate::QueryParamType> {
+            match shape {
+                Shape::Unconstrained | Shape::Null | Shape::Plain => None,
+                Shape::DateTime => Some(crate::QueryParamType::DateTime),
+                Shape::Array(element) => {
+                    lower(element).map(|ty| crate::QueryParamType::Array(Box::new(ty)))
+                }
+                Shape::Nullable(inner) => {
+                    lower(inner).map(|ty| crate::QueryParamType::Nullable(Box::new(ty)))
+                }
+                Shape::Object(fields) => {
+                    let types = fields
+                        .iter()
+                        .map(|(field, shape)| (*field, lower(shape)))
+                        .collect::<Vec<_>>();
+                    if types.iter().all(|(_, ty)| ty.is_none()) {
+                        return None;
+                    }
+                    let fields =
+                        crate::ObjectFields::new(types.into_iter().map(|(field, ty)| {
+                            (field, ty.unwrap_or(crate::QueryParamType::Value))
+                        }))
+                        .expect("an object's field names are distinct and at least one is typed");
+                    Some(crate::QueryParamType::Record(fields))
+                }
+            }
+        }
+        /// The shape both `a` and `b` fit, or `None` when no declaration
+        /// holds both.
+        fn join<'v>(a: Shape<'v>, b: Shape<'v>) -> Option<Shape<'v>> {
+            match (a, b) {
+                (Shape::Unconstrained, other) | (other, Shape::Unconstrained) => Some(other),
+                (a, b) if a == b => Some(a),
+                (Shape::Null, Shape::Nullable(inner)) | (Shape::Nullable(inner), Shape::Null) => {
+                    Some(Shape::Nullable(inner))
+                }
+                (Shape::Null, other) | (other, Shape::Null) => {
+                    Some(Shape::Nullable(Box::new(other)))
+                }
+                (Shape::Nullable(a), Shape::Nullable(b)) => {
+                    join(*a, *b).map(|inner| Shape::Nullable(Box::new(inner)))
+                }
+                (Shape::Nullable(a), other) | (other, Shape::Nullable(a)) => {
+                    join(*a, other).map(|inner| Shape::Nullable(Box::new(inner)))
+                }
+                (Shape::Array(a), Shape::Array(b)) => {
+                    join(*a, *b).map(|element| Shape::Array(Box::new(element)))
+                }
+                (Shape::Object(a), Shape::Object(b)) if a.keys().eq(b.keys()) => a
+                    .into_iter()
+                    .zip(b.into_values())
+                    .map(|((field, a), b)| join(a, b).map(|shape| (field, shape)))
+                    .collect::<Option<BTreeMap<_, _>>>()
+                    .map(Shape::Object),
+                // Differing shapes fit `value` together unless one needs a
+                // datetime declared.
+                (a, b) => (lower(&a).is_none() && lower(&b).is_none()).then_some(Shape::Plain),
+            }
+        }
+        fn shape<'v>(
             value: &'v crate::QueryValue,
             name: &str,
             segments: &mut Vec<Segment<'v>>,
-        ) -> Result<Option<crate::QueryParamType>, crate::QueryError> {
+        ) -> Result<Shape<'v>, crate::QueryError> {
             match value {
-                crate::QueryValue::DateTime(_) => Ok(Some(crate::QueryParamType::DateTime)),
-                crate::QueryValue::Object(fields) => {
-                    let types = fields
-                        .iter()
-                        .map(|(field, value)| {
-                            segments.push(Segment::Field(field));
-                            let ty = datetime_type(value, name, segments);
-                            segments.pop();
-                            ty.map(|ty| (field.as_str(), ty))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    if types.iter().all(|(_, ty)| ty.is_none()) {
-                        return Ok(None);
-                    }
-                    crate::ObjectFields::new(
-                        types
-                            .into_iter()
-                            .map(|(field, ty)| (field, ty.unwrap_or(crate::QueryParamType::Value))),
-                    )
-                    .map(|fields| Some(crate::QueryParamType::Record(fields)))
-                }
-                crate::QueryValue::Array(values) => {
-                    let mut element = None;
-                    for (index, value) in values.iter().enumerate() {
-                        segments.push(Segment::Index(index));
-                        let ty = datetime_type(value, name, segments)?;
-                        match &element {
-                            None => element = Some(ty),
-                            Some(first) if *first == ty => {}
-                            Some(first) => {
-                                let path =
-                                    segments.iter().fold(name.to_owned(), |mut path, segment| {
-                                        match segment {
-                                            Segment::Index(index) => {
-                                                path.push_str(&format!("[{index}]"))
-                                            }
-                                            Segment::Field(field) => {
-                                                path.push('.');
-                                                path.push_str(field);
-                                            }
-                                        }
-                                        path
-                                    });
-                                return Err(crate::QueryError::ParameterTypeMismatch {
-                                    path,
-                                    expected: first.clone().unwrap_or(crate::QueryParamType::Value),
-                                    actual: "a value of another shape",
-                                });
-                            }
-                        }
-                        segments.pop();
-                    }
-                    Ok(element
-                        .flatten()
-                        .map(|ty| crate::QueryParamType::Array(Box::new(ty))))
-                }
-                crate::QueryValue::Null
-                | crate::QueryValue::Bool(_)
+                crate::QueryValue::DateTime(_) => Ok(Shape::DateTime),
+                crate::QueryValue::Null => Ok(Shape::Null),
+                crate::QueryValue::Bool(_)
                 | crate::QueryValue::I64(_)
                 | crate::QueryValue::F64(_)
                 | crate::QueryValue::F32(_)
-                | crate::QueryValue::String(_) => Ok(None),
+                | crate::QueryValue::String(_) => Ok(Shape::Plain),
+                crate::QueryValue::Object(fields) => fields
+                    .iter()
+                    .map(|(field, value)| {
+                        segments.push(Segment::Field(field));
+                        let field_shape = shape(value, name, segments);
+                        segments.pop();
+                        field_shape.map(|field_shape| (field.as_str(), field_shape))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()
+                    .map(Shape::Object),
+                crate::QueryValue::Array(values) => values
+                    .iter()
+                    .enumerate()
+                    .try_fold(Shape::Unconstrained, |joined, (index, value)| {
+                        segments.push(Segment::Index(index));
+                        let element = shape(value, name, segments)?;
+                        let Some(joined) = join(joined, element) else {
+                            // Rebuilt only for the error: the elements
+                            // before this one fit one shape.
+                            let expected = values[..index]
+                                .iter()
+                                .try_fold(Shape::Unconstrained, |joined, value| {
+                                    join(joined, shape(value, name, &mut Vec::new()).ok()?)
+                                })
+                                .as_ref()
+                                .and_then(lower)
+                                .unwrap_or(crate::QueryParamType::Value);
+                            let path =
+                                segments.iter().fold(name.to_owned(), |mut path, segment| {
+                                    match segment {
+                                        Segment::Index(index) => {
+                                            path.push_str(&format!("[{index}]"))
+                                        }
+                                        Segment::Field(field) => {
+                                            path.push('.');
+                                            path.push_str(field);
+                                        }
+                                    }
+                                    path
+                                });
+                            return Err(crate::QueryError::ParameterTypeMismatch {
+                                path,
+                                expected,
+                                actual: "a value of another shape",
+                            });
+                        };
+                        segments.pop();
+                        Ok(joined)
+                    })
+                    .map(|element| Shape::Array(Box::new(element))),
             }
         }
-        Ok(datetime_type(value, name, &mut Vec::new())?.unwrap_or(declared))
+        Ok(lower(&shape(value, name, &mut Vec::new())?).unwrap_or(declared))
     }
 }
 

@@ -582,7 +582,8 @@ fn assert_complete_fixture_coverage(coverage: &FixtureCoverage) {
         "QueryParamType",
         &coverage.query_param_types,
         &[
-            "Bool", "I64", "F64", "F32", "String", "DateTime", "Value", "Object", "Record", "Array",
+            "Bool", "I64", "F64", "F32", "String", "DateTime", "Value", "Object", "Record",
+            "Array", "Nullable",
         ],
     );
     assert_variants(
@@ -1459,6 +1460,10 @@ fn visit_query_param_type(param_type: &QueryParamType, coverage: &mut FixtureCov
         }
         QueryParamType::Array(inner) => {
             coverage.query_param_types.insert("Array");
+            visit_query_param_type(inner, coverage);
+        }
+        QueryParamType::Nullable(inner) => {
+            coverage.query_param_types.insert("Nullable");
             visit_query_param_type(inner, coverage);
         }
     }
@@ -2841,6 +2846,13 @@ fn json_only_fixtures() -> Vec<Fixture> {
                             ("nested", object(vec![("flag", QueryValue::Bool(true))])),
                         ]),
                     ),
+                    (
+                        "nullable",
+                        array(vec![
+                            object(vec![("at", QueryValue::Null)]),
+                            object(vec![("at", string("2026-06-01T05:00:00+09:00"))]),
+                        ]),
+                    ),
                 ],
                 vec![
                     ("null", QueryParamType::Value),
@@ -2869,6 +2881,16 @@ fn json_only_fixtures() -> Vec<Fixture> {
                             ])
                             .expect("distinct fields"),
                         ),
+                    ),
+                    (
+                        "nullable",
+                        QueryParamType::Array(Box::new(QueryParamType::Record(
+                            ObjectFields::new([(
+                                "at",
+                                QueryParamType::Nullable(Box::new(QueryParamType::DateTime)),
+                            )])
+                            .expect("one field"),
+                        ))),
                     ),
                 ],
             ),
