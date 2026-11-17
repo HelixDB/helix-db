@@ -329,7 +329,9 @@ async fn writes_racing_the_scan_converge() {
                 .await
             {
                 CommittedOperationStep::Progressed => {}
-                end => break end,
+                end @ (CommittedOperationStep::Completed
+                | CommittedOperationStep::Blocked
+                | CommittedOperationStep::TransientFailure) => break end,
             }
         };
         assert_eq!(end, CommittedOperationStep::Completed);
