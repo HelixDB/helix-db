@@ -1124,8 +1124,7 @@ async fn the_label_bitmap_audit_runs_only_when_asked_for() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-            .unwrap();
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["error"], "invalid_request_option", "{body}");
     db.close().await.unwrap();
 }
@@ -1149,7 +1148,9 @@ async fn concurrent_label_audits_read_the_store_once() {
     let asked = tokio::time::Instant::now();
     let first = flight.get(
         asked,
-        audited(&runs, async { released.await.expect("the audit is released") }),
+        audited(&runs, async {
+            released.await.expect("the audit is released")
+        }),
     );
     let second = async {
         tokio::task::yield_now().await;

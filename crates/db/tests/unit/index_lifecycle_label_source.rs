@@ -260,12 +260,7 @@ async fn a_step_reads_about_its_input_byte_limit() {
     }
     let read = snapshot(&db).await;
     // Small rows: the first chunk measures them, the next fills the limit.
-    let step_read = admit(
-        &read,
-        &progress(scope, node, None, 999),
-        limits(1024, 4096),
-    )
-    .await;
+    let step_read = admit(&read, &progress(scope, node, None, 999), limits(1024, 4096)).await;
     assert_eq!(
         step_read.ids,
         (0..step_read.ids.len() as u64).collect::<Vec<_>>()
@@ -331,8 +326,12 @@ async fn large_rows_read_about_one_limit_per_step() {
         let mut after = None;
         let mut steps = 0;
         while after != Some(47) {
-            let step_read =
-                admit(&read, &progress(scope, node, after, 47), limits(1024, LIMIT)).await;
+            let step_read = admit(
+                &read,
+                &progress(scope, node, after, 47),
+                limits(1024, LIMIT),
+            )
+            .await;
             after = step_read.ids.last().copied();
             steps += 1;
             // A step fills its limit to within a row, unless the label ends.

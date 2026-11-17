@@ -8058,7 +8058,11 @@ mod tests {
         for _ in 0..30 {
             writer.query(add()).await.expect("node is added");
         }
-        writer.inner_db().flush().await.expect("writes become visible");
+        writer
+            .inner_db()
+            .flush()
+            .await
+            .expect("writes become visible");
         let reader = HelixDB::open_reader_with_object_store_for_tests(
             token.database().to_string(),
             token.object_store(),
@@ -8074,7 +8078,13 @@ mod tests {
                 .map_or(0, |finding| finding.rows)
         };
         tokio::time::timeout(Duration::from_secs(10), async {
-            while users(&reader.audit_label_bitmaps(scope).await.expect("reader audits")) < 30 {
+            while users(
+                &reader
+                    .audit_label_bitmaps(scope)
+                    .await
+                    .expect("reader audits"),
+            ) < 30
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -8089,17 +8099,27 @@ mod tests {
                 writer
                     .query(QueryRequest::write(
                         write_batch()
-                            .var_as("gone", g().n_with_label("User").limit(2_usize).drop().count())
+                            .var_as(
+                                "gone",
+                                g().n_with_label("User").limit(2_usize).drop().count(),
+                            )
                             .returning(["gone"]),
                     ))
                     .await
                     .expect("nodes are deleted");
-                writer.inner_db().flush().await.expect("writes become visible");
+                writer
+                    .inner_db()
+                    .flush()
+                    .await
+                    .expect("writes become visible");
             }
         };
         let audits = async {
             for _ in 0..20 {
-                let audit = reader.audit_label_bitmaps(scope).await.expect("reader audits");
+                let audit = reader
+                    .audit_label_bitmaps(scope)
+                    .await
+                    .expect("reader audits");
                 assert!(audit.is_complete(), "{audit:?}");
                 tokio::task::yield_now().await;
             }
