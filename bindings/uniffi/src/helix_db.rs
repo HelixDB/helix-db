@@ -114,7 +114,7 @@ pub enum HelixDbSource {
     InMemory { database: String },
     /// Local filesystem object storage rooted at `root`, scoped by database path.
     Disk { root: String, database: String },
-    /// S3-compatible object storage.
+    /// S3 or S3-compatible object storage.
     ObjectStorage {
         database: String,
         bucket: String,
@@ -140,10 +140,12 @@ impl From<HelixDbSource> for db::HelixDbSource {
                 allow_http,
             } => Self::ObjectStorage {
                 database,
-                bucket,
-                region,
-                endpoint,
-                allow_http,
+                bucket: db::ObjectStorageBucket::S3 {
+                    name: bucket,
+                    region,
+                    endpoint,
+                    allow_http,
+                },
             },
         }
     }
@@ -594,28 +596,26 @@ mod tests {
         assert_eq!(root, std::path::PathBuf::from("/tmp/helix"));
         assert_eq!(database, "disk");
 
-        let db::HelixDbSource::ObjectStorage {
-            database,
-            bucket,
-            region,
-            endpoint,
-            allow_http,
-        } = HelixDbSource::ObjectStorage {
+        let db::HelixDbSource::ObjectStorage { database, bucket } = HelixDbSource::ObjectStorage {
             database: "os".to_string(),
             bucket: "bucket".to_string(),
             region: "region".to_string(),
             endpoint: Some("http://localhost:9000".to_string()),
             allow_http: true,
         }
-        .into()
-        else {
+        .into() else {
             panic!("expected object-storage source");
         };
         assert_eq!(database, "os");
-        assert_eq!(bucket, "bucket");
-        assert_eq!(region, "region");
-        assert_eq!(endpoint.as_deref(), Some("http://localhost:9000"));
-        assert!(allow_http);
+        assert_eq!(
+            bucket,
+            db::ObjectStorageBucket::S3 {
+                name: "bucket".to_string(),
+                region: "region".to_string(),
+                endpoint: Some("http://localhost:9000".to_string()),
+                allow_http: true,
+            }
+        );
     }
 
     #[tokio::test]

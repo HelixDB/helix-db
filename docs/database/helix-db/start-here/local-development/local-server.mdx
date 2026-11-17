@@ -120,7 +120,8 @@ externally managed object-store data during stop, restart, or prune.
 
 ## Run the image directly
 
-Memory mode is selected by leaving both `HELIX_DATA_DIR` and `S3_BUCKET` unset:
+Memory mode is selected by leaving `HELIX_DATA_DIR`, `S3_BUCKET`, `GCS_BUCKET` and
+`AZURE_CONTAINER_NAME` unset:
 
 ```bash
 docker run --rm --name helixdb \
@@ -140,8 +141,9 @@ curl -fsS http://127.0.0.1:6969/readyz
 
 <Warning>
 Do not set `S3_BUCKET=IN_MEMORY`. Every defined `S3_BUCKET` value selects
-S3-compatible storage and is interpreted as a real bucket name. Setting
-`HELIX_DATA_DIR` and `S3_BUCKET` together causes startup to fail.
+S3-compatible storage and is interpreted as a real bucket name. Setting more
+than one of `HELIX_DATA_DIR`, `S3_BUCKET`, `GCS_BUCKET` and `AZURE_CONTAINER_NAME`
+causes startup to fail.
 </Warning>
 
 ## Endpoints
@@ -304,7 +306,10 @@ SeaweedFS 4.09 or later enforce both.
 | Variable | Purpose |
 | --- | --- |
 | `HELIX_DATA_DIR` | Selects native disk storage and names its container directory; mount a volume there for persistence |
-| `S3_BUCKET` | Selects S3 mode and names the object-store bucket; omit both storage selectors for memory mode |
+| `S3_BUCKET` | Selects S3 mode and names the object-store bucket; omit every storage selector for memory mode |
+| `GCS_BUCKET` | Selects Google Cloud Storage and names the bucket. Credentials come from `GOOGLE_SERVICE_ACCOUNT`, `GOOGLE_SERVICE_ACCOUNT_KEY` or `GOOGLE_APPLICATION_CREDENTIALS`, else the GCE metadata server (GKE Workload Identity) |
+| `AZURE_CONTAINER_NAME` | Selects Azure Blob Storage and names the container; requires `AZURE_STORAGE_ACCOUNT_NAME`. Credentials come from `AZURE_STORAGE_ACCOUNT_KEY`, workload identity (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE`, which AKS Workload Identity injects), a service principal (`AZURE_CLIENT_SECRET`), `AZURE_STORAGE_SAS_KEY`, else the managed identity |
+| `AZURE_STORAGE_ACCOUNT_NAME` | Storage account that holds `AZURE_CONTAINER_NAME` |
 | `S3_REGION` | Region supplied to the S3 client; falls back to `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1` |
 | `DB_PATH` | Logical database prefix inside the selected store, including under `HELIX_DATA_DIR`; defaults to `db/` |
 | `AWS_ACCESS_KEY_ID` | Access key |
@@ -365,7 +370,7 @@ directory. Use one cache directory per running server and per database; changing
 
 | Variable | Purpose |
 | --- | --- |
-| `HELIX_DISK_CACHE_DIR` | Disk cache directory, created if needed. Defaults to `/var/cache/helix` with `S3_BUCKET`; with `HELIX_DATA_DIR`, setting it enables the disk cache |
+| `HELIX_DISK_CACHE_DIR` | Disk cache directory, created if needed. Defaults to `/var/cache/helix` with `S3_BUCKET`, `GCS_BUCKET` or `AZURE_CONTAINER_NAME`; with `HELIX_DATA_DIR`, setting it enables the disk cache |
 | `HELIX_DISK_CACHE_BYTES` | Total disk budget in bytes, from 64 MiB to 1 TiB; defaults to 8 GiB |
 | `HELIX_DISK_CACHE_MEMORY_BYTES` | Memory tier of the block cache in bytes; defaults to 640 MiB |
 | `HELIX_DISK_CACHE_WARM` | `on` (the default) or `off`: whether the server warms the disk cache at startup |
