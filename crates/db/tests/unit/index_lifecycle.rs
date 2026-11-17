@@ -673,7 +673,7 @@ async fn mutate_secondary_entity(
     let mutations = load_mutation_set(&transaction, DataScope::LegacyUnscoped)
         .await
         .expect("secondary mutation set loads from canonical rows");
-    maintain_entity(
+    let staged = maintain_entity(
         &transaction,
         DataScope::LegacyUnscoped,
         &mutations,
@@ -684,6 +684,10 @@ async fn mutate_secondary_entity(
     )
     .await
     .expect("secondary mutation stages with graph source data");
+    assert!(
+        staged.is_empty(),
+        "the model mutates only Active generations, which record no build delta"
+    );
     if after.is_empty() {
         transaction
             .delete(secondary_source_key(entity_id))

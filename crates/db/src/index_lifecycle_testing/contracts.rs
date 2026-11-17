@@ -1255,7 +1255,7 @@ async fn run_active_drop_and_mutation_serialization() {
     let mutations = crate::index_lifecycle::secondary::load_mutation_set(&transaction, scope)
         .await
         .expect("spanning graph transaction captures Active authority");
-    crate::index_lifecycle::secondary::maintain_entity(
+    let staged = crate::index_lifecycle::secondary::maintain_entity(
         &transaction,
         scope,
         &mutations,
@@ -1284,6 +1284,7 @@ async fn run_active_drop_and_mutation_serialization() {
         transaction.commit().await.is_err(),
         "transaction retaining old Active authority must conflict with DROP"
     );
+    db.inner.index_scope_gates.delta_ledgers().record(staged);
     mutate_source(&db, scope, entity_id, &before, &after)
         .await
         .expect("graph mutation retries safely after DROP hides the index");
@@ -1834,7 +1835,7 @@ async fn run_secondary_mutation_interleaving() {
     let mutations = crate::index_lifecycle::secondary::load_mutation_set(&transaction, scope)
         .await
         .expect("activation-spanning mutation captures Building authority");
-    crate::index_lifecycle::secondary::maintain_entity(
+    let staged = crate::index_lifecycle::secondary::maintain_entity(
         &transaction,
         scope,
         &mutations,
@@ -1866,6 +1867,7 @@ async fn run_secondary_mutation_interleaving() {
         transaction.commit().await.is_err(),
         "transaction retaining Building authority must conflict with activation"
     );
+    db.inner.index_scope_gates.delta_ledgers().record(staged);
     mutate_source(&db, scope, spanning_id, &spanning_before, &spanning_after)
         .await
         .expect("activation-spanning mutation retries against Active authority");
@@ -3284,21 +3286,24 @@ async fn mutate_source(
     before: &[Property],
     after: &[Property],
 ) -> crate::error::Result<()> {
-    let _scope_permit = db.index_mutation_scope_permit(scope).await;
+    let mut scope_permit = db.index_mutation_scope_permit(scope).await;
     let writer = db.lifecycle_test_writer_db()?;
     let transaction = writer.begin(IsolationLevel::SerializableSnapshot).await?;
     let mutations =
         crate::index_lifecycle::secondary::load_mutation_set(&transaction, scope).await?;
-    crate::index_lifecycle::secondary::maintain_entity(
-        &transaction,
-        scope,
-        &mutations,
-        IndexElementKind::Node,
-        entity_id,
-        before,
-        after,
-    )
-    .await?;
+    // Recorded when the permit drops, after the commit.
+    scope_permit.stage_build_deltas(
+        crate::index_lifecycle::secondary::maintain_entity(
+            &transaction,
+            scope,
+            &mutations,
+            IndexElementKind::Node,
+            entity_id,
+            before,
+            after,
+        )
+        .await?,
+    );
     if after.is_empty() {
         transaction.delete(source_key(scope, entity_id))?;
     } else {
@@ -3316,21 +3321,24 @@ async fn mutate_edge_source(
     before: &[Property],
     after: &[Property],
 ) -> crate::error::Result<()> {
-    let _scope_permit = db.index_mutation_scope_permit(scope).await;
+    let mut scope_permit = db.index_mutation_scope_permit(scope).await;
     let writer = db.lifecycle_test_writer_db()?;
     let transaction = writer.begin(IsolationLevel::SerializableSnapshot).await?;
     let mutations =
         crate::index_lifecycle::secondary::load_mutation_set(&transaction, scope).await?;
-    crate::index_lifecycle::secondary::maintain_entity(
-        &transaction,
-        scope,
-        &mutations,
-        IndexElementKind::Edge,
-        entity_id,
-        before,
-        after,
-    )
-    .await?;
+    // Recorded when the permit drops, after the commit.
+    scope_permit.stage_build_deltas(
+        crate::index_lifecycle::secondary::maintain_entity(
+            &transaction,
+            scope,
+            &mutations,
+            IndexElementKind::Edge,
+            entity_id,
+            before,
+            after,
+        )
+        .await?,
+    );
     if after.is_empty() {
         transaction.delete(edge_source_key(scope, entity_id))?;
     } else {

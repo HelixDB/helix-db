@@ -30,12 +30,35 @@ use tokio::sync::{
     Mutex as AsyncMutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
 };
 
+use super::secondary::delta_ledger::{DeltaLedgers, StagedBuildDeltas};
 use crate::encoding::v2::keys::scope::DataScope;
 
 /// Shared authority retained by one graph mutation transaction.
+///
+/// It also carries the build deltas the transaction staged, and records them
+/// in their generations' ledgers when dropped, before the gate unlocks: the
+/// holder keeps it until its commit has applied or failed, so a delta is
+/// recorded after it can be read and before a fenced step can run (see
+/// [`DeltaLedgers`]).
 #[derive(Debug)]
 pub(crate) struct IndexScopeMutationPermit {
+    staged: StagedBuildDeltas,
+    ledgers: Arc<DeltaLedgers>,
     _guard: OwnedRwLockReadGuard<()>,
+}
+
+impl IndexScopeMutationPermit {
+    /// Adds deltas this permit's transaction staged, recorded once it is
+    /// dropped.
+    pub(crate) fn stage_build_deltas(&mut self, staged: StagedBuildDeltas) {
+        self.staged.append(staged);
+    }
+}
+
+impl Drop for IndexScopeMutationPermit {
+    fn drop(&mut self) {
+        self.ledgers.record(std::mem::take(&mut self.staged));
+    }
 }
 
 /// Version of one scope's planner-visible canonical catalog.
@@ -175,14 +198,22 @@ pub(crate) struct IndexScopeGates {
     catalog_refreshes: Mutex<HashMap<DataScope, Weak<AsyncMutex<()>>>>,
     publications: Mutex<HashMap<super::queue::QueueTarget, Weak<AsyncMutex<()>>>>,
     build_steps: Mutex<HashMap<DataScope, Weak<AsyncMutex<()>>>>,
+    delta_ledgers: Arc<DeltaLedgers>,
 }
 
 impl IndexScopeGates {
     /// Acquires shared scope authority before a graph transaction takes its snapshot.
     pub(crate) async fn mutation_permit(&self, scope: DataScope) -> IndexScopeMutationPermit {
         IndexScopeMutationPermit {
+            staged: StagedBuildDeltas::default(),
+            ledgers: Arc::clone(&self.delta_ledgers),
             _guard: self.mutation_gate(scope).read_owned().await,
         }
+    }
+
+    /// Every building secondary generation's pending-delta ledger.
+    pub(crate) fn delta_ledgers(&self) -> &DeltaLedgers {
+        &self.delta_ledgers
     }
 
     /// Acquires shared authority before refreshing the catalog used for planning.

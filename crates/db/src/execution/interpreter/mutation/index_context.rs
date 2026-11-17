@@ -324,7 +324,7 @@ impl MutationIndexContext {
     pub(crate) fn into_prepared(self) -> Result<PreparedMutationIndexContext, crate::HelixDbError> {
         let Self {
             property_writes,
-            _scope_permit,
+            _scope_permit: mut scope_permit,
             active,
             secondary,
             secondary_runtime,
@@ -339,10 +339,15 @@ impl MutationIndexContext {
                 transitions: _,
         } = self;
         topology_runtime.consume_prepared()?;
-        secondary_runtime.consume_prepared()?;
+        let staged = secondary_runtime.consume_prepared()?;
+        // The permit records them once dropped, after the commit applies;
+        // only focused tests run without one.
+        if let Some(permit) = scope_permit.as_mut() {
+            permit.stage_build_deltas(staged);
+        }
         Ok(PreparedMutationIndexContext {
             _property_writes: property_writes,
-            _scope_permit,
+            _scope_permit: scope_permit,
             active_generations: active.into_generations(),
             _secondary: secondary,
             _vector: vector,

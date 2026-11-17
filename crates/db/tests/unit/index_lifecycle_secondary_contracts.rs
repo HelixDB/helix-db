@@ -115,10 +115,18 @@ async fn repeated_build_deltas_preserve_the_first_secondary_value() {
             kind: IndexElementKind::Node,
             id: entity_id,
         };
-        stage_secondary_build_delta(&transaction, scope, &target, entity, first.clone())
-            .await
-            .unwrap();
-        stage_secondary_build_delta(&transaction, scope, &target, entity, second)
+        let mut staged = delta_ledger::StagedBuildDeltas::default();
+        stage_secondary_build_delta(
+            &transaction,
+            scope,
+            &target,
+            entity,
+            first.clone(),
+            &mut staged,
+        )
+        .await
+        .unwrap();
+        stage_secondary_build_delta(&transaction, scope, &target, entity, second, &mut staged)
             .await
             .unwrap();
 
@@ -135,6 +143,16 @@ async fn repeated_build_deltas_preserve_the_first_secondary_value() {
         assert_eq!(
             delta.state,
             CoalescedBuildDeltaState::SecondaryBefore(first)
+        );
+        let generation = delta_ledger::DeltaGeneration {
+            scope,
+            index_id: target.index_id,
+            generation: target.generation,
+        };
+        assert_eq!(
+            staged.0,
+            [(generation, key.clone()), (generation, key)],
+            "every staging names the delta key for its commit to record"
         );
     }
 
@@ -1252,7 +1270,19 @@ async fn mutation_runtime_executes_build_delta_and_active_bitmap_programs_then_s
         .collect(scope, &building, &routes, &created)
         .is_err());
     assert!(runtime.flush(&transaction, &building).await.is_err());
-    runtime.consume_prepared().unwrap();
+    let staged = runtime.consume_prepared().unwrap();
+    assert_eq!(
+        staged.0,
+        [(
+            delta_ledger::DeltaGeneration {
+                scope,
+                index_id: IndexId::initial(),
+                generation: IndexGenerationId::initial(),
+            },
+            delta_key,
+        )],
+        "the prepared runtime hands its staged delta to the commit"
+    );
     assert!(SecondaryMutationRuntime::default()
         .consume_prepared()
         .is_err());
@@ -1400,7 +1430,7 @@ async fn mutation_runtime_filters_other_families_skips_noops_and_executes_unique
         )
         .unwrap();
     runtime.prepare(&transaction, &mutations).await.unwrap();
-    runtime.consume_prepared().unwrap();
+    assert!(runtime.consume_prepared().unwrap().is_empty());
     transaction.rollback();
     db.close().await.unwrap();
 }
