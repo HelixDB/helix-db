@@ -39,6 +39,8 @@ mod catalog;
 mod cursor_contracts;
 pub(crate) mod failpoints;
 pub(crate) mod graph_mutation;
+pub(crate) mod label_audit;
+pub(crate) mod label_source;
 pub(crate) mod lifecycle;
 mod metadata;
 mod model;
@@ -60,6 +62,7 @@ pub(crate) mod worker;
 
 pub(crate) use catalog::*;
 pub(crate) use metadata::*;
+pub use label_audit::{LabelBitmapAudit, LabelBitmapFinding};
 pub use model::*;
 pub use operation::*;
 pub use public::*;

@@ -2021,15 +2021,13 @@ impl HelixDB {
         )
         .expect("secondary output ceiling is a valid family batch limit");
         let secondary_driver: Arc<dyn index_lifecycle::outbox::IndexOperationDriver> = Arc::new(
-            index_lifecycle::secondary::SecondaryIndexDriver::new(Arc::clone(&index_scope_gates))
-                .with_scan_tuning(lifecycle_throughput.scan()),
+            index_lifecycle::secondary::SecondaryIndexDriver::new(Arc::clone(&index_scope_gates)),
         );
         let vector_driver = index_lifecycle::vector::VectorIndexDriver::new(
             Arc::clone(&index_scope_gates),
             Arc::clone(&vector_memory.registry),
             Arc::clone(&vector_memory.simhasher_registry),
         )
-        .with_scan_tuning(lifecycle_throughput.scan())
         .with_batch_reads(batch_reads::BatchReads::for_block_cache(
             slate_db_cache.as_ref(),
         ))
@@ -2362,6 +2360,54 @@ impl HelixDB {
         Ok(index_lifecycle::IndexOperationStatus::from_record(
             &operation,
         ))
+    }
+
+    /// Compares every label bitmap of `scope` with the rows carrying its
+    /// label, at one snapshot, and changes nothing.
+    ///
+    /// Label scans and index builds read a label's rows through its bitmap,
+    /// so a row the bitmap lacks is invisible to both; see
+    /// [`index_lifecycle::LabelBitmapAudit`]. This reads every node and edge
+    /// row of `scope` once.
+    ///
+    /// ```
+    /// # #![recursion_limit = "256"]
+    /// # tokio_test::block_on(async {
+    /// use db::encoding::v2::keys::scope::DataScope;
+    /// use db::{HelixDB, HelixDbSource};
+    /// use helix_ast::{batch, query::QueryRequest, traversal, value::PropertyInput};
+    ///
+    /// let db = HelixDB::open(HelixDbSource::InMemory {
+    ///     database: "label-bitmap-audit-example".to_string(),
+    /// }).await.unwrap();
+    /// db.query(QueryRequest::write(
+    ///     batch::write_batch()
+    ///         .var_as(
+    ///             "created",
+    ///             traversal::g().add_n("User", vec![("name", PropertyInput::from("Ada"))]),
+    ///         )
+    ///         .returning(["created"]),
+    /// )).await.unwrap();
+    /// let audit = db.audit_label_bitmaps(DataScope::LegacyUnscoped).await.unwrap();
+    /// assert!(audit.is_complete());
+    /// assert_eq!(audit.findings[0].label, "User");
+    /// assert_eq!(audit.findings[0].rows, 1);
+    /// db.close().await.unwrap();
+    /// # });
+    /// ```
+    pub async fn audit_label_bitmaps(
+        &self,
+        scope: DataScope,
+    ) -> Result<index_lifecycle::LabelBitmapAudit> {
+        match self.storage() {
+            HelixStorage::Reader(reader) => {
+                index_lifecycle::label_audit::audit(reader.as_ref(), scope).await
+            }
+            HelixStorage::Writer(writer) => {
+                let snapshot = writer.db().snapshot().await?;
+                index_lifecycle::label_audit::audit(snapshot.as_ref(), scope).await
+            }
+        }
     }
 
     /// Advances at most one immediately eligible secondary lifecycle step.

@@ -3279,23 +3279,28 @@ fn document_with_values(
 
 /// Writes setup data before any lifecycle definition exists.
 async fn put_source(db: &HelixDB, scope: DataScope, entity_id: u64, properties: &[Property]) {
-    db.lifecycle_test_writer_db()
-        .expect("source setup has writer storage")
-        .put(source_key(scope, entity_id), encode_properties(properties))
-        .await
-        .expect("source setup row commits");
+    crate::index_lifecycle::label_source::testing::put_source_row(
+        db.lifecycle_test_writer_db()
+            .expect("source setup has writer storage"),
+        scope,
+        IndexElementKind::Node,
+        entity_id,
+        properties,
+    )
+    .await;
 }
 
 /// Writes edge setup data before any lifecycle definition exists.
 async fn put_edge_source(db: &HelixDB, scope: DataScope, entity_id: u64, properties: &[Property]) {
-    db.lifecycle_test_writer_db()
-        .expect("edge source setup has writer storage")
-        .put(
-            edge_source_key(scope, entity_id),
-            encode_properties(properties),
-        )
-        .await
-        .expect("edge source setup row commits");
+    crate::index_lifecycle::label_source::testing::put_source_row(
+        db.lifecycle_test_writer_db()
+            .expect("edge source setup has writer storage"),
+        scope,
+        IndexElementKind::Edge,
+        entity_id,
+        properties,
+    )
+    .await;
 }
 
 /// Atomically maintains every applicable secondary generation and graph source.
@@ -3323,6 +3328,14 @@ async fn mutate_source(
             after,
         )
         .await?,
+    );
+    crate::index_lifecycle::label_source::testing::stage_labels(
+        &transaction,
+        scope,
+        IndexElementKind::Node,
+        entity_id,
+        before,
+        after,
     );
     if after.is_empty() {
         transaction.delete(source_key(scope, entity_id))?;
@@ -3358,6 +3371,14 @@ async fn mutate_edge_source(
             after,
         )
         .await?,
+    );
+    crate::index_lifecycle::label_source::testing::stage_labels(
+        &transaction,
+        scope,
+        IndexElementKind::Edge,
+        entity_id,
+        before,
+        after,
     );
     if after.is_empty() {
         transaction.delete(edge_source_key(scope, entity_id))?;

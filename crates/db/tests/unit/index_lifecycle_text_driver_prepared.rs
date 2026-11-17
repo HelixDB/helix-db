@@ -1046,30 +1046,6 @@ fn text_driver_key_projection_and_counter_helpers_fail_closed() {
     )
     .is_err());
 
-    let node_key = authoritative_property_key(scope, entity);
-    assert_eq!(
-        source_entity(scope, IndexElementKind::Node, &node_key).unwrap(),
-        Some(entity.id)
-    );
-    let edge = IndexEntity {
-        kind: IndexElementKind::Edge,
-        id: IndexEntityId::new(9),
-    };
-    let edge_key = authoritative_property_key(scope, edge);
-    assert_eq!(
-        source_entity(scope, IndexElementKind::Edge, &edge_key).unwrap(),
-        Some(edge.id)
-    );
-    assert_eq!(
-        source_entity(scope, IndexElementKind::Edge, &node_key).unwrap(),
-        None
-    );
-    assert!(source_entity(scope, IndexElementKind::Node, &edge_key).is_err());
-    assert_ne!(
-        source_prefix(scope, IndexElementKind::Node),
-        source_prefix(scope, IndexElementKind::Edge)
-    );
-
     let prefix = Bytes::from_static(b"prefix/");
     assert_eq!(cursor_suffix(&prefix, None).unwrap(), None);
     let complete = IndexCursor::try_new(Bytes::from_static(b"prefix/suffix")).unwrap();
@@ -1131,7 +1107,6 @@ async fn scan_source_case(
         },
         limits,
         document_limits(),
-        IndexLifecycleScanTuning::default(),
     )
     .await;
     drop(transaction);
@@ -1264,7 +1239,6 @@ async fn source_scan_attributes_every_input_output_and_corruption_boundary() {
             },
             batch_limits(8, u64::MAX, u64::MAX, u64::MAX),
             document_limits(),
-            IndexLifecycleScanTuning::default(),
         )
         .await
         .unwrap(),
@@ -1290,7 +1264,6 @@ async fn source_scan_attributes_every_input_output_and_corruption_boundary() {
         },
         batch_limits(8, u64::MAX, u64::MAX, u64::MAX),
         document_limits(),
-        IndexLifecycleScanTuning::default(),
     )
     .await
     .is_err());
@@ -1659,7 +1632,6 @@ async fn partition_blocker_retries_once_its_graph_row_is_repaired() {
             },
             batch_limits(8, u64::MAX, u64::MAX, u64::MAX),
             document_limits(),
-            IndexLifecycleScanTuning::default(),
         )
         .await
         .unwrap(),
@@ -2216,7 +2188,6 @@ async fn scanned_generation(
             },
             batch_limits(64, u64::MAX, u64::MAX, u64::MAX),
             document_limits(),
-            IndexLifecycleScanTuning::default(),
         )
         .await
         .unwrap(),

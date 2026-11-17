@@ -2141,6 +2141,18 @@ pub(crate) async fn read_node_label(
     .await
 }
 
+/// Look up all node IDs carrying `label` from the node label index.
+///
+/// The label index is the `$label` equality bitmap, kept with every node
+/// row in the same transaction; index builds read their label's nodes here.
+pub async fn lookup_node_label_index_scoped(
+    txn: &(impl DbReadOps + Send + Sync),
+    label: &str,
+    tenant_scope: DataScope,
+) -> Result<RoaringTreemap, HelixDbError> {
+    lookup_equality_index_set_scoped(txn, "$label", label, tenant_scope).await
+}
+
 /// Look up all edge IDs for a globally indexed edge property/value pair.
 pub async fn lookup_global_edge_equality_index(
     txn: &(impl DbReadOps + Send + Sync),
