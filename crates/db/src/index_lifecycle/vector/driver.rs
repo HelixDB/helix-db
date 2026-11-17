@@ -32,13 +32,13 @@ use rand::{rngs::StdRng, SeedableRng};
 use sha2::{Digest, Sha256};
 use slatedb::{Db, DbTransaction, IsolationLevel};
 
-use crate::config::{IndexLifecycleScanTuning, SearchIndexBackfillLimits, SearchIndexBatchLimits};
+use crate::config::{SearchIndexBackfillLimits, SearchIndexBatchLimits};
 use crate::encoding::v2::keys::indexes::vector::{
     VectorIndexMetadataKey, VectorKey, VectorStorageLane,
 };
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
-use crate::encoding::v2::keys::{DataKey, DataKeyKind, KeyPrefix};
+use crate::encoding::v2::keys::{DataKey, DataKeyKind};
 use crate::encoding::v2::keys::{
     GlobalKey, IndexEntity, IndexEntityStateKey, RecordKind, ScopedKey,
 };
@@ -87,7 +87,6 @@ pub(crate) struct VectorIndexDriver {
     scope_gates: Arc<crate::index_lifecycle::IndexScopeGates>,
     cache_registry: Arc<vector::VectorCacheRegistry>,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
-    scan_tuning: IndexLifecycleScanTuning,
     /// How build handles fetch HNSW row batches, fixed by the database's cache mode.
     batch_reads: crate::batch_reads::BatchReads,
     /// Planning budget shared with queue publication.
@@ -998,18 +997,11 @@ impl VectorIndexDriver {
             scope_gates,
             cache_registry,
             simhasher_registry,
-            scan_tuning: IndexLifecycleScanTuning::default(),
             batch_reads: crate::batch_reads::BatchReads::Single,
             build_cache: Arc::new(VectorBuildCache::new(
                 SearchIndexBackfillLimits::default().vector_build_cache_bytes(),
             )),
         }
-    }
-
-    /// Applies runtime source-scan prefetching without admitting blocks to cache.
-    pub(crate) const fn with_scan_tuning(mut self, scan_tuning: IndexLifecycleScanTuning) -> Self {
-        self.scan_tuning = scan_tuning;
-        self
     }
 
     /// Applies the database's row-batch fetch policy to build handles.
@@ -1130,7 +1122,6 @@ impl IndexOperationDriver for VectorIndexDriver {
                             definition,
                             stage,
                             limits,
-                            self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
                             self.batch_reads,
                             &self.build_cache,
@@ -1147,7 +1138,6 @@ impl IndexOperationDriver for VectorIndexDriver {
                             definition,
                             stage,
                             limits,
-                            self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
                             self.batch_reads,
                             &self.build_cache,
@@ -1164,7 +1154,6 @@ impl IndexOperationDriver for VectorIndexDriver {
                             definition,
                             stage,
                             limits,
-                            self.scan_tuning,
                             Arc::clone(&self.simhasher_registry),
                             self.batch_reads,
                             &self.build_cache,
@@ -2087,7 +2076,6 @@ async fn step_build<D: Distance>(
     definition: &ValidatedVectorIndexDefinition,
     stage: &VectorBuildStage,
     limits: SearchIndexBatchLimits,
-    scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     batch_reads: crate::batch_reads::BatchReads,
     build_cache: &VectorBuildCache,
@@ -2134,7 +2122,6 @@ async fn step_build<D: Distance>(
                 definition,
                 progress,
                 limits,
-                scan_tuning,
                 simhasher_registry,
                 batch_reads,
                 &mut session,
@@ -2786,45 +2773,32 @@ async fn scan_source<D: Distance>(
     definition: &ValidatedVectorIndexDefinition,
     progress: &SourceScanProgress,
     limits: SearchIndexBatchLimits,
-    scan_tuning: IndexLifecycleScanTuning,
     simhasher_registry: Arc<vector::SimHasherRegistry>,
     batch_reads: crate::batch_reads::BatchReads,
     build_session: &mut CheckedOutSession<D>,
 ) -> Result<VectorStepResult> {
-    let source_prefix = source_prefix(scope, definition.element_kind());
-    let start = cursor_suffix(&source_prefix, progress.cursor.as_ref())?;
-    let upper = cursor_suffix(&source_prefix, Some(&progress.inclusive_upper_bound))?
-        .ok_or_else(|| corruption("vector source upper bound is absent"))?;
-    match start.as_ref().map(|start| start.cmp(&upper)) {
-        Some(std::cmp::Ordering::Greater) => {
-            return Err(corruption(
-                "vector source cursor exceeds its inclusive upper bound",
-            ));
-        }
-        Some(std::cmp::Ordering::Equal) => {
-            return Ok(VectorStepResult::ordinary(progressed_build(
-                VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
-                    cursor: None,
-                    counters: progress.counters,
-                }),
-            )));
-        }
-        Some(std::cmp::Ordering::Less) | None => {}
-    }
-    let start = start.map_or(Bound::Unbounded, Bound::Excluded);
-    let scan_options = scan_tuning.scan_options();
     let planning = db.begin(IsolationLevel::Snapshot).await?;
     // Source rows are read untracked, from the planning snapshot; see
     // "Build source reads" in [`crate::index_lifecycle::queue`]. A blocker
     // is durable, so each one first reads its row through `transaction`: a
     // write that repairs the row before this step commits fails the commit.
-    let mut rows = planning
-        .scan_prefix_with_options(
-            &source_prefix,
-            (start, Bound::Included(upper)),
-            &scan_options,
-        )
-        .await?;
+    let Some(mut rows) = crate::index_lifecycle::label_source::LabelSource::open(
+        &planning,
+        scope,
+        definition.element_kind(),
+        definition.label().as_str(),
+        progress,
+        limits,
+    )
+    .await?
+    else {
+        return Ok(VectorStepResult::ordinary(progressed_build(
+            VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
+                cursor: None,
+                counters: progress.counters,
+            }),
+        )));
+    };
     let target = VectorPlanTarget::build(scope, operation, record)?;
     let planning_recorder = VectorWriteRecorder::new();
     let mut accounting = VectorBatchAccounting::new(progress.counters, limits);
@@ -2832,14 +2806,19 @@ async fn scan_source<D: Distance>(
     let mut exhausted = true;
     let mut scratch = view::Scratch::new();
     while accounting.can_read_another() {
-        let Some(row) = rows.next().await? else {
-            break;
+        let row = match rows.next().await? {
+            crate::index_lifecycle::label_source::LabelRead::Row(row) => row,
+            crate::index_lifecycle::label_source::LabelRead::Exhausted => break,
+            crate::index_lifecycle::label_source::LabelRead::Paused(paused) => {
+                cursor = Some(paused);
+                exhausted = false;
+                break;
+            }
         };
+        let entity_id = row.entity_id;
         let input_bytes = row.key.len().saturating_add(row.value.len()) as u64;
         if !accounting.can_admit_input(input_bytes) {
             if accounting.is_empty() {
-                let entity_id = source_entity(scope, definition.element_kind(), &row.key)?
-                    .unwrap_or(IndexEntityId::initial());
                 transaction.get(&row.key).await?;
                 return Ok(VectorStepResult::ordinary(
                     IndexOperationStepResult::Blocked(IndexOperationBlocker::OversizedEntity {
@@ -2854,11 +2833,6 @@ async fn scan_source<D: Distance>(
             break;
         }
         let complete_cursor = IndexCursor::try_new(row.key.clone()).map_err(operation_error)?;
-        let Some(entity_id) = source_entity(scope, definition.element_kind(), &row.key)? else {
-            accounting.admit(input_bytes, VectorWriteMeasurement::zero(), 0, 0, 0)?;
-            cursor = Some(complete_cursor);
-            continue;
-        };
         let Ok(document) = stored_vector_document(definition, &row.value, &mut scratch) else {
             if !accounting.is_empty() {
                 exhausted = false;
@@ -4246,42 +4220,6 @@ async fn generation_has_rows(
     let prefix = generation_prefix(scope, kind, index_id, generation);
     let mut rows = transaction.scan_prefix(prefix, ..).await?;
     Ok(rows.next().await?.is_some())
-}
-
-fn source_prefix(scope: DataScope, kind: IndexElementKind) -> Bytes {
-    let prefix = match kind {
-        IndexElementKind::Node => KeyPrefix::NodeProperty,
-        IndexElementKind::Edge => KeyPrefix::EdgePropertyById,
-    };
-    DataKey::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
-}
-
-fn source_entity(
-    scope: DataScope,
-    expected: IndexElementKind,
-    key: &[u8],
-) -> Result<Option<IndexEntityId>> {
-    let parsed = DataKey::parse_from_slice(scope, key)?;
-    Ok(match (expected, parsed) {
-        (
-            IndexElementKind::Node,
-            DataKey::Data {
-                kind: DataKeyKind::NodeProperty(key),
-                ..
-            },
-        ) => Some(IndexEntityId::new(key.node_id())),
-        (
-            IndexElementKind::Edge,
-            DataKey::Data {
-                kind: DataKeyKind::EdgePropertyById(key),
-                ..
-            },
-        ) => Some(IndexEntityId::new(key.edge_id())),
-        (IndexElementKind::Edge, DataKey::Data { .. }) => None,
-        (IndexElementKind::Node, DataKey::Data { .. }) | (_, DataKey::Global { .. }) => {
-            return Err(corruption("vector source prefix yielded another key kind"));
-        }
-    })
 }
 
 fn generation_prefix(
