@@ -201,7 +201,9 @@ pub struct IndexOperationStatusCommon {
     pub family: PublicIndexFamily,
     /// Frozen family stage serialized in snake case.
     pub stage: IndexOperationStage,
-    /// Number of claims attempted.
+    /// Claims that have tried the current checkpoint: `1` while a healthy
+    /// operation runs. Every step that makes progress resets it, so it grows only
+    /// while consecutive attempts fail to make progress.
     pub attempt: u32,
     /// Monotonic bounded-work progress.
     pub progress: IndexOperationPublicProgress,

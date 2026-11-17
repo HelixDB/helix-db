@@ -1783,14 +1783,24 @@ fn operation_not_found(operation_id: IndexOperationId) -> HelixDbError {
 }
 
 /// How long a released claim waits before it is runnable again.
+///
+/// Both delays read the same attempt counter, which counts consecutive claims
+/// at the current checkpoint and resets whenever a step makes progress (see
+/// [`IndexOperationRecord::attempt`]). A lost conflict is one of those
+/// attempts, so it also grows the backoff of a later failure at the same
+/// checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransientRetry {
-    /// Exponential in the operation's claim attempts.
+    /// Exponential in the attempts since the last progress: the first
+    /// failure after progress waits the base delay however long the
+    /// operation has run, and only repeated failures at one checkpoint grow
+    /// towards the maximum.
     Backoff,
-    /// The base delay: a commit lost a serializable conflict, which a later
-    /// attempt usually wins. The attempt counter counts every claim, so
-    /// scaling by it would stall a long build for the maximum delay after
-    /// one conflict.
+    /// The base delay: a commit lost a serializable conflict to a concurrent
+    /// writer. Waiting longer does not make writers conflict less, and the
+    /// secondary driver bounds a run of conflicts itself by fencing writers
+    /// after `PREPARATIONS_BEFORE_FENCE` stalled preparations, so a growing
+    /// delay would only stretch that bounded wait.
     Conflict,
 }
 
@@ -3385,7 +3395,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(aborted.operation_id(), operation.operation_id());
-            assert_eq!(aborted.attempt(), before_abort.attempt());
+            assert_eq!(aborted.attempt(), 0, "cleanup starts a new checkpoint");
             assert_eq!(
                 aborted.operation_revision().get(),
                 before_abort.operation_revision().get() + 1
@@ -3522,12 +3532,59 @@ mod tests {
     }
 
     /// A step whose commit loses a serializable conflict requeues its claim
-    /// after the base delay, however many claims it took, instead of failing
-    /// the worker cycle with the error.
+    /// after the base delay instead of failing the worker cycle. Transient
+    /// failures back off exponentially in the attempts since the last
+    /// progress, conflicts included: a long build waits the base delay after
+    /// its first failure however many steps and claims it has run.
     #[tokio::test]
-    async fn a_lost_commit_conflict_requeues_the_claim_after_the_base_delay() {
+    async fn transient_backoff_counts_failures_since_the_last_progress() {
+        /// Observes `operation` at `now` and claims it for `epoch`.
+        async fn claim_at(
+            db: &Db,
+            operation: IndexOperationId,
+            epoch: WriterEpoch,
+            sequence: u64,
+            now: u64,
+        ) -> ClaimedOperation {
+            let OperationPointerObservation::Eligible(eligible) =
+                observe_operation_pointer(db, operation, epoch, now)
+                    .await
+                    .unwrap()
+            else {
+                panic!("the operation is eligible at {now}");
+            };
+            claim_operation(
+                db,
+                &eligible,
+                epoch,
+                ClaimSequence::new(sequence).unwrap(),
+                now,
+                ClaimPermission::Normal,
+            )
+            .await
+            .unwrap()
+            .expect("the observed revision is claimable")
+        }
+
+        /// The delay a failed claim of `operation` still waits at `now`.
+        async fn delay_at(
+            db: &Db,
+            operation: IndexOperationId,
+            epoch: WriterEpoch,
+            now: u64,
+        ) -> u64 {
+            match observe_operation_pointer(db, operation, epoch, now)
+                .await
+                .unwrap()
+            {
+                OperationPointerObservation::Delayed { delay_millis } => delay_millis,
+                observation => panic!("a failed claim waits: {observation:?}"),
+            }
+        }
+
         let db = db("outbox-commit-conflict").await;
         let (index, operation) = fixture(15);
+        let operation_id = operation.operation_id();
         enqueue_operation(
             &db,
             DataScope::LegacyUnscoped,
@@ -3538,71 +3595,133 @@ mod tests {
         .await
         .unwrap();
         let epoch = WriterEpoch::from_bytes([16; 16]).unwrap();
-        let mut claimed = None;
-        for sequence in 1..=6 {
-            let eligible =
-                match observe_operation_pointer(&db, operation.operation_id(), epoch, 100)
-                    .await
-                    .unwrap()
-                {
-                    OperationPointerObservation::Eligible(eligible)
-                    | OperationPointerObservation::ClaimedByCurrentWriter(eligible) => eligible,
-                    observation @ (OperationPointerObservation::Delayed { .. }
-                    | OperationPointerObservation::StalePointerRemoved) => {
-                        panic!("the operation stays claimable: {observation:?}")
-                    }
+        let conflicting = ConflictingDriver {
+            probe: Bytes::from_static(b"outbox-commit-conflict-probe"),
+        };
+        let limits = SearchIndexBackfillLimits::default().batch();
+
+        // A long build: many slices, each claimed once and progressed under
+        // a kept claim before releasing it.
+        let mut sequence = 0;
+        let mut entities = 0;
+        for _ in 0..6 {
+            sequence += 1;
+            let mut claimed = claim_at(&db, operation_id, epoch, sequence, 0).await;
+            for continuation in [ClaimContinuation::Retain, ClaimContinuation::Release] {
+                entities += 1;
+                let executed = step(
+                    &db,
+                    &claimed,
+                    IndexOperationStepResult::Progressed(activate_progress(entities)),
+                    continuation,
+                )
+                .await;
+                let Some(retained) = executed.retained else {
+                    break;
                 };
-            let permission = if claimed.is_none() {
-                ClaimPermission::Normal
-            } else {
-                ClaimPermission::SameEpochRecovery(SameEpochRecoveryProof::after_join(epoch))
-            };
-            claimed = claim_operation(
-                &db,
-                &eligible,
-                epoch,
-                ClaimSequence::new(sequence).unwrap(),
-                100,
-                permission,
-            )
-            .await
-            .unwrap();
+                assert_eq!(retained.record.attempt(), 1);
+                claimed = retained;
+            }
+            let released = read_operation(&db, DataScope::LegacyUnscoped, operation_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(released.attempt(), 0, "progress resets the attempts");
         }
-        let claimed = claimed.expect("the last claim succeeds");
+
+        // The first failure after progress waits the base delay; repeated
+        // failures at one checkpoint double it, counting lost conflicts,
+        // which themselves always wait the base delay.
+        let failures: [(u32, bool, &dyn IndexOperationDriver); 5] = [
+            (1, true, &conflicting),
+            (
+                2,
+                false,
+                &StaticDriver(IndexOperationStepResult::TransientFailure),
+            ),
+            (3, true, &conflicting),
+            (
+                4,
+                false,
+                &FailingDriver {
+                    mode: FailureMode::StorageUnavailable,
+                    probe_key: Bytes::from_static(b"outbox-commit-conflict-probe"),
+                },
+            ),
+            (
+                5,
+                true,
+                &FailingDriver {
+                    mode: FailureMode::Conflict,
+                    probe_key: Bytes::from_static(b"outbox-commit-conflict-probe"),
+                },
+            ),
+        ];
+        let mut now = 0;
+        for (attempt, conflict, driver) in failures {
+            sequence += 1;
+            let claimed = claim_at(&db, operation_id, epoch, sequence, now).await;
+            assert_eq!(claimed.record.attempt(), attempt);
+            assert_eq!(
+                execute_claimed_step(&db, &claimed, driver, limits, now)
+                    .await
+                    .expect("a transient failure is not a worker failure"),
+                CommittedOperationStep::TransientFailure
+            );
+            let retained = read_operation(&db, DataScope::LegacyUnscoped, operation_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained.progress(), &activate_progress(entities));
+            assert_eq!(retained.attempt(), attempt, "failures accumulate");
+            let expected = if conflict {
+                BASE_OPERATION_BACKOFF_MILLIS
+            } else {
+                BASE_OPERATION_BACKOFF_MILLIS << (attempt - 1)
+            };
+            assert_eq!(delay_at(&db, operation_id, epoch, now).await, expected);
+            now += expected;
+        }
+
+        // Progress resets the backoff: the next transient failure waits the
+        // base delay again.
+        sequence += 1;
+        let claimed = claim_at(&db, operation_id, epoch, sequence, now).await;
         assert_eq!(claimed.record.attempt(), 6);
+        assert!(step(
+            &db,
+            &claimed,
+            IndexOperationStepResult::Progressed(activate_progress(entities + 1)),
+            ClaimContinuation::Release,
+        )
+        .await
+        .retained
+        .is_none());
+        sequence += 1;
+        let claimed = claim_at(&db, operation_id, epoch, sequence, now).await;
+        assert_eq!(claimed.record.attempt(), 1);
         assert_eq!(
             execute_claimed_step(
                 &db,
                 &claimed,
-                &ConflictingDriver {
-                    probe: Bytes::from_static(b"outbox-commit-conflict-probe"),
-                },
-                SearchIndexBackfillLimits::default().batch(),
-                100,
+                &StaticDriver(IndexOperationStepResult::TransientFailure),
+                limits,
+                now
             )
             .await
-            .expect("a lost conflict is not a worker failure"),
+            .unwrap(),
             CommittedOperationStep::TransientFailure
         );
-        let retained = read_operation(&db, DataScope::LegacyUnscoped, operation.operation_id())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(retained.progress(), claimed.record.progress());
-        assert!(matches!(
-            observe_operation_pointer(&db, operation.operation_id(), epoch, 100)
-                .await
-                .unwrap(),
-            OperationPointerObservation::Delayed {
-                delay_millis: BASE_OPERATION_BACKOFF_MILLIS
-            }
-        ));
+        assert_eq!(
+            delay_at(&db, operation_id, epoch, now).await,
+            BASE_OPERATION_BACKOFF_MILLIS
+        );
         assert!(matches!(
             observe_operation_pointer(
                 &db,
-                operation.operation_id(),
+                operation_id,
                 epoch,
-                100 + BASE_OPERATION_BACKOFF_MILLIS
+                now + BASE_OPERATION_BACKOFF_MILLIS
             )
             .await
             .unwrap(),

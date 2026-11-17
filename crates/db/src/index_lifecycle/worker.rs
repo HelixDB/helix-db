@@ -1460,6 +1460,84 @@ mod tests {
         assert_eq!(finished.operation_revision().get(), 1 + 1 + 50 + 1);
     }
 
+    /// The public status reports a build as running from its claim until
+    /// it completes: the steps of one slice keep the claim, so the status
+    /// never falls back to queued between them.
+    #[tokio::test]
+    async fn status_stays_running_across_the_steps_of_a_slice() {
+        let db = Arc::new(
+            Db::builder("worker-claim-slice-status", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let operation = enqueue(&db, 11).await;
+        let operation_id = operation.operation_id();
+        let poller = tokio::spawn({
+            let db = Arc::clone(&db);
+            async move {
+                let mut observed = Vec::new();
+                loop {
+                    // What `get_index_operation` projects for a writer.
+                    let status = IndexOperationStatus::from_record(
+                        &outbox::read_operation(
+                            db.as_ref(),
+                            DataScope::LegacyUnscoped,
+                            operation_id,
+                        )
+                        .await
+                        .unwrap()
+                        .expect("the operation is retained"),
+                    );
+                    assert!(
+                        !matches!(&status, IndexOperationStatus::Running { common } if common.attempt != 1),
+                        "a running build reports one attempt: {status:?}"
+                    );
+                    let terminal = matches!(status, IndexOperationStatus::Succeeded { .. });
+                    if observed.last().is_none_or(|last| {
+                        std::mem::discriminant(last) != std::mem::discriminant(&status)
+                    }) {
+                        observed.push(status);
+                    }
+                    if terminal {
+                        return observed;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        let finished = run_task(
+            &db,
+            &operation,
+            CountingDriver {
+                completes_at: 40,
+                delay: Duration::from_millis(2),
+            },
+            watch::channel(false).1,
+        )
+        .await;
+        let observed = poller.await.unwrap();
+        let kinds = observed
+            .iter()
+            .map(|status| match status {
+                IndexOperationStatus::Queued { .. } => "queued",
+                IndexOperationStatus::Running { .. } => "running",
+                IndexOperationStatus::Succeeded { .. } => "succeeded",
+                IndexOperationStatus::Blocked { .. } | IndexOperationStatus::Aborted { .. } => {
+                    "other"
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                kinds.as_slice(),
+                ["running", "succeeded"] | ["queued", "running", "succeeded"]
+            ),
+            "the status went {kinds:?}"
+        );
+        assert_eq!(finished.attempt(), 1);
+    }
+
     /// A slice ends by releasing its claim, so the dispatcher can schedule
     /// other queued work; shutdown ends it after one step.
     #[tokio::test]
@@ -1497,7 +1575,7 @@ mod tests {
             (2..1_000).contains(&entities),
             "several steps ran under the claim before the slice released it: {entities}"
         );
-        assert_eq!(released.attempt(), 1);
+        assert_eq!(released.attempt(), 0, "progress resets the attempts");
 
         // One index per database: the fixture always uses the first index ID.
         let db = Arc::new(
