@@ -105,6 +105,16 @@ async fn run_explicit_batches_between_advances() {
             "sustained writes must not stop the build: {status:?}"
         );
         if matches!(status, IndexOperationStatus::Succeeded { .. }) {
+            // The scan counts each seed it reads, and catch-up each entity it
+            // re-reads for a write; validation adds nothing. Each batch
+            // inserts `INSERTS_PER_BATCH` entities and moves one seed.
+            let entities = status.common().progress.entities;
+            let writes = (batch + 1) * (INSERTS_PER_BATCH + 1);
+            assert!(
+                (seeds.len() as u64..=seeds.len() as u64 + writes).contains(&entities),
+                "{entities} entities after {writes} writes over {} seeds",
+                seeds.len()
+            );
             activated = true;
             break;
         }

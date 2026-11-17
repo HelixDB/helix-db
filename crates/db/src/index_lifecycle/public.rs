@@ -119,7 +119,12 @@ pub enum IndexOperationBlockerCode {
 /// Monotonic bounded-work counters safe for public progress reporting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct IndexOperationPublicProgress {
-    /// Authoritative entities visited.
+    /// Source entities read. A build counts each entity its source scan
+    /// reads and each entity it re-reads to apply a write made during the
+    /// build; validation and other passes over entities already counted add
+    /// bytes and operations, never entities, so a build over `N` entities
+    /// with no concurrent writes reports `N`. Cleanup counts the rows it
+    /// removes.
     #[serde(with = "u64_string")]
     pub entities: u64,
     /// Source bytes consumed.

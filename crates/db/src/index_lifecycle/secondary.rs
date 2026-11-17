@@ -3012,7 +3012,12 @@ async fn release_validated_rows(
             cursor = Some(IndexCursor::try_new(key).map_err(operation_error)?);
         }
     }
-    let counters = accounting.finish()?;
+    // Validation revisits entities the scan and catch-up already counted:
+    // its rows bound the batch and add bytes and operations, never entities.
+    let counters = OperationCounters {
+        entities: counters.entities,
+        ..accounting.finish()?
+    };
     let next = if exhausted {
         SecondaryBuildStage::Activate(NoCursorProgress { counters })
     } else {
@@ -10766,6 +10771,86 @@ mod tests {
 
     fn is_activation(stage: &SecondaryBuildStage) -> bool {
         matches!(stage, SecondaryBuildStage::Activate(_))
+    }
+
+    /// The public `entities` progress counts each source entity once for
+    /// equality, unique, and range builds: validation revisits every applied
+    /// row, which shows as bytes and operations, never as entities.
+    #[tokio::test]
+    async fn progress_counts_each_source_entity_once() {
+        const ENTITIES: u64 = 10;
+        let limits = SearchIndexBatchLimits::try_new(
+            std::num::NonZeroUsize::new(3).expect("three is positive"),
+            std::num::NonZeroU64::new(1024 * 1024).expect("one MiB is positive"),
+            std::num::NonZeroU64::new(4096).expect("operation limit is positive"),
+            std::num::NonZeroU64::new(1024 * 1024).expect("one MiB is positive"),
+            std::num::NonZeroU64::new(1024 * 1024).expect("one MiB is positive"),
+        )
+        .expect("three-entity test limits are internally consistent");
+        for definition in [
+            SecondaryIndexDefinition::node_equality("User", "email"),
+            SecondaryIndexDefinition::node_unique_equality("User", "email"),
+            SecondaryIndexDefinition::node_range("User", "rank"),
+        ] {
+            let definition = validated(definition.expect("test definition is valid"));
+            let db = test_db("secondary-progress-entities").await;
+            let scope = DataScope::LegacyUnscoped;
+            for entity_id in 0..ENTITIES {
+                let mut properties = user_properties(&format!("seed-{entity_id}@example.com"));
+                properties.push(Property::i64(
+                    "rank",
+                    i64::try_from(entity_id).expect("rank fits"),
+                ));
+                put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            }
+            let (operation_id, _, _) = create_build(&db, scope, &definition, ENTITIES - 1).await;
+            let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+            let status = |record: IndexOperationRecord| {
+                let status = crate::index_lifecycle::IndexOperationStatus::from_record(&record);
+                (status.common().stage, status.common().progress)
+            };
+            let mut claim_sequence = 1;
+            let mut validation_steps = 0;
+            let (mut stage, mut progress) = status(
+                read_operation(&db, scope, operation_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+            loop {
+                let step =
+                    drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits)
+                        .await;
+                let (next_stage, next_progress) = status(
+                    read_operation(&db, scope, operation_id)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+                assert!(
+                    next_progress.entities <= ENTITIES,
+                    "{stage:?} counted an entity twice: {next_progress:?}"
+                );
+                if stage == crate::index_lifecycle::IndexOperationStage::Validate {
+                    assert_eq!(next_progress.entities, ENTITIES);
+                    // Validation reports its reads as bytes.
+                    if next_progress.input_bytes > progress.input_bytes {
+                        validation_steps += 1;
+                    }
+                }
+                (stage, progress) = (next_stage, next_progress);
+                if step != CommittedOperationStep::Progressed {
+                    assert_eq!(step, CommittedOperationStep::Completed);
+                    break;
+                }
+            }
+            assert!(
+                validation_steps > 1,
+                "validation read rows in several batches"
+            );
+            assert_eq!(progress.entities, ENTITIES);
+            db.close().await.expect("secondary test database closes");
+        }
     }
 
     /// A validation step neither waits for in-flight writes nor blocks new

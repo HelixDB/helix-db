@@ -715,7 +715,7 @@ async fn run_family_tenant_reopen_recovery(ordinal: usize, family: IndexDefiniti
     let controller = LifecycleTestController::new();
 
     let definition = recovery_definition(family, &format!("ReopenActive{ordinal}"));
-    let _entity_ids = seed_recovery_rows(&db, &controller, scope, &definition).await;
+    let entity_ids = seed_recovery_rows(&db, &controller, scope, &definition).await;
     let IndexDdlReceipt::Accepted { operation_id, .. } = controller
         .create_index(
             &db,
@@ -728,19 +728,24 @@ async fn run_family_tenant_reopen_recovery(ordinal: usize, family: IndexDefiniti
     else {
         panic!("fresh tenant recovery build must enqueue");
     };
-    assert!(matches!(
-        drive_to_terminal_with_reopen(
-            &mut db,
-            &database,
-            &object_store,
-            &config,
-            &controller,
-            scope,
-            operation_id,
-        )
-        .await,
-        IndexOperationStatus::Succeeded { .. }
-    ));
+    let built = drive_to_terminal_with_reopen(
+        &mut db,
+        &database,
+        &object_store,
+        &config,
+        &controller,
+        scope,
+        operation_id,
+    )
+    .await;
+    assert!(matches!(built, IndexOperationStatus::Succeeded { .. }));
+    // Every later pass revisits the scanned entities without counting them,
+    // across a reopen after every step.
+    assert_eq!(
+        built.common().progress.entities,
+        entity_ids.end - entity_ids.start,
+        "{family:?} counts each source entity once"
+    );
     let active = crate::index_lifecycle::repository::load_index_record(
         db.lifecycle_test_writer_db()
             .expect("tenant recovery writer storage is available"),

@@ -2126,12 +2126,10 @@ async fn scan_partition_documents(
         empty_root = Some(root);
     }
 
+    // The partition scan revisits entities the source scan already counted:
+    // they bound the batch and add bytes and operations, never entities.
     let completed_counters = OperationCounters {
-        entities: checked_add(
-            progress.counters.entities,
-            batch_entities as u64,
-            "cumulative entities",
-        )?,
+        entities: progress.counters.entities,
         input_bytes: checked_add(
             progress.counters.input_bytes,
             checked_add(

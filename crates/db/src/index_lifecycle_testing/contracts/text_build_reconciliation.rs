@@ -349,9 +349,11 @@ async fn pause_at(
             .await
             .common()
             .progress
-            .entities;
+            .input_bytes;
+            // The partition scan revisits counted entities; its reads show
+            // as input bytes.
             drive_until(db, controller, SCOPE, operation_id, |status| {
-                status.common().progress.entities > scanned
+                status.common().progress.input_bytes > scanned
             })
             .await
         }

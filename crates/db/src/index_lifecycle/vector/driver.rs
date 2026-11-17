@@ -3738,7 +3738,12 @@ async fn validate_descriptor<D: Distance>(
         if !accounting.can_read_another() {
             exhausted = false;
         }
-        let counters = accounting.finish()?;
+        // Validation revisits entities the scan and catch-up already counted:
+        // its rows bound the batch and add bytes and operations, never entities.
+        let counters = OperationCounters {
+            entities: progress.counters.entities,
+            ..accounting.finish()?
+        };
         if !exhausted {
             return Ok(progressed_build(VectorBuildStage::ValidateDescriptor(
                 PrefixScanProgress { cursor, counters },
@@ -3898,7 +3903,11 @@ async fn validate_mappings_or_finish<D: Distance>(
     if !accounting.can_read_another() {
         exhausted = false;
     }
-    let counters = accounting.finish()?;
+    // Mappings are partitions, not entities: they bound the batch only.
+    let counters = OperationCounters {
+        entities: counters.entities,
+        ..accounting.finish()?
+    };
     Ok(progressed_build(if exhausted {
         VectorBuildStage::Activate(NoCursorProgress { counters })
     } else {
