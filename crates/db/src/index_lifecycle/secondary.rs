@@ -11958,27 +11958,23 @@ mod tests {
             .begin(slatedb::IsolationLevel::SerializableSnapshot)
             .await
             .expect("transaction opens");
-        let result = activate(
+        // Activation's own drain, without its completion: a delta the fence
+        // ruled out is one no writer recorded, which test builds reject at
+        // activation (see `activation_rejects_a_delta_no_writer_recorded`).
+        let mut drained_through = drained_through;
+        let drain = drain_build_deltas(
             &transaction,
             scope,
             &operation,
             secondary,
-            counters,
+            &mut BatchAccounting::new(counters, one_entity_limits()),
+            AppliedStateDisposition::Release,
             &deltas,
-            drained_through,
-            one_entity_limits(),
+            &mut drained_through,
         )
         .await
         .expect("the step stages");
-        assert!(
-            matches!(
-                result,
-                IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
-                    BuildOperationOutcome::Succeeded
-                ))
-            ),
-            "{result:?}"
-        );
+        assert!(matches!(drain, DeltaDrain::Drained), "{drain:?}");
         transaction.commit().await.expect("the drain commits");
         let [(remaining, _)] = <[_; 1]>::try_from(
             generation_rows(&db, scope, RecordKind::BuildDelta, index_id, generation).await,
