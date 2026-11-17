@@ -223,6 +223,15 @@ converts it once in the background: each property whose every value is a datetim
 string with at most millisecond precision becomes datetimes, and any other property is left as
 stored and named in the server log.
 
+<Warning>
+After the conversion, a Cypher or SQL filter that compares such a property with text matches no
+rows and raises no error, because a datetime never equals or orders against a string. This covers
+string literals (`WHERE e.at > '2026-01-01'`) and string parameters, including every JSON
+parameter, which has no datetime form. Read the text as a datetime instead: `datetime('…')` or
+`datetime($since)` in [Cypher](/database/helix-db/query-guides/cypher#datetimes), and
+`TIMESTAMP '…'` or `CAST(? AS TIMESTAMP)` in [SQL](/database/helix-db/query-guides/sql).
+</Warning>
+
 ## Query names
 
 `query_name` is optional diagnostic metadata. It does not create a stored endpoint.

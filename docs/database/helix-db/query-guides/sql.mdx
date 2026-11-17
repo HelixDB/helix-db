@@ -225,7 +225,7 @@ plan = client.explain_sql(
 | Tables | Tables as node labels; `Start_TYPE_End` relationship tables; aliases; schema prefixes; [mappings](#mappings) |
 | Joins | `JOIN .. ON` one column equality, `USING`, `NATURAL JOIN`, chains through a relationship table, comma joins and `CROSS JOIN` |
 | Row clauses | `WHERE`, `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY` (including positions), `LIMIT`, `OFFSET`, `FETCH FIRST`, `TOP` |
-| Expressions | Parameters; literals; arithmetic; comparisons; `AND`, `OR`, `XOR`, `NOT`; `IS [NOT] NULL`, `IS [NOT] TRUE`, `IS [NOT] DISTINCT FROM`; `IN` lists; `BETWEEN`; `LIKE` and `ILIKE` with a leading or trailing `%`; `\|\|`; simple and searched `CASE`; `CAST`; row values such as `(a, b) < (1, 2)` |
+| Expressions | Parameters; literals; arithmetic; comparisons; `AND`, `OR`, `XOR`, `NOT`; `IS [NOT] NULL`, `IS [NOT] TRUE`, `IS [NOT] DISTINCT FROM`; `IN` lists; `BETWEEN`; `LIKE` and `ILIKE` with a leading or trailing `%`; `\|\|`; simple and searched `CASE`; `CAST`; [`TIMESTAMP` literals and `EXTRACT`](#expressions-and-functions); row values such as `(a, b) < (1, 2)` |
 | Functions | `lower`, `upper`, `length`, `trim`, `ltrim`, `rtrim`, `substring`, `concat`, `coalesce`, `nvl`, `nullif`, `nvl2`, `abs`, `square`, `power`, `mod`, and the [Cypher functions](/database/helix-db/query-guides/cypher#what-is-supported) under their own names, such as `id(p)` |
 | Aggregation | `count` (including `count(*)`), `sum`, `avg`, `min`, `max`, `array_agg`, each with `DISTINCT` arguments |
 | Values | The [Cypher values](/database/helix-db/query-guides/cypher#values-and-parameters), with the same lossless JSON encoding |
@@ -408,10 +408,29 @@ and `stddev` `stDev`.
 Timestamps are Cypher's [UTC datetimes](/database/helix-db/query-guides/cypher#datetimes).
 `CURRENT_TIMESTAMP` and `NOW()` become `datetime()`, the statement's clock. A
 `TIMESTAMP '2026-06-01 09:00:00'` literal is a datetime, read as UTC unless the
-text has an offset, so it can bound a range index; text other than RFC 3339, a
-date and time, or a date is rejected (`sql_construct`). `CAST(x AS TIMESTAMP)`
-becomes `datetime(x)`, which, unlike the other casts, fails on text it cannot
-read. `DATE` and `TIME` literals are not supported.
+text has an offset, so it can bound a range index. Text other than RFC 3339, a
+date and time, or a date, each zero-padded with years `0000`–`9999`, is
+rejected (`sql_construct`), and text in that form that names no instant, such
+as `'2026-02-30'`, fails with `argument_error` (`invalid_datetime`).
+`CAST(x AS TIMESTAMP)` becomes `datetime(x)`, which, unlike the other casts,
+fails on text it cannot read. `DATE` and `TIME` literals are not supported.
+
+<Warning>
+A timestamp column never equals or orders against text: unlike PostgreSQL,
+`WHERE e.at > '2026-01-01'` does not cast the string, so it matches no rows
+and raises no error. The same holds for a string parameter. Write
+`e.at > TIMESTAMP '2026-01-01'` or `e.at > CAST(? AS TIMESTAMP)`. Properties
+written as `date_time` parameters before datetimes were stored natively are
+[converted to datetimes](/database/helix-db/query-guides/parameters#supported-parameter-families),
+so filters that compared them with text stop matching after the conversion.
+</Warning>
+
+`EXTRACT(field FROM x)` reads the datetime field of the same meaning in UTC:
+`YEAR`, `QUARTER`, `MONTH`, `WEEK` and `ISOYEAR` (ISO 8601 weeks), `DAY`,
+`DOY`, `ISODOW` (Monday is 1), `HOUR`, `MINUTE`, and `EPOCH` (seconds, with
+milliseconds as the fraction). `SECOND`, `MILLISECONDS`, `DOW`, and other
+fields are rejected (`sql_construct`): PostgreSQL's `SECOND` and
+`MILLISECONDS` include the fraction of a second and `DOW` counts Sunday as 0.
 
 ## What is not supported
 

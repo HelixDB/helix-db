@@ -220,7 +220,7 @@ plan = client.explain_cypher(
 | Reading patterns | `MATCH` and `OPTIONAL MATCH`; fixed-length directed and undirected relationships; several patterns in one clause; repeated variables; named paths such as `p = (a)-[:KNOWS]->(b)` |
 | Row clauses | `WHERE`, `WITH`, `RETURN`, `RETURN *` and `WITH *`, aliases, `DISTINCT`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT` |
 | Writing | `CREATE`; property and map `SET` (`=` and `+=`); property `REMOVE`; `DELETE`; `DETACH DELETE` |
-| Expressions | Parameters; scalar, list, and map literals; property and index access; list slices such as `xs[1..3]`; arithmetic; comparisons (`<>` or `!=` for inequality) and comparison chains; `AND`, `OR`, `XOR`, `NOT`; `IS NULL` and `IS NOT NULL`; `IN`; `STARTS WITH`, `ENDS WITH`, `CONTAINS`; label tests such as `n:User`; simple and searched `CASE` |
+| Expressions | Parameters; scalar, list, and map literals; property and index access, including [datetime fields](#datetimes) such as `dt.year`; list slices such as `xs[1..3]`; arithmetic; comparisons (`<>` or `!=` for inequality) and comparison chains; `AND`, `OR`, `XOR`, `NOT`; `IS NULL` and `IS NOT NULL`; `IN`; `STARTS WITH`, `ENDS WITH`, `CONTAINS`; label tests such as `n:User`; simple and searched `CASE` |
 | Graph and list functions | `id`, `type`, `labels`, `properties`, `keys`, `exists` (for properties), `size`, `length`, `nodes`, `relationships`, `head`, `last`, `range`, `reverse` |
 | Scalar functions | `coalesce`, `abs`, `toString`, `toInteger` (and `toInt`), `toFloat`, `toBoolean`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
 | Datetime functions | `datetime()`, `datetime(text)`, `datetime({epochMillis: n})`, and `timestamp()`; see [datetimes](#datetimes) |
@@ -269,7 +269,7 @@ before anything runs, with the error category `unsupported_feature` and the
 | Schema commands | `DROP INDEX person_name` | `schema_ddl` |
 | Namespaced functions | `apoc.text.join(...)`, `db.labels()` | `namespaced_function` |
 | Other built-in functions, including other temporal types, spatial, and most math and string functions | `sqrt(x)`, `round(x)`, `date()`, `localdatetime()`, `duration('P1D')`, `point(...)`, `split(s, ',')`, `replace(s, 'a', 'b')`, `startNode(r)`, `endNode(r)`, `tail(xs)` | `function` (the message names the function) |
-| `datetime` with a component map or literal text it does not read | `datetime({year: 2024})`, `datetime('2015-W30-2T21:40Z')`, `datetime('2015-07-21T21:40+01:00[Europe/Stockholm]')` | `function` |
+| `datetime` with a component map or literal text outside its grammar | `datetime({year: 2024})`, `datetime('2015-W30-2T21:40Z')`, `datetime('2015-07-21T21:40+01:00[Europe/Stockholm]')` | `function` |
 | More than one label on a node | `CREATE (n:Admin:User)` | `multiple_node_labels` |
 | Adding or removing labels | `SET n:Admin`, `REMOVE n:Admin` | `label_mutation` |
 | Creating a node without exactly one label | `CREATE (n)` | `node_label_required` |
@@ -429,9 +429,11 @@ maps, and `CREATE` and `SET` store datetimes back as datetimes.
 - `datetime()` and `timestamp()` read the statement's clock, once: every call in
   one statement returns the same instant, as a datetime or as integer epoch
   milliseconds.
-- `datetime(text)` reads RFC 3339 with a `Z` or `±hh:mm` offset, a date and time
-  without an offset (read as UTC), or a date alone (UTC midnight). A space may
-  separate date and time; digits past milliseconds are dropped.
+- `datetime(text)` reads RFC 3339 (`2026-06-01T09:00:00Z`) with a `Z` or
+  `±hh:mm` offset, a date and time without an offset (read as UTC), or a date
+  alone (`2026-06-01`, UTC midnight). Every field is zero-padded, years run
+  from `0000` to `9999`, and seconds are required. A space may separate date
+  and time; digits past milliseconds are dropped.
   `datetime({epochMillis: n})` converts an integer, and a datetime or null
   passes through.
 - Datetimes compare in time order. Against any other type, `=` is false and
@@ -439,14 +441,32 @@ maps, and `CREATE` and `SET` store datetimes back as datetimes.
   datetime never equals the string of its text. `ORDER BY` places datetimes
   after paths and before strings. `min`, `max`, `DISTINCT`, and grouping work
   on datetimes; `sum`, `avg`, and arithmetic reject them.
+- Fields read UTC components as integers: `dt.year`, `dt.quarter`,
+  `dt.month`, `dt.week` and `dt.weekYear` (ISO 8601 weeks, starting Monday),
+  `dt.day`, `dt.ordinalDay`, `dt.dayOfWeek` (Monday is 1), `dt.hour`,
+  `dt.minute`, `dt.second`, `dt.millisecond`, `dt.epochSeconds`, and
+  `dt.epochMillis`. Use them to bucket or compute, such as
+  `b.at.epochMillis - a.at.epochMillis` for a duration in milliseconds. Any
+  other field is a `type_error`.
 - `toString(dt)` returns the same RFC 3339 text a result shows.
 
-Literal text outside that grammar, such as an ISO week date or a time-zone
-name, is rejected before anything runs (`unsupported_feature`, `function`).
-Text that arrives at run time and does not read fails with `argument_error`
-(`invalid_datetime`). A stored instant more than about 262,000 years from
-year 0 compares and sorts, but returning or converting it to text fails with
-`argument_error` (`datetime_out_of_range`), as a native response does.
+Literal text outside that grammar, such as an ISO week date, a time-zone
+name, or `2026-6-1`, is rejected before anything runs (`unsupported_feature`,
+`function`). Literal text in the grammar's form that names no instant, such
+as `2026-02-30` or a leap second, is rejected before anything runs with
+`argument_error` (`invalid_datetime`). Text that arrives at run time and does
+not read fails with `argument_error` (`invalid_datetime`). A stored instant
+outside years `0000`–`9999` compares and sorts, and a result renders it as
+native responses do (`+10000-01-01T00:00:00.000Z`), but `datetime()` does
+not read that text back; use `datetime({epochMillis: n})`. Past about
+262,000 years from year 0, returning it, converting it to text, or reading a
+calendar field fails with `argument_error` (`datetime_out_of_range`), as a
+native response does.
+
+Comparing a datetime property with text never matches. A filter such as
+`e.at > '2026-01-01'` or `e.at >= $since` with a string parameter returns no
+rows, without an error; read the text first with `datetime('2026-01-01')` or
+`datetime($since)`.
 
 ```cypher
 MATCH (e:Event)
