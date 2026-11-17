@@ -71,7 +71,7 @@ pub(super) fn normalize_typed_value(
     // type.
     fn type_depth(ty: &QueryParamType) -> usize {
         1 + match ty {
-            QueryParamType::Array(inner) => type_depth(inner),
+            QueryParamType::Array(inner) | QueryParamType::Nullable(inner) => type_depth(inner),
             QueryParamType::Record(fields) => fields
                 .iter()
                 .map(|(_, ty)| type_depth(ty))
@@ -137,6 +137,8 @@ fn normalize_nested(
             ))
         }
         (QueryParamType::DateTime, value @ QueryValue::DateTime(_)) => Ok(value),
+        (QueryParamType::Nullable(_), QueryValue::Null) => Ok(QueryValue::Null),
+        (QueryParamType::Nullable(inner), value) => normalize_nested(inner, value, path, level),
         (QueryParamType::Value, value) => {
             validate_below(&value, path, level)?;
             Ok(value)
@@ -272,6 +274,7 @@ fn lazy_value_validation_matches_the_eager_oracle() {
 #[test]
 fn lazy_typed_normalization_matches_the_eager_oracle() {
     let array = |inner: QueryParamType| QueryParamType::Array(Box::new(inner));
+    let nullable = |inner: QueryParamType| QueryParamType::Nullable(Box::new(inner));
     let record = |fields: Vec<(&str, QueryParamType)>| {
         QueryParamType::Record(super::ObjectFields::new(fields).unwrap())
     };
@@ -291,6 +294,15 @@ fn lazy_typed_normalization_matches_the_eager_oracle() {
         array(array(QueryParamType::I64)),
         record(vec![("x", QueryParamType::I64)]),
         record(vec![("x", QueryParamType::Value)]),
+        nullable(QueryParamType::DateTime),
+        nullable(QueryParamType::Value),
+        nullable(nullable(QueryParamType::I64)),
+        nullable(array(nullable(QueryParamType::F32))),
+        array(record(vec![("x", nullable(QueryParamType::DateTime))])),
+        record(vec![(
+            "x",
+            nullable(record(vec![("y", QueryParamType::I64)])),
+        )]),
         array(record(vec![("x", QueryParamType::I64)])),
         array(record(vec![("x", QueryParamType::Value)])),
         record(vec![
@@ -309,6 +321,10 @@ fn lazy_typed_normalization_matches_the_eager_oracle() {
         MAX_REQUEST_JSON_DEPTH + 1,
     ] {
         types.push((1..depth).fold(QueryParamType::I64, |inner, _| array(inner)));
+        // A nullable level counts toward the declared type's depth.
+        types.push(nullable(
+            (1..depth).fold(QueryParamType::I64, |inner, _| array(inner)),
+        ));
         // Object levels count like array levels, in either branch.
         types.push(
             (1..depth).fold(QueryParamType::Value, |inner, level| match level % 2 == 0 {
@@ -344,6 +360,11 @@ fn lazy_typed_normalization_matches_the_eager_oracle() {
         ]),
         object(vec![("x", QueryValue::I64(1))]),
         object(vec![("x", QueryValue::Null)]),
+        object(vec![(
+            "x",
+            QueryValue::String("2026-10-07T10:00:00+02:00".to_owned()),
+        )]),
+        object(vec![("x", object(vec![("y", QueryValue::I64(1))]))]),
         object(vec![("x", QueryValue::I64(1)), ("y", QueryValue::I64(2))]),
         object(vec![("y", QueryValue::I64(2))]),
         object(vec![]),

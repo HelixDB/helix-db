@@ -11,8 +11,9 @@ use crate::value::PropertyValue;
 ///
 /// Each family serializes as its snake_case name (`"date_time"`), an array as
 /// `{"array": <element type>}`, and an object with declared fields as
-/// `{"object": {"<field>": <type>, ...}}`. A bare `"object"` accepts any
-/// object and validates its fields like [`QueryParamType::Value`].
+/// `{"object": {"<field>": <type>, ...}}`, and a type that also accepts
+/// `null` as `{"nullable": <type>}`. A bare `"object"` accepts any object and
+/// validates its fields like [`QueryParamType::Value`].
 ///
 /// ```
 /// use helix_ast::query::{ObjectFields, QueryParamType};
@@ -36,6 +37,10 @@ use crate::value::PropertyValue;
 /// // A declaration names at least one field, each once.
 /// assert!(serde_json::from_str::<QueryParamType>(r#"{"object":{}}"#).is_err());
 /// assert!(serde_json::from_str::<QueryParamType>(r#"{"object":{"a":"i64","a":"bool"}}"#).is_err());
+/// assert_eq!(
+///     serde_json::from_str::<QueryParamType>(r#"{"nullable":"date_time"}"#).unwrap(),
+///     QueryParamType::Nullable(Box::new(QueryParamType::DateTime))
+/// );
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryParamType {
@@ -59,10 +64,36 @@ pub enum QueryParamType {
     Object,
     /// An object with exactly the declared fields, each normalized to its
     /// declared type. A missing or undeclared field is rejected, and `null`
-    /// satisfies only a [`QueryParamType::Value`] field.
+    /// satisfies only a [`QueryParamType::Value`] or
+    /// [`QueryParamType::Nullable`] field.
     Record(ObjectFields),
     /// Array.
     Array(Box<QueryParamType>),
+    /// `null`, or a value of the inner type normalized to it, such as an
+    /// optional datetime column in bulk-imported rows.
+    Nullable(Box<QueryParamType>),
+}
+
+/// The wire spelling: `date_time`, `array of i64`, `nullable date_time`, and
+/// `object` for any object, so an error names a typed object without
+/// repeating its whole declaration.
+impl std::fmt::Display for QueryParamType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bool => f.write_str("bool"),
+            Self::I64 => f.write_str("i64"),
+            Self::F64 => f.write_str("f64"),
+            Self::F32 => f.write_str("f32"),
+            Self::String => f.write_str("string"),
+            Self::DateTime => f.write_str("date_time"),
+            Self::Bytes => f.write_str("bytes"),
+            Self::Value => f.write_str("value"),
+            Self::Object => f.write_str("object"),
+            Self::Record(_) => f.write_str("object with declared fields"),
+            Self::Array(inner) => write!(f, "array of {inner}"),
+            Self::Nullable(inner) => write!(f, "nullable {inner}"),
+        }
+    }
 }
 
 impl Serialize for QueryParamType {
@@ -74,6 +105,9 @@ impl Serialize for QueryParamType {
             }
             Self::Array(inner) => {
                 return serializer.serialize_newtype_variant(NAME, 10, "array", inner);
+            }
+            Self::Nullable(inner) => {
+                return serializer.serialize_newtype_variant(NAME, 11, "nullable", inner);
             }
             Self::Bool => (0, "bool"),
             Self::I64 => (1, "i64"),
@@ -111,6 +145,7 @@ impl<'de> Deserialize<'de> for QueryParamType {
         enum Nested {
             Array(Box<QueryParamType>),
             Object(ObjectFields),
+            Nullable(Box<QueryParamType>),
         }
         struct TypeVisitor;
         impl<'de> Visitor<'de> for TypeVisitor {
@@ -118,7 +153,7 @@ impl<'de> Deserialize<'de> for QueryParamType {
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter
-                    .write_str("a parameter type name, {\"array\": ...} or {\"object\": {...}}")
+                    .write_str("a parameter type name, {\"array\": ...}, {\"object\": {...}} or {\"nullable\": ...}")
             }
 
             fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<Self::Value, E> {
@@ -149,6 +184,7 @@ impl<'de> Deserialize<'de> for QueryParamType {
                 Ok(match nested {
                     Nested::Array(inner) => QueryParamType::Array(inner),
                     Nested::Object(fields) => QueryParamType::Record(fields),
+                    Nested::Nullable(inner) => QueryParamType::Nullable(inner),
                 })
             }
         }
@@ -542,7 +578,7 @@ impl std::fmt::Display for QueryError {
                 actual,
             } => write!(
                 f,
-                "parameter '{path}' expected {expected:?}, but received {actual}"
+                "parameter '{path}' expected {expected}, but received {actual}"
             ),
             Self::NestingTooDeep { path, maximum } => {
                 write!(f, "{path} nests deeper than {maximum} levels")
@@ -1672,7 +1708,9 @@ fn normalize_typed_value(
             });
         }
         match ty {
-            QueryParamType::Array(inner) => pending.push((inner, depth + 1)),
+            QueryParamType::Array(inner) | QueryParamType::Nullable(inner) => {
+                pending.push((inner, depth + 1));
+            }
             QueryParamType::Record(fields) => {
                 pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1)));
             }
@@ -1735,6 +1773,11 @@ fn normalize_typed_value_at<'t>(
                 })
         }
         (QueryParamType::DateTime, value @ QueryValue::DateTime(_)) => Ok(value),
+        (QueryParamType::Nullable(_), QueryValue::Null) => Ok(QueryValue::Null),
+        // Not a nesting level: the inner type describes this same value.
+        (QueryParamType::Nullable(inner), value) => {
+            normalize_typed_value_at(inner, value, name, segments)
+        }
         (QueryParamType::Value, value)
         | (QueryParamType::Object, value @ QueryValue::Object(_)) => {
             validate_json_value(&value, ParamPath { name, segments }, segments.len())?;
@@ -2976,5 +3019,159 @@ mod tests {
             typed(wide, object(vec![("a", QueryValue::I64(1))])),
             Err(QueryError::NestingTooDeep { path, .. }) if path == "value"
         ));
+    }
+
+    fn nullable(inner: QueryParamType) -> QueryParamType {
+        QueryParamType::Nullable(Box::new(inner))
+    }
+
+    #[test]
+    fn nullable_types_accept_null_or_normalize_to_their_inner_type() {
+        // Bulk rows with an optional datetime column: every row keeps the
+        // field, and a present value is still a stored datetime.
+        let rows = QueryParamType::Array(Box::new(record(vec![
+            ("deleted_at", nullable(QueryParamType::DateTime)),
+            ("n", QueryParamType::I64),
+        ])));
+        let request = typed(
+            rows.clone(),
+            QueryValue::Array(vec![
+                object(vec![
+                    ("deleted_at", rfc3339("2026-07-28T14:34:56+02:00")),
+                    ("n", QueryValue::I64(1)),
+                ]),
+                object(vec![
+                    ("deleted_at", QueryValue::Null),
+                    ("n", QueryValue::I64(2)),
+                ]),
+            ]),
+        )
+        .unwrap();
+        let millis = crate::value::DateTime::parse_rfc3339("2026-07-28T12:34:56Z")
+            .unwrap()
+            .millis();
+        assert_eq!(
+            request.parameters().unwrap()["value"],
+            QueryValue::Array(vec![
+                object(vec![
+                    ("deleted_at", QueryValue::DateTime(millis)),
+                    ("n", QueryValue::I64(1)),
+                ]),
+                object(vec![
+                    ("deleted_at", QueryValue::Null),
+                    ("n", QueryValue::I64(2)),
+                ]),
+            ])
+        );
+        // Nullable is not optional: the field must still be present.
+        assert!(matches!(
+            typed(rows.clone(), QueryValue::Array(vec![object(vec![("n", QueryValue::I64(1))])])),
+            Err(QueryError::ObjectFieldMismatch { missing_fields, .. })
+                if missing_fields == ["deleted_at"]
+        ));
+        // A present value must still be the inner type.
+        for (invalid, actual) in [
+            (rfc3339("2026-07-28"), "string"),
+            (QueryValue::I64(0), "i64"),
+        ] {
+            let error = typed(
+                rows.clone(),
+                QueryValue::Array(vec![object(vec![
+                    ("deleted_at", invalid),
+                    ("n", QueryValue::I64(1)),
+                ])]),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    QueryError::ParameterTypeMismatch { path, expected, actual: found }
+                        if path == "value[0].deleted_at"
+                            && *expected == QueryParamType::DateTime
+                            && *found == actual
+                ),
+                "{error:?}"
+            );
+        }
+        // Top level, in arrays, and around objects.
+        assert!(typed(nullable(QueryParamType::I64), QueryValue::Null).is_ok());
+        assert!(typed(
+            nullable(QueryParamType::I64),
+            QueryValue::String("1".to_owned())
+        )
+        .is_err());
+        assert_eq!(
+            typed(
+                QueryParamType::Array(Box::new(nullable(QueryParamType::F32))),
+                QueryValue::Array(vec![QueryValue::Null, QueryValue::F64(1.5)]),
+            )
+            .unwrap()
+            .parameters()
+            .unwrap()["value"],
+            QueryValue::Array(vec![QueryValue::Null, QueryValue::F32(1.5)])
+        );
+        let optional_record = nullable(record(vec![("a", QueryParamType::DateTime)]));
+        assert!(typed(optional_record.clone(), QueryValue::Null).is_ok());
+        assert!(matches!(
+            typed(optional_record, object(vec![("a", QueryValue::Null)])),
+            Err(QueryError::ParameterTypeMismatch { path, .. }) if path == "value.a"
+        ));
+        // The wire form round-trips, and a nullable level counts toward the
+        // declared type's depth without nesting the value.
+        let parse = |types: &str, values: &str| {
+            QueryRequest::from_json_slice(
+                read_wire(values, Some(&format!(r#"{{"value":{types}}}"#))).as_bytes(),
+            )
+        };
+        let declared = r#"{"array":{"object":{"at":{"nullable":"date_time"}}}}"#;
+        let request = parse(
+            declared,
+            r#"{"value":[{"at":null},{"at":"2026-07-28T12:34:56Z"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&request.parameter_types().unwrap()["value"]).unwrap(),
+            declared
+        );
+        assert!(parse(r#"{"nullable":"i64","array":"i64"}"#, r#"{"value":1}"#).is_err());
+        assert!(parse(r#"{"nullable":null}"#, r#"{"value":1}"#).is_err());
+        let deep =
+            |levels: usize| (0..levels).fold(QueryParamType::I64, |inner, _| nullable(inner));
+        assert!(typed(deep(MAX_REQUEST_JSON_DEPTH - 1), QueryValue::I64(1)).is_ok());
+        assert!(matches!(
+            typed(deep(MAX_REQUEST_JSON_DEPTH), QueryValue::I64(1)),
+            Err(QueryError::NestingTooDeep { .. })
+        ));
+    }
+
+    /// Errors name a type by its wire spelling, so a typed object does not
+    /// repeat its whole declaration in every row's error.
+    #[test]
+    fn type_mismatches_name_types_by_their_wire_spelling() {
+        let rows = QueryParamType::Array(Box::new(row_type()));
+        let error = typed(rows, QueryValue::Array(vec![rfc3339("not an object")]))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "parameter 'value[0]' expected object with declared fields, but received string"
+        );
+        for (ty, spelling) in [
+            (QueryParamType::Bool, "bool"),
+            (QueryParamType::I64, "i64"),
+            (QueryParamType::F64, "f64"),
+            (QueryParamType::F32, "f32"),
+            (QueryParamType::String, "string"),
+            (QueryParamType::DateTime, "date_time"),
+            (QueryParamType::Bytes, "bytes"),
+            (QueryParamType::Value, "value"),
+            (QueryParamType::Object, "object"),
+            (
+                QueryParamType::Array(Box::new(nullable(QueryParamType::DateTime))),
+                "array of nullable date_time",
+            ),
+        ] {
+            assert_eq!(ty.to_string(), spelling);
+        }
     }
 }

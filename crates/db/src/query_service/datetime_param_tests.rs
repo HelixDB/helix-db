@@ -480,20 +480,20 @@ async fn foreach_rows_with_invalid_datetime_or_mismatched_fields_write_nothing()
         // An invalid RFC3339 string is an error, never a stored string.
         (
             with("at", json!("2026-01-01")),
-            "'rows[1].at' expected DateTime",
+            "'rows[1].at' expected date_time",
         ),
         (
             with("at", json!("yesterday")),
-            "'rows[1].at' expected DateTime",
+            "'rows[1].at' expected date_time",
         ),
-        (with("at", json!(null)), "'rows[1].at' expected DateTime"),
+        (with("at", json!(null)), "'rows[1].at' expected date_time"),
         (
             with("at", json!(1_767_225_600_000_i64)),
-            "'rows[1].at' expected DateTime",
+            "'rows[1].at' expected date_time",
         ),
         (
             with("audit", json!({ "seen_at": "not a datetime" })),
-            "'rows[1].audit.seen_at' expected DateTime",
+            "'rows[1].audit.seen_at' expected date_time",
         ),
         (without("at"), r#"missing: [\"at\"]"#),
         (
@@ -505,7 +505,10 @@ async fn foreach_rows_with_invalid_datetime_or_mismatched_fields_write_nothing()
             with("createdAt", json!("2026-01-01T00:00:00Z")),
             r#"undeclared: [\"createdAt\"]"#,
         ),
-        (json!("not an object"), "'rows[1]' expected Record"),
+        (
+            json!("not an object"),
+            "'rows[1]' expected object with declared fields",
+        ),
     ] {
         let error = db
             .query_json(&import_json(json!([valid, row]), declared.clone()))
@@ -555,4 +558,152 @@ async fn foreach_rows_declared_as_untyped_objects_keep_rfc3339_strings() {
         stored["events"],
         json!([{ "at": "2026-06-01T05:00:00+09:00" }])
     );
+}
+
+/// A nullable `date_time` field, such as an optional timestamp column: rows
+/// where it is set store datetimes that typed and literal range filters
+/// match, and rows where it is `null` store `null` and match neither.
+#[tokio::test]
+async fn foreach_rows_with_nullable_datetime_fields_store_datetimes_or_null() {
+    let db = open("datetime-rows-nullable").await;
+    db.query_json(&import_json(
+        json!([
+            unset_row("unset_first"),
+            import_row("param", "2026-06-01T00:00:00Z"),
+            import_row("offset_earlier", "2026-06-01T05:00:00+09:00"),
+            unset_row("unset_last"),
+        ]),
+        nullable_row_type(),
+    ))
+    .await
+    .unwrap();
+    for request in [
+        after_param("2025-01-01T00:00:00Z"),
+        after_literal("2025-01-01T00:00:00Z"),
+    ] {
+        assert_eq!(
+            sorted_names(&db.query(request).await.unwrap()),
+            ["offset_earlier", "param"]
+        );
+    }
+    assert_eq!(
+        sorted_names(&db.query(after_param("2026-05-31T23:00:00Z")).await.unwrap()),
+        ["param"]
+    );
+    let stored = db
+        .query(QueryRequest::read(
+            read_batch()
+                .var_as(
+                    "events",
+                    g().n_with_label("Event")
+                        .value_map(Some(vec!["name", "at", "audit"])),
+                )
+                .returning(["events"]),
+        ))
+        .await
+        .unwrap();
+    let mut events = stored["events"].as_array().unwrap().clone();
+    events.sort_by_key(|event| event["name"].as_str().unwrap().to_owned());
+    let audit = json!({ "seen_at": "2026-06-01T00:00:00.000Z" });
+    let null_audit = json!({ "seen_at": null });
+    assert_eq!(
+        events,
+        [
+            json!({ "name": "offset_earlier", "at": "2026-05-31T20:00:00.000Z", "audit": audit }),
+            json!({ "name": "param", "at": "2026-06-01T00:00:00.000Z", "audit": audit }),
+            json!({ "name": "unset_first", "at": null, "audit": null_audit }),
+            json!({ "name": "unset_last", "at": null, "audit": null_audit }),
+        ]
+    );
+
+    // A set value must still be a valid datetime, and the field present.
+    let db = open("datetime-rows-nullable-rejected").await;
+    for (row, expected) in [
+        (
+            json!({ "name": "bad", "at": "2026-06-01", "audit": { "seen_at": null } }),
+            "'rows[0].at' expected date_time",
+        ),
+        (
+            json!({ "name": "bad", "audit": { "seen_at": null } }),
+            r#"missing: [\"at\"]"#,
+        ),
+    ] {
+        let error = db
+            .query_json(&import_json(json!([row]), nullable_row_type()))
+            .await
+            .expect_err("an invalid row rejects the whole request")
+            .to_string();
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+    assert_eq!(event_count(&db).await, json!(0));
+}
+
+/// Rows with every nullable datetime set match through a range index. A
+/// range index rejects any `null` value, however it was declared, so a
+/// `null` row rejects the whole import.
+#[tokio::test]
+async fn foreach_rows_with_nullable_datetime_fields_and_a_range_index() {
+    let db = open("datetime-rows-nullable-range-index").await;
+    db.install_index_for_tests(
+        SecondaryIndexDefinition::node_range("Event", "at")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    for declared in [nullable_row_type(), json!({ "array": "object" })] {
+        let error = db
+            .query_json(&import_json(
+                json!([
+                    import_row("param", "2026-06-01T00:00:00Z"),
+                    unset_row("unset")
+                ]),
+                declared,
+            ))
+            .await
+            .expect_err("a range index rejects null")
+            .to_string();
+        assert!(error.contains("unsupported range value type Null"), "{error}");
+    }
+    assert_eq!(event_count(&db).await, json!(0));
+
+    db.query_json(&import_json(
+        json!([
+            import_row("param", "2026-06-01T00:00:00Z"),
+            import_row("offset_earlier", "2026-06-01T05:00:00+09:00"),
+        ]),
+        nullable_row_type(),
+    ))
+    .await
+    .unwrap();
+    let service = HelixQueryService::new(Arc::clone(&db));
+    for request in [
+        after_param("2026-05-31T23:00:00Z"),
+        after_literal("2026-05-31T23:00:00Z"),
+    ] {
+        let response = service.execute_query(request).await.unwrap();
+        assert_eq!(sorted_names(&response.json()), ["param"]);
+        assert!(!response
+            .diagnostics()
+            .insights
+            .iter()
+            .any(|insight| matches!(
+                insight,
+                helix_planner::diagnostics::PlannerInsight::MissingIndex(_)
+            )));
+    }
+}
+
+/// `rows` with `at` and `audit.seen_at` declared `{ "nullable": "date_time" }`.
+fn nullable_row_type() -> serde_json::Value {
+    json!({ "array": { "object": {
+        "name": "string",
+        "at": { "nullable": "date_time" },
+        "audit": { "object": { "seen_at": { "nullable": "date_time" } } },
+    } } })
+}
+
+fn unset_row(name: &str) -> serde_json::Value {
+    json!({ "name": name, "at": null, "audit": { "seen_at": null } })
 }

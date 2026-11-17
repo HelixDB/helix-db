@@ -990,6 +990,15 @@ pub fn every_variant() -> Vec<Shape> {
                 ),
             ]))]),
         ),
+        (
+            QueryParamType::Array(Box::new(QueryParamType::Nullable(Box::new(
+                QueryParamType::DateTime,
+            )))),
+            QueryValue::Array(vec![
+                QueryValue::Null,
+                QueryValue::String(String::from("2026-10-07T10:00:00Z")),
+            ]),
+        ),
     ];
     shapes.push(Shape::new(
         "params/typed",
