@@ -1813,6 +1813,19 @@ async fn activate(
         }
         DeltaDrain::Blocked(blocker) => return Ok(IndexOperationStepResult::Blocked(blocker)),
     }
+    // Every writer records the deltas it commits (see [`delta_ledger`]), so
+    // the keys observed under the permit were all of them. Production trusts
+    // that contract rather than rescan the prefix's tombstones while every
+    // writer waits; test builds prove it at every activation, so a writer
+    // that skips its record fails every lifecycle test that activates.
+    #[cfg(any(test, feature = "index-lifecycle-testing"))]
+    {
+        let left = transaction_delta_keys(transaction, scope, operation).await?;
+        assert!(
+            left.is_empty(),
+            "activation left build deltas no writer recorded: {left:?}"
+        );
+    }
     Ok(IndexOperationStepResult::Completed(
         IndexOperationOutcome::Build(BuildOperationOutcome::Succeeded),
     ))
@@ -8871,6 +8884,72 @@ mod tests {
             .await;
             db.close().await.expect("secondary test database closes");
         }
+    }
+
+    /// A delta committed behind the ledger without a record breaks the
+    /// writer contract; test builds catch it at activation instead of
+    /// activating an index that misses the write.
+    #[tokio::test]
+    #[should_panic(expected = "activation left build deltas no writer recorded")]
+    async fn activation_rejects_a_delta_no_writer_recorded() {
+        let db = test_db("secondary-ledger-unrecorded").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        let ValidatedDynamicIndexDefinition::Secondary(secondary) = &definition else {
+            panic!("a secondary definition");
+        };
+        let seeded = user_properties("seed-0@example.com");
+        put_source(&db, scope, IndexElementKind::Node, 0, &seeded).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 3).await;
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, |stage| {
+            matches!(stage, SecondaryBuildStage::Validate(_))
+        })
+        .await;
+        assert_eq!(
+            drive_one(&db, &driver, operation_id, &mut claim_sequence).await,
+            CommittedOperationStep::Progressed
+        );
+        let entity = IndexEntity {
+            kind: IndexElementKind::Node,
+            id: IndexEntityId::new(0),
+        };
+        db.put(
+            scoped_index_key(
+                scope,
+                ScopedKey::BuildDelta(IndexEntityStateKey {
+                    index_id,
+                    generation,
+                    entity,
+                }),
+            ),
+            encode_build_delta(&CoalescedBuildDeltaValue {
+                index_id,
+                generation,
+                entity_kind: entity.kind,
+                entity_id: entity.id,
+                state: CoalescedBuildDeltaState::SecondaryBefore(
+                    canonical_value(secondary, &seeded, entity.id)
+                        .ok()
+                        .flatten(),
+                ),
+            }),
+        )
+        .await
+        .expect("the unrecorded delta commits");
+        put_source(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            &user_properties("moved@example.com"),
+        )
+        .await;
+        drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await;
     }
 
     /// Aborting a build drops its ledger along with its rows.
