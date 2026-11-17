@@ -1470,6 +1470,145 @@ mod tests {
         ));
     }
 
+    #[query]
+    #[allow(unused_variables)] // `for_each_param` names the parameter rather than reading it
+    fn q_rows(rows: Vec<ParamObject>) {
+        write_batch().for_each_param(
+            "rows",
+            write_batch().var_as(
+                "event",
+                g().add_n(
+                    "Event",
+                    vec![
+                        ("name", PropertyInput::param("name")),
+                        ("at", PropertyInput::param("at")),
+                    ],
+                ),
+            ),
+        )
+    }
+    #[query]
+    fn q_datetime_map(times: BTreeMap<String, DateTime>) {
+        read_batch()
+            .var_as("v", g().n_where(SourcePredicate::eq("field", times)))
+            .returning(["v"])
+    }
+
+    /// Typed fields for `#[query]` parameters follow the converted value, and
+    /// survive the JSON a remote server parses.
+    fn declared_and_reparsed(request: &QueryRequest, name: &str) -> QueryParamType {
+        let reparsed =
+            QueryRequest::from_json_slice(request.to_json_string().unwrap().as_bytes()).unwrap();
+        assert_eq!(reparsed.parameters(), request.parameters());
+        request.parameter_types().unwrap()[name].clone()
+    }
+
+    #[test]
+    fn datetimes_inside_maps_values_and_rows_are_declared_date_time() {
+        let fields = |fields: Vec<(&str, QueryParamType)>| {
+            QueryParamType::Record(ObjectFields::new(fields).unwrap())
+        };
+        let row = |name: &str, at: Option<i64>| {
+            ParamObject::from([
+                ("name".to_string(), PropertyValue::from(name)),
+                (
+                    "at".to_string(),
+                    at.map_or(PropertyValue::Null, PropertyValue::DateTime),
+                ),
+            ])
+        };
+
+        let rows = q_rows(vec![row("a", Some(0)), row("b", Some(1_000))]).unwrap();
+        assert_eq!(
+            declared_and_reparsed(&rows, "rows"),
+            QueryParamType::Array(Box::new(fields(vec![
+                ("at", QueryParamType::DateTime),
+                ("name", QueryParamType::Value),
+            ])))
+        );
+        assert!(matches!(
+            &rows.parameters().unwrap()["rows"],
+            QueryValue::Array(values) if matches!(
+                &values[1],
+                QueryValue::Object(fields) if fields["at"] == QueryValue::DateTime(1_000)
+            )
+        ));
+        // Rows without datetimes keep the untyped declaration.
+        let untyped = q_rows(vec![row("a", None), row("b", None)]).unwrap();
+        assert_eq!(
+            declared_and_reparsed(&untyped, "rows"),
+            QueryParamType::Array(Box::new(QueryParamType::Object))
+        );
+        assert_eq!(
+            declared_and_reparsed(&q_rows(Vec::new()).unwrap(), "rows"),
+            QueryParamType::Array(Box::new(QueryParamType::Object))
+        );
+        // One array declares one row type, so rows that need different ones
+        // fail instead of sending a datetime as text.
+        assert!(matches!(
+            q_rows(vec![row("a", Some(0)), row("b", None)]),
+            Err(QueryError::ParameterTypeMismatch { path, .. }) if path == "rows[1]"
+        ));
+        let mut extra = row("c", Some(0));
+        extra.insert("seen".to_string(), PropertyValue::DateTime(0));
+        assert!(matches!(
+            q_rows(vec![row("a", Some(0)), extra]),
+            Err(QueryError::ParameterTypeMismatch { path, .. }) if path == "rows[1]"
+        ));
+
+        let nested = q_value(PropertyValue::object(vec![
+            ("at", PropertyValue::DateTime(0)),
+            (
+                "history",
+                PropertyValue::array(vec![PropertyValue::DateTime(1), PropertyValue::DateTime(2)]),
+            ),
+            ("note", PropertyValue::from("x")),
+        ]))
+        .unwrap();
+        assert_eq!(
+            declared_and_reparsed(&nested, "val"),
+            fields(vec![
+                ("at", QueryParamType::DateTime),
+                (
+                    "history",
+                    QueryParamType::Array(Box::new(QueryParamType::DateTime))
+                ),
+                ("note", QueryParamType::Value),
+            ])
+        );
+        assert_eq!(
+            declared_and_reparsed(&q_value(PropertyValue::DateTime(5)).unwrap(), "val"),
+            QueryParamType::DateTime
+        );
+        assert!(matches!(
+            q_value(PropertyValue::array(vec![
+                PropertyValue::DateTime(1),
+                PropertyValue::from("x"),
+            ])),
+            Err(QueryError::ParameterTypeMismatch { path, .. }) if path == "val[1]"
+        ));
+
+        let times = q_datetime_map(BTreeMap::from([
+            ("start".to_string(), DateTime::from_millis(0)),
+            ("end".to_string(), DateTime::from_millis(1)),
+        ]))
+        .unwrap();
+        assert_eq!(
+            declared_and_reparsed(&times, "times"),
+            fields(vec![
+                ("end", QueryParamType::DateTime),
+                ("start", QueryParamType::DateTime),
+            ])
+        );
+        assert!(matches!(
+            q_datetime_map(BTreeMap::from([(
+                "bad".to_string(),
+                DateTime::from_millis(i64::MAX)
+            )])),
+            Err(QueryError::InvalidDateTimeParameter { path, .. }) if path == "times.bad"
+        ));
+    }
+
     #[test]
     fn bytes_param_returns_error_without_panicking() {
         // Bytes cannot be represented by the query JSON route
