@@ -556,7 +556,9 @@ fn check_legacy_text_migration_interruption() -> Result<()> {
     Ok(())
 }
 
-/// Observes an exact queued text-build stage before a worker acquires it.
+/// Observes an exact text-build stage before a worker runs a step from it:
+/// once when the dispatcher observes the queued operation, and before every
+/// step a worker runs under a retained claim.
 #[cfg(test)]
 pub(crate) fn observe_legacy_text_migration_operation(
     operation: &crate::index_lifecycle::IndexOperationRecord,

@@ -8915,8 +8915,10 @@ mod tests {
     }
 
     /// Reproduces a writer committing while each gated step waits for the
-    /// scope permit, so every step observes a fresh delta. The step drains
-    /// it under the gate and advances instead of returning to catch-up.
+    /// scope permit, so every gated step observes a fresh delta. The step
+    /// drains it under the gate and advances instead of returning to
+    /// catch-up. Validation fences no writer here, so its step may finish
+    /// before the write, which the next step then observes.
     #[tokio::test]
     async fn gated_steps_drain_the_write_they_waited_for() {
         for (ordinal, definition) in [
@@ -8944,15 +8946,20 @@ mod tests {
 
             let mut activated = false;
             for step in 0_u64..8 {
+                let fences = !matches!(
+                    build_stage(&db, operation_id).await,
+                    SecondaryBuildStage::Validate(_)
+                );
                 let in_flight = gates.mutation_permit(scope).await;
                 let pending = drive_one(&db, &driver, operation_id, &mut claim_sequence);
                 tokio::pin!(pending);
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(50), &mut pending)
-                        .await
-                        .is_err(),
-                    "every step from catch-up on waits for the in-flight write"
-                );
+                let early = tokio::time::timeout(Duration::from_millis(50), &mut pending).await;
+                if fences {
+                    assert!(
+                        early.is_err(),
+                        "catch-up and activation wait for the in-flight write"
+                    );
+                }
                 let inserted = 4 + step;
                 let properties = user_properties(&format!("waited-{step}@example.com"));
                 mutate_source(
@@ -8968,10 +8975,13 @@ mod tests {
                 .expect("the in-flight write commits while the step waits");
                 sources.insert(inserted, properties);
                 drop(in_flight);
-                match tokio::time::timeout(Duration::from_secs(5), pending)
-                    .await
-                    .expect("the step acquires the gate once the write commits")
-                {
+                let step = match early {
+                    Ok(step) => step,
+                    Err(_) => tokio::time::timeout(Duration::from_secs(5), pending)
+                        .await
+                        .expect("the step acquires the gate once the write commits"),
+                };
+                match step {
                     CommittedOperationStep::Progressed => {}
                     CommittedOperationStep::Completed => {
                         activated = true;
@@ -9765,13 +9775,11 @@ mod tests {
             for _ in 0..64 {
                 let mut still_running = Vec::new();
                 for operation_id in running {
-                    // Three indexed inserts commit while the step waits for
-                    // the scope permit they hold. Catch-up and activation
-                    // always wait; validation waits only once it fences.
-                    let fences = !matches!(
-                        build_stage(&db, operation_id).await,
-                        SecondaryBuildStage::Validate(_)
-                    );
+                    // Three indexed inserts commit under the scope permit
+                    // they hold. A step that fences waits for them; one
+                    // whose backlog is beyond its gated reach first drains
+                    // by exact keys without fencing, and validation fences
+                    // only once it stalls, so those may finish first.
                     let in_flight = gates.mutation_permit(scope).await;
                     let pending = drive_one_with_limits(
                         &db,
@@ -9782,12 +9790,6 @@ mod tests {
                     );
                     tokio::pin!(pending);
                     let early = tokio::time::timeout(Duration::from_millis(50), &mut pending).await;
-                    if fences {
-                        assert!(
-                            early.is_err(),
-                            "catch-up and activation wait for the in-flight writes"
-                        );
-                    }
                     let first = sources.keys().next_back().map_or(0, |last| last + 1);
                     for entity_id in first..first + 3 {
                         let properties =
@@ -9807,7 +9809,7 @@ mod tests {
                     }
                     drop(in_flight);
                     // A fenced validation drains every pending delta, one
-                    // durable transaction per entity under these limits.
+                    // transaction per entity under these limits.
                     let step = match early {
                         Ok(step) => step,
                         Err(_) => tokio::time::timeout(Duration::from_secs(60), pending)

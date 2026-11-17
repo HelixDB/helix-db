@@ -126,13 +126,19 @@ async fn run_automatic_worker_under_a_writer_loop() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-sustained-automatic".to_string(),
         },
-        // Small batches spread the scan and validation over several steps,
-        // each racing the writer.
-        DbConfig::new().with_secondary_index_lifecycle_tuning(
-            SecondaryIndexLifecycleTuning::default().with_batch_rows(
-                SecondaryIndexLifecycleBatchRows::new(64).expect("sustained batch is positive"),
+        // One-row batches spread the scan and validation over hundreds of
+        // steps, each racing the writer. Build steps do not wait for their
+        // WAL upload but every public write does, so a short flush interval
+        // keeps the writer's batches as quick as a handful of steps.
+        DbConfig::new()
+            .with_secondary_index_lifecycle_tuning(
+                SecondaryIndexLifecycleTuning::default().with_batch_rows(
+                    SecondaryIndexLifecycleBatchRows::new(1).expect("sustained batch is positive"),
+                ),
+            )
+            .with_wal_flush_interval_ms(
+                std::num::NonZeroU64::new(2).expect("flush interval is positive"),
             ),
-        ),
         LifecycleTestScheduling::Automatic,
     )
     .await

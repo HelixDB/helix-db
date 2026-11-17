@@ -367,6 +367,9 @@ impl InFlightTask {
                 let slice = std::time::Instant::now();
                 let mut claimed = claimed;
                 loop {
+                    // The dispatcher observed only the slice's first step.
+                    #[cfg(test)]
+                    crate::migrations::observe_legacy_text_migration_operation(&claimed.record)?;
                     let claim = if *shutdown.borrow() || slice.elapsed() >= CLAIM_SLICE {
                         ClaimContinuation::Release
                     } else {
