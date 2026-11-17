@@ -195,17 +195,28 @@ VALUES (?, ?, '2026-07-24');
 parameter. Inside the body, each field of the current row is a parameter:
 `PropertyInput.param("email")` reads that row's `email`.
 
+Declare each row's fields so every value gets its type. Here `joinedAt` is a
+`date_time` field, so it is stored as a datetime that range filters and range indexes
+match, not as RFC3339 text. See
+[Typed object fields](/database/helix-db/query-guides/parameters#typed-object-fields).
+
 <CodeGroup>
 
 ```rust Rust
 use std::collections::BTreeMap;
 
-let row = |email: &str, name: &str| {
+let row = |email: &str, name: &str, joined_at: &str| {
     QueryValue::Object(BTreeMap::from([
         ("email".to_string(), QueryValue::String(email.to_string())),
         ("name".to_string(), QueryValue::String(name.to_string())),
+        ("joinedAt".to_string(), QueryValue::String(joined_at.to_string())),
     ]))
 };
+let row_type = QueryParamType::Record(ObjectFields::new([
+    ("email", QueryParamType::String),
+    ("name", QueryParamType::String),
+    ("joinedAt", QueryParamType::DateTime),
+])?);
 
 let request = QueryRequest::write(write_batch().for_each_param(
     "rows",
@@ -216,6 +227,7 @@ let request = QueryRequest::write(write_batch().for_each_param(
             vec![
                 ("email", PropertyInput::param("email")),
                 ("name", PropertyInput::param("name")),
+                ("joinedAt", PropertyInput::param("joinedAt")),
             ],
         ),
     ),
@@ -223,16 +235,24 @@ let request = QueryRequest::write(write_batch().for_each_param(
 .with_query_name("import_users")
 .with_typed_parameter(
     "rows",
-    QueryParamType::Array(Box::new(QueryParamType::Object)),
+    QueryParamType::Array(Box::new(row_type)),
     QueryValue::Array(vec![
-        row("alice@example.com", "Alice"),
-        row("bob@example.com", "Bob"),
+        row("alice@example.com", "Alice", "2026-01-05T09:30:00Z"),
+        row("bob@example.com", "Bob", "2026-02-11T17:00:00+01:00"),
     ]),
 )?;
 ```
 
 ```ts TypeScript
-const params = defineParams({ rows: param.array(param.object()) });
+const params = defineParams({
+  rows: param.array(
+    param.object({
+      email: param.string(),
+      name: param.string(),
+      joinedAt: param.dateTime(),
+    }),
+  ),
+});
 
 const query = writeBatch().forEachParam(
   "rows",
@@ -241,6 +261,7 @@ const query = writeBatch().forEachParam(
     g().addN("User", {
       email: PropertyInput.param("email"),
       name: PropertyInput.param("name"),
+      joinedAt: PropertyInput.param("joinedAt"),
     }),
   ),
 );
@@ -249,8 +270,8 @@ const request = query.toQueryRequest(
   params,
   {
     rows: [
-      { email: "alice@example.com", name: "Alice" },
-      { email: "bob@example.com", name: "Bob" },
+      { email: "alice@example.com", name: "Alice", joinedAt: "2026-01-05T09:30:00Z" },
+      { email: "bob@example.com", name: "Bob", joinedAt: DateTime.parseRfc3339("2026-02-11T17:00:00+01:00") },
     ],
   },
   { queryName: "import_users" },
@@ -260,20 +281,37 @@ const request = query.toQueryRequest(
 ```go Go
 q := helix.WriteQuery("import_users")
 q.ParamArray("rows", []any{
-	map[string]any{"email": "alice@example.com", "name": "Alice"},
-	map[string]any{"email": "bob@example.com", "name": "Bob"},
-}, helix.ParamTypeObject())
+	map[string]any{"email": "alice@example.com", "name": "Alice", "joinedAt": "2026-01-05T09:30:00Z"},
+	map[string]any{"email": "bob@example.com", "name": "Bob", "joinedAt": time.Date(2026, 2, 11, 16, 0, 0, 0, time.UTC)},
+}, helix.ParamTypeObjectFields(map[string]helix.QueryParamType{
+	"email":    helix.ParamTypeString(),
+	"name":     helix.ParamTypeString(),
+	"joinedAt": helix.ParamTypeDateTime(),
+}))
 
 request := q.
 	ForEachParam("rows", helix.Write().VarAs("user", helix.G().AddN("User", helix.Props{
 		helix.Prop("email", helix.ExprParam("email")),
 		helix.Prop("name", helix.ExprParam("name")),
+		helix.Prop("joinedAt", helix.ExprParam("joinedAt")),
 	}))).
 	Returning()
 ```
 
 ```python Python
-params = define_params({"rows": param.array(param.object())})
+params = define_params(
+    {
+        "rows": param.array(
+            param.object(
+                {
+                    "email": param.string(),
+                    "name": param.string(),
+                    "joinedAt": param.date_time(),
+                }
+            )
+        )
+    }
+)
 
 query = write_batch().for_each_param(
     "rows",
@@ -284,6 +322,7 @@ query = write_batch().for_each_param(
             {
                 "email": PropertyInput.param("email"),
                 "name": PropertyInput.param("name"),
+                "joinedAt": PropertyInput.param("joinedAt"),
             },
         ),
     ),
@@ -293,8 +332,12 @@ request = query.to_query_request(
     params,
     {
         "rows": [
-            {"email": "alice@example.com", "name": "Alice"},
-            {"email": "bob@example.com", "name": "Bob"},
+            {"email": "alice@example.com", "name": "Alice", "joinedAt": "2026-01-05T09:30:00Z"},
+            {
+                "email": "bob@example.com",
+                "name": "Bob",
+                "joinedAt": datetime(2026, 2, 11, 16, 0, tzinfo=timezone.utc),
+            },
         ]
     },
     query_name="import_users",
@@ -320,7 +363,8 @@ request = query.to_query_request(
                       "label": "User",
                       "properties": [
                         ["email", { "expr": { "param": "email" } }],
-                        ["name", { "expr": { "param": "name" } }]
+                        ["name", { "expr": { "param": "name" } }],
+                        ["joinedAt", { "expr": { "param": "joinedAt" } }]
                       ]
                     }
                   }
@@ -335,12 +379,16 @@ request = query.to_query_request(
   },
   "parameters": {
     "rows": [
-      { "email": "alice@example.com", "name": "Alice" },
-      { "email": "bob@example.com", "name": "Bob" }
+      { "email": "alice@example.com", "name": "Alice", "joinedAt": "2026-01-05T09:30:00.000Z" },
+      { "email": "bob@example.com", "name": "Bob", "joinedAt": "2026-02-11T16:00:00.000Z" }
     ]
   },
   "parameter_types": {
-    "rows": { "array": "object" }
+    "rows": {
+      "array": {
+        "object": { "email": "string", "name": "string", "joinedAt": "date_time" }
+      }
+    }
   }
 }
 ```
@@ -350,6 +398,12 @@ request = query.to_query_request(
 - The parameter must be an array of objects. Any other value fails type validation
   before the query runs when typed as here (`invalid_query_json` over HTTP), or with
   `invalid_query` when untyped. An empty array runs the body zero times.
+- Every row must have exactly the declared fields. A missing or undeclared field, a
+  wrong-typed value, an invalid RFC3339 string in a `date_time` field, or `null` in any
+  field not declared `value` rejects the whole request before anything is written.
+- Rows declared as a bare `{ "array": "object" }` (`param.object()`,
+  `QueryParamType::Object`, `ParamTypeObject()`) are not checked field by field, and
+  their RFC3339 strings stay strings.
 - Variables are not per-iteration: after the loop, `user` holds only the last row's
   result, so this request returns nothing.
 - All rows commit in one transaction. Split very large imports into several requests,
