@@ -192,7 +192,8 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
         if self.read_bytes >= self.max_input_bytes {
             return Ok(false);
         }
-        let ids = self.ids.by_ref().take(self.chunk_ids()).collect::<Vec<_>>();
+        let chunk_ids = self.chunk_ids();
+        let ids = self.ids.by_ref().take(chunk_ids).collect::<Vec<_>>();
         let Some(&last) = ids.last() else {
             return Ok(false);
         };
