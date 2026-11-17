@@ -12,7 +12,8 @@ pub use crate::projection::{
     PropertyProjection,
 };
 pub use crate::query::{
-    QueryError, QueryParamType, QueryRequest, QueryRequestType, QueryValue, SearchConsistency,
+    ObjectFields, QueryError, QueryParamType, QueryRequest, QueryRequestType, QueryValue,
+    SearchConsistency,
 };
 pub use crate::traversal::{
     g, sub, AggregateFunction, AstNode, EmitBehavior, Empty, OnEdges, OnNodes, Order, ReadOnly,

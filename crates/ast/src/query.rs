@@ -8,8 +8,36 @@ use crate::arena::{self, ArenaDeserialize, IntoOwned};
 use crate::batch::{ArenaBatchQuery, BatchQuery, ReadBatch, WriteBatch};
 use crate::value::PropertyValue;
 /// Declared query parameter shape.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// Each family serializes as its snake_case name (`"date_time"`), an array as
+/// `{"array": <element type>}`, and an object with declared fields as
+/// `{"object": {"<field>": <type>, ...}}`. A bare `"object"` accepts any
+/// object and validates its fields like [`QueryParamType::Value`].
+///
+/// ```
+/// use helix_ast::query::{ObjectFields, QueryParamType};
+///
+/// let row = ObjectFields::new([
+///     ("email", QueryParamType::String),
+///     ("created_at", QueryParamType::DateTime),
+/// ])
+/// .unwrap();
+/// let rows = QueryParamType::Array(Box::new(QueryParamType::Record(row)));
+/// let json = serde_json::to_string(&rows).unwrap();
+/// assert_eq!(
+///     json,
+///     r#"{"array":{"object":{"created_at":"date_time","email":"string"}}}"#
+/// );
+/// assert_eq!(serde_json::from_str::<QueryParamType>(&json).unwrap(), rows);
+/// assert_eq!(
+///     serde_json::from_str::<QueryParamType>(r#""object""#).unwrap(),
+///     QueryParamType::Object
+/// );
+/// // A declaration names at least one field, each once.
+/// assert!(serde_json::from_str::<QueryParamType>(r#"{"object":{}}"#).is_err());
+/// assert!(serde_json::from_str::<QueryParamType>(r#"{"object":{"a":"i64","a":"bool"}}"#).is_err());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryParamType {
     /// Boolean.
     Bool,
@@ -27,10 +55,186 @@ pub enum QueryParamType {
     Bytes,
     /// Any property value.
     Value,
-    /// Object.
+    /// Any object; its fields are validated like [`QueryParamType::Value`].
     Object,
+    /// An object with exactly the declared fields, each normalized to its
+    /// declared type. A missing or undeclared field is rejected, and `null`
+    /// satisfies only a [`QueryParamType::Value`] field.
+    Record(ObjectFields),
     /// Array.
     Array(Box<QueryParamType>),
+}
+
+impl Serialize for QueryParamType {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        const NAME: &str = "QueryParamType";
+        let (index, variant) = match self {
+            Self::Record(fields) => {
+                return serializer.serialize_newtype_variant(NAME, 9, "object", fields);
+            }
+            Self::Array(inner) => {
+                return serializer.serialize_newtype_variant(NAME, 10, "array", inner);
+            }
+            Self::Bool => (0, "bool"),
+            Self::I64 => (1, "i64"),
+            Self::F64 => (2, "f64"),
+            Self::F32 => (3, "f32"),
+            Self::String => (4, "string"),
+            Self::DateTime => (5, "date_time"),
+            Self::Bytes => (6, "bytes"),
+            Self::Value => (7, "value"),
+            Self::Object => (8, "object"),
+        };
+        serializer.serialize_unit_variant(NAME, index, variant)
+    }
+}
+
+impl<'de> Deserialize<'de> for QueryParamType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The families written as a bare name.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Named {
+            Bool,
+            I64,
+            F64,
+            F32,
+            String,
+            DateTime,
+            Bytes,
+            Value,
+            Object,
+        }
+        /// The families written as a one-key object around their contents.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Nested {
+            Array(Box<QueryParamType>),
+            Object(ObjectFields),
+        }
+        struct TypeVisitor;
+        impl<'de> Visitor<'de> for TypeVisitor {
+            type Value = QueryParamType;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter
+                    .write_str("a parameter type name, {\"array\": ...} or {\"object\": {...}}")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<Self::Value, E> {
+                Named::deserialize(serde::de::value::StrDeserializer::<E>::new(name)).map(|named| {
+                    match named {
+                        Named::Bool => QueryParamType::Bool,
+                        Named::I64 => QueryParamType::I64,
+                        Named::F64 => QueryParamType::F64,
+                        Named::F32 => QueryParamType::F32,
+                        Named::String => QueryParamType::String,
+                        Named::DateTime => QueryParamType::DateTime,
+                        Named::Bytes => QueryParamType::Bytes,
+                        Named::Value => QueryParamType::Value,
+                        Named::Object => QueryParamType::Object,
+                    }
+                })
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let nested =
+                    Nested::deserialize(serde::de::value::MapAccessDeserializer::new(&mut map))?;
+                // The enum reads one entry; a second would otherwise be ignored.
+                if map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+                    return Err(serde::de::Error::custom(
+                        "a parameter type object must have exactly one key",
+                    ));
+                }
+                Ok(match nested {
+                    Nested::Array(inner) => QueryParamType::Array(inner),
+                    Nested::Object(fields) => QueryParamType::Record(fields),
+                })
+            }
+        }
+        deserializer.deserialize_any(TypeVisitor)
+    }
+}
+
+/// The fields of a [`QueryParamType::Record`]: at least one, each named once.
+///
+/// ```
+/// use helix_ast::query::{ObjectFields, QueryError, QueryParamType};
+///
+/// let fields = ObjectFields::new([("at", QueryParamType::DateTime)]).unwrap();
+/// assert_eq!(fields.get("at"), Some(&QueryParamType::DateTime));
+/// assert!(matches!(
+///     ObjectFields::new(Vec::<(String, QueryParamType)>::new()),
+///     Err(QueryError::EmptyObjectFields)
+/// ));
+/// assert!(matches!(
+///     ObjectFields::new([("a", QueryParamType::I64), ("a", QueryParamType::Bool)]),
+///     Err(QueryError::DuplicateObjectField(name)) if name == "a"
+/// ));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ObjectFields(BTreeMap<String, QueryParamType>);
+
+impl ObjectFields {
+    /// Declare fields, rejecting an empty list and a repeated name.
+    ///
+    /// # Errors
+    ///
+    /// [`QueryError::EmptyObjectFields`] for no fields, and
+    /// [`QueryError::DuplicateObjectField`] for a name given twice.
+    pub fn new(
+        fields: impl IntoIterator<Item = (impl Into<String>, QueryParamType)>,
+    ) -> Result<Self, QueryError> {
+        let fields = fields
+            .into_iter()
+            .try_fold(BTreeMap::new(), |mut fields, (name, ty)| {
+                let name = name.into();
+                match fields.contains_key(&name) {
+                    true => Err(QueryError::DuplicateObjectField(name)),
+                    false => {
+                        fields.insert(name, ty);
+                        Ok(fields)
+                    }
+                }
+            })?;
+        match fields.is_empty() {
+            true => Err(QueryError::EmptyObjectFields),
+            false => Ok(Self(fields)),
+        }
+    }
+
+    /// The declared type of `name`.
+    pub fn get(&self, name: &str) -> Option<&QueryParamType> {
+        self.0.get(name)
+    }
+
+    /// Fields in name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &QueryParamType)> {
+        self.0.iter().map(|(name, ty)| (name.as_str(), ty))
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectFields {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FieldsVisitor;
+        impl<'de> Visitor<'de> for FieldsVisitor {
+            type Value = ObjectFields;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an object of field types")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut fields = Vec::with_capacity(map.size_hint().unwrap_or(0).min(64));
+                while let Some(field) = map.next_entry::<String, QueryParamType>()? {
+                    fields.push(field);
+                }
+                ObjectFields::new(fields).map_err(serde::de::Error::custom)
+            }
+        }
+        deserializer.deserialize_map(FieldsVisitor)
+    }
 }
 
 /// Query request type.
@@ -282,6 +486,19 @@ pub enum QueryError {
     },
     /// Write batches always search strongly, so they cannot request eventual search.
     EventualWriteSearchConsistency,
+    /// An object declaration must name at least one field.
+    EmptyObjectFields,
+    /// An object declaration names a field twice.
+    DuplicateObjectField(String),
+    /// An object's fields do not exactly match its declared fields.
+    ObjectFieldMismatch {
+        /// The object's path.
+        path: String,
+        /// Declared fields the object lacks.
+        missing_fields: Vec<String>,
+        /// Object fields that are not declared.
+        extra_fields: Vec<String>,
+    },
 }
 
 impl QueryError {
@@ -340,6 +557,20 @@ impl std::fmt::Display for QueryError {
             Self::EventualWriteSearchConsistency => write!(
                 f,
                 "search_consistency \"eventual\" is only valid for read requests; write batches always search strongly"
+            ),
+            Self::EmptyObjectFields => {
+                write!(f, "an object parameter type must declare at least one field")
+            }
+            Self::DuplicateObjectField(name) => {
+                write!(f, "object parameter field '{name}' is declared twice")
+            }
+            Self::ObjectFieldMismatch {
+                path,
+                missing_fields,
+                extra_fields,
+            } => write!(
+                f,
+                "parameter '{path}' fields do not match its declared fields (missing: {missing_fields:?}, undeclared: {extra_fields:?})"
             ),
         }
     }
@@ -1284,21 +1515,30 @@ fn validate_parameter_name(name: &str) -> Result<(), QueryError> {
     }
 }
 
-/// A parameter's path below its name: one array index per declared array
-/// level. It renders (`name[3][0]`) only when an error reports it, so
-/// accepting a large parameter formats no paths.
+/// One step below a typed parameter's name: an array index or a declared
+/// object field.
+#[derive(Clone, Copy)]
+enum PathSegment<'t> {
+    Index(usize),
+    Field(&'t str),
+}
+
+/// A parameter's path below its name: one segment per declared array or
+/// object level. It renders (`name[3].created_at`) only when an error reports
+/// it, so accepting a large parameter formats no paths.
 #[derive(Clone, Copy)]
 struct ParamPath<'p> {
     name: &'p str,
-    indices: &'p [usize],
+    segments: &'p [PathSegment<'p>],
 }
 
 impl std::fmt::Display for ParamPath<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name)?;
-        self.indices
-            .iter()
-            .try_for_each(|index| write!(f, "[{index}]"))
+        self.segments.iter().try_for_each(|segment| match segment {
+            PathSegment::Index(index) => write!(f, "[{index}]"),
+            PathSegment::Field(field) => write!(f, ".{field}"),
+        })
     }
 }
 
@@ -1418,38 +1658,48 @@ fn normalize_typed_value(
     value: QueryValue,
     name: &str,
 ) -> Result<QueryValue, QueryError> {
-    // Normalization recurses once per array level of the declared type.
-    let type_depth = std::iter::successors(Some(ty), |ty| match ty {
-        QueryParamType::Array(inner) => Some(inner.as_ref()),
-        QueryParamType::Bool
-        | QueryParamType::I64
-        | QueryParamType::F64
-        | QueryParamType::F32
-        | QueryParamType::String
-        | QueryParamType::DateTime
-        | QueryParamType::Bytes
-        | QueryParamType::Value
-        | QueryParamType::Object => None,
-    })
-    .count();
-    if type_depth > MAX_REQUEST_JSON_DEPTH {
-        return Err(QueryError::NestingTooDeep {
-            path: name.to_owned(),
-            maximum: MAX_REQUEST_JSON_DEPTH,
-        });
+    // Normalization recurses once per array or object level of the declared
+    // type. The depth walk keeps an explicit stack, so a deep or wide
+    // declaration never reaches the call stack before it is rejected.
+    let mut type_depth = 0;
+    let mut pending = vec![(ty, 1_usize)];
+    while let Some((ty, depth)) = pending.pop() {
+        type_depth = type_depth.max(depth);
+        if type_depth > MAX_REQUEST_JSON_DEPTH {
+            return Err(QueryError::NestingTooDeep {
+                path: name.to_owned(),
+                maximum: MAX_REQUEST_JSON_DEPTH,
+            });
+        }
+        match ty {
+            QueryParamType::Array(inner) => pending.push((inner, depth + 1)),
+            QueryParamType::Record(fields) => {
+                pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1)));
+            }
+            QueryParamType::Bool
+            | QueryParamType::I64
+            | QueryParamType::F64
+            | QueryParamType::F32
+            | QueryParamType::String
+            | QueryParamType::DateTime
+            | QueryParamType::Bytes
+            | QueryParamType::Value
+            | QueryParamType::Object => {}
+        }
     }
     normalize_typed_value_at(ty, value, name, &mut Vec::with_capacity(type_depth))
 }
 
-/// [`normalize_typed_value`] below `indices`, the array positions leading to
-/// `value`, which render into a path only when an error reports one.
-fn normalize_typed_value_at(
-    ty: &QueryParamType,
+/// [`normalize_typed_value`] below `segments`, the array positions and
+/// object fields leading to `value`, which render into a path only when an
+/// error reports one.
+fn normalize_typed_value_at<'t>(
+    ty: &'t QueryParamType,
     value: QueryValue,
     name: &str,
-    indices: &mut Vec<usize>,
+    segments: &mut Vec<PathSegment<'t>>,
 ) -> Result<QueryValue, QueryError> {
-    let path = || ParamPath { name, indices }.to_string();
+    let path = |segments: &[PathSegment<'_>]| ParamPath { name, segments }.to_string();
     let actual = query_value_kind(&value);
     match (ty, value) {
         (QueryParamType::Bool, value @ QueryValue::Bool(_))
@@ -1479,34 +1729,71 @@ fn normalize_typed_value_at(
             crate::value::DateTime::parse_rfc3339(&datetime)
                 .map(|datetime| QueryValue::DateTime(datetime.millis()))
                 .map_err(|_| QueryError::ParameterTypeMismatch {
-                    path: path(),
+                    path: path(segments),
                     expected: QueryParamType::DateTime,
                     actual,
                 })
         }
         (QueryParamType::DateTime, value @ QueryValue::DateTime(_)) => Ok(value),
-        (QueryParamType::Value, value) => {
-            validate_json_value(&value, ParamPath { name, indices }, indices.len())?;
+        (QueryParamType::Value, value)
+        | (QueryParamType::Object, value @ QueryValue::Object(_)) => {
+            validate_json_value(&value, ParamPath { name, segments }, segments.len())?;
             Ok(value)
         }
-        (QueryParamType::Object, value @ QueryValue::Object(_)) => {
-            validate_json_value(&value, ParamPath { name, indices }, indices.len())?;
-            Ok(value)
+        (QueryParamType::Record(fields), QueryValue::Object(mut values)) => {
+            // Both maps order their names the same way, so equal name lists
+            // pair every value with its declaration in one pass.
+            if !values
+                .keys()
+                .map(String::as_str)
+                .eq(fields.iter().map(|(field, _)| field))
+            {
+                return Err(QueryError::ObjectFieldMismatch {
+                    path: path(segments),
+                    missing_fields: fields
+                        .iter()
+                        .filter(|(field, _)| !values.contains_key(*field))
+                        .map(|(field, _)| field.to_owned())
+                        .collect(),
+                    extra_fields: values
+                        .keys()
+                        .filter(|field| fields.get(field).is_none())
+                        .cloned()
+                        .collect(),
+                });
+            }
+            // Normalized in place, so a bulk row keeps its map allocation.
+            values
+                .values_mut()
+                .zip(fields.iter())
+                .try_for_each(|(value, (field, ty))| {
+                    segments.push(PathSegment::Field(field));
+                    let normalized = normalize_typed_value_at(
+                        ty,
+                        std::mem::replace(value, QueryValue::Null),
+                        name,
+                        segments,
+                    );
+                    segments.pop();
+                    *value = normalized?;
+                    Ok::<_, QueryError>(())
+                })?;
+            Ok(QueryValue::Object(values))
         }
         (QueryParamType::Array(inner), QueryValue::Array(values)) => values
             .into_iter()
             .enumerate()
             .map(|(index, value)| {
-                indices.push(index);
-                let normalized = normalize_typed_value_at(inner, value, name, indices);
-                indices.pop();
+                segments.push(PathSegment::Index(index));
+                let normalized = normalize_typed_value_at(inner, value, name, segments);
+                segments.pop();
                 normalized
             })
             .collect::<Result<Vec<_>, _>>()
             .map(QueryValue::Array),
-        (QueryParamType::Bytes, _) => Err(QueryError::unsupported_bytes(path())),
+        (QueryParamType::Bytes, _) => Err(QueryError::unsupported_bytes(path(segments))),
         (expected, _) => Err(QueryError::ParameterTypeMismatch {
-            path: path(),
+            path: path(segments),
             expected: expected.clone(),
             actual,
         }),
@@ -2344,6 +2631,350 @@ mod tests {
         assert!(matches!(
             untyped.parameters().unwrap().get("value"),
             Some(QueryValue::Object(_))
+        ));
+    }
+
+    fn record(fields: Vec<(&str, QueryParamType)>) -> QueryParamType {
+        QueryParamType::Record(ObjectFields::new(fields).unwrap())
+    }
+
+    fn object(fields: Vec<(&str, QueryValue)>) -> QueryValue {
+        QueryValue::Object(
+            fields
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value))
+                .collect(),
+        )
+    }
+
+    fn rfc3339(value: &str) -> QueryValue {
+        QueryValue::String(value.to_owned())
+    }
+
+    /// A bulk-import row declaration: a datetime, a nested object with its
+    /// own datetime, and an untyped field.
+    fn row_type() -> QueryParamType {
+        record(vec![
+            ("email", QueryParamType::String),
+            ("created_at", QueryParamType::DateTime),
+            (
+                "audit",
+                record(vec![
+                    ("seen_at", QueryParamType::DateTime),
+                    (
+                        "tags",
+                        QueryParamType::Array(Box::new(QueryParamType::String)),
+                    ),
+                ]),
+            ),
+            ("extra", QueryParamType::Value),
+        ])
+    }
+
+    fn row(email: &str, created_at: &str) -> QueryValue {
+        object(vec![
+            ("email", rfc3339(email)),
+            ("created_at", rfc3339(created_at)),
+            (
+                "audit",
+                object(vec![
+                    ("seen_at", rfc3339("2026-06-01T09:00:00+09:00")),
+                    (
+                        "tags",
+                        QueryValue::Array(vec![rfc3339("2026-06-01T00:00:00Z")]),
+                    ),
+                ]),
+            ),
+            ("extra", rfc3339("2026-06-01T00:00:00Z")),
+        ])
+    }
+
+    #[test]
+    fn object_fields_normalize_to_their_declared_types_at_every_level() {
+        let rows = QueryParamType::Array(Box::new(row_type()));
+        let request = typed(
+            rows.clone(),
+            QueryValue::Array(vec![
+                row("a@example.com", "2026-07-28T12:34:56Z"),
+                row("b@example.com", "1969-12-31T23:59:59.999Z"),
+            ]),
+        )
+        .unwrap();
+        let normalized = |created_at: i64, email: &str| {
+            object(vec![
+                ("email", rfc3339(email)),
+                ("created_at", QueryValue::DateTime(created_at)),
+                (
+                    "audit",
+                    object(vec![
+                        ("seen_at", QueryValue::DateTime(1_780_272_000_000)),
+                        // A string field keeps RFC3339 text as text, and so does
+                        // an untyped `value` field.
+                        (
+                            "tags",
+                            QueryValue::Array(vec![rfc3339("2026-06-01T00:00:00Z")]),
+                        ),
+                    ]),
+                ),
+                ("extra", rfc3339("2026-06-01T00:00:00Z")),
+            ])
+        };
+        assert_eq!(
+            request.parameters().unwrap().get("value"),
+            Some(&QueryValue::Array(vec![
+                normalized(1_785_242_096_000, "a@example.com"),
+                normalized(-1, "b@example.com"),
+            ]))
+        );
+        assert_eq!(request.parameter_types().unwrap().get("value"), Some(&rows));
+
+        // The normalized request round-trips through JSON, owned and arena.
+        let json = request.to_json_string().unwrap();
+        assert!(
+            json.contains(r#""parameter_types":{"value":{"array":{"object":{"audit":{"object":{"seen_at":"date_time","tags":{"array":"string"}}},"created_at":"date_time","email":"string","extra":"value"}}}}"#),
+            "{json}"
+        );
+        assert_eq!(
+            QueryRequest::from_json_slice(json.as_bytes()).unwrap(),
+            request
+        );
+        let bump = arena::Bump::new();
+        assert_eq!(
+            ArenaQueryRequest::from_json_slice(&bump, json.as_bytes())
+                .unwrap()
+                .into_owned(),
+            request
+        );
+        // Normalization is idempotent.
+        let (_, values) = request.clone().into_query();
+        assert_eq!(typed(rows, values["value"].clone()).unwrap(), request);
+    }
+
+    #[test]
+    fn object_fields_reject_wrong_missing_extra_and_null_values_with_their_paths() {
+        let rows = QueryParamType::Array(Box::new(row_type()));
+        let with = |field: &str, value: QueryValue| {
+            let QueryValue::Object(mut fields) = row("a@example.com", "2026-07-28T12:34:56Z")
+            else {
+                unreachable!("rows are objects")
+            };
+            fields.insert(field.to_owned(), value);
+            QueryValue::Array(vec![
+                row("ok@example.com", "2026-07-28T12:34:56Z"),
+                QueryValue::Object(fields),
+            ])
+        };
+        let mismatch = |value: QueryValue| match typed(rows.clone(), value) {
+            Err(QueryError::ParameterTypeMismatch {
+                path,
+                expected,
+                actual,
+            }) => (path, expected, actual),
+            other => panic!("expected a type mismatch, got {other:?}"),
+        };
+        // An unparseable datetime is an error, never a stored string.
+        for invalid in ["28 July 2026", "2026-07-28", "2026-07-28T12:34:56", ""] {
+            assert_eq!(
+                mismatch(with("created_at", rfc3339(invalid))),
+                (
+                    "value[1].created_at".to_owned(),
+                    QueryParamType::DateTime,
+                    "string"
+                ),
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            mismatch(with("created_at", QueryValue::Null)),
+            (
+                "value[1].created_at".to_owned(),
+                QueryParamType::DateTime,
+                "null"
+            )
+        );
+        assert_eq!(
+            mismatch(with("created_at", QueryValue::I64(0))),
+            (
+                "value[1].created_at".to_owned(),
+                QueryParamType::DateTime,
+                "i64"
+            )
+        );
+        assert_eq!(
+            mismatch(with(
+                "audit",
+                object(vec![
+                    ("seen_at", rfc3339("not a date")),
+                    ("tags", QueryValue::Array(Vec::new())),
+                ])
+            )),
+            (
+                "value[1].audit.seen_at".to_owned(),
+                QueryParamType::DateTime,
+                "string"
+            )
+        );
+        assert_eq!(
+            mismatch(with("audit", rfc3339("2026-07-28T12:34:56Z"))).0,
+            "value[1].audit"
+        );
+        assert_eq!(
+            mismatch(QueryValue::Array(vec![QueryValue::Null])),
+            ("value[0]".to_owned(), row_type(), "null")
+        );
+        // A `value` field accepts null.
+        assert!(typed(rows.clone(), with("extra", QueryValue::Null)).is_ok());
+
+        let field_mismatch = |value: QueryValue| match typed(rows.clone(), value) {
+            Err(QueryError::ObjectFieldMismatch {
+                path,
+                missing_fields,
+                extra_fields,
+            }) => (path, missing_fields, extra_fields),
+            other => panic!("expected a field mismatch, got {other:?}"),
+        };
+        let QueryValue::Object(mut missing) = row("a@example.com", "2026-07-28T12:34:56Z") else {
+            unreachable!("rows are objects")
+        };
+        missing.remove("created_at");
+        missing.remove("extra");
+        assert_eq!(
+            field_mismatch(QueryValue::Array(vec![QueryValue::Object(missing)])),
+            (
+                "value[0]".to_owned(),
+                vec!["created_at".to_owned(), "extra".to_owned()],
+                Vec::new()
+            )
+        );
+        // An undeclared field, such as a misspelled datetime, is rejected
+        // rather than stored untyped.
+        assert_eq!(
+            field_mismatch(with("createdAt", rfc3339("2026-07-28T12:34:56Z"))),
+            (
+                "value[1]".to_owned(),
+                Vec::new(),
+                vec!["createdAt".to_owned()]
+            )
+        );
+        assert_eq!(
+            field_mismatch(with(
+                "audit",
+                object(vec![("seen_at", rfc3339("2026-07-28T12:34:56Z"))])
+            )),
+            (
+                "value[1].audit".to_owned(),
+                vec!["tags".to_owned()],
+                Vec::new()
+            )
+        );
+        assert_eq!(
+            field_mismatch(QueryValue::Array(vec![object(vec![])])),
+            (
+                "value[0]".to_owned(),
+                vec![
+                    "audit".to_owned(),
+                    "created_at".to_owned(),
+                    "email".to_owned(),
+                    "extra".to_owned()
+                ],
+                Vec::new()
+            )
+        );
+        assert!(QueryError::ObjectFieldMismatch {
+            path: "rows[0]".to_owned(),
+            missing_fields: vec!["a".to_owned()],
+            extra_fields: vec!["b".to_owned()],
+        }
+        .to_string()
+        .contains("rows[0]"));
+    }
+
+    #[test]
+    fn object_field_declarations_parse_strictly() {
+        let parse = |types: &str| {
+            QueryRequest::from_json_slice(
+                read_wire(
+                    r#"{"value":{"a":1}}"#,
+                    Some(&format!(r#"{{"value":{types}}}"#)),
+                )
+                .as_bytes(),
+            )
+        };
+        assert!(parse(r#"{"object":{"a":"i64"}}"#).is_ok());
+        assert!(parse(r#""object""#).is_ok());
+        for (invalid, reason) in [
+            (r#"{"object":{}}"#, "at least one field"),
+            (r#"{"object":{"a":"i64","a":"i64"}}"#, "declared twice"),
+            (r#"{"object":{"a":"i64"},"array":"i64"}"#, "exactly one key"),
+            (r#"{"array":"i64","object":{"a":"i64"}}"#, "exactly one key"),
+            (r#"{"object":"i64"}"#, "ExpectedMap"),
+            (r#"{"object":{"a":"int"}}"#, "unknown variant"),
+            (r#"{"record":{"a":"i64"}}"#, "unknown variant"),
+            (r#"{}"#, ""),
+            (r#"["object"]"#, ""),
+            (r#"{"object":{"a":"i64","b":"i64"}}"#, r#"missing: [\"b\"]"#),
+            (r#"{"object":{"b":"i64"}}"#, r#"undeclared: [\"a\"]"#),
+        ] {
+            let error = parse(invalid).expect_err(invalid).to_string();
+            assert!(error.contains(reason), "{invalid}: {error}");
+        }
+        // Arena parsing rejects the same declarations.
+        let bump = arena::Bump::new();
+        let duplicate = read_wire(
+            r#"{"value":{"a":1}}"#,
+            Some(r#"{"value":{"object":{"a":"i64","a":"i64"}}}"#),
+        );
+        assert!(ArenaQueryRequest::from_json_slice(&bump, duplicate.as_bytes()).is_err());
+
+        let error = ObjectFields::new([("a", QueryParamType::I64), ("a", QueryParamType::I64)]);
+        assert!(matches!(error, Err(QueryError::DuplicateObjectField(name)) if name == "a"));
+        assert!(matches!(
+            ObjectFields::new(Vec::<(&str, QueryParamType)>::new()),
+            Err(QueryError::EmptyObjectFields)
+        ));
+        let fields =
+            ObjectFields::new([("b", QueryParamType::I64), ("a", QueryParamType::Bool)]).unwrap();
+        assert_eq!(
+            fields.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+    }
+
+    /// Object levels count toward the nesting bound like array levels, both
+    /// in the declaration and for the values under them.
+    #[test]
+    fn object_field_levels_count_toward_the_nesting_bound() {
+        let declared = |levels: usize, leaf: QueryParamType| {
+            (0..levels).fold(leaf, |inner, _| record(vec![("k", inner)]))
+        };
+        let nested = |levels: usize, leaf: QueryValue| {
+            (0..levels).fold(leaf, |inner, _| object(vec![("k", inner)]))
+        };
+        let at_limit = typed(
+            declared(100, QueryParamType::Value),
+            nested(100, nested(154, QueryValue::Null)),
+        )
+        .expect("a parameter at the limit is accepted");
+        assert!(at_limit.check_nesting().is_ok());
+        assert!(matches!(
+            typed(
+                declared(100, QueryParamType::Value),
+                nested(100, nested(155, QueryValue::Null))
+            ),
+            Err(QueryError::NestingTooDeep { path, maximum })
+                if maximum == MAX_REQUEST_JSON_DEPTH && path.starts_with("value.k.k")
+        ));
+        // A deep field in any position bounds the whole declaration.
+        let wide = QueryParamType::Record(
+            ObjectFields::new([
+                ("a", QueryParamType::I64),
+                ("z", declared(MAX_REQUEST_JSON_DEPTH, QueryParamType::I64)),
+            ])
+            .unwrap(),
+        );
+        assert!(matches!(
+            typed(wide, object(vec![("a", QueryValue::I64(1))])),
+            Err(QueryError::NestingTooDeep { path, .. }) if path == "value"
         ));
     }
 }

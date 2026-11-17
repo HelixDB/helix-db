@@ -8,7 +8,12 @@ use std::collections::BTreeMap;
 /// Validate a parameter value with an explicit stack, so neither its size nor
 /// its nesting reaches the call stack; nesting is bounded like a request.
 pub(super) fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), QueryError> {
-    let mut pending = vec![(value, path.to_owned(), 1_usize)];
+    validate_below(value, path, 0)
+}
+
+/// [`validate_json_value`] for a value under `levels_above` declared levels.
+fn validate_below(value: &QueryValue, path: &str, levels_above: usize) -> Result<(), QueryError> {
+    let mut pending = vec![(value, path.to_owned(), levels_above + 1)];
     while let Some((value, path, depth)) = pending.pop() {
         if depth > MAX_REQUEST_JSON_DEPTH {
             return Err(QueryError::NestingTooDeep {
@@ -62,26 +67,43 @@ pub(super) fn normalize_typed_value(
     value: QueryValue,
     path: &str,
 ) -> Result<QueryValue, QueryError> {
-    // Normalization recurses once per array level of the declared type.
-    let type_depth = std::iter::successors(Some(ty), |ty| match ty {
-        QueryParamType::Array(inner) => Some(inner.as_ref()),
-        QueryParamType::Bool
-        | QueryParamType::I64
-        | QueryParamType::F64
-        | QueryParamType::F32
-        | QueryParamType::String
-        | QueryParamType::DateTime
-        | QueryParamType::Bytes
-        | QueryParamType::Value
-        | QueryParamType::Object => None,
-    })
-    .count();
-    if type_depth > MAX_REQUEST_JSON_DEPTH {
+    // Normalization recurses once per array or object level of the declared
+    // type.
+    fn type_depth(ty: &QueryParamType) -> usize {
+        1 + match ty {
+            QueryParamType::Array(inner) => type_depth(inner),
+            QueryParamType::Record(fields) => fields
+                .iter()
+                .map(|(_, ty)| type_depth(ty))
+                .max()
+                .unwrap_or(0),
+            QueryParamType::Bool
+            | QueryParamType::I64
+            | QueryParamType::F64
+            | QueryParamType::F32
+            | QueryParamType::String
+            | QueryParamType::DateTime
+            | QueryParamType::Bytes
+            | QueryParamType::Value
+            | QueryParamType::Object => 0,
+        }
+    }
+    if type_depth(ty) > MAX_REQUEST_JSON_DEPTH {
         return Err(QueryError::NestingTooDeep {
             path: path.to_owned(),
             maximum: MAX_REQUEST_JSON_DEPTH,
         });
     }
+    normalize_nested(ty, value, path, 0)
+}
+
+/// [`normalize_typed_value`] for a value under `level` declared levels.
+fn normalize_nested(
+    ty: &QueryParamType,
+    value: QueryValue,
+    path: &str,
+    level: usize,
+) -> Result<QueryValue, QueryError> {
     let actual = query_value_kind(&value);
     match (ty, value) {
         (QueryParamType::Bool, value @ QueryValue::Bool(_))
@@ -116,17 +138,50 @@ pub(super) fn normalize_typed_value(
         }
         (QueryParamType::DateTime, value @ QueryValue::DateTime(_)) => Ok(value),
         (QueryParamType::Value, value) => {
-            validate_json_value(&value, path)?;
+            validate_below(&value, path, level)?;
             Ok(value)
         }
         (QueryParamType::Object, value @ QueryValue::Object(_)) => {
-            validate_json_value(&value, path)?;
+            validate_below(&value, path, level)?;
             Ok(value)
+        }
+        (QueryParamType::Record(fields), QueryValue::Object(values)) => {
+            let declared = fields
+                .iter()
+                .map(|(field, _)| field.to_owned())
+                .collect::<Vec<_>>();
+            let present = values.keys().cloned().collect::<Vec<_>>();
+            if declared != present {
+                return Err(QueryError::ObjectFieldMismatch {
+                    path: path.to_owned(),
+                    missing_fields: declared
+                        .iter()
+                        .filter(|field| !present.contains(field))
+                        .cloned()
+                        .collect(),
+                    extra_fields: present
+                        .iter()
+                        .filter(|field| !declared.contains(field))
+                        .cloned()
+                        .collect(),
+                });
+            }
+            values
+                .into_iter()
+                .map(|(field, value)| {
+                    let ty = fields.get(&field).expect("declared field");
+                    normalize_nested(ty, value, &format!("{path}.{field}"), level + 1)
+                        .map(|value| (field, value))
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map(QueryValue::Object)
         }
         (QueryParamType::Array(inner), QueryValue::Array(values)) => values
             .into_iter()
             .enumerate()
-            .map(|(index, value)| normalize_typed_value(inner, value, &format!("{path}[{index}]")))
+            .map(|(index, value)| {
+                normalize_nested(inner, value, &format!("{path}[{index}]"), level + 1)
+            })
             .collect::<Result<Vec<_>, _>>()
             .map(QueryValue::Array),
         (QueryParamType::Bytes, _) => Err(QueryError::unsupported_bytes(path)),
@@ -217,6 +272,9 @@ fn lazy_value_validation_matches_the_eager_oracle() {
 #[test]
 fn lazy_typed_normalization_matches_the_eager_oracle() {
     let array = |inner: QueryParamType| QueryParamType::Array(Box::new(inner));
+    let record = |fields: Vec<(&str, QueryParamType)>| {
+        QueryParamType::Record(super::ObjectFields::new(fields).unwrap())
+    };
     let mut types = vec![
         QueryParamType::Bool,
         QueryParamType::I64,
@@ -231,15 +289,42 @@ fn lazy_typed_normalization_matches_the_eager_oracle() {
         array(QueryParamType::Object),
         array(array(QueryParamType::Value)),
         array(array(QueryParamType::I64)),
+        record(vec![("x", QueryParamType::I64)]),
+        record(vec![("x", QueryParamType::Value)]),
+        array(record(vec![("x", QueryParamType::I64)])),
+        array(record(vec![("x", QueryParamType::Value)])),
+        record(vec![
+            ("a", QueryParamType::DateTime),
+            ("b", array(record(vec![("c", QueryParamType::F32)]))),
+        ]),
+        record(vec![
+            ("field0", QueryParamType::I64),
+            ("field1", QueryParamType::F64),
+            ("field2", QueryParamType::Value),
+        ]),
     ];
-    types.extend(
-        [
-            MAX_REQUEST_JSON_DEPTH - 1,
-            MAX_REQUEST_JSON_DEPTH,
-            MAX_REQUEST_JSON_DEPTH + 1,
-        ]
-        .map(|depth| (1..depth).fold(QueryParamType::I64, |inner, _| array(inner))),
-    );
+    for depth in [
+        MAX_REQUEST_JSON_DEPTH - 1,
+        MAX_REQUEST_JSON_DEPTH,
+        MAX_REQUEST_JSON_DEPTH + 1,
+    ] {
+        types.push((1..depth).fold(QueryParamType::I64, |inner, _| array(inner)));
+        // Object levels count like array levels, in either branch.
+        types.push(
+            (1..depth).fold(QueryParamType::Value, |inner, level| match level % 2 == 0 {
+                true => record(vec![(format!("k{level}").as_str(), inner)]),
+                false => record(vec![("a", QueryParamType::I64), ("z", inner)]),
+            }),
+        );
+    }
+    let object = |fields: Vec<(&str, QueryValue)>| {
+        QueryValue::Object(
+            fields
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value))
+                .collect(),
+        )
+    };
     let mut values = values();
     values.extend([
         QueryValue::String("2026-10-07T10:00:00Z".to_owned()),
@@ -257,7 +342,51 @@ fn lazy_typed_normalization_matches_the_eager_oracle() {
             QueryValue::Array(vec![QueryValue::I64(1), QueryValue::I64(2)]),
             QueryValue::Array(vec![QueryValue::I64(3), QueryValue::String("x".to_owned())]),
         ]),
+        object(vec![("x", QueryValue::I64(1))]),
+        object(vec![("x", QueryValue::Null)]),
+        object(vec![("x", QueryValue::I64(1)), ("y", QueryValue::I64(2))]),
+        object(vec![("y", QueryValue::I64(2))]),
+        object(vec![]),
+        QueryValue::Array(vec![
+            object(vec![("x", QueryValue::I64(1))]),
+            object(vec![("x", QueryValue::String("1".to_owned()))]),
+            object(vec![("w", QueryValue::I64(1))]),
+        ]),
+        object(vec![
+            (
+                "a",
+                QueryValue::String("2026-10-07T10:00:00+02:00".to_owned()),
+            ),
+            (
+                "b",
+                QueryValue::Array(vec![
+                    object(vec![("c", QueryValue::F64(0.5))]),
+                    object(vec![("c", QueryValue::F64(f64::MAX))]),
+                ]),
+            ),
+        ]),
+        object(vec![
+            ("a", QueryValue::String("2026-10-07".to_owned())),
+            ("b", QueryValue::Array(Vec::new())),
+        ]),
+        object(vec![
+            ("a", QueryValue::String("2026-10-07T10:00:00Z".to_owned())),
+            ("b", QueryValue::Array(vec![object(vec![])])),
+        ]),
     ]);
+    // Values nested to match the deep object declarations, around the limit.
+    for depth in [
+        MAX_REQUEST_JSON_DEPTH - 1,
+        MAX_REQUEST_JSON_DEPTH,
+        MAX_REQUEST_JSON_DEPTH + 1,
+    ] {
+        values.push(
+            (1..depth).fold(QueryValue::Null, |inner, level| match level % 2 == 0 {
+                true => object(vec![(format!("k{level}").as_str(), inner)]),
+                false => object(vec![("a", QueryValue::I64(1)), ("z", inner)]),
+            }),
+        );
+    }
     for ty in &types {
         for value in &values {
             assert_eq!(

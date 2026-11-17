@@ -16,7 +16,7 @@ use crate::projection::{
     BindingProjection, BindingTarget, BindingValueRef, ExprProjection, Projection,
     PropertyProjection,
 };
-use crate::query::{QueryParamType, QueryRequest, QueryValue};
+use crate::query::{ObjectFields, QueryParamType, QueryRequest, QueryValue};
 use crate::traversal::{
     AggregateFunction, AstNode, EmitBehavior, Order, RepeatConfig, ShortestPathDirection,
     SubTraversal,
@@ -965,6 +965,30 @@ pub fn every_variant() -> Vec<Shape> {
                 QueryParamType::F32,
             )))),
             QueryValue::Array(vec![QueryValue::Array(vec![QueryValue::F64(1.0)])]),
+        ),
+        (
+            QueryParamType::Array(Box::new(QueryParamType::Record(
+                ObjectFields::new([
+                    ("at", QueryParamType::DateTime),
+                    (
+                        "nested",
+                        QueryParamType::Record(
+                            ObjectFields::new([("n", QueryParamType::I64)]).expect("one field"),
+                        ),
+                    ),
+                ])
+                .expect("distinct fields"),
+            ))),
+            QueryValue::Array(vec![QueryValue::Object(BTreeMap::from([
+                (
+                    String::from("at"),
+                    QueryValue::String(String::from("2026-10-07T10:00:00Z")),
+                ),
+                (
+                    String::from("nested"),
+                    QueryValue::Object(BTreeMap::from([(String::from("n"), QueryValue::I64(1))])),
+                ),
+            ]))]),
         ),
     ];
     shapes.push(Shape::new(
