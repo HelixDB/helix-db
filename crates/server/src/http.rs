@@ -78,9 +78,23 @@ fn health_response(status: StatusCode, state: ServerState) -> Response {
     )
 }
 
+/// `GET /v2/diagnostics` options.
+#[derive(Debug, serde::Deserialize)]
+struct DiagnosticsQuery {
+    /// An audit to run beside the checks (`?audit=labels`); audits read
+    /// stored data, so they run only when asked for.
+    audit: Option<crate::diagnostics::Audit>,
+}
+
 /// Read-only checks of how this server is set up ([`crate::diagnostics`]).
-async fn diagnostics(State(state): State<ServerState>) -> Response {
-    json_response(StatusCode::OK, &crate::diagnostics::report(&state).await)
+async fn diagnostics(
+    State(state): State<ServerState>,
+    axum::extract::Query(query): axum::extract::Query<DiagnosticsQuery>,
+) -> Response {
+    json_response(
+        StatusCode::OK,
+        &crate::diagnostics::report(&state, query.audit).await,
+    )
 }
 
 async fn execute_query(

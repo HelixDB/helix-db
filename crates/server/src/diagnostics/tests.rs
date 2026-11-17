@@ -666,6 +666,80 @@ fn index_publication_warns_on_held_back_entities_or_a_late_backlog() {
     );
 }
 
+fn finding(
+    kind: db::index_lifecycle::IndexElementKind,
+    label: &str,
+    rows: u64,
+    missing: &[u64],
+) -> db::index_lifecycle::LabelBitmapFinding {
+    db::index_lifecycle::LabelBitmapFinding {
+        kind,
+        label: label.into(),
+        rows,
+        missing: missing.iter().copied().collect(),
+        extra: 0,
+    }
+}
+
+#[test]
+fn label_bitmaps_fail_on_missing_rows_and_warn_on_unreadable_ones() {
+    use db::index_lifecycle::{IndexElementKind, LabelBitmapAudit};
+
+    let complete = label_bitmaps(Ok(LabelBitmapAudit {
+        findings: vec![
+            finding(IndexElementKind::Node, "User", 3, &[]),
+            finding(IndexElementKind::Edge, "FOLLOWS", 1, &[]),
+        ],
+        unreadable_rows: 0,
+    }));
+    assert_eq!(complete.id, CheckId::LabelBitmaps);
+    assert_eq!(complete.category, Category::Indexes);
+    assert_eq!(status(&complete), "pass");
+    assert_eq!(complete.summary, "Every row is in its label's bitmap");
+    assert_eq!(
+        detail(&complete),
+        "4 rows carrying 2 labels, each in its label's bitmap."
+    );
+    assert_eq!(
+        detail(&label_bitmaps(Ok(LabelBitmapAudit::default()))),
+        "0 rows carrying 0 labels, each in its label's bitmap."
+    );
+
+    let unreadable = label_bitmaps(Ok(LabelBitmapAudit {
+        findings: vec![finding(IndexElementKind::Node, "User", 1, &[])],
+        unreadable_rows: 2,
+    }));
+    assert_eq!(status(&unreadable), "warn");
+    assert_eq!(
+        detail(&unreadable),
+        "1 row carrying 1 label, each in its label's bitmap. 2 rows could not be decoded, \
+         so their labels were not checked."
+    );
+
+    let missing = label_bitmaps(Ok(LabelBitmapAudit {
+        findings: vec![
+            finding(IndexElementKind::Node, "User", 9, &[1, 2, 3, 4, 5, 6]),
+            finding(IndexElementKind::Node, "Ok", 2, &[]),
+            finding(IndexElementKind::Edge, "LIKES", 1, &[7]),
+        ],
+        unreadable_rows: 1,
+    }));
+    assert_eq!(status(&missing), "fail");
+    assert_eq!(missing.summary, "2 label bitmaps are missing rows");
+    assert_eq!(
+        detail(&missing),
+        "node \"User\": 6 of 9 rows missing (ids 1, 2, 3, 4, 5, ...); edge \"LIKES\": 1 of 1 \
+         row missing (ids 7). 1 row could not be decoded, so its label was not checked."
+    );
+    assert!(fix(&missing).unwrap().contains("rewrites stored data"));
+
+    let failed = label_bitmaps(Err(db::error::HelixDbError::InvariantViolation(
+        "closed".into(),
+    )));
+    assert_eq!(status(&failed), "skip");
+    assert!(detail(&failed).contains("closed"));
+}
+
 #[test]
 fn missing_indexes_list_each_index_with_a_runnable_fix() {
     let none = InsightSnapshot::default();
@@ -900,10 +974,14 @@ fn sizes_and_durations_read_in_their_coarsest_unit() {
 }
 
 async fn get_report(router: axum::Router) -> serde_json::Value {
+    get_report_at(router, "/v2/diagnostics").await
+}
+
+async fn get_report_at(router: axum::Router, uri: &str) -> serde_json::Value {
     let response = router
         .oneshot(
             Request::builder()
-                .uri("/v2/diagnostics")
+                .uri(uri)
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -993,6 +1071,48 @@ async fn memory_storage_reports_its_checks_and_recent_missing_indexes() {
     );
     // The scan the missing index bounds is reported under that index.
     assert_eq!(find(&report, "queries.unbounded_scans")["status"], "pass");
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_label_bitmap_audit_runs_only_when_asked_for() {
+    let db = Arc::new(
+        db::HelixDB::open(db::HelixDbSource::InMemory {
+            database: "diagnostics-label-audit".into(),
+        })
+        .await
+        .unwrap(),
+    );
+    let state = ServerState::new(Arc::clone(&db), None, StorageConfig::Memory);
+    let router = crate::http::router(state.clone());
+    state
+        .query_service()
+        .execute_query(query::QueryRequest::write(
+            batch::write_batch()
+                .var_as("ada", traversal::g().add_n("User", vec![("n", helix_ast::value::PropertyInput::from(1_i64))]))
+                .var_as("bob", traversal::g().add_n("User", vec![("n", helix_ast::value::PropertyInput::from(1_i64))]))
+                .returning(["ada", "bob"]),
+        ))
+        .await
+        .unwrap();
+
+    assert!(!ids(&get_report(router.clone()).await).contains(&"indexes.label_bitmaps"));
+    let report = get_report_at(router.clone(), "/v2/diagnostics?audit=labels").await;
+    assert_eq!(ids(&report).last(), Some(&"indexes.label_bitmaps"));
+    let audit = find(&report, "indexes.label_bitmaps");
+    assert_eq!(audit["status"], "pass", "{audit}");
+    assert_eq!(audit["detail"], "2 rows carrying 1 label, each in its label's bitmap.");
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/v2/diagnostics?audit=everything")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     db.close().await.unwrap();
 }
 
