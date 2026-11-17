@@ -4672,6 +4672,110 @@ mod tests {
         }
     }
 
+    /// Builds of several labels each index only their own rows, over many
+    /// steps on a database reopened between steps, and a last step that
+    /// takes exactly a batch ends the scan without another.
+    #[tokio::test]
+    async fn builds_of_many_labels_scan_their_own_rows_across_reopens() {
+        let scope = DataScope::LegacyUnscoped;
+        let store = Arc::new(InMemory::new());
+        let open = || {
+            Db::builder("vector-label-many-reopened", store.clone())
+                .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+                .build()
+        };
+        let mut db = open().await.expect("database opens");
+        bootstrap_writer(&db).await.expect("database bootstraps");
+        let labels = ["Document", "Note", "Image"];
+        let label_of = |id: u64| labels[usize::try_from(id % 3).expect("label index fits")];
+        let transaction = db
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("sources begin");
+        for id in 0..192_u64 {
+            let mut row = properties([id as f32, 1.0, 0.0], None);
+            row[0] = Property::new("$label", PropertyValue::String(label_of(id).into()));
+            transaction
+                .put(source_key(scope, id), encode_properties(&row))
+                .expect("source stages");
+            crate::index_lifecycle::label_source::testing::stage_member(
+                &transaction,
+                scope,
+                IndexElementKind::Node,
+                label_of(id),
+                id,
+            );
+        }
+        transaction.commit().await.expect("sources commit");
+        let sixteen = SearchIndexBatchLimits::try_new(
+            NonZeroUsize::new(16).expect("entity limit is positive"),
+            NonZeroU64::new(1 << 20).expect("input limit is positive"),
+            NonZeroU64::new(1 << 20).expect("operation limit is positive"),
+            NonZeroU64::new(1 << 30).expect("output limit is positive"),
+            NonZeroU64::new(16 << 20).expect("entity output is positive"),
+        )
+        .expect("step limits validate");
+        for label in labels {
+            let runtime =
+                VectorIndexDefinition::new_node(label, "embedding", 3, VectorDistanceMetric::Euclidean)
+                    .expect("vector definition validates");
+            let definition = ValidatedDynamicIndexDefinition::Vector(
+                ValidatedVectorIndexDefinition::try_from_runtime(&runtime)
+                    .expect("V2 vector definition validates"),
+            );
+            let (build_id, _, _) = create_build(&db, scope, &definition, 191).await;
+            let mut claim_sequence = 1;
+            let mut scan_steps = 0;
+            while matches!(
+                read_operation(&db, scope, build_id).await.progress(),
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::Scan(_)
+                ))
+            ) {
+                assert_eq!(
+                    drive_one(&db, &driver(), build_id, &mut claim_sequence, sixteen).await,
+                    CommittedOperationStep::Progressed
+                );
+                scan_steps += 1;
+                db.close().await.expect("database closes");
+                db = open().await.expect("database reopens");
+            }
+            // Sixty-four rows of the label at sixteen a step.
+            assert_eq!(scan_steps, 4, "{label}");
+            assert_eq!(
+                drive_to_terminal(&db, &driver(), build_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+            let active = read_index(&db, scope, &definition).await;
+            let IndexStateV2::Active {
+                physical:
+                    PhysicalGeneration::Vector {
+                        layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                        ..
+                    },
+                ..
+            } = active.state()
+            else {
+                panic!("completed vector build is active and unpartitioned");
+            };
+            let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
+                .expect("active vector record projects a handle");
+            let generation = ValidatedVectorGenerationHandle::try_from_active::<
+                vector::distance::Euclidean,
+            >(&active_handle, *physical_index_id)
+            .expect("active physical generation validates");
+            let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
+            for id in 0..192_u64 {
+                assert_eq!(
+                    index.get_item(&db, id).await.unwrap().is_some(),
+                    label_of(id) == label,
+                    "{label} row {id}"
+                );
+            }
+        }
+        db.close().await.expect("database closes");
+    }
+
     #[tokio::test]
     async fn unpartitioned_build_restarts_activates_and_drop_removes_physical_rows() {
         let db = test_db("vector-driver-unpartitioned-build-drop").await;

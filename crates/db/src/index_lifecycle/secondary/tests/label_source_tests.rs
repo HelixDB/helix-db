@@ -166,80 +166,231 @@ async fn each_of_many_labels_scans_only_its_own_rows() {
 /// the build.
 #[tokio::test]
 async fn builds_match_a_scan_of_every_row_on_random_graphs() {
-    let scope = DataScope::LegacyUnscoped;
-    let node = IndexElementKind::Node;
     for seed_value in 1..=3_u64 {
-        let mut random = Seeded(0x9E37_79B9_7F4A_7C15 ^ seed_value);
-        let db = test_db(&format!("label-source-differential-{seed_value}")).await;
-        let mut sources = BTreeMap::new();
-        let mut id = 0_u64;
-        let mut absent = Vec::new();
-        for _ in 0..600 {
-            id += 1 + random.next(3);
-            if random.next(40) == 0 {
-                // A long run of members whose rows are gone.
-                let run = 1 + random.next(300);
-                absent.extend(id..id + run);
-                id += run;
-                continue;
-            }
-            let properties = match random.next(10) {
-                0..=3 => labelled("User", &format!("{}@example.com", random.next(400))),
-                4 => vec![Property::string("$label", "User")],
-                5 if random.next(30) == 0 => labelled("Other", &"x".repeat(9_000)),
-                _ => labelled("Other", &format!("{id}@example.com")),
-            };
-            put_source(&db, scope, node, id, &properties).await;
-            sources.insert(id, properties);
-        }
-        let upper = id;
-        // Rows above the bound write after the build's cut: a build leaves
-        // them to their deltas, which this graph never has.
-        for above in upper + 1..upper + 20 {
-            put_source(
-                &db,
-                scope,
-                node,
-                above,
-                &labelled("User", "late@example.com"),
-            )
-            .await;
-        }
-        let transaction = db
-            .begin(IsolationLevel::Snapshot)
-            .await
-            .expect("bitmap write begins");
-        absent
-            .iter()
-            .for_each(|&missing| testing::stage_member(&transaction, scope, node, "User", missing));
-        let collided = *sources
-            .iter()
-            .find(|(_, properties)| properties[0].value.as_str() == Some("Other"))
-            .expect("the graph has another label")
-            .0;
-        testing::stage_member(&transaction, scope, node, "User", collided);
-        transaction.commit().await.expect("bitmap members commit");
-
-        let limits = match seed_value % 3 {
-            0 => SearchIndexBackfillLimits::default().batch(),
-            1 => batch_limits(37, 1 << 20, 1 << 20, 1 << 30),
-            // About 4 KiB: every 256-id chunk crosses the input bound.
-            _ => batch_limits(1_024, 4_096, 1 << 20, 1 << 30),
-        };
-        let definition = email_index();
-        let (operation_id, index_id, generation) =
-            create_build(&db, scope, &definition, upper).await;
-        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
-        let mut claim_sequence = 1;
-        let (scan_steps, end) =
-            drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
-        assert_eq!(end, CommittedOperationStep::Completed, "seed {seed_value}");
-        assert!(scan_steps >= 1);
-        sources.retain(|&id, _| id <= upper);
-        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
-            .await;
-        db.close().await.expect("database closes");
+        build_random_graph(
+            IndexElementKind::Node,
+            ["User", "Other", "Account"],
+            email_index(),
+            seed_value,
+        )
+        .await;
     }
+}
+
+/// Edge builds read the edge-label bitmap, and match what a scan of every
+/// edge row builds on the same random graphs.
+#[tokio::test]
+async fn edge_builds_match_a_scan_of_every_row_on_random_graphs() {
+    for seed_value in 1..=3_u64 {
+        build_random_graph(
+            IndexElementKind::Edge,
+            ["FOLLOWS", "LIKES", "OWNS"],
+            validated(
+                SecondaryIndexDefinition::edge_equality("FOLLOWS", "email").expect("definition"),
+            ),
+            seed_value,
+        )
+        .await;
+    }
+}
+
+/// Builds `definition`, on `labels[0]`, over a random graph of `kind` rows
+/// of `labels` and checks the generation against every row up to the bound.
+async fn build_random_graph(
+    kind: IndexElementKind,
+    labels: [&str; 3],
+    definition: ValidatedDynamicIndexDefinition,
+    seed_value: u64,
+) {
+    let scope = DataScope::LegacyUnscoped;
+    let [label, other, third] = labels;
+    let mut random = Seeded(0x9E37_79B9_7F4A_7C15 ^ seed_value);
+    let db = test_db(&format!("label-source-differential-{kind:?}-{seed_value}")).await;
+    let mut sources = BTreeMap::new();
+    let mut id = 0_u64;
+    let mut absent = Vec::new();
+    for _ in 0..600 {
+        id += 1 + random.next(3);
+        if random.next(40) == 0 {
+            // A long run of members whose rows are gone.
+            let run = 1 + random.next(300);
+            absent.extend(id..id + run);
+            id += run;
+            continue;
+        }
+        let properties = match random.next(10) {
+            0..=3 => labelled(label, &format!("{}@example.com", random.next(400))),
+            4 => vec![Property::string("$label", label)],
+            5 if random.next(30) == 0 => labelled(other, &"x".repeat(9_000)),
+            6 => labelled(third, &format!("{id}@example.com")),
+            _ => labelled(other, &format!("{id}@example.com")),
+        };
+        put_source(&db, scope, kind, id, &properties).await;
+        sources.insert(id, properties);
+    }
+    let upper = id;
+    // Rows above the bound write after the build's cut: a build leaves them
+    // to their deltas, which this graph never has.
+    for above in upper + 1..upper + 20 {
+        put_source(&db, scope, kind, above, &labelled(label, "late@example.com")).await;
+    }
+    let transaction = db
+        .begin(IsolationLevel::Snapshot)
+        .await
+        .expect("bitmap write begins");
+    absent
+        .iter()
+        .for_each(|&missing| testing::stage_member(&transaction, scope, kind, label, missing));
+    let collided = *sources
+        .iter()
+        .find(|(_, properties)| properties[0].value.as_str() == Some(other))
+        .expect("the graph has another label")
+        .0;
+    testing::stage_member(&transaction, scope, kind, label, collided);
+    transaction.commit().await.expect("bitmap members commit");
+
+    let limits = match seed_value % 3 {
+        0 => SearchIndexBackfillLimits::default().batch(),
+        1 => batch_limits(37, 1 << 20, 1 << 20, 1 << 30),
+        // About 4 KiB: every step stops at its input bound.
+        _ => batch_limits(1_024, 4_096, 1 << 20, 1 << 30),
+    };
+    let (operation_id, index_id, generation) = create_build(&db, scope, &definition, upper).await;
+    let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+    let mut claim_sequence = 1;
+    let (scan_steps, end) =
+        drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
+    assert_eq!(end, CommittedOperationStep::Completed, "{kind:?} seed {seed_value}");
+    assert!(scan_steps >= 1);
+    sources.retain(|&id, _| id <= upper);
+    assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources).await;
+    db.close().await.expect("database closes");
+}
+
+/// An edge build an older binary left on a retired `[from][to]` row
+/// resumes after edge `from` and finishes through the driver: the
+/// generation holds the label's edges after it, which the older scan had
+/// not reached, and none before.
+#[tokio::test]
+async fn an_edge_build_resumes_after_a_retired_pair_key_cursor() {
+    let scope = DataScope::LegacyUnscoped;
+    let edge = IndexElementKind::Edge;
+    let db = test_db("label-source-edge-legacy-cursor").await;
+    let mut sources = BTreeMap::new();
+    for id in 0..40_u64 {
+        let label = if id % 4 == 3 { "LIKES" } else { "FOLLOWS" };
+        let properties = labelled(label, &format!("{id}@example.com"));
+        put_source(&db, scope, edge, id, &properties).await;
+        sources.insert(id, properties);
+    }
+    let definition = validated(
+        SecondaryIndexDefinition::edge_equality("FOLLOWS", "email").expect("definition"),
+    );
+    let ValidatedDynamicIndexDefinition::Secondary(secondary) = &definition else {
+        unreachable!("secondary fixture")
+    };
+    let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 39).await;
+    let operation = read_operation(&db, scope, operation_id)
+        .await
+        .expect("operation reads")
+        .expect("operation exists");
+    let legacy = IndexCursor::try_new(
+        DataKey::Data {
+            scope,
+            kind: DataKeyKind::EdgePropertyPair(
+                crate::encoding::v2::legacy::edge_property_pair::LegacyEdgePropertyPairKey::new(
+                    17, 2,
+                ),
+            ),
+        }
+        .to_bytes(),
+    )
+    .expect("a retired key is a cursor");
+    let mut progress = SourceScanProgress {
+        inclusive_upper_bound: source_cursor(scope, edge, 39),
+        cursor: Some(legacy),
+        counters: OperationCounters::default(),
+    };
+    let limits = batch_limits(4, 1 << 20, 1 << 20, 1 << 30);
+    let mut steps = 0;
+    loop {
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("step begins");
+        let result = scan_source(&db, &transaction, scope, &operation, secondary, &progress, limits)
+            .await
+            .expect("the step stages");
+        transaction.commit().await.expect("the step commits");
+        steps += 1;
+        match progressed_stage(&result) {
+            SecondaryBuildStage::Scan(next) => progress = next.clone(),
+            SecondaryBuildStage::CatchUp(_) => break,
+            stage => panic!("a scan step leads to Scan or CatchUp, not {stage:?}"),
+        }
+    }
+    // FOLLOWS edges 18 to 39 not 3 mod 4: sixteen, four a step.
+    assert_eq!(steps, 4);
+    let expected = sources
+        .iter()
+        .filter(|(id, properties)| {
+            **id > 17 && properties[0].value.as_str() == Some("FOLLOWS")
+        })
+        .map(|(id, _)| *id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(expected.len(), 16);
+    let indexed = generation_rows(
+        &db,
+        scope,
+        RecordKind::SecondaryEqualityBitmap,
+        index_id,
+        generation,
+    )
+    .await
+    .into_iter()
+    .flat_map(|(_, value)| {
+        SecondaryEqualityBitmapValue::decode(&value)
+            .expect("generation bitmap decodes")
+            .into_ids()
+            .iter()
+            .collect::<Vec<_>>()
+    })
+    .collect::<BTreeSet<_>>();
+    assert_eq!(indexed, expected);
+    db.close().await.expect("database closes");
+}
+
+/// A label of rows near the input limit scans about one limit a step, and
+/// builds what a scan of every row builds.
+#[tokio::test]
+async fn a_label_of_large_rows_scans_about_one_input_limit_a_step() {
+    let db = test_db("label-source-large-rows").await;
+    let scope = DataScope::LegacyUnscoped;
+    let mut sources = BTreeMap::new();
+    for id in 0..80_u64 {
+        let label = if id % 2 == 0 { "User" } else { "Other" };
+        let mut properties = labelled(label, &format!("{id}@example.com"));
+        properties.push(Property::string("bio", "x".repeat(512 << 10)));
+        put_source(&db, scope, IndexElementKind::Node, id, &properties).await;
+        sources.insert(id, properties);
+    }
+    let definition = email_index();
+    let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 79).await;
+    let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+    let mut claim_sequence = 1;
+    let (scan_steps, end) = drive_build(
+        &db,
+        &driver,
+        operation_id,
+        &mut claim_sequence,
+        batch_limits(1_024, 8 << 20, 1 << 20, 1 << 30),
+    )
+    .await;
+    assert_eq!(end, CommittedOperationStep::Completed);
+    // Fifteen rows of 512 KiB fit 8 MiB: forty rows take three steps.
+    assert_eq!(scan_steps, 3);
+    assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources).await;
+    db.close().await.expect("database closes");
 }
 
 /// A row of the label too large for a batch still blocks the build, as it

@@ -202,8 +202,56 @@ async fn members_are_read_in_id_order_skipping_absent_rows_and_ids_above_the_bou
     assert_eq!(steps, 15);
 }
 
+/// What one step read, as [`admit`] drives it.
+struct Admitted {
+    ids: Vec<u64>,
+    /// Key and value bytes of the rows admitted.
+    bytes: u64,
+    /// The largest row read.
+    largest: u64,
+    /// Key and value bytes the source read.
+    read: u64,
+}
+
+/// Reads one step as a driver does: rows are admitted until the next would
+/// pass the input-byte limit, which ends the step.
+async fn admit(
+    snapshot: &DbTransaction,
+    progress: &SourceScanProgress,
+    limits: SearchIndexBatchLimits,
+) -> Admitted {
+    let scope = DataScope::LegacyUnscoped;
+    let mut source = LabelSource::open(
+        snapshot,
+        scope,
+        IndexElementKind::Node,
+        "User",
+        progress,
+        limits,
+    )
+    .await
+    .expect("the label source opens")
+    .expect("members remain");
+    let (mut admitted, mut admitted_bytes, mut largest) = (Vec::new(), 0_u64, 0_u64);
+    while let LabelRead::Row(row) = source.next().await.expect("the label source reads") {
+        let bytes = u64::try_from(row.key.len() + row.value.len()).expect("row size fits");
+        largest = largest.max(bytes);
+        if admitted_bytes + bytes > limits.max_input_bytes().get() {
+            break;
+        }
+        admitted_bytes += bytes;
+        admitted.push(row.entity_id.get());
+    }
+    Admitted {
+        ids: admitted,
+        bytes: admitted_bytes,
+        largest,
+        read: source.read_bytes,
+    }
+}
+
 #[tokio::test]
-async fn no_chunk_is_read_past_the_input_byte_limit() {
+async fn a_step_reads_about_its_input_byte_limit() {
     let db = test_db("label-source-bytes").await;
     let scope = DataScope::LegacyUnscoped;
     let node = IndexElementKind::Node;
@@ -211,8 +259,25 @@ async fn no_chunk_is_read_past_the_input_byte_limit() {
         testing::put_source_row(&db, scope, node, id, &row("User", 100)).await;
     }
     let read = snapshot(&db).await;
-    // The first chunk of 256 rows already passes 4 KiB: the step returns
-    // that chunk and pauses after its last id.
+    // Small rows: the first chunk measures them, the next fills the limit.
+    let step_read = admit(
+        &read,
+        &progress(scope, node, None, 999),
+        limits(1024, 4096),
+    )
+    .await;
+    assert_eq!(
+        step_read.ids,
+        (0..step_read.ids.len() as u64).collect::<Vec<_>>()
+    );
+    assert!(step_read.bytes > 4096 - step_read.largest);
+    assert!(
+        step_read.read <= step_read.bytes + 2 * step_read.largest,
+        "{} read for {} admitted",
+        step_read.read,
+        step_read.bytes
+    );
+    // A step that stops at its byte limit pauses after its last id read.
     let (ids, paused) = step(
         &read,
         node,
@@ -222,21 +287,77 @@ async fn no_chunk_is_read_past_the_input_byte_limit() {
     )
     .await
     .expect("members remain");
-    assert_eq!(ids, (0..256).collect::<Vec<_>>());
-    assert_eq!(paused, Some(255));
-    // A limit two chunks fit in reads both and the start of a third.
-    let (ids, paused) = step(
-        &read,
-        node,
-        "User",
-        &progress(scope, node, Some(255), 999),
-        limits(1024, 2 * 256 * 140),
-    )
-    .await
-    .expect("members remain");
-    assert_eq!(ids.first(), Some(&256));
     assert_eq!(paused, ids.last().copied());
-    assert_eq!(ids.len() % CHUNK_IDS, 0);
+    // Under a large limit, chunks grow to the most one read takes, and the
+    // step takes every member.
+    assert_eq!(
+        step(
+            &read,
+            node,
+            "User",
+            &progress(scope, node, None, 999),
+            limits(1024, 1 << 30),
+        )
+        .await,
+        Some(((0..1000).collect(), None))
+    );
+}
+
+/// A label of rows near the step's limit reads about the limit per step,
+/// not a whole chunk of rows the next step reads again.
+#[tokio::test]
+async fn large_rows_read_about_one_limit_per_step() {
+    const LIMIT: u64 = 8 << 20;
+    let scope = DataScope::LegacyUnscoped;
+    let node = IndexElementKind::Node;
+    let mut random = 0x2545_F491_4F6C_DD1D_u64;
+    // `None` is rows of 256 KiB to 1 MiB.
+    for (name, size) in [
+        ("label-source-256k", Some(256 << 10)),
+        ("label-source-1m", Some(1 << 20)),
+        ("label-source-mixed", None),
+    ] {
+        let db = test_db(name).await;
+        for id in 0..48 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let filler = size.unwrap_or_else(|| {
+                (256 << 10) + usize::try_from(random % (768 << 10)).expect("fits")
+            });
+            testing::put_source_row(&db, scope, node, id, &row("User", filler)).await;
+        }
+        let read = snapshot(&db).await;
+        let mut after = None;
+        let mut steps = 0;
+        while after != Some(47) {
+            let step_read =
+                admit(&read, &progress(scope, node, after, 47), limits(1024, LIMIT)).await;
+            after = step_read.ids.last().copied();
+            steps += 1;
+            // A step fills its limit to within a row, unless the label ends.
+            assert!(
+                after == Some(47) || step_read.bytes > LIMIT - step_read.largest,
+                "{name}: {} admitted",
+                step_read.bytes
+            );
+            // Rows of one size are read to within two rows of what is
+            // admitted; rows of mixed sizes to within twice the limit, where
+            // a chunk of 256 such rows read 160 MiB.
+            let bound = match size {
+                Some(_) => step_read.bytes + 2 * step_read.largest,
+                None => 2 * LIMIT,
+            };
+            assert!(
+                step_read.read <= bound,
+                "{name}: {} read for {} admitted",
+                step_read.read,
+                step_read.bytes
+            );
+        }
+        assert!(steps >= 2, "{name}");
+        db.close().await.expect("database closes");
+    }
 }
 
 #[tokio::test]

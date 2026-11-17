@@ -255,12 +255,6 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
             .clamp(least, CHUNK_IDS)
     }
 
-    /// Key and value bytes of the rows read so far.
-    #[cfg(test)]
-    pub(crate) fn read_bytes(&self) -> u64 {
-        self.read_bytes
-    }
-
     fn end(&self) -> LabelRead {
         let last_read = self
             .last_read

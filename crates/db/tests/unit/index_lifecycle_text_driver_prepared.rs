@@ -3183,3 +3183,101 @@ async fn source_scan_reads_only_its_label() {
         db.close().await.unwrap();
     }
 }
+
+/// A text build of one label among several scans only that label's rows,
+/// over several steps on a database reopened between steps, and a last step
+/// that takes exactly a batch ends the scan without another.
+#[tokio::test]
+async fn source_scan_steps_resume_on_a_reopened_database() {
+    let scope = DataScope::LegacyUnscoped;
+    let store = Arc::new(InMemory::new());
+    let path = "text-driver-label-scan-reopened";
+    let mut db = open_graph_db(path, store.clone()).await.unwrap();
+    let labels = ["Document", "Note", "Image"];
+    let label_of = |id: u64| labels[usize::try_from(id % 3).unwrap()];
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    for id in 0..288_u64 {
+        transaction
+            .put(
+                authoritative_property_key(scope, reconciliation_entity(id)),
+                property::encode_properties(&[
+                    property::Property::string("$label", label_of(id)),
+                    property::Property::string("body", "searchable text"),
+                ]),
+            )
+            .unwrap();
+        crate::index_lifecycle::label_source::testing::stage_member(
+            &transaction,
+            scope,
+            IndexElementKind::Node,
+            label_of(id),
+            id,
+        );
+    }
+    transaction.commit().await.unwrap();
+    let operation = operation();
+    let mut progress = SourceScanProgress {
+        inclusive_upper_bound: IndexCursor::try_new(authoritative_property_key(
+            scope,
+            reconciliation_entity(287),
+        ))
+        .unwrap(),
+        cursor: None,
+        counters: OperationCounters::default(),
+    };
+    let mut steps = 0;
+    let scanned = loop {
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let source = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let result = scan_source(
+            &source,
+            &transaction,
+            scope,
+            &operation,
+            &record(),
+            &progress,
+            batch_limits(16, u64::MAX, u64::MAX, u64::MAX),
+            document_limits(),
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        drop(source);
+        steps += 1;
+        db.close().await.unwrap();
+        db = open_graph_db(path, store.clone()).await.unwrap();
+        let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+            TextBuildProgress::Constructing(stage),
+        )) = result
+        else {
+            panic!("a scan step progresses: {result:?}");
+        };
+        match stage {
+            TextBuildStage::Scan(next) => progress = next,
+            TextBuildStage::ScanPartitions(scanned) => break scanned,
+            stage => panic!("a scan step leads to Scan or ScanPartitions: {stage:?}"),
+        }
+    };
+    // Ninety-six Documents at sixteen a step.
+    assert_eq!(steps, 6);
+    assert_eq!(scanned.counters.entities, 96);
+    for id in 0..288_u64 {
+        let applied = scoped_index_key(
+            scope,
+            ScopedKey::AppliedState(IndexEntityStateKey {
+                index_id: operation.index_id(),
+                generation: operation.generation(),
+                entity: reconciliation_entity(id),
+            }),
+        );
+        assert_eq!(
+            db.get(&applied).await.unwrap().is_some(),
+            label_of(id) == "Document",
+            "row {id}"
+        );
+    }
+    db.close().await.unwrap();
+}
