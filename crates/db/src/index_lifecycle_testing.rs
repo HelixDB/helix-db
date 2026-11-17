@@ -1750,8 +1750,10 @@ impl HelixDB {
             driver.as_ref(),
             limits,
             now_unix_millis,
+            crate::index_lifecycle::ClaimContinuation::Release,
         )
-        .await?;
+        .await?
+        .evidence;
         let outcome = match committed.outcome {
             outbox::CommittedOperationStep::Progressed => LifecycleStepOutcome::Progressed,
             outbox::CommittedOperationStep::TransientFailure => {

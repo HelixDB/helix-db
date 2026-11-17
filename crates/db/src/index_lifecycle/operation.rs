@@ -997,6 +997,15 @@ impl IndexOperationQueueSchedule {
     }
 }
 
+/// What a progressed step does with the claim it ran under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ClaimContinuation {
+    /// Requeue the operation, so any worker may claim its next step.
+    Release,
+    /// Keep the claim, so the worker holding it runs the next step directly.
+    Retain,
+}
+
 /// Canonical durable index operation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexOperationRecord {
@@ -1254,10 +1263,16 @@ impl IndexOperationRecord {
         )
     }
 
-    /// Persists a successful bounded checkpoint and releases its claim.
+    /// Persists a successful bounded checkpoint, then requeues the operation
+    /// or keeps its claim as `claim` asks.
+    ///
+    /// A kept claim is the exact claim the step ran under, so the worker that
+    /// holds it can run the next step without claiming again, and the
+    /// attempt counter does not grow.
     pub(crate) fn progressed(
         &self,
         progress: IndexOperationProgress,
+        claim: ClaimContinuation,
     ) -> Result<Self, IndexOperationModelError> {
         if !matches!(
             self.execution_state,
@@ -1268,13 +1283,17 @@ impl IndexOperationRecord {
                 transition: "progress",
             });
         }
+        let execution_state = match claim {
+            ClaimContinuation::Release => IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None,
+            },
+            ClaimContinuation::Retain => self.execution_state.clone(),
+        };
         self.next(
             self.index_record_revision,
             progress,
             self.attempt,
-            IndexOperationExecutionState::Queued {
-                not_before_unix_millis: None,
-            },
+            execution_state,
         )
     }
 
@@ -2397,13 +2416,25 @@ mod tests {
         let replaced = claimed.claim(claim(2, 2)).unwrap();
         assert_eq!(replaced.attempt(), 8);
 
-        let progressed = claimed.progressed(secondary_constructing()).unwrap();
+        let progressed = claimed
+            .progressed(secondary_constructing(), ClaimContinuation::Release)
+            .unwrap();
         assert!(matches!(
             progressed.execution_state(),
             IndexOperationExecutionState::Queued {
                 not_before_unix_millis: None
             }
         ));
+        let retained = claimed
+            .progressed(secondary_constructing(), ClaimContinuation::Retain)
+            .unwrap();
+        assert_eq!(retained.execution_state(), claimed.execution_state());
+        assert_eq!(retained.attempt(), claimed.attempt());
+        assert_eq!(
+            retained.operation_revision(),
+            claimed.operation_revision().checked_next().unwrap()
+        );
+        assert_eq!(retained.queue_schedule(), None);
         let failed = claimed.transient_failure(30).unwrap();
         assert!(failed
             .queue_schedule()
@@ -2430,7 +2461,8 @@ mod tests {
         assert_eq!(completed.index_record_revision().get(), 8);
 
         for transition in [
-            queued.progressed(secondary_constructing()),
+            queued.progressed(secondary_constructing(), ClaimContinuation::Release),
+            queued.progressed(secondary_constructing(), ClaimContinuation::Retain),
             queued.transient_failure(1),
             queued.block(IndexOperationBlocker::InvariantViolation),
             queued.complete(

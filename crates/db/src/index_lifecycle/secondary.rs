@@ -1584,7 +1584,12 @@ async fn drain_backlog_under_gate(
             return Ok((counters, drained_through));
         }
         counters = accounting.finish()?;
-        transaction.commit().await?;
+        // Like a progressed step, a drain does not wait for the WAL upload,
+        // which would hold the scope's writers for that long: a crash loses
+        // it with every later commit, and its deltas stay pending.
+        transaction
+            .commit_with_options(&crate::transaction::CommitDurability::Applied.write_options())
+            .await?;
         drained_through = staged_through;
         match drain {
             DeltaDrain::BudgetExhausted => {}
@@ -8995,23 +9000,32 @@ mod tests {
         }
     }
 
-    /// A crash inside a gated step loses its uncommitted transaction and
-    /// nothing else. Before every step a write lands; the step then runs the
-    /// production claim, preparation, and gate, and is dropped once it has
-    /// staged, with the database dropped unclosed. After each reopen every
-    /// delta, applied row, and entry is as the step's committed drains left
-    /// them, and the next step, from another writer epoch, still advances
+    /// A crash inside a gated step loses its uncommitted transaction and,
+    /// at most, the commits whose WAL upload had not landed. Before every
+    /// step a durable write lands; the step then runs the production claim,
+    /// preparation, and gate, and is dropped once it has staged, with the
+    /// database dropped unclosed. The claim and the drains under the gate do
+    /// not wait for their WAL upload: on alternate pairs of crashes the
+    /// upload lands first, and every delta, applied row, and entry is as the
+    /// drains left them, or it never lands, and they are as the last durable
+    /// write left them, with the operation back at its last durable record.
+    /// Either way the next step, from another writer epoch, still advances
     /// the build until it activates equal to its source.
     #[tokio::test]
     async fn sustained_writes_converge_across_a_crash_inside_every_gated_step() {
-        let store = Arc::new(InMemory::new());
+        use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+
+        let mut store = Arc::new(GatedWalStore::new());
         let path = "secondary-sustained-writes-crash";
-        let open = || {
-            Db::builder(path, store.clone())
-                .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
-                .build()
+        let open = |store: &Arc<GatedWalStore>| {
+            Db::builder(
+                path,
+                Arc::clone(store) as Arc<dyn slatedb::object_store::ObjectStore>,
+            )
+            .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+            .build()
         };
-        let mut db = open().await.expect("crash test database opens");
+        let mut db = open(&store).await.expect("crash test database opens");
         bootstrap_writer(&db)
             .await
             .expect("crash test database bootstraps");
@@ -9063,6 +9077,23 @@ mod tests {
             .await
             .expect("update records a build delta");
             sources.insert(updated, after);
+            // The writes above are durable; on lost-tail crashes nothing
+            // after them is.
+            let tail_lost = (step / 2) % 2 == 1;
+            let mut durable_rows = Vec::new();
+            for kind in [
+                RecordKind::BuildDelta,
+                RecordKind::AppliedState,
+                RecordKind::SecondaryEntry,
+            ] {
+                durable_rows.push(generation_rows(&db, scope, kind, index_id, generation).await);
+            }
+            let durable_operation = read_operation(&db, scope, operation_id)
+                .await
+                .expect("operation is readable");
+            if tail_lost {
+                store.uploads.send_replace(WalUploads::Held);
+            }
 
             let pause =
                 crate::index_lifecycle::outbox::step_pause::StepPause::arm(&db, |progress| {
@@ -9112,7 +9143,7 @@ mod tests {
                     }
                 }
                 // Drains the step committed under its gate before its own
-                // transaction are durable; that transaction is not.
+                // transaction are applied; that transaction is not.
                 let mut committed = Vec::new();
                 for kind in [
                     RecordKind::BuildDelta,
@@ -9121,17 +9152,24 @@ mod tests {
                 ] {
                     committed.push(generation_rows(&db, scope, kind, index_id, generation).await);
                 }
+                if !tail_lost {
+                    db.flush().await.expect("the applied drains upload");
+                }
                 committed
                 // The held step and its staged transaction die here.
             };
             drop(pause);
             drop(db);
-            db = open()
+            // Uploads the crashed process held never land.
+            store = Arc::new(store.restarted());
+            db = open(&store)
                 .await
                 .expect("crash test database reopens after the crash");
             // A crashed process loses its delta ledgers; every other step
-            // continues with the ledgers its failed step left.
-            if step % 2 == 0 {
+            // whose drains survived continues with the ledgers its failed
+            // step left. A lost WAL tail means the process died, so its
+            // ledgers always go with it.
+            if step % 2 == 0 || tail_lost {
                 driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
             }
             let mut recovered = Vec::new();
@@ -9142,10 +9180,24 @@ mod tests {
             ] {
                 recovered.push(generation_rows(&db, scope, kind, index_id, generation).await);
             }
-            assert_eq!(
-                recovered, lifecycle_rows,
-                "an uncommitted step transaction leaves no trace"
-            );
+            if tail_lost {
+                assert_eq!(
+                    recovered, durable_rows,
+                    "a lost WAL tail takes every drain after the last durable write"
+                );
+                assert_eq!(
+                    read_operation(&db, scope, operation_id)
+                        .await
+                        .expect("operation is readable"),
+                    durable_operation,
+                    "a lost WAL tail takes the crashed claim too"
+                );
+            } else {
+                assert_eq!(
+                    recovered, lifecycle_rows,
+                    "an uncommitted step transaction leaves no trace"
+                );
+            }
 
             match drive_one(&db, &driver, operation_id, &mut claim_sequence).await {
                 CommittedOperationStep::Progressed => {}

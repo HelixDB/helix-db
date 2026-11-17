@@ -397,7 +397,10 @@ impl PreparedTextOperationStep {
             Self::CompactionRetirement(prepared) => {
                 let next = prepared
                     .source_operation
-                    .progressed(prepared.progress.clone())
+                    .progressed(
+                        prepared.progress.clone(),
+                        crate::index_lifecycle::ClaimContinuation::Release,
+                    )
                     .ok();
                 let input_bytes = next.as_ref().map_or(0, |next| {
                     operation_input_delta(&prepared.source_operation, next)
