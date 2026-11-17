@@ -302,6 +302,11 @@ fn datetime_rejects_unreadable_text_maps_and_types() {
         "yesterday",
         "2023-11-14T22:13",
         "2023-11-14T22:13:20+0200",
+        // Outside the grammar's padding and years, or naming no instant.
+        "2023-1-5",
+        "+10000-01-01T00:00:00.000Z",
+        "2023-02-30",
+        "2016-12-31T23:59:60Z",
     ] {
         assert_eq!(code(V::String(text.into())), invalid, "{text}");
     }
@@ -424,6 +429,112 @@ fn static_types_follow_datetime_values() {
         .unwrap(),
         r::ValueType::Boolean
     );
+    // A datetime's fields are integers; a key it does not have fails before
+    // anything runs.
+    let property = |value: E, key: &str| infer(E::Property(Box::new(value), key.into()));
+    assert_eq!(
+        property(E::Function(F::DateTime, vec![]), "year").unwrap(),
+        r::ValueType::Integer
+    );
+    let error = property(E::Literal(V::DateTime(1)), "Year").unwrap_err();
+    assert_eq!(
+        (error.category.as_str(), error.detail.as_str(), error.phase),
+        (
+            r::category::TYPE_ERROR,
+            r::detail::INVALID_ARGUMENT_TYPE,
+            r::ErrorPhase::Compile
+        )
+    );
+    assert_eq!(
+        property(E::Parameter("p".into()), "Year").unwrap(),
+        r::ValueType::Any
+    );
+    let error = property(E::Literal(V::String("x".into())), "year").unwrap_err();
+    assert_eq!(error.category, r::category::TYPE_ERROR);
+}
+
+#[test]
+fn property_access_reads_datetime_fields() {
+    let field = |value: V, key: &str| eval(&E::Property(Box::new(E::Literal(value)), key.into()));
+    // NOW is 2023-11-14T22:13:20.123Z, a Tuesday.
+    for (key, expected) in [
+        ("year", 2023),
+        ("quarter", 4),
+        ("month", 11),
+        ("week", 46),
+        ("weekYear", 2023),
+        ("day", 14),
+        ("ordinalDay", 318),
+        ("dayOfWeek", 2),
+        ("hour", 22),
+        ("minute", 13),
+        ("second", 20),
+        ("millisecond", 123),
+        ("epochSeconds", 1_700_000_000),
+        ("epochMillis", NOW),
+    ] {
+        assert_eq!(
+            field(V::DateTime(NOW), key).unwrap(),
+            V::Integer(expected),
+            "{key}"
+        );
+    }
+    // A parameter or a clock read gives the same fields.
+    let year = |value: E| eval(&E::Property(Box::new(value), "year".into())).unwrap();
+    assert_eq!(year(E::Parameter("at".into())), V::Integer(2023));
+    assert_eq!(year(E::Function(F::DateTime, vec![])), V::Integer(2023));
+    assert_eq!(field(V::Null, "year").unwrap(), V::Null);
+    // Fields are integers, so they bucket and compute.
+    assert_eq!(
+        eval(&E::Binary(
+            r::Binary::Subtract,
+            Box::new(E::Property(
+                Box::new(E::Literal(V::DateTime(NOW))),
+                "epochMillis".into()
+            )),
+            Box::new(E::Property(
+                Box::new(E::Literal(V::DateTime(NOW - 5))),
+                "epochMillis".into()
+            )),
+        ))
+        .unwrap(),
+        V::Integer(5)
+    );
+    // A key a datetime does not have is a type error, not null.
+    for key in ["Year", "years", "timezone", "nanosecond", ""] {
+        let error = field(V::DateTime(NOW), key).unwrap_err();
+        assert_eq!(
+            (error.category.as_str(), error.detail.as_str(), error.phase),
+            (
+                r::category::TYPE_ERROR,
+                r::detail::INVALID_ARGUMENT_TYPE,
+                r::ErrorPhase::Runtime
+            ),
+            "{key}"
+        );
+    }
+    // Past chrono's years only the epoch fields exist.
+    assert_eq!(
+        field(V::DateTime(i64::MAX), "epochMillis").unwrap(),
+        V::Integer(i64::MAX)
+    );
+    assert_eq!(
+        field(V::DateTime(i64::MIN), "epochSeconds").unwrap(),
+        V::Integer(i64::MIN.div_euclid(1000))
+    );
+    let error = field(V::DateTime(i64::MAX), "year").unwrap_err();
+    assert_eq!(
+        (error.category.as_str(), error.detail.as_str()),
+        (
+            r::category::ARGUMENT_ERROR,
+            r::detail::DATETIME_OUT_OF_RANGE
+        )
+    );
+    // Other scalars still reject property access.
+    for value in [V::Integer(1), V::String("x".into()), V::Boolean(true)] {
+        let error = field(value.clone(), "year").unwrap_err();
+        assert_eq!(error.category, r::category::TYPE_ERROR, "{value:?}");
+    }
 }
 
 #[test]

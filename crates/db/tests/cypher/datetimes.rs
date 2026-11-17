@@ -467,6 +467,23 @@ async fn datetime_bad_paths_fail_with_typed_errors() {
             compile(r::category::UNSUPPORTED_FEATURE, r::detail::FUNCTION),
         ),
         (
+            "RETURN datetime('2024-1-5')",
+            compile(r::category::UNSUPPORTED_FEATURE, r::detail::FUNCTION),
+        ),
+        (
+            "RETURN datetime('2024-02-30')",
+            compile(r::category::ARGUMENT_ERROR, r::detail::INVALID_DATETIME),
+        ),
+        (
+            "RETURN datetime().Year",
+            compile(r::category::TYPE_ERROR, r::detail::INVALID_ARGUMENT_TYPE),
+        ),
+        (
+            "WITH [datetime()] AS xs RETURN xs[0].Year",
+            runtime(r::category::TYPE_ERROR, r::detail::INVALID_ARGUMENT_TYPE),
+        ),
+        ("RETURN $far.year", out_of_range.clone()),
+        (
             "RETURN datetime({year: 2024})",
             compile(r::category::UNSUPPORTED_FEATURE, r::detail::FUNCTION),
         ),
@@ -627,20 +644,34 @@ async fn sql_reads_and_writes_datetimes() {
         let body: Value = serde_json::from_slice(encoded.body()).unwrap();
         assert_eq!(body["rows"], json!(expected), "{query}");
     }
-    for (query, detail) in [
-        ("SELECT TIMESTAMP 'nope'", r::detail::SQL_CONSTRUCT),
-        ("SELECT CAST('nope' AS TIMESTAMP)", r::detail::FUNCTION),
+    for (query, category, detail) in [
+        (
+            "SELECT TIMESTAMP 'nope'",
+            r::category::UNSUPPORTED_FEATURE,
+            r::detail::SQL_CONSTRUCT,
+        ),
+        (
+            "SELECT CAST('nope' AS TIMESTAMP)",
+            r::category::UNSUPPORTED_FEATURE,
+            r::detail::FUNCTION,
+        ),
+        (
+            "SELECT TIMESTAMP '2024-02-30'",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_DATETIME,
+        ),
+        (
+            "SELECT EXTRACT(SECOND FROM e.at) FROM Event e",
+            r::category::UNSUPPORTED_FEATURE,
+            r::detail::SQL_CONSTRUCT,
+        ),
     ] {
         let Err(cypher::Error::Query(error)) = db.sql(Request::new(query)).await else {
             panic!("{query}: unreadable timestamp text fails to compile");
         };
         assert_eq!(
             (error.category.as_str(), error.detail.as_str(), error.phase),
-            (
-                r::category::UNSUPPORTED_FEATURE,
-                detail,
-                r::ErrorPhase::Compile
-            ),
+            (category, detail, r::ErrorPhase::Compile),
             "{query}"
         );
     }
@@ -679,5 +710,81 @@ async fn sql_reads_and_writes_datetimes() {
         panic!("an access step");
     };
     assert!(format!("{:?}", step.op).contains("RangeIndex"));
+    db.close().await.unwrap();
+}
+
+/// Datetime fields bucket and compute stored datetimes in Cypher and, through
+/// `EXTRACT`, in SQL; a string that only looks like a datetime has none.
+#[tokio::test]
+async fn datetime_fields_bucket_and_compute_stored_datetimes() {
+    use cypher::sql::request::Request;
+    let db = database().await;
+    events(&db).await;
+    // BASE is 22:13:20 on November 14, so seq 0 and 1 fall on the 14th.
+    let by_day = vec![vec![json!(14), json!(2)], vec![json!(15), json!(8)]];
+    assert_eq!(
+        read(
+            &db,
+            "MATCH (e:Event) WHERE e.seq < 10 \
+             RETURN e.at.day AS day, count(*) AS events ORDER BY day",
+        )
+        .await,
+        by_day
+    );
+    assert_eq!(
+        read(
+            &db,
+            "MATCH (e:Event) WHERE e.seq < 10 \
+             RETURN max(e.at.epochMillis) - min(e.at.epochMillis) AS span, \
+             min(e.at.hour) AS earliest, max(e.at.hour) AS latest",
+        )
+        .await,
+        vec![vec![json!(9 * HOUR), json!(0), json!(23)]]
+    );
+    assert_eq!(
+        read(
+            &db,
+            "MATCH (e:Event {seq: 0}) RETURN e.at.year, e.at.month, e.at.minute, \
+             e.at.second, e.at.millisecond, e.at.epochSeconds, e.at.dayOfWeek",
+        )
+        .await,
+        vec![vec![
+            json!(2023),
+            json!(11),
+            json!(13),
+            json!(20),
+            json!(0),
+            json!(BASE / 1000),
+            json!(2),
+        ]]
+    );
+    for (query, expected) in [
+        (
+            "SELECT EXTRACT(DAY FROM e.at) AS day, COUNT(*) AS events FROM Event e \
+             WHERE e.seq < 10 GROUP BY EXTRACT(DAY FROM e.at) ORDER BY day",
+            by_day.clone(),
+        ),
+        (
+            "SELECT EXTRACT(YEAR FROM e.at), EXTRACT(DOY FROM e.at), EXTRACT(EPOCH FROM e.at) \
+             FROM Event e WHERE e.seq = 0",
+            vec![vec![json!(2023), json!(318), json!(1_700_000_000.0)]],
+        ),
+    ] {
+        let response = db.sql(Request::new(query)).await.unwrap();
+        assert_eq!(response.rows, expected, "{query}");
+        let encoded = db.sql_json(Request::new(query)).await.unwrap();
+        let body: Value = serde_json::from_slice(encoded.body()).unwrap();
+        assert_eq!(body["rows"], json!(expected), "{query}");
+    }
+    // The string holds no datetime, so it has no fields.
+    let error = query_error(
+        &db,
+        cypher::Request::new("MATCH (e:Event {seq: 99}) RETURN e.at.year"),
+    )
+    .await;
+    assert_eq!(
+        (error.category.as_str(), error.phase),
+        (r::category::TYPE_ERROR, r::ErrorPhase::Runtime)
+    );
     db.close().await.unwrap();
 }

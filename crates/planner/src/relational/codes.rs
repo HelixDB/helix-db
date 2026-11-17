@@ -66,8 +66,10 @@ pub mod detail {
         AMBIGUOUS_COLUMN = "ambiguous_column",
         COLLECTION_LIMIT = "collection_limit",
         COLUMN_NAME_CONFLICT = "column_name_conflict",
-        /// A datetime outside the years RFC 3339 text can express, from
-        /// epoch milliseconds that a response or `toString` must render.
+        /// A datetime past the years its text and calendar fields can
+        /// express (about 262,000 years from year 0), from epoch
+        /// milliseconds that a response, `toString` or a field such as
+        /// `dt.year` must render.
         DATETIME_OUT_OF_RANGE = "datetime_out_of_range",
         DELETE_CONNECTED_NODE = "delete_connected_node",
         DELETED_ENTITY_ACCESS = "deleted_entity_access",

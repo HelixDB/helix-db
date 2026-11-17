@@ -636,8 +636,11 @@ impl Display for Literal<'_> {
                 f.write_char('}')
             }
             // Datetime literals come from SQL `TIMESTAMP '…'`; Cypher spells
-            // them as the call that binds back to the same literal.
-            r::Value::DateTime(millis) => match r::format_datetime(*millis) {
+            // them as the call that binds back to the same literal, as text
+            // when the text reads back and as epoch milliseconds otherwise.
+            r::Value::DateTime(millis) => match r::format_datetime(*millis)
+                .filter(|text| r::parse_datetime(text) == Ok(*millis))
+            {
                 Some(text) => write!(f, "datetime({})", Literal(&r::Value::String(text))),
                 None => write!(f, "datetime({{epochMillis: {millis}}})"),
             },

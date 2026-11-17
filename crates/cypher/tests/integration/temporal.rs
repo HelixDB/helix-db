@@ -65,8 +65,19 @@ fn temporal_calls_outside_the_profile_report_their_capability() {
             "RETURN datetime('2015-07-21T21:40:32.142+02:00[Europe/Stockholm]') AS v",
             "function:datetime",
         ),
-        ("RETURN datetime('2024-13-01') AS v", "function:datetime"),
         ("RETURN datetime('not a date') AS v", "function:datetime"),
+        // Fields that are not zero-padded and years outside RFC 3339's are
+        // outside the grammar too.
+        ("RETURN datetime('2024-1-5') AS v", "function:datetime"),
+        (
+            "RETURN datetime('2024-01-05T1:02:03') AS v",
+            "function:datetime",
+        ),
+        (
+            "RETURN datetime('+10000-01-01T00:00:00.000Z') AS v",
+            "function:datetime",
+        ),
+        ("RETURN datetime('-0001-01-01') AS v", "function:datetime"),
     ] {
         let error = error(text);
         assert_eq!(error.category, r::category::UNSUPPORTED_FEATURE, "{text}");
@@ -99,6 +110,22 @@ fn temporal_calls_outside_the_profile_report_their_capability() {
             "RETURN -datetime() AS v",
             r::category::SYNTAX_ERROR,
             r::detail::INVALID_ARGUMENT_TYPE,
+        ),
+        // Text in the grammar's form that names no instant is bad input.
+        (
+            "RETURN datetime('2024-13-01') AS v",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_DATETIME,
+        ),
+        (
+            "RETURN datetime('2024-02-30T00:00:00Z') AS v",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_DATETIME,
+        ),
+        (
+            "RETURN datetime('2016-12-31T23:59:60Z') AS v",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_DATETIME,
         ),
     ] {
         let error = error(text);

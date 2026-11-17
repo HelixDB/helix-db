@@ -287,6 +287,17 @@ fn values_without_literal_syntax_print_as_equivalent_expressions() {
     for (millis, expected) in [
         (0, "datetime('1970-01-01T00:00:00.000Z')"),
         (-1, "datetime('1969-12-31T23:59:59.999Z')"),
+        (253_402_300_799_999, "datetime('9999-12-31T23:59:59.999Z')"),
+        (-62_167_219_200_000, "datetime('0000-01-01T00:00:00.000Z')"),
+        // Rendered as `+10000-…` and `-0001-…`, text the grammar does not read.
+        (
+            253_402_300_800_000,
+            "datetime({epochMillis: 253402300800000})",
+        ),
+        (
+            -62_167_219_200_001,
+            "datetime({epochMillis: -62167219200001})",
+        ),
         (i64::MAX, "datetime({epochMillis: 9223372036854775807})"),
         (i64::MIN, "datetime({epochMillis: -9223372036854775808})"),
     ] {

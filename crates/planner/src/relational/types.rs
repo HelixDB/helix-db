@@ -61,14 +61,26 @@ impl Expression {
                     .value_type
             }
             Self::Parameter(_) => T::Any,
-            Self::Property(value, _) => {
-                require(
-                    infer(value)?,
-                    &[T::Map, T::Node, T::Relationship],
-                    category::TYPE_ERROR,
-                )?;
-                T::Any
-            }
+            Self::Property(value, key) => match infer(value)? {
+                T::DateTime => {
+                    super::DatetimeField::from_key(key).ok_or_else(|| {
+                        QueryError::compile(
+                            category::TYPE_ERROR,
+                            detail::INVALID_ARGUMENT_TYPE,
+                            format!("a datetime has no property `{key}`"),
+                        )
+                    })?;
+                    T::Integer
+                }
+                value => {
+                    require(
+                        value,
+                        &[T::Map, T::Node, T::Relationship, T::DateTime],
+                        category::TYPE_ERROR,
+                    )?;
+                    T::Any
+                }
+            },
             Self::Index(value, index) => {
                 require(
                     infer(value)?,

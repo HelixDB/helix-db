@@ -1724,9 +1724,9 @@ fn bound_value<'a>(
             };
             let value = bound_value(argument, params)?;
             match value.as_ref() {
-                P::String(text) => {
-                    parse_datetime(text).map(|millis| Cow::Owned(P::DateTime(millis)))
-                }
+                P::String(text) => parse_datetime(text)
+                    .ok()
+                    .map(|millis| Cow::Owned(P::DateTime(millis))),
                 P::DateTime(_) | P::Null => Some(value),
                 P::Bool(_)
                 | P::I64(_)

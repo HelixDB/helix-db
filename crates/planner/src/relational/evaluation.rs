@@ -126,9 +126,19 @@ impl Evaluation<'_> {
                     self.remaining(value.allocated_bytes())?;
                     value.clone()
                 }
+                Value::DateTime(millis) => {
+                    let field = super::DatetimeField::from_key(key).ok_or_else(|| {
+                        QueryError::runtime(
+                            category::TYPE_ERROR,
+                            detail::INVALID_ARGUMENT_TYPE,
+                            format!("a datetime has no property `{key}`"),
+                        )
+                    })?;
+                    Value::Integer(field.of(millis).ok_or_else(unrenderable_datetime)?)
+                }
                 _ => {
                     return Err(type_error(
-                        "property access requires a map, node, or relationship",
+                        "property access requires a map, node, relationship, or datetime",
                     ))
                 }
             },
@@ -799,7 +809,7 @@ impl Evaluation<'_> {
             F::DateTime => match first {
                 Value::DateTime(_) => first,
                 Value::String(text) => {
-                    Value::DateTime(super::parse_datetime(&text).ok_or_else(|| {
+                    Value::DateTime(super::parse_datetime(&text).map_err(|_| {
                         QueryError::runtime(
                             category::ARGUMENT_ERROR,
                             detail::INVALID_DATETIME,
@@ -924,12 +934,12 @@ fn truth(value: Option<bool>) -> Value {
 pub(super) fn type_error(message: &str) -> QueryError {
     QueryError::runtime(category::TYPE_ERROR, detail::INVALID_ARGUMENT_TYPE, message)
 }
-/// A datetime outside chrono's range of years has no RFC 3339 text.
+/// A datetime outside chrono's range of years has no text or calendar fields.
 pub fn unrenderable_datetime() -> QueryError {
     QueryError::runtime(
         category::ARGUMENT_ERROR,
         detail::DATETIME_OUT_OF_RANGE,
-        "datetime is outside the range of years RFC 3339 text can express",
+        "datetime is outside the range of years its text and fields can express",
     )
 }
 pub(super) fn overflow() -> QueryError {

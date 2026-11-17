@@ -373,7 +373,7 @@ fn expressions_translate_with_sql_semantics() {
         assert_eq!(cypher(sql), expected, "{sql}");
     }
     for sql in [
-        "SELECT EXTRACT(YEAR FROM t.d) FROM t",
+        "SELECT EXTRACT(SECOND FROM t.d) FROM t",
         "SELECT INTERVAL '1' DAY",
         "SELECT DATE '2020-01-01'",
         "SELECT CAST(1 AS DATE)",

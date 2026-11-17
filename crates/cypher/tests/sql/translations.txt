@@ -918,6 +918,52 @@ SELECT CAST('yesterday' AS TIMESTAMP)
 => RETURN datetime('yesterday')
 !! unsupported_feature function
 
+# HelixDB: TIMESTAMP text in the grammar's form that names no instant is bad input
+SELECT TIMESTAMP '2024-02-30 00:00:00'
+=> error: argument_error invalid_datetime
+
+# HelixDB: fields that are not zero-padded are outside the grammar
+SELECT TIMESTAMP '2024-1-5'
+=> error: unsupported_feature sql_construct
+
+# HelixDB: so are years outside RFC 3339's 0000-9999
+SELECT TIMESTAMP '-0001-01-01'
+=> error: unsupported_feature sql_construct
+
+# HelixDB: a cast of text naming no instant fails when the translation compiles
+SELECT CAST('2024-13-01' AS TIMESTAMP)
+=> RETURN datetime('2024-13-01')
+!! argument_error invalid_datetime
+
+# HelixDB: EXTRACT reads the datetime property of the same meaning; EPOCH is fractional seconds
+SELECT EXTRACT(YEAR FROM e.at), EXTRACT(QUARTER FROM e.at), EXTRACT(MONTH FROM e.at), EXTRACT(WEEK FROM e.at), EXTRACT(ISOYEAR FROM e.at), EXTRACT(DAY FROM e.at), EXTRACT(DOY FROM e.at), EXTRACT(ISODOW FROM e.at), EXTRACT(HOUR FROM e.at), EXTRACT(MINUTE FROM e.at), EXTRACT(EPOCH FROM e.at) FROM Event e
+=> MATCH (e:Event) RETURN e.at.year, e.at.quarter, e.at.month, e.at.week, e.at.weekYear, e.at.day, e.at.ordinalDay, e.at.dayOfWeek, e.at.hour, e.at.minute, e.at.epochMillis / 1000.0
+
+# HelixDB: EXTRACT groups by a datetime field
+SELECT EXTRACT(YEAR FROM e.at) AS year, COUNT(*) AS events FROM Event e GROUP BY EXTRACT(YEAR FROM e.at)
+=> MATCH (e:Event) RETURN e.at.year AS year, count(*) AS events
+
+# HelixDB: EXTRACT of a literal is checked when the translation compiles
+SELECT EXTRACT(MONTH FROM TIMESTAMP '2024-05-06')
+=> RETURN datetime('2024-05-06T00:00:00.000Z').month
+
+# HelixDB: EXTRACT from text is a type error, as property access on a string is
+SELECT EXTRACT(YEAR FROM 'x')
+=> RETURN 'x'.year
+!! type_error invalid_argument_type
+
+# HelixDB: PostgreSQL's SECOND carries the seconds' fraction, which no one property holds
+SELECT EXTRACT(SECOND FROM e.at) FROM Event e
+=> error: unsupported_feature sql_construct
+
+# HelixDB: so does MILLISECONDS
+SELECT EXTRACT(MILLISECONDS FROM e.at) FROM Event e
+=> error: unsupported_feature sql_construct
+
+# HelixDB: PostgreSQL's DOW counts Sunday as 0; ISODOW is dayOfWeek
+SELECT EXTRACT(DOW FROM e.at) FROM Event e
+=> error: unsupported_feature sql_construct
+
 # HelixDB: dates and times of day have no type yet
 SELECT CURRENT_DATE
 => RETURN date()

@@ -12,7 +12,9 @@
 //! that a cast to `TIMESTAMP` is Cypher's `datetime`, which fails on such text.
 //! `CURRENT_TIMESTAMP` and `NOW()` are the statement's UTC clock, and a
 //! `TIMESTAMP '…'` literal is a UTC datetime read by
-//! [`helix_planner::relational::parse_datetime`] at translation.
+//! [`helix_planner::relational::parse_datetime`] at translation. `EXTRACT`
+//! reads the datetime property of the same meaning, such as `DOY` as
+//! `ordinalDay`, and `EPOCH` as `epochMillis / 1000.0`.
 use super::tables::Scope;
 use super::{binary, call, invalid, literal, unsupported, Translator};
 use crate::syntax::{Expr, ExprKind};
@@ -114,12 +116,20 @@ impl Translator<'_> {
                     ));
                 };
                 // PostgreSQL's special values, such as 'epoch', are text
-                // this translation does not read.
-                let millis = r::parse_datetime(text).ok_or_else(|| {
-                    unsupported(
+                // this translation does not read; text in the grammar's form
+                // that names no instant, such as February 30, is an input
+                // error.
+                let millis = r::parse_datetime(text).map_err(|error| match error {
+                    r::DatetimeTextError::OutsideGrammar => unsupported(
                         "TIMESTAMP text other than RFC 3339, a UTC date and time, or a date",
                         span,
+                    ),
+                    r::DatetimeTextError::NoSuchInstant => QueryError::compile(
+                        category::ARGUMENT_ERROR,
+                        detail::INVALID_DATETIME,
+                        format!("TIMESTAMP text {text:?} names no instant"),
                     )
+                    .at(span),
                 })?;
                 literal(r::Value::DateTime(millis), span)
             }
@@ -219,6 +229,40 @@ impl Translator<'_> {
                 let function = cast_function(data_type)
                     .ok_or_else(|| unsupported(format!("CAST to `{data_type}`"), span))?;
                 call(function, vec![self.expr(expr, scope)?], span)
+            }
+            // Fields whose PostgreSQL meaning is a datetime property. Its
+            // SECOND and MILLISECONDS carry the seconds' fraction, which no
+            // one property holds, and EPOCH is fractional seconds.
+            E::Extract { field, expr, .. } => {
+                use ast::DateTimeField as D;
+                let span = span();
+                let key = match field {
+                    D::Year => "year",
+                    D::Quarter => "quarter",
+                    D::Month => "month",
+                    D::Week(None) => "week",
+                    D::Isoyear => "weekYear",
+                    D::Day => "day",
+                    D::Doy => "ordinalDay",
+                    D::Isodow => "dayOfWeek",
+                    D::Hour => "hour",
+                    D::Minute => "minute",
+                    D::Epoch => "epochMillis",
+                    _ => return Err(unsupported(format!("EXTRACT of `{field}`"), span)),
+                };
+                let value = Expr::new(
+                    ExprKind::Property(Box::new(self.expr(expr, scope)?), key.to_owned()),
+                    span,
+                )?;
+                match field {
+                    D::Epoch => binary(
+                        r::Binary::Divide,
+                        value,
+                        literal(r::Value::Float(1000.0), span)?,
+                        span,
+                    ),
+                    _ => Ok(value),
+                }
             }
             E::Function(function) => self.function(function, scope, span()),
             E::Case {
