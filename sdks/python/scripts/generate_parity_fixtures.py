@@ -284,6 +284,10 @@ def query_value_shapes() -> Fixture:
                         {"at": "2026-06-01T05:00:00+09:00", "nested": {"flag": True}}
                     ),
                 ),
+                (
+                    "nullable",
+                    QueryValue.array([{"at": None}, {"at": "2026-06-01T05:00:00+09:00"}]),
+                ),
             ],
             [
                 ("null", QueryParamType.value()),
@@ -301,6 +305,14 @@ def query_value_shapes() -> Fixture:
                             "at": QueryParamType.date_time(),
                             "nested": QueryParamType.object({"flag": QueryParamType.bool()}),
                         }
+                    ),
+                ),
+                (
+                    "nullable",
+                    QueryParamType.array(
+                        QueryParamType.object(
+                            {"at": QueryParamType.nullable(QueryParamType.date_time())}
+                        )
                     ),
                 ),
             ],

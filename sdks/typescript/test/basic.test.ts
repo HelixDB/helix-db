@@ -557,6 +557,41 @@ assert.throws(() => param.object({}), /at least one field/);
 assert.throws(() => param.object(param.string() as never), /must be a parameter type/);
 assert.deepEqual(QueryParamType.object().toJSON(), "object");
 assert.deepEqual(param.object().toJSON(), "object");
+// The chef prompt's bulk-seed pattern: typed rows, with an optional column.
+const seedParams = defineParams({
+  data: param.array(param.object({ name: param.string(), deletedAt: param.nullable(param.dateTime()) })),
+});
+const seedRequest = JSON.parse(
+  writeBatch().toQueryJson(seedParams, {
+    data: [
+      { name: "Ada", deletedAt: null },
+      { name: "Grace", deletedAt: "2026-06-01T05:00:00+09:00" },
+    ],
+  }),
+);
+assert.deepEqual(seedRequest.parameter_types, {
+  data: { array: { object: { name: "string", deletedAt: { nullable: "date_time" } } } },
+});
+assert.deepEqual(seedRequest.parameters.data, [
+  { name: "Ada", deletedAt: null },
+  { name: "Grace", deletedAt: "2026-05-31T20:00:00.000Z" },
+]);
+// Nullable is not optional, and a set value is still checked.
+assert.throws(() => writeBatch().toQueryJson(seedParams, { data: [{ name: "Ada" }] } as never), /missing: \["deletedAt"\]/);
+assert.throws(() => writeBatch().toQueryJson(seedParams, { data: [{ name: "Ada", deletedAt: "2026-06-01" }] }), /RFC3339|datetime/i);
+const nullableType = QueryParamType.nullable(QueryParamType.dateTime());
+assert.deepEqual(nullableType.toJSON(), { nullable: "date_time" });
+assert.equal(nullableType.inner?.variant, "DateTime");
+assert.equal(param.nullable(param.i64()).inner?.kind, "I64");
+assert.deepEqual(
+  parsed(
+    QueryRequest.read(readBatch())
+      .withTypedParameter("a", nullableType, null)
+      .withTypedParameter("b", QueryParamType.array(nullableType), [null, "2026-06-01T05:00:00+09:00"]),
+  ).parameters,
+  { a: null, b: [null, "2026-05-31T20:00:00.000Z"] },
+);
+assert.throws(() => QueryRequest.read(readBatch()).withTypedParameter("a", nullableType, 1));
 
 const bytesParams = defineParams({ payload: param.bytes() });
 assert.throws(() => readBatch().toQueryJson(bytesParams, { payload: new Uint8Array([1, 2, 3]) }), QueryError);

@@ -316,6 +316,76 @@ class DslAstTests(unittest.TestCase):
             typed_rows.inner.fields = {}  # type: ignore[misc]
         with self.assertRaises(TypeError):
             typed_rows.inner.fields["x"] = QueryParamType.i64()  # type: ignore[index]
+        # Field-declared types hash like every other type, by value.
+        same_rows = QueryParamType.array(
+            QueryParamType.object({"n": QueryParamType.i64(), "at": QueryParamType.date_time()})
+        )
+        self.assertEqual(hash(typed_rows), hash(same_rows))
+        self.assertEqual(len({typed_rows, same_rows, QueryParamType.object()}), 2)
+        schema = param.array(param.object({"at": param.date_time()}))
+        self.assertEqual({schema: 1}[param.array(param.object({"at": param.date_time()}))], 1)
+
+    def test_nullable_fields_accept_none_or_their_inner_type(self) -> None:
+        # The bulk-seed pattern with an optional datetime column.
+        rows = define_params(
+            {
+                "data": param.array(
+                    param.object(
+                        {"name": param.string(), "deleted_at": param.nullable(param.date_time())}
+                    )
+                )
+            }
+        )
+        body = parsed(
+            write_batch().to_query_request(
+                rows,
+                {
+                    "data": [
+                        {"name": "Ada", "deleted_at": None},
+                        {"name": "Grace", "deleted_at": "2026-06-01T05:00:00+09:00"},
+                    ]
+                },
+            )
+        )
+        self.assertEqual(
+            body["parameter_types"],
+            {
+                "data": {
+                    "array": {"object": {"name": "string", "deleted_at": {"nullable": "date_time"}}}
+                }
+            },
+        )
+        self.assertEqual(
+            body["parameters"]["data"],
+            [
+                {"name": "Ada", "deleted_at": None},
+                {"name": "Grace", "deleted_at": "2026-05-31T20:00:00.000Z"},
+            ],
+        )
+        # Nullable is not optional, and a set value is still checked.
+        with self.assertRaisesRegex(TypeError, r"missing: \['deleted_at'\]"):
+            write_batch().to_query_request(rows, {"data": [{"name": "Ada"}]})
+        with self.assertRaises((TypeError, QueryError)):
+            write_batch().to_query_request(
+                rows, {"data": [{"name": "Ada", "deleted_at": "2026-06-01"}]}
+            )
+
+        nullable = QueryParamType.nullable(QueryParamType.date_time())
+        self.assertEqual(parsed(nullable), {"nullable": "date_time"})
+        self.assertEqual(nullable.inner, QueryParamType.date_time())
+        self.assertEqual(param.nullable(param.i64()).to_json(), {"nullable": "i64"})
+        typed = (
+            QueryRequest.read(read_batch())
+            .with_typed_parameter("a", nullable, None)
+            .with_typed_parameter(
+                "b", QueryParamType.array(nullable), [None, "2026-06-01T05:00:00+09:00"]
+            )
+        )
+        self.assertEqual(
+            parsed(typed)["parameters"], {"a": None, "b": [None, "2026-05-31T20:00:00.000Z"]}
+        )
+        with self.assertRaises((TypeError, QueryError)):
+            QueryRequest.read(read_batch()).with_typed_parameter("a", nullable, "2026-06-01")
 
     def test_index_lifecycle_response_decoders_are_strict_and_additive(self) -> None:
         operation_id = "018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"

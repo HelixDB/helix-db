@@ -420,6 +420,8 @@ func TestQueryParamTypesCoverEveryValidAndInvalidState(t *testing.T) {
 			"at":    ParamTypeDateTime(),
 			"audit": ParamTypeObjectFields(map[string]QueryParamType{"seen": ParamTypeDateTime()}),
 		})),
+		ParamTypeNullable(ParamTypeDateTime()),
+		ParamTypeArray(ParamTypeObjectFields(map[string]QueryParamType{"at": ParamTypeNullable(ParamTypeDateTime())})),
 	}
 	for _, parameterType := range valid {
 		body, err := json.Marshal(parameterType)
@@ -443,7 +445,11 @@ func TestQueryParamTypesCoverEveryValidAndInvalidState(t *testing.T) {
 	}
 
 	scalarInner := ParamTypeString()
+	oneField := map[string]QueryParamType{"a": ParamTypeI64()}
 	invalid := []QueryParamType{
+		{kind: paramKindNullable},
+		ParamTypeNullable(QueryParamType{kind: ParamKind(255)}),
+		{kind: paramKindNullable, inner: &scalarInner, fields: &oneField},
 		{kind: paramKindBool, inner: &scalarInner},
 		{kind: paramKindArray},
 		{kind: ParamKind(255)},
@@ -451,8 +457,9 @@ func TestQueryParamTypesCoverEveryValidAndInvalidState(t *testing.T) {
 		ParamTypeObjectFields(nil),
 		ParamTypeObjectFields(map[string]QueryParamType{}),
 		ParamTypeObjectFields(map[string]QueryParamType{"bad": {kind: paramKindArray}}),
-		{kind: paramKindRecord, fields: map[string]QueryParamType{"a": ParamTypeI64()}, inner: &scalarInner},
-		{kind: paramKindString, fields: map[string]QueryParamType{"a": ParamTypeI64()}},
+		{kind: paramKindRecord},
+		{kind: paramKindRecord, fields: &oneField, inner: &scalarInner},
+		{kind: paramKindString, fields: &oneField},
 	}
 	for _, parameterType := range invalid {
 		if err := parameterType.Validate(); err == nil {
@@ -476,6 +483,9 @@ func TestQueryParamTypesCoverEveryValidAndInvalidState(t *testing.T) {
 		`{"object":{"a":"i64","a":"i64"}}`,
 		`{"object":{"a":"future"}}`,
 		`{"object":{"a":"i64"},"array":"i64"}`,
+		`{"nullable":null}`,
+		`{"nullable":"future"}`,
+		`{"nullable":"i64","array":"i64"}`,
 	} {
 		var parameterType QueryParamType
 		if err := json.Unmarshal([]byte(input), &parameterType); err == nil {
@@ -657,6 +667,75 @@ func TestTypedObjectFieldsNormalizeAndDeclareEachField(t *testing.T) {
 	}
 	if ParamTypeObject().Fields() != nil {
 		t.Fatal("an untyped object has no declared fields")
+	}
+}
+
+func TestNullableFieldsAcceptNilOrTheirInnerType(t *testing.T) {
+	rows := ParamTypeArray(ParamTypeObjectFields(map[string]QueryParamType{
+		"name":      ParamTypeString(),
+		"deletedAt": ParamTypeNullable(ParamTypeDateTime()),
+	}))
+	request := NewWriteQueryRequest(Write())
+	if err := request.InsertTypedParameter("rows", rows, QueryArray(
+		map[string]any{"name": "Ada", "deletedAt": nil},
+		map[string]any{"name": "Grace", "deletedAt": "2026-06-01T05:00:00+09:00"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Parameters     map[string]any `json:"parameters"`
+		ParameterTypes map[string]any `json:"parameter_types"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	wantTypes := map[string]any{"rows": map[string]any{"array": map[string]any{"object": map[string]any{
+		"name":      "string",
+		"deletedAt": map[string]any{"nullable": "date_time"},
+	}}}}
+	if !reflect.DeepEqual(decoded.ParameterTypes, wantTypes) {
+		t.Fatalf("parameter types = %#v", decoded.ParameterTypes)
+	}
+	wantRows := []any{
+		map[string]any{"name": "Ada", "deletedAt": nil},
+		map[string]any{"name": "Grace", "deletedAt": "2026-05-31T20:00:00.000Z"},
+	}
+	if !reflect.DeepEqual(decoded.Parameters["rows"], wantRows) {
+		t.Fatalf("rows = %#v", decoded.Parameters["rows"])
+	}
+	// Nullable is not optional, and a set value is still checked.
+	for _, test := range []struct {
+		row any
+		is  error
+	}{
+		{map[string]any{"name": "Ada"}, ErrObjectFieldMismatch},
+		{map[string]any{"name": "Ada", "deletedAt": "2026-06-01"}, ErrInvalidDateTimeParameter},
+	} {
+		err := NewWriteQueryRequest(Write()).InsertTypedParameter("rows", rows, QueryArray(test.row))
+		if !errors.Is(err, test.is) {
+			t.Fatalf("row %#v: got %v, want %v", test.row, err, test.is)
+		}
+	}
+	if err := NewReadQueryRequest(Read()).InsertTypedParameter("at", ParamTypeNullable(ParamTypeDateTime()), nil); err != nil {
+		t.Fatalf("a top-level nullable accepts nil: %v", err)
+	}
+}
+
+// QueryParamType and ParamRef stay comparable, so they work with == and as
+// map keys whatever type they hold.
+func TestParamTypesAndRefsStayComparable(t *testing.T) {
+	record := ParamTypeObjectFields(map[string]QueryParamType{"at": ParamTypeDateTime()})
+	same := record
+	if ParamTypeString() != ParamTypeString() || same != record || record == ParamTypeObject() {
+		t.Fatal("parameter types compare by kind, and composite types by identity")
+	}
+	refs := map[ParamRef]bool{{Name: "rows", Type: record}: true, {Name: "at", Type: ParamTypeNullable(ParamTypeDateTime())}: true}
+	if !refs[ParamRef{Name: "rows", Type: record}] || len(refs) != 2 {
+		t.Fatalf("param refs must work as map keys: %#v", refs)
 	}
 }
 

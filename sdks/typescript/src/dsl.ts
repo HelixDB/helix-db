@@ -2726,7 +2726,7 @@ export function writeBatch(): WriteBatch {
 type QueryParamTypeState =
   | { readonly variant: "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes" | "Value" | "Object" }
   | { readonly variant: "Record"; readonly fields: Readonly<Record<string, QueryParamType>> }
-  | { readonly variant: "Array"; readonly inner: QueryParamType };
+  | { readonly variant: "Array" | "Nullable"; readonly inner: QueryParamType };
 
 /** Copy declared fields, rejecting an empty declaration. */
 function declaredFields<T>(fields: Record<string, T>, isField: (field: unknown) => field is T): Readonly<Record<string, T>> {
@@ -2756,7 +2756,7 @@ export class QueryParamType implements Encodable {
     return this.state.variant;
   }
   get inner(): QueryParamType | undefined {
-    return this.state.variant === "Array" ? this.state.inner : undefined;
+    return this.state.variant === "Array" || this.state.variant === "Nullable" ? this.state.inner : undefined;
   }
   /** Declared fields of an object type created with `object(fields)`. */
   get fields(): Readonly<Record<string, QueryParamType>> | undefined {
@@ -2803,10 +2803,19 @@ export class QueryParamType implements Encodable {
   static array(inner: QueryParamType): QueryParamType {
     return new QueryParamType({ variant: "Array", inner });
   }
+  /**
+   * `null`, or a value of `inner`, sent as `{ "nullable": inner }`: an optional
+   * datetime column in bulk rows stays a datetime where it is set. The field
+   * itself must still be present.
+   */
+  static nullable(inner: QueryParamType): QueryParamType {
+    return new QueryParamType({ variant: "Nullable", inner });
+  }
   toJSON(): JsonValue {
     switch (this.state.variant) {
       case "Array":
-        return astNewtype("Array", this.state.inner);
+      case "Nullable":
+        return astNewtype(this.state.variant, this.state.inner);
       case "Record":
         return astNewtype("Object", this.state.fields);
       default:
@@ -2815,7 +2824,7 @@ export class QueryParamType implements Encodable {
   }
 }
 
-type ParamKind = "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes" | "Value" | "Object" | "Record" | "Array";
+type ParamKind = "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes" | "Value" | "Object" | "Record" | "Array" | "Nullable";
 
 export type ParamSchemaInput<T> = T extends ParamSchema<infer Input> ? Input : never;
 /** Declared object fields: each field's schema by name. */
@@ -2827,7 +2836,7 @@ const PARAMS_METADATA: unique symbol = Symbol("@helixdb/enterprise-ql/params-met
 type ParamSchemaState =
   | { readonly kind: "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes" | "Value" | "Object" }
   | { readonly kind: "Record"; readonly fields: Readonly<ParamFields> }
-  | { readonly kind: "Array"; readonly inner: ParamSchema };
+  | { readonly kind: "Array" | "Nullable"; readonly inner: ParamSchema };
 
 export class ParamSchema<Input = unknown> implements Encodable {
   declare readonly __input?: Input;
@@ -2839,7 +2848,7 @@ export class ParamSchema<Input = unknown> implements Encodable {
     return this.state.kind;
   }
   get inner(): ParamSchema | undefined {
-    return this.state.kind === "Array" ? this.state.inner : undefined;
+    return this.state.kind === "Array" || this.state.kind === "Nullable" ? this.state.inner : undefined;
   }
   /** Declared fields of an object schema created with `param.object(fields)`. */
   get fields(): Readonly<ParamFields> | undefined {
@@ -2881,6 +2890,9 @@ export class ParamSchema<Input = unknown> implements Encodable {
   static array<Inner extends ParamSchema>(inner: Inner): ParamSchema<ParamSchemaInput<Inner>[]> {
     return new ParamSchema({ kind: "Array", inner });
   }
+  static nullable<Inner extends ParamSchema>(inner: Inner): ParamSchema<ParamSchemaInput<Inner> | null> {
+    return new ParamSchema({ kind: "Nullable", inner });
+  }
   toParamType(): QueryParamType {
     switch (this.state.kind) {
       case "Bool":
@@ -2907,6 +2919,8 @@ export class ParamSchema<Input = unknown> implements Encodable {
         );
       case "Array":
         return QueryParamType.array(this.state.inner.toParamType());
+      case "Nullable":
+        return QueryParamType.nullable(this.state.inner.toParamType());
     }
   }
   toJSON(): JsonValue {
@@ -2930,6 +2944,11 @@ export const param = {
    */
   object: ParamSchema.object,
   array: ParamSchema.array,
+  /**
+   * `null`, or a value of `inner`: `param.object({ deletedAt: param.nullable(param.dateTime()) })`
+   * keeps a set `deletedAt` a datetime and accepts `null` where it is unset.
+   */
+  nullable: ParamSchema.nullable,
 };
 
 export class ParamRef<Input = unknown> implements Encodable {
@@ -3027,6 +3046,8 @@ function convertParamValue(schema: ParamSchema, value: unknown, path: string): J
       if (!Array.isArray(value)) throw new TypeError(`parameter '${path}' must be array`);
       return value.map((entry, index) => convertParamValue(schema.inner!, entry, `${path}[${index}]`));
     }
+    case "Nullable":
+      return value === null ? null : convertParamValue(schema.inner!, value, path);
   }
 }
 
@@ -3093,6 +3114,8 @@ function normalizeTypedQueryValue(type: QueryParamType, value: JsonValue, path: 
     case "Array":
       if (!Array.isArray(value)) throw new TypeError(`parameter '${path}' must be array`);
       return value.map((entry, index) => normalizeTypedQueryValue(type.inner!, entry, `${path}[${index}]`));
+    case "Nullable":
+      return value === null ? null : normalizeTypedQueryValue(type.inner!, value, path);
   }
 }
 

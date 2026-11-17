@@ -30,6 +30,7 @@ const readParams = defineParams({
 const writeParams = defineParams({
   values: param.array(param.object()),
   rows: param.array(param.object({ at: param.dateTime(), n: param.i64() })),
+  optional: param.array(param.object({ deletedAt: param.nullable(param.dateTime()) })),
 });
 
 function directFindUsers(p: typeof readParams) {
@@ -65,6 +66,7 @@ writeBatch()
   .toQueryBytes(writeParams, {
     values: [{ id: 1, nested: { ok: true } }],
     rows: [{ at: DateTime.fromMillis(0), n: 1 }],
+    optional: [{ deletedAt: null }, { deletedAt: DateTime.fromMillis(0) }],
   });
 readBatch().varAs("count", g().nWithLabel("User").count()).toQueryJson();
 readBatch()
@@ -100,7 +102,10 @@ directBatch.toQueryJson(readParams, { tenant: "acme", limit: 10, createdAfter: 0
 directBatch.toQueryJson(readParams, { tenant: "acme", limit: 10, createdAfter: 0, scores: [], labels: {} });
 
 // @ts-expect-error a typed datetime field rejects a boolean
-writeBatch().toQueryJson(writeParams, { values: [], rows: [{ at: true, n: 1 }] });
+writeBatch().toQueryJson(writeParams, { values: [], rows: [{ at: true, n: 1 }], optional: [] });
+
+// @ts-expect-error a datetime field rejects null unless declared nullable
+writeBatch().toQueryJson(writeParams, { values: [], rows: [{ at: null, n: 1 }], optional: [] });
 
 // @ts-expect-error write traversal is rejected by read batches
 readBatch().varAs("created", g().addN("User", {}));

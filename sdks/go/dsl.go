@@ -2470,12 +2470,17 @@ const (
 	paramKindObject
 	paramKindArray
 	paramKindRecord
+	paramKindNullable
 )
 
+// QueryParamType is a declared parameter type. It stays comparable with ==
+// (like ParamRef, which embeds it): composite types hold their contents
+// behind pointers, so two separately built array, nullable or object-fields
+// types compare unequal even with equal contents.
 type QueryParamType struct {
 	kind   ParamKind
 	inner  *QueryParamType
-	fields map[string]QueryParamType
+	fields *map[string]QueryParamType
 }
 
 func ParamTypeBool() QueryParamType     { return QueryParamType{} }
@@ -2501,7 +2506,15 @@ func ParamTypeObjectFields(fields map[string]QueryParamType) QueryParamType {
 	for name, field := range fields {
 		copied[name] = field
 	}
-	return QueryParamType{kind: paramKindRecord, fields: copied}
+	return QueryParamType{kind: paramKindRecord, fields: &copied}
+}
+
+// ParamTypeNullable accepts nil or a value of inner, sent as
+// {"nullable": <inner>}: an optional datetime column in bulk rows stays a
+// datetime where it is set. An object field declared nullable must still be
+// present.
+func ParamTypeNullable(inner QueryParamType) QueryParamType {
+	return QueryParamType{kind: paramKindNullable, inner: &inner}
 }
 
 // Fields returns a copy of the declared fields of a ParamTypeObjectFields
@@ -2510,8 +2523,8 @@ func (q QueryParamType) Fields() map[string]QueryParamType {
 	if q.kind != paramKindRecord {
 		return nil
 	}
-	copied := make(map[string]QueryParamType, len(q.fields))
-	for name, field := range q.fields {
+	copied := make(map[string]QueryParamType, len(*q.fields))
+	for name, field := range *q.fields {
 		copied[name] = field
 	}
 	return copied
@@ -2524,19 +2537,19 @@ func (q QueryParamType) Validate() error {
 			return errors.New("helix: scalar parameter type cannot have an inner type")
 		}
 		return nil
-	case paramKindArray:
+	case paramKindArray, paramKindNullable:
 		if q.inner == nil || q.fields != nil {
-			return errors.New("helix: array parameter type requires an inner type")
+			return fmt.Errorf("helix: %s parameter type requires an inner type", strings.ToLower(paramKindName(q.kind)))
 		}
 		return q.inner.Validate()
 	case paramKindRecord:
 		if q.inner != nil {
 			return errors.New("helix: object fields parameter type cannot have an inner type")
 		}
-		if len(q.fields) == 0 {
+		if q.fields == nil || len(*q.fields) == 0 {
 			return ErrEmptyObjectFields
 		}
-		for name, field := range q.fields {
+		for name, field := range *q.fields {
 			if err := field.Validate(); err != nil {
 				return &PathError{Path: name, Err: err}
 			}
@@ -2551,10 +2564,10 @@ func (q QueryParamType) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	switch q.kind {
-	case paramKindArray:
-		return json.Marshal(astNewtype("Array", q.inner))
+	case paramKindArray, paramKindNullable:
+		return json.Marshal(astNewtype(paramKindName(q.kind), q.inner))
 	case paramKindRecord:
-		return json.Marshal(astNewtype("Object", q.fields))
+		return json.Marshal(astNewtype("Object", *q.fields))
 	default:
 		return json.Marshal(astUnit(paramKindName(q.kind)))
 	}
@@ -2578,22 +2591,27 @@ func (q *QueryParamType) UnmarshalJSON(data []byte) error {
 		if err != nil {
 			return err
 		}
-		parsed := QueryParamType{kind: paramKindRecord, fields: fields}
+		parsed := QueryParamType{kind: paramKindRecord, fields: &fields}
 		if err := parsed.Validate(); err != nil {
 			return err
 		}
 		*q = parsed
 		return nil
 	}
+	wrap := ParamTypeArray
 	rawInner, ok := tagged["array"]
+	if !ok {
+		wrap = ParamTypeNullable
+		rawInner, ok = tagged["nullable"]
+	}
 	if !ok || len(tagged) != 1 || string(rawInner) == "null" {
-		return errors.New("helix: array parameter type requires exactly one inner type")
+		return errors.New("helix: array or nullable parameter type requires exactly one inner type")
 	}
 	var inner QueryParamType
 	if err := json.Unmarshal(rawInner, &inner); err != nil {
 		return err
 	}
-	*q = ParamTypeArray(inner)
+	*q = wrap(inner)
 	return nil
 }
 
@@ -2647,6 +2665,8 @@ func paramKindName(kind ParamKind) string {
 		return "Array"
 	case paramKindRecord:
 		return "Record"
+	case paramKindNullable:
+		return "Nullable"
 	default:
 		panic("validated parameter kind must be known")
 	}
@@ -3205,13 +3225,13 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 			return nil, ErrInvalidParameterType
 		}
 		var missing, extra []string
-		for name := range parameterType.fields {
+		for name := range *parameterType.fields {
 			if !reflected.MapIndex(reflect.ValueOf(name).Convert(reflected.Type().Key())).IsValid() {
 				missing = append(missing, name)
 			}
 		}
 		for _, key := range reflected.MapKeys() {
-			if _, declared := parameterType.fields[key.String()]; !declared {
+			if _, declared := (*parameterType.fields)[key.String()]; !declared {
 				extra = append(extra, key.String())
 			}
 		}
@@ -3220,8 +3240,8 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 			sort.Strings(extra)
 			return nil, &PathError{Path: path, Err: fmt.Errorf("%w (missing: %q, undeclared: %q)", ErrObjectFieldMismatch, missing, extra)}
 		}
-		values := make(map[string]QueryValue, len(parameterType.fields))
-		for name, field := range parameterType.fields {
+		values := make(map[string]QueryValue, len(*parameterType.fields))
+		for name, field := range *parameterType.fields {
 			fieldPath := path + "." + name
 			normalized, err := normalizeTypedQueryValue(
 				field,
@@ -3259,6 +3279,11 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 			values[index] = normalized
 		}
 		return values, nil
+	case paramKindNullable:
+		if value == nil {
+			return QueryNull(), nil
+		}
+		return normalizeTypedQueryValue(*parameterType.inner, value, path)
 	default:
 		return nil, ErrInvalidParameterType
 	}

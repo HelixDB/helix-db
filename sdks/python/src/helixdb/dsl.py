@@ -3545,15 +3545,22 @@ class QueryParamType:
         }
         if variant in scalar_variants and (inner is not None or fields is not None):
             raise TypeError("scalar parameter types cannot contain an inner type")
-        if variant == "Array" and (not isinstance(inner, QueryParamType) or fields is not None):
-            raise TypeError("array parameter type requires an inner type")
+        if variant in {"Array", "Nullable"} and (
+            not isinstance(inner, QueryParamType) or fields is not None
+        ):
+            raise TypeError(f"{variant.lower()} parameter type requires an inner type")
         if variant == "Record" and (inner is not None or fields is None):
             raise TypeError("object fields parameter type requires its fields")
-        if variant not in scalar_variants and variant not in {"Array", "Record"}:
+        if variant not in scalar_variants and variant not in {"Array", "Nullable", "Record"}:
             raise TypeError(f"unknown query parameter type: {variant}")
         object.__setattr__(self, "variant", variant)
         object.__setattr__(self, "inner", inner)
         object.__setattr__(self, "fields", fields)
+
+    def __hash__(self) -> int:
+        # The read-only ``fields`` mapping cannot be hashed itself.
+        fields = None if self.fields is None else frozenset(self.fields.items())
+        return hash((self.variant, self.inner, fields))
 
     @classmethod
     def _create(
@@ -3617,9 +3624,18 @@ class QueryParamType:
     def array(cls, inner: "QueryParamType") -> "QueryParamType":
         return cls._create("Array", inner)
 
+    @classmethod
+    def nullable(cls, inner: "QueryParamType") -> "QueryParamType":
+        """``None``, or a value of ``inner``, sent as ``{"nullable": inner}``.
+
+        An optional datetime column in bulk rows stays a datetime where it is
+        set. The field itself must still be present.
+        """
+        return cls._create("Nullable", inner)
+
     def to_json(self) -> JsonValue:
-        if self.variant == "Array":
-            return _ast_newtype("Array", self.inner)
+        if self.variant in {"Array", "Nullable"}:
+            return _ast_newtype(self.variant, self.inner)
         if self.variant == "Record":
             return _ast_newtype("Object", dict(self.fields or {}))
         return _ast_unit(self.variant)
@@ -3654,15 +3670,22 @@ class ParamSchema:
         }
         if kind in scalar_kinds and (inner is not None or fields is not None):
             raise TypeError("scalar parameter schemas cannot contain payload schemas")
-        if kind == "Array" and (not isinstance(inner, ParamSchema) or fields is not None):
-            raise TypeError("array parameter schema requires exactly one inner schema")
+        if kind in {"Array", "Nullable"} and (
+            not isinstance(inner, ParamSchema) or fields is not None
+        ):
+            raise TypeError(f"{kind.lower()} parameter schema requires exactly one inner schema")
         if kind == "Record" and (inner is not None or fields is None):
             raise TypeError("object fields parameter schema requires its fields")
-        if kind not in scalar_kinds and kind not in {"Array", "Record"}:
+        if kind not in scalar_kinds and kind not in {"Array", "Nullable", "Record"}:
             raise TypeError(f"unknown parameter schema: {kind}")
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "inner", inner)
         object.__setattr__(self, "fields", fields)
+
+    def __hash__(self) -> int:
+        # The read-only ``fields`` mapping cannot be hashed itself.
+        fields = None if self.fields is None else frozenset(self.fields.items())
+        return hash((self.kind, self.inner, fields))
 
     @classmethod
     def _create(
@@ -3700,6 +3723,10 @@ class ParamSchema:
             if self.inner is None:
                 raise TypeError("array parameter schema requires an inner schema")
             return QueryParamType.array(self.inner.to_param_type())
+        if self.kind == "Nullable":
+            if self.inner is None:
+                raise TypeError("nullable parameter schema requires an inner schema")
+            return QueryParamType.nullable(self.inner.to_param_type())
         raise TypeError(f"unknown parameter schema: {self.kind}")
 
     def to_json(self) -> JsonValue:
@@ -3745,6 +3772,12 @@ class _ParamNamespace:
 
     def array(self, inner: ParamSchema) -> ParamSchema:
         return ParamSchema._create("Array", inner=inner)
+
+    def nullable(self, inner: ParamSchema) -> ParamSchema:
+        """``None``, or a value of ``inner``: ``param.object({"deleted_at":
+        param.nullable(param.date_time())})`` keeps a set ``deleted_at`` a
+        datetime and accepts ``None`` where it is unset."""
+        return ParamSchema._create("Nullable", inner=inner)
 
 
 param = _ParamNamespace()
@@ -3856,6 +3889,10 @@ def _convert_param_value(schema: ParamSchema, value: Any, path: str) -> JsonValu
             _convert_param_value(schema.inner, entry, f"{path}[{index}]")
             for index, entry in enumerate(value)
         ]
+    if schema.kind == "Nullable":
+        if schema.inner is None:
+            raise TypeError(f"parameter '{path}' nullable schema requires an inner schema")
+        return None if value is None else _convert_param_value(schema.inner, value, path)
     raise TypeError(f"unknown parameter schema: {schema.kind}")
 
 
@@ -4012,6 +4049,12 @@ def _normalize_typed_query_value(
             _normalize_typed_query_value(inner, entry, f"{path}[{index}]")
             for index, entry in enumerate(value)
         ]
+    if parameter_type.variant == "Nullable":
+        if parameter_type.inner is None:
+            raise AssertionError("closed nullable parameter type must have an inner type")
+        if value is None:
+            return None
+        return _normalize_typed_query_value(parameter_type.inner, value, path)
     raise AssertionError(f"unknown closed parameter type: {parameter_type.variant}")
 
 

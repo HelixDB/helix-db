@@ -946,6 +946,9 @@ func fixtureQueryValueShapes() fixture {
 		"at":     helix.ParamTypeDateTime(),
 		"nested": helix.ParamTypeObjectFields(map[string]helix.QueryParamType{"flag": helix.ParamTypeBool()}),
 	}), map[string]any{"at": "2026-06-01T05:00:00+09:00", "nested": map[string]any{"flag": true}})
+	q.WithTypedParameter("nullable", helix.ParamTypeArray(helix.ParamTypeObjectFields(map[string]helix.QueryParamType{
+		"at": helix.ParamTypeNullable(helix.ParamTypeDateTime()),
+	})), []any{map[string]any{"at": nil}, map[string]any{"at": "2026-06-01T05:00:00+09:00"}})
 	return jsonOnly(
 		"902-query-value-and-param-type-shapes",
 		q.VarAs("empty", helix.G().NWithLabel("Missing").Count()).Returning("empty"),

@@ -928,6 +928,7 @@ function jsonOnlyFixtures(): Fixture[] {
           ["array", QueryValue.array([1, "two"])],
           ["object", QueryValue.object({ nested: true })],
           ["record", QueryValue.object({ at: "2026-06-01T05:00:00+09:00", nested: { flag: true } })],
+          ["nullable", QueryValue.array([{ at: null }, { at: "2026-06-01T05:00:00+09:00" }])],
         ],
         [
           ["null", QueryParamType.value()],
@@ -942,6 +943,7 @@ function jsonOnlyFixtures(): Fixture[] {
             "record",
             QueryParamType.object({ at: QueryParamType.dateTime(), nested: QueryParamType.object({ flag: QueryParamType.bool() }) }),
           ],
+          ["nullable", QueryParamType.array(QueryParamType.object({ at: QueryParamType.nullable(QueryParamType.dateTime()) }))],
         ],
       ),
     ),
