@@ -3682,7 +3682,11 @@ mod tests {
                 .unwrap()
             {
                 OperationPointerObservation::Delayed { delay_millis } => delay_millis,
-                observation => panic!("a failed claim waits: {observation:?}"),
+                observation @ (OperationPointerObservation::Eligible(_)
+                | OperationPointerObservation::ClaimedByCurrentWriter(_)
+                | OperationPointerObservation::StalePointerRemoved) => {
+                    panic!("a failed claim waits: {observation:?}")
+                }
             }
         }
 
@@ -4185,7 +4189,9 @@ mod tests {
                 decided.evidence.outcome,
                 match fate {
                     IndexOperationStepResult::Completed(_) => CommittedOperationStep::Completed,
-                    _ => CommittedOperationStep::Blocked,
+                    IndexOperationStepResult::Progressed(_)
+                    | IndexOperationStepResult::TransientFailure
+                    | IndexOperationStepResult::Blocked(_) => CommittedOperationStep::Blocked,
                 }
             );
             db.close().await.unwrap();
