@@ -1131,13 +1131,42 @@ pub(crate) async fn execute_claimed_step_with_evidence(
     let _ownership = driver
         .acquire_generation_ownership(claimed.scope, &claimed.record)
         .await;
+    // A retained claim reaches its next step without a claim transaction,
+    // so an abort, a retry or another writer's claim that landed during its
+    // slice is caught here, before a preparation that may scan the whole
+    // generation or fence writers. The step transaction below still checks
+    // the exact revision; this read only skips work that cannot commit.
+    let current = db
+        .get(scoped_operation_key(
+            claimed.scope,
+            claimed.record.operation_id(),
+        ))
+        .await?
+        .map(|value| decode_operation_record(&value))
+        .transpose()?;
+    if current
+        .is_some_and(|current| current.operation_revision() != claimed.record.operation_revision())
+    {
+        let stage = IndexOperationStatus::from_record(&claimed.record)
+            .common()
+            .stage;
+        return Ok(ExecutedOperationStep::released(
+            CommittedOperationStepEvidence {
+                outcome: CommittedOperationStep::TransientFailure,
+                before_stage: stage,
+                after_stage: stage,
+                resources: StepResourceUsage::default(),
+                elapsed_micros: elapsed_micros(started),
+            },
+        ));
+    }
     let prepared = match driver
         .prepare_step(db, claimed.scope, &claimed.record, limits)
         .await
     {
         Ok(prepared) => prepared,
         Err(error) => {
-            return record_driver_failure(db, claimed, error, now_unix_millis, started)
+            return record_driver_failure(db, claimed, driver, error, now_unix_millis, started)
                 .await
                 .map(ExecutedOperationStep::released);
         }
@@ -2202,6 +2231,35 @@ mod tests {
             _limits: SearchIndexBatchLimits,
         ) -> Result<IndexOperationStepExecution> {
             Ok(IndexOperationStepExecution::new(self.0.clone()))
+        }
+    }
+
+    /// Fails the test if a step reaches preparation or staging.
+    struct UnpreparedDriver;
+
+    #[async_trait]
+    impl IndexOperationDriver for UnpreparedDriver {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn acquire_step_permit(
+            &self,
+            _scope: DataScope,
+            _operation: &IndexOperationRecord,
+        ) -> Result<Box<dyn IndexOperationStepPermit>> {
+            panic!("a superseded claim must not prepare a step");
+        }
+
+        async fn step(
+            &self,
+            _db: &Db,
+            _transaction: &DbTransaction,
+            _scope: DataScope,
+            _operation: &IndexOperationRecord,
+            _limits: SearchIndexBatchLimits,
+        ) -> Result<IndexOperationStepExecution> {
+            panic!("a superseded claim must not stage a step");
         }
     }
 
@@ -4227,7 +4285,7 @@ mod tests {
 
     /// A retained claim keeps its exact claim and attempt; it is runnable
     /// only by its holder, and an abort or another writer's claim supersedes
-    /// it without a write or an error.
+    /// it without a write, an error, or a preparation.
     #[tokio::test]
     async fn a_retained_claim_is_exclusive_and_superseded_cleanly() {
         let scope = DataScope::LegacyUnscoped;
@@ -4286,16 +4344,19 @@ mod tests {
         .is_none());
 
         // Another writer takes the operation over; the holder's next step
-        // finds its claim superseded and writes nothing.
+        // finds its claim superseded before it prepares and writes nothing.
         let taker = WriterEpoch::from_bytes([95; 16]).unwrap();
         let taken = claim(&db, &retained.record, taker, 1).await;
-        let superseded = step(
+        let superseded = execute_claimed_step_with_evidence(
             &db,
             &retained,
-            IndexOperationStepResult::Progressed(activate_progress(2)),
+            &UnpreparedDriver,
+            SearchIndexBackfillLimits::default().batch(),
+            0,
             ClaimContinuation::Retain,
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             superseded.evidence.outcome,
             CommittedOperationStep::TransientFailure
@@ -4322,15 +4383,16 @@ mod tests {
         let aborted = abort_operation(&db, scope, operation.operation_id())
             .await
             .unwrap();
-        let superseded = step(
+        let superseded = execute_claimed_step_with_evidence(
             &db,
             &retained,
-            IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
-                BuildOperationOutcome::Succeeded,
-            )),
+            &UnpreparedDriver,
+            SearchIndexBackfillLimits::default().batch(),
+            0,
             ClaimContinuation::Retain,
         )
-        .await;
+        .await
+        .unwrap();
         assert_eq!(
             superseded.evidence.outcome,
             CommittedOperationStep::TransientFailure
@@ -4342,6 +4404,93 @@ mod tests {
                 .as_ref(),
             Some(&aborted),
             "an aborted build never activates from a stale claim"
+        );
+        db.close().await.unwrap();
+    }
+
+    /// An abort that commits while a step prepares, after the early revision
+    /// check, is caught by the step transaction: nothing is staged, nothing
+    /// commits, and the build never activates.
+    #[tokio::test]
+    async fn an_abort_during_preparation_supersedes_the_step() {
+        struct AbortingDriver;
+
+        #[async_trait]
+        impl IndexOperationDriver for AbortingDriver {
+            fn family(&self) -> IndexOperationFamily {
+                IndexOperationFamily::Secondary
+            }
+
+            async fn prepare_step(
+                &self,
+                db: &Db,
+                scope: DataScope,
+                operation: &IndexOperationRecord,
+                _limits: SearchIndexBatchLimits,
+            ) -> Result<PreparedIndexOperationStep> {
+                abort_operation(db, scope, operation.operation_id()).await?;
+                Ok(PreparedIndexOperationStep::driver_owned(
+                    self.family(),
+                    Box::new(()),
+                ))
+            }
+
+            async fn step(
+                &self,
+                _db: &Db,
+                _transaction: &DbTransaction,
+                _scope: DataScope,
+                _operation: &IndexOperationRecord,
+                _limits: SearchIndexBatchLimits,
+            ) -> Result<IndexOperationStepExecution> {
+                panic!("a superseded claim must not stage a step");
+            }
+        }
+
+        let scope = DataScope::LegacyUnscoped;
+        let db = db("outbox-abort-during-prepare").await;
+        let (index, operation) = fixture(96);
+        enqueue_operation(
+            &db,
+            scope,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let claimed = claim(
+            &db,
+            &operation,
+            WriterEpoch::from_bytes([96; 16]).unwrap(),
+            1,
+        )
+        .await;
+        let executed = execute_claimed_step_with_evidence(
+            &db,
+            &claimed,
+            &AbortingDriver,
+            SearchIndexBackfillLimits::default().batch(),
+            0,
+            ClaimContinuation::Retain,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            executed.evidence.outcome,
+            CommittedOperationStep::TransientFailure
+        );
+        assert!(executed.retained.is_none());
+        let current = read_operation(&db, scope, operation.operation_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                current.progress(),
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(_))
+            ),
+            "the abort stands and the build never activates"
         );
         db.close().await.unwrap();
     }
