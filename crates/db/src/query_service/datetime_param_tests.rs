@@ -664,7 +664,10 @@ async fn foreach_rows_with_nullable_datetime_fields_and_a_range_index() {
             .await
             .expect_err("a range index rejects null")
             .to_string();
-        assert!(error.contains("unsupported range value type Null"), "{error}");
+        assert!(
+            error.contains("unsupported range value type Null"),
+            "{error}"
+        );
     }
     assert_eq!(event_count(&db).await, json!(0));
 
