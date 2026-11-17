@@ -432,7 +432,7 @@ async fn stored_native_values_do_not_fail_unevaluated_cypher_branches() {
                         ("name", value::PropertyInput::from("Ada")),
                         (
                             "future",
-                            value::PropertyInput::Value(value::PropertyValue::DateTime(1)),
+                            value::PropertyInput::Value(value::PropertyValue::Bytes(vec![1])),
                         ),
                     ],
                 ),

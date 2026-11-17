@@ -57,6 +57,7 @@ impl ProbeValues {
             | r::Value::Integer(_)
             | r::Value::Float(_)
             | r::Value::String(_)
+            | r::Value::DateTime(_)
             | r::Value::List(_)
             | r::Value::Path(_) => Ok(None),
         }
@@ -88,7 +89,10 @@ impl Probe {
         let string_bytes = match probe {
             r::Value::Null => return Ok(Self::Empty),
             r::Value::String(value) => value.len(),
-            r::Value::Boolean(_) | r::Value::Integer(_) | r::Value::Float(_) => 0,
+            r::Value::Boolean(_)
+            | r::Value::Integer(_)
+            | r::Value::Float(_)
+            | r::Value::DateTime(_) => 0,
             r::Value::List(_) | r::Value::Map(_) | r::Value::Entity(_) | r::Value::Path(_) => {
                 return Ok(Self::Scan);
             }
@@ -119,6 +123,7 @@ impl Probe {
             r::Value::Integer(value) => P::I64(*value),
             r::Value::Float(value) => P::F64(*value),
             r::Value::String(value) => P::String(value.clone()),
+            r::Value::DateTime(millis) => P::DateTime(*millis),
             r::Value::Null
             | r::Value::List(_)
             | r::Value::Map(_)
@@ -171,6 +176,7 @@ impl Probe {
             | r::Value::Integer(_)
             | r::Value::Float(_)
             | r::Value::String(_)
+            | r::Value::DateTime(_)
             | r::Value::Map(_)
             | r::Value::Entity(_)
             | r::Value::Path(_) => return Ok(Self::Scan),
@@ -192,6 +198,7 @@ impl Probe {
                             | r::Value::Boolean(_)
                             | r::Value::Integer(_)
                             | r::Value::Float(_)
+                            | r::Value::DateTime(_)
                             | r::Value::List(_)
                             | r::Value::Map(_)
                             | r::Value::Entity(_)
@@ -207,6 +214,7 @@ impl Probe {
             Integer(i64),
             Float(u64),
             String(&'a str),
+            DateTime(i64),
         }
         let mut seen = std::collections::HashSet::with_capacity(members.len());
         let mut literals = Vec::with_capacity(members.len());
@@ -217,6 +225,7 @@ impl Probe {
                 r::Value::Integer(value) => (P::I64(*value), Member::Integer(*value)),
                 r::Value::Float(value) => (P::F64(*value), Member::Float(value.to_bits())),
                 r::Value::String(value) => (P::String(value.clone()), Member::String(value)),
+                r::Value::DateTime(millis) => (P::DateTime(*millis), Member::DateTime(*millis)),
                 r::Value::List(_) | r::Value::Map(_) | r::Value::Entity(_) | r::Value::Path(_) => {
                     return Ok(Self::Scan);
                 }

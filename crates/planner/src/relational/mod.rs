@@ -30,6 +30,7 @@ mod reference;
 pub use pipeline::*;
 pub use projection::*;
 mod query;
+mod temporal;
 mod types;
 mod value;
 mod window;
@@ -41,6 +42,7 @@ pub use expression::*;
 pub use graph_values::*;
 pub use planning::*;
 pub use query::*;
+pub use temporal::*;
 pub use value::*;
 
 /// The source location of a diagnostic, measured in UTF-8 bytes.

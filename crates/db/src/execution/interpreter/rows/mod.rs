@@ -520,6 +520,7 @@ impl ExecutionContext<'_> {
             group: None,
             max_collection_items: limits.collection_items,
             memory: self.row_budget().evaluation_memory(),
+            statement_time: self.statement_time,
         }
     }
 }

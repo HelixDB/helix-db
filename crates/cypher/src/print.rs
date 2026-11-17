@@ -635,6 +635,12 @@ impl Display for Literal<'_> {
                     })?;
                 f.write_char('}')
             }
+            // Datetime literals come from SQL `TIMESTAMP '…'`; Cypher spells
+            // them as the call that binds back to the same literal.
+            r::Value::DateTime(millis) => match r::format_datetime(*millis) {
+                Some(text) => write!(f, "datetime({})", Literal(&r::Value::String(text))),
+                None => write!(f, "datetime({{epochMillis: {millis}}})"),
+            },
             // Graph values never appear in statement text.
             r::Value::Entity(_) | r::Value::Path(_) => f.write_str("NULL"),
         }

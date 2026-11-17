@@ -8,7 +8,11 @@
 //! `SUM` of no values is null. `ARRAY_AGG` leaves out nulls, as Cypher's
 //! `collect` does, where SQL keeps them. `TRIM` and its variants remove all leading or
 //! trailing whitespace, as Cypher's do, not only spaces. `CAST` uses Cypher's conversions: to an integer it truncates toward zero,
-//! and text that does not convert becomes null rather than an error.
+//! and text that does not convert becomes null rather than an error, except
+//! that a cast to `TIMESTAMP` is Cypher's `datetime`, which fails on such text.
+//! `CURRENT_TIMESTAMP` and `NOW()` are the statement's UTC clock, and a
+//! `TIMESTAMP '…'` literal is a UTC datetime read by
+//! [`helix_planner::relational::parse_datetime`] at translation.
 use super::tables::Scope;
 use super::{binary, call, invalid, literal, unsupported, Translator};
 use crate::syntax::{Expr, ExprKind};
@@ -92,6 +96,33 @@ impl Translator<'_> {
             },
             E::CompoundIdentifier(parts) => scope.column(parts, span()),
             E::Value(value) => self.value(value, false, span()),
+            // A timestamp literal is a UTC datetime, read once like Cypher's
+            // `datetime('…')`; a time zone in the type changes nothing.
+            E::TypedString(ast::TypedString {
+                data_type:
+                    ast::DataType::Timestamp(..)
+                    | ast::DataType::TimestampNtz(_)
+                    | ast::DataType::Datetime(_),
+                value,
+                ..
+            }) => {
+                let span = span();
+                let ast::Value::SingleQuotedString(text) = &value.value else {
+                    return Err(unsupported(
+                        "TIMESTAMP literals other than quoted text",
+                        span,
+                    ));
+                };
+                let millis = r::parse_datetime(text).ok_or_else(|| {
+                    QueryError::compile(
+                        category::ARGUMENT_ERROR,
+                        detail::INVALID_DATETIME,
+                        "TIMESTAMP text must be RFC 3339, a UTC date and time, or a date",
+                    )
+                    .at(span)
+                })?;
+                literal(r::Value::DateTime(millis), span)
+            }
             E::Nested(inner) => self.expr(inner, scope),
             E::BinaryOp { left, op, right } => self.binary_op(expression, left, op, right, scope),
             E::UnaryOp {
@@ -742,7 +773,7 @@ impl Translator<'_> {
             "stddev_pop" => "stDevP",
             "array_agg" => "collect",
             "elementid" => "id",
-            "current_timestamp" | "now" => "localdatetime",
+            "current_timestamp" | "now" => "datetime",
             "current_date" => "date",
             "current_time" => "localtime",
             // PostgreSQL's CONCAT: strings joined, nulls skipped.
@@ -1168,6 +1199,7 @@ fn cast_function(data_type: &ast::DataType) -> Option<&'static str> {
         | T::Numeric(_)
         | T::Dec(_) => "toFloat",
         T::Bool | T::Boolean => "toBoolean",
+        T::Timestamp(..) | T::TimestampNtz(_) | T::Datetime(_) => "datetime",
         _ => return None,
     })
 }

@@ -302,7 +302,7 @@ async fn returned_entities_with_unreadable_properties_fail_with_the_stored_value
             property::encode_properties(&[
                 Property::string("$label", "N"),
                 Property::i64("k", 1),
-                Property::new("when", P::DateTime(1)),
+                Property::new("when", P::Bytes(vec![1])),
             ]),
         )
         .await

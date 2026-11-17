@@ -22,6 +22,10 @@ pub struct Evaluation<'a> {
     pub group: Option<&'a [Row]>,
     pub max_collection_items: usize,
     pub memory: EvaluationMemory<'a>,
+    /// The statement's clock in UTC epoch milliseconds, read once when the
+    /// statement starts, so every `datetime()` and `timestamp()` in one
+    /// statement returns the same instant, as openCypher's statement clock does.
+    pub statement_time: i64,
 }
 
 impl Evaluation<'_> {
@@ -485,6 +489,14 @@ impl Evaluation<'_> {
 
     fn function(&self, function: Function, mut args: Vec<Value>) -> Result<Value> {
         use Function as F;
+        // The binder admits no arguments to these clock reads only.
+        if args.is_empty() {
+            return match function {
+                F::DateTime => Ok(Value::DateTime(self.statement_time)),
+                F::Timestamp => Ok(Value::Integer(self.statement_time)),
+                _ => Err(type_error("missing function argument")),
+            };
+        }
         let first = args
             .first_mut()
             .ok_or_else(|| type_error("missing function argument"))?;
@@ -608,6 +620,12 @@ impl Evaluation<'_> {
             },
             F::ToString => match first {
                 Value::String(_) => first,
+                Value::DateTime(millis) => {
+                    self.remaining(
+                        size_of::<Value>().saturating_add(super::MAX_DATETIME_TEXT_BYTES),
+                    )?;
+                    Value::String(super::format_datetime(millis).ok_or_else(unrenderable_datetime)?)
+                }
                 _ => {
                     let formatted = formatting::ScalarText::new(&first)?;
                     self.remaining(size_of::<Value>().saturating_add(formatted.bytes()))?;
@@ -777,6 +795,37 @@ impl Evaluation<'_> {
                 self.remaining(size_of::<Value>().saturating_add(bytes))?;
                 Value::String(s[start..start + bytes].to_owned())
             }
+            F::DateTime => match first {
+                Value::DateTime(_) => first,
+                Value::String(text) => {
+                    Value::DateTime(super::parse_datetime(&text).ok_or_else(|| {
+                        QueryError::runtime(
+                            category::ARGUMENT_ERROR,
+                            detail::INVALID_DATETIME,
+                            "datetime() text must be RFC 3339, a UTC date and time, or a date",
+                        )
+                    })?)
+                }
+                Value::Map(map) => {
+                    let mut entries = map.into_iter();
+                    let millis = match (entries.next(), entries.next()) {
+                        (Some((key, Value::Integer(millis))), None) if key == "epochMillis" => {
+                            millis
+                        }
+                        _ => {
+                            return Err(QueryError::runtime(
+                                category::ARGUMENT_ERROR,
+                                detail::INVALID_DATETIME,
+                                "a datetime() map must hold only an integer epochMillis",
+                            ))
+                        }
+                    };
+                    super::format_datetime(millis).ok_or_else(unrenderable_datetime)?;
+                    Value::DateTime(millis)
+                }
+                _ => return Err(type_error("datetime requires a string, map or datetime")),
+            },
+            F::Timestamp => return Err(type_error("timestamp takes no arguments")),
             F::Coalesce | F::Exists => unreachable!("handled before strict function evaluation"),
         })
     }
@@ -873,6 +922,14 @@ fn truth(value: Option<bool>) -> Value {
 }
 pub(super) fn type_error(message: &str) -> QueryError {
     QueryError::runtime(category::TYPE_ERROR, detail::INVALID_ARGUMENT_TYPE, message)
+}
+/// A datetime outside chrono's range of years has no RFC 3339 text.
+pub fn unrenderable_datetime() -> QueryError {
+    QueryError::runtime(
+        category::ARGUMENT_ERROR,
+        detail::DATETIME_OUT_OF_RANGE,
+        "datetime is outside the range of years RFC 3339 text can express",
+    )
 }
 pub(super) fn overflow() -> QueryError {
     QueryError::runtime(
@@ -990,6 +1047,7 @@ fn predicate_order(a: &Value, b: &Value) -> Option<Ordering> {
             a.number_cmp(b)
         }
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+        (Value::DateTime(a), Value::DateTime(b)) => Some(a.cmp(b)),
         (Value::Boolean(a), Value::Boolean(b)) => Some(a.cmp(b)),
         (Value::List(a), Value::List(b)) => {
             for (a, b) in a.iter().zip(b) {

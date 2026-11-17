@@ -23,6 +23,7 @@ fn scalar(text: &str) -> r::Value {
         group: None,
         memory: r::EvaluationMemory::new(usize::MAX),
         max_collection_items: 1000,
+        statement_time: 0,
     }
     .eval(&items[0].expression)
     .unwrap()

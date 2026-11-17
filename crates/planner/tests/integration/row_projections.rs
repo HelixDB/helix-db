@@ -27,6 +27,7 @@ fn evaluate(
         group: None,
         max_collection_items: 1000,
         memory: r::EvaluationMemory::new(budget),
+        statement_time: 0,
     };
     let future = program.evaluate(&mut evaluator);
     let Poll::Ready(result) = std::pin::pin!(future)

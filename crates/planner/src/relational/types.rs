@@ -11,6 +11,7 @@ pub enum ValueType {
     Integer,
     Float,
     String,
+    DateTime,
     List,
     Map,
     Node,
@@ -40,6 +41,7 @@ impl Expression {
                 Value::Integer(_) => T::Integer,
                 Value::Float(_) => T::Float,
                 Value::String(_) => T::String,
+                Value::DateTime(_) => T::DateTime,
                 Value::List(_) => T::List,
                 Value::Map(_) => T::Map,
                 Value::Entity(super::Entity::Node(_)) => T::Node,
@@ -271,6 +273,15 @@ impl Expression {
                     | Function::ToLower
                     | Function::ToUpper
                     | Function::Substring => T::String,
+                    Function::DateTime => {
+                        require(
+                            first,
+                            &[T::String, T::DateTime, T::Map],
+                            category::TYPE_ERROR,
+                        )?;
+                        T::DateTime
+                    }
+                    Function::Timestamp => T::Integer,
                 }
             }
         })

@@ -52,6 +52,9 @@ fn preflight_bounds_allocations_and_retained_capacity_for_every_supported_shape(
         P::Bool(true),
         P::I64(i64::MIN),
         P::I64(i64::MAX),
+        P::DateTime(i64::MIN),
+        P::DateTime(0),
+        P::DateTime(i64::MAX),
         P::F64(-0.0),
         P::F32(f64::INFINITY),
         P::String(String::new()),
@@ -71,6 +74,7 @@ fn preflight_bounds_allocations_and_retained_capacity_for_every_supported_shape(
             P::F32Array(vec![-1.5; length]),
             P::StringArray((0..length).map(|i| "x".repeat(i % 17)).collect()),
             P::Array((0..length).map(|i| P::Bool(i % 2 == 0)).collect()),
+            P::Array((0..length as i64).map(P::DateTime).collect()),
             P::Object(
                 (0..length)
                     .map(|i| (format!("key{i:04}"), P::Array(vec![P::I64(i as i64)])))
@@ -151,7 +155,7 @@ fn conversion_preserves_lossless_numeric_bits_and_moves_string_payloads() {
 
 #[test]
 fn unsupported_subtrees_create_only_one_error_without_partial_containers() {
-    for unsupported in [P::DateTime(1), P::Bytes(vec![7; 8192])] {
+    for unsupported in [P::Bytes(Vec::new()), P::Bytes(vec![7; 8192])] {
         for input in [
             unsupported.clone(),
             P::Array(vec![unsupported.clone(), P::I64Array(vec![1; 8192])]),
@@ -173,4 +177,40 @@ fn unsupported_subtrees_create_only_one_error_without_partial_containers() {
             assert_eq!(allocations.bytes, bound);
         }
     }
+}
+
+#[test]
+fn stored_datetimes_convert_at_any_depth_with_their_exact_millis() {
+    // Unrenderable millis still convert: only text output needs chrono's range.
+    for millis in [i64::MIN, -1, 0, 1_700_000_000_123, i64::MAX] {
+        assert_eq!(
+            Conversion::new(P::DateTime(millis)).finish().unwrap(),
+            r::Value::DateTime(millis)
+        );
+        let nested = P::Object(BTreeMap::from([
+            ("at".into(), P::DateTime(millis)),
+            (
+                "history".into(),
+                P::Array(vec![P::DateTime(millis), P::I64(millis), P::Null]),
+            ),
+        ]));
+        assert_eq!(
+            Conversion::new(nested).finish().unwrap(),
+            r::Value::Map(BTreeMap::from([
+                ("at".into(), r::Value::DateTime(millis)),
+                (
+                    "history".into(),
+                    r::Value::List(vec![
+                        r::Value::DateTime(millis),
+                        r::Value::Integer(millis),
+                        r::Value::Null,
+                    ]),
+                ),
+            ]))
+        );
+    }
+    // A datetime beside bytes still leaves the whole value rejected.
+    let mixed = P::Array(vec![P::DateTime(1), P::Bytes(vec![1])]);
+    let error = Conversion::new(mixed).finish().unwrap_err();
+    assert_eq!(error.detail, "stored_value_type");
 }

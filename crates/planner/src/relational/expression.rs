@@ -98,6 +98,12 @@ pub enum Function {
     ToLower,
     ToUpper,
     Substring,
+    /// `datetime()` is the statement's clock ([`super::Evaluation::statement_time`]);
+    /// `datetime(x)` reads RFC 3339 text ([`super::parse_datetime`]), a map
+    /// holding only `epochMillis`, or returns a datetime unchanged.
+    DateTime,
+    /// `timestamp()`: the statement's clock as integer epoch milliseconds.
+    Timestamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -303,6 +309,8 @@ impl Expression {
                     let valid = match function {
                         Function::Coalesce => !args.is_empty(),
                         Function::Range | Function::Substring => (2..=3).contains(&args.len()),
+                        Function::DateTime => args.len() <= 1,
+                        Function::Timestamp => args.is_empty(),
                         _ => args.len() == 1,
                     };
                     if !valid {

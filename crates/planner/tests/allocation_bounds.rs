@@ -329,6 +329,7 @@ fn runtime_depth_rejection_allocates_only_the_error_before_borrowed_value_clonin
         group: None,
         max_collection_items: usize::MAX,
         memory: r::EvaluationMemory::new(usize::MAX),
+        statement_time: 0,
     };
     for expression in [
         r::Expression::Literal(value),
@@ -387,6 +388,7 @@ fn case_conversion_admission_covers_live_buffers_and_rejection() {
                     group: None,
                     max_collection_items: 10,
                     memory: r::EvaluationMemory::new(budget),
+                    statement_time: 0,
                 };
                 let ((result, peak), _) = observe(|| {
                     let result = evaluation.eval(&expression);
@@ -442,6 +444,7 @@ fn case_conversion_matches_all_unicode_scalars_and_contextual_mapping() {
         group: None,
         max_collection_items: 10,
         memory: r::EvaluationMemory::new(4 * 1024 * 1024),
+        statement_time: 0,
     };
     let check = |source: &str| {
         for function in [r::Function::ToLower, r::Function::ToUpper] {
@@ -557,6 +560,7 @@ fn property_keys_admit_one_output_buffer_and_do_not_evaluate_values() {
                     group: None,
                     max_collection_items: 1024,
                     memory: r::EvaluationMemory::new(max_value_bytes),
+                    statement_time: 0,
                 };
                 let ((result, peak), _) = observe(|| {
                     let result = evaluation.eval(&expression);
@@ -624,6 +628,7 @@ fn map_keys_admit_output_slots_while_the_owned_map_is_live() {
                 group: None,
                 max_collection_items: 1024,
                 memory: r::EvaluationMemory::new(max_value_bytes),
+                statement_time: 0,
             };
             let ((result, peak), _) = observe(|| {
                 let result = evaluation.eval(&expression);
@@ -709,6 +714,7 @@ fn concatenation_moves_owned_payloads_and_preserves_parameters() {
             group: None,
             max_collection_items: 100,
             memory: r::EvaluationMemory::new(4 * input_bytes),
+            statement_time: 0,
         };
         let expression = r::Expression::Binary(
             r::Binary::Add,
@@ -770,6 +776,7 @@ fn concatenation_reuses_empty_operands_and_retained_capacity() {
                 group: None,
                 max_collection_items: 100,
                 memory: r::EvaluationMemory::new(budget),
+                statement_time: 0,
             };
             let expression = r::Expression::Binary(
                 r::Binary::Add,
@@ -806,6 +813,7 @@ fn concatenation_reuses_empty_operands_and_retained_capacity() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(budget),
+        statement_time: 0,
     };
     let ((result, peak), _) = observe(|| {
         let result = evaluation.eval(&expression);
@@ -891,6 +899,7 @@ fn primitive_binary_evaluation_needs_only_live_operands() {
             group: None,
             max_collection_items: 100,
             memory: r::EvaluationMemory::new(budget),
+            statement_time: 0,
         };
         let expression = r::Expression::Binary(
             op,
@@ -916,6 +925,7 @@ fn addition_preserves_nulls_errors_and_operand_order() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(16 * 1024),
+        statement_time: 0,
     };
     for value in [
         r::Value::List(vec![r::Value::Integer(1)]),
@@ -1038,6 +1048,7 @@ fn numeric_text_uses_exact_buffers_and_rejects_before_formatting_output() {
                     group: None,
                     max_collection_items: 10,
                     memory: r::EvaluationMemory::new(budget),
+                    statement_time: 0,
                 };
                 let ((result, peak), _) = observe(|| {
                     let result = evaluation.eval(&expression);
@@ -1110,6 +1121,7 @@ fn numeric_text_uses_exact_buffers_and_rejects_before_formatting_output() {
             group: None,
             max_collection_items: 100,
             memory: r::EvaluationMemory::new(16 * 1024),
+            statement_time: 0,
         };
         let expression =
             r::Expression::Function(r::Function::ToString, vec![r::Expression::Literal(value)]);
@@ -1132,6 +1144,7 @@ fn impossible_expression_sequence_capacity_is_a_resource_error() {
         group: None,
         max_collection_items: usize::MAX,
         memory: r::EvaluationMemory::new(usize::MAX),
+        statement_time: 0,
     };
     let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         evaluation.eval_sequence(std::iter::repeat_n(&expression, usize::MAX))
@@ -1193,6 +1206,7 @@ fn scalar_ranges_admit_exact_outputs_at_integer_boundaries() {
                 group: None,
                 max_collection_items: 128,
                 memory: r::EvaluationMemory::new(max_value_bytes),
+                statement_time: 0,
             };
             let ((result, peak), _) = observe(|| {
                 let result = evaluation.eval(&expression);
@@ -1272,6 +1286,7 @@ fn scalar_range_limits_reject_huge_collections_without_changing_streaming() {
             group: None,
             max_collection_items: items,
             memory: r::EvaluationMemory::new(memory),
+            statement_time: 0,
         };
         let ((error, peak), _) = observe(|| {
             let error = evaluation.eval(&expression).unwrap_err();
@@ -1299,6 +1314,7 @@ fn scalar_range_limits_reject_huge_collections_without_changing_streaming() {
         group: None,
         max_collection_items: 3,
         memory: r::EvaluationMemory::new(6 * size_of::<r::Value>()),
+        statement_time: 0,
     };
     let ((range, peak), _) = observe(|| {
         let range = evaluation.unwind(&expression).unwrap();
@@ -1348,6 +1364,7 @@ fn decimal_integer_conversion_allocates_only_its_owned_argument() {
             group: None,
             max_collection_items: 100,
             memory: r::EvaluationMemory::new(2 * size_of::<r::Value>() + bytes),
+            statement_time: 0,
         };
         let ((result, peak), _) = observe(|| {
             let result = evaluation.eval(&expression);
@@ -1379,6 +1396,7 @@ fn collection_rejection_does_not_clone_borrowed_payloads() {
         group: None,
         max_collection_items: 1,
         memory: r::EvaluationMemory::new(usize::MAX),
+        statement_time: 0,
     };
     for expression in [
         E::Literal(wide.clone()),
@@ -1438,6 +1456,7 @@ fn graph_collection_rejection_does_not_allocate_output_buffers() {
         group: None,
         max_collection_items: 1,
         memory: r::EvaluationMemory::new(usize::MAX),
+        statement_time: 0,
     };
     let node = E::Literal(V::Entity(r::Entity::Node(1)));
     for (expression, argument_bytes) in [
@@ -1503,6 +1522,7 @@ fn scalar_memory_peaks_cover_transient_allocations() {
         group: None,
         max_collection_items: 20000,
         memory: r::EvaluationMemory::new(16 * 1024 * 1024),
+        statement_time: 0,
     };
     for expression in expressions {
         let expected = evaluation.eval(&expression).unwrap();
@@ -1582,6 +1602,7 @@ fn scalar_sequence_peak_includes_earlier_owned_outputs() {
         group: None,
         max_collection_items: 20000,
         memory: r::EvaluationMemory::observed(16 * 1024 * 1024, 4096, &reported).unwrap(),
+        statement_time: 0,
     };
     let expressions = [
         E::Literal(V::String("x".repeat(10000))),
@@ -1618,6 +1639,7 @@ fn scalar_distinct_count_admits_input_and_key_copy_together() {
             group: Some(&rows),
             max_collection_items: 10,
             memory: r::EvaluationMemory::new(budget),
+            statement_time: 0,
         };
         let ((result, actual), _) = observe(|| {
             let result = evaluation.eval(&expression);
@@ -1671,6 +1693,7 @@ fn scalar_aggregate_peak_covers_input_and_retained_state() {
                 group: Some(&rows[..count]),
                 max_collection_items: 20000,
                 memory: r::EvaluationMemory::observed(16 * 1024 * 1024, 4096, &reported).unwrap(),
+                statement_time: 0,
             };
             let expression = E::Aggregate {
                 function,

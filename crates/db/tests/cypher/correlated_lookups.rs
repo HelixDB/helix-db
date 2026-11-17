@@ -228,7 +228,7 @@ async fn unreadable_probe_properties_fail_only_where_a_scan_would() {
                         "Post",
                         vec![(
                             "author",
-                            value::PropertyInput::Value(value::PropertyValue::DateTime(1)),
+                            value::PropertyInput::Value(value::PropertyValue::Bytes(vec![1])),
                         )],
                     ),
                 )

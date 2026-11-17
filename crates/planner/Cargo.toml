@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = "0.4"
 helix-ast = { path = "../ast" }
 helix-value-semantics = { path = "../value-semantics" }
 serde = { version = "1", features = ["derive", "rc"] }

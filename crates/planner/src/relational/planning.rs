@@ -1308,8 +1308,9 @@ impl Totality<'_> {
     }
 
     /// An operand that evaluates without failing: a literal, a slot, a bound
-    /// parameter, a property of a slot that holds properties, or a list or
-    /// map built from such operands.
+    /// parameter, a property of a slot that holds properties, the statement
+    /// clock, `datetime()` of bound text it reads, or a list or map built from
+    /// such operands.
     pub(super) fn operand(self, operand: &Expression) -> bool {
         match operand {
             Expression::Literal(_) | Expression::Slot(_) => true,
@@ -1328,6 +1329,15 @@ impl Totality<'_> {
                         if bound_value(operand, params).is_some())
             }
             Expression::Index(..) => {
+                matches!(self.params, Parameters::Bound(params)
+                    if bound_value(operand, params).is_some())
+            }
+            Expression::Function(Function::DateTime | Function::Timestamp, arguments)
+                if arguments.is_empty() =>
+            {
+                true
+            }
+            Expression::Function(Function::DateTime, _) => {
                 matches!(self.params, Parameters::Bound(params)
                     if bound_value(operand, params).is_some())
             }
@@ -1658,8 +1668,9 @@ fn equality_disjuncts(
 }
 
 /// The value of a bound parameter, or of a property or element of one, as
-/// `$p`, `$p.key`, `$p['key']` and `$ids[1]` evaluate. Access that could
-/// fail, such as a property of a list, has no value here.
+/// `$p`, `$p.key`, `$p['key']` and `$ids[1]` evaluate, and `datetime($text)`
+/// of bound text, as evaluation reads it. Access or conversion that could
+/// fail, such as a property of a list or unreadable text, has no value here.
 fn bound_value<'a>(
     expression: &Expression,
     params: &'a context::ParamBindings,
@@ -1705,6 +1716,29 @@ fn bound_value<'a>(
                 }
                 Expression::Literal(Value::Null) if *value == P::Null => Some(Cow::Owned(P::Null)),
                 _ => None,
+            }
+        }
+        Expression::Function(Function::DateTime, arguments) => {
+            let [argument] = arguments.as_slice() else {
+                return None;
+            };
+            let value = bound_value(argument, params)?;
+            match value.as_ref() {
+                P::String(text) => {
+                    parse_datetime(text).map(|millis| Cow::Owned(P::DateTime(millis)))
+                }
+                P::DateTime(_) | P::Null => Some(value),
+                P::Bool(_)
+                | P::I64(_)
+                | P::F64(_)
+                | P::F32(_)
+                | P::Bytes(_)
+                | P::I64Array(_)
+                | P::F64Array(_)
+                | P::F32Array(_)
+                | P::StringArray(_)
+                | P::Array(_)
+                | P::Object(_) => None,
             }
         }
         _ => None,
@@ -1755,6 +1789,7 @@ fn literal(value: Value) -> Option<helix_ast::value::PropertyValue> {
         Value::Integer(i) => Some(P::I64(i)),
         Value::Float(f) => Some(P::F64(f)),
         Value::String(s) => Some(P::String(s)),
+        Value::DateTime(millis) => Some(P::DateTime(millis)),
         Value::List(_) | Value::Map(_) | Value::Entity(_) | Value::Path(_) => None,
     }
 }

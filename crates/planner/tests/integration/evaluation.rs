@@ -25,6 +25,7 @@ fn owned_expression_temporaries_preserve_inputs_and_function_arguments() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(16_384),
+        statement_time: 0,
     };
     let integer = |n| E::Literal(V::Integer(n));
     for (expression, expected) in [
@@ -100,6 +101,7 @@ fn unwind_range_admits_live_arguments_and_keeps_argument_errors_visible() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(1200),
+        statement_time: 0,
     };
     let range = E::Function(
         F::Range,
@@ -135,6 +137,7 @@ fn overlapping_index_and_slice_operands_are_admitted_together() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(1600),
+        statement_time: 0,
     };
     let index = E::Function(F::Size, vec![E::Parameter("large".into())]);
     // Either operand fits alone. The index expression still needs its large
@@ -200,6 +203,7 @@ fn graph_outputs_and_path_expansion_are_admitted_before_materialization() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(1024),
+        statement_time: 0,
     };
     let node = E::Literal(V::Entity(Entity::Node(1)));
     assert_eq!(
@@ -258,6 +262,7 @@ fn expression_sequences_share_live_memory_and_preserve_error_order() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(1600),
+        statement_time: 0,
     };
     let large = E::Parameter("large".into());
     let missing = E::Parameter("missing".into());
@@ -320,6 +325,7 @@ fn string_transforms_admit_outputs_before_allocating_them() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(source.len() * 3 / 2),
+        statement_time: 0,
     };
     for function in [F::Trim, F::Ltrim, F::Rtrim, F::Reverse, F::Substring] {
         let mut args = vec![E::Parameter("value".into())];
@@ -374,6 +380,7 @@ fn string_selection_preserves_unicode_boundaries_and_argument_errors() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(16_384),
+        statement_time: 0,
     };
     let integer = |n| E::Literal(V::Integer(n));
     for (function, source, trailing, expected) in [
@@ -465,6 +472,7 @@ fn string_scalar_conversions_reuse_admitted_arguments() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(source.len() + 2 * size_of::<V>()),
+        statement_time: 0,
     };
     for (function, expected) in [
         (F::ToString, V::String(source.clone())),
@@ -501,6 +509,7 @@ fn decimal_integer_conversion_preserves_precision_and_checks_exact_bounds() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(64 * 1024),
+        statement_time: 0,
     };
     for (text, expected) in [
         ("9007199254740993.0", Some(9_007_199_254_740_993)),
@@ -609,6 +618,7 @@ fn decimal_integer_conversion_matches_scaled_integer_oracles() {
         group: None,
         max_collection_items: 100,
         memory: r::EvaluationMemory::new(16 * 1024),
+        statement_time: 0,
     };
     let mut bits = 0x6a09e667f3bcc909_u64;
     for _ in 0..4096 {
@@ -658,6 +668,7 @@ fn collection_limits_bound_values_instead_of_function_arity() {
         group: None,
         max_collection_items: 1,
         memory: r::EvaluationMemory::new(64 * 1024),
+        statement_time: 0,
     };
     let integer = |n| E::Literal(V::Integer(n));
     for (expression, expected) in [
@@ -762,6 +773,7 @@ fn collection_limits_validate_nested_borrowed_inputs_before_selected_results() {
         group: None,
         max_collection_items: 1,
         memory: r::EvaluationMemory::new(64 * 1024),
+        statement_time: 0,
     };
     for expression in [
         E::Literal(nested.clone()),
@@ -841,6 +853,7 @@ fn collection_limits_cover_graph_lists_without_reading_dormant_values() {
         group: None,
         max_collection_items: 1,
         memory: r::EvaluationMemory::new(64 * 1024),
+        statement_time: 0,
     };
     let node = E::Literal(V::Entity(r::Entity::Node(1)));
     let path = E::Literal(V::Path(r::Path::new(vec![1, 2, 3], vec![1, 2]).unwrap()));
@@ -1001,6 +1014,7 @@ fn nested_collection_limits_match_an_independent_stack_walk() {
                 group: None,
                 max_collection_items: limit,
                 memory: r::EvaluationMemory::new(usize::MAX),
+                statement_time: 0,
             };
             let result = evaluation.eval(&r::Expression::Literal(value.clone()));
             match expected {
@@ -1031,6 +1045,7 @@ fn collection_growth_checks_cardinality_even_with_spare_capacity() {
         group: Some(&group),
         max_collection_items: 2,
         memory: r::EvaluationMemory::new(64 * 1024),
+        statement_time: 0,
     };
     let collect = E::Aggregate {
         function: r::Aggregate::Collect,

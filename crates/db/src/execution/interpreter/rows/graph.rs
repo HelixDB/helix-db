@@ -426,7 +426,8 @@ pub(super) fn visit_entities(
         | r::Value::Boolean(_)
         | r::Value::Integer(_)
         | r::Value::Float(_)
-        | r::Value::String(_) => {}
+        | r::Value::String(_)
+        | r::Value::DateTime(_) => {}
     }
     Ok(())
 }
@@ -444,6 +445,9 @@ impl GraphBatch {
             r::Value::Float(f) if f.is_finite() => size_of::<serde_json::Value>(),
             r::Value::Integer(_) | r::Value::Float(_) => 2048,
             r::Value::String(s) => size_of::<serde_json::Value>().saturating_add(s.len()),
+            r::Value::DateTime(_) => {
+                size_of::<serde_json::Value>().saturating_add(r::MAX_DATETIME_TEXT_BYTES)
+            }
             r::Value::List(values) => {
                 // Fallible collect may grow geometrically, including the minimum
                 // Vec allocation for a one-element list.
@@ -526,6 +530,11 @@ impl GraphBatch {
                 }
             }
             r::Value::String(s) => json!(s),
+            // Exactly the native response encoding of a stored datetime.
+            r::Value::DateTime(millis) => J::String(
+                crate::encoding::property::datetime_millis_to_rfc3339(*millis)
+                    .ok_or_else(r::unrenderable_datetime)?,
+            ),
             r::Value::List(xs) => J::Array(xs.iter().map(|v| self.wire(v)).collect::<Result<_>>()?),
             r::Value::Map(xs) => {
                 let map = xs
@@ -588,6 +597,7 @@ pub(super) fn to_property(value: r::Value) -> Result<P> {
         r::Value::Integer(i) => P::I64(i),
         r::Value::Float(f) => P::F64(f),
         r::Value::String(s) => P::String(s),
+        r::Value::DateTime(millis) => P::DateTime(millis),
         r::Value::List(xs) => {
             if xs.iter().any(|v| {
                 matches!(
@@ -642,16 +652,25 @@ pub(super) fn to_property(value: r::Value) -> Result<P> {
                         })
                         .collect(),
                 ),
-                Some(r::Value::Boolean(_)) => {
-                    // Exact capacity makes simultaneous source/destination
-                    // admission independent of fallible-collect growth or
-                    // compiler-specific in-place collection optimizations.
+                // Exact capacity makes simultaneous source/destination
+                // admission independent of fallible-collect growth or
+                // compiler-specific in-place collection optimizations.
+                // Datetime lists, like boolean lists, have no typed array.
+                Some(r::Value::Boolean(_) | r::Value::DateTime(_)) => {
                     let mut values = Vec::with_capacity(xs.len());
                     for value in xs {
-                        let r::Value::Boolean(value) = value else {
-                            unreachable!("validated homogeneous list");
-                        };
-                        values.push(P::Bool(value));
+                        values.push(match value {
+                            r::Value::Boolean(value) => P::Bool(value),
+                            r::Value::DateTime(millis) => P::DateTime(millis),
+                            r::Value::Null
+                            | r::Value::Integer(_)
+                            | r::Value::Float(_)
+                            | r::Value::String(_)
+                            | r::Value::List(_)
+                            | r::Value::Map(_)
+                            | r::Value::Entity(_)
+                            | r::Value::Path(_) => unreachable!("validated homogeneous list"),
+                        });
                     }
                     P::Array(values)
                 }

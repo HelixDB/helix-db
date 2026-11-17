@@ -289,6 +289,7 @@ impl<'db> ExecutionContext<'db> {
             shared_index_reads: Arc::clone(&self.shared_index_reads),
             // Parallel contexts share the parent's immutable reader snapshot.
             pending_sets: Arc::clone(&self.pending_sets),
+            statement_time: self.statement_time,
             #[cfg(test)]
             projection_reads: std::sync::Arc::clone(&self.projection_reads),
             #[cfg(test)]

@@ -63,6 +63,12 @@ pub enum Value {
     Integer(i64),
     Float(#[serde(with = "float_bits")] f64),
     String(String),
+    /// A UTC instant in epoch milliseconds, the representation of a stored
+    /// datetime property. Datetimes compare chronologically with each other
+    /// and, like any two types, never equal or order against another type.
+    /// Any `i64` is representable, as in storage; only rendering it as text
+    /// ([`format_datetime`]) is limited to chrono's range of years.
+    DateTime(i64),
     List(Vec<Value>),
     Map(BTreeMap<String, Value>),
     Entity(Entity),
@@ -182,6 +188,7 @@ impl Value {
             | Self::Integer(_)
             | Self::Float(_)
             | Self::String(_)
+            | Self::DateTime(_)
             | Self::Entity(_)
             | Self::Path(_) => Ok(()),
         }
@@ -221,9 +228,12 @@ impl Value {
                 .capacity()
                 .saturating_add(p.relationships.capacity())
                 .saturating_mul(size_of::<u64>()),
-            Self::Null | Self::Boolean(_) | Self::Integer(_) | Self::Float(_) | Self::Entity(_) => {
-                0
-            }
+            Self::Null
+            | Self::Boolean(_)
+            | Self::Integer(_)
+            | Self::Float(_)
+            | Self::DateTime(_)
+            | Self::Entity(_) => 0,
         };
         size_of::<Self>().saturating_add(nested)
     }
@@ -278,6 +288,15 @@ impl Value {
     }
 
     /// Total equivalence/order used by grouping, DISTINCT and sorting, not WHERE.
+    /// Types rank in openCypher's ascending order, with datetimes between
+    /// paths and strings.
+    ///
+    /// ```
+    /// use helix_planner::relational::{Path, Value};
+    /// let path = Value::Path(Path::new(vec![1], vec![]).unwrap());
+    /// let ascending = [path, Value::DateTime(-1), Value::DateTime(0), Value::String("".into())];
+    /// assert!(ascending.windows(2).all(|pair| pair[0].total_cmp(&pair[1]).is_lt()));
+    /// ```
     pub fn total_cmp(&self, other: &Self) -> Ordering {
         let rank = |v: &Self| match v {
             Self::Map(_) => 0,
@@ -285,10 +304,11 @@ impl Value {
             Self::Entity(Entity::Relationship(_)) => 2,
             Self::List(_) => 3,
             Self::Path(_) => 4,
-            Self::String(_) => 5,
-            Self::Boolean(_) => 6,
-            Self::Integer(_) | Self::Float(_) => 7,
-            Self::Null => 8,
+            Self::DateTime(_) => 5,
+            Self::String(_) => 6,
+            Self::Boolean(_) => 7,
+            Self::Integer(_) | Self::Float(_) => 8,
+            Self::Null => 9,
         };
         let compare_lists = |a: &[Self], b: &[Self]| {
             a.iter()
@@ -307,6 +327,7 @@ impl Value {
                     _ => Ordering::Less,
                 }),
             (Self::String(a), Self::String(b)) => a.cmp(b),
+            (Self::DateTime(a), Self::DateTime(b)) => a.cmp(b),
             (Self::Boolean(a), Self::Boolean(b)) => a.cmp(b),
             (Self::Entity(a), Self::Entity(b)) => a.cmp(b),
             (Self::List(a), Self::List(b)) => compare_lists(a, b),
@@ -430,6 +451,10 @@ impl std::hash::Hash for GroupingKey {
                         key.hash(state);
                         hash_value(value, state);
                     }
+                }
+                Value::DateTime(value) => {
+                    8_u8.hash(state);
+                    value.hash(state);
                 }
             }
         }

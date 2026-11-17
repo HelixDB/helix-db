@@ -66,6 +66,9 @@ pub mod detail {
         AMBIGUOUS_COLUMN = "ambiguous_column",
         COLLECTION_LIMIT = "collection_limit",
         COLUMN_NAME_CONFLICT = "column_name_conflict",
+        /// A datetime outside the years RFC 3339 text can express, from
+        /// epoch milliseconds that a response or `toString` must render.
+        DATETIME_OUT_OF_RANGE = "datetime_out_of_range",
         DELETE_CONNECTED_NODE = "delete_connected_node",
         DELETED_ENTITY_ACCESS = "deleted_entity_access",
         DIVISION_BY_ZERO = "division_by_zero",
@@ -91,6 +94,7 @@ pub mod detail {
         INVALID_ARGUMENT_TYPE = "invalid_argument_type",
         INVALID_CASE = "invalid_case",
         INVALID_CLAUSE_COMPOSITION = "invalid_clause_composition",
+        INVALID_DATETIME = "invalid_datetime",
         INVALID_DELETE = "invalid_delete",
         INVALID_LIMITS = "invalid_limits",
         INVALID_NODE_SLOT = "invalid_node_slot",

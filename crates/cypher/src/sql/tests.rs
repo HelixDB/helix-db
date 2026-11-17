@@ -1167,7 +1167,7 @@ fn rare_forms_follow_their_rules() {
         Err(error) => format!("{} {}", error.category, error.detail),
     };
     for (sql, expected) in [
-        ("SELECT CURRENT_TIMESTAMP", "ok RETURN localdatetime()"),
+        ("SELECT CURRENT_TIMESTAMP", "ok RETURN datetime()"),
         (
             "SELECT ARRAY(SELECT 1)",
             "unsupported_feature procedures_and_subqueries",

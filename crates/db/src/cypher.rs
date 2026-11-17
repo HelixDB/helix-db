@@ -333,11 +333,7 @@ fn parameter_value(value: &helix_ast::query::QueryValue) -> r::Value {
         Q::I64(i) => r::Value::Integer(*i),
         Q::F64(f) => r::Value::Float(*f),
         Q::F32(f) => r::Value::Float(f64::from(*f)),
-        // Cypher has no temporal value yet, and its routes take untyped
-        // parameters, so a datetime only arrives from an in-process request.
-        Q::DateTime(millis) => helix_ast::value::DateTime::from_millis(*millis)
-            .to_rfc3339()
-            .map_or(r::Value::Integer(*millis), r::Value::String),
+        Q::DateTime(millis) => r::Value::DateTime(*millis),
         Q::String(s) => r::Value::String(s.clone()),
         Q::Array(xs) => r::Value::List(xs.iter().map(parameter_value).collect()),
         Q::Object(xs) => r::Value::Map(
