@@ -9027,7 +9027,7 @@ mod tests {
             sources.insert(entity_id, properties);
         }
         let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 3).await;
-        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
         let mut claim_sequence = 1;
         drive_until_catch_up(&db, &driver, operation_id, &mut claim_sequence).await;
         // The crashed steps run as a process the later steps do not share.
@@ -9129,6 +9129,11 @@ mod tests {
             db = open()
                 .await
                 .expect("crash test database reopens after the crash");
+            // A crashed process loses its delta ledgers; every other step
+            // continues with the ledgers its failed step left.
+            if step % 2 == 0 {
+                driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+            }
             let mut recovered = Vec::new();
             for kind in [
                 RecordKind::BuildDelta,
