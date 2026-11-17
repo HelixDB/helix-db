@@ -344,7 +344,9 @@ async fn an_edge_build_resumes_after_a_retired_pair_key_cursor() {
         match progressed_stage(&result) {
             SecondaryBuildStage::Scan(next) => progress = next.clone(),
             SecondaryBuildStage::CatchUp(_) => break,
-            stage => panic!("a scan step leads to Scan or CatchUp, not {stage:?}"),
+            stage @ (SecondaryBuildStage::Validate(_) | SecondaryBuildStage::Activate(_)) => {
+                panic!("a scan step leads to Scan or CatchUp, not {stage:?}")
+            }
         }
     }
     // FOLLOWS edges 18 to 39 not 3 mod 4: sixteen, four a step.

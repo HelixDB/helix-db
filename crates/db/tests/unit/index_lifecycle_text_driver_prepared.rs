@@ -3258,7 +3258,13 @@ async fn source_scan_steps_resume_on_a_reopened_database() {
         match stage {
             TextBuildStage::ScanSource(next) => progress = next,
             TextBuildStage::ScanPartitions(scanned) => break scanned,
-            stage => panic!("a scan step leads to ScanSource or ScanPartitions: {stage:?}"),
+            stage @ (TextBuildStage::CatchUp(_)
+            | TextBuildStage::Compact(_)
+            | TextBuildStage::PrepareManifests(_)
+            | TextBuildStage::ValidateManifests(_)
+            | TextBuildStage::Activate(_)) => {
+                panic!("a scan step leads to ScanSource or ScanPartitions: {stage:?}")
+            }
         }
     };
     // Ninety-six Documents at sixteen a step.
