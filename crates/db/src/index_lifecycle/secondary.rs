@@ -1441,16 +1441,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         };
         let result = match operation.progress() {
             IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(stage)) => {
-                step_build(
-                    db,
-                    transaction,
-                    scope,
-                    operation,
-                    definition,
-                    stage,
-                    limits,
-                )
-                .await
+                step_build(db, transaction, scope, operation, definition, stage, limits).await
             }
             IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(progress)) => {
                 step_cleanup(
@@ -7078,7 +7069,10 @@ mod tests {
         entity_id: u64,
         properties: &[Property],
     ) {
-        crate::index_lifecycle::label_source::testing::put_source_row(db, scope, kind, entity_id, properties).await;
+        crate::index_lifecycle::label_source::testing::put_source_row(
+            db, scope, kind, entity_id, properties,
+        )
+        .await;
     }
 
     async fn create_build(
@@ -9856,9 +9850,16 @@ mod tests {
                         sources.insert(entity_id, properties);
                     }
                     Broken::Bytes(bytes) => {
-                        db.put(source_key(scope, IndexElementKind::Node, entity_id), bytes)
-                            .await
-                            .expect("malformed source row is written");
+                        // A row that no longer decodes keeps its membership.
+                        crate::index_lifecycle::label_source::testing::put_raw_source_row(
+                            &db,
+                            scope,
+                            IndexElementKind::Node,
+                            entity_id,
+                            "User",
+                            bytes,
+                        )
+                        .await;
                     }
                 }
                 upper = entity_id;

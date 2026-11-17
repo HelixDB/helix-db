@@ -61,8 +61,8 @@ pub(crate) mod work;
 pub(crate) mod worker;
 
 pub(crate) use catalog::*;
-pub(crate) use metadata::*;
 pub use label_audit::{LabelBitmapAudit, LabelBitmapFinding};
+pub(crate) use metadata::*;
 pub use model::*;
 pub use operation::*;
 pub use public::*;

@@ -4600,6 +4600,79 @@ mod tests {
         assert_eq!(counters.output_bytes, 24);
     }
 
+    /// A build reads only its label's rows: among 3,000 rows of another
+    /// label, an empty label finishes its scan in one step, and ten rows of
+    /// the label take one step, which indexes those ten and no other row.
+    #[tokio::test]
+    async fn builds_scan_only_their_label() {
+        let scope = DataScope::LegacyUnscoped;
+        for (members, name) in [(0_u64, "vector-label-empty"), (10, "vector-label-small")] {
+            let db = test_db(name).await;
+            for id in 0..3_000_u64 {
+                let mut row = properties([id as f32, 1.0, 0.0], None);
+                if !(members > 0 && id % 300 == 7) {
+                    row[0] = Property::new("$label", PropertyValue::String("Other".into()));
+                }
+                put_source(&db, scope, id, &row).await;
+            }
+            let definition = definition(None);
+            let (build_id, _, _) = create_build(&db, scope, &definition, 2_999).await;
+            let mut claim_sequence = 1;
+            assert_eq!(
+                drive_one(
+                    &db,
+                    &driver(),
+                    build_id,
+                    &mut claim_sequence,
+                    SearchIndexBackfillLimits::default().batch(),
+                )
+                .await,
+                CommittedOperationStep::Progressed
+            );
+            let IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                VectorBuildStage::ValidateDescriptor(progress),
+            )) = read_operation(&db, scope, build_id)
+                .await
+                .progress()
+                .clone()
+            else {
+                panic!("one step ends the scan of {members} rows");
+            };
+            assert_eq!(progress.counters.entities, members);
+            assert_eq!(
+                drive_to_terminal(&db, &driver(), build_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+            let active = read_index(&db, scope, &definition).await;
+            let IndexStateV2::Active {
+                physical:
+                    PhysicalGeneration::Vector {
+                        layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                        ..
+                    },
+                ..
+            } = active.state()
+            else {
+                panic!("completed vector build is active and unpartitioned");
+            };
+            let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
+                .expect("active vector record projects a handle");
+            let generation = ValidatedVectorGenerationHandle::try_from_active::<
+                vector::distance::Euclidean,
+            >(&active_handle, *physical_index_id)
+            .expect("active physical generation validates");
+            let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
+            for id in 0..3_000_u64 {
+                assert_eq!(
+                    index.get_item(&db, id).await.unwrap().is_some(),
+                    members > 0 && id % 300 == 7,
+                    "row {id}"
+                );
+            }
+            db.close().await.expect("database closes");
+        }
+    }
+
     #[tokio::test]
     async fn unpartitioned_build_restarts_activates_and_drop_removes_physical_rows() {
         let db = test_db("vector-driver-unpartitioned-build-drop").await;
@@ -4861,9 +4934,15 @@ mod tests {
         let db = test_db("vector-driver-scan-repaired-blocker").await;
         let scope = DataScope::LegacyUnscoped;
         let definition = definition(None);
-        db.put(source_key(scope, 0), Bytes::from_static(b"malformed"))
-            .await
-            .expect("invalid vector source is written");
+        crate::index_lifecycle::label_source::testing::put_raw_source_row(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            "Document",
+            Bytes::from_static(b"malformed"),
+        )
+        .await;
         for entity_id in 1..4_u8 {
             let vector = [f32::from(entity_id), 1.0, 2.0];
             put_source(&db, scope, u64::from(entity_id), &properties(vector, None)).await;

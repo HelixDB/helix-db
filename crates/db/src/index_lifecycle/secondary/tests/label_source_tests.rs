@@ -51,11 +51,7 @@ async fn drive_build(
 
 /// Puts `count` rows of `filler` before `ids` of `User`, every row below
 /// `count` that `ids` does not name being `Other`.
-async fn seed(
-    db: &Db,
-    count: u64,
-    users: impl Fn(u64) -> bool,
-) -> BTreeMap<u64, Vec<Property>> {
+async fn seed(db: &Db, count: u64, users: impl Fn(u64) -> bool) -> BTreeMap<u64, Vec<Property>> {
     let scope = DataScope::LegacyUnscoped;
     let mut sources = BTreeMap::new();
     for id in 0..count {
@@ -200,7 +196,14 @@ async fn builds_match_a_scan_of_every_row_on_random_graphs() {
         // Rows above the bound write after the build's cut: a build leaves
         // them to their deltas, which this graph never has.
         for above in upper + 1..upper + 20 {
-            put_source(&db, scope, node, above, &labelled("User", "late@example.com")).await;
+            put_source(
+                &db,
+                scope,
+                node,
+                above,
+                &labelled("User", "late@example.com"),
+            )
+            .await;
         }
         let transaction = db
             .begin(IsolationLevel::Snapshot)
@@ -285,8 +288,7 @@ async fn writes_racing_the_scan_converge() {
         let definition = validated(definition.expect("definition"));
         let db = test_db("label-source-racing-writes").await;
         let mut sources = seed(&db, 600, |id| id % 3 == 0).await;
-        let (operation_id, index_id, generation) =
-            create_build(&db, scope, &definition, 599).await;
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 599).await;
         let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
         let mut claim_sequence = 1;
         let limits = batch_limits(25, 1 << 20, 1 << 20, 1 << 30);
@@ -299,7 +301,10 @@ async fn writes_racing_the_scan_converge() {
                 let (id, after) = match random.next(5) {
                     // Into the label, or out of it.
                     0 => (random.next(600), labelled("User", &format!("in-{write}@x"))),
-                    1 => (random.next(600), labelled("Other", &format!("out-{write}@x"))),
+                    1 => (
+                        random.next(600),
+                        labelled("Other", &format!("out-{write}@x")),
+                    ),
                     // A delete.
                     2 => (random.next(600), Vec::new()),
                     // A create below the bound, where a row was deleted.
@@ -360,13 +365,14 @@ async fn crash_at_every_scan_failpoint() {
     let mut db = open().await.expect("crash test database opens");
     bootstrap_writer(&db).await.expect("database bootstraps");
     let scope = DataScope::LegacyUnscoped;
-    let sources = seed(&db, 2_000, |id| id % 2 == 0).await;
+    let sources = seed(&db, 900, |id| id % 3 == 0).await;
     let definition = validated(
         SecondaryIndexDefinition::node_unique_equality("User", "email").expect("definition"),
     );
-    let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 1_999).await;
+    let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 899).await;
     let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
-    let limits = batch_limits(40, 1 << 20, 1 << 20, 1 << 30);
+    // 300 rows of the label at 10 a step: the scan outlasts every crash.
+    let limits = batch_limits(10, 1 << 20, 1 << 20, 1 << 30);
     let mut claim_sequence = 1;
     let crashed_epoch = WriterEpoch::from_bytes([0x5C; 16]).expect("writer epoch is non-nil");
     for failpoint in [
@@ -387,8 +393,9 @@ async fn crash_at_every_scan_failpoint() {
             ),
             "{failpoint:?} strikes mid-Scan"
         );
-        failpoints::inject_for_operation_once(failpoint, operation_id)
-            .expect("failpoint installs");
+        // The claim's boundaries name no operation, so the injection is
+        // process-wide; this test runs in a process of its own.
+        failpoints::inject_once(failpoint).expect("failpoint installs");
         let OperationPointerObservation::Eligible(eligible) =
             observe_operation_pointer(&db, operation_id, crashed_epoch, NOW_MILLIS + 1)
                 .await
@@ -408,7 +415,10 @@ async fn crash_at_every_scan_failpoint() {
         claim_sequence += 1;
         // A failpoint in the claim leaves nothing to execute.
         let Ok(Some(claimed)) = claimed else {
-            assert!(failpoints::was_triggered(), "{failpoint:?} fired in the claim");
+            assert!(
+                failpoints::was_triggered(),
+                "{failpoint:?} fired in the claim"
+            );
             drop(db);
             db = open().await.expect("database reopens after the crash");
             drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await;
@@ -424,8 +434,7 @@ async fn crash_at_every_scan_failpoint() {
     }
     let (_, end) = drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
     assert_eq!(end, CommittedOperationStep::Completed);
-    assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
-        .await;
+    assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources).await;
     db.close().await.expect("database closes");
 }
 
@@ -456,7 +465,12 @@ async fn scan_progress_resumes_across_binaries_in_both_directions() {
         panic!("fifty of three hundred rows leave more to scan");
     };
     assert_eq!(progress.cursor, Some(source_cursor(scope, node, 148)));
-    assert_eq!(generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation).await.len(), 50);
+    assert_eq!(
+        generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation)
+            .await
+            .len(),
+        50
+    );
 
     // An older binary's cursor, on row 299 of another label: the next step
     // resumes after id 299, at the label's row 301.
@@ -473,16 +487,32 @@ async fn scan_progress_resumes_across_binaries_in_both_directions() {
         .begin(IsolationLevel::SerializableSnapshot)
         .await
         .expect("step begins");
-    let result = scan_source(&db, &transaction, scope, &operation, secondary, &older, limits)
+    let result = scan_source(
+        &db,
+        &transaction,
+        scope,
+        &operation,
+        secondary,
+        &older,
+        limits,
+    )
+    .await
+    .expect("the resumed step stages");
+    transaction
+        .commit()
         .await
-        .expect("the resumed step stages");
-    transaction.commit().await.expect("the resumed step commits");
+        .expect("the resumed step commits");
     let SecondaryBuildStage::Scan(resumed) = progressed_stage(&result) else {
         panic!("fifty more rows leave more to scan");
     };
     // Rows 301, 304, ... 448.
     assert_eq!(resumed.cursor, Some(source_cursor(scope, node, 448)));
-    assert_eq!(generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation).await.len(), 100);
+    assert_eq!(
+        generation_rows(&db, scope, RecordKind::AppliedState, index_id, generation)
+            .await
+            .len(),
+        100
+    );
     let label_rows = sources
         .iter()
         .filter(|(id, properties)| {

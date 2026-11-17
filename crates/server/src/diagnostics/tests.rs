@@ -979,12 +979,7 @@ async fn get_report(router: axum::Router) -> serde_json::Value {
 
 async fn get_report_at(router: axum::Router, uri: &str) -> serde_json::Value {
     let response = router
-        .oneshot(
-            Request::builder()
-                .uri(uri)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -1089,8 +1084,20 @@ async fn the_label_bitmap_audit_runs_only_when_asked_for() {
         .query_service()
         .execute_query(query::QueryRequest::write(
             batch::write_batch()
-                .var_as("ada", traversal::g().add_n("User", vec![("n", helix_ast::value::PropertyInput::from(1_i64))]))
-                .var_as("bob", traversal::g().add_n("User", vec![("n", helix_ast::value::PropertyInput::from(1_i64))]))
+                .var_as(
+                    "ada",
+                    traversal::g().add_n(
+                        "User",
+                        vec![("n", helix_ast::value::PropertyInput::from(1_i64))],
+                    ),
+                )
+                .var_as(
+                    "bob",
+                    traversal::g().add_n(
+                        "User",
+                        vec![("n", helix_ast::value::PropertyInput::from(1_i64))],
+                    ),
+                )
                 .returning(["ada", "bob"]),
         ))
         .await
@@ -1101,7 +1108,10 @@ async fn the_label_bitmap_audit_runs_only_when_asked_for() {
     assert_eq!(ids(&report).last(), Some(&"indexes.label_bitmaps"));
     let audit = find(&report, "indexes.label_bitmaps");
     assert_eq!(audit["status"], "pass", "{audit}");
-    assert_eq!(audit["detail"], "2 rows carrying 1 label, each in its label's bitmap.");
+    assert_eq!(
+        audit["detail"],
+        "2 rows carrying 1 label, each in its label's bitmap."
+    );
 
     let response = router
         .oneshot(

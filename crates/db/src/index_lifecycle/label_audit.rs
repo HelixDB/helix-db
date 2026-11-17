@@ -168,7 +168,11 @@ mod tests {
         transaction.commit().await.expect("write commits");
     }
 
-    fn finding<'a>(audit: &'a LabelBitmapAudit, kind: IndexElementKind, label: &str) -> &'a LabelBitmapFinding {
+    fn finding<'a>(
+        audit: &'a LabelBitmapAudit,
+        kind: IndexElementKind,
+        label: &str,
+    ) -> &'a LabelBitmapFinding {
         audit
             .findings
             .iter()
@@ -185,8 +189,7 @@ mod tests {
                 .await;
         }
         testing::put_source_row(&db, scope, IndexElementKind::Node, 4, &labelled("Post")).await;
-        testing::put_source_row(&db, scope, IndexElementKind::Edge, 4, &labelled("FOLLOWS"))
-            .await;
+        testing::put_source_row(&db, scope, IndexElementKind::Edge, 4, &labelled("FOLLOWS")).await;
         // A retired `[from][to]` edge row is no entity and is not audited.
         db.put(
             DataKey::Data {
@@ -254,7 +257,9 @@ mod tests {
         assert_eq!(user.extra, 3, "99, 5 and the unreadable 6");
         let likes = finding(&audit, IndexElementKind::Edge, "LIKES");
         assert_eq!(likes.missing.iter().collect::<Vec<_>>(), [7]);
-        assert!(finding(&audit, IndexElementKind::Node, "Post").missing.is_empty());
+        assert!(finding(&audit, IndexElementKind::Node, "Post")
+            .missing
+            .is_empty());
     }
 
     #[tokio::test]
