@@ -223,7 +223,7 @@ const addContact = (p = params) =>
 
 **2. Bulk seed via `forEachParam` (write):** runs the body once per object in the `data` array.
 ```ts
-const params = defineParams({ data: param.array(param.object(param.value())) });
+const params = defineParams({ data: param.array(param.object({ name: param.string(), email: param.string() })) });
 const seed = (p = params) =>
   writeBatch()
     .forEachParam('data',
@@ -232,7 +232,7 @@ const seed = (p = params) =>
     .returning(['created']);
 // values: { data: [{ name: 'Ada', email: 'ada@example.com' }, { name: 'Grace', email: 'grace@example.com' }] }
 ```
-Inside the body, each object's fields (`name`, `email`) are scoped as params for the inner query.
+Inside the body, each object's fields (`name`, `email`) are scoped as params for the inner query. Declare every row field with its type, and every row must have exactly those fields. A timestamp field needs `param.dateTime()` (or `param.nullable(param.dateTime())` when it can be `null`) to be stored as a datetime that range filters and indexes match.
 
 **3. Create an edge between two existing nodes by id (write):**
 ```ts
@@ -2346,6 +2346,16 @@ mod tests {
                 ["constant"]["string"],
             "User"
         );
+    }
+
+    /// The prompt's bulk-seed pattern declares typed row fields: the SDK
+    /// no longer accepts `param.object(<inner schema>)`.
+    #[test]
+    fn agent_prompt_seeds_rows_with_typed_fields() {
+        assert!(AGENT_PROMPT_TEMPLATE.contains(
+            "param.array(param.object({ name: param.string(), email: param.string() }))"
+        ));
+        assert!(!AGENT_PROMPT_TEMPLATE.contains("param.object(param."));
     }
 
     #[test]
