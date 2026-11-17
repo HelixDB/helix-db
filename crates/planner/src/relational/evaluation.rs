@@ -621,8 +621,9 @@ impl Evaluation<'_> {
             F::ToString => match first {
                 Value::String(_) => first,
                 Value::DateTime(millis) => {
+                    // The formatter reserves under twice the text it writes.
                     self.remaining(
-                        size_of::<Value>().saturating_add(super::MAX_DATETIME_TEXT_BYTES),
+                        size_of::<Value>().saturating_add(2 * super::MAX_DATETIME_TEXT_BYTES),
                     )?;
                     Value::String(super::format_datetime(millis).ok_or_else(unrenderable_datetime)?)
                 }

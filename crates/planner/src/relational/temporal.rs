@@ -66,8 +66,12 @@ pub fn parse_datetime(text: &str) -> Option<i64> {
 /// assert_eq!(format_datetime(i64::MAX), None);
 /// ```
 pub fn format_datetime(millis: i64) -> Option<String> {
-    chrono::DateTime::<Utc>::from_timestamp_millis(millis)
-        .map(|instant| instant.to_rfc3339_opts(SecondsFormat::Millis, true))
+    chrono::DateTime::<Utc>::from_timestamp_millis(millis).map(|instant| {
+        // The formatter reserves more than it writes; callers admit the text.
+        let mut text = instant.to_rfc3339_opts(SecondsFormat::Millis, true);
+        text.shrink_to_fit();
+        text
+    })
 }
 
 #[cfg(test)]
@@ -132,14 +136,14 @@ mod tests {
             253_402_300_799_999,
         ] {
             let text = format_datetime(millis).unwrap();
-            assert!(text.len() <= MAX_DATETIME_TEXT_BYTES, "{text}");
+            assert!(text.capacity() <= MAX_DATETIME_TEXT_BYTES, "{text}");
             assert_eq!(parse_datetime(&text), Some(millis), "{text}");
         }
         let earliest = chrono::DateTime::<Utc>::MIN_UTC.timestamp_millis();
         let latest = chrono::DateTime::<Utc>::MAX_UTC.timestamp_millis();
         for millis in [earliest, latest] {
             let text = format_datetime(millis).unwrap();
-            assert!(text.len() <= MAX_DATETIME_TEXT_BYTES, "{text}");
+            assert!(text.capacity() <= MAX_DATETIME_TEXT_BYTES, "{text}");
         }
         for millis in [earliest - 1, latest + 1, i64::MIN, i64::MAX] {
             assert_eq!(format_datetime(millis), None, "{millis}");

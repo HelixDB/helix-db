@@ -530,11 +530,14 @@ impl GraphBatch {
                 }
             }
             r::Value::String(s) => json!(s),
-            // Exactly the native response encoding of a stored datetime.
-            r::Value::DateTime(millis) => J::String(
-                crate::encoding::property::datetime_millis_to_rfc3339(*millis)
-                    .ok_or_else(r::unrenderable_datetime)?,
-            ),
+            // Exactly the native response encoding of a stored datetime, its
+            // formatter's spare capacity released to fit `wire_memory`.
+            r::Value::DateTime(millis) => {
+                let mut text = crate::encoding::property::datetime_millis_to_rfc3339(*millis)
+                    .ok_or_else(r::unrenderable_datetime)?;
+                text.shrink_to_fit();
+                J::String(text)
+            }
             r::Value::List(xs) => J::Array(xs.iter().map(|v| self.wire(v)).collect::<Result<_>>()?),
             r::Value::Map(xs) => {
                 let map = xs
