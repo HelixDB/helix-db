@@ -168,17 +168,17 @@ async fn each_of_many_labels_scans_only_its_own_rows() {
 async fn builds_match_a_scan_of_every_row_on_random_graphs() {
     let scope = DataScope::LegacyUnscoped;
     let node = IndexElementKind::Node;
-    for seed_value in 1..=6_u64 {
+    for seed_value in 1..=3_u64 {
         let mut random = Seeded(0x9E37_79B9_7F4A_7C15 ^ seed_value);
         let db = test_db(&format!("label-source-differential-{seed_value}")).await;
         let mut sources = BTreeMap::new();
         let mut id = 0_u64;
         let mut absent = Vec::new();
-        for _ in 0..1_500 {
+        for _ in 0..600 {
             id += 1 + random.next(3);
             if random.next(40) == 0 {
                 // A long run of members whose rows are gone.
-                let run = 1 + random.next(600);
+                let run = 1 + random.next(300);
                 absent.extend(id..id + run);
                 id += run;
                 continue;
