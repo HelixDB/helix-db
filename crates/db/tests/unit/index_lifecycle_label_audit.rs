@@ -58,8 +58,7 @@ async fn a_store_whose_rows_are_all_in_their_bitmaps_is_complete() {
     let db = test_db("label-audit-clean").await;
     let scope = DataScope::LegacyUnscoped;
     for id in [1, 2, 3] {
-        testing::put_source_row(&db, scope, IndexElementKind::Node, id, &labelled("User"))
-            .await;
+        testing::put_source_row(&db, scope, IndexElementKind::Node, id, &labelled("User")).await;
     }
     testing::put_source_row(&db, scope, IndexElementKind::Node, 4, &labelled("Post")).await;
     testing::put_source_row(&db, scope, IndexElementKind::Edge, 4, &labelled("FOLLOWS")).await;
@@ -98,8 +97,7 @@ async fn rows_missing_from_their_bitmap_and_stale_members_are_reported() {
     let db = test_db("label-audit-gaps").await;
     let scope = DataScope::LegacyUnscoped;
     for id in [1, 2, 3] {
-        testing::put_source_row(&db, scope, IndexElementKind::Node, id, &labelled("User"))
-            .await;
+        testing::put_source_row(&db, scope, IndexElementKind::Node, id, &labelled("User")).await;
     }
     testing::put_source_row(&db, scope, IndexElementKind::Edge, 7, &labelled("LIKES")).await;
     commit(&db, |transaction| {
