@@ -668,6 +668,15 @@ func TestTypedObjectFieldsNormalizeAndDeclareEachField(t *testing.T) {
 	if ParamTypeObject().Fields() != nil {
 		t.Fatal("an untyped object has no declared fields")
 	}
+	// Malformed composite types are rejected rather than dereferenced.
+	if (QueryParamType{kind: paramKindRecord}).Fields() != nil {
+		t.Fatal("a record without fields has no declared fields")
+	}
+	for _, malformed := range []QueryParamType{{kind: paramKindRecord}, {kind: paramKindNullable}} {
+		if _, err := normalizeTypedQueryValue(malformed, map[string]any{}, "p"); !errors.Is(err, ErrInvalidParameterType) {
+			t.Fatalf("malformed %#v: got %v", malformed, err)
+		}
+	}
 }
 
 func TestNullableFieldsAcceptNilOrTheirInnerType(t *testing.T) {

@@ -2520,7 +2520,7 @@ func ParamTypeNullable(inner QueryParamType) QueryParamType {
 // Fields returns a copy of the declared fields of a ParamTypeObjectFields
 // type, or nil for any other type.
 func (q QueryParamType) Fields() map[string]QueryParamType {
-	if q.kind != paramKindRecord {
+	if q.kind != paramKindRecord || q.fields == nil {
 		return nil
 	}
 	copied := make(map[string]QueryParamType, len(*q.fields))
@@ -3221,7 +3221,7 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 		return queryValueFromValue(value, path)
 	case paramKindRecord:
 		reflected := reflect.ValueOf(value)
-		if !reflected.IsValid() || reflected.Kind() != reflect.Map || reflected.Type().Key().Kind() != reflect.String {
+		if parameterType.fields == nil || !reflected.IsValid() || reflected.Kind() != reflect.Map || reflected.Type().Key().Kind() != reflect.String {
 			return nil, ErrInvalidParameterType
 		}
 		var missing, extra []string
@@ -3280,6 +3280,9 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 		}
 		return values, nil
 	case paramKindNullable:
+		if parameterType.inner == nil {
+			return nil, ErrInvalidParameterType
+		}
 		if value == nil {
 			return QueryNull(), nil
 		}
