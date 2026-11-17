@@ -55,6 +55,18 @@ fn temporal_calls_outside_the_profile_report_their_capability() {
         ("RETURN localtime() AS v", "function:localtime"),
         ("RETURN time() AS v", "function:time"),
         ("RETURN duration('P1D') AS v", "function:duration"),
+        // Literal text outside the grammar may be ISO 8601 the profile does
+        // not read, so it reports the capability rather than bad input.
+        (
+            "RETURN datetime('2015-W30-2T214032.142Z') AS v",
+            "function:datetime",
+        ),
+        (
+            "RETURN datetime('2015-07-21T21:40:32.142+02:00[Europe/Stockholm]') AS v",
+            "function:datetime",
+        ),
+        ("RETURN datetime('2024-13-01') AS v", "function:datetime"),
+        ("RETURN datetime('not a date') AS v", "function:datetime"),
     ] {
         let error = error(text);
         assert_eq!(error.category, r::category::UNSUPPORTED_FEATURE, "{text}");
@@ -68,16 +80,6 @@ fn temporal_calls_outside_the_profile_report_their_capability() {
         );
     }
     for (text, category, detail) in [
-        (
-            "RETURN datetime('2024-13-01') AS v",
-            r::category::ARGUMENT_ERROR,
-            r::detail::INVALID_DATETIME,
-        ),
-        (
-            "RETURN datetime('2024-01-01T00:00:00+0100') AS v",
-            r::category::ARGUMENT_ERROR,
-            r::detail::INVALID_DATETIME,
-        ),
         (
             "RETURN timestamp(1) AS v",
             r::category::SYNTAX_ERROR,

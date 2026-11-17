@@ -909,14 +909,14 @@ SELECT TIMESTAMP WITH TIME ZONE '2024-01-01T10:00:00+02:00', TIMESTAMP '2024-01-
 SELECT CAST(e.at AS TIMESTAMP), CAST('2024-01-01T00:00:00+02:00' AS TIMESTAMP), NOW() FROM Event e
 => MATCH (e:Event) RETURN datetime(e.at), datetime('2024-01-01T00:00:00+02:00'), datetime()
 
-# HelixDB: an unreadable TIMESTAMP literal fails translation
+# HelixDB: TIMESTAMP text other than RFC 3339, a UTC date and time, or a date
 SELECT TIMESTAMP 'yesterday'
-=> error: argument_error invalid_datetime
+=> error: unsupported_feature sql_construct
 
 # HelixDB: a cast of unreadable text fails when the translation compiles
 SELECT CAST('yesterday' AS TIMESTAMP)
 => RETURN datetime('yesterday')
-!! argument_error invalid_datetime
+!! unsupported_feature function
 
 # HelixDB: dates and times of day have no type yet
 SELECT CURRENT_DATE

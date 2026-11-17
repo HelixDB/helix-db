@@ -1193,13 +1193,15 @@ impl Binder {
                         .collect::<Result<Vec<_>>>()?;
                     match (function, arguments.as_slice()) {
                         // Literal text is read once, so a datetime literal
-                        // reaches index planning and bad text fails to compile.
+                        // reaches index planning. Other literal text may be
+                        // ISO 8601 this profile does not read, such as week
+                        // dates or zone names, so it reports the capability.
                         (F::DateTime, [r::Expression::Literal(r::Value::String(text))]) => {
                             let millis = r::parse_datetime(text).ok_or_else(|| {
-                                QueryError::compile(
-                                    category::ARGUMENT_ERROR,
-                                    detail::INVALID_DATETIME,
-                                    "datetime() text must be RFC 3339, a UTC date and time, or a date",
+                                QueryError::unsupported(
+                                    detail::FUNCTION,
+                                    "function `datetime` with text other than RFC 3339, \
+                                     a UTC date and time, or a date",
                                 )
                                 .at(e.span)
                             })?;

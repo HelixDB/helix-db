@@ -464,7 +464,7 @@ async fn datetime_bad_paths_fail_with_typed_errors() {
     for (query, expected) in [
         (
             "RETURN datetime('not a date')",
-            compile(r::category::ARGUMENT_ERROR, r::detail::INVALID_DATETIME),
+            compile(r::category::UNSUPPORTED_FEATURE, r::detail::FUNCTION),
         ),
         (
             "RETURN datetime({year: 2024})",
@@ -627,16 +627,35 @@ async fn sql_reads_and_writes_datetimes() {
         let body: Value = serde_json::from_slice(encoded.body()).unwrap();
         assert_eq!(body["rows"], json!(expected), "{query}");
     }
-    let Err(cypher::Error::Query(error)) = db.sql(Request::new("SELECT TIMESTAMP 'nope'")).await
-    else {
-        panic!("an unreadable timestamp literal fails");
+    for (query, detail) in [
+        ("SELECT TIMESTAMP 'nope'", r::detail::SQL_CONSTRUCT),
+        ("SELECT CAST('nope' AS TIMESTAMP)", r::detail::FUNCTION),
+    ] {
+        let Err(cypher::Error::Query(error)) = db.sql(Request::new(query)).await else {
+            panic!("{query}: unreadable timestamp text fails to compile");
+        };
+        assert_eq!(
+            (error.category.as_str(), error.detail.as_str(), error.phase),
+            (
+                r::category::UNSUPPORTED_FEATURE,
+                detail,
+                r::ErrorPhase::Compile
+            ),
+            "{query}"
+        );
+    }
+    // Text that arrives at run time fails as an invalid argument.
+    let mut cast = Request::new("SELECT CAST(? AS TIMESTAMP)");
+    cast.parameters.insert("1".into(), Q::String("nope".into()));
+    let Err(cypher::Error::Query(error)) = db.sql(cast).await else {
+        panic!("unreadable parameter text fails");
     };
     assert_eq!(
         (error.category.as_str(), error.detail.as_str(), error.phase),
         (
             r::category::ARGUMENT_ERROR,
             r::detail::INVALID_DATETIME,
-            r::ErrorPhase::Compile
+            r::ErrorPhase::Runtime
         )
     );
     let explanation = db

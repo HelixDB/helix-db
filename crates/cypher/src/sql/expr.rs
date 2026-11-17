@@ -113,13 +113,13 @@ impl Translator<'_> {
                         span,
                     ));
                 };
+                // PostgreSQL's special values, such as 'epoch', are text
+                // this translation does not read.
                 let millis = r::parse_datetime(text).ok_or_else(|| {
-                    QueryError::compile(
-                        category::ARGUMENT_ERROR,
-                        detail::INVALID_DATETIME,
-                        "TIMESTAMP text must be RFC 3339, a UTC date and time, or a date",
+                    unsupported(
+                        "TIMESTAMP text other than RFC 3339, a UTC date and time, or a date",
+                        span,
                     )
-                    .at(span)
                 })?;
                 literal(r::Value::DateTime(millis), span)
             }
