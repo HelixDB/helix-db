@@ -89,8 +89,17 @@ struct DiagnosticsQuery {
 /// Read-only checks of how this server is set up ([`crate::diagnostics`]).
 async fn diagnostics(
     State(state): State<ServerState>,
-    axum::extract::Query(query): axum::extract::Query<DiagnosticsQuery>,
+    query: Result<axum::extract::Query<DiagnosticsQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
+    let query = match query {
+        Ok(axum::extract::Query(query)) => query,
+        Err(rejection) => {
+            return error_response(
+                error_code::QueryErrorCode::InvalidRequestOption,
+                rejection.body_text(),
+            );
+        }
+    };
     json_response(
         StatusCode::OK,
         &crate::diagnostics::report(&state, query.audit).await,

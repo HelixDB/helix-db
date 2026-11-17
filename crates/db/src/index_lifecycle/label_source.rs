@@ -14,11 +14,16 @@
 //! another label (a label-hash collision) is read and left to each driver's
 //! own label check, which writes nothing for it.
 //!
-//! Rows are read with `multi_get`, [`helix_planner::cost::RECORD_BATCH_ROWS`]
-//! ids at a time and only once the previous chunk is consumed, and no chunk
-//! is read once the step has read its input-byte limit, so a step holds at
-//! most one chunk of rows beyond that limit. Like the prefix scan before it,
-//! a build's reads do not fill the block cache.
+//! Rows are read with `multi_get`, in chunks of at most
+//! [`helix_planner::cost::RECORD_BATCH_ROWS`] ids, each read only once the
+//! previous one is consumed, and no chunk is read once the step has read its
+//! input-byte limit. Each chunk is sized to the input bytes the step has left
+//! at the mean bytes per id read so far (a step's first chunk, and every
+//! chunk before one holds a row, starts small and doubles), so a label of
+//! large rows reads about its limit and a row or two more per step, rather
+//! than a whole chunk of rows the step then leaves for the next one to read
+//! again. Like the prefix scan before it, a build's reads do not fill the
+//! block cache.
 
 use bytes::Bytes;
 use slatedb::DbReadOps;
@@ -29,8 +34,13 @@ use crate::encoding::v2::keys::{DataKey, DataKeyKind, EdgePropertyByIdKey, NodeP
 use crate::error::{HelixDbError, Result};
 use crate::index_lifecycle::{IndexCursor, IndexElementKind, IndexEntityId, SourceScanProgress};
 
-/// Ids read by one `multi_get`.
+/// The most ids one `multi_get` reads.
 const CHUNK_IDS: usize = helix_planner::cost::RECORD_BATCH_ROWS as usize;
+
+/// The ids a step reads before it knows how large the label's rows are: one
+/// such chunk of the largest rows a step admits stays near its byte limit.
+const FIRST_CHUNK_IDS: usize = 4;
+const _: () = assert!(FIRST_CHUNK_IDS <= CHUNK_IDS);
 
 /// One present source row of the label.
 pub(crate) struct SourceRow {
@@ -69,6 +79,9 @@ pub(crate) struct LabelSource<'a, R> {
     chunk: std::vec::IntoIter<(u64, Bytes, Option<Bytes>)>,
     /// The last id read.
     last_read: Option<u64>,
+    /// Ids read so far, present or not.
+    ids_read: u64,
+    /// Key and value bytes of the present rows read so far.
     read_bytes: u64,
     max_input_bytes: u64,
 }
@@ -77,7 +90,9 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
     /// Takes the members of `label` after `progress`'s cursor, up to its
     /// inclusive upper bound, at most `limits.max_entities()` of them, from
     /// the bitmap `reader` holds. `None` when no member is left: the scan is
-    /// complete.
+    /// complete. A step therefore returns at most `limits.max_entities()`
+    /// rows, and a driver ends its step on [`LabelRead::Exhausted`] or
+    /// [`LabelRead::Paused`] rather than counting entities itself.
     ///
     /// A cursor is the complete property-by-ID key of its kind. An edge
     /// cursor may also be a retired 16-byte `[from][to]` property key an older
@@ -144,6 +159,7 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
             more: in_bound.next().is_some(),
             chunk: Vec::new().into_iter(),
             last_read: None,
+            ids_read: 0,
             read_bytes: 0,
             max_input_bytes: limits.max_input_bytes().get(),
         }))
@@ -176,7 +192,11 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
         if self.read_bytes >= self.max_input_bytes {
             return Ok(false);
         }
-        let ids = self.ids.by_ref().take(CHUNK_IDS).collect::<Vec<_>>();
+        let ids = self
+            .ids
+            .by_ref()
+            .take(self.chunk_ids())
+            .collect::<Vec<_>>();
         let Some(&last) = ids.last() else {
             return Ok(false);
         };
@@ -205,6 +225,9 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
             .fold(self.read_bytes, |bytes, row| {
                 bytes.saturating_add(u64::try_from(row).unwrap_or(u64::MAX))
             });
+        self.ids_read = self
+            .ids_read
+            .saturating_add(u64::try_from(ids.len()).unwrap_or(u64::MAX));
         self.last_read = Some(last);
         self.chunk = ids
             .into_iter()
@@ -214,6 +237,28 @@ impl<'a, R: DbReadOps + Send + Sync> LabelSource<'a, R> {
             .collect::<Vec<_>>()
             .into_iter();
         Ok(true)
+    }
+
+    /// How many ids the next chunk reads: enough to reach the input-byte
+    /// limit at the mean bytes per id read so far, or, before any row was
+    /// read, as many ids as were read (starting at [`FIRST_CHUNK_IDS`]).
+    fn chunk_ids(&self) -> usize {
+        let (ids, least) = if self.read_bytes == 0 {
+            (u128::from(self.ids_read), FIRST_CHUNK_IDS)
+        } else {
+            let left = u128::from(self.max_input_bytes - self.read_bytes);
+            let ids = (left * u128::from(self.ids_read)).div_ceil(u128::from(self.read_bytes));
+            (ids, 1)
+        };
+        usize::try_from(ids)
+            .unwrap_or(usize::MAX)
+            .clamp(least, CHUNK_IDS)
+    }
+
+    /// Key and value bytes of the rows read so far.
+    #[cfg(test)]
+    pub(crate) fn read_bytes(&self) -> u64 {
+        self.read_bytes
     }
 
     fn end(&self) -> LabelRead {

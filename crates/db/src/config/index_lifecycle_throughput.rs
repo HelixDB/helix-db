@@ -1,7 +1,8 @@
 //! Runtime-only throughput policy for index lifecycle work.
 //!
-//! This policy controls source-scan prefetching and worker concurrency. It is
-//! never serialized into lifecycle records or physical index rows.
+//! This policy controls text partition-scan prefetching and worker
+//! concurrency. It is never serialized into lifecycle records or physical
+//! index rows.
 //!
 //! # Usage
 //!
@@ -67,7 +68,10 @@ impl core::fmt::Display for IndexLifecycleThroughputTuningError {
 
 impl std::error::Error for IndexLifecycleThroughputTuningError {}
 
-/// Positive source-scan prefetch policy with cache admission permanently off.
+/// Positive prefetch policy for text builds' partition scans, with cache
+/// admission permanently off. Secondary, text and vector builds read their
+/// source rows by id through the label bitmap
+/// (`index_lifecycle::label_source`), which this policy does not tune.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IndexLifecycleScanTuning {
     read_ahead_bytes: NonZeroUsize,
