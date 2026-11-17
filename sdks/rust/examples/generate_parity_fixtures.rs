@@ -582,8 +582,7 @@ fn assert_complete_fixture_coverage(coverage: &FixtureCoverage) {
         "QueryParamType",
         &coverage.query_param_types,
         &[
-            "Bool", "I64", "F64", "F32", "String", "DateTime", "Value", "Object", "Record",
-            "Array",
+            "Bool", "I64", "F64", "F32", "String", "DateTime", "Value", "Object", "Record", "Array",
         ],
     );
     assert_variants(
