@@ -562,21 +562,17 @@ async fn populate_named_legacy_vector<D: crate::search::vector::Distance>(
 /// Writes the graph-authoritative portion retained by the pinned legacy
 /// writer after it moved the indexed embedding into HNSW.
 async fn seed_legacy_node_without_vector(raw: &Db, entity_id: u64, label: &str) {
-    raw.put(
-        Key::Data {
-            scope: DataScope::LegacyUnscoped,
-            kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
-                crate::encoding::v1::keys::NodePropertyKey::new(entity_id),
-            ),
-        }
-        .to_bytes(),
-        property::encode_properties(&[
+    crate::index_lifecycle::label_source::testing::put_source_row(
+        raw,
+        DataScope::LegacyUnscoped,
+        crate::index_lifecycle::IndexElementKind::Node,
+        entity_id,
+        &[
             Property::string("$label", label),
             Property::string("title", "retained graph property"),
-        ]),
+        ],
     )
-    .await
-    .expect("legacy graph property row writes");
+    .await;
 }
 
 /// Writes the current edge rows retained after the legacy writer moved the
@@ -609,6 +605,13 @@ async fn seed_legacy_edge_without_vector(raw: &Db, edge_id: u64, from: u64, to: 
             ]),
         )
         .expect("legacy edge properties stage");
+    crate::index_lifecycle::label_source::testing::stage_member(
+        &transaction,
+        DataScope::LegacyUnscoped,
+        crate::index_lifecycle::IndexElementKind::Edge,
+        label,
+        edge_id,
+    );
     transaction.commit().await.expect("legacy edge rows commit");
 }
 
@@ -1786,23 +1789,18 @@ pub(crate) async fn run_vector_ineligible_contracts() {
     let tenant_source = self::raw(&tenant_database, Arc::clone(&tenant_store)).await;
     let tenant_entity_id = 91;
     let source_tenant = Property::string("tenant", "alpha");
-    tenant_source
-        .put(
-            Key::Data {
-                scope: DataScope::LegacyUnscoped,
-                kind: crate::encoding::v1::keys::DataKeyKind::NodeProperty(
-                    crate::encoding::v1::keys::NodePropertyKey::new(tenant_entity_id),
-                ),
-            }
-            .to_bytes(),
-            property::encode_properties(&[
-                Property::string("$label", "Document"),
-                Property::string("title", "retained graph property"),
-                source_tenant.clone(),
-            ]),
-        )
-        .await
-        .expect("tenant legacy graph row writes");
+    crate::index_lifecycle::label_source::testing::put_source_row(
+        &tenant_source,
+        DataScope::LegacyUnscoped,
+        crate::index_lifecycle::IndexElementKind::Node,
+        tenant_entity_id,
+        &[
+            Property::string("$label", "Document"),
+            Property::string("title", "retained graph property"),
+            source_tenant.clone(),
+        ],
+    )
+    .await;
     let tenant_runtime = tenant_vector_definition.to_runtime();
     let tenant_physical_name = crate::search::vector_tenant_index_name(
         tenant_runtime.element_type(),

@@ -910,7 +910,11 @@ fn label_bitmaps(audit: db::error::Result<db::index_lifecycle::LabelBitmapAudit>
             format!(
                 "{} {} missing rows",
                 incomplete.len(),
-                plural(incomplete.len() as u64, "label bitmap is", "label bitmaps are")
+                plural(
+                    incomplete.len() as u64,
+                    "label bitmap is",
+                    "label bitmaps are"
+                )
             ),
             Outcome::Fail {
                 detail: format!("{}.{unreadable}", incomplete.join("; ")),

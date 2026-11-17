@@ -688,6 +688,14 @@ async fn mutate_secondary_entity(
         staged.is_empty(),
         "the model mutates only Active generations, which record no build delta"
     );
+    crate::index_lifecycle::label_source::testing::stage_labels(
+        &transaction,
+        DataScope::LegacyUnscoped,
+        IndexElementKind::Node,
+        entity_id,
+        &before,
+        &after,
+    );
     if after.is_empty() {
         transaction
             .delete(secondary_source_key(entity_id))
@@ -788,12 +796,14 @@ async fn exercise_typed_limit_retry(db: &Db, claim_sequence: &mut u64, entity_id
             PropertyValue::String("limit-retry@example.com".to_string()),
         ),
     ];
-    db.put(
-        secondary_source_key(entity_id),
-        encode_properties(&properties),
+    crate::index_lifecycle::label_source::testing::put_source_row(
+        db,
+        DataScope::LegacyUnscoped,
+        IndexElementKind::Node,
+        entity_id,
+        &properties,
     )
-    .await
-    .expect("retry source row commits");
+    .await;
     let operation_id = enqueue_secondary_build(db, &definition, entity_id).await;
     let tiny = SearchIndexBatchLimits::try_new(
         NonZeroUsize::MIN,
@@ -849,12 +859,14 @@ async fn exercise_partial_build_abort(db: &Db, claim_sequence: &mut u64, entity_
             PropertyValue::String("abort@example.com".to_string()),
         ),
     ];
-    db.put(
-        secondary_source_key(entity_id),
-        encode_properties(&properties),
+    crate::index_lifecycle::label_source::testing::put_source_row(
+        db,
+        DataScope::LegacyUnscoped,
+        IndexElementKind::Node,
+        entity_id,
+        &properties,
     )
-    .await
-    .expect("abort source row commits");
+    .await;
     let operation_id = enqueue_secondary_build(db, &definition, entity_id).await;
     let driver = secondary_driver();
     let first = drive_one_secondary_step(

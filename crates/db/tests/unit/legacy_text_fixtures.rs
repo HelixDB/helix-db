@@ -292,6 +292,17 @@ fn put_entity(
             properties(definition, text, tenant),
         )
         .expect("legacy graph row stages");
+    // Legacy writers kept the label bitmap with each row, as label scans need.
+    crate::index_lifecycle::label_source::testing::stage_member(
+        transaction,
+        DataScope::LegacyUnscoped,
+        match definition.element_type() {
+            TextElementType::Node => crate::index_lifecycle::IndexElementKind::Node,
+            TextElementType::Edge => crate::index_lifecycle::IndexElementKind::Edge,
+        },
+        definition.label(),
+        entity_id,
+    );
     if definition.element_type() == TextElementType::Edge {
         transaction
             .put(

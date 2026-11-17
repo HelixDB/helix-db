@@ -239,9 +239,8 @@ enum SourceKey {
 }
 
 fn source_id(scope: DataScope, kind: IndexElementKind, key: &[u8]) -> Result<SourceKey> {
-    let parsed = DataKey::parse_from_slice(scope, key).map_err(|_| {
-        corruption("build source cursor is not a property key of its scope")
-    })?;
+    let parsed = DataKey::parse_from_slice(scope, key)
+        .map_err(|_| corruption("build source cursor is not a property key of its scope"))?;
     match (kind, parsed) {
         (
             IndexElementKind::Node,
@@ -271,7 +270,7 @@ fn source_id(scope: DataScope, kind: IndexElementKind, key: &[u8]) -> Result<Sou
 }
 
 /// The property-by-ID key of `id`.
-pub(crate) fn source_key(scope: DataScope, kind: IndexElementKind, id: u64) -> Bytes {
+fn source_key(scope: DataScope, kind: IndexElementKind, id: u64) -> Bytes {
     let kind = match kind {
         IndexElementKind::Node => DataKeyKind::NodeProperty(NodePropertyKey::new(id)),
         IndexElementKind::Edge => DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(id)),
@@ -336,14 +335,12 @@ pub(crate) mod testing {
                 id,
                 scope,
             ),
-            IndexElementKind::Edge => {
-                crate::search::remove_from_global_edge_label_index_scoped(
-                    transaction,
-                    label,
-                    id,
-                    scope,
-                )
-            }
+            IndexElementKind::Edge => crate::search::remove_from_global_edge_label_index_scoped(
+                transaction,
+                label,
+                id,
+                scope,
+            ),
         }
         .expect("label departure stages");
     }
@@ -523,20 +520,40 @@ mod tests {
         testing::put_source_row(&db, scope, node, 5, &row("User", 0)).await;
         let read = snapshot(&db).await;
         let limits = limits(1024, 1 << 20);
-        assert!(step(&read, node, "Absent", &progress(scope, node, None, 299), limits)
-            .await
-            .is_none());
+        assert!(step(
+            &read,
+            node,
+            "Absent",
+            &progress(scope, node, None, 299),
+            limits
+        )
+        .await
+        .is_none());
         // Its only member is at or before the cursor, or above the bound.
-        assert!(step(&read, node, "User", &progress(scope, node, Some(5), 299), limits)
-            .await
-            .is_none());
-        assert!(step(&read, node, "User", &progress(scope, node, None, 4), limits)
-            .await
-            .is_none());
+        assert!(step(
+            &read,
+            node,
+            "User",
+            &progress(scope, node, Some(5), 299),
+            limits
+        )
+        .await
+        .is_none());
+        assert!(
+            step(&read, node, "User", &progress(scope, node, None, 4), limits)
+                .await
+                .is_none()
+        );
         // A cursor at the bound is done without reading the bitmap.
-        assert!(step(&read, node, "User", &progress(scope, node, Some(299), 299), limits)
-            .await
-            .is_none());
+        assert!(step(
+            &read,
+            node,
+            "User",
+            &progress(scope, node, Some(299), 299),
+            limits
+        )
+        .await
+        .is_none());
         assert!(matches!(
             LabelSource::open(&read, scope, node, "User", &progress(scope, node, Some(300), 299), limits).await,
             Err(HelixDbError::IndexCatalogCorruption(reason)) if reason.contains("exceeds")
@@ -552,31 +569,49 @@ mod tests {
             testing::put_source_row(&db, scope, node, id, &row("User", 0)).await;
         }
         testing::put_source_row(&db, scope, node, 4, &row("Other", 0)).await;
-        let transaction = db.begin(IsolationLevel::Snapshot).await.expect("write begins");
+        let transaction = db
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("write begins");
         // A long run of members without rows, and one row of another label.
         (10..1500).for_each(|id| testing::stage_member(&transaction, scope, node, "User", id));
         testing::stage_member(&transaction, scope, node, "User", 4);
         transaction.commit().await.expect("members commit");
         let read = snapshot(&db).await;
 
-        let all = step(&read, node, "User", &progress(scope, node, None, 1999), limits(4096, 1 << 20))
-            .await
-            .expect("members remain");
+        let all = step(
+            &read,
+            node,
+            "User",
+            &progress(scope, node, None, 1999),
+            limits(4096, 1 << 20),
+        )
+        .await
+        .expect("members remain");
         assert_eq!(all, (vec![3, 4, 9, 600, 601], None));
 
         // Absent ids count towards a step's entities and move its cursor.
         let mut after = None;
         let mut read_ids = Vec::new();
         let mut steps = 0;
-        while let Some((ids, paused)) =
-            step(&read, node, "User", &progress(scope, node, after, 1999), limits(100, 1 << 20)).await
+        while let Some((ids, paused)) = step(
+            &read,
+            node,
+            "User",
+            &progress(scope, node, after, 1999),
+            limits(100, 1 << 20),
+        )
+        .await
         {
             steps += 1;
             read_ids.extend(ids);
             let Some(paused) = paused else {
                 break;
             };
-            assert!(after.is_none_or(|after| paused > after), "every step advances");
+            assert!(
+                after.is_none_or(|after| paused > after),
+                "every step advances"
+            );
             after = Some(paused);
         }
         assert_eq!(read_ids, [3, 4, 9, 600, 601]);
@@ -595,15 +630,27 @@ mod tests {
         let read = snapshot(&db).await;
         // The first chunk of 256 rows already passes 4 KiB: the step returns
         // that chunk and pauses after its last id.
-        let (ids, paused) = step(&read, node, "User", &progress(scope, node, None, 999), limits(1024, 4096))
-            .await
-            .expect("members remain");
+        let (ids, paused) = step(
+            &read,
+            node,
+            "User",
+            &progress(scope, node, None, 999),
+            limits(1024, 4096),
+        )
+        .await
+        .expect("members remain");
         assert_eq!(ids, (0..256).collect::<Vec<_>>());
         assert_eq!(paused, Some(255));
         // A limit two chunks fit in reads both and the start of a third.
-        let (ids, paused) = step(&read, node, "User", &progress(scope, node, Some(255), 999), limits(1024, 2 * 256 * 140))
-            .await
-            .expect("members remain");
+        let (ids, paused) = step(
+            &read,
+            node,
+            "User",
+            &progress(scope, node, Some(255), 999),
+            limits(1024, 2 * 256 * 140),
+        )
+        .await
+        .expect("members remain");
         assert_eq!(ids.first(), Some(&256));
         assert_eq!(paused, ids.last().copied());
         assert_eq!(ids.len() % CHUNK_IDS, 0);
@@ -691,8 +738,15 @@ mod tests {
         .await
         .expect("corrupt bitmap writes");
         let read = snapshot(&db).await;
-        assert!(LabelSource::open(&read, scope, node, "User", &progress(scope, node, None, 1), limits(1024, 1 << 20))
-            .await
-            .is_err());
+        assert!(LabelSource::open(
+            &read,
+            scope,
+            node,
+            "User",
+            &progress(scope, node, None, 1),
+            limits(1024, 1 << 20)
+        )
+        .await
+        .is_err());
     }
 }

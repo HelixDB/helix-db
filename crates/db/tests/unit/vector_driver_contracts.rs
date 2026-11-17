@@ -38,6 +38,7 @@ pub(super) const NOW_MILLIS: u64 = 1;
 
 pub(super) async fn test_db(name: &str) -> Db {
     let db = Db::builder(name, Arc::new(InMemory::new()))
+        .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
         .build()
         .await
         .expect("vector driver test database opens");
