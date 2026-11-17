@@ -1394,8 +1394,9 @@ async fn source_scan_step_commits_through_writes_to_its_source_range() {
         writes: vec![(key(1), row("omega")), (key(6), row("omega"))],
     };
     let writer_epoch = WriterEpoch::from_bytes([0x7C; 16]).unwrap();
-    let steps: [(&dyn IndexOperationDriver, u64); 2] = [(&racing, 3), (&inner, 7)];
-    for (sequence, (driver, cursor)) in (1..).zip(steps) {
+    // The second step takes the label's last four rows, which ends the scan.
+    let steps: [(&dyn IndexOperationDriver, Option<u64>); 2] = [(&racing, Some(3)), (&inner, None)];
+    for (sequence, (driver, cursor)) in (1_u64..).zip(steps) {
         let OperationPointerObservation::Eligible(eligible) =
             observe_operation_pointer(&db, operation_id, writer_epoch, 1)
                 .await
@@ -1430,17 +1431,23 @@ async fn source_scan_step_commits_through_writes_to_its_source_range() {
             .await
             .unwrap()
             .unwrap();
-        let IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
-            TextBuildStage::ScanSource(progress),
-        )) = operation.progress()
+        let IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(stage)) =
+            operation.progress()
         else {
-            panic!("the build is still scanning its source");
+            panic!("the build is constructing");
         };
-        assert_eq!(
-            progress.cursor,
-            Some(IndexCursor::try_new(key(cursor)).unwrap())
-        );
-        assert_eq!(progress.counters.entities, cursor + 1);
+        let counters = match (stage, cursor) {
+            (TextBuildStage::ScanSource(progress), Some(cursor)) => {
+                assert_eq!(
+                    progress.cursor,
+                    Some(IndexCursor::try_new(key(cursor)).unwrap())
+                );
+                progress.counters
+            }
+            (TextBuildStage::ScanPartitions(progress), None) => progress.counters,
+            (stage, cursor) => panic!("step {sequence} expected cursor {cursor:?}: {stage:?}"),
+        };
+        assert_eq!(counters.entities, 4 * sequence);
     }
 
     let snapshot = db.begin(IsolationLevel::Snapshot).await.unwrap();
@@ -1608,13 +1615,13 @@ async fn source_scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
         .await
         .unwrap()
         .unwrap();
+    // The step took the label's last row, which ends the scan.
     let IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
-        TextBuildStage::ScanSource(progress),
+        TextBuildStage::ScanPartitions(progress),
     )) = operation.progress()
     else {
-        panic!("the build is still scanning its source");
+        panic!("the build has scanned its source");
     };
-    assert_eq!(progress.cursor, Some(IndexCursor::try_new(key(3)).unwrap()));
     assert_eq!(progress.counters.entities, 4);
     let snapshot = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let (_, marker) = crate::index_lifecycle::text::statistics::read_marker(
