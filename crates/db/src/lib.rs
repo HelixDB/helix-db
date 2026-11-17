@@ -8034,6 +8034,86 @@ mod tests {
         db.close().await.expect("writer closes");
     }
 
+    /// A reader audits one snapshot: while the writer adds and deletes
+    /// labelled nodes, and the reader follows it, no audit reports a row
+    /// missing from its label's bitmap.
+    #[tokio::test]
+    async fn a_reader_audits_one_snapshot_while_the_writer_moves_on() {
+        let token = ProcessLocalDatabaseToken::new("label-audit-reader").unwrap();
+        let writer = HelixDB::open(HelixDbSource::InMemoryToken {
+            token: token.clone(),
+        })
+        .await
+        .expect("writer opens");
+        let add = || {
+            QueryRequest::write(
+                write_batch()
+                    .var_as(
+                        "added",
+                        g().add_n("User", vec![("n", PropertyInput::from(1_i64))]),
+                    )
+                    .returning(["added"]),
+            )
+        };
+        for _ in 0..30 {
+            writer.query(add()).await.expect("node is added");
+        }
+        writer.inner_db().flush().await.expect("writes become visible");
+        let reader = HelixDB::open_reader_with_object_store_for_tests(
+            token.database().to_string(),
+            token.object_store(),
+        )
+        .await
+        .expect("reader opens");
+        let scope = DataScope::LegacyUnscoped;
+        let users = |audit: &index_lifecycle::LabelBitmapAudit| {
+            audit
+                .findings
+                .iter()
+                .find(|finding| finding.label == "User")
+                .map_or(0, |finding| finding.rows)
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while users(&reader.audit_label_bitmaps(scope).await.expect("reader audits")) < 30 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the reader sees the writer's nodes");
+
+        let writes = async {
+            for _ in 0..10 {
+                for _ in 0..3 {
+                    writer.query(add()).await.expect("node is added");
+                }
+                writer
+                    .query(QueryRequest::write(
+                        write_batch()
+                            .var_as("gone", g().n_with_label("User").limit(2_usize).drop().count())
+                            .returning(["gone"]),
+                    ))
+                    .await
+                    .expect("nodes are deleted");
+                writer.inner_db().flush().await.expect("writes become visible");
+            }
+        };
+        let audits = async {
+            for _ in 0..20 {
+                let audit = reader.audit_label_bitmaps(scope).await.expect("reader audits");
+                assert!(audit.is_complete(), "{audit:?}");
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::join!(writes, audits);
+        assert!(writer
+            .audit_label_bitmaps(scope)
+            .await
+            .expect("writer audits")
+            .is_complete());
+        reader.close().await.expect("reader closes");
+        writer.close().await.expect("writer closes");
+    }
+
     /// A reader reuses a catalog only for the snapshot sequence it was loaded
     /// at, and still follows remote activation and drop without reopening.
     #[tokio::test]
