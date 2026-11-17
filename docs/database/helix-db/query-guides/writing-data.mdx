@@ -400,7 +400,10 @@ request = query.to_query_request(
   `invalid_query` when untyped. An empty array runs the body zero times.
 - Every row must have exactly the declared fields. A missing or undeclared field, a
   wrong-typed value, an invalid RFC3339 string in a `date_time` field, or `null` in any
-  field not declared `value` rejects the whole request before anything is written.
+  field not declared `value` or nullable rejects the whole request before anything is
+  written. Declare a column that can be `null`, such as a `deletedAt` timestamp, as
+  `param.nullable(param.dateTime())` (`{ "nullable": "date_time" }`); see
+  [Nullable fields](/database/helix-db/query-guides/parameters#nullable-fields).
 - Rows declared as a bare `{ "array": "object" }` (`param.object()`,
   `QueryParamType::Object`, `ParamTypeObject()`) are not checked field by field, and
   their RFC3339 strings stay strings.

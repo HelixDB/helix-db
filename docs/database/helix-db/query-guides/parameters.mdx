@@ -199,6 +199,8 @@ placeholders instead, `parameters` is a list bound in written order. See
 - an object with declared fields, sent as `{ "object": { "<field>": "<type>", ... } }`;
   see [Typed object fields](#typed-object-fields)
 - arrays of any family, sent as `{ "array": "<element type>" }`
+- `null` or a value of any family, sent as `{ "nullable": "<type>" }`; see
+  [Nullable fields](#nullable-fields)
 
 Query JSON cannot represent bytes, and no SDK provides a byte request encoder. Every SDK rejects a
 bytes parameter with an `UnsupportedBytesParameter` error when it serializes the request, so bytes
@@ -315,15 +317,67 @@ params = define_params(
   `rows[3]`. To accept free-form fields, use a bare `object`, or declare a field as `value`.
 - A wrong-typed field, including an invalid RFC3339 string in a `date_time` field, rejects
   the request with the field's path, such as `rows[3].createdAt`. Nothing is written.
-- `null` satisfies only a `value` field, as for top-level parameters. There is no optional
-  typed field yet: send rows whose datetime may be missing in a separate request, or declare
-  that field `value` and accept that it stays text.
+- `null` satisfies only a `value` or [nullable](#nullable-fields) field, as for top-level
+  parameters.
 - Object levels count toward the request nesting limit like array levels.
 
 In Rust, `#[query]` functions declare this for you: a `DateTime` inside a `ParamObject`,
 `ParamValue` or `BTreeMap<String, DateTime>` argument is declared `date_time` where it sits.
-All rows of one array must then need the same declaration, so rows with different fields,
-or a datetime in one row and `null` in another, fail with `ParameterTypeMismatch`.
+One array declares one element type that fits all its elements: a datetime field that is
+`null` in some rows is declared `{ "nullable": "date_time" }`, and an empty array fits any
+element type. Rows that no single type fits, such as rows with different fields or a
+datetime in one row and text in another, fail with `ParameterTypeMismatch`.
+
+### Nullable fields
+
+`{ "nullable": "<type>" }` accepts `null` or a value of the inner type, normalized as that
+type. Declare an optional datetime column, such as `deletedAt`, this way: rows where it is
+set store a datetime, and rows where it is `null` store `null`.
+
+<CodeGroup>
+
+```rust Rust
+let row = QueryParamType::Record(ObjectFields::new([
+    ("name", QueryParamType::String),
+    ("deletedAt", QueryParamType::Nullable(Box::new(QueryParamType::DateTime))),
+])?);
+```
+
+```ts TypeScript
+const params = defineParams({
+  rows: param.array(param.object({ name: param.string(), deletedAt: param.nullable(param.dateTime()) })),
+});
+```
+
+```go Go
+rows := helix.ParamTypeArray(helix.ParamTypeObjectFields(map[string]helix.QueryParamType{
+	"name":      helix.ParamTypeString(),
+	"deletedAt": helix.ParamTypeNullable(helix.ParamTypeDateTime()),
+}))
+```
+
+```python Python
+params = define_params(
+    {
+        "rows": param.array(
+            param.object({"name": param.string(), "deletedAt": param.nullable(param.date_time())})
+        )
+    }
+)
+```
+
+```json JSON
+{
+  "parameter_types": {
+    "rows": { "array": { "object": { "name": "string", "deletedAt": { "nullable": "date_time" } } } }
+  }
+}
+```
+
+</CodeGroup>
+
+Nullable is not optional: a declared field must still be present in every row, with `null`
+where it has no value.
 
 ## Query names
 
