@@ -1,18 +1,26 @@
-//! Proof, against a real Google Cloud Storage bucket, that GCS keeps the
-//! storage contract SlateDB and HelixDB rely on.
+//! Proof, against real S3, GCS and Azure Blob Storage, that each object
+//! storage service HelixDB supports keeps the storage contract SlateDB and
+//! HelixDB rely on.
 //!
 //! SlateDB fences an older writer with create-only puts, advances GC boundary
-//! files with generation-matched overwrites and revalidates them with
+//! files with version-matched overwrites and revalidates them with
 //! conditional GETs, verifies a retried put through custom metadata, and lists
-//! strongly consistently. The first tests check each primitive against GCS;
-//! the last two open SlateDB and HelixDB on GCS end to end.
+//! strongly consistently. The first three contracts check each primitive; the
+//! last two open SlateDB and HelixDB on the service end to end. Every service
+//! runs the same five contracts, in its own module.
 //!
-//! Every test is ignored by default because it needs a bucket and
-//! credentials (see [`db::ObjectStorageBucket::Gcs`]):
+//! Every test is ignored by default because it needs a real bucket or
+//! container and credentials (see [`db::ObjectStorageBucket`]). Run one
+//! service's module with its variables set:
 //!
 //! ```text
+//! HELIX_TEST_S3_BUCKET=<bucket> AWS_REGION=<region> \
+//!     cargo test -p db --test object_storage_contract -- --ignored s3::
 //! HELIX_TEST_GCS_BUCKET=<bucket> GOOGLE_SERVICE_ACCOUNT=<key file> \
-//!     cargo test -p db --test gcs_object_storage -- --ignored
+//!     cargo test -p db --test object_storage_contract -- --ignored gcs::
+//! HELIX_TEST_AZURE_CONTAINER=<container> AZURE_STORAGE_ACCOUNT_NAME=<account> \
+//!     AZURE_STORAGE_ACCOUNT_KEY=<key> \
+//!     cargo test -p db --test object_storage_contract -- --ignored azure::
 //! ```
 //!
 //! Each test writes under its own random prefix and deletes it once it passes.
@@ -28,25 +36,71 @@ use serde_json::json;
 use slatedb::object_store::{self, ObjectStore, ObjectStoreExt as _};
 use slatedb::{CloseReason, Db, ErrorKind, IsolationLevel};
 
-const BUCKET_VARIABLE: &str = "HELIX_TEST_GCS_BUCKET";
-/// GCS multipart uploads need every part but the last to be at least 5 MiB.
+/// S3 and GCS multipart uploads need every part but the last to be at least
+/// 5 MiB; Azure has no minimum.
 const PART_BYTES: usize = 5 * 1024 * 1024;
 
-fn bucket() -> String {
-    std::env::var(BUCKET_VARIABLE)
-        .unwrap_or_else(|_| panic!("set {BUCKET_VARIABLE} to a GCS bucket"))
+/// An object storage service under test.
+#[derive(Clone, Copy, Debug)]
+enum Service {
+    S3,
+    Gcs,
+    Azure,
 }
 
-/// A GCS client for the test bucket and a fresh prefix inside it.
-fn scratch() -> (Arc<dyn ObjectStore>, String) {
-    let store = object_store::gcp::GoogleCloudStorageBuilder::from_env()
-        .with_bucket_name(bucket())
-        .build()
-        .expect("GCS client builds");
-    (
-        Arc::new(store),
-        format!("helix-gcs-contract/{}", uuid::Uuid::new_v4()),
-    )
+fn variable(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("set {name}"))
+}
+
+impl Service {
+    /// The bucket or container under test, as HelixDB opens it.
+    fn bucket(self) -> ObjectStorageBucket {
+        match self {
+            Self::S3 => ObjectStorageBucket::S3 {
+                name: variable("HELIX_TEST_S3_BUCKET"),
+                region: variable("AWS_REGION"),
+                endpoint: None,
+                allow_http: false,
+            },
+            Self::Gcs => ObjectStorageBucket::Gcs {
+                name: variable("HELIX_TEST_GCS_BUCKET"),
+            },
+            Self::Azure => ObjectStorageBucket::Azure {
+                account: variable("AZURE_STORAGE_ACCOUNT_NAME"),
+                container: variable("HELIX_TEST_AZURE_CONTAINER"),
+            },
+        }
+    }
+
+    /// A client for the bucket under test and a fresh prefix inside it.
+    fn scratch(self) -> (Arc<dyn ObjectStore>, String) {
+        let store: Arc<dyn ObjectStore> = match self.bucket() {
+            ObjectStorageBucket::S3 { name, region, .. } => Arc::new(
+                object_store::aws::AmazonS3Builder::from_env()
+                    .with_bucket_name(name)
+                    .with_region(region)
+                    .build()
+                    .expect("S3 client builds"),
+            ),
+            ObjectStorageBucket::Gcs { name } => Arc::new(
+                object_store::gcp::GoogleCloudStorageBuilder::from_env()
+                    .with_bucket_name(name)
+                    .build()
+                    .expect("GCS client builds"),
+            ),
+            ObjectStorageBucket::Azure { account, container } => Arc::new(
+                object_store::azure::MicrosoftAzureBuilder::from_env()
+                    .with_account(account)
+                    .with_container_name(container)
+                    .build()
+                    .expect("Azure client builds"),
+            ),
+        };
+        (
+            store,
+            format!("helix-object-storage-contract/{}", uuid::Uuid::new_v4()),
+        )
+    }
 }
 
 /// Deletes every object under `prefix`.
@@ -73,23 +127,17 @@ fn put_id(value: &'static str) -> object_store::Attributes {
 }
 
 /// A create-only put refuses an existing object, an overwrite must match the
-/// current generation, and a GET conditioned on the current ETag reports the
+/// current version, and a GET conditioned on the current ETag reports the
 /// object unchanged: the writer fence and the GC boundary file both rest on
 /// these.
-#[tokio::test]
-#[ignore = "needs a GCS bucket in HELIX_TEST_GCS_BUCKET"]
-async fn conditional_writes_fence_and_compare_and_swap() {
-    let (store, prefix) = scratch();
+async fn conditional_writes_fence_and_compare_and_swap(service: Service) {
+    let (store, prefix) = service.scratch();
     let path = object_store::path::Path::from(format!("{prefix}/boundary"));
 
     let created = store
         .put_opts(&path, "1".into(), object_store::PutMode::Create.into())
         .await
         .expect("create-only put of a new object");
-    assert!(
-        created.version.is_some(),
-        "GCS returns the generation an overwrite must match"
-    );
     let error = store
         .put_opts(&path, "x".into(), object_store::PutMode::Create.into())
         .await
@@ -99,6 +147,7 @@ async fn conditional_writes_fence_and_compare_and_swap() {
         "{error:?}"
     );
 
+    // S3 and Azure match the ETag, GCS the generation in `version`.
     let first = object_store::UpdateVersion {
         e_tag: created.e_tag.clone(),
         version: created.version.clone(),
@@ -110,7 +159,7 @@ async fn conditional_writes_fence_and_compare_and_swap() {
             object_store::PutMode::Update(first.clone()).into(),
         )
         .await
-        .expect("overwrite matching the current generation");
+        .expect("overwrite matching the current version");
     let error = store
         .put_opts(
             &path,
@@ -118,7 +167,7 @@ async fn conditional_writes_fence_and_compare_and_swap() {
             object_store::PutMode::Update(first).into(),
         )
         .await
-        .expect_err("overwrite matching a stale generation");
+        .expect_err("overwrite matching a stale version");
     assert!(
         matches!(error, object_store::Error::Precondition { .. }),
         "{error:?}"
@@ -155,10 +204,8 @@ async fn conditional_writes_fence_and_compare_and_swap() {
 
 /// SlateDB proves a timed-out put landed by reading back its put ID, so the
 /// ID must survive both single and multipart uploads.
-#[tokio::test]
-#[ignore = "needs a GCS bucket in HELIX_TEST_GCS_BUCKET"]
-async fn put_metadata_survives_single_and_multipart_uploads() {
-    let (store, prefix) = scratch();
+async fn put_metadata_survives_single_and_multipart_uploads(service: Service) {
+    let (store, prefix) = service.scratch();
     let head = object_store::GetOptions {
         head: true,
         ..Default::default()
@@ -214,12 +261,10 @@ async fn put_metadata_survives_single_and_multipart_uploads() {
     remove(store.as_ref(), &prefix).await;
 }
 
-/// A listing sees every object written before it, in key order, and an
-/// offset listing starts after the offset key.
-#[tokio::test]
-#[ignore = "needs a GCS bucket in HELIX_TEST_GCS_BUCKET"]
-async fn listings_are_consistent_and_honour_offsets() {
-    let (store, prefix) = scratch();
+/// A listing sees every object written before it, and an offset listing
+/// returns only the keys after the offset.
+async fn listings_are_consistent_and_honour_offsets(service: Service) {
+    let (store, prefix) = service.scratch();
     let names = ["a", "b", "c"];
     for name in names {
         store
@@ -255,13 +300,12 @@ async fn listings_are_consistent_and_honour_offsets() {
     remove(store.as_ref(), &prefix).await;
 }
 
-/// SlateDB's single-writer epoch holds on GCS: a newer writer's open fences a
-/// transaction the older writer already began (see `writer_fence_contract`).
-#[tokio::test]
-#[ignore = "needs a GCS bucket in HELIX_TEST_GCS_BUCKET"]
+/// SlateDB's single-writer epoch holds on the service: a newer writer's open
+/// fences a transaction the older writer already began (see
+/// `writer_fence_contract`).
 #[allow(clippy::disallowed_methods)] // Raw backend writes are the subject here.
-async fn newer_slatedb_writer_fences_an_older_one_on_gcs() {
-    let (store, prefix) = scratch();
+async fn newer_slatedb_writer_fences_an_older_one(service: Service) {
+    let (store, prefix) = service.scratch();
 
     let old_writer = Db::open(prefix.as_str(), Arc::clone(&store))
         .await
@@ -304,16 +348,14 @@ async fn newer_slatedb_writer_fences_an_older_one_on_gcs() {
     remove(store.as_ref(), &prefix).await;
 }
 
-/// HelixDB opened through `ObjectStorageBucket::Gcs`: a second writer fences
-/// the first, which can no longer commit, and a reader sees exactly what the
-/// surviving writer committed.
-#[tokio::test]
-#[ignore = "needs a GCS bucket in HELIX_TEST_GCS_BUCKET"]
-async fn helix_db_writes_fences_and_reads_through_a_gcs_source() {
-    let (store, prefix) = scratch();
+/// HelixDB opened through the service's [`ObjectStorageBucket`]: a second
+/// writer fences the first, which can no longer commit, and a reader sees
+/// exactly what the surviving writer committed.
+async fn helix_db_writes_fences_and_reads_through_its_source(service: Service) {
+    let (store, prefix) = service.scratch();
     let source = || HelixDbSource::ObjectStorage {
         database: prefix.clone(),
-        bucket: ObjectStorageBucket::Gcs { name: bucket() },
+        bucket: service.bucket(),
     };
     let add = |name: &str| {
         QueryRequest::write(
@@ -369,3 +411,56 @@ async fn helix_db_writes_fences_and_reads_through_a_gcs_source() {
 
     remove(store.as_ref(), &prefix).await;
 }
+
+/// One module per service, each running every contract above.
+macro_rules! contracts {
+    ($module:ident, $service:expr, $needs:literal) => {
+        mod $module {
+            #[tokio::test]
+            #[ignore = $needs]
+            async fn conditional_writes_fence_and_compare_and_swap() {
+                super::conditional_writes_fence_and_compare_and_swap($service).await;
+            }
+
+            #[tokio::test]
+            #[ignore = $needs]
+            async fn put_metadata_survives_single_and_multipart_uploads() {
+                super::put_metadata_survives_single_and_multipart_uploads($service).await;
+            }
+
+            #[tokio::test]
+            #[ignore = $needs]
+            async fn listings_are_consistent_and_honour_offsets() {
+                super::listings_are_consistent_and_honour_offsets($service).await;
+            }
+
+            #[tokio::test]
+            #[ignore = $needs]
+            async fn newer_slatedb_writer_fences_an_older_one() {
+                super::newer_slatedb_writer_fences_an_older_one($service).await;
+            }
+
+            #[tokio::test]
+            #[ignore = $needs]
+            async fn helix_db_writes_fences_and_reads_through_its_source() {
+                super::helix_db_writes_fences_and_reads_through_its_source($service).await;
+            }
+        }
+    };
+}
+
+contracts!(
+    s3,
+    super::Service::S3,
+    "needs an S3 bucket in HELIX_TEST_S3_BUCKET"
+);
+contracts!(
+    gcs,
+    super::Service::Gcs,
+    "needs a GCS bucket in HELIX_TEST_GCS_BUCKET"
+);
+contracts!(
+    azure,
+    super::Service::Azure,
+    "needs an Azure container in HELIX_TEST_AZURE_CONTAINER"
+);

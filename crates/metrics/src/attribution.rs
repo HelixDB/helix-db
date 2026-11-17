@@ -34,6 +34,7 @@ pub const PROJECT_ID_ENV: &str = "HELIX_TELEMETRY_PROJECT_ID";
 const PROJECT_DOMAIN: &[u8] = b"helix-telemetry-project-v1";
 const DEPLOYMENT_DOMAIN: &[u8] = b"helix-telemetry-deployment-v1";
 const GCS_DEPLOYMENT_DOMAIN: &[u8] = b"helix-telemetry-deployment-gcs-v1";
+const AZURE_DEPLOYMENT_DOMAIN: &[u8] = b"helix-telemetry-deployment-azure-v1";
 const CONTAINER_MARKERS: [&str; 2] = ["/.dockerenv", "/run/.containerenv"];
 
 /// CI service a process runs in, detected from the variable it always sets.
@@ -234,6 +235,29 @@ impl DeploymentId {
     #[must_use]
     pub fn for_gcs(bucket: &str, database: &str) -> Self {
         Self(domain_digest(GCS_DEPLOYMENT_DOMAIN, [bucket, database]))
+    }
+
+    /// Derives an ID from Azure Blob Storage, whose storage account names are
+    /// globally unique. It is hashed in its own domain, so it never shares an
+    /// ID with an S3 or GCS bucket.
+    ///
+    /// ```
+    /// use helix_metrics::attribution::DeploymentId;
+    ///
+    /// let id = DeploymentId::for_azure("acme", "data", "db/");
+    /// assert_eq!(id, DeploymentId::for_azure("acme", "data", "db/"));
+    /// assert_ne!(id, DeploymentId::for_azure("acme", "data", "other/"));
+    /// assert_ne!(id, DeploymentId::for_azure("acme", "other", "db/"));
+    /// // Parts are hashed apart, so moving a boundary between them changes the ID.
+    /// assert_ne!(id, DeploymentId::for_azure("acmed", "ata", "db/"));
+    /// assert_ne!(id, DeploymentId::for_gcs("data", "db/"));
+    /// ```
+    #[must_use]
+    pub fn for_azure(account: &str, container: &str, database: &str) -> Self {
+        Self(domain_digest(
+            AZURE_DEPLOYMENT_DOMAIN,
+            [account, container, database],
+        ))
     }
 
     #[must_use]

@@ -125,7 +125,8 @@ use slatedb::db_cache::{
 #[cfg(test)]
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::{
-    aws::AmazonS3Builder, gcp::GoogleCloudStorageBuilder, local::LocalFileSystem, ObjectStore,
+    aws::AmazonS3Builder, azure::MicrosoftAzureBuilder, gcp::GoogleCloudStorageBuilder,
+    local::LocalFileSystem, ObjectStore,
 };
 use slatedb::{CacheTarget, Db, DbCacheManagerOps, DbMetadataOps, DbReader};
 use tokio::sync::{oneshot, watch, Mutex};
@@ -373,7 +374,8 @@ pub enum HelixDbSource {
         /// Logical database path inside the local object store.
         database: String,
     },
-    /// Remote object storage: an S3 or GCS bucket.
+    /// Remote object storage: an S3 or GCS bucket, or an Azure Blob Storage
+    /// container.
     ObjectStorage {
         /// Logical database path inside the bucket.
         database: String,
@@ -385,7 +387,7 @@ pub enum HelixDbSource {
 /// The bucket an [`HelixDbSource::ObjectStorage`] database lives in, and the
 /// service that holds it.
 ///
-/// Both services give SlateDB what its single-writer fencing needs: create-only
+/// Every service gives SlateDB what its single-writer fencing needs: create-only
 /// puts, compare-and-swap overwrites of GC boundary files, and strongly
 /// consistent listings. GCS is reached through its own API, never its
 /// S3-compatible endpoint, which does not offer the same conditional writes.
@@ -412,15 +414,28 @@ pub enum ObjectStorageBucket {
         /// Bucket name.
         name: String,
     },
+    /// An Azure Blob Storage container. Credentials come from, in order,
+    /// `AZURE_STORAGE_TOKEN`, `AZURE_STORAGE_ACCOUNT_KEY`, workload identity
+    /// (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_FEDERATED_TOKEN_FILE`,
+    /// which AKS Workload Identity injects), a service principal
+    /// (`AZURE_CLIENT_SECRET`), `AZURE_STORAGE_SAS_KEY`, the Azure CLI
+    /// (`AZURE_USE_AZURE_CLI`), else the instance's managed identity.
+    /// `AZURE_STORAGE_USE_EMULATOR` selects Azurite.
+    Azure {
+        /// Storage account name.
+        account: String,
+        /// Container name.
+        container: String,
+    },
 }
 
 impl HelixDbSource {
     /// Telemetry deployment ID derived from this source's storage.
     ///
-    /// Only AWS S3 and GCS storage have one: their bucket names are globally
-    /// unique, while memory, disk and custom S3 endpoints reuse the same names
-    /// across unrelated users. An S3 and a GCS bucket with the same name give
-    /// different IDs.
+    /// Only AWS S3, GCS and Azure storage have one: their bucket and storage
+    /// account names are globally unique, while memory, disk and custom S3
+    /// endpoints reuse the same names across unrelated users. Buckets with the
+    /// same name on different services give different IDs.
     ///
     /// ```
     /// use db::{HelixDbSource, ObjectStorageBucket};
@@ -442,6 +457,15 @@ impl HelixDbSource {
     /// };
     /// assert!(gcs.telemetry_deployment_id().is_some());
     /// assert_ne!(gcs.telemetry_deployment_id(), s3(None).telemetry_deployment_id());
+    /// let azure = HelixDbSource::ObjectStorage {
+    ///     database: "db/".to_string(),
+    ///     bucket: ObjectStorageBucket::Azure {
+    ///         account: "acme".to_string(),
+    ///         container: "acme-data".to_string(),
+    ///     },
+    /// };
+    /// assert!(azure.telemetry_deployment_id().is_some());
+    /// assert_ne!(azure.telemetry_deployment_id(), gcs.telemetry_deployment_id());
     /// let memory = HelixDbSource::InMemory { database: "db/".to_string() };
     /// assert!(memory.telemetry_deployment_id().is_none());
     /// ```
@@ -459,6 +483,11 @@ impl HelixDbSource {
                 ObjectStorageBucket::Gcs { name } => Some(
                     helix_metrics::attribution::DeploymentId::for_gcs(name, database),
                 ),
+                ObjectStorageBucket::Azure { account, container } => {
+                    Some(helix_metrics::attribution::DeploymentId::for_azure(
+                        account, container, database,
+                    ))
+                }
             },
             Self::InMemory { .. } | Self::InMemoryToken { .. } | Self::Disk { .. } => None,
         }
@@ -526,6 +555,15 @@ impl HelixDbSource {
                     }
                     ObjectStorageBucket::Gcs { name } => {
                         let builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(name);
+                        #[cfg(feature = "async-index-benchmark")]
+                        let builder =
+                            builder.with_http_connector(benchmark::io::Connector::default());
+                        Arc::new(builder.build()?)
+                    }
+                    ObjectStorageBucket::Azure { account, container } => {
+                        let builder = MicrosoftAzureBuilder::from_env()
+                            .with_account(account)
+                            .with_container_name(container);
                         #[cfg(feature = "async-index-benchmark")]
                         let builder =
                             builder.with_http_connector(benchmark::io::Connector::default());
@@ -4790,15 +4828,25 @@ mod tests {
             },
         }
         .embedded_default_config();
+        let azure = HelixDbSource::ObjectStorage {
+            database: "remote-defaults".to_string(),
+            bucket: ObjectStorageBucket::Azure {
+                account: "account".to_string(),
+                container: "container".to_string(),
+            },
+        }
+        .embedded_default_config();
         // Every object storage service keeps the remote profile.
-        assert_eq!(
-            gcs.slate().to_writer_settings(None).flush_interval,
-            Some(Duration::from_millis(100))
-        );
-        assert_eq!(
-            gcs.cache().vector_memory().budget().bytes(),
-            Some(256 * 1024 * 1024)
-        );
+        for config in [&gcs, &azure] {
+            assert_eq!(
+                config.slate().to_writer_settings(None).flush_interval,
+                Some(Duration::from_millis(100))
+            );
+            assert_eq!(
+                config.cache().vector_memory().budget().bytes(),
+                Some(256 * 1024 * 1024)
+            );
+        }
         assert_eq!(
             object_storage
                 .slate()
@@ -4860,6 +4908,13 @@ mod tests {
                 name: "test-bucket".to_owned(),
             },
         };
+        let azure = || HelixDbSource::ObjectStorage {
+            database: "azure-gc".to_owned(),
+            bucket: ObjectStorageBucket::Azure {
+                account: "testaccount".to_owned(),
+                container: "test-container".to_owned(),
+            },
+        };
         let memory = || HelixDbSource::InMemory {
             database: "memory-gc".to_owned(),
         };
@@ -4870,6 +4925,7 @@ mod tests {
         assert_eq!(boundary_files(disk(), &defaults), Some(false));
         assert_eq!(boundary_files(object_storage(), &defaults), Some(true));
         assert_eq!(boundary_files(gcs(), &defaults), Some(true));
+        assert_eq!(boundary_files(azure(), &defaults), Some(true));
         assert_eq!(boundary_files(memory(), &defaults), Some(true));
         let embedded_disk = disk().embedded_default_config();
         assert_eq!(boundary_files(disk(), &embedded_disk), Some(false));
@@ -4891,6 +4947,7 @@ mod tests {
             Some(false)
         );
         assert_eq!(boundary_files(gcs(), &gc_config(false)), Some(false));
+        assert_eq!(boundary_files(azure(), &gc_config(false)), Some(false));
 
         // Without a garbage collector there is nothing to turn off.
         let no_gc = DbConfig::new().with_slate_settings(slatedb::Settings {
@@ -5042,6 +5099,23 @@ mod tests {
         .expect("GCS source builds without a request");
         assert_eq!(path, "facade-gcs");
         assert_eq!(store.to_string(), "GoogleCloudStorage(test-bucket)");
+
+        // Without credentials in the environment the Azure client falls back
+        // to the managed identity, which it also asks on its first request.
+        let (path, store, _) = HelixDbSource::ObjectStorage {
+            database: "facade-azure".into(),
+            bucket: ObjectStorageBucket::Azure {
+                account: "testaccount".into(),
+                container: "test-container".into(),
+            },
+        }
+        .into_parts()
+        .expect("Azure source builds without a request");
+        assert_eq!(path, "facade-azure");
+        assert_eq!(
+            store.to_string(),
+            "MicrosoftAzure { account: testaccount, container: test-container }"
+        );
     }
 
     #[tokio::test]

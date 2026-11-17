@@ -84,12 +84,13 @@ impl ServerConfig {
     /// Load server configuration from environment variables.
     ///
     /// Paths may be any bytes; every other variable must be UTF-8. At most one
-    /// of `HELIX_DATA_DIR`, `S3_BUCKET` and `GCS_BUCKET` picks durable
-    /// storage; with none, data stays in memory. Object storage (S3 or GCS)
-    /// always runs a hybrid disk cache, rooted at `HELIX_DISK_CACHE_DIR` or
-    /// else `/var/cache/helix`; with `HELIX_DATA_DIR` the cache is opt-in
-    /// through `HELIX_DISK_CACHE_DIR`, and memory storage rejects every cache
-    /// variable. Without `HELIX_DISK_CACHE_BYTES`, the default disk budget
+    /// of `HELIX_DATA_DIR`, `S3_BUCKET`, `GCS_BUCKET` and `AZURE_CONTAINER_NAME`
+    /// picks durable storage; with none, data stays in memory. An Azure
+    /// container also needs `AZURE_STORAGE_ACCOUNT_NAME`. Object storage (S3,
+    /// GCS or Azure) always runs a hybrid disk cache, rooted at
+    /// `HELIX_DISK_CACHE_DIR` or else `/var/cache/helix`; with
+    /// `HELIX_DATA_DIR` the cache is opt-in through `HELIX_DISK_CACHE_DIR`,
+    /// and memory storage rejects every cache variable. Without `HELIX_DISK_CACHE_BYTES`, the default disk budget
     /// must fit the cache's filesystem. `HELIX_DISK_CACHE_WARM=off` stops the
     /// startup warm of the disk cache ([`HybridCache`]).
     /// `HELIX_STRONG_VECTOR_SEARCH_MAX_PENDING_BYTES` and
@@ -304,7 +305,8 @@ pub enum StorageConfig {
         /// Local caches in front of the object store.
         cache: CacheConfig,
     },
-    /// An S3 (`S3_BUCKET`) or GCS (`GCS_BUCKET`) bucket.
+    /// An S3 (`S3_BUCKET`) or GCS (`GCS_BUCKET`) bucket, or an Azure Blob
+    /// Storage container (`AZURE_CONTAINER_NAME`).
     ObjectStorage {
         /// The bucket and the service that holds it.
         bucket: db::ObjectStorageBucket,
@@ -333,22 +335,34 @@ impl StorageConfig {
     fn from_lookup(
         lookup: &mut impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self, ServerConfigError> {
-        let bucket = match (
-            lookup("HELIX_DATA_DIR"),
-            text(lookup, &["S3_BUCKET"])?,
-            text(lookup, &["GCS_BUCKET"])?,
-        ) {
-            (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
-                return Err(ServerConfigError::ConflictingStorageConfiguration);
-            }
-            (Some(root), None, None) => {
+        /// The durable store one selector variable picks.
+        enum Selected {
+            Disk(OsString),
+            S3(String),
+            Gcs(String),
+            Azure(String),
+        }
+        let mut selected = [
+            lookup("HELIX_DATA_DIR").map(Selected::Disk),
+            text(lookup, &["S3_BUCKET"])?.map(|(_, name)| Selected::S3(name)),
+            text(lookup, &["GCS_BUCKET"])?.map(|(_, name)| Selected::Gcs(name)),
+            text(lookup, &["AZURE_CONTAINER_NAME"])?.map(|(_, name)| Selected::Azure(name)),
+        ]
+        .into_iter()
+        .flatten();
+        let (selected, conflicting) = (selected.next(), selected.next());
+        if conflicting.is_some() {
+            return Err(ServerConfigError::ConflictingStorageConfiguration);
+        }
+        let bucket = match selected {
+            Some(Selected::Disk(root)) => {
                 return Ok(Self::Disk {
                     root: PathBuf::from(root),
                     cache: CacheConfig::from_lookup(lookup)?,
                 });
             }
             // Reject before any cache directory is created.
-            (None, None, None) => {
+            None => {
                 return [
                     "HELIX_DISK_CACHE_DIR",
                     "HELIX_DISK_CACHE_MEMORY_BYTES",
@@ -361,7 +375,7 @@ impl StorageConfig {
                     Err(ServerConfigError::CacheWithMemoryStorage { variable })
                 });
             }
-            (None, Some((_, name)), None) => db::ObjectStorageBucket::S3 {
+            Some(Selected::S3(name)) => db::ObjectStorageBucket::S3 {
                 name,
                 region: text(lookup, &["S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"])?
                     .map_or_else(|| "us-east-1".to_string(), |(_, region)| region),
@@ -370,7 +384,13 @@ impl StorageConfig {
                 allow_http: text(lookup, &["AWS_ALLOW_HTTP"])?
                     .is_some_and(|(_, value)| value.eq_ignore_ascii_case("true") || value == "1"),
             },
-            (None, None, Some((_, name))) => db::ObjectStorageBucket::Gcs { name },
+            Some(Selected::Gcs(name)) => db::ObjectStorageBucket::Gcs { name },
+            Some(Selected::Azure(container)) => db::ObjectStorageBucket::Azure {
+                account: text(lookup, &["AZURE_STORAGE_ACCOUNT_NAME"])?
+                    .map(|(_, account)| account)
+                    .ok_or(ServerConfigError::AzureAccountMissing)?,
+                container,
+            },
         };
         // Last, so every other variable is valid before the cache directory
         // is created.
@@ -899,11 +919,14 @@ pub enum ServerConfigError {
         variable: &'static str,
     },
     /// More than one durable storage backend was configured.
-    #[error("set at most one of HELIX_DATA_DIR, S3_BUCKET and GCS_BUCKET")]
+    #[error("set at most one of HELIX_DATA_DIR, S3_BUCKET, GCS_BUCKET and AZURE_CONTAINER_NAME")]
     ConflictingStorageConfiguration,
+    /// An Azure container was selected without its storage account.
+    #[error("AZURE_CONTAINER_NAME requires AZURE_STORAGE_ACCOUNT_NAME")]
+    AzureAccountMissing,
     /// A disk cache setting was supplied for in-memory storage.
     #[error(
-        "{variable} requires HELIX_DATA_DIR, S3_BUCKET or GCS_BUCKET; in-memory storage has no durable objects to cache on disk"
+        "{variable} requires HELIX_DATA_DIR, S3_BUCKET, GCS_BUCKET or AZURE_CONTAINER_NAME; in-memory storage has no durable objects to cache on disk"
     )]
     CacheWithMemoryStorage {
         /// First cache variable found.
@@ -1175,6 +1198,13 @@ mod tests {
             StorageConfig::ObjectStorage {
                 bucket: db::ObjectStorageBucket::Gcs {
                     name: "bucket".to_string(),
+                },
+                cache: Box::new(cache.clone()),
+            },
+            StorageConfig::ObjectStorage {
+                bucket: db::ObjectStorageBucket::Azure {
+                    account: "account".to_string(),
+                    container: "container".to_string(),
                 },
                 cache: Box::new(cache),
             },
@@ -1488,13 +1518,102 @@ mod tests {
         ));
     }
 
-    /// Every pair of durable backends, and all three, is rejected before a
-    /// cache directory is created.
+    /// `AZURE_CONTAINER_NAME` selects Azure Blob Storage in the account
+    /// `AZURE_STORAGE_ACCOUNT_NAME` names, whatever S3 variables are set, and
+    /// maps to an Azure source for `DB_PATH`.
+    #[test]
+    fn azure_container_selects_azure_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_root = directory.path().join("cache");
+        let values = BTreeMap::from([
+            ("AZURE_CONTAINER_NAME", OsString::from("launch-container")),
+            ("AZURE_STORAGE_ACCOUNT_NAME", "launchaccount".into()),
+            ("DB_PATH", "tenant/db".into()),
+            ("S3_REGION", "ignored".into()),
+            ("AWS_ENDPOINT", "http://ignored:8333".into()),
+            ("HELIX_DISK_CACHE_DIR", cache_root.clone().into_os_string()),
+            (
+                "HELIX_DISK_CACHE_BYTES",
+                MIN_CACHE_DISK_BYTES.to_string().into(),
+            ),
+        ]);
+        let config = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
+        let azure = db::ObjectStorageBucket::Azure {
+            account: "launchaccount".to_string(),
+            container: "launch-container".to_string(),
+        };
+        assert_eq!(
+            config.storage,
+            StorageConfig::ObjectStorage {
+                bucket: azure.clone(),
+                cache: Box::new(
+                    HybridCache::try_new(
+                        &cache_root,
+                        DEFAULT_CACHE_MEMORY_BYTES,
+                        NonZeroUsize::new(MIN_CACHE_DISK_BYTES).unwrap()
+                    )
+                    .unwrap()
+                ),
+            }
+        );
+        assert!(matches!(
+            config.db_source(),
+            HelixDbSource::ObjectStorage { database, bucket }
+                if database == "tenant/db" && bucket == azure
+        ));
+    }
+
+    /// An Azure container without its account fails startup naming both
+    /// variables, before a cache directory is created; an account alone
+    /// selects nothing.
+    #[test]
+    fn azure_container_requires_its_storage_account() {
+        let cache_root = tempfile::tempdir().unwrap().path().join("never-created");
+        let values = BTreeMap::from([
+            ("AZURE_CONTAINER_NAME", OsString::from("container")),
+            ("HELIX_DISK_CACHE_DIR", cache_root.clone().into_os_string()),
+        ]);
+        let error = ServerConfig::from_lookup(|name| values.get(name).cloned()).unwrap_err();
+        assert!(
+            matches!(error, ServerConfigError::AzureAccountMissing),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "AZURE_CONTAINER_NAME requires AZURE_STORAGE_ACCOUNT_NAME"
+        );
+        assert!(!cache_root.exists());
+
+        let account_only =
+            |name: &str| (name == "AZURE_STORAGE_ACCOUNT_NAME").then(|| OsString::from("account"));
+        assert_eq!(
+            ServerConfig::from_lookup(account_only).unwrap().storage,
+            StorageConfig::Memory
+        );
+    }
+
+    /// Every combination of two or more durable backends is rejected before
+    /// a cache directory is created, and before an Azure container's account
+    /// is required.
     #[test]
     fn durable_storage_backends_are_mutually_exclusive() {
-        let backends = ["HELIX_DATA_DIR", "S3_BUCKET", "GCS_BUCKET"];
-        let pairs = [[0, 1], [0, 2], [1, 2]].map(|[a, b]| vec![backends[a], backends[b]]);
-        for set in pairs.into_iter().chain([backends.to_vec()]) {
+        let backends = [
+            "HELIX_DATA_DIR",
+            "S3_BUCKET",
+            "GCS_BUCKET",
+            "AZURE_CONTAINER_NAME",
+        ];
+        let sets = (0_u32..1 << backends.len())
+            .filter(|mask| mask.count_ones() >= 2)
+            .map(|mask| {
+                (0..backends.len())
+                    .filter(|bit| mask & (1 << bit) != 0)
+                    .map(|bit| backends[bit])
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sets.len(), 11);
+        for set in sets {
             let cache_root = tempfile::tempdir().unwrap().path().join("never-created");
             let error = ServerConfig::from_lookup(|name| {
                 if name == "HELIX_DISK_CACHE_DIR" {
@@ -2114,6 +2233,8 @@ mod tests {
         let warms = |storage: (&'static str, &str), warm: Option<&str>| {
             let mut values = BTreeMap::from([
                 (storage.0, OsString::from(storage.1)),
+                // Read only when Azure is the storage.
+                ("AZURE_STORAGE_ACCOUNT_NAME", OsString::from("account")),
                 ("HELIX_DISK_CACHE_DIR", root.clone()),
                 (
                     "HELIX_DISK_CACHE_BYTES",
@@ -2138,6 +2259,7 @@ mod tests {
         };
         let s3 = ("S3_BUCKET", "bucket");
         let gcs = ("GCS_BUCKET", "bucket");
+        let azure = ("AZURE_CONTAINER_NAME", "container");
         let disk = ("HELIX_DATA_DIR", "/var/lib/helix");
         let on = SlateWarmConfig::default;
         for (storage, warm, expected) in [
@@ -2149,6 +2271,12 @@ mod tests {
             (gcs, None, (on(), VectorPartWarm::Background)),
             (
                 gcs,
+                Some("off"),
+                (SlateWarmConfig::Off, VectorPartWarm::Off),
+            ),
+            (azure, None, (on(), VectorPartWarm::Background)),
+            (
+                azure,
                 Some("off"),
                 (SlateWarmConfig::Off, VectorPartWarm::Off),
             ),
@@ -2230,6 +2358,17 @@ mod tests {
                 "gcs",
                 [
                     vec![("GCS_BUCKET", OsString::from("bucket"))],
+                    cache.to_vec(),
+                ]
+                .concat(),
+            ),
+            (
+                "azure",
+                [
+                    vec![
+                        ("AZURE_CONTAINER_NAME", OsString::from("container")),
+                        ("AZURE_STORAGE_ACCOUNT_NAME", OsString::from("account")),
+                    ],
                     cache.to_vec(),
                 ]
                 .concat(),
@@ -2329,8 +2468,18 @@ mod tests {
             ("S3_BUCKET", "HELIX_DISK_CACHE_BYTES", "not-a-number"),
             ("GCS_BUCKET", "HELIX_DISK_CACHE_MEMORY_BYTES", "0"),
             ("GCS_BUCKET", "HELIX_DISK_CACHE_BYTES", "not-a-number"),
+            ("AZURE_CONTAINER_NAME", "HELIX_DISK_CACHE_MEMORY_BYTES", "0"),
+            (
+                "AZURE_CONTAINER_NAME",
+                "HELIX_DISK_CACHE_BYTES",
+                "not-a-number",
+            ),
         ] {
-            let values = BTreeMap::from([(bucket, "bucket"), (variable, value)]);
+            let values = BTreeMap::from([
+                (bucket, "bucket"),
+                ("AZURE_STORAGE_ACCOUNT_NAME", "account"),
+                (variable, value),
+            ]);
             let error =
                 ServerConfig::from_lookup(|name| values.get(name).map(OsString::from)).unwrap_err();
             assert!(
@@ -2370,9 +2519,10 @@ mod tests {
         {
             return;
         }
-        for bucket in ["S3_BUCKET", "GCS_BUCKET"] {
+        for bucket in ["S3_BUCKET", "GCS_BUCKET", "AZURE_CONTAINER_NAME"] {
             let values = BTreeMap::from([
                 (bucket, "bucket".to_string()),
+                ("AZURE_STORAGE_ACCOUNT_NAME", "account".to_string()),
                 ("HELIX_DISK_CACHE_BYTES", MIN_CACHE_DISK_BYTES.to_string()),
             ]);
             let error =
@@ -2436,11 +2586,15 @@ mod tests {
             ("S3_BUCKET", "HELIX_DISK_CACHE_WARM"),
             ("GCS_BUCKET", "GCS_BUCKET"),
             ("GCS_BUCKET", "HELIX_DISK_CACHE_WARM"),
+            ("AZURE_CONTAINER_NAME", "AZURE_CONTAINER_NAME"),
+            ("AZURE_CONTAINER_NAME", "AZURE_STORAGE_ACCOUNT_NAME"),
+            ("AZURE_CONTAINER_NAME", "HELIX_DISK_CACHE_WARM"),
             ("HELIX_DATA_DIR", "HELIX_DISK_CACHE_WARM"),
             ("DB_PATH", "HELIX_HTTP_ADDR"),
         ] {
             let values = BTreeMap::from([
                 (storage, OsString::from("value")),
+                ("AZURE_STORAGE_ACCOUNT_NAME", OsString::from("account")),
                 ("HELIX_DISK_CACHE_DIR", root.clone().into_os_string()),
                 (variable, latin1()),
             ]);
