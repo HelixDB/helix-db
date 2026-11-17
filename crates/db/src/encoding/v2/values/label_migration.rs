@@ -2,90 +2,113 @@
 //!
 //! The copy of hash-keyed label rows to exact keys and the cleanup of the hash
 //! rows after it each record where they stopped, so an interrupted pass
-//! resumes instead of starting over. Both resume after a physical storage key:
-//! the last hash label row the pass committed.
+//! resumes instead of starting over. Both resume after a physical storage key.
+
+use std::num::NonZeroU64;
 
 use bytes::{BufMut, Bytes};
 
 use crate::encoding::error::EncodingError;
 
-const WRITER_EPOCH_LEN: usize = core::mem::size_of::<u64>();
-const WRITER_EPOCH_OFFSET: usize = 0;
+const NEWEST_SEQ_LEN: usize = core::mem::size_of::<u64>();
+const NEWEST_SEQ_OFFSET: usize = 0;
+const ROWS_LEN: usize = core::mem::size_of::<u64>();
+const ROWS_OFFSET: usize = NEWEST_SEQ_OFFSET + NEWEST_SEQ_LEN;
+const RESUME_AFTER_OFFSET: usize = ROWS_OFFSET + ROWS_LEN;
 
 /// Progress of an unpublished label identity copy.
 ///
 /// ```text
-/// Value: [writer_epoch:8][resume_after: the rest, empty before any row]
+/// Value: [newest_seq:8][rows:8][resume_after: the rest, a non-empty storage key]
 /// ```
 ///
-/// `writer_epoch` is the SlateDB writer epoch of the open that last advanced
-/// the copy; a later open resumes only from its own predecessor's progress.
+/// The copy committed every hash label row up to and including
+/// `resume_after`: `rows` rows, the newest written at SlateDB sequence number
+/// `newest_seq`. A later open resumes after `resume_after` only if those rows
+/// are still the ones it copied: as many, and none written later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LabelCopyProgressValue {
-    writer_epoch: u64,
-    resume_after: Option<Bytes>,
+    newest_seq: u64,
+    rows: NonZeroU64,
+    resume_after: Bytes,
 }
 
 impl LabelCopyProgressValue {
-    /// Progress of the open at `writer_epoch`, which copied every hash row up
-    /// to and including `resume_after`, or none yet.
-    ///
     /// # Panics
     ///
     /// When `resume_after` is empty: no storage key is.
-    pub(crate) fn new(writer_epoch: u64, resume_after: Option<Bytes>) -> Self {
+    pub(crate) fn new(newest_seq: u64, rows: NonZeroU64, resume_after: Bytes) -> Self {
         assert!(
-            resume_after.as_ref().is_none_or(|key| !key.is_empty()),
+            !resume_after.is_empty(),
             "a resume key is a non-empty storage key"
         );
         Self {
-            writer_epoch,
+            newest_seq,
+            rows,
             resume_after,
         }
     }
 
-    pub(crate) const fn writer_epoch(&self) -> u64 {
-        self.writer_epoch
+    /// The newest sequence number among the copied hash rows.
+    pub(crate) const fn newest_seq(&self) -> u64 {
+        self.newest_seq
     }
 
-    /// The last hash row the copy committed, or `None` before any.
-    pub(crate) fn resume_after(&self) -> Option<&Bytes> {
-        self.resume_after.as_ref()
+    /// How many hash rows the copy passed, up to and including
+    /// [`Self::resume_after`].
+    pub(crate) const fn rows(&self) -> NonZeroU64 {
+        self.rows
+    }
+
+    /// The last hash row the copy committed.
+    pub(crate) const fn resume_after(&self) -> &Bytes {
+        &self.resume_after
     }
 
     pub(crate) fn encode(&self) -> Bytes {
-        let resume_after = self.resume_after.as_deref().unwrap_or_default();
-        let mut buf = Vec::with_capacity(WRITER_EPOCH_LEN + resume_after.len());
-        buf.put_u64(self.writer_epoch);
-        buf.put_slice(resume_after);
+        let mut buf = Vec::with_capacity(RESUME_AFTER_OFFSET + self.resume_after.len());
+        buf.put_u64(self.newest_seq);
+        buf.put_u64(self.rows.get());
+        buf.put_slice(&self.resume_after);
         Bytes::from(buf)
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, EncodingError> {
-        if bytes.len() < WRITER_EPOCH_LEN {
+        if bytes.len() <= RESUME_AFTER_OFFSET {
             return Err(EncodingError::BufferTooShort {
-                expected: WRITER_EPOCH_LEN,
+                expected: RESUME_AFTER_OFFSET + 1,
                 actual: bytes.len(),
             });
         }
-        let writer_epoch = u64::from_be_bytes(
-            bytes[WRITER_EPOCH_OFFSET..WRITER_EPOCH_OFFSET + WRITER_EPOCH_LEN]
-                .try_into()
-                .expect("writer epoch slice is eight bytes"),
-        );
-        let resume_after = &bytes[WRITER_EPOCH_OFFSET + WRITER_EPOCH_LEN..];
+        let read_u64 = |offset: usize, len: usize| {
+            u64::from_be_bytes(
+                bytes[offset..offset + len]
+                    .try_into()
+                    .expect("progress field slice is eight bytes"),
+            )
+        };
+        let newest_seq = read_u64(NEWEST_SEQ_OFFSET, NEWEST_SEQ_LEN);
+        let Some(rows) = NonZeroU64::new(read_u64(ROWS_OFFSET, ROWS_LEN)) else {
+            return Err(EncodingError::Custom(
+                "label copy progress counts no copied row".to_string(),
+            ));
+        };
         Ok(Self {
-            writer_epoch,
-            resume_after: (!resume_after.is_empty()).then(|| Bytes::copy_from_slice(resume_after)),
+            newest_seq,
+            rows,
+            resume_after: Bytes::copy_from_slice(&bytes[RESUME_AFTER_OFFSET..]),
         })
     }
 }
 
-/// Progress of an unfinished hash label row cleanup: the last row it deleted.
+/// Progress of an unfinished hash label row cleanup.
 ///
 /// ```text
 /// Value: [resume_after: a non-empty storage key]
 /// ```
+///
+/// `resume_after` is the last row the cleanup deleted, or the first label
+/// row prefix of the scope a step stopped before.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LabelCleanupProgressValue(Bytes);
 
@@ -126,36 +149,45 @@ mod tests {
 
     #[test]
     fn copy_progress_round_trips_its_exact_layout() {
-        let before_any = LabelCopyProgressValue::new(7, None);
-        assert_eq!(before_any.encode().as_ref(), &7u64.to_be_bytes());
-        assert_eq!(
-            LabelCopyProgressValue::decode(&before_any.encode()).unwrap(),
-            before_any
-        );
-        assert_eq!(before_any.resume_after(), None);
-
         let key = Bytes::from_static(&[0x03, 0x04, 1, 2, 3, 4, 5, 6, 7, 8]);
-        let after = LabelCopyProgressValue::new(u64::MAX, Some(key.clone()));
+        let progress =
+            LabelCopyProgressValue::new(u64::MAX, NonZeroU64::new(9).unwrap(), key.clone());
         let mut expected = u64::MAX.to_be_bytes().to_vec();
+        expected.extend_from_slice(&9u64.to_be_bytes());
         expected.extend_from_slice(&key);
-        assert_eq!(after.encode().as_ref(), expected.as_slice());
-        let decoded = LabelCopyProgressValue::decode(&after.encode()).unwrap();
-        assert_eq!(decoded, after);
+        assert_eq!(progress.encode().as_ref(), expected.as_slice());
+        let decoded = LabelCopyProgressValue::decode(&progress.encode()).unwrap();
+        assert_eq!(decoded, progress);
         assert_eq!(
-            (decoded.writer_epoch(), decoded.resume_after()),
-            (u64::MAX, Some(&key))
+            (
+                decoded.newest_seq(),
+                decoded.rows().get(),
+                decoded.resume_after()
+            ),
+            (u64::MAX, 9, &key)
         );
+    }
 
+    #[test]
+    fn copy_progress_rejects_short_values_and_a_zero_count() {
+        for short in [&[0; RESUME_AFTER_OFFSET - 1][..], &[0; RESUME_AFTER_OFFSET]] {
+            assert!(matches!(
+                LabelCopyProgressValue::decode(short),
+                Err(EncodingError::BufferTooShort { .. })
+            ));
+        }
+        let mut zero_rows = vec![0; RESUME_AFTER_OFFSET];
+        zero_rows.push(0x03);
         assert!(matches!(
-            LabelCopyProgressValue::decode(&[0; WRITER_EPOCH_LEN - 1]),
-            Err(EncodingError::BufferTooShort { .. })
+            LabelCopyProgressValue::decode(&zero_rows),
+            Err(EncodingError::Custom(_))
         ));
     }
 
     #[test]
     #[should_panic(expected = "non-empty storage key")]
     fn copy_progress_rejects_an_empty_resume_key() {
-        LabelCopyProgressValue::new(1, Some(Bytes::new()));
+        LabelCopyProgressValue::new(1, NonZeroU64::MIN, Bytes::new());
     }
 
     #[test]

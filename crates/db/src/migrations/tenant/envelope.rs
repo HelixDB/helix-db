@@ -14,6 +14,7 @@ use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::scope::{TenantId, TENANT_ID_LEN, TENANT_KEY_PREFIX};
 use crate::encoding::v2::keys::DataKeyKind;
 use crate::encoding::v2::keys::{GlobalKey, ScopedKey, STORAGE_KEY_MAX_LEN};
+use crate::encoding::v2::legacy::label_hash;
 use crate::encoding::v2::legacy::tenant_envelope::LegacyTenantEnvelope;
 use crate::encoding::v2::values::{
     decode_applied_state, decode_build_artifact, decode_build_delta, decode_corpus_statistics,
@@ -264,7 +265,7 @@ fn parse_logical_key(logical: &[u8], value: &[u8]) -> Result<Option<TenantLogica
         validate_managed_value(&kind, value)?;
         return Ok(Some(TenantLogicalKey::Managed(kind)));
     }
-    if DataKeyKind::parse_from_slice(logical).is_ok() {
+    if DataKeyKind::parse_from_slice(logical).is_ok() || label_hash::is_retired_label_key(logical) {
         return Ok(Some(TenantLogicalKey::Graph));
     }
     Ok(None)
@@ -370,8 +371,14 @@ fn migrate_legacy_cursor(scope: DataScope, cursor: &IndexCursor) -> Result<Index
     IndexCursor::try_new(Bytes::from(migrated)).map_err(|error| corruption(&error.to_string()))
 }
 
+/// Whether `logical` is a typed key. Retired hash label rows count: no live
+/// key kind parses them, but they are graph rows until the label identity
+/// cleanup deletes them, so a tenant's must move with it and an unscoped one
+/// must not be read as a legacy tenant envelope.
 fn parse_logical_key_without_value(logical: &[u8]) -> bool {
-    ScopedKey::parse_from_slice(logical).is_ok() || DataKeyKind::parse_from_slice(logical).is_ok()
+    ScopedKey::parse_from_slice(logical).is_ok()
+        || DataKeyKind::parse_from_slice(logical).is_ok()
+        || label_hash::is_retired_label_key(logical)
 }
 
 #[cfg(test)]
@@ -724,6 +731,94 @@ mod tests {
         assert!(migrated
             .progress()
             .cursors_are_valid(|cursor| cursor.as_bytes() == &new_graph));
+        assert!(crate::migrations::tenant_key_envelope_ready(&db)
+            .await
+            .unwrap());
+        db.close().await.unwrap();
+    }
+
+    /// Retired hash label rows parse as no live key kind. A tenant's must
+    /// still move under its envelope, so the label identity migration later in
+    /// the open finds them, and an unscoped or already enveloped one must stay:
+    /// read as a legacy tenant envelope, the key's tail can parse as a key.
+    #[tokio::test]
+    async fn retired_hash_label_rows_move_with_their_tenant_and_unscoped_ones_stay() {
+        use crate::encoding::indexes::{hash_property_value, EdgeDirection};
+        use crate::encoding::v2::legacy::tenant_envelope::encode_for_contract;
+
+        let db = Db::builder(
+            "retired-label-row-tenant-migration",
+            Arc::new(InMemory::new()),
+        )
+        .build()
+        .await
+        .unwrap();
+        let tenant = TenantId::from_u128(0x0102_0304_0506_0708_1112_1314_1516_1718);
+        let scope = DataScope::Tenant(tenant);
+        // The label's hash ends in `[0xFF][_][_]`, a metadata key.
+        let label = (0u32..)
+            .map(|n| format!("L{n}"))
+            .find(|label| hash_property_value(label)[5] == 0xFF)
+            .unwrap();
+        let logical = [
+            label_hash::LegacyEdgeLabelKey::for_label(&label).to_bytes(),
+            label_hash::LegacyEdgeLabelNeighborKey::for_label(EdgeDirection::Out, 11, &label)
+                .to_bytes(),
+            label_hash::LegacyEdgeLabelNeighborKey::for_label(EdgeDirection::In, 12, &label)
+                .to_bytes(),
+        ];
+        let neighbor = &logical[1];
+        assert!(DataKeyKind::parse_from_slice(&neighbor[TENANT_ID_LEN..]).is_ok());
+        let value = Bytes::from_static(b"label-bitmap");
+        for key in &logical {
+            db.put(key, value.clone()).await.unwrap();
+            db.put(encode_for_contract(tenant, key), value.clone())
+                .await
+                .unwrap();
+        }
+        // Moved by an interrupted earlier run: its envelope's last tenant byte
+        // and its logical key read as a metadata key.
+        let moved_tenant = DataScope::Tenant(TenantId::from_u128(0xFF));
+        let moved = GraphKey::data_prefix(moved_tenant, neighbor.clone());
+        assert!(DataKeyKind::parse_from_slice(&moved[TENANT_ID_LEN..]).is_ok());
+        db.put(&moved, value.clone()).await.unwrap();
+
+        migrate_all_tenant_keys(&db).await.unwrap();
+
+        for key in &logical {
+            assert_eq!(db.get(key).await.unwrap(), Some(value.clone()));
+            assert_eq!(
+                db.get(encode_for_contract(tenant, key)).await.unwrap(),
+                None
+            );
+            assert_eq!(
+                db.get(GraphKey::data_prefix(scope, key.clone()))
+                    .await
+                    .unwrap(),
+                Some(value.clone())
+            );
+        }
+        assert_eq!(db.get(&moved).await.unwrap(), Some(value.clone()));
+        // No row moved under a tenant read from another key.
+        let mut enveloped = db
+            .scan(
+                Bytes::from_static(&[TENANT_KEY_PREFIX])
+                    ..Bytes::from_static(&[TENANT_KEY_PREFIX + 1]),
+            )
+            .await
+            .unwrap();
+        let mut tenant_rows = 0;
+        while let Some(row) = enveloped.next().await.unwrap() {
+            if row.key == moved {
+                continue;
+            }
+            assert_eq!(
+                DataScope::strip_tenant_envelope(&row.key).map(|(found, _)| found),
+                Some(tenant)
+            );
+            tenant_rows += 1;
+        }
+        assert_eq!(tenant_rows, logical.len());
         assert!(crate::migrations::tenant_key_envelope_ready(&db)
             .await
             .unwrap());

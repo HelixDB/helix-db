@@ -69,16 +69,23 @@ label change and are not copied, and a highest such member with a different labe
 (two labels sharing a hash) fails the open closed. Until publication readers of
 any version-5-capable binary keep reading complete hash rows, and a failed or
 interrupted copy leaves an ordinary version-5 store that older binaries still
-open. Each copy batch records its last row and the open's SlateDB writer epoch:
-the next writer open resumes after it when that epoch is its own predecessor's,
-and otherwise, since another writer (possibly an older binary) may have changed
-the hash rows, clears the partial copy and copies again. After publication
-readers read only exact rows, and the background migration worker deletes the
-hash rows while the writer serves, one tuned batch per step beside the other
-background migrations, resuming after the last deleted row; with the worker
-disabled they stay until a step is taken. Recovery-only managed failover reports
-`WriterMigrationRequired` for a version-5 store. Binaries that support at most version 5 refuse a version-6
-store, so a rollback after publication needs a backup taken before the upgrade.
+open. One iterator walks every scope's hash rows in key order, seeking past
+other rows, so a scope without label rows costs a few seeks, and batches span
+scopes. Each copy batch records its last row, how many hash rows the copy has
+passed, and the newest SlateDB sequence number among them. A later open resumes
+after that row only if the hash rows up to it are still those: as many, and none
+newer. Otherwise another writer (possibly an older binary) changed rows the copy
+had passed, so it clears the partial copy and copies again. Writer epochs play no
+part, so non-consecutive managed epochs and rejected failover opens do not force a
+restart. After publication readers read only exact rows, and the background
+migration worker deletes the hash rows while the writer serves, one tuned batch
+and at most 256 scopes per step beside the other background migrations, resuming
+after the last deleted row or the scope it stopped before. Every writer runs these
+cleanup steps, a managed failover writer included, though it runs no other
+migration; with the worker disabled the hash rows stay until a step is taken.
+Recovery-only managed failover reports `WriterMigrationRequired` for a version-5
+store. Binaries that support at most version 5 refuse a version-6 store, so a
+rollback after publication needs a backup taken before the upgrade.
 Labels longer than the label index bound are rejected as invalid queries.
 
 New databases initialize at version 6. Versions after 6 return the existing

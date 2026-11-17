@@ -1441,7 +1441,8 @@ impl HelixDB {
         }
         .await;
         db.close_on_open_error(finish_result).await?;
-        db.start_background_migration_worker().await;
+        db.start_background_migration_worker(migrations::background::BackgroundMigrations::All)
+            .await;
         Ok(db)
     }
 
@@ -1667,9 +1668,14 @@ impl HelixDB {
         }
         .await;
         db.close_on_open_error(finish_result).await?;
-        if migration_authorized {
-            db.start_background_migration_worker().await;
-        }
+        // A writer that may not migrate storage still finishes the label hash
+        // cleanup a migrating writer before it started.
+        db.start_background_migration_worker(if migration_authorized {
+            migrations::background::BackgroundMigrations::All
+        } else {
+            migrations::background::BackgroundMigrations::LabelHashCleanup
+        })
+        .await;
         tracing::info!(
             open_intent,
             writer_epoch,
@@ -2153,7 +2159,10 @@ impl HelixDB {
         self.mode() == HelixDbMode::Writer
     }
 
-    async fn start_background_migration_worker(&self) {
+    async fn start_background_migration_worker(
+        &self,
+        background: migrations::background::BackgroundMigrations,
+    ) {
         let tuning = self.inner.config.db().migrations();
         let HelixStorage::Writer(writer) = self.inner.storage.handle() else {
             return;
@@ -2163,6 +2172,7 @@ impl HelixDB {
             *worker = migrations::background::MigrationWorkerSupervisor::start_if_enabled(
                 Arc::clone(writer),
                 tuning,
+                background,
             );
         }
     }
@@ -4154,8 +4164,12 @@ impl HelixDB {
         if self.config().db().migrations().worker_mode() != config::MigrationWorkerMode::Disabled {
             return Err(HelixDbError::MigrationSteppingRequiresDisabledMode);
         }
-        migrations::background::process_background_step(writer, self.config().db().migrations())
-            .await
+        migrations::background::process_background_step(
+            writer,
+            self.config().db().migrations(),
+            migrations::background::BackgroundMigrations::All,
+        )
+        .await
     }
 
     #[cfg(any(test, feature = "bench-internals"))]

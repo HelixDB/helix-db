@@ -908,9 +908,12 @@ impl HelixMergeOperator {
                 MergeKeyType::Bitmap(BitmapBase::PortablePrefix)
             }
             Some(prefix) if prefix == KeyPrefix::PropertyIndex.as_u8() => {
-                // Every label row is a bitmap, so its prefix decides without
-                // validating the label it carries. Retired hash-keyed rows
-                // keep merging until the label identity cleanup deletes them.
+                // Every label row is a bitmap, so its index byte decides
+                // without validating the label it carries, and only other rows
+                // are parsed below. Retired hash-keyed rows keep merging until
+                // the label identity cleanup deletes them; telling them apart
+                // reads two bytes and the `$label` name hash, and allocates
+                // nothing.
                 if matches!(
                     IndexPrefix::from_slice(logical),
                     Ok(IndexPrefix::NodeLabel

@@ -8,14 +8,19 @@
 //! the same writer open as the startup label identity migration, which then
 //! copies every row to its exact key. Readers consult them only while a
 //! store's marker predates the migration's publication. Each key is built from
-//! the label string, never from a bare hash.
+//! the label string, never from a bare hash. Code that classifies every stored
+//! key, such as the merge operator and the tenant envelope migration, asks
+//! [`LegacyLabelScanPrefix::of`] or [`is_retired_label_key`], since no live
+//! key parser accepts these rows.
+
+use std::sync::LazyLock;
 
 use crate::encoding::{
     error::EncodingError,
     indexes::{
         equality::{scans::EqualityScanPrefix, EqualityIndexKey},
-        hash_property_name, hash_property_value, EdgeDirection, ValueHash, INDEX_PREFIX_LEN,
-        VALUE_HASH_MAX_LEN,
+        hash_property_name, hash_property_value, EdgeDirection, IndexPrefix, PropertyHash,
+        ValueHash, INDEX_PREFIX_LEN, PROPERTY_HASH_MAX_LEN, VALUE_HASH_MAX_LEN,
     },
     keys::{KeyPrefix, PREFIX_LEN},
     v2::keys::codec::read_u64,
@@ -25,6 +30,10 @@ use bytes::{BufMut, Bytes};
 
 /// Property name under which legacy node-label rows join the equality keyspace.
 const LABEL_PROPERTY: &str = "$label";
+/// Name hash of [`LABEL_PROPERTY`], computed once: every merge of a property
+/// index row classifies its key against it.
+static LABEL_PROPERTY_HASH: LazyLock<PropertyHash> =
+    LazyLock::new(|| hash_property_name(LABEL_PROPERTY));
 /// Index byte of retired global edge label rows.
 const EDGE_LABEL_INDEX_PREFIX: u8 = 0x04;
 /// Index byte of retired edge-label neighbor rows; a direction byte follows.
@@ -245,18 +254,49 @@ impl LegacyLabelScanPrefix {
         }
     }
 
-    /// The family of the logical key `logical`, if it is a retired label row.
+    /// The family of the logical key `logical`, if it is a retired label row
+    /// or a prefix of its family. Reads at most the index byte and the
+    /// property hash, without allocating.
     pub(crate) fn of(logical: &[u8]) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|family| logical.starts_with(&family.to_bytes()))
+        if logical.first() != Some(&KeyPrefix::PropertyIndex.as_u8()) {
+            return None;
+        }
+        match logical.get(PREFIX_LEN..PREFIX_LEN + INDEX_PREFIX_LEN)? {
+            [EDGE_LABEL_INDEX_PREFIX] => Some(Self::EdgeLabels),
+            [EDGE_LABEL_NEIGHBOR_INDEX_PREFIX] => Some(Self::EdgeLabelNeighbors),
+            index if index == IndexPrefix::Equality.as_slice() => {
+                (logical.get(
+                    PREFIX_LEN + INDEX_PREFIX_LEN
+                        ..PREFIX_LEN + INDEX_PREFIX_LEN + PROPERTY_HASH_MAX_LEN,
+                ) == Some(LABEL_PROPERTY_HASH.as_slice()))
+                .then_some(Self::NodeLabels)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Whether `logical` is exactly one retired edge label or edge-label neighbor
+/// key, the two retired kinds no live key parser accepts. Legacy node label
+/// rows are `$label` equality rows, which the live equality key parses.
+///
+/// Classifiers of every stored key, such as the tenant envelope migration,
+/// use it so these rows stay typed until the label identity cleanup deletes
+/// them. It checks framing only, without allocating.
+pub(crate) fn is_retired_label_key(logical: &[u8]) -> bool {
+    match LegacyLabelScanPrefix::of(logical) {
+        Some(LegacyLabelScanPrefix::EdgeLabels) => logical.len() == LegacyEdgeLabelKey::ENCODED_LEN,
+        Some(LegacyLabelScanPrefix::EdgeLabelNeighbors) => {
+            logical.len() == LegacyEdgeLabelNeighborKey::ENCODED_LEN
+                && EdgeDirection::from_u8(logical[PREFIX_LEN + INDEX_PREFIX_LEN]).is_ok()
+        }
+        Some(LegacyLabelScanPrefix::NodeLabels) | None => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::indexes::IndexPrefix;
 
     const LABEL_HASH: ValueHash = [5, 6, 7, 8, 9, 10, 11, 12];
 
@@ -351,6 +391,53 @@ mod tests {
                 Err(EncodingError::InvalidIndexPrefix(_))
             ));
         }
+    }
+
+    #[test]
+    fn retired_label_keys_are_recognised_only_by_their_exact_framing() {
+        let edge = LegacyEdgeLabelKey::new(LABEL_HASH).to_bytes();
+        let neighbor = LegacyEdgeLabelNeighborKey::new(EdgeDirection::In, 1, LABEL_HASH).to_bytes();
+        assert!(is_retired_label_key(&edge));
+        assert!(is_retired_label_key(&neighbor));
+        for key in [&edge, &neighbor] {
+            assert!(!is_retired_label_key(&key[..key.len() - 1]));
+            let mut trailing = key.to_vec();
+            trailing.push(0);
+            assert!(!is_retired_label_key(&trailing));
+        }
+        let mut direction = neighbor.to_vec();
+        direction[PREFIX_LEN + INDEX_PREFIX_LEN] = 0x02;
+        assert!(!is_retired_label_key(&direction));
+        // An unscoped neighbor row's last bytes, which a legacy tenant
+        // envelope would read as its logical key, are no retired key.
+        assert!(!is_retired_label_key(
+            &neighbor[neighbor.len() - (VALUE_HASH_MAX_LEN - 5)..]
+        ));
+        // Legacy node label rows are live equality rows, and a family prefix
+        // is no key.
+        let mut node = Vec::new();
+        LegacyNodeLabelKey::for_label("Person").encode_into(&mut node);
+        assert!(!is_retired_label_key(&node));
+        assert!(!is_retired_label_key(
+            &LegacyLabelScanPrefix::EdgeLabels.to_bytes()
+        ));
+    }
+
+    #[test]
+    fn only_label_equality_rows_are_legacy_node_label_rows() {
+        let mut node = Vec::new();
+        LegacyNodeLabelKey::for_label("Person").encode_into(&mut node);
+        assert_eq!(
+            LegacyLabelScanPrefix::of(&node),
+            Some(LegacyLabelScanPrefix::NodeLabels)
+        );
+        let other = EqualityScanPrefix::Property {
+            property_hash: hash_property_name("name"),
+        }
+        .to_bytes();
+        assert_eq!(LegacyLabelScanPrefix::of(&other), None);
+        // Too short to carry a property hash.
+        assert_eq!(LegacyLabelScanPrefix::of(&node[..PREFIX_LEN + 2]), None);
     }
 
     #[test]
