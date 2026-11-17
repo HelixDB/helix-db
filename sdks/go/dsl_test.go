@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -415,6 +416,10 @@ func TestQueryParamTypesCoverEveryValidAndInvalidState(t *testing.T) {
 		ParamTypeValue(),
 		ParamTypeObject(),
 		ParamTypeArray(ParamTypeArray(ParamTypeString())),
+		ParamTypeArray(ParamTypeObjectFields(map[string]QueryParamType{
+			"at":    ParamTypeDateTime(),
+			"audit": ParamTypeObjectFields(map[string]QueryParamType{"seen": ParamTypeDateTime()}),
+		})),
 	}
 	for _, parameterType := range valid {
 		body, err := json.Marshal(parameterType)
@@ -443,6 +448,11 @@ func TestQueryParamTypesCoverEveryValidAndInvalidState(t *testing.T) {
 		{kind: paramKindArray},
 		{kind: ParamKind(255)},
 		ParamTypeArray(QueryParamType{kind: ParamKind(255)}),
+		ParamTypeObjectFields(nil),
+		ParamTypeObjectFields(map[string]QueryParamType{}),
+		ParamTypeObjectFields(map[string]QueryParamType{"bad": {kind: paramKindArray}}),
+		{kind: paramKindRecord, fields: map[string]QueryParamType{"a": ParamTypeI64()}, inner: &scalarInner},
+		{kind: paramKindString, fields: map[string]QueryParamType{"a": ParamTypeI64()}},
 	}
 	for _, parameterType := range invalid {
 		if err := parameterType.Validate(); err == nil {
@@ -461,6 +471,11 @@ func TestQueryParamTypesCoverEveryValidAndInvalidState(t *testing.T) {
 		`{"future":"i64"}`,
 		`[]`,
 		`{`,
+		`{"object":{}}`,
+		`{"object":"i64"}`,
+		`{"object":{"a":"i64","a":"i64"}}`,
+		`{"object":{"a":"future"}}`,
+		`{"object":{"a":"i64"},"array":"i64"}`,
 	} {
 		var parameterType QueryParamType
 		if err := json.Unmarshal([]byte(input), &parameterType); err == nil {
@@ -550,6 +565,98 @@ func TestAtomicTypedAndExplicitUntypedParameterStates(t *testing.T) {
 	}
 	if err := NewReadQueryRequest(Read()).InsertTypedParameter("", ParamTypeBool(), QueryBool(true)); !errors.Is(err, ErrEmptyParameterName) {
 		t.Fatalf("empty typed parameter name should fail: %v", err)
+	}
+}
+
+func TestTypedObjectFieldsNormalizeAndDeclareEachField(t *testing.T) {
+	rows := ParamTypeArray(ParamTypeObjectFields(map[string]QueryParamType{
+		"email": ParamTypeString(),
+		"at":    ParamTypeDateTime(),
+		"audit": ParamTypeObjectFields(map[string]QueryParamType{"seenAt": ParamTypeDateTime(), "note": ParamTypeValue()}),
+	}))
+	request := WriteQuery("import")
+	request.ParamArray("rows", []any{
+		map[string]any{"email": "a@example.com", "at": "2026-06-01T05:00:00+09:00", "audit": map[string]any{"seenAt": DateTimeFromMillis(0), "note": nil}},
+		map[string]any{"email": "b@example.com", "at": time.UnixMilli(1_000).UTC(), "audit": map[string]any{"seenAt": "2026-06-01T00:00:00.250Z", "note": "text"}},
+	}, *rows.inner)
+	body, err := json.Marshal(request.Returning())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Parameters     map[string]any `json:"parameters"`
+		ParameterTypes map[string]any `json:"parameter_types"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	wantTypes := map[string]any{"rows": map[string]any{"array": map[string]any{"object": map[string]any{
+		"email": "string",
+		"at":    "date_time",
+		"audit": map[string]any{"object": map[string]any{"seenAt": "date_time", "note": "value"}},
+	}}}}
+	if !reflect.DeepEqual(decoded.ParameterTypes, wantTypes) {
+		t.Fatalf("parameter types = %#v", decoded.ParameterTypes)
+	}
+	wantRows := []any{
+		map[string]any{"email": "a@example.com", "at": "2026-05-31T20:00:00.000Z", "audit": map[string]any{"seenAt": "1970-01-01T00:00:00.000Z", "note": nil}},
+		map[string]any{"email": "b@example.com", "at": "1970-01-01T00:00:01.000Z", "audit": map[string]any{"seenAt": "2026-06-01T00:00:00.250Z", "note": "text"}},
+	}
+	if !reflect.DeepEqual(decoded.Parameters["rows"], wantRows) {
+		t.Fatalf("rows = %#v", decoded.Parameters["rows"])
+	}
+
+	valid := func() map[string]any {
+		return map[string]any{"email": "a@example.com", "at": "2026-06-01T00:00:00Z", "audit": map[string]any{"seenAt": "2026-06-01T00:00:00Z", "note": int64(1)}}
+	}
+	with := func(field string, value any) map[string]any {
+		row := valid()
+		row[field] = value
+		return row
+	}
+	without := func(field string) map[string]any {
+		row := valid()
+		delete(row, field)
+		return row
+	}
+	for _, test := range []struct {
+		row     any
+		is      error
+		message string
+	}{
+		{with("at", "2026-06-01"), ErrInvalidDateTimeParameter, "rows[0].at"},
+		{with("at", nil), ErrInvalidDateTimeParameter, "rows[0].at"},
+		{with("audit", map[string]any{"seenAt": "nope", "note": nil}), ErrInvalidDateTimeParameter, "rows[0].audit.seenAt"},
+		{without("at"), ErrObjectFieldMismatch, `rows[0]: helix: object fields do not match the declared fields (missing: ["at"], undeclared: [])`},
+		{with("createdAt", "2026-06-01T00:00:00Z"), ErrObjectFieldMismatch, `undeclared: ["createdAt"]`},
+		{with("audit", map[string]any{"seenAt": "2026-06-01T00:00:00Z"}), ErrObjectFieldMismatch, "rows[0].audit"},
+		{"not an object", ErrInvalidParameterType, ""},
+	} {
+		candidate := NewWriteQueryRequest(Write())
+		err := candidate.InsertTypedParameter("rows", rows, QueryArray(test.row))
+		if !errors.Is(err, test.is) || !strings.Contains(err.Error(), test.message) {
+			t.Fatalf("row %#v: got %v, want %v containing %q", test.row, err, test.is, test.message)
+		}
+		if len(candidate.parameters) != 0 || len(candidate.types) != 0 {
+			t.Fatalf("invalid row %#v partially mutated the request", test.row)
+		}
+	}
+	if err := NewWriteQueryRequest(Write()).InsertTypedParameter("row", ParamTypeObjectFields(nil), QueryObject(nil)); !errors.Is(err, ErrEmptyObjectFields) {
+		t.Fatalf("empty object fields should fail: %v", err)
+	}
+
+	declared := map[string]QueryParamType{"at": ParamTypeDateTime()}
+	fields := ParamTypeObjectFields(declared)
+	declared["extra"] = ParamTypeI64()
+	if len(fields.Fields()) != 1 {
+		t.Fatalf("object fields must not alias the caller's map: %#v", fields.Fields())
+	}
+	fields.Fields()["extra"] = ParamTypeI64()
+	if len(fields.Fields()) != 1 {
+		t.Fatalf("Fields must return a copy: %#v", fields.Fields())
+	}
+	if ParamTypeObject().Fields() != nil {
+		t.Fatal("an untyped object has no declared fields")
 	}
 }
 

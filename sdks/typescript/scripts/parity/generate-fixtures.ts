@@ -303,6 +303,7 @@ export function runtimeFixtures(): Fixture[] {
                   ["eventId", PropertyInput.param("eventId")],
                   ["kind", PropertyInput.param("kind")],
                   ["score", PropertyInput.param("score")],
+                  ["seenAt", PropertyInput.param("seenAt")],
                 ]),
               ),
             )
@@ -312,12 +313,24 @@ export function runtimeFixtures(): Fixture[] {
           [
             "rows",
             [
-              { eventId: "event-1", kind: "click", score: 10 },
-              { eventId: "event-2", kind: "view", score: 5 },
+              { eventId: "event-1", kind: "click", score: 10, seenAt: "2026-06-01T05:00:00+09:00" },
+              { eventId: "event-2", kind: "view", score: 5, seenAt: "2026-06-01T00:00:00.250Z" },
             ],
           ],
         ],
-        [["rows", QueryParamType.array(QueryParamType.object())]],
+        [
+          [
+            "rows",
+            QueryParamType.array(
+              QueryParamType.object({
+                eventId: QueryParamType.string(),
+                kind: QueryParamType.string(),
+                score: QueryParamType.i64(),
+                seenAt: QueryParamType.dateTime(),
+              }),
+            ),
+          ],
+        ],
       ),
     ),
     runtime(
@@ -914,6 +927,7 @@ function jsonOnlyFixtures(): Fixture[] {
           ["string", QueryValue.string("value")],
           ["array", QueryValue.array([1, "two"])],
           ["object", QueryValue.object({ nested: true })],
+          ["record", QueryValue.object({ at: "2026-06-01T05:00:00+09:00", nested: { flag: true } })],
         ],
         [
           ["null", QueryParamType.value()],
@@ -924,6 +938,10 @@ function jsonOnlyFixtures(): Fixture[] {
           ["string", QueryParamType.string()],
           ["array", QueryParamType.array(QueryParamType.value())],
           ["object", QueryParamType.object()],
+          [
+            "record",
+            QueryParamType.object({ at: QueryParamType.dateTime(), nested: QueryParamType.object({ flag: QueryParamType.bool() }) }),
+          ],
         ],
       ),
     ),

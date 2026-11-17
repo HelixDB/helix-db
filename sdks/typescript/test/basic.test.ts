@@ -374,7 +374,7 @@ const params = defineParams({
   tenant_id: param.string(),
   limit: param.i64(),
   created_after: param.dateTime(),
-  labels: param.object(param.string()),
+  labels: param.object({ status: param.string() }),
 });
 
 function readQuery(p: typeof params) {
@@ -392,7 +392,7 @@ function readQuery(p: typeof params) {
 }
 
 const writeParams = defineParams({
-  data: param.array(param.object(param.value())),
+  data: param.array(param.object()),
 });
 
 function writeQuery(p: typeof writeParams) {
@@ -412,6 +412,7 @@ const request = readQuery(params).toQueryRequest(
   { queryName: "read_query" },
 );
 const requestJson = JSON.parse(request.toJsonString());
+assert.deepEqual(requestJson.parameter_types.labels, { object: { status: "string" } });
 assert.equal(requestJson.request_type, "read");
 assert.equal(requestJson.query_name, "read_query");
 assert.deepEqual(Object.keys(requestJson.query), ["read"]);
@@ -446,7 +447,7 @@ assert.equal(
   JSON.parse(
     readQuery(params).toQueryJson(
       params,
-      { tenant_id: "acme", limit: 1n, created_after: DateTime.fromMillis(0), labels: {} },
+      { tenant_id: "acme", limit: 1n, created_after: DateTime.fromMillis(0), labels: { status: "active" } },
       {
         searchConsistency: SearchConsistency.Eventual,
       },
@@ -487,6 +488,75 @@ assert.throws(
     } as never),
   TypeError,
 );
+
+// Typed object fields: each field converts by its schema and declares its
+// type, so a datetime field inside bulk rows binds as a datetime.
+const rowParams = defineParams({
+  rows: param.array(
+    param.object({
+      email: param.string(),
+      at: param.dateTime(),
+      audit: param.object({ seenAt: param.dateTime(), note: param.value() }),
+    }),
+  ),
+});
+const rowRequest = JSON.parse(
+  writeBatch()
+    .forEachParam(
+      "rows",
+      writeBatch().varAs("user", g().addN("User", { email: PropertyInput.param("email"), at: PropertyInput.param("at") })),
+    )
+    .toQueryJson(rowParams, {
+      rows: [
+        { email: "a@example.com", at: "2026-06-01T05:00:00+09:00", audit: { seenAt: DateTime.fromMillis(0), note: null } },
+        { email: "b@example.com", at: 1_000, audit: { seenAt: "2026-06-01T00:00:00.250Z", note: "text" } },
+      ],
+    }),
+);
+assert.deepEqual(rowRequest.parameter_types, {
+  rows: { array: { object: { email: "string", at: "date_time", audit: { object: { seenAt: "date_time", note: "value" } } } } },
+});
+assert.deepEqual(rowRequest.parameters.rows, [
+  { email: "a@example.com", at: "2026-05-31T20:00:00.000Z", audit: { seenAt: "1970-01-01T00:00:00.000Z", note: null } },
+  { email: "b@example.com", at: "1970-01-01T00:00:01.000Z", audit: { seenAt: "2026-06-01T00:00:00.250Z", note: "text" } },
+]);
+const rowInput = (row: Record<string, unknown>) => ({ rows: [row] }) as never;
+const validRow = { email: "a@example.com", at: "2026-06-01T00:00:00Z", audit: { seenAt: "2026-06-01T00:00:00Z", note: 1 } };
+assert.throws(() => writeBatch().toQueryJson(rowParams, rowInput({ ...validRow, at: "2026-06-01" })), /RFC3339|datetime/i);
+assert.throws(() => writeBatch().toQueryJson(rowParams, rowInput({ ...validRow, at: null })));
+assert.throws(
+  () => writeBatch().toQueryJson(rowParams, rowInput({ email: "a@example.com", audit: validRow.audit })),
+  /parameter 'rows\[0\]' fields do not match its declared fields \(missing: \["at"\], undeclared: \[\]\)/,
+);
+assert.throws(
+  () => writeBatch().toQueryJson(rowParams, rowInput({ ...validRow, createdAt: "2026-06-01T00:00:00Z" })),
+  /undeclared: \["createdAt"\]/,
+);
+assert.throws(
+  () => writeBatch().toQueryJson(rowParams, rowInput({ ...validRow, audit: { seenAt: "2026-06-01T00:00:00Z" } })),
+  /'rows\[0\].audit'/,
+);
+assert.throws(() => writeBatch().toQueryJson(rowParams, { rows: ["not an object"] } as never), /'rows\[0\]' must be object/);
+// The wire type normalizes JSON values the same way.
+const typedRows = QueryParamType.array(QueryParamType.object({ at: QueryParamType.dateTime(), n: QueryParamType.i64() }));
+assert.deepEqual(typedRows.toJSON(), { array: { object: { at: "date_time", n: "i64" } } });
+assert.equal(typedRows.inner?.variant, "Record");
+assert.deepEqual(Object.keys(typedRows.inner?.fields ?? {}), ["at", "n"]);
+assert.deepEqual(
+  parsed(QueryRequest.write(writeBatch()).withTypedParameter("rows", typedRows, [{ at: "2026-06-01T05:00:00+09:00", n: 1 }])).parameters,
+  { rows: [{ at: "2026-05-31T20:00:00.000Z", n: 1 }] },
+);
+assert.throws(() => QueryRequest.write(writeBatch()).withTypedParameter("rows", typedRows, [{ at: "nope", n: 1 }]));
+assert.throws(
+  () => QueryRequest.write(writeBatch()).withTypedParameter("rows", typedRows, [{ at: "2026-06-01T00:00:00Z" }]),
+  /missing: \["n"\]/,
+);
+assert.throws(() => QueryParamType.object({}), /at least one field/);
+assert.throws(() => QueryParamType.object({ at: "date_time" as never }), /must be a parameter type/);
+assert.throws(() => param.object({}), /at least one field/);
+assert.throws(() => param.object(param.string() as never), /must be a parameter type/);
+assert.deepEqual(QueryParamType.object().toJSON(), "object");
+assert.deepEqual(param.object().toJSON(), "object");
 
 const bytesParams = defineParams({ payload: param.bytes() });
 assert.throws(() => readBatch().toQueryJson(bytesParams, { payload: new Uint8Array([1, 2, 3]) }), QueryError);

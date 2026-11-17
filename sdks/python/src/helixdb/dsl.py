@@ -15,6 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Literal, TypeAlias
 
 JsonValue: TypeAlias = Any
@@ -3488,15 +3489,44 @@ def write_batch() -> WriteBatch:
     return WriteBatch.new()
 
 
+def _declared_fields(fields: Any, field_type: type, label: str) -> "Mapping[str, Any]":
+    """Copy declared object fields, rejecting an empty or malformed declaration."""
+    if not isinstance(fields, Mapping):
+        raise TypeError("object fields must be a mapping of field names to types")
+    if not fields:
+        raise TypeError("an object parameter type must declare at least one field")
+    for name, field in fields.items():
+        if not isinstance(name, str):
+            raise TypeError("object field names must be strings")
+        if not isinstance(field, field_type):
+            raise TypeError(f"object field '{name}' must be a {label}")
+    return MappingProxyType(dict(fields))
+
+
+def _check_declared_fields(
+    declared: Mapping[str, Any], value: Mapping[Any, Any], path: str
+) -> None:
+    """Fail unless ``value`` has exactly the declared field names."""
+    missing = sorted(name for name in declared if name not in value)
+    extra = sorted(str(name) for name in value if name not in declared)
+    if missing or extra:
+        raise TypeError(
+            f"parameter '{path}' fields do not match its declared fields "
+            f"(missing: {missing}, undeclared: {extra})"
+        )
+
+
 @dataclass(frozen=True, init=False)
 class QueryParamType:
     variant: str
     inner: "QueryParamType | None"
+    fields: "Mapping[str, QueryParamType] | None"
 
     def __init__(
         self,
         variant: str,
         inner: "QueryParamType | None" = None,
+        fields: "Mapping[str, QueryParamType] | None" = None,
         *,
         _token: object | None = None,
     ) -> None:
@@ -3513,18 +3543,26 @@ class QueryParamType:
             "Value",
             "Object",
         }
-        if variant in scalar_variants and inner is not None:
+        if variant in scalar_variants and (inner is not None or fields is not None):
             raise TypeError("scalar parameter types cannot contain an inner type")
-        if variant == "Array" and not isinstance(inner, QueryParamType):
+        if variant == "Array" and (not isinstance(inner, QueryParamType) or fields is not None):
             raise TypeError("array parameter type requires an inner type")
-        if variant not in scalar_variants and variant != "Array":
+        if variant == "Record" and (inner is not None or fields is None):
+            raise TypeError("object fields parameter type requires its fields")
+        if variant not in scalar_variants and variant not in {"Array", "Record"}:
             raise TypeError(f"unknown query parameter type: {variant}")
         object.__setattr__(self, "variant", variant)
         object.__setattr__(self, "inner", inner)
+        object.__setattr__(self, "fields", fields)
 
     @classmethod
-    def _create(cls, variant: str, inner: "QueryParamType | None" = None) -> "QueryParamType":
-        return cls(variant, inner, _token=_FACTORY_TOKEN)
+    def _create(
+        cls,
+        variant: str,
+        inner: "QueryParamType | None" = None,
+        fields: "Mapping[str, QueryParamType] | None" = None,
+    ) -> "QueryParamType":
+        return cls(variant, inner, fields, _token=_FACTORY_TOKEN)
 
     @classmethod
     def bool(cls) -> "QueryParamType":
@@ -3561,32 +3599,43 @@ class QueryParamType:
         return cls._create("Value")
 
     @classmethod
-    def object(cls) -> "QueryParamType":
-        return cls._create("Object")
+    def object(cls, fields: "Mapping[str, QueryParamType] | None" = None) -> "QueryParamType":
+        """Any object without ``fields``, sent as ``"object"``.
+
+        With ``fields``, an object with exactly those fields, each normalized to
+        its type and sent as ``{"object": {field: type}}``, so a ``date_time()``
+        field binds as a datetime on the server. A missing or undeclared field
+        is rejected, and ``None`` satisfies only a ``value()`` field.
+        """
+        if fields is None:
+            return cls._create("Object")
+        return cls._create(
+            "Record", fields=_declared_fields(fields, QueryParamType, "QueryParamType")
+        )
 
     @classmethod
     def array(cls, inner: "QueryParamType") -> "QueryParamType":
         return cls._create("Array", inner)
 
     def to_json(self) -> JsonValue:
-        return (
-            _ast_newtype("Array", self.inner)
-            if self.variant == "Array"
-            else _ast_unit(self.variant)
-        )
+        if self.variant == "Array":
+            return _ast_newtype("Array", self.inner)
+        if self.variant == "Record":
+            return _ast_newtype("Object", dict(self.fields or {}))
+        return _ast_unit(self.variant)
 
 
 @dataclass(frozen=True, init=False)
 class ParamSchema:
     kind: str
     inner: "ParamSchema | None"
-    object_inner: "ParamSchema | None"
+    fields: "Mapping[str, ParamSchema] | None"
 
     def __init__(
         self,
         kind: str,
         inner: "ParamSchema | None" = None,
-        object_inner: "ParamSchema | None" = None,
+        fields: "Mapping[str, ParamSchema] | None" = None,
         *,
         _token: object | None = None,
     ) -> None:
@@ -3601,27 +3650,28 @@ class ParamSchema:
             "DateTime",
             "Bytes",
             "Value",
+            "Object",
         }
-        if kind in scalar_kinds and (inner is not None or object_inner is not None):
+        if kind in scalar_kinds and (inner is not None or fields is not None):
             raise TypeError("scalar parameter schemas cannot contain payload schemas")
-        if kind == "Array" and (not isinstance(inner, ParamSchema) or object_inner is not None):
+        if kind == "Array" and (not isinstance(inner, ParamSchema) or fields is not None):
             raise TypeError("array parameter schema requires exactly one inner schema")
-        if kind == "Object" and (inner is not None or not isinstance(object_inner, ParamSchema)):
-            raise TypeError("object parameter schema requires exactly one value schema")
-        if kind not in scalar_kinds and kind not in {"Array", "Object"}:
+        if kind == "Record" and (inner is not None or fields is None):
+            raise TypeError("object fields parameter schema requires its fields")
+        if kind not in scalar_kinds and kind not in {"Array", "Record"}:
             raise TypeError(f"unknown parameter schema: {kind}")
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "inner", inner)
-        object.__setattr__(self, "object_inner", object_inner)
+        object.__setattr__(self, "fields", fields)
 
     @classmethod
     def _create(
         cls,
         kind: str,
         inner: "ParamSchema | None" = None,
-        object_inner: "ParamSchema | None" = None,
+        fields: "Mapping[str, ParamSchema] | None" = None,
     ) -> "ParamSchema":
-        return cls(kind, inner, object_inner, _token=_FACTORY_TOKEN)
+        return cls(kind, inner, fields, _token=_FACTORY_TOKEN)
 
     def to_param_type(self) -> QueryParamType:
         if self.kind == "Bool":
@@ -3642,6 +3692,10 @@ class ParamSchema:
             return QueryParamType.value()
         if self.kind == "Object":
             return QueryParamType.object()
+        if self.kind == "Record":
+            return QueryParamType.object(
+                {name: field.to_param_type() for name, field in (self.fields or {}).items()}
+            )
         if self.kind == "Array":
             if self.inner is None:
                 raise TypeError("array parameter schema requires an inner schema")
@@ -3679,8 +3733,15 @@ class _ParamNamespace:
     def value(self) -> ParamSchema:
         return ParamSchema._create("Value")
 
-    def object(self, inner: ParamSchema | None = None) -> ParamSchema:
-        return ParamSchema._create("Object", object_inner=inner or self.value())
+    def object(self, fields: Mapping[str, ParamSchema] | None = None) -> ParamSchema:
+        """Any object without ``fields``; with them, an object with exactly those
+        fields, each converted by its schema. ``param.object({"at": param.date_time()})``
+        sends ``at`` as a datetime the server stores, compares and indexes as one."""
+        if fields is None:
+            return ParamSchema._create("Object")
+        return ParamSchema._create(
+            "Record", fields=_declared_fields(fields, ParamSchema, "ParamSchema")
+        )
 
     def array(self, inner: ParamSchema) -> ParamSchema:
         return ParamSchema._create("Array", inner=inner)
@@ -3773,9 +3834,18 @@ def _convert_param_value(schema: ParamSchema, value: Any, path: str) -> JsonValu
     if schema.kind == "Object":
         if not isinstance(value, Mapping):
             raise TypeError(f"parameter '{path}' must be object")
-        inner = schema.object_inner or param.value()
         return {
-            key: _convert_param_value(inner, entry, f"{path}.{key}") for key, entry in value.items()
+            key: _convert_param_value(param.value(), entry, f"{path}.{key}")
+            for key, entry in value.items()
+        }
+    if schema.kind == "Record":
+        if not isinstance(value, Mapping):
+            raise TypeError(f"parameter '{path}' must be object")
+        fields = schema.fields or {}
+        _check_declared_fields(fields, value, path)
+        return {
+            key: _convert_param_value(field, value[key], f"{path}.{key}")
+            for key, field in fields.items()
         }
     if schema.kind == "Array":
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
@@ -3923,6 +3993,15 @@ def _normalize_typed_query_value(
         if not isinstance(value, Mapping):
             raise TypeError(f"parameter '{path}' must be object")
         return _validate_json_value(value, path)
+    if parameter_type.variant == "Record":
+        if not isinstance(value, Mapping):
+            raise TypeError(f"parameter '{path}' must be object")
+        fields = parameter_type.fields or {}
+        _check_declared_fields(fields, value, path)
+        return {
+            key: _normalize_typed_query_value(field, value[key], f"{path}.{key}")
+            for key, field in fields.items()
+        }
     if parameter_type.variant == "Array":
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
             raise TypeError(f"parameter '{path}' must be array")

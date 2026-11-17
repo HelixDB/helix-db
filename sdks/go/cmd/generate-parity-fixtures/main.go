@@ -687,15 +687,21 @@ func fixtureReadForeachParam() fixture {
 func fixtureWriteForeachParamCreate() fixture {
 	q := write()
 	q.ParamArray("rows", []any{
-		map[string]any{"eventId": "event-1", "kind": "click", "score": int64(10)},
-		map[string]any{"eventId": "event-2", "kind": "view", "score": int64(5)},
-	}, helix.ParamTypeObject())
+		map[string]any{"eventId": "event-1", "kind": "click", "score": int64(10), "seenAt": "2026-06-01T05:00:00+09:00"},
+		map[string]any{"eventId": "event-2", "kind": "view", "score": int64(5), "seenAt": "2026-06-01T00:00:00.250Z"},
+	}, helix.ParamTypeObjectFields(map[string]helix.QueryParamType{
+		"eventId": helix.ParamTypeString(),
+		"kind":    helix.ParamTypeString(),
+		"score":   helix.ParamTypeI64(),
+		"seenAt":  helix.ParamTypeDateTime(),
+	}))
 	return runtime(
 		"013-write-foreach-param-create",
 		q.ForEachParam("rows", helix.Write().VarAs("created", helix.G().AddN("ParityEvent", helix.Props{
 			helix.Prop("eventId", helix.ExprParam("eventId")),
 			helix.Prop("kind", helix.ExprParam("kind")),
 			helix.Prop("score", helix.ExprParam("score")),
+			helix.Prop("seenAt", helix.ExprParam("seenAt")),
 		}))).Returning("created"),
 	)
 }
@@ -936,6 +942,10 @@ func fixtureQueryValueShapes() fixture {
 	q.ParamString("string", "value")
 	q.ParamArray("array", []any{int64(1), "two"}, helix.ParamTypeValue())
 	q.ParamObject("object", map[string]any{"nested": true})
+	q.WithTypedParameter("record", helix.ParamTypeObjectFields(map[string]helix.QueryParamType{
+		"at":     helix.ParamTypeDateTime(),
+		"nested": helix.ParamTypeObjectFields(map[string]helix.QueryParamType{"flag": helix.ParamTypeBool()}),
+	}), map[string]any{"at": "2026-06-01T05:00:00+09:00", "nested": map[string]any{"flag": true}})
 	return jsonOnly(
 		"902-query-value-and-param-type-shapes",
 		q.VarAs("empty", helix.G().NWithLabel("Missing").Count()).Returning("empty"),

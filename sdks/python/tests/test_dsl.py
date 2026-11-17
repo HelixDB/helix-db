@@ -191,6 +191,132 @@ class DslAstTests(unittest.TestCase):
         self.assertEqual(raised.exception.millis, 253_402_300_800_000)
         self.assertIn("bad_millis", raised.exception.path)
 
+    def test_typed_object_fields_normalize_and_declare_each_field(self) -> None:
+        rows = define_params(
+            {
+                "rows": param.array(
+                    param.object(
+                        {
+                            "email": param.string(),
+                            "at": param.date_time(),
+                            "audit": param.object(
+                                {"seen_at": param.date_time(), "note": param.value()}
+                            ),
+                        }
+                    )
+                )
+            }
+        )
+        body = parsed(
+            write_batch().to_query_request(
+                rows,
+                {
+                    "rows": [
+                        {
+                            "email": "a@example.com",
+                            "at": "2026-06-01T05:00:00+09:00",
+                            "audit": {"seen_at": DateTime.from_millis(0), "note": None},
+                        },
+                        {
+                            "email": "b@example.com",
+                            "at": 1_000,
+                            "audit": {"seen_at": "2026-06-01T00:00:00.250Z", "note": "text"},
+                        },
+                    ]
+                },
+            )
+        )
+        self.assertEqual(
+            body["parameter_types"],
+            {
+                "rows": {
+                    "array": {
+                        "object": {
+                            "email": "string",
+                            "at": "date_time",
+                            "audit": {"object": {"seen_at": "date_time", "note": "value"}},
+                        }
+                    }
+                }
+            },
+        )
+        self.assertEqual(
+            body["parameters"]["rows"],
+            [
+                {
+                    "email": "a@example.com",
+                    "at": "2026-05-31T20:00:00.000Z",
+                    "audit": {"seen_at": "1970-01-01T00:00:00.000Z", "note": None},
+                },
+                {
+                    "email": "b@example.com",
+                    "at": "1970-01-01T00:00:01.000Z",
+                    "audit": {"seen_at": "2026-06-01T00:00:00.250Z", "note": "text"},
+                },
+            ],
+        )
+
+        valid = {
+            "email": "a@example.com",
+            "at": "2026-06-01T00:00:00Z",
+            "audit": {"seen_at": "2026-06-01T00:00:00Z", "note": 1},
+        }
+
+        def build(row: object) -> None:
+            write_batch().to_query_request(rows, {"rows": [row]})
+
+        for row, message in [
+            ({**valid, "at": "2026-06-01"}, ""),
+            ({**valid, "at": None}, ""),
+            (
+                {key: value for key, value in valid.items() if key != "at"},
+                "parameter 'rows[0]' fields do not match its declared fields "
+                "(missing: ['at'], undeclared: [])",
+            ),
+            ({**valid, "createdAt": "2026-06-01T00:00:00Z"}, "undeclared: ['createdAt']"),
+            ({**valid, "audit": {"seen_at": "2026-06-01T00:00:00Z"}}, "'rows[0].audit'"),
+            ("not an object", "'rows[0]' must be object"),
+        ]:
+            with self.subTest(row=row):
+                with self.assertRaises((TypeError, QueryError)) as raised:
+                    build(row)
+                self.assertIn(message, str(raised.exception))
+
+        typed_rows = QueryParamType.array(
+            QueryParamType.object({"at": QueryParamType.date_time(), "n": QueryParamType.i64()})
+        )
+        self.assertEqual(parsed(typed_rows), {"array": {"object": {"at": "date_time", "n": "i64"}}})
+        self.assertEqual(typed_rows.inner.variant, "Record")
+        self.assertEqual(list(typed_rows.inner.fields), ["at", "n"])
+        typed = QueryRequest.write(write_batch()).with_typed_parameter(
+            "rows", typed_rows, [{"at": "2026-06-01T05:00:00+09:00", "n": 1}]
+        )
+        self.assertEqual(
+            parsed(typed)["parameters"], {"rows": [{"at": "2026-05-31T20:00:00.000Z", "n": 1}]}
+        )
+        with self.assertRaises(TypeError):
+            QueryRequest.write(write_batch()).with_typed_parameter(
+                "rows", typed_rows, [{"at": "nope", "n": 1}]
+            )
+        with self.assertRaisesRegex(TypeError, r"missing: \['n'\]"):
+            QueryRequest.write(write_batch()).with_typed_parameter(
+                "rows", typed_rows, [{"at": "2026-06-01T00:00:00Z"}]
+            )
+        for invalid in [{}, {"at": "date_time"}, ["at"]]:
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(TypeError):
+                    QueryParamType.object(invalid)  # type: ignore[arg-type]
+                with self.assertRaises(TypeError):
+                    param.object(invalid)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            param.object(param.string())  # type: ignore[arg-type]
+        self.assertEqual(parsed(QueryParamType.object()), "object")
+        self.assertEqual(parsed(param.object()), "object")
+        with self.assertRaises(FrozenInstanceError):
+            typed_rows.inner.fields = {}  # type: ignore[misc]
+        with self.assertRaises(TypeError):
+            typed_rows.inner.fields["x"] = QueryParamType.i64()  # type: ignore[index]
+
     def test_index_lifecycle_response_decoders_are_strict_and_additive(self) -> None:
         operation_id = "018f0c58-6bc7-7c56-8d3d-9c5f18a0f001"
         receipt = parse_index_ddl_receipt(
@@ -811,7 +937,7 @@ class DslAstTests(unittest.TestCase):
 
     def test_query_requests(self) -> None:
         params = define_params({"tenant_id": param.string(), "limit": param.i64()})
-        write_params = define_params({"data": param.array(param.object(param.value()))})
+        write_params = define_params({"data": param.array(param.object())})
 
         def read_query(p):
             return (
