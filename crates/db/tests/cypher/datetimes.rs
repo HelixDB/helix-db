@@ -78,7 +78,13 @@ async fn look_alike(db: &HelixDB) {
 /// The node access a statement's first MATCH starts from.
 async fn access(db: &HelixDB, request: cypher::Request) -> String {
     let explanation = db.explain_cypher(request).await.unwrap();
-    let [step, ..] = explanation.plan().matches()[&0].sources[0].access.steps() else {
+    let first = explanation
+        .plan()
+        .matches()
+        .values()
+        .next()
+        .expect("a MATCH");
+    let [step, ..] = first.sources[0].access.steps() else {
         panic!("an access step");
     };
     format!("{:?}", step.op)
@@ -433,6 +439,107 @@ async fn datetime_predicates_read_range_and_equality_indexes() {
     let error = query_error(&range, unreadable).await;
     assert_eq!(error.detail, r::detail::INVALID_DATETIME);
     for db in [range, equality, scanned] {
+        db.close().await.unwrap();
+    }
+}
+
+/// Recency filters relative to the statement clock read range indexes, in
+/// Cypher and SQL, and return what a scan at the same clock returns: events
+/// half an hour off every whole hour before and after the clock stay on one
+/// side of each bound however long the statements take.
+#[tokio::test]
+async fn clock_relative_filters_read_range_indexes_as_a_scan_does() {
+    use cypher::sql::request::Request;
+    let range = database().await;
+    let scanned = database().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    // seq k is at now - (k - 3) hours - half an hour: seqs 0..=2 are ahead.
+    for db in [&range, &scanned] {
+        for seq in 0..12_i64 {
+            let at = now - (seq - 3) * HOUR - HOUR / 2;
+            rows(
+                db,
+                request(
+                    "CREATE (:Event {seq: $seq, at: $at, ms: $ms})",
+                    [
+                        ("seq", Q::I64(seq)),
+                        ("at", Q::DateTime(at)),
+                        ("ms", Q::I64(at)),
+                    ],
+                ),
+            )
+            .await;
+        }
+    }
+    create_index(&range, index::IndexSpec::node_range("Event", "at")).await;
+    create_index(&range, index::IndexSpec::node_range("Event", "ms")).await;
+    let window = || [("window", Q::I64(5 * HOUR))];
+    for query in [
+        "MATCH (e:Event) WHERE e.at > datetime({epochMillis: timestamp() - $window}) \
+         RETURN e.seq ORDER BY e.seq",
+        "MATCH (e:Event) WHERE e.ms >= timestamp() - $window AND e.ms < timestamp() \
+         RETURN e.seq ORDER BY e.seq",
+        "MATCH (e:Event) WHERE e.ms > timestamp() - $window AND e.at <= datetime() \
+         RETURN e.seq ORDER BY e.seq",
+    ] {
+        assert_eq!(
+            access(&range, request(query, window())).await,
+            "RangeIndex",
+            "{query}"
+        );
+        let direct = rows(&range, request(query, window())).await;
+        assert_eq!(
+            direct,
+            if query.starts_with("MATCH (e:Event) WHERE e.at >") {
+                seqs(0..8)
+            } else {
+                seqs(3..8)
+            },
+            "{query}"
+        );
+        assert_eq!(
+            rows(&scanned, request(query, window())).await,
+            direct,
+            "{query}"
+        );
+    }
+    for (query, expected) in [
+        (
+            "SELECT e.seq FROM Event e WHERE e.at < NOW() ORDER BY e.seq",
+            seqs(3..12),
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE e.at >= CURRENT_TIMESTAMP(0) ORDER BY e.seq",
+            seqs(0..3),
+        ),
+    ] {
+        let explanation = range.explain_sql(Request::new(query)).await.unwrap();
+        let [step, ..] = explanation.plan().matches()[&0].sources[0].access.steps() else {
+            panic!("an access step");
+        };
+        assert!(format!("{:?}", step.op).contains("RangeIndex"), "{query}");
+        let direct = range.sql(Request::new(query)).await.unwrap().rows;
+        assert_eq!(direct, expected, "{query}");
+        assert_eq!(
+            scanned.sql(Request::new(query)).await.unwrap().rows,
+            direct,
+            "{query}"
+        );
+    }
+    // An operand that fails keeps the scan, which raises its error.
+    let overflow = request(
+        "MATCH (e:Event) WHERE e.ms > timestamp() * 9223372036854775807 RETURN e.seq",
+        [],
+    );
+    assert_eq!(access(&range, overflow.clone()).await, "LabelScan");
+    assert_eq!(
+        query_error(&range, overflow).await.category,
+        r::category::ARITHMETIC_ERROR
+    );
+    for db in [range, scanned] {
         db.close().await.unwrap();
     }
 }
@@ -881,10 +988,16 @@ async fn datetime_lists_are_held_and_found_by_equality_indexes() {
             seqs([1]),
             "Bitmap",
         ),
-        // A member the planner does not read before running keeps the scan.
         (
             "MATCH (s:Slot) WHERE s.at = [datetime({epochMillis: 0}), datetime({epochMillis: 1})] \
              RETURN s.seq",
+            seqs([1]),
+            "Bitmap",
+        ),
+        // A member the planner does not read before running keeps the scan.
+        (
+            "MATCH (s:Slot) WHERE s.at = [datetime({epochMillis: 0}), \
+             datetime({epochMillis: toInteger('1')})] RETURN s.seq",
             seqs([1]),
             "LabelScan",
         ),
