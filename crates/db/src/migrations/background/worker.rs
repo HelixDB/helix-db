@@ -76,6 +76,14 @@ impl MigrationWorkerSupervisor {
         Some(Self { shutdown, handle })
     }
 
+    /// Joins a worker that stops on its own once every job has finished.
+    #[cfg(test)]
+    pub(crate) async fn join(self) {
+        self.handle
+            .await
+            .expect("background migration worker does not panic");
+    }
+
     /// Requests shutdown and joins the worker before its storage dependency closes.
     pub(crate) async fn stop(self) {
         let _ = self.shutdown.send(true);

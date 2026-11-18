@@ -207,12 +207,16 @@ impl TestDbConfig {
     }
 }
 
+/// Fixture writers open with their background migrations finished, so a
+/// test's own writes are the only rows that change after open.
 pub(crate) async fn open_db(database: &str) -> HelixDB {
-    HelixDB::open(HelixDbSource::InMemory {
+    let db = HelixDB::open(HelixDbSource::InMemory {
         database: database.to_string(),
     })
     .await
-    .expect("db opens")
+    .expect("db opens");
+    db.wait_for_background_migrations().await;
+    db
 }
 
 pub(crate) async fn open_db_with_config(config: TestDbConfig) -> HelixDB {
@@ -222,6 +226,7 @@ pub(crate) async fn open_db_with_config(config: TestDbConfig) -> HelixDB {
     )
     .await
     .expect("db opens");
+    db.wait_for_background_migrations().await;
     for definition in config.indexes {
         db.install_index_for_tests(definition)
             .await
@@ -234,9 +239,11 @@ pub(crate) async fn open_db_with_object_store(
     database: &str,
     object_store: Arc<dyn ObjectStore>,
 ) -> HelixDB {
-    HelixDB::open_with_object_store_for_tests_inner(database.to_string(), object_store)
+    let db = HelixDB::open_with_object_store_for_tests_inner(database.to_string(), object_store)
         .await
-        .expect("object-store db opens")
+        .expect("object-store db opens");
+    db.wait_for_background_migrations().await;
+    db
 }
 
 #[cfg(test)]

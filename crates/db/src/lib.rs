@@ -1455,6 +1455,23 @@ impl HelixDB {
         .await
     }
 
+    /// Waits until the background migration worker has finished every job.
+    ///
+    /// The datetime string job keeps scanning rows written after open until it
+    /// catches up, committing a progress row per batch, so a fixture that
+    /// compares stored rows across writes waits here before writing. A handle
+    /// without a worker returns at once. There is no deadline: fixtures with
+    /// paused clocks would fire one early, and a fresh store's jobs finish in a
+    /// few batches.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_background_migrations(&self) {
+        let worker = self.inner.migration_worker.lock().await.take();
+        let Some(worker) = worker else {
+            return;
+        };
+        worker.join().await;
+    }
+
     #[cfg(test)]
     async fn open_with_object_store_for_tests_inner(
         database: impl Into<String>,

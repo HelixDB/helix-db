@@ -321,6 +321,8 @@ async fn graph_rows_and_complete_operations_commit_together_without_physical_row
     )
     .await;
     install_vector_and_text(&db).await;
+    // Only the write below may add keys, not open-time migration progress.
+    db.wait_for_background_migrations().await;
 
     let before = all_keys(&db).await;
     let id = add_doc(&db, vec![1.0, 2.0], "hello queued world")
