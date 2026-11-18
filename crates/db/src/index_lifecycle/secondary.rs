@@ -1166,6 +1166,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
 
     async fn acquire_step_permit(
         &self,
+        db: &slatedb::Db,
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
@@ -1187,7 +1188,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
                 ));
             }
         };
-        Ok(self.scope_gates.step_permit(scope, gate).await)
+        self.scope_gates.step_permit(db, scope, gate).await
     }
 
     /// Prepares one build step with the narrowest coordination it needs.
@@ -1234,7 +1235,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
         else {
             self.reset_stalled_preparations(operation);
             ledgers.forget(generation);
-            let permit = self.acquire_step_permit(scope, operation).await?;
+            let permit = self.acquire_step_permit(db, scope, operation).await?;
             return Ok(PreparedIndexOperationStep::driver_owned(
                 self.family(),
                 permit,
@@ -1269,7 +1270,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
                 };
                 return Ok(PreparedIndexOperationStep::driver_owned(
                     self.family(),
-                    self.scope_gates.step_permit(scope, gate).await,
+                    self.scope_gates.step_permit(db, scope, gate).await?,
                 ));
             }
             SecondaryBuildStage::CatchUp(progress) => {
@@ -1337,7 +1338,7 @@ impl IndexOperationDriver for SecondaryIndexDriver {
                 )
             }
         };
-        let permit = self.scope_gates.step_permit(scope, gate).await;
+        let permit = self.scope_gates.step_permit(db, scope, gate).await?;
         // Writes that committed while the permit was awaited may have taken
         // a catch-up backlog past the gated reach. A stalled validation and
         // activation drain it regardless: they fence writers to finish.
@@ -9322,13 +9323,6 @@ mod tests {
             ] {
                 durable_rows.push(generation_rows(&db, scope, kind, index_id, generation).await);
             }
-            let durable_operation = read_operation(&db, scope, operation_id)
-                .await
-                .expect("operation is readable");
-            if tail_lost {
-                store.uploads.send_replace(WalUploads::Held);
-            }
-
             let pause =
                 crate::index_lifecycle::outbox::step_pause::StepPause::arm(&db, |progress| {
                     matches!(
@@ -9361,6 +9355,15 @@ mod tests {
             .expect("the crashing claim succeeds")
             .expect("exact queued revision is claimable");
             claim_sequence += 1;
+            // A gated step uploads everything applied before it takes its
+            // gate, so only what it commits under the gate can be lost.
+            db.flush().await.expect("the claim uploads");
+            let durable_operation = read_operation(&db, scope, operation_id)
+                .await
+                .expect("operation is readable");
+            if tail_lost {
+                store.uploads.send_replace(WalUploads::Held);
+            }
             let lifecycle_rows = {
                 let crashing = execute_claimed_step(
                     &db,
@@ -9424,7 +9427,7 @@ mod tests {
                         .await
                         .expect("operation is readable"),
                     durable_operation,
-                    "a lost WAL tail takes the crashed claim too"
+                    "a lost WAL tail leaves the operation at its uploaded claim"
                 );
             } else {
                 assert_eq!(
@@ -9449,6 +9452,75 @@ mod tests {
         assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
             .await;
         db.close().await.expect("crash test database closes");
+    }
+
+    /// A gated step uploads the build's unflushed tail before it fences
+    /// anyone. Progressed steps and claims commit without waiting for their
+    /// WAL upload, and activation's completion waits for every lower
+    /// sequence; taking the lifecycle permit first would hold writers and
+    /// planning through that whole upload. Here the upload is held while the
+    /// activation's claim is unflushed: writers and planning still get their
+    /// permits, and the activation completes once the upload lands.
+    #[tokio::test]
+    async fn activation_fences_nobody_while_earlier_commits_upload() {
+        use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+
+        let store = Arc::new(GatedWalStore::new());
+        let db = Db::builder(
+            "secondary-activation-tail-upload",
+            Arc::clone(&store) as Arc<dyn slatedb::object_store::ObjectStore>,
+        )
+        .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+        .build()
+        .await
+        .expect("activation test database opens");
+        bootstrap_writer(&db)
+            .await
+            .expect("activation test database bootstraps");
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email").expect("test definition"),
+        );
+        let mut sources = BTreeMap::new();
+        for entity_id in 0..4 {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 3).await;
+        let gates = Arc::new(IndexScopeGates::default());
+        let driver = SecondaryIndexDriver::new(Arc::clone(&gates));
+        let mut claim_sequence = 1;
+        drive_until_stage(&db, &driver, operation_id, &mut claim_sequence, |stage| {
+            matches!(stage, SecondaryBuildStage::Activate(_))
+        })
+        .await;
+
+        store.uploads.send_replace(WalUploads::Held);
+        let activation = drive_one(&db, &driver, operation_id, &mut claim_sequence);
+        tokio::pin!(activation);
+        let wait = Duration::from_secs(1);
+        for _ in 0..3 {
+            tokio::select! {
+                outcome = &mut activation => {
+                    panic!("activation completed before its upload: {outcome:?}")
+                }
+                permits = async {
+                    tokio::time::timeout(wait, gates.mutation_permit(scope)).await.map(drop)?;
+                    tokio::time::timeout(wait, gates.catalog_permit(scope)).await.map(drop)
+                } => permits.expect("writers and planning run while the tail uploads"),
+            }
+        }
+        store.uploads.send_replace(WalUploads::Open);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), activation)
+                .await
+                .expect("activation completes once the upload lands"),
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("activation test database closes");
     }
 
     /// Writes inside the scanned range commit while a source batch is held

@@ -1062,6 +1062,7 @@ impl IndexOperationDriver for VectorIndexDriver {
 
     async fn acquire_step_permit(
         &self,
+        db: &Db,
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
@@ -1087,17 +1088,17 @@ impl IndexOperationDriver for VectorIndexDriver {
                 return Err(corruption("vector driver received another family progress"));
             }
         };
-        Ok(self.scope_gates.step_permit(scope, gate).await)
+        self.scope_gates.step_permit(db, scope, gate).await
     }
 
     async fn prepare_step(
         &self,
-        _db: &Db,
+        db: &Db,
         scope: DataScope,
         operation: &IndexOperationRecord,
         _limits: SearchIndexBatchLimits,
     ) -> Result<PreparedIndexOperationStep> {
-        let permit = self.acquire_step_permit(scope, operation).await?;
+        let permit = self.acquire_step_permit(db, scope, operation).await?;
         Ok(PreparedIndexOperationStep::driver_owned(
             self.family(),
             permit,

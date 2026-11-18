@@ -496,6 +496,7 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
     /// permit supplied by this default implementation.
     async fn acquire_step_permit(
         &self,
+        _db: &Db,
         _scope: DataScope,
         _operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
@@ -509,12 +510,12 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
     /// all other stages on the ordinary path.
     async fn prepare_step(
         &self,
-        _db: &Db,
+        db: &Db,
         scope: DataScope,
         operation: &IndexOperationRecord,
         _limits: SearchIndexBatchLimits,
     ) -> Result<PreparedIndexOperationStep> {
-        let permit = self.acquire_step_permit(scope, operation).await?;
+        let permit = self.acquire_step_permit(db, scope, operation).await?;
         Ok(PreparedIndexOperationStep::driver_owned(
             self.family(),
             permit,
@@ -2245,6 +2246,7 @@ mod tests {
 
         async fn acquire_step_permit(
             &self,
+            _db: &Db,
             _scope: DataScope,
             _operation: &IndexOperationRecord,
         ) -> Result<Box<dyn IndexOperationStepPermit>> {
@@ -2293,6 +2295,7 @@ mod tests {
 
         async fn acquire_step_permit(
             &self,
+            _db: &Db,
             _scope: DataScope,
             _operation: &IndexOperationRecord,
         ) -> Result<Box<dyn IndexOperationStepPermit>> {
