@@ -1,6 +1,6 @@
 //! Executable `ForEach` batch interpretation.
 
-use helix_ast::query::QueryValue;
+use helix_ast::query::{self as ast_query, QueryValue};
 use helix_ast::value::PropertyValue as AstPropertyValue;
 use helix_planner::{context, exec, ir};
 
@@ -18,6 +18,7 @@ struct RestoredParamBinding {
     name: ir::NonEmptyString,
     ast: Option<AstPropertyValue>,
     query: Option<QueryValue>,
+    ty: Option<ast_query::QueryParamType>,
 }
 
 #[derive(Debug)]
@@ -31,6 +32,25 @@ impl<'db> ExecutionContext<'db> {
     ) -> Result<ExecutionValue> {
         let frames = self.foreach_param_frames(param)?;
         let param_restore = RestoredParamBinding::remove(&mut self.params, param.clone());
+        // The fields each row declares, when the batch parameter is typed as
+        // an array of objects with declared fields.
+        let row_fields = param_restore.ty.as_ref().and_then(|ty| {
+            let mut ty = ty;
+            while let ast_query::QueryParamType::Nullable(inner) = ty {
+                ty = inner;
+            }
+            let ast_query::QueryParamType::Array(row) = ty else {
+                return None;
+            };
+            let mut row = row.as_ref();
+            while let ast_query::QueryParamType::Nullable(inner) = row {
+                row = inner;
+            }
+            let ast_query::QueryParamType::Record(fields) = row else {
+                return None;
+            };
+            Some(fields)
+        });
         // Membership sets are forgotten only when a binding they read
         // changes: the body runs with the batch parameter unbound.
         self.prepared_memberships
@@ -39,7 +59,7 @@ impl<'db> ExecutionContext<'db> {
             let mut last = None;
             for frame in frames {
                 self.check_execution_deadline()?;
-                let restore = frame.apply_to(&mut self.params);
+                let restore = frame.apply_to(&mut self.params, row_fields);
                 // Sets resolved from the bindings this frame replaces cannot
                 // serve it,
                 self.prepared_memberships
@@ -78,7 +98,19 @@ impl<'db> ExecutionContext<'db> {
 }
 
 impl ForEachParamFrame {
-    fn apply_to(self, params: &mut context::ParamBindings) -> ForEachParamRestore {
+    /// Bind this row's fields over the current bindings, returning what
+    /// restores them.
+    ///
+    /// With `declared`, the row's declared fields, a query row also binds
+    /// each field's declared type, so a nested `forEach` over a field knows
+    /// its rows' fields. A declared field the row omits (only a nullable one
+    /// may be) is unbound for the iteration: a binding of the same name from
+    /// outside the loop, or from an enclosing row, never stands in for it.
+    fn apply_to(
+        self,
+        params: &mut context::ParamBindings,
+        declared: Option<&ast_query::ObjectFields>,
+    ) -> ForEachParamRestore {
         match self {
             Self::Ast(fields) => {
                 let mut restore = Vec::with_capacity(fields.len());
@@ -89,9 +121,29 @@ impl ForEachParamFrame {
                 ForEachParamRestore(restore)
             }
             Self::Query(fields) => {
-                let mut restore = Vec::with_capacity(fields.len());
+                // Row fields come from an object's map, so they are in name
+                // order and a binary search finds each declared one.
+                let omitted = declared
+                    .into_iter()
+                    .flat_map(ast_query::ObjectFields::iter)
+                    .filter(|(field, _)| {
+                        fields
+                            .binary_search_by(|(name, _)| (**name).cmp(*field))
+                            .is_err()
+                    })
+                    .filter_map(|(field, _)| ir::NonEmptyString::new(field.to_owned()))
+                    .collect::<Vec<_>>();
+                let mut restore = Vec::with_capacity(fields.len() + omitted.len());
+                for name in omitted {
+                    restore.push(RestoredParamBinding::remove(params, name));
+                }
                 for (name, value) in fields {
                     restore.push(RestoredParamBinding::remove(params, name.clone()));
+                    params.query_types.extend(
+                        declared
+                            .and_then(|declared| declared.get(&name))
+                            .map(|ty| (name.clone(), ty.clone())),
+                    );
                     params.query_values.insert(name, value);
                 }
                 ForEachParamRestore(restore)
@@ -105,6 +157,7 @@ impl RestoredParamBinding {
         Self {
             ast: params.values.remove(&name),
             query: params.query_values.remove(&name),
+            ty: params.query_types.remove(&name),
             name,
         }
     }
@@ -112,8 +165,12 @@ impl RestoredParamBinding {
     fn restore(self, params: &mut context::ParamBindings) {
         params.values.remove(&self.name);
         params.query_values.remove(&self.name);
+        params.query_types.remove(&self.name);
         if let Some(value) = self.ast {
             params.values.insert(self.name.clone(), value);
+        }
+        if let Some(ty) = self.ty {
+            params.query_types.insert(self.name.clone(), ty);
         }
         if let Some(value) = self.query {
             params.query_values.insert(self.name, value);
@@ -489,7 +546,7 @@ mod tests {
             id.clone(),
             QueryValue::String("new-query".to_string()),
         )])
-        .apply_to(&mut params);
+        .apply_to(&mut params, None);
 
         assert!(!params.values.contains_key(&id));
         assert_eq!(
@@ -507,5 +564,59 @@ mod tests {
             Some(&AstPropertyValue::from("old-static"))
         );
         assert!(!params.query_values.contains_key(&id));
+    }
+
+    /// A declared field the row omits is unbound for the iteration, value
+    /// and type, and comes back afterwards; a bound field carries its
+    /// declared type.
+    #[test]
+    fn foreach_frame_apply_unbinds_declared_fields_the_row_omits() {
+        let (at, name_field, stable) = (name("at"), name("name"), name("stable"));
+        let declared = ast_query::ObjectFields::new([
+            ("name", ast_query::QueryParamType::String),
+            (
+                "at",
+                ast_query::QueryParamType::Nullable(Box::new(ast_query::QueryParamType::DateTime)),
+            ),
+        ])
+        .unwrap();
+        let mut params = context::ParamBindings::default()
+            .with_value(at.clone(), AstPropertyValue::from("old-static"))
+            .with_query_value(at.clone(), QueryValue::DateTime(1))
+            .with_query_value(stable.clone(), QueryValue::I64(2));
+        params
+            .query_types
+            .insert(at.clone(), ast_query::QueryParamType::DateTime);
+        let before = params.clone();
+
+        let restore = ForEachParamFrame::Query(vec![(
+            name_field.clone(),
+            QueryValue::String("row".to_string()),
+        )])
+        .apply_to(&mut params, Some(&declared));
+
+        assert!(restore.binds(&at));
+        assert!(!params.values.contains_key(&at));
+        assert!(!params.query_values.contains_key(&at));
+        assert!(!params.query_types.contains_key(&at));
+        assert_eq!(
+            params.query_types.get(&name_field),
+            Some(&ast_query::QueryParamType::String)
+        );
+        assert_eq!(params.query_values.get(&stable), Some(&QueryValue::I64(2)));
+
+        restore.restore(&mut params);
+        assert_eq!(params, before);
+
+        // Without a declaration, only the row's own fields are bound.
+        let restore = ForEachParamFrame::Query(vec![(
+            name_field.clone(),
+            QueryValue::String("row".to_string()),
+        )])
+        .apply_to(&mut params, None);
+        assert_eq!(params.query_values.get(&at), Some(&QueryValue::DateTime(1)));
+        assert!(!params.query_types.contains_key(&name_field));
+        restore.restore(&mut params);
+        assert_eq!(params, before);
     }
 }

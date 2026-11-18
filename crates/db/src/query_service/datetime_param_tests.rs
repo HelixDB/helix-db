@@ -645,6 +645,171 @@ async fn foreach_rows_with_nullable_datetime_fields_store_datetimes_or_null() {
     assert_eq!(event_count(&db).await, json!(0));
 }
 
+/// A request body over `parameters` declared with `parameter_types`.
+fn request_json(
+    request: QueryRequest,
+    parameters: serde_json::Value,
+    parameter_types: serde_json::Value,
+) -> Vec<u8> {
+    let mut request = serde_json::to_value(request).unwrap();
+    request["parameters"] = parameters;
+    request["parameter_types"] = parameter_types;
+    serde_json::to_vec(&request).unwrap()
+}
+
+async fn stored(db: &HelixDB, label: &str, properties: Vec<&str>) -> Vec<serde_json::Value> {
+    let response = db
+        .query(QueryRequest::read(
+            read_batch()
+                .var_as("found", g().n_with_label(label).value_map(Some(properties)))
+                .returning(["found"]),
+        ))
+        .await
+        .unwrap();
+    response["found"].as_array().unwrap().clone()
+}
+
+/// A row that omits a declared nullable field leaves it unbound for that
+/// iteration even when a parameter of the same name is bound outside the
+/// loop: the outer value never stands in for the row's own field. A row that
+/// sends the field, even as `null`, binds it.
+#[tokio::test]
+async fn foreach_rows_omitting_a_nullable_field_do_not_read_a_same_named_parameter() {
+    let request = || {
+        QueryRequest::write(write_batch().for_each_param(
+            "rows",
+            write_batch().var_as(
+                "event",
+                g().add_n(
+                    "Event",
+                    vec![
+                        ("name", PropertyInput::param("name")),
+                        ("at", PropertyInput::param("at")),
+                        ("source", PropertyInput::param("source")),
+                    ],
+                ),
+            ),
+        ))
+    };
+    let types = json!({
+        "rows": { "array": { "object": {
+            "name": "string",
+            "at": { "nullable": "date_time" },
+        } } },
+        "at": "date_time",
+        "source": "string",
+    });
+    let parameters = |row: serde_json::Value| json!({ "rows": [row], "at": "2026-01-01T00:00:00Z", "source": "import" });
+
+    let db = open("datetime-rows-omitted-shadow").await;
+    let error = db
+        .query_json(&request_json(
+            request(),
+            parameters(json!({ "name": "omitted" })),
+            types.clone(),
+        ))
+        .await
+        .expect_err("the omitted row field is unbound")
+        .to_string();
+    assert!(error.contains("`at` is not bound"), "{error}");
+    assert_eq!(event_count(&db).await, json!(0));
+
+    // An outer parameter the rows do not declare stays readable, and a row
+    // field sent as `null` binds `null` over the outer value.
+    db.query_json(&request_json(
+        request(),
+        parameters(json!({ "name": "null", "at": null })),
+        types,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        stored(&db, "Event", vec!["name", "at", "source"]).await,
+        [json!({ "name": "null", "at": null, "source": "import" })]
+    );
+}
+
+/// The same holds one loop down: an inner row that omits a declared
+/// nullable field does not read the enclosing row's field of that name.
+#[tokio::test]
+async fn nested_foreach_rows_omitting_a_nullable_field_do_not_read_the_outer_row_field() {
+    let request = || {
+        QueryRequest::write(
+            write_batch().for_each_param(
+                "rows",
+                write_batch()
+                    .var_as(
+                        "event",
+                        g().add_n(
+                            "Event",
+                            vec![
+                                ("name", PropertyInput::param("name")),
+                                ("at", PropertyInput::param("at")),
+                            ],
+                        ),
+                    )
+                    .for_each_param(
+                        "items",
+                        write_batch().var_as(
+                            "item",
+                            g().add_n(
+                                "Item",
+                                vec![
+                                    ("label", PropertyInput::param("label")),
+                                    ("at", PropertyInput::param("at")),
+                                ],
+                            ),
+                        ),
+                    ),
+            ),
+        )
+    };
+    let types = json!({ "rows": { "array": { "object": {
+        "name": "string",
+        "at": "date_time",
+        "items": { "array": { "object": {
+            "label": "string",
+            "at": { "nullable": "date_time" },
+        } } },
+    } } } });
+    let parameters = |item: serde_json::Value| {
+        json!({ "rows": [{
+            "name": "outer",
+            "at": "2026-01-01T00:00:00Z",
+            "items": [item],
+        }] })
+    };
+
+    let db = open("datetime-rows-nested-omitted-shadow").await;
+    let error = db
+        .query_json(&request_json(
+            request(),
+            parameters(json!({ "label": "omitted" })),
+            types.clone(),
+        ))
+        .await
+        .expect_err("the omitted inner row field is unbound")
+        .to_string();
+    assert!(error.contains("`at` is not bound"), "{error}");
+    assert_eq!(event_count(&db).await, json!(0));
+
+    db.query_json(&request_json(
+        request(),
+        parameters(json!({ "label": "set", "at": "2026-06-01T00:00:00Z" })),
+        types,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        stored(&db, "Event", vec!["name", "at"]).await,
+        [json!({ "name": "outer", "at": "2026-01-01T00:00:00.000Z" })]
+    );
+    assert_eq!(
+        stored(&db, "Item", vec!["label", "at"]).await,
+        [json!({ "label": "set", "at": "2026-06-01T00:00:00.000Z" })]
+    );
+}
+
 /// A nullable field may be omitted: inside a stored object it stays absent
 /// rather than becoming `null`, and in another row the same field set is
 /// still stored as a datetime.

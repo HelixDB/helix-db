@@ -995,6 +995,38 @@ impl QueryRequest {
         (self.query, values)
     }
 
+    /// Consume the validated request into its closed query, its runtime
+    /// values, and the declared type of each value: none when untyped, and
+    /// one per value when typed.
+    ///
+    /// ```
+    /// use helix_ast::batch::read_batch;
+    /// use helix_ast::query::{QueryParamType, QueryRequest, QueryValue};
+    ///
+    /// let request = QueryRequest::read(read_batch())
+    ///     .with_typed_parameter("n", QueryParamType::I64, QueryValue::I64(1))
+    ///     .unwrap();
+    /// let (_, values, types) = request.into_query_with_types();
+    /// assert_eq!(values["n"], QueryValue::I64(1));
+    /// assert_eq!(types["n"], QueryParamType::I64);
+    ///
+    /// let (_, _, types) = QueryRequest::read(read_batch()).into_query_with_types();
+    /// assert!(types.is_empty());
+    /// ```
+    pub fn into_query_with_types(
+        self,
+    ) -> (
+        BatchQuery,
+        BTreeMap<String, QueryValue>,
+        BTreeMap<String, QueryParamType>,
+    ) {
+        let (values, types) = match self.parameters {
+            QueryParameters::Untyped(values) => (values, BTreeMap::new()),
+            QueryParameters::Typed { values, types } => (values, types),
+        };
+        (self.query, values, types)
+    }
+
     /// Insert an explicitly untyped parameter.
     pub fn try_insert_untyped_parameter(
         &mut self,
