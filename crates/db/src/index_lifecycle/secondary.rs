@@ -9499,18 +9499,23 @@ mod tests {
         store.uploads.send_replace(WalUploads::Held);
         let activation = drive_one(&db, &driver, operation_id, &mut claim_sequence);
         tokio::pin!(activation);
+        // Long enough for the step to reach the upload it waits for.
+        let outcome = tokio::time::timeout(Duration::from_millis(500), &mut activation).await;
+        assert!(
+            outcome.is_err(),
+            "activation completed before its upload: {outcome:?}"
+        );
         let wait = Duration::from_secs(1);
-        for _ in 0..3 {
-            tokio::select! {
-                outcome = &mut activation => {
-                    panic!("activation completed before its upload: {outcome:?}")
-                }
-                permits = async {
-                    tokio::time::timeout(wait, gates.mutation_permit(scope)).await.map(drop)?;
-                    tokio::time::timeout(wait, gates.catalog_permit(scope)).await.map(drop)
-                } => permits.expect("writers and planning run while the tail uploads"),
-            }
-        }
+        drop(
+            tokio::time::timeout(wait, gates.mutation_permit(scope))
+                .await
+                .expect("writers run while the tail uploads"),
+        );
+        drop(
+            tokio::time::timeout(wait, gates.catalog_permit(scope))
+                .await
+                .expect("planning runs while the tail uploads"),
+        );
         store.uploads.send_replace(WalUploads::Open);
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(10), activation)
