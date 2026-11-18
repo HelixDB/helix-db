@@ -406,7 +406,8 @@ request = query.to_query_request(
   (`{ "nullable": "date_time" }`); see
   [Nullable fields](/database/helix-db/query-guides/parameters#nullable-fields). A row
   that omits a field the body reads, such as `PropertyInput.param("deletedAt")`, fails as
-  an unbound parameter, so send `null` for a column the body writes.
+  an unbound parameter, even when another parameter or an enclosing row has a field of
+  that name, so send `null` for a column the body writes.
 - Rows declared as a bare `{ "array": "object" }` (`param.object()`,
   `QueryParamType::Object`, `ParamTypeObject()`) are not checked field by field, and
   their RFC3339 strings stay strings.
