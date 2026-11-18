@@ -1541,6 +1541,12 @@ async fn publish_storage_schema_completion(db: &Db, scope: DataScope) -> Result<
 /// and no allocator to reserve, and a store without legacy vector definitions
 /// has no vector property to restore. Running either would rewrite or scan
 /// every node and edge while the writer serves nothing.
+///
+/// Ends by re-proving the legacy vector reservations against the rewritten
+/// catalog while legacy definitions remain. This must finish before the
+/// runtime starts its index worker: a resumed legacy adoption writes the
+/// reservation, metadata, definition, and index rows the preflight reads, so a
+/// preflight overlapping it would fail writer open with a transaction conflict.
 pub(crate) async fn run_blocking_startup_migration(
     writer: &HelixWriter,
     tuning: config::MigrationTuning,
@@ -1645,10 +1651,16 @@ pub(crate) async fn run_blocking_startup_migration(
     );
     #[cfg(test)]
     trip_migration_failpoint(MigrationFailpoint::CleanupEnqueueAfter)?;
+    if !index_v2_migration_ready(writer.db(), scope).await? {
+        preflight_legacy_vector_reservations(writer.db()).await?;
+    }
     Ok(())
 }
 
 /// Converges persisted legacy catalog rows through normal V2 lifecycle work.
+///
+/// Relies on [`run_blocking_startup_migration`] having reserved every legacy
+/// vector namespace before the index worker started.
 pub(crate) async fn migrate_legacy_definitions(db: &crate::HelixDB) -> Result<()> {
     let started = Instant::now();
     let scope = DataScope::LegacyUnscoped;
@@ -1690,8 +1702,6 @@ pub(crate) async fn migrate_legacy_definitions(db: &crate::HelixDB) -> Result<()
                     .to_string(),
         });
     }
-    preflight_legacy_vector_reservations(writer.db()).await?;
-
     let legacy_rows = load_legacy_definition_rows(writer.db(), scope).await?;
     let scanned_count = u64::try_from(legacy_rows.len()).unwrap_or(u64::MAX);
     for row in &legacy_rows {
@@ -1950,9 +1960,10 @@ struct V2VectorPhysicalOwner {
 
 /// Reserves and cross-validates every hash-derived legacy vector namespace.
 ///
-/// Writer open calls this before queue reconciliation or lifecycle allocation.
-/// The serializable transaction either installs the complete reservation set or
-/// leaves every legacy catalog and physical row unchanged.
+/// Writer open calls this before queue reconciliation or lifecycle allocation,
+/// and never once the index worker runs: its reads span rows that lifecycle
+/// steps write. The serializable transaction either installs the complete
+/// reservation set or leaves every legacy catalog and physical row unchanged.
 pub(crate) async fn preflight_legacy_vector_reservations(db: &Db) -> Result<()> {
     use crate::encoding::v1::keys::vectors::{VectorMetadataScanPrefix, VectorMetadataScanRow};
     use crate::encoding::v1::values::vectors::metadata::{decode_legacy_metadata, decode_metadata};

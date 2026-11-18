@@ -1296,10 +1296,6 @@ async fn recover_interrupted_vector_adoptions(
     boundaries: &[MigrationFailpoint],
     held_preflight: Option<std::num::NonZeroUsize>,
 ) -> Vec<&'static str> {
-    // SlateDB's default 100 ms flush, not `one_row_config`'s 1 ms: a fast
-    // flush lets the recovery open race a resumed index operation into a
-    // transaction conflict (HEL-996).
-    let adoption_config = || one_row_config().with_slate_settings(slatedb::Settings::default());
     let mut recovered_boundaries = Vec::with_capacity(boundaries.len());
     for &failpoint in boundaries {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1351,7 +1347,7 @@ async fn recover_interrupted_vector_adoptions(
             HelixDB::open_with_object_store_for_migration_parity(
                 database.clone(),
                 Arc::clone(&store),
-                adoption_config(),
+                one_row_config(),
             ),
         )
         .await
@@ -1445,11 +1441,7 @@ async fn recover_interrupted_vector_adoptions(
         }
         let recovered = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            HelixDB::open_with_object_store_for_migration_parity(
-                database,
-                store,
-                adoption_config(),
-            ),
+            HelixDB::open_with_object_store_for_migration_parity(database, store, one_row_config()),
         )
         .await
         .unwrap_or_else(|_| {
