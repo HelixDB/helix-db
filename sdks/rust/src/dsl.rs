@@ -152,18 +152,19 @@ pub mod __private {
                     }
                     // A field `null` or omitted in some rows is declared
                     // nullable, so the server accepts it omitted too.
-                    let fields = crate::ObjectFields::new(types.into_iter().map(
-                        |(field, shape, ty)| match shape {
-                            Shape::Null | Shape::Nullable(_) => (
-                                field,
-                                ty.unwrap_or(crate::QueryParamType::Nullable(Box::new(
-                                    crate::QueryParamType::Value,
-                                ))),
-                            ),
-                            _ => (field, ty.unwrap_or(crate::QueryParamType::Value)),
-                        },
-                    ))
-                    .expect("an object's field names are distinct and at least one is typed");
+                    let fields =
+                        crate::ObjectFields::new(types.into_iter().map(|(field, shape, ty)| {
+                            match shape {
+                                Shape::Null | Shape::Nullable(_) => (
+                                    field,
+                                    ty.unwrap_or(crate::QueryParamType::Nullable(Box::new(
+                                        crate::QueryParamType::Value,
+                                    ))),
+                                ),
+                                _ => (field, ty.unwrap_or(crate::QueryParamType::Value)),
+                            }
+                        }))
+                        .expect("an object's field names are distinct and at least one is typed");
                     Some(crate::QueryParamType::Record(fields))
                 }
             }
@@ -184,9 +185,7 @@ pub mod __private {
                 (Shape::Null, Shape::Nullable(inner)) | (Shape::Nullable(inner), Shape::Null) => {
                     Ok(Shape::Nullable(inner))
                 }
-                (Shape::Null, other) | (other, Shape::Null) => {
-                    Ok(Shape::Nullable(Box::new(other)))
-                }
+                (Shape::Null, other) | (other, Shape::Null) => Ok(Shape::Nullable(Box::new(other))),
                 (Shape::Nullable(joined), Shape::Nullable(next)) => {
                     join(*joined, *next).map(|inner| Shape::Nullable(Box::new(inner)))
                 }

@@ -2071,7 +2071,9 @@ mod tests {
     fn parameters_at_the_json_depth_limit() {
         let deepest = MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH;
         let arrays = |levels: usize| {
-            (0..levels).fold(QueryValue::I64(1), |inner, _| QueryValue::Array(vec![inner]))
+            (0..levels).fold(QueryValue::I64(1), |inner, _| {
+                QueryValue::Array(vec![inner])
+            })
         };
         let objects = |levels: usize| {
             (0..levels).fold(QueryValue::I64(1), |inner, _| object(vec![("k", inner)]))
@@ -2091,8 +2093,16 @@ mod tests {
         };
         // Each case at the limit, and one level past it.
         let cases = [
-            ("untyped arrays", (None, arrays(deepest)), (None, arrays(deepest + 1))),
-            ("untyped objects", (None, objects(deepest)), (None, objects(deepest + 1))),
+            (
+                "untyped arrays",
+                (None, arrays(deepest)),
+                (None, arrays(deepest + 1)),
+            ),
+            (
+                "untyped objects",
+                (None, objects(deepest)),
+                (None, objects(deepest + 1)),
+            ),
             (
                 "typed arrays",
                 (Some(array_types(deepest)), arrays(deepest)),
@@ -2101,7 +2111,10 @@ mod tests {
             (
                 "typed records",
                 (Some(record_types(deepest / 2)), objects(deepest / 2)),
-                (Some(record_types(deepest / 2 + 1)), objects(deepest / 2 + 1)),
+                (
+                    Some(record_types(deepest / 2 + 1)),
+                    objects(deepest / 2 + 1),
+                ),
             ),
             (
                 "typed nullables",
@@ -2137,9 +2150,8 @@ mod tests {
             );
             // The same request written by hand fails to parse.
             let (ty, value) = past;
-            let types = ty.map(|ty| {
-                format!(r#"{{"value":{}}}"#, serde_json::to_string(&ty).unwrap())
-            });
+            let types =
+                ty.map(|ty| format!(r#"{{"value":{}}}"#, serde_json::to_string(&ty).unwrap()));
             let json = read_wire(
                 &format!(r#"{{"value":{}}}"#, serde_json::to_string(&value).unwrap()),
                 types.as_deref(),
@@ -3296,7 +3308,10 @@ mod tests {
             ("b", nullable(QueryParamType::I64)),
         ]);
         assert_eq!(
-            typed(optional.clone(), object(vec![])).unwrap().parameters().unwrap()["value"],
+            typed(optional.clone(), object(vec![]))
+                .unwrap()
+                .parameters()
+                .unwrap()["value"],
             object(vec![])
         );
         assert!(matches!(

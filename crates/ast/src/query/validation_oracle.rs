@@ -19,7 +19,11 @@ pub(super) fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), 
 /// objects of a typed parameter.
 fn validate_below(value: &QueryValue, path: &str, levels_above: usize) -> Result<(), QueryError> {
     // `depth` is the JSON level the value opens if it is an array or object.
-    let mut pending = vec![(value, path.to_owned(), PARAMETER_JSON_DEPTH + levels_above + 1)];
+    let mut pending = vec![(
+        value,
+        path.to_owned(),
+        PARAMETER_JSON_DEPTH + levels_above + 1,
+    )];
     while let Some((value, path, depth)) = pending.pop() {
         if matches!(value, QueryValue::Array(_) | QueryValue::Object(_))
             && depth > MAX_REQUEST_JSON_DEPTH

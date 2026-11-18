@@ -1703,7 +1703,11 @@ mod tests {
         ])));
         for rows in [
             vec![row(vec![named("a")]), row(vec![named("b"), at(1)])],
-            vec![row(vec![named("a"), at(0)]), row(vec![named("b")]), row(vec![named("c"), at(2)])],
+            vec![
+                row(vec![named("a"), at(0)]),
+                row(vec![named("b")]),
+                row(vec![named("c"), at(2)]),
+            ],
             vec![row(vec![named("a"), at(0)]), row(vec![named("b")])],
             // Omitted in one row and null in another.
             vec![
@@ -1756,7 +1760,9 @@ mod tests {
         let audited = |seen: Option<i64>| {
             (
                 "audit",
-                PropertyValue::object(seen.map(|millis| ("seen_at", PropertyValue::DateTime(millis)))),
+                PropertyValue::object(
+                    seen.map(|millis| ("seen_at", PropertyValue::DateTime(millis))),
+                ),
             )
         };
         let request = q_rows(vec![
@@ -1771,7 +1777,10 @@ mod tests {
                 ("at", QueryParamType::DateTime),
                 (
                     "audit",
-                    nullable(fields(vec![("seen_at", nullable(QueryParamType::DateTime))]))
+                    nullable(fields(vec![(
+                        "seen_at",
+                        nullable(QueryParamType::DateTime)
+                    )]))
                 ),
                 ("name", QueryParamType::Value),
             ])))
