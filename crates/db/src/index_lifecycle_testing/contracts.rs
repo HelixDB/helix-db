@@ -1468,9 +1468,10 @@ async fn run_create_batch_durability() {
 }
 
 /// Proves the automatic worker claims each operation in its own task: with
-/// eight secondary slots, sixteen empty builds created in one batch step side
-/// by side instead of one claim per WAL upload, and every build converges
-/// without a worker failure or restart.
+/// eight secondary slots, sixteen builds created in one batch step side by
+/// side instead of one claim at a time, and every build converges without a
+/// worker failure or restart. Each build runs a hundred one-entity steps, so
+/// a task outlasts the dispatch of the next ones.
 async fn run_concurrent_claim_convergence() {
     let concurrency =
         IndexLifecycleConcurrency::try_new(8, 8, 1, 1).expect("eight secondary slots validate");
@@ -1478,13 +1479,27 @@ async fn run_concurrent_claim_convergence() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-concurrent-claims".to_string(),
         },
-        DbConfig::new().with_index_lifecycle_throughput_tuning(
-            IndexLifecycleThroughputTuning::new(Default::default(), concurrency),
-        ),
+        DbConfig::new()
+            .with_index_lifecycle_throughput_tuning(IndexLifecycleThroughputTuning::new(
+                Default::default(),
+                concurrency,
+            ))
+            .with_secondary_index_lifecycle_tuning(
+                SecondaryIndexLifecycleTuning::default().with_batch_rows(
+                    SecondaryIndexLifecycleBatchRows::new(1).expect("one row is positive"),
+                ),
+            ),
         LifecycleTestScheduling::Automatic,
     )
     .await
     .expect("concurrent claim writer opens");
+    for ordinal in 0..16 {
+        db.cypher(crate::cypher::Request::new(format!(
+            "UNWIND range(0, 99) AS value CREATE (:ConcurrentClaim{ordinal} {{value: value}})"
+        )))
+        .await
+        .expect("build sources load");
+    }
     let controller = LifecycleTestController::new();
     let scope = DataScope::LegacyUnscoped;
     let names: Vec<String> = (0..16).map(|ordinal| format!("i{ordinal}")).collect();
