@@ -8059,9 +8059,11 @@ datetimes, however it is written, is stored as one datetime list, which an
 equality index holds and an equality such as
 `e.slots = [datetime('2026-06-01'), datetime('2026-06-02')]` reads through it.
 
-- `datetime()` and `timestamp()` read the statement's clock, once: every call in
-  one statement returns the same instant, as a datetime or as integer epoch
-  milliseconds.
+- `datetime()` and `timestamp()` read the statement's clock, once, before the
+  statement is planned: every call in one statement, in a filter, a result or a
+  write, returns the same instant, as a datetime or as integer epoch
+  milliseconds. There is no `duration`; subtract milliseconds instead, as in
+  `datetime({epochMillis: timestamp() - 86400000})` for a day ago.
 - `datetime(text)` reads RFC 3339 (`2026-06-01T09:00:00Z`) with a `Z` or
   `±hh:mm` offset, a date and time without an offset (read as UTC), or a date
   alone (`2026-06-01`, UTC midnight). Every field is zero-padded, years run
@@ -8159,9 +8161,13 @@ in the statement; explain shows which one was chosen.
 An index is only used when every other condition on that node cannot fail.
 Comparisons, string predicates, label and null tests, and their `AND`, `OR`,
 `XOR`, and `NOT` combinations over literals, parameters, variables, and properties
-qualify, as do datetime literals, typed datetime parameters, and `datetime($text)`
-of a parameter that reads as a datetime. Arithmetic and other function calls,
-including the clock `datetime()`, keep the label scan.
+qualify, as do datetime literals, typed datetime parameters, `datetime($text)`
+of a parameter that reads as a datetime, and the statement clock: `datetime()`,
+`timestamp()`, integer arithmetic over them, literals and parameters, and
+`datetime({epochMillis: n})` of such an integer, so a recency filter such as
+`WHERE e.at > datetime({epochMillis: timestamp() - $windowMs})` reads a range
+index. Arithmetic that would fail, such as an overflow, and other function calls
+keep the label scan, which raises the error.
 
 ## Load and fetch in batches
 
@@ -8664,7 +8670,8 @@ profile and are rejected (`function`): `CURRENT_DATE` becomes `date()`,
 and `stddev` `stDev`.
 
 Timestamps are Cypher's [UTC datetimes](/database/helix-db/query-guides/cypher#datetimes).
-`CURRENT_TIMESTAMP` and `NOW()` become `datetime()`, the statement's clock.
+`CURRENT_TIMESTAMP` and `NOW()` become `datetime()`, the statement's clock,
+which is read before planning, so `WHERE e.at > NOW()` can bound a range index.
 Their one optional argument is a fractional-seconds precision from 0 to 6, as
 in PostgreSQL's `CURRENT_TIMESTAMP(p)` and MySQL's `NOW(p)`, which rounds the
 clock; a datetime holds milliseconds, so 3 to 6 change nothing. Any other
