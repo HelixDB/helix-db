@@ -2496,11 +2496,13 @@ func ParamTypeArray(inner QueryParamType) QueryParamType {
 	return QueryParamType{kind: paramKindArray, inner: &inner}
 }
 
-// ParamTypeObjectFields declares an object with exactly these fields, each
+// ParamTypeObjectFields declares an object with these fields, each
 // normalized to its type and sent as {"object": {"<field>": <type>}}, so a
-// ParamTypeDateTime field binds as a datetime on the server. A missing or
-// undeclared field is rejected, and nil satisfies only a ParamTypeValue
-// field. Validate rejects an empty field map with ErrEmptyObjectFields.
+// ParamTypeDateTime field binds as a datetime on the server. An undeclared
+// field is rejected, and so is a missing one unless it is ParamTypeNullable;
+// nil satisfies only a ParamTypeValue or ParamTypeNullable field. Fields are
+// validated in name order, so the first invalid one reported is stable.
+// Validate rejects an empty field map with ErrEmptyObjectFields.
 func ParamTypeObjectFields(fields map[string]QueryParamType) QueryParamType {
 	copied := make(map[string]QueryParamType, len(fields))
 	for name, field := range fields {
@@ -2511,8 +2513,9 @@ func ParamTypeObjectFields(fields map[string]QueryParamType) QueryParamType {
 
 // ParamTypeNullable accepts nil or a value of inner, sent as
 // {"nullable": <inner>}: an optional datetime column in bulk rows stays a
-// datetime where it is set. An object field declared nullable must still be
-// present.
+// datetime where it is set. A typed nil, such as a nil *time.Time, is nil
+// too, and a set pointer stands for the value it points to. An object field
+// declared nullable may also be omitted, and then stays absent.
 func ParamTypeNullable(inner QueryParamType) QueryParamType {
 	return QueryParamType{kind: paramKindNullable, inner: &inner}
 }
@@ -2549,8 +2552,14 @@ func (q QueryParamType) Validate() error {
 		if q.fields == nil || len(*q.fields) == 0 {
 			return ErrEmptyObjectFields
 		}
-		for name, field := range *q.fields {
-			if err := field.Validate(); err != nil {
+		// In name order, so the first invalid field reported is stable.
+		names := make([]string, 0, len(*q.fields))
+		for name := range *q.fields {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if err := (*q.fields)[name].Validate(); err != nil {
 				return &PathError{Path: name, Err: err}
 			}
 		}
@@ -3224,9 +3233,20 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 		if parameterType.fields == nil || !reflected.IsValid() || reflected.Kind() != reflect.Map || reflected.Type().Key().Kind() != reflect.String {
 			return nil, ErrInvalidParameterType
 		}
-		var missing, extra []string
+		// Fields are checked in name order, as the server and the Rust SDK
+		// order them, so the first invalid field reported is stable.
+		names := make([]string, 0, len(*parameterType.fields))
 		for name := range *parameterType.fields {
-			if !reflected.MapIndex(reflect.ValueOf(name).Convert(reflected.Type().Key())).IsValid() {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		field := func(name string) reflect.Value {
+			return reflected.MapIndex(reflect.ValueOf(name).Convert(reflected.Type().Key()))
+		}
+		// A nullable field may be omitted and then stays absent.
+		var missing, extra []string
+		for _, name := range names {
+			if !field(name).IsValid() && (*parameterType.fields)[name].kind != paramKindNullable {
 				missing = append(missing, name)
 			}
 		}
@@ -3236,16 +3256,19 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 			}
 		}
 		if len(missing) > 0 || len(extra) > 0 {
-			sort.Strings(missing)
 			sort.Strings(extra)
 			return nil, &PathError{Path: path, Err: fmt.Errorf("%w (missing: %q, undeclared: %q)", ErrObjectFieldMismatch, missing, extra)}
 		}
-		values := make(map[string]QueryValue, len(*parameterType.fields))
-		for name, field := range *parameterType.fields {
+		values := make(map[string]QueryValue, len(names))
+		for _, name := range names {
+			entry := field(name)
+			if !entry.IsValid() {
+				continue
+			}
 			fieldPath := path + "." + name
 			normalized, err := normalizeTypedQueryValue(
-				field,
-				reflected.MapIndex(reflect.ValueOf(name).Convert(reflected.Type().Key())).Interface(),
+				(*parameterType.fields)[name],
+				entry.Interface(),
 				fieldPath,
 			)
 			if err != nil {
@@ -3283,8 +3306,20 @@ func normalizeTypedQueryValue(parameterType QueryParamType, value QueryValue, pa
 		if parameterType.inner == nil {
 			return nil, ErrInvalidParameterType
 		}
-		if value == nil {
+		// A typed nil (a nil *time.Time, map or slice) is null
+		// too, and a set pointer stands for the value it points to.
+		reflected := reflect.ValueOf(value)
+		if !reflected.IsValid() {
 			return QueryNull(), nil
+		}
+		switch reflected.Kind() {
+		case reflect.Pointer, reflect.Map, reflect.Slice:
+			if reflected.IsNil() {
+				return QueryNull(), nil
+			}
+		}
+		if reflected.Kind() == reflect.Pointer {
+			return normalizeTypedQueryValue(parameterType, reflected.Elem().Interface(), path)
 		}
 		return normalizeTypedQueryValue(*parameterType.inner, value, path)
 	default:

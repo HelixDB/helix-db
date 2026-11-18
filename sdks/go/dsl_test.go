@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -716,21 +717,121 @@ func TestNullableFieldsAcceptNilOrTheirInnerType(t *testing.T) {
 	if !reflect.DeepEqual(decoded.Parameters["rows"], wantRows) {
 		t.Fatalf("rows = %#v", decoded.Parameters["rows"])
 	}
-	// Nullable is not optional, and a set value is still checked.
+	// A nullable field may be omitted and stays absent, as the server keeps
+	// it; a field that is not nullable must be present, an undeclared one is
+	// rejected, and a set value is still checked.
+	omitted, err := normalizeTypedQueryValue(rows, QueryArray(map[string]any{"name": "Ada"}), "rows")
+	if err != nil || !reflect.DeepEqual(omitted, []QueryValue{map[string]QueryValue{"name": QueryString("Ada")}}) {
+		t.Fatalf("an omitted nullable field stays absent: %#v, %v", omitted, err)
+	}
 	for _, test := range []struct {
-		row any
-		is  error
+		row     any
+		is      error
+		message string
 	}{
-		{map[string]any{"name": "Ada"}, ErrObjectFieldMismatch},
-		{map[string]any{"name": "Ada", "deletedAt": "2026-06-01"}, ErrInvalidDateTimeParameter},
+		{map[string]any{"deletedAt": nil}, ErrObjectFieldMismatch, `(missing: ["name"], undeclared: [])`},
+		{map[string]any{"name": "Ada", "note": 1}, ErrObjectFieldMismatch, `(missing: [], undeclared: ["note"])`},
+		{map[string]any{"name": "Ada", "deletedAt": "2026-06-01"}, ErrInvalidDateTimeParameter, "rows[0].deletedAt"},
 	} {
 		err := NewWriteQueryRequest(Write()).InsertTypedParameter("rows", rows, QueryArray(test.row))
-		if !errors.Is(err, test.is) {
-			t.Fatalf("row %#v: got %v, want %v", test.row, err, test.is)
+		if !errors.Is(err, test.is) || !strings.Contains(err.Error(), test.message) {
+			t.Fatalf("row %#v: got %v, want %v containing %q", test.row, err, test.is, test.message)
 		}
 	}
 	if err := NewReadQueryRequest(Read()).InsertTypedParameter("at", ParamTypeNullable(ParamTypeDateTime()), nil); err != nil {
 		t.Fatalf("a top-level nullable accepts nil: %v", err)
+	}
+}
+
+// A typed nil is nil to a nullable type: a nil *time.Time in an optional
+// column, a nil map or slice. A set pointer stands for the value it points
+// to, and a typed nil is still rejected where nil is not accepted.
+func TestNullableTypesTreatTypedNilsAsNull(t *testing.T) {
+	at := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	var unset *time.Time
+	pointer := &at
+	for _, test := range []struct {
+		name  string
+		ty    QueryParamType
+		value any
+		want  QueryValue
+	}{
+		{"nil *time.Time", ParamTypeNullable(ParamTypeDateTime()), unset, QueryNull()},
+		{"set *time.Time", ParamTypeNullable(ParamTypeDateTime()), &at, QueryString("2026-06-01T00:00:00.000Z")},
+		{"**time.Time", ParamTypeNullable(ParamTypeDateTime()), &pointer, QueryString("2026-06-01T00:00:00.000Z")},
+		{"nil **time.Time", ParamTypeNullable(ParamTypeDateTime()), (**time.Time)(nil), QueryNull()},
+		{"nil slice", ParamTypeNullable(ParamTypeArray(ParamTypeString())), []string(nil), QueryNull()},
+		{"nil map", ParamTypeNullable(ParamTypeObjectFields(map[string]QueryParamType{"a": ParamTypeI64()})), map[string]any(nil), QueryNull()},
+		{"nil *string", ParamTypeNullable(ParamTypeString()), (*string)(nil), QueryNull()},
+	} {
+		got, err := normalizeTypedQueryValue(test.ty, test.value, "p")
+		if err != nil || !reflect.DeepEqual(got, test.want) {
+			t.Fatalf("%s: got %#v, %v; want %#v", test.name, got, err, test.want)
+		}
+	}
+
+	// In bulk rows: the reviewer-reported case.
+	rows := ParamTypeArray(ParamTypeObjectFields(map[string]QueryParamType{
+		"name":      ParamTypeString(),
+		"deletedAt": ParamTypeNullable(ParamTypeDateTime()),
+	}))
+	request := NewWriteQueryRequest(Write())
+	if err := request.InsertTypedParameter("rows", rows, QueryArray(
+		map[string]any{"name": "Ada", "deletedAt": unset},
+		map[string]any{"name": "Grace", "deletedAt": &at},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"rows":[{"deletedAt":null,"name":"Ada"},{"deletedAt":"2026-06-01T00:00:00.000Z","name":"Grace"}]`) {
+		t.Fatalf("typed nil rows = %s", body)
+	}
+
+	// Without a nullable declaration a typed nil is still invalid.
+	for _, ty := range []QueryParamType{ParamTypeDateTime(), ParamTypeString(), ParamTypeArray(ParamTypeString())} {
+		if _, err := normalizeTypedQueryValue(ty, unset, "p"); err == nil {
+			t.Fatalf("%#v accepted a nil *time.Time", ty)
+		}
+	}
+	// A set pointer to the wrong type is still checked.
+	text := "2026-06-01"
+	if _, err := normalizeTypedQueryValue(ParamTypeNullable(ParamTypeDateTime()), &text, "p"); !errors.Is(err, ErrInvalidDateTimeParameter) {
+		t.Fatalf("a pointer to an invalid datetime: %v", err)
+	}
+}
+
+// With several invalid fields, the first in name order is reported every
+// time, as on the server, rather than whichever map iteration reached first.
+func TestObjectFieldErrorsAreReportedInNameOrder(t *testing.T) {
+	declared := map[string]QueryParamType{}
+	value := map[string]any{}
+	for index := 0; index < 32; index++ {
+		name := fmt.Sprintf("f%02d", index)
+		declared[name] = ParamTypeDateTime()
+		value[name] = "not a datetime " + name
+	}
+	record := ParamTypeObjectFields(declared)
+	for run := 0; run < 200; run++ {
+		_, err := normalizeTypedQueryValue(record, value, "row")
+		var pathErr *PathError
+		if !errors.As(err, &pathErr) || pathErr.Path != "row.f00" {
+			t.Fatalf("run %d reported %v, want row.f00", run, err)
+		}
+	}
+	// Declaration validation reports its first invalid field in name order too.
+	invalid := map[string]QueryParamType{}
+	for index := 0; index < 32; index++ {
+		invalid[fmt.Sprintf("f%02d", index)] = QueryParamType{kind: paramKindArray}
+	}
+	malformed := ParamTypeObjectFields(invalid)
+	for run := 0; run < 200; run++ {
+		var pathErr *PathError
+		if err := malformed.Validate(); !errors.As(err, &pathErr) || pathErr.Path != "f00" {
+			t.Fatalf("run %d reported %v, want f00", run, err)
+		}
 	}
 }
 
