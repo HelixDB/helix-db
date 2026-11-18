@@ -1768,7 +1768,7 @@
             "properties": {
               "object": {
                 "type": "object",
-                "description": "Declared fields of an object parameter. A value must have exactly these fields, each normalized to its declared type; null satisfies only a value or nullable field. Field names must be unique.",
+                "description": "Declared fields of an object parameter. A value must have these fields, except nullable ones, which it may omit (they stay absent); it must not have others. Each is normalized to its declared type; null satisfies only a value or nullable field. Field names must be unique.",
                 "minProperties": 1,
                 "additionalProperties": {
                   "$ref": "#/components/schemas/QueryParameterType"

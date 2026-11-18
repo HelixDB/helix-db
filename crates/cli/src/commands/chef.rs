@@ -232,7 +232,7 @@ const seed = (p = params) =>
     .returning(['created']);
 // values: { data: [{ name: 'Ada', email: 'ada@example.com' }, { name: 'Grace', email: 'grace@example.com' }] }
 ```
-Inside the body, each object's fields (`name`, `email`) are scoped as params for the inner query. Declare every row field with its type, and every row must have exactly those fields. A timestamp field needs `param.dateTime()` (or `param.nullable(param.dateTime())` when it can be `null`) to be stored as a datetime that range filters and indexes match.
+Inside the body, each object's fields (`name`, `email`) are scoped as params for the inner query. Declare every row field with its type; a row must not have undeclared fields, and must send every field the body reads (`null` for an unset `param.nullable(...)` field). A timestamp field needs `param.dateTime()` (or `param.nullable(param.dateTime())` when it can be `null`) to be stored as a datetime that range filters and indexes match.
 
 **3. Create an edge between two existing nodes by id (write):**
 ```ts

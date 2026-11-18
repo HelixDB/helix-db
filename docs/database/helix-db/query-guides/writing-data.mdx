@@ -398,12 +398,15 @@ request = query.to_query_request(
 - The parameter must be an array of objects. Any other value fails type validation
   before the query runs when typed as here (`invalid_query_json` over HTTP), or with
   `invalid_query` when untyped. An empty array runs the body zero times.
-- Every row must have exactly the declared fields. A missing or undeclared field, a
-  wrong-typed value, an invalid RFC3339 string in a `date_time` field, or `null` in any
-  field not declared `value` or nullable rejects the whole request before anything is
-  written. Declare a column that can be `null`, such as a `deletedAt` timestamp, as
-  `param.nullable(param.dateTime())` (`{ "nullable": "date_time" }`); see
-  [Nullable fields](/database/helix-db/query-guides/parameters#nullable-fields).
+- Every row must have the declared fields, except nullable ones, which a row may omit. A
+  missing field that is not nullable, an undeclared field, a wrong-typed value, an invalid
+  RFC3339 string in a `date_time` field, or `null` in any field not declared `value` or
+  nullable rejects the whole request before anything is written. Declare a column that can
+  be `null`, such as a `deletedAt` timestamp, as `param.nullable(param.dateTime())`
+  (`{ "nullable": "date_time" }`); see
+  [Nullable fields](/database/helix-db/query-guides/parameters#nullable-fields). A row
+  that omits a field the body reads, such as `PropertyInput.param("deletedAt")`, fails as
+  an unbound parameter, so send `null` for a column the body writes.
 - Rows declared as a bare `{ "array": "object" }` (`param.object()`,
   `QueryParamType::Object`, `ParamTypeObject()`) are not checked field by field, and
   their RFC3339 strings stay strings.
