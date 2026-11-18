@@ -92,7 +92,10 @@ impl MigrationWorkerSupervisor {
 ///
 /// Each runs every step, so none waits for another to finish, and one failing
 /// does not stop another's batch from committing. The cleanup follows the
-/// copy, so the step that publishes the copy starts it.
+/// copy, so the step that publishes the copy starts it. The label steps wait
+/// while the writer's flush backlog is high (see
+/// [`LabelCopySession::admit_step`]), so they never push foreground writes into
+/// storage backpressure.
 pub(crate) async fn process_background_step(
     writer: &HelixWriter,
     tuning: MigrationTuning,
@@ -105,9 +108,16 @@ pub(crate) async fn process_background_step(
         }
         BackgroundMigrations::LabelIdentity => Ok(false),
     };
-    let copy = label_identity::copy_hash_label_rows_once(writer, labels).await;
-    let cleanup = label_identity::delete_hash_label_rows_once(writer.db(), tuning).await;
-    Ok(job? | copy?.advanced() | cleanup?.advanced())
+    // Label steps run only while the writer's flush backlog leaves room for
+    // foreground writes; a step held back is taken later.
+    let labels_advanced = if labels.admit_step(writer.db()).await? {
+        let copy = label_identity::copy_hash_label_rows_once(writer, labels).await;
+        let cleanup = label_identity::delete_hash_label_rows_once(writer.db(), labels).await;
+        copy?.advanced() | cleanup?.advanced()
+    } else {
+        true
+    };
+    Ok(job? | labels_advanced)
 }
 
 async fn run(

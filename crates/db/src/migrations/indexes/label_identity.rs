@@ -101,7 +101,6 @@ use roaring::RoaringTreemap;
 use slatedb::config::WriteOptions;
 use slatedb::{Db, DbTransaction, IsolationLevel, KeyValue};
 
-use crate::config::MigrationTuning;
 use crate::encoding::indexes::{
     hash_property_value, label, EdgeDirection, PropertyIndexKey, ValueHash,
 };
@@ -126,11 +125,27 @@ const LABEL_HASH_CLEANUP_READY: &[u8] = b"kv_migration_ready:label_hash_cleanup"
 /// Metadata key of an unfinished cleanup's progress.
 const LABEL_HASH_CLEANUP_PROGRESS: &[u8] = b"kv_migration_progress:label_hash_cleanup";
 
-/// Hash rows one copy step reads. Neighbor rows dominate: one per endpoint,
-/// direction, and edge label, mostly of a member or two.
-const BATCH_ROWS: usize = 8192;
-/// Bytes of the keys and values one copy step stages, bounding its memory.
-const BATCH_BYTES: usize = 32 * 1024 * 1024;
+/// Hash rows one copy step reads at most. Neighbor rows dominate: one per
+/// endpoint, direction, and edge label, mostly of a member or two.
+const BATCH_ROWS: usize = 16_384;
+/// Bytes of the keys and values one step stages at most. A step also stages
+/// at most 1/[`STEP_SHARE`] of the writer's `max_unflushed_bytes`, so no single
+/// commit takes a large part of the room foreground writes share.
+const BATCH_BYTES: usize = 8 * 1024 * 1024;
+/// The share of `max_unflushed_bytes` one step may stage: 1 in this many.
+const STEP_SHARE: usize = 16;
+/// Steps stop while the flush backlog, the immutable memtables and unflushed
+/// WAL waiting for object storage, reaches 1/this of `max_unflushed_bytes`...
+const BACKLOG_HIGH_SHARE: usize = 4;
+/// ...and start again once it is below 1/this, so they do not flap at one mark.
+const BACKLOG_LOW_SHARE: usize = 8;
+/// How long a held-back step waits before the next check.
+const YIELD_WAIT: Duration = Duration::from_millis(50);
+/// A step whose durable commit takes longer than this halves the next step;
+/// a quicker commit grows it back by a quarter, up to the limits above.
+const SLOW_COMMIT: Duration = Duration::from_millis(500);
+/// Hash rows one cleanup step deletes at most.
+const CLEANUP_BATCH_ROWS: usize = 16_384;
 /// Members one copy step adds: each is a conflict token the step's
 /// transaction holds, and a committed transaction's tokens stay retained, in
 /// a quota shared with graph writes, while any older transaction is open.
@@ -191,21 +206,29 @@ impl LabelIdentityMigration {
     }
 }
 
-/// What one background writer keeps between copy steps: the batch limits a
-/// conflict narrows, the exact edge labels of the scope it is in, and its
-/// running totals. Nothing in it is needed to resume: a fresh session, of
-/// this writer or another, picks up from the stored progress.
+/// What one background writer keeps between label steps: the pacing that
+/// holds steps back while the writer's flush backlog is high, the step limits
+/// conflicts and slow commits narrow, the exact edge labels of the scope the
+/// copy is in, and running totals for the progress log. Nothing in it is
+/// needed to resume: a fresh session, of this writer or another, picks up from
+/// the stored progress.
 pub(crate) struct LabelCopySession {
     max_rows: usize,
     max_members: u64,
-    /// The current limits: each conflict halves them, so a batch a hot row's
-    /// writes keep hitting shrinks to that row alone, and a commit restores
-    /// them.
+    max_bytes: usize,
+    /// The current limits of a copy step: a conflict or a slow commit halves
+    /// them, so a batch a hot row's writes keep hitting shrinks to that row
+    /// alone, and each quick commit grows them back by a quarter.
     rows: usize,
     members: u64,
+    bytes: usize,
+    cleanup_rows: usize,
+    pacing: FlushPacing,
     /// Exact edge labels of one scope by the hash its neighbor rows carry.
     edge_labels: Option<(DataScope, BTreeMap<ValueHash, label::SharedLabel>)>,
     totals: LabelIdentityMigration,
+    /// Hash rows the cleanup deleted.
+    deleted: u64,
     started: Instant,
     reported: Instant,
     /// Runs before the next batch commits, so a test can write between a
@@ -224,10 +247,15 @@ impl LabelCopySession {
         Self {
             max_rows: rows,
             max_members: members,
+            max_bytes: BATCH_BYTES,
             rows,
             members,
+            bytes: BATCH_BYTES,
+            cleanup_rows: CLEANUP_BATCH_ROWS,
+            pacing: FlushPacing::default(),
             edge_labels: None,
             totals: LabelIdentityMigration::default(),
+            deleted: 0,
             started: Instant::now(),
             reported: Instant::now(),
             #[cfg(test)]
@@ -235,27 +263,96 @@ impl LabelCopySession {
         }
     }
 
-    fn conflicted(&mut self) {
-        self.totals.conflicts += 1;
-        self.rows = (self.rows / 2).max(1);
-        self.members = (self.members / 2).max(1);
+    /// A session whose cleanup deletes at most `rows` hash rows a step.
+    #[cfg(test)]
+    pub(crate) fn with_cleanup_rows(rows: usize) -> Self {
+        assert!(rows > 0, "a cleanup step deletes something");
+        Self {
+            cleanup_rows: rows,
+            ..Self::new()
+        }
     }
 
-    fn committed(&mut self, batch: LabelIdentityMigration) {
+    /// Whether a label step may run now. While the writer's flush backlog is
+    /// high it waits [`YIELD_WAIT`] and declines, so the caller takes the step
+    /// later and foreground writes keep the room meanwhile.
+    pub(crate) async fn admit_step(&mut self, db: &Db) -> Result<bool> {
+        let unflushed = db.unflushed_bytes()?;
+        if self.pacing.admits(unflushed) {
+            return Ok(true);
+        }
+        let waited = Instant::now();
+        tokio::time::sleep(YIELD_WAIT).await;
+        self.pacing.yielded += waited.elapsed();
+        Ok(false)
+    }
+
+    fn conflicted(&mut self) {
+        self.totals.conflicts += 1;
+        self.narrow();
+    }
+
+    fn narrow(&mut self) {
+        self.rows = (self.rows / 2).max(1);
+        self.members = (self.members / 2).max(1);
+        self.bytes = (self.bytes / 2).max(1);
+    }
+
+    fn committed(&mut self, batch: LabelIdentityMigration, commit: Duration) {
         self.totals.add(batch);
-        self.rows = self.max_rows;
-        self.members = self.max_members;
+        if commit > SLOW_COMMIT {
+            self.narrow();
+        } else {
+            self.rows = self
+                .rows
+                .saturating_add(self.rows / 4 + 1)
+                .min(self.max_rows);
+            self.members = self
+                .members
+                .saturating_add(self.members / 4 + 1)
+                .min(self.max_members);
+            self.bytes = self
+                .bytes
+                .saturating_add(self.bytes / 4 + 1)
+                .min(self.max_bytes);
+        }
         if self.reported.elapsed() < PROGRESS_INTERVAL {
             return;
         }
         self.reported = Instant::now();
+        let elapsed = self.started.elapsed();
         tracing::info!(
             copied = self.totals.copied,
             skipped = self.totals.skipped,
             stale_members = self.totals.stale_members,
             conflicts = self.totals.conflicts,
-            elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            rows_per_second = per_second(self.totals.copied + self.totals.skipped, elapsed),
+            step_rows = self.rows,
+            step_bytes = self.bytes,
+            last_commit_ms = u64::try_from(commit.as_millis()).unwrap_or(u64::MAX),
+            yields = self.pacing.yields,
+            yielded_ms = u64::try_from(self.pacing.yielded.as_millis()).unwrap_or(u64::MAX),
+            flush_backlog_bytes = self.pacing.backlog,
+            elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             "label identity copy in progress"
+        );
+    }
+
+    fn cleaned(&mut self, deleted: u64) {
+        self.deleted += deleted;
+        if self.reported.elapsed() < PROGRESS_INTERVAL {
+            return;
+        }
+        self.reported = Instant::now();
+        let elapsed = self.started.elapsed();
+        tracing::info!(
+            deleted = self.deleted,
+            rows_per_second = per_second(self.deleted, elapsed),
+            yields = self.pacing.yields,
+            yielded_ms = u64::try_from(self.pacing.yielded.as_millis()).unwrap_or(u64::MAX),
+            flush_backlog_bytes = self.pacing.backlog,
+            elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            "label hash cleanup in progress"
         );
     }
 
@@ -279,6 +376,53 @@ impl LabelCopySession {
     #[cfg(test)]
     pub(crate) const fn totals(&self) -> LabelIdentityMigration {
         self.totals
+    }
+}
+
+fn per_second(rows: u64, elapsed: Duration) -> u64 {
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= 0.0 {
+        return 0;
+    }
+    (rows as f64 / seconds) as u64
+}
+
+/// Holds label steps back while the writer's flush backlog is high.
+///
+/// Every write, foreground or background, waits once the writer's unflushed
+/// bytes reach `max_unflushed_bytes` (SlateDB backpressure). The backlog that
+/// fills that room is the immutable memtables and the WAL waiting for object
+/// storage; the active memtable fills and freezes in normal operation. Label
+/// steps stop once the backlog reaches 1/[`BACKLOG_HIGH_SHARE`] of the limit
+/// and start again below 1/[`BACKLOG_LOW_SHARE`], so they only use flush
+/// capacity foreground writes leave spare.
+#[derive(Debug, Default)]
+struct FlushPacing {
+    /// Whether steps are waiting for the backlog to fall below the low mark.
+    yielding: bool,
+    /// How often steps started waiting, and for how long in all.
+    yields: u64,
+    yielded: Duration,
+    /// The flush backlog last observed, in bytes.
+    backlog: usize,
+}
+
+impl FlushPacing {
+    /// Whether a step may run under `unflushed`.
+    fn admits(&mut self, unflushed: slatedb::UnflushedBytes) -> bool {
+        self.backlog = unflushed
+            .immutable_memtable_bytes
+            .saturating_add(unflushed.wal_bytes);
+        let was_yielding = self.yielding;
+        self.yielding = if was_yielding {
+            self.backlog > unflushed.max_unflushed_bytes / BACKLOG_LOW_SHARE
+        } else {
+            self.backlog >= unflushed.max_unflushed_bytes / BACKLOG_HIGH_SHARE
+        };
+        if self.yielding && !was_yielding {
+            self.yields += 1;
+        }
+        !self.yielding
     }
 }
 
@@ -395,7 +539,12 @@ pub(crate) async fn copy_hash_label_rows_once(
             })
         })
         .transpose()?;
-    let mut batch = CopyBatch::new(session);
+    // No step stages more than its share of the writer's unflushed budget.
+    let step_bytes = session
+        .bytes
+        .min(db.unflushed_bytes()?.max_unflushed_bytes / STEP_SHARE)
+        .max(1);
+    let mut batch = CopyBatch::new(session, step_bytes);
     // The scope whose exact edge labels this step read.
     let mut reloaded = None;
     let after = match &recorded {
@@ -476,9 +625,12 @@ pub(crate) async fn copy_hash_label_rows_once(
     Mutation::put(&transaction, &progress_key, progress.encode())?;
     #[cfg(test)]
     tests::pause(session.before_commit.take()).await;
+    // A durable commit keeps at most one step of the copy waiting in the WAL,
+    // so foreground writes never queue behind a backlog the copy built.
+    let commit_started = Instant::now();
     let committed = transaction
         .commit_with_options(&WriteOptions {
-            await_durable: false,
+            await_durable: true,
             ..WriteOptions::default()
         })
         .await;
@@ -490,7 +642,7 @@ pub(crate) async fn copy_hash_label_rows_once(
         }
         Err(error) => return Err(error.into()),
     }
-    session.committed(totals);
+    session.committed(totals, commit_started.elapsed());
     if exhausted {
         return publish(writer, session).await;
     }
@@ -535,6 +687,7 @@ struct CopyBatch {
     members: u64,
     max_rows: usize,
     max_members: u64,
+    max_bytes: usize,
     /// The last row passed, or the last member copied of a row too large for
     /// one batch; `None` until the batch passes a row.
     progress: Option<label_migration::LabelCopyProgressValue>,
@@ -542,7 +695,7 @@ struct CopyBatch {
 }
 
 impl CopyBatch {
-    fn new(session: &LabelCopySession) -> Self {
+    fn new(session: &LabelCopySession, max_bytes: usize) -> Self {
         Self {
             rows: Vec::new(),
             passed: 0,
@@ -550,6 +703,7 @@ impl CopyBatch {
             members: 0,
             max_rows: session.rows,
             max_members: session.members,
+            max_bytes,
             progress: None,
             totals: LabelIdentityMigration::default(),
         }
@@ -565,7 +719,7 @@ impl CopyBatch {
         self.progress = Some(label_migration::LabelCopyProgressValue::rows(row));
         self.passed += 1;
         self.passed >= self.max_rows
-            || self.bytes >= BATCH_BYTES
+            || self.bytes >= self.max_bytes
             || self.members >= self.max_members
     }
 
@@ -1179,18 +1333,19 @@ impl LabelHashCleanup {
 }
 
 /// Deletes the next retired hash label rows once the label identity migration
-/// is published: at most `tuning`'s batch rows and bytes, from at most
-/// [`CLEANUP_SCOPES_PER_STEP`] scopes after the one it starts in. It records
-/// [`LABEL_HASH_CLEANUP_READY`] with the last.
+/// is published: at most `session`'s cleanup rows, and as many bytes as a copy
+/// step may stage, from at most [`CLEANUP_SCOPES_PER_STEP`] scopes after the
+/// one it starts in. It records [`LABEL_HASH_CLEANUP_READY`] with the last.
 ///
 /// Nothing reads those rows by then, and graph writes never touch them, so it
 /// runs beside the serving writer, of any open intent. Each step commits
-/// [`LABEL_HASH_CLEANUP_PROGRESS`] with its deletes: the last row it deleted,
-/// or the scope it stopped before. The next step, of this open or a later one,
-/// starts there rather than walking deleted rows or empty scopes again.
+/// [`LABEL_HASH_CLEANUP_PROGRESS`] with its deletes, durably like a copy step:
+/// the last row it deleted, or the scope it stopped before. The next step, of
+/// this open or a later one, starts there rather than walking deleted rows or
+/// empty scopes again.
 pub(crate) async fn delete_hash_label_rows_once(
     db: &Db,
-    tuning: MigrationTuning,
+    session: &mut LabelCopySession,
 ) -> Result<LabelHashCleanup> {
     if cleanup_ready(db).await? {
         return Ok(LabelHashCleanup::AlreadyDone);
@@ -1214,23 +1369,23 @@ pub(crate) async fn delete_hash_label_rows_once(
                 })
         })
         .transpose()?;
+    let max_bytes = BATCH_BYTES
+        .min(db.unflushed_bytes()?.max_unflushed_bytes / STEP_SHARE)
+        .max(1);
     let mut walk = hash_rows(db, after.as_ref(), Some(CLEANUP_SCOPES_PER_STEP)).await?;
     let mut batch = Batch::begin(db).await?;
     let mut deleted = 0u64;
     while let Some((_, _, row)) = walk.next().await? {
         batch.transaction.delete(&row.key)?;
         deleted += 1;
-        if batch.staged(
-            row.key.len(),
-            tuning.batch_rows().get(),
-            tuning.batch_bytes().get(),
-        ) {
+        if batch.staged(row.key.len(), session.cleanup_rows, max_bytes) {
             Mutation::put(
                 &batch.transaction,
                 &progress_key,
                 label_migration::LabelCleanupProgressValue::new(row.key).encode(),
             )?;
-            batch.commit(false).await?;
+            batch.commit(true).await?;
+            session.cleaned(deleted);
             return Ok(LabelHashCleanup::Advanced { deleted });
         }
     }
@@ -1241,9 +1396,11 @@ pub(crate) async fn delete_hash_label_rows_once(
             super::super::scoped_metadata_key(DataScope::LegacyUnscoped, LABEL_HASH_CLEANUP_READY),
             label_migration::LabelCleanupReadyValue.encode(),
         )?;
-        batch.commit(false).await?;
+        batch.commit(true).await?;
+        session.cleaned(deleted);
         tracing::info!(
-            deleted,
+            deleted = session.deleted,
+            elapsed_ms = u64::try_from(session.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             "label identity cleanup deleted the last retired hash label rows"
         );
         return Ok(LabelHashCleanup::Done { deleted });
@@ -1253,7 +1410,8 @@ pub(crate) async fn delete_hash_label_rows_once(
         &progress_key,
         label_migration::LabelCleanupProgressValue::new(stopped_before).encode(),
     )?;
-    batch.commit(false).await?;
+    batch.commit(true).await?;
+    session.cleaned(deleted);
     Ok(LabelHashCleanup::Advanced { deleted })
 }
 

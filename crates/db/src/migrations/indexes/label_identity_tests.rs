@@ -11,6 +11,7 @@ use slatedb::DbReadOps;
 use tokio::sync::Notify;
 
 use super::*;
+use crate::config::MigrationTuning;
 use crate::encoding::property::{encode_properties, Property};
 use crate::encoding::v2::keys::{GlobalKey, ManagedIndexKey};
 use crate::encoding::v2::values::encode_metadata_value;
@@ -444,11 +445,10 @@ async fn copy_all(
 /// Takes cleanup steps of `batch_rows` rows until the cleanup is done,
 /// returning each step's outcome.
 async fn clean_up(db: &Db, batch_rows: usize) -> Vec<LabelHashCleanup> {
-    let tuning = MigrationTuning::default()
-        .with_batch_rows(crate::config::MigrationBatchRows::new(batch_rows).unwrap());
+    let mut session = LabelCopySession::with_cleanup_rows(batch_rows);
     let mut steps = Vec::new();
     loop {
-        let step = delete_hash_label_rows_once(db, tuning).await.unwrap();
+        let step = delete_hash_label_rows_once(db, &mut session).await.unwrap();
         steps.push(step);
         if !step.advanced() {
             return steps;
@@ -1379,10 +1379,10 @@ async fn cleanup_waits_for_publication_and_resumes_after_every_batch() {
     assert_eq!(label_rows(inner.as_ref()).await.1.len(), exact_before.len());
 
     copy_all(&writer_of(&db), &mut LabelCopySession::new()).await;
-    let tuning = MigrationTuning::default()
-        .with_batch_rows(crate::config::MigrationBatchRows::new(4).unwrap());
     assert_eq!(
-        delete_hash_label_rows_once(&inner, tuning).await.unwrap(),
+        delete_hash_label_rows_once(&inner, &mut LabelCopySession::with_cleanup_rows(4))
+            .await
+            .unwrap(),
         LabelHashCleanup::Advanced { deleted: 4 }
     );
     assert!(present(&inner, LABEL_HASH_CLEANUP_PROGRESS).await);
@@ -1467,9 +1467,11 @@ async fn cleanup_steps_cross_a_bounded_number_of_scopes() {
         put_legacy_row(&inner, &key, &[1]).await;
     }
 
-    let tuning = MigrationTuning::default();
+    let mut session = LabelCopySession::new();
     assert_eq!(
-        delete_hash_label_rows_once(&inner, tuning).await.unwrap(),
+        delete_hash_label_rows_once(&inner, &mut session)
+            .await
+            .unwrap(),
         LabelHashCleanup::Advanced { deleted: 1 }
     );
     let cursor = inner
@@ -1487,7 +1489,9 @@ async fn cleanup_steps_cross_a_bounded_number_of_scopes() {
         )
     );
     assert_eq!(
-        delete_hash_label_rows_once(&inner, tuning).await.unwrap(),
+        delete_hash_label_rows_once(&inner, &mut session)
+            .await
+            .unwrap(),
         LabelHashCleanup::Done { deleted: 1 }
     );
     assert!(label_rows(inner.as_ref()).await.1.is_empty());
@@ -1518,7 +1522,7 @@ async fn malformed_markers_and_progress_fail_closed() {
             if name == LABEL_HASH_CLEANUP_PROGRESS {
                 copy_all(&writer, &mut LabelCopySession::new()).await;
             }
-            delete_hash_label_rows_once(&inner, MigrationTuning::default())
+            delete_hash_label_rows_once(&inner, &mut LabelCopySession::new())
                 .await
                 .map(|_| ())
         };
@@ -2038,5 +2042,222 @@ async fn concurrent_graph_writes_and_copy_steps_converge_on_the_records() {
         during_copy >= 50,
         "{during_copy} writes overlapped the copy"
     );
+    db.close().await.unwrap();
+}
+
+fn unflushed(active: usize, immutable: usize, wal: usize) -> slatedb::UnflushedBytes {
+    slatedb::UnflushedBytes {
+        active_memtable_bytes: active,
+        immutable_memtable_bytes: immutable,
+        wal_bytes: wal,
+        max_unflushed_bytes: 1_000,
+    }
+}
+
+/// Steps stop at a quarter of the unflushed budget and start again only
+/// below an eighth, counting the immutable memtables and the WAL waiting for
+/// object storage but not the active memtable, which fills in normal use.
+#[test]
+fn flush_pacing_holds_steps_back_between_its_marks() {
+    let mut pacing = FlushPacing::default();
+    assert!(pacing.admits(unflushed(0, 0, 0)));
+    assert!(pacing.admits(unflushed(900, 0, 0)));
+    assert!(pacing.admits(unflushed(0, 149, 100)));
+    assert!(!pacing.admits(unflushed(0, 150, 100)));
+    assert_eq!((pacing.yields, pacing.backlog), (1, 250));
+    assert!(!pacing.admits(unflushed(0, 100, 26)));
+    assert!(pacing.admits(unflushed(0, 100, 25)));
+    assert!(pacing.admits(unflushed(0, 200, 0)));
+    assert!(!pacing.admits(unflushed(0, 0, 300)));
+    assert_eq!(pacing.yields, 2);
+}
+
+/// A slow commit halves a step's rows, members, and bytes; each quick commit
+/// grows them back by a quarter, never past their limits.
+#[test]
+fn slow_commits_narrow_steps_and_quick_ones_grow_them_back() {
+    let mut session = LabelCopySession::with_limits(100, 64);
+    let slow = SLOW_COMMIT + Duration::from_millis(1);
+    session.committed(LabelIdentityMigration::default(), slow);
+    session.committed(LabelIdentityMigration::default(), slow);
+    assert_eq!(
+        (session.rows, session.members, session.bytes),
+        (25, 16, BATCH_BYTES / 4)
+    );
+    session.committed(LabelIdentityMigration::default(), Duration::ZERO);
+    assert_eq!((session.rows, session.members), (32, 21));
+    for _ in 0..20 {
+        session.committed(LabelIdentityMigration::default(), Duration::ZERO);
+    }
+    assert_eq!(
+        (session.rows, session.members, session.bytes),
+        (100, 64, BATCH_BYTES)
+    );
+}
+
+/// Writes a scope's worth of neighbor hash rows straight to storage: one
+/// `LINK` edge row, the two edge records naming it, and `rows` neighbor rows
+/// of distinct nodes, each with one neighbor.
+async fn put_neighbor_rows(db: &Db, rows: u64) {
+    let scope = DataScope::LegacyUnscoped;
+    for edge in [1, 2] {
+        crate::transaction::put_unbatched(
+            db,
+            &DataKey::Data {
+                scope,
+                kind: DataKeyKind::EdgePropertyById(EdgePropertyByIdKey::new(edge)),
+            }
+            .to_bytes(),
+            &encode_properties(&[Property::string("$label", "LINK")]),
+        )
+        .await
+        .unwrap();
+    }
+    put_legacy_row(db, &edge_row("LINK"), &[1, 2]).await;
+    for start in (0..rows).step_by(10_000) {
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        for node in start..(start + 10_000).min(rows) {
+            Mutation::put(
+                &transaction,
+                neighbor_row(EdgeDirection::Out, 100_000 + node, "LINK"),
+                SecondaryEqualityBitmapValue::new(RoaringTreemap::from_iter([node])).encode(),
+            )
+            .unwrap();
+        }
+        transaction.commit().await.unwrap();
+    }
+}
+
+/// Under a slow object store and a small unflushed budget, the background
+/// label steps never fill that budget, so foreground writes never wait on
+/// storage backpressure, and the copy and cleanup still finish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_label_steps_leave_foreground_writes_room_under_a_slow_store() {
+    use slatedb::object_store::throttle::{ThrottleConfig, ThrottledStore};
+
+    // A version-6 store holding 150k neighbor hash rows to copy.
+    let (store, _reads, _exact) = legacy_store().await;
+    let raw = open_raw(&store).await;
+    put_neighbor_rows(&raw, 150_000).await;
+    raw.close().await.unwrap();
+
+    // Every object store write takes 40 ms, and the writer may hold only
+    // 4 MiB unflushed before SlateDB holds every write back.
+    let slow: Arc<dyn ObjectStore> = Arc::new(ThrottledStore::new(
+        Arc::clone(&store),
+        ThrottleConfig {
+            wait_put_per_call: Duration::from_millis(40),
+            ..ThrottleConfig::default()
+        },
+    ));
+    let mut settings = crate::config::DbConfig::new()
+        .slate()
+        .to_writer_settings(None);
+    settings.max_unflushed_bytes = 4 * 1024 * 1024;
+    settings.l0_sst_size_bytes = 1024 * 1024;
+    let db = Arc::new(
+        crate::HelixDB::open_with_object_store_and_config(
+            DB_PATH,
+            slow,
+            crate::config::DbConfig::new()
+                .with_slate_settings(settings)
+                .with_migration_tuning(
+                    MigrationTuning::default()
+                        .with_worker_mode(crate::config::MigrationWorkerMode::Disabled),
+                ),
+        )
+        .await
+        .expect("writer opens"),
+    );
+    let inner = db.inner_db();
+    assert_eq!(
+        storage_version(inner.as_ref()).await.unwrap(),
+        IndexStorageVersion::LABEL_COPY
+    );
+
+    // The background worker's steps, as the worker takes them.
+    let writer = writer_of(&db);
+    let steps = tokio::spawn({
+        let writer = Arc::clone(&writer);
+        async move {
+            let mut session = LabelCopySession::new();
+            let started = Instant::now();
+            while crate::migrations::background::process_background_step(
+                &writer,
+                MigrationTuning::default(),
+                crate::migrations::background::BackgroundMigrations::LabelIdentity,
+                &mut session,
+            )
+            .await
+            .unwrap()
+            {
+                assert!(
+                    started.elapsed() < Duration::from_secs(600),
+                    "label steps stalled"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            session.pacing.yields
+        }
+    });
+    // The writer's unflushed bytes, sampled while the steps run.
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = tokio::spawn({
+        let inner = Arc::clone(&inner);
+        let done = Arc::clone(&done);
+        async move {
+            let mut peak = 0;
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                peak = peak.max(inner.unflushed_bytes().unwrap().total());
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            peak
+        }
+    });
+    // Foreground writes, timed one by one, while the copy runs.
+    let mut latencies = Vec::new();
+    while !steps.is_finished() {
+        let started = Instant::now();
+        db.query(QueryRequest::write(
+            write_batch()
+                .var_as(
+                    "node",
+                    g().add_n("Person", vec![("name", PropertyInput::from("load"))]),
+                )
+                .returning(Vec::<String>::new()),
+        ))
+        .await
+        .unwrap();
+        latencies.push(started.elapsed());
+    }
+    let yields = steps.await.unwrap();
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let peak = sampler.await.unwrap();
+    assert_eq!(
+        storage_version(inner.as_ref()).await.unwrap(),
+        IndexStorageVersion::LABEL_IDENTITY
+    );
+    assert!(cleanup_ready(&inner).await.unwrap());
+    let unflushed = inner.unflushed_bytes().unwrap();
+    latencies.sort();
+    let slowest = *latencies.last().unwrap();
+    let p99 = latencies[latencies.len() * 99 / 100];
+    eprintln!(
+        "foreground writes: {} during the copy and cleanup, p99 {p99:?}, slowest {slowest:?}; \
+         steps held back {yields} times; unflushed peak {peak} of {} bytes",
+        latencies.len(),
+        unflushed.max_unflushed_bytes
+    );
+    assert!(yields > 0, "the slow store never held a step back");
+    assert!(
+        peak < unflushed.max_unflushed_bytes,
+        "unflushed bytes reached {peak}, the backpressure limit"
+    );
+    assert!(
+        slowest < Duration::from_secs(2),
+        "a foreground write waited {slowest:?}"
+    );
+    let copied = label_rows(inner.as_ref()).await.0;
+    assert!(copied.len() >= 150_000);
     db.close().await.unwrap();
 }
