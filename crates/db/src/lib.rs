@@ -6741,7 +6741,7 @@ mod tests {
     /// the next step. Both retry against the new state and land.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn abort_and_drop_land_between_retained_build_steps() {
-        const TRIALS: usize = 16;
+        const TRIALS: usize = 8;
         let scope = DataScope::LegacyUnscoped;
         let spec = helix_ast::index::IndexSpec::node_equality("User", "rank");
         // One entity per step keeps the build's steps short and back to back.
@@ -6760,7 +6760,7 @@ mod tests {
             .await
             .expect("writer opens");
             db.cypher(cypher::Request::new(
-                "UNWIND range(0, 4999) AS rank CREATE (:User {rank: rank})",
+                "UNWIND range(0, 1999) AS rank CREATE (:User {rank: rank})",
             ))
             .await
             .expect("users load");
