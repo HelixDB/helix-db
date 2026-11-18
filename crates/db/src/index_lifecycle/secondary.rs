@@ -9528,6 +9528,72 @@ mod tests {
         db.close().await.expect("activation test database closes");
     }
 
+    /// An activation forces the upload of its completion rather than waiting
+    /// for the next WAL flush tick, so it holds its lifecycle permit only for
+    /// its own work and that upload. With a tick far longer than the bound
+    /// here, a completion that waited for it would not finish in time.
+    #[tokio::test]
+    async fn activation_forces_its_upload_instead_of_waiting_for_the_flush_tick() {
+        let store = Arc::new(InMemory::new());
+        let path = "secondary-activation-forced-upload";
+        let open = |interval| {
+            Db::builder(
+                path,
+                Arc::clone(&store) as Arc<dyn slatedb::object_store::ObjectStore>,
+            )
+            .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+            .with_settings(slatedb::Settings {
+                flush_interval: Some(interval),
+                ..slatedb::Settings::default()
+            })
+            .build()
+        };
+        let db = open(Duration::from_millis(1))
+            .await
+            .expect("activation test database opens");
+        bootstrap_writer(&db)
+            .await
+            .expect("activation test database bootstraps");
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email").expect("test definition"),
+        );
+        let mut sources = BTreeMap::new();
+        for entity_id in 0..4 {
+            let properties = user_properties(&format!("seed-{entity_id}@example.com"));
+            put_source(&db, scope, IndexElementKind::Node, entity_id, &properties).await;
+            sources.insert(entity_id, properties);
+        }
+        let (operation_id, index_id, generation) = create_build(&db, scope, &definition, 3).await;
+        let mut claim_sequence = 1;
+        drive_until_stage(
+            &db,
+            &SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default())),
+            operation_id,
+            &mut claim_sequence,
+            |stage| matches!(stage, SecondaryBuildStage::Activate(_)),
+        )
+        .await;
+        db.close().await.expect("activation test database closes");
+
+        let db = open(Duration::from_secs(60))
+            .await
+            .expect("activation test database reopens with a long flush tick");
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                drive_one(&db, &driver, operation_id, &mut claim_sequence),
+            )
+            .await
+            .expect("activation does not wait for the flush tick"),
+            CommittedOperationStep::Completed
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("activation test database closes");
+    }
+
     /// Writes inside the scanned range commit while a source batch is held
     /// between staging and commit. The batch was read outside the step's
     /// serializable transaction, so a non-unique step still commits on its

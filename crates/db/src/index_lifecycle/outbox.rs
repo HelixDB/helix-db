@@ -1102,7 +1102,9 @@ pub(crate) async fn execute_claimed_step(
 /// Any later durable commit, such as a user write or this operation's own
 /// blocker or completion, makes every earlier step durable first. Blocked and
 /// completed steps decide the operation's fate, so they wait for the upload:
-/// an activation is never acknowledged before it is durable.
+/// an activation is never acknowledged before it is durable. They force that
+/// upload instead of waiting for the next WAL flush tick, because a gated
+/// step holds its permit until then.
 ///
 /// # Claims
 ///
@@ -1373,8 +1375,11 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         | CommittedOperationStep::Blocked
         | CommittedOperationStep::Completed => CommitDurability::Durable,
     };
+    // A durable outcome forces its upload below rather than waiting for the
+    // next WAL flush tick: a gated step holds writers, and an activation
+    // planning too, until it is durable.
     match transaction
-        .commit_with_options(&durability.write_options())
+        .commit_with_options(&CommitDurability::Applied.write_options())
         .await
     {
         Ok(_) => {}
@@ -1401,6 +1406,10 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                 },
             ));
         }
+    }
+    if durability == CommitDurability::Durable {
+        // A failed upload closes the database, like a failed durable commit.
+        db.flush().await?;
     }
     prepared.after_commit().await;
     driver
