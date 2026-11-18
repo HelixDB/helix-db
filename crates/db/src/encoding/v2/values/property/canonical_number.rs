@@ -20,6 +20,7 @@ pub(crate) fn from_property(value: &PropertyValue) -> Option<CanonicalNumber> {
         | PropertyValue::F32Array(_)
         | PropertyValue::StringArray(_)
         | PropertyValue::Array(_)
-        | PropertyValue::Object(_) => None,
+        | PropertyValue::Object(_)
+        | PropertyValue::DateTimeArray(_) => None,
     }
 }

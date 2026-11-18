@@ -109,7 +109,50 @@ mod tests {
             Property::string_array("string_array", vec!["a".to_string(), "b".to_string()]),
             Property::new("array", PropertyValue::Array(vec![PropertyValue::I64(1)])),
             Property::new("object", PropertyValue::Object(object)),
+            Property::new(
+                "datetime_array",
+                PropertyValue::DateTimeArray(vec![i64::MIN, -1, 0, i64::MAX]),
+            ),
         ]
+    }
+
+    /// Stored rows persist each value's rkyv discriminant, its declaration
+    /// index, so a variant may only ever be appended.
+    #[test]
+    fn stored_discriminants_keep_their_declaration_order() {
+        let mut object = BTreeMap::new();
+        object.insert("nested".to_string(), PropertyValue::Bool(true));
+        let values = [
+            PropertyValue::Null,
+            PropertyValue::Bool(true),
+            PropertyValue::I64(-7),
+            PropertyValue::DateTime(0),
+            PropertyValue::F64(1.5),
+            PropertyValue::F32(2.5),
+            PropertyValue::String("value".to_string()),
+            PropertyValue::Bytes(vec![1]),
+            PropertyValue::I64Array(vec![1]),
+            PropertyValue::F64Array(vec![1.0]),
+            PropertyValue::F32Array(vec![1.0]),
+            PropertyValue::StringArray(vec!["a".to_string()]),
+            PropertyValue::Array(vec![PropertyValue::I64(1)]),
+            PropertyValue::Object(object),
+            PropertyValue::DateTimeArray(vec![1]),
+        ];
+        let root = size_of::<rkyv::Archived<PropertyValue>>();
+        for (discriminant, value) in values.into_iter().enumerate() {
+            let bytes = encode_index_partition_value(&value);
+            assert_eq!(
+                usize::from(bytes[bytes.len() - root]),
+                discriminant,
+                "{value:?}"
+            );
+        }
+        // An integer list and a datetime list of the same millis stay distinct.
+        assert_ne!(
+            encode_index_partition_value(&PropertyValue::I64Array(vec![1])),
+            encode_index_partition_value(&PropertyValue::DateTimeArray(vec![1]))
+        );
     }
 
     #[test]

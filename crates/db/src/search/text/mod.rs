@@ -1291,7 +1291,8 @@ pub fn normalize_indexed_text_value(value: &PropertyValue) -> Result<String, Hel
         | PropertyValue::F64Array(_)
         | PropertyValue::F32Array(_)
         | PropertyValue::Array(_)
-        | PropertyValue::Object(_) => Err(HelixDbError::Query(
+        | PropertyValue::Object(_)
+        | PropertyValue::DateTimeArray(_) => Err(HelixDbError::Query(
             "text indexes only support String and StringArray values".into(),
         )),
     }
@@ -1346,7 +1347,8 @@ pub fn normalize_tenant_value(value: &PropertyValue) -> Option<&PropertyValue> {
         | PropertyValue::F32Array(_)
         | PropertyValue::StringArray(_)
         | PropertyValue::Array(_)
-        | PropertyValue::Object(_) => Some(value),
+        | PropertyValue::Object(_)
+        | PropertyValue::DateTimeArray(_) => Some(value),
     }
 }
 

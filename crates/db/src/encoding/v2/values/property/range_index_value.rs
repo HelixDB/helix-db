@@ -124,6 +124,9 @@ pub(crate) fn project_range_value(
         PropertyValue::StringArray(_) => return RangeValueProjection::Unsupported("StringArray"),
         PropertyValue::Array(_) => return RangeValueProjection::Unsupported("Array"),
         PropertyValue::Object(_) => return RangeValueProjection::Unsupported("Object"),
+        PropertyValue::DateTimeArray(_) => {
+            return RangeValueProjection::Unsupported("DateTimeArray")
+        }
     }
     if encoded.len() > MAX_RANGE_ENCODED_LEN {
         return RangeValueProjection::Oversized {
@@ -458,6 +461,7 @@ mod tests {
                 )])),
                 "Object",
             ),
+            (PropertyValue::DateTimeArray(vec![1]), "DateTimeArray"),
         ];
         for (value, expected_type) in unsupported {
             assert_eq!(

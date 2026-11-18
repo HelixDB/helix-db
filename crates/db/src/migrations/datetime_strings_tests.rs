@@ -589,9 +589,22 @@ fn verdicts_follow_every_value_kind() {
             "skip_is_final",
             PropertyValue::String("2026-01-01T00:00:00Z".to_owned()),
         ),
+        // A datetime list is a list, not a datetime, like any other array.
+        (
+            "string_then_datetime_list",
+            PropertyValue::String("2026-01-01T00:00:00Z".to_owned()),
+        ),
+        (
+            "string_then_datetime_list",
+            PropertyValue::DateTimeArray(vec![1]),
+        ),
     ] {
         observe(&mut tracked, key(name), &value);
     }
+    assert_eq!(
+        tracked[&key("string_then_datetime_list")].verdict,
+        Verdict::Skipped(SkipReason::MixedTypes)
+    );
     assert!(!tracked.contains_key(&key("null_only")));
     assert_eq!(tracked[&key("datetime_only")].verdict, Verdict::Datetimes);
     assert_eq!(

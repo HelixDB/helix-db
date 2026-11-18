@@ -376,6 +376,14 @@ pub(crate) fn hash_property_value_component(value: &PropertyValue) -> u64 {
                 hash_property_value_component(item).hash(&mut hasher);
             }
         }
+        // Exactly the generic array of the same datetimes, the form such a
+        // list had before it had its own variant, so its index names stay.
+        PropertyValue::DateTimeArray(v) => {
+            12u8.hash(&mut hasher);
+            for item in v {
+                hash_property_value_component(&PropertyValue::DateTime(*item)).hash(&mut hasher);
+            }
+        }
         PropertyValue::Object(v) => {
             13u8.hash(&mut hasher);
             for (key, item) in v {
@@ -3524,6 +3532,23 @@ mod tests {
         assert_ne!(
             hash_property_value_component(&PropertyValue::F64(1.0)),
             hash_property_value_component(&PropertyValue::F32(1.0))
+        );
+    }
+
+    /// Tenant-scoped index names embed this hash. A typed datetime list names
+    /// the same index as the generic array of datetimes it used to be stored as.
+    #[test]
+    fn property_value_hash_of_a_datetime_list_is_its_generic_array_hash() {
+        assert_eq!(
+            hash_property_value_component(&PropertyValue::DateTimeArray(vec![-1, 7])),
+            hash_property_value_component(&PropertyValue::Array(vec![
+                PropertyValue::DateTime(-1),
+                PropertyValue::DateTime(7),
+            ]))
+        );
+        assert_ne!(
+            hash_property_value_component(&PropertyValue::DateTimeArray(vec![-1, 7])),
+            hash_property_value_component(&PropertyValue::I64Array(vec![-1, 7]))
         );
     }
 

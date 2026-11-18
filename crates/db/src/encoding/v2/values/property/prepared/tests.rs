@@ -17,6 +17,7 @@ fn prepared_selection_bounds_actual_allocations_for_every_stored_variant() {
         PropertyValue::F64Array(vec![f64::NEG_INFINITY, -0.0, f64::NAN]),
         PropertyValue::F32Array(vec![f32::INFINITY, f32::NAN]),
         PropertyValue::StringArray(vec![String::new(), "text".repeat(128)]),
+        PropertyValue::DateTimeArray(vec![i64::MIN, 0, i64::MAX]),
         PropertyValue::Array(vec![
             PropertyValue::Null,
             PropertyValue::Object(BTreeMap::from([(

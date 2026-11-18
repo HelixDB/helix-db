@@ -436,6 +436,188 @@ async fn datetime_predicates_read_range_and_equality_indexes() {
     }
 }
 
+/// A datetime list is stored in one typed form however it is written —
+/// Cypher, a typed Cypher or SQL parameter, or a native typed parameter — so
+/// an equality index holds it, equality finds it through the index exactly as
+/// a scan does, and every response reads it back as a list of datetimes.
+#[tokio::test]
+async fn datetime_lists_are_held_and_found_by_equality_indexes() {
+    use cypher::sql::request::Request;
+    use helix_ast::query::QueryParamType as T;
+    let indexed = database().await;
+    let scanned = database().await;
+    create_index(&indexed, index::IndexSpec::node_equality("Slot", "at")).await;
+    let list = |millis: &[i64]| Q::Array(millis.iter().copied().map(Q::DateTime).collect());
+    let texts = |millis: &[i64]| json!(millis.iter().map(|&at| text(at)).collect::<Vec<_>>());
+    for db in [&indexed, &scanned] {
+        read(
+            db,
+            "CREATE (:Slot {seq: 1, at: [datetime({epochMillis: 0}), \
+             datetime('1970-01-01T00:00:00.001Z')]})",
+        )
+        .await;
+        rows(
+            db,
+            request(
+                "CREATE (:Slot {seq: 2, at: $at})",
+                [("at", list(&[BASE, BASE + HOUR]))],
+            ),
+        )
+        .await;
+        let mut insert = Request::new("INSERT INTO Slot (seq, at) VALUES (3, ?)");
+        insert
+            .parameters
+            .insert("1".into(), list(&[BASE + 2 * HOUR]));
+        db.sql(insert).await.unwrap();
+        db.query(
+            query::QueryRequest::write(batch::write_batch().var_as(
+                "slot",
+                traversal::g().add_n(
+                    "Slot",
+                    vec![
+                        ("seq", helix_ast::value::PropertyInput::from(4_i64)),
+                        ("at", helix_ast::value::PropertyInput::param("at")),
+                    ],
+                ),
+            ))
+            .with_typed_parameter(
+                "at",
+                T::Array(Box::new(T::DateTime)),
+                Q::Array(vec![
+                    Q::String("1970-01-01T00:00:00Z".into()),
+                    Q::String("1970-01-01T01:00:00+01:00".into()),
+                ]),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    for (query, expected, access_op) in [
+        (
+            "MATCH (s:Slot) WHERE s.at = [datetime('1970-01-01'), \
+             datetime('1970-01-01T00:00:00.001Z')] RETURN s.seq",
+            seqs([1]),
+            "Bitmap",
+        ),
+        // A member the planner does not read before running keeps the scan.
+        (
+            "MATCH (s:Slot) WHERE s.at = [datetime({epochMillis: 0}), datetime({epochMillis: 1})] \
+             RETURN s.seq",
+            seqs([1]),
+            "LabelScan",
+        ),
+        (
+            "MATCH (s:Slot {at: [datetime('2023-11-14T22:13:20Z'), \
+             datetime('2023-11-14T23:13:20Z')]}) RETURN s.seq",
+            seqs([2]),
+            "Bitmap",
+        ),
+        (
+            "MATCH (s:Slot) WHERE s.at = [datetime('1970-01-01'), datetime('1970-01-01')] \
+             RETURN s.seq",
+            seqs([4]),
+            "Bitmap",
+        ),
+        // Order, length and member type all count.
+        (
+            "MATCH (s:Slot) WHERE s.at = [datetime('1970-01-01T00:00:00.001Z'), \
+             datetime('1970-01-01')] RETURN s.seq",
+            seqs([]),
+            "Bitmap",
+        ),
+        (
+            "MATCH (s:Slot) WHERE s.at = [datetime('1970-01-01')] RETURN s.seq",
+            seqs([]),
+            "Bitmap",
+        ),
+        (
+            "MATCH (s:Slot) WHERE s.at = [0, 1] RETURN s.seq",
+            seqs([]),
+            "LabelScan",
+        ),
+        (
+            "MATCH (s:Slot) WHERE s.at IN [[datetime('1970-01-01'), \
+             datetime('1970-01-01T00:00:00.001Z')], [datetime('2023-11-15T00:13:20Z')]] \
+             RETURN s.seq ORDER BY s.seq",
+            seqs([1, 3]),
+            "SecondarySet",
+        ),
+    ] {
+        assert_eq!(
+            access(&indexed, cypher::Request::new(query)).await,
+            access_op,
+            "{query}"
+        );
+        assert_eq!(read(&indexed, query).await, expected, "{query}");
+        assert_eq!(read(&scanned, query).await, expected, "{query}");
+    }
+    for db in [&indexed, &scanned] {
+        assert_eq!(
+            rows(
+                db,
+                request(
+                    "MATCH (s:Slot) WHERE s.at = $at RETURN s.seq",
+                    [("at", list(&[BASE, BASE + HOUR]))],
+                ),
+            )
+            .await,
+            seqs([2])
+        );
+        let returned = read(
+            db,
+            "MATCH (s:Slot {seq: 1}) RETURN s.at, s.at[1] > s.at[0], s.at[0].epochMillis, \
+             s.at = [datetime({epochMillis: 0}), datetime({epochMillis: 1})], s",
+        )
+        .await;
+        assert_eq!(
+            returned[0][..4],
+            [texts(&[0, 1]), json!(true), json!(0), json!(true)]
+        );
+        assert_eq!(
+            returned[0][4]["properties"],
+            json!({"seq": 1, "at": texts(&[0, 1])})
+        );
+        let sql = db
+            .sql(Request::new("SELECT s.at FROM Slot s WHERE s.seq = 3"))
+            .await
+            .unwrap();
+        assert_eq!(sql.rows, vec![vec![texts(&[BASE + 2 * HOUR])]]);
+        let native = db
+            .query(query::QueryRequest::read(
+                batch::read_batch()
+                    .var_as(
+                        "rows",
+                        traversal::g()
+                            .n_with_label("Slot")
+                            .value_map(None::<Vec<String>>),
+                    )
+                    .returning(["rows"]),
+            ))
+            .await
+            .unwrap();
+        let mut native = native["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| (row["seq"].as_i64().unwrap(), row["at"].clone()))
+            .collect::<Vec<_>>();
+        native.sort_by_key(|(seq, _)| *seq);
+        assert_eq!(
+            native,
+            vec![
+                (1, texts(&[0, 1])),
+                (2, texts(&[BASE, BASE + HOUR])),
+                (3, texts(&[BASE + 2 * HOUR])),
+                (4, texts(&[0, 0])),
+            ]
+        );
+    }
+    for db in [indexed, scanned] {
+        db.close().await.unwrap();
+    }
+}
+
 /// Unreadable text, unsupported forms, out-of-range instants and arithmetic
 /// fail with typed errors; comparing an out-of-range instant still works.
 #[tokio::test]

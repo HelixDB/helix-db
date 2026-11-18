@@ -48,6 +48,7 @@ pub enum ParityValue {
     StringArray(Vec<String>),
     Array(Vec<ParityValue>),
     Object(BTreeMap<String, ParityValue>),
+    DateTimeArray(Vec<i64>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -717,6 +718,7 @@ pub(crate) fn parity_value(value: &PropertyValue) -> ParityValue {
         PropertyValue::String(value) => ParityValue::String(value.clone()),
         PropertyValue::Bytes(value) => ParityValue::Bytes(value.clone()),
         PropertyValue::I64Array(value) => ParityValue::I64Array(value.clone()),
+        PropertyValue::DateTimeArray(value) => ParityValue::DateTimeArray(value.clone()),
         PropertyValue::F64Array(value) => {
             ParityValue::F64ArrayBits(value.iter().map(|value| value.to_bits()).collect())
         }

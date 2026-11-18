@@ -141,6 +141,7 @@ fn literal_copy_admission_covers_all_flat_types_and_spare_source_capacity() {
         P::F64Array(doubles),
         P::F32Array(floats),
         P::StringArray(strings),
+        P::Array(vec![P::DateTime(i64::MIN), P::DateTime(i64::MAX)]),
         P::String(String::with_capacity(8192)),
         P::Bytes(Vec::with_capacity(8192)),
         P::I64Array(Vec::with_capacity(8192)),

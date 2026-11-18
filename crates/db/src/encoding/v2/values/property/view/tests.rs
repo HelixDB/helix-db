@@ -50,6 +50,7 @@ fn value() -> impl Strategy<Value = PropertyValue> {
         collection::vec(proptest::num::f64::ANY, 0..8).prop_map(PropertyValue::F64Array),
         collection::vec(proptest::num::f32::ANY, 0..64).prop_map(PropertyValue::F32Array),
         collection::vec(".{0,6}", 0..4).prop_map(PropertyValue::StringArray),
+        collection::vec(any::<i64>(), 0..8).prop_map(PropertyValue::DateTimeArray),
     ];
     leaf.prop_recursive(3, 24, 4, |inner| {
         prop_oneof![

@@ -13,7 +13,8 @@ pub const MAX_INDEXED_EQUALITY_BYTES: usize = 1024 * 1024 - 64;
 /// Invalid literal payload for a secondary index lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecondaryIndexLiteralError {
-    /// Secondary indexes do not store nested array/object values.
+    /// Secondary indexes do not store objects, or arrays other than a
+    /// nonempty list of datetimes.
     NestedValue,
 }
 
@@ -51,8 +52,9 @@ pub enum LiteralEqualityIndexValueSemantics {
 /// Literal value that can be looked up in a secondary equality index.
 ///
 /// Secondary equality indexes share the storage-side value contract used by
-/// secondary indexes. Nested heterogeneous arrays and objects are rejected.
-/// Null is resolved through an authoritative scan, while `"null"` is an
+/// secondary indexes. Objects and generic arrays are rejected, except a
+/// nonempty array of datetimes, which storage holds as its typed datetime
+/// list. Null is resolved through an authoritative scan, while `"null"` is an
 /// ordinary typed string.
 ///
 /// ```
@@ -66,6 +68,19 @@ pub enum LiteralEqualityIndexValueSemantics {
 /// );
 /// assert_eq!(
 ///     SecondaryIndexLiteral::new(PropertyValue::array([1])),
+///     Err(SecondaryIndexLiteralError::NestedValue)
+/// );
+/// let datetimes = PropertyValue::array([PropertyValue::DateTime(0), PropertyValue::DateTime(1)]);
+/// assert!(SecondaryIndexLiteral::new(datetimes).is_ok());
+/// assert_eq!(
+///     SecondaryIndexLiteral::new(PropertyValue::array(Vec::<PropertyValue>::new())),
+///     Err(SecondaryIndexLiteralError::NestedValue)
+/// );
+/// assert_eq!(
+///     SecondaryIndexLiteral::new(PropertyValue::array([
+///         PropertyValue::DateTime(0),
+///         PropertyValue::from("1970-01-01T00:00:00Z"),
+///     ])),
 ///     Err(SecondaryIndexLiteralError::NestedValue)
 /// );
 /// assert!(SecondaryIndexLiteral::new(PropertyValue::Null).is_ok());
@@ -87,6 +102,14 @@ impl SecondaryIndexLiteral {
     /// Borrowed eligibility shared by scheduling and owned literal construction.
     pub(crate) fn validate_value(value: &PropertyValue) -> Result<(), SecondaryIndexLiteralError> {
         match value {
+            PropertyValue::Array(values)
+                if !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|value| matches!(value, PropertyValue::DateTime(_))) =>
+            {
+                Ok(())
+            }
             PropertyValue::Array(_) | PropertyValue::Object(_) => {
                 Err(SecondaryIndexLiteralError::NestedValue)
             }
@@ -121,6 +144,8 @@ impl SecondaryIndexLiteral {
                 })
             }
             PropertyValue::I64Array(values) => items(values.len()),
+            // Only a datetime list, stored as a flat list of millis.
+            PropertyValue::Array(values) => items(values.len()),
             PropertyValue::F64Array(values) => items(values.len()),
             PropertyValue::F32Array(values) => items(values.len()),
             PropertyValue::Null
@@ -129,7 +154,6 @@ impl SecondaryIndexLiteral {
             | PropertyValue::F64(_)
             | PropertyValue::F32(_)
             | PropertyValue::DateTime(_)
-            | PropertyValue::Array(_)
             | PropertyValue::Object(_) => 0,
         };
         payload.saturating_add(64) > MAX_INDEXED_EQUALITY_BYTES
@@ -184,9 +208,11 @@ impl SecondaryIndexLiteral {
             | PropertyValue::I64Array(_)
             | PropertyValue::F64Array(_)
             | PropertyValue::F32Array(_)
-            | PropertyValue::StringArray(_) => LiteralEqualityIndexValueSemantics::Indexed,
-            PropertyValue::Array(_) | PropertyValue::Object(_) => {
-                unreachable!("secondary-index literals reject nested values")
+            | PropertyValue::StringArray(_)
+            // Only a nonempty datetime list is admitted.
+            | PropertyValue::Array(_) => LiteralEqualityIndexValueSemantics::Indexed,
+            PropertyValue::Object(_) => {
+                unreachable!("secondary-index literals reject objects")
             }
         }
     }

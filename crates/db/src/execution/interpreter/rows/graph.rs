@@ -620,9 +620,10 @@ pub(super) fn to_property(value: r::Value) -> Result<P> {
             {
                 return Err(property_type());
             }
-            // Use the existing typed storage forms so equality-index maintenance
-            // accepts homogeneous numeric/string lists. Generic arrays remain
-            // readable, and boolean lists retain their existing storage form.
+            // Use the typed storage forms so equality-index maintenance accepts
+            // homogeneous numeric, string and datetime lists. Generic arrays
+            // remain readable, and boolean lists retain their existing storage
+            // form.
             match xs.first() {
                 None => P::I64Array(Vec::new()),
                 Some(r::Value::Integer(_)) => P::I64Array(
@@ -655,25 +656,26 @@ pub(super) fn to_property(value: r::Value) -> Result<P> {
                         })
                         .collect(),
                 ),
-                // Exact capacity makes simultaneous source/destination
-                // admission independent of fallible-collect growth or
-                // compiler-specific in-place collection optimizations.
-                // Datetime lists, like boolean lists, have no typed array.
-                Some(r::Value::Boolean(_) | r::Value::DateTime(_)) => {
+                Some(r::Value::DateTime(_)) => P::DateTimeArray(
+                    xs.into_iter()
+                        .map(|value| {
+                            let r::Value::DateTime(millis) = value else {
+                                unreachable!("validated homogeneous list")
+                            };
+                            millis
+                        })
+                        .collect(),
+                ),
+                Some(r::Value::Boolean(_)) => {
+                    // Exact capacity makes simultaneous source/destination
+                    // admission independent of fallible-collect growth or
+                    // compiler-specific in-place collection optimizations.
                     let mut values = Vec::with_capacity(xs.len());
                     for value in xs {
-                        values.push(match value {
-                            r::Value::Boolean(value) => P::Bool(value),
-                            r::Value::DateTime(millis) => P::DateTime(millis),
-                            r::Value::Null
-                            | r::Value::Integer(_)
-                            | r::Value::Float(_)
-                            | r::Value::String(_)
-                            | r::Value::List(_)
-                            | r::Value::Map(_)
-                            | r::Value::Entity(_)
-                            | r::Value::Path(_) => unreachable!("validated homogeneous list"),
-                        });
+                        let r::Value::Boolean(value) = value else {
+                            unreachable!("validated homogeneous list");
+                        };
+                        values.push(P::Bool(value));
                     }
                     P::Array(values)
                 }

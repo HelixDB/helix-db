@@ -1718,6 +1718,19 @@ fn bound_value<'a>(
                 _ => None,
             }
         }
+        // A list of datetimes, the one list an equality index holds.
+        Expression::List(items) if !items.is_empty() => Some(Cow::Owned(P::Array(
+            items
+                .iter()
+                .map(|item| match item {
+                    Expression::Literal(Value::DateTime(millis)) => Some(P::DateTime(*millis)),
+                    item => match bound_value(item, params)?.into_owned() {
+                        datetime @ P::DateTime(_) => Some(datetime),
+                        _ => None,
+                    },
+                })
+                .collect::<Option<_>>()?,
+        ))),
         Expression::Function(Function::DateTime, arguments) => {
             let [argument] = arguments.as_slice() else {
                 return None;
@@ -1790,6 +1803,24 @@ fn literal(value: Value) -> Option<helix_ast::value::PropertyValue> {
         Value::Float(f) => Some(P::F64(f)),
         Value::String(s) => Some(P::String(s)),
         Value::DateTime(millis) => Some(P::DateTime(millis)),
+        // A datetime list is the one list an equality index holds, as storage
+        // keeps it in one typed form.
+        Value::List(values)
+            if !values.is_empty()
+                && values
+                    .iter()
+                    .all(|value| matches!(value, Value::DateTime(_))) =>
+        {
+            Some(P::Array(
+                values
+                    .into_iter()
+                    .filter_map(|value| match value {
+                        Value::DateTime(millis) => Some(P::DateTime(millis)),
+                        _ => None,
+                    })
+                    .collect(),
+            ))
+        }
         Value::List(_) | Value::Map(_) | Value::Entity(_) | Value::Path(_) => None,
     }
 }

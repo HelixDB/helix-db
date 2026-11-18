@@ -106,6 +106,9 @@ fn runtime_equality_domain_from_value(original: PropertyValue) -> RuntimeEqualit
         PropertyValue::I64Array(values) => {
             classify_members(values.iter().copied().map(PropertyValue::I64))
         }
+        PropertyValue::DateTimeArray(values) => {
+            classify_members(values.iter().copied().map(PropertyValue::DateTime))
+        }
         PropertyValue::F64Array(values) => {
             classify_members(values.iter().copied().map(PropertyValue::F64))
         }
