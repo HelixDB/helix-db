@@ -19,8 +19,8 @@ use db::index_lifecycle::{
     ValidatedDynamicIndexDefinition,
 };
 use db::index_lifecycle_testing::{
-    arm_text_search_page_barrier, LifecycleTestController, LifecycleTestScheduling,
-    LifecycleWorkTarget, TextManifestValidationLane,
+    arm_text_search_page_barrier, text_compaction_pointer_count, LifecycleTestController,
+    LifecycleTestScheduling, LifecycleWorkTarget, TextManifestValidationLane,
 };
 use db::{HelixDB, HelixDbSource, ProcessLocalDatabaseToken};
 use helix_ast::batch;
@@ -629,7 +629,21 @@ async fn open_active_tenant_fixture(database: &str) -> (HelixDB, u64, u64) {
     (db, from, to)
 }
 
+/// The graph, index, and outbox state once background index work has settled.
+///
+/// Publication of earlier writes and the text compaction it schedules run in
+/// the background and rewrite their own rows at any moment, so a snapshot is
+/// taken only once both are idle. A rejected mutation starts neither.
 async fn rollback_snapshot(db: &HelixDB) -> db::migration_parity::MigrationParitySnapshot {
+    wait_published(db).await;
+    let started = Instant::now();
+    while text_compaction_pointer_count(db).await != 0 {
+        assert!(
+            started.elapsed() < OPERATION_TIMEOUT,
+            "scheduled text compaction stalled"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let mut snapshot = db
         .migration_parity_snapshot()
         .await
