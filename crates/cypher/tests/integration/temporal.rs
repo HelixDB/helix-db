@@ -127,6 +127,18 @@ fn temporal_calls_outside_the_profile_report_their_capability() {
             r::category::ARGUMENT_ERROR,
             r::detail::INVALID_DATETIME,
         ),
+        // An offset that moves the instant outside the four-digit UTC years
+        // names an instant whose text this grammar cannot read back.
+        (
+            "RETURN datetime('9999-12-31T23:59:59-00:01') AS v",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_DATETIME,
+        ),
+        (
+            "RETURN datetime('0000-01-01T00:00:00+00:01') AS v",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_DATETIME,
+        ),
     ] {
         let error = error(text);
         assert_eq!(

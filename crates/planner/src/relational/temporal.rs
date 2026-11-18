@@ -9,6 +9,11 @@ use chrono::{NaiveDate, NaiveTime, SecondsFormat, Utc};
 /// Upper bound on [`format_datetime`]'s output, `+262142-12-31T23:59:59.999Z`.
 pub const MAX_DATETIME_TEXT_BYTES: usize = 27;
 
+/// The earliest and latest instants [`parse_datetime`] reads,
+/// `0000-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`: the instants
+/// whose RFC 3339 text [`format_datetime`] writes with a four-digit year.
+const READABLE_MILLIS: std::ops::RangeInclusive<i64> = -62_167_219_200_000..=253_402_300_799_999;
+
 /// Why [`parse_datetime`] read no instant from some text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatetimeTextError {
@@ -19,6 +24,10 @@ pub enum DatetimeTextError {
     /// The text has the grammar's form but names no instant, such as
     /// February 30, hour 24, a leap second, or an offset of 24 hours.
     NoSuchInstant,
+    /// The text names an instant whose UTC year is outside `0000`–`9999`,
+    /// because its offset moves it across a year boundary, such as
+    /// `9999-12-31T23:59:59-00:01`. No text in the grammar names it in UTC.
+    OutsideYears,
 }
 
 /// UTC epoch milliseconds of datetime text in one of these forms, each field
@@ -31,8 +40,9 @@ pub enum DatetimeTextError {
 ///
 /// The date and time may be separated by `T`, `t` or one space, `Z` may be
 /// `z`, and digits past milliseconds are truncated. Years are `0000`–`9999`,
-/// the range RFC 3339 allows, so [`format_datetime`] renders every instant
-/// this reads as text this reads back to the same instant.
+/// the range RFC 3339 allows, in the text and in UTC once its offset is
+/// applied, so [`format_datetime`] renders every instant this reads as text
+/// this reads back to the same instant.
 ///
 /// ```
 /// use helix_planner::relational::{parse_datetime, DatetimeTextError};
@@ -46,6 +56,10 @@ pub enum DatetimeTextError {
 /// );
 /// assert_eq!(parse_datetime("1970-1-1"), Err(DatetimeTextError::OutsideGrammar));
 /// assert_eq!(parse_datetime("1970-02-30"), Err(DatetimeTextError::NoSuchInstant));
+/// assert_eq!(
+///     parse_datetime("9999-12-31T23:59:59-00:01"),
+///     Err(DatetimeTextError::OutsideYears)
+/// );
 /// ```
 pub fn parse_datetime(text: &str) -> Result<i64, DatetimeTextError> {
     use DatetimeTextError as Error;
@@ -121,7 +135,12 @@ pub fn parse_datetime(text: &str) -> Result<i64, DatetimeTextError> {
     let (Some(date), Some(time)) = (date, time) else {
         return Err(Error::NoSuchInstant);
     };
-    Ok(date.and_time(time).and_utc().timestamp_millis() - offset_seconds * 1000)
+    // Within a day of the readable years, so this cannot overflow.
+    let millis = date.and_time(time).and_utc().timestamp_millis() - offset_seconds * 1000;
+    if !READABLE_MILLIS.contains(&millis) {
+        return Err(Error::OutsideYears);
+    }
+    Ok(millis)
 }
 
 /// RFC 3339 UTC text with milliseconds, byte for byte the encoding of a
@@ -348,6 +367,43 @@ mod tests {
             );
         }
         assert_eq!(parse_datetime("2024-02-29"), Ok(1_709_164_800_000));
+    }
+
+    #[test]
+    fn offsets_never_carry_an_instant_outside_the_readable_years() {
+        let (first, last) = (*READABLE_MILLIS.start(), *READABLE_MILLIS.end());
+        // An offset that moves the first or last readable day across the
+        // year boundary names an instant no four-digit UTC year writes.
+        for text in [
+            "9999-12-31T23:59:59-00:01",
+            "9999-12-31T23:59:59.999-00:01",
+            "9999-12-31T23:00:00-23:59",
+            "0000-01-01T00:00:00+00:01",
+            "0000-01-01T00:00:00.000+23:59",
+            "0000-01-01T23:58:59+23:59",
+        ] {
+            assert_eq!(
+                parse_datetime(text),
+                Err(DatetimeTextError::OutsideYears),
+                "{text}"
+            );
+        }
+        // The same days with offsets that keep the instant inside read, and
+        // write back as text that reads the same instant.
+        for (text, millis) in [
+            ("9999-12-31T23:59:59.999+00:00", last),
+            ("9999-12-31T23:59:59.999-00:00", last),
+            ("9999-12-31T23:59:59.999+00:01", last - 60_000),
+            ("9999-12-31T00:00:00-23:59", last + 1 - 60_000),
+            ("0000-01-01T00:00:00-00:00", first),
+            ("0000-01-01T00:00:00-00:01", first + 60_000),
+            ("0000-01-01T23:59:00+23:59", first),
+            ("0000-01-01T00:00:00+00:00", first),
+        ] {
+            assert_eq!(parse_datetime(text), Ok(millis), "{text}");
+            let written = format_datetime(millis).unwrap();
+            assert_eq!(parse_datetime(&written), Ok(millis), "{written}");
+        }
     }
 
     #[test]

@@ -1213,6 +1213,14 @@ impl Binder {
                                         detail::INVALID_DATETIME,
                                         format!("datetime text {text:?} names no instant"),
                                     ),
+                                    r::DatetimeTextError::OutsideYears => QueryError::compile(
+                                        category::ARGUMENT_ERROR,
+                                        detail::INVALID_DATETIME,
+                                        format!(
+                                            "datetime text {text:?} names an instant outside \
+                                             the UTC years 0000 to 9999"
+                                        ),
+                                    ),
                                 }
                                 .at(e.span)
                             })?;

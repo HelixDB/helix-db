@@ -130,6 +130,15 @@ impl Translator<'_> {
                         format!("TIMESTAMP text {text:?} names no instant"),
                     )
                     .at(span),
+                    r::DatetimeTextError::OutsideYears => QueryError::compile(
+                        category::ARGUMENT_ERROR,
+                        detail::INVALID_DATETIME,
+                        format!(
+                            "TIMESTAMP text {text:?} names an instant outside the UTC years \
+                             0000 to 9999"
+                        ),
+                    )
+                    .at(span),
                 })?;
                 literal(r::Value::DateTime(millis), span)
             }

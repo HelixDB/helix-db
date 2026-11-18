@@ -657,6 +657,10 @@ async fn datetime_bad_paths_fail_with_typed_errors() {
             compile(r::category::ARGUMENT_ERROR, r::detail::INVALID_DATETIME),
         ),
         (
+            "RETURN datetime('0000-01-01T00:00:00.000+00:01')",
+            compile(r::category::ARGUMENT_ERROR, r::detail::INVALID_DATETIME),
+        ),
+        (
             "RETURN datetime().Year",
             compile(r::category::TYPE_ERROR, r::detail::INVALID_ARGUMENT_TYPE),
         ),
@@ -839,6 +843,11 @@ async fn sql_reads_and_writes_datetimes() {
         ),
         (
             "SELECT TIMESTAMP '2024-02-30'",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_DATETIME,
+        ),
+        (
+            "SELECT TIMESTAMP '9999-12-31T23:59:59-00:01'",
             r::category::ARGUMENT_ERROR,
             r::detail::INVALID_DATETIME,
         ),

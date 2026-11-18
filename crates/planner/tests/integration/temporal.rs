@@ -307,6 +307,9 @@ fn datetime_rejects_unreadable_text_maps_and_types() {
         "+10000-01-01T00:00:00.000Z",
         "2023-02-30",
         "2016-12-31T23:59:60Z",
+        // An offset moving the instant outside the four-digit UTC years.
+        "9999-12-31T23:59:59-00:01",
+        "0000-01-01T00:00:00+00:01",
     ] {
         assert_eq!(code(V::String(text.into())), invalid, "{text}");
     }
