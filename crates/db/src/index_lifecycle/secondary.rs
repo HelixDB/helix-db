@@ -1816,8 +1816,11 @@ async fn activate(
     // Every writer records the deltas it commits (see [`delta_ledger`]), so
     // the keys observed under the permit were all of them. Production trusts
     // that contract rather than rescan the prefix's tombstones while every
-    // writer waits; test builds prove it at every activation, so a writer
-    // that skips its record fails every lifecycle test that activates.
+    // writer waits: a rescan, and even a seek for the first live key, walks
+    // one tombstone per delta the build reconciled (about 2.6 s per million
+    // on an in-memory store). Test builds prove it at every activation, so
+    // a writer that skips its record fails every lifecycle test that
+    // activates.
     #[cfg(any(test, feature = "index-lifecycle-testing"))]
     {
         let left = transaction_delta_keys(transaction, scope, operation).await?;
