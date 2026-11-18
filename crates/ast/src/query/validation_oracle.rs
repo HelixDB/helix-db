@@ -2,20 +2,28 @@
 //! the oracle its replacement must match exactly: same verdicts, same first
 //! error in document order, same paths.
 
-use super::{query_value_kind, QueryError, QueryParamType, QueryValue, MAX_REQUEST_JSON_DEPTH};
+use super::{
+    query_value_kind, QueryError, QueryParamType, QueryValue, MAX_REQUEST_JSON_DEPTH,
+    PARAMETER_JSON_DEPTH,
+};
 use std::collections::BTreeMap;
 
 /// Validate a parameter value with an explicit stack, so neither its size nor
-/// its nesting reaches the call stack; nesting is bounded like a request.
+/// its nesting reaches the call stack; nesting is bounded in JSON levels of
+/// the request body.
 pub(super) fn validate_json_value(value: &QueryValue, path: &str) -> Result<(), QueryError> {
     validate_below(value, path, 0)
 }
 
-/// [`validate_json_value`] for a value under `levels_above` declared levels.
+/// [`validate_json_value`] for a value under `levels_above` arrays and
+/// objects of a typed parameter.
 fn validate_below(value: &QueryValue, path: &str, levels_above: usize) -> Result<(), QueryError> {
-    let mut pending = vec![(value, path.to_owned(), levels_above + 1)];
+    // `depth` is the JSON level the value opens if it is an array or object.
+    let mut pending = vec![(value, path.to_owned(), PARAMETER_JSON_DEPTH + levels_above + 1)];
     while let Some((value, path, depth)) = pending.pop() {
-        if depth > MAX_REQUEST_JSON_DEPTH {
+        if matches!(value, QueryValue::Array(_) | QueryValue::Object(_))
+            && depth > MAX_REQUEST_JSON_DEPTH
+        {
             return Err(QueryError::NestingTooDeep {
                 path,
                 maximum: MAX_REQUEST_JSON_DEPTH,
@@ -67,16 +75,18 @@ pub(super) fn normalize_typed_value(
     value: QueryValue,
     path: &str,
 ) -> Result<QueryValue, QueryError> {
-    // Normalization recurses once per array or object level of the declared
-    // type.
+    // The JSON levels the declared type opens: one for an array or
+    // nullable, two for an object with fields.
     fn type_depth(ty: &QueryParamType) -> usize {
-        1 + match ty {
-            QueryParamType::Array(inner) | QueryParamType::Nullable(inner) => type_depth(inner),
-            QueryParamType::Record(fields) => fields
-                .iter()
-                .map(|(_, ty)| type_depth(ty))
-                .max()
-                .unwrap_or(0),
+        match ty {
+            QueryParamType::Array(inner) | QueryParamType::Nullable(inner) => 1 + type_depth(inner),
+            QueryParamType::Record(fields) => {
+                2 + fields
+                    .iter()
+                    .map(|(_, ty)| type_depth(ty))
+                    .max()
+                    .unwrap_or(0)
+            }
             QueryParamType::Bool
             | QueryParamType::I64
             | QueryParamType::F64
@@ -88,7 +98,7 @@ pub(super) fn normalize_typed_value(
             | QueryParamType::Object => 0,
         }
     }
-    if type_depth(ty) > MAX_REQUEST_JSON_DEPTH {
+    if PARAMETER_JSON_DEPTH + type_depth(ty) > MAX_REQUEST_JSON_DEPTH {
         return Err(QueryError::NestingTooDeep {
             path: path.to_owned(),
             maximum: MAX_REQUEST_JSON_DEPTH,
@@ -246,7 +256,10 @@ fn values() -> Vec<QueryValue> {
         ]));
     }
     for depth in [
-        MAX_REQUEST_JSON_DEPTH - 1,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH - 1,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH + 1,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH + 2,
         MAX_REQUEST_JSON_DEPTH,
         MAX_REQUEST_JSON_DEPTH + 1,
         MAX_REQUEST_JSON_DEPTH + 5,
@@ -315,10 +328,16 @@ fn lazy_typed_normalization_matches_the_eager_oracle() {
             ("field2", QueryParamType::Value),
         ]),
     ];
+    // Around the limit for array, nullable and object levels; an object
+    // level is two JSON levels, so its declarations nest half as deep.
     for depth in [
-        MAX_REQUEST_JSON_DEPTH - 1,
-        MAX_REQUEST_JSON_DEPTH,
-        MAX_REQUEST_JSON_DEPTH + 1,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH - 1,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH + 1,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH + 2,
+        (MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH) / 2,
+        (MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH) / 2 + 1,
+        (MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH) / 2 + 2,
     ] {
         types.push((1..depth).fold(QueryParamType::I64, |inner, _| array(inner)));
         // A nullable level counts toward the declared type's depth.
@@ -397,7 +416,11 @@ fn lazy_typed_normalization_matches_the_eager_oracle() {
     ]);
     // Values nested to match the deep object declarations, around the limit.
     for depth in [
-        MAX_REQUEST_JSON_DEPTH - 1,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH - 1,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH,
+        MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH + 1,
+        (MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH) / 2,
+        (MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH) / 2 + 1,
         MAX_REQUEST_JSON_DEPTH,
         MAX_REQUEST_JSON_DEPTH + 1,
     ] {

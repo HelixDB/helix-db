@@ -692,6 +692,43 @@ pub struct QueryRequest {
 /// enforces it before parsing.
 pub const MAX_REQUEST_JSON_DEPTH: usize = 255;
 
+/// JSON levels a parameter's value or declared type sits under in a request
+/// body: the body itself and its `parameters` or `parameter_types` map.
+///
+/// Parameters are bounded in this same unit, JSON levels of the body, when
+/// they are built in memory and when they are parsed, so a request built
+/// within the bound also parses.
+///
+/// A declared object level is two JSON levels (`{"object": {"<field>": ...}}`)
+/// and its value one, so a record nests at most 126 levels:
+///
+/// ```
+/// use helix_ast::batch::read_batch;
+/// use helix_ast::query::{
+///     ObjectFields, QueryParamType, QueryRequest, QueryValue, MAX_REQUEST_JSON_DEPTH,
+///     PARAMETER_JSON_DEPTH,
+/// };
+/// let declared = |levels: usize| (0..levels).fold(QueryParamType::I64, |inner, _| {
+///     QueryParamType::Record(ObjectFields::new([("k", inner)]).unwrap())
+/// });
+/// let nested = |levels: usize| (0..levels).fold(QueryValue::I64(1), |inner, _| {
+///     QueryValue::Object([("k".to_owned(), inner)].into())
+/// });
+/// let deepest = (MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH) / 2;
+/// assert_eq!(deepest, 126);
+/// let request = QueryRequest::read(read_batch())
+///     .with_typed_parameter("p", declared(deepest), nested(deepest))
+///     .unwrap();
+/// # // An unoptimized parser needs more than the default stack this deep.
+/// # std::thread::Builder::new().stack_size(64 << 20).spawn(move || {
+/// assert!(QueryRequest::from_json_slice(request.to_json_string().unwrap().as_bytes()).is_ok());
+/// # }).unwrap().join().unwrap();
+/// assert!(QueryRequest::read(read_batch())
+///     .with_typed_parameter("p", declared(deepest + 1), nested(deepest + 1))
+///     .is_err());
+/// ```
+pub const PARAMETER_JSON_DEPTH: usize = 2;
+
 /// Reject JSON nested deeper than [`MAX_REQUEST_JSON_DEPTH`] with one flat
 /// pass that tracks only the depth. Every JSON backend runs it first, so the
 /// bound does not depend on which parser reads the body.
@@ -1579,9 +1616,10 @@ impl std::fmt::Display for ParamPath<'_> {
 }
 
 /// Validate a parameter value with an explicit stack, so neither its size nor
-/// its nesting reaches the call stack; nesting is bounded like a request,
-/// counting the `levels_above` the value already sits under (the declared
-/// array levels of a typed parameter). Every parameter a request holds has
+/// its nesting reaches the call stack. Nesting is bounded in JSON levels of
+/// the request body: [`PARAMETER_JSON_DEPTH`], the `levels_above` arrays and
+/// objects the value already sits in (inside a typed parameter), and one for
+/// each array or object on the way down. Every parameter a request holds has
 /// passed this check, so [`QueryRequest::check_nesting`] need not walk them.
 ///
 /// The walk visits values in document order and keeps one frame per open
@@ -1625,8 +1663,11 @@ fn validate_json_value(
     let mut frames = Vec::<Frame<'_>>::new();
     let mut visit = value;
     loop {
-        // Every open frame is an ancestor of `visit`.
-        if levels_above + frames.len() + 1 > MAX_REQUEST_JSON_DEPTH {
+        // Every open frame is an ancestor of `visit`, and an array or object
+        // opens one more JSON level.
+        if matches!(visit, QueryValue::Array(_) | QueryValue::Object(_))
+            && PARAMETER_JSON_DEPTH + levels_above + frames.len() + 1 > MAX_REQUEST_JSON_DEPTH
+        {
             return Err(QueryError::NestingTooDeep {
                 path: render(&frames),
                 maximum: MAX_REQUEST_JSON_DEPTH,
@@ -1689,16 +1730,20 @@ fn validate_json_value(
 /// Normalize a typed parameter to its declared schema. The declared type
 /// bounds the recursion, so its depth is checked once here rather than at
 /// every element.
+///
+/// The declaration is bounded in JSON levels of the request body, like the
+/// value: `{"array": ...}` and `{"nullable": ...}` open one level each and
+/// `{"object": {"<field>": ...}}` two, under [`PARAMETER_JSON_DEPTH`].
 fn normalize_typed_value(
     ty: &QueryParamType,
     value: QueryValue,
     name: &str,
 ) -> Result<QueryValue, QueryError> {
-    // Normalization recurses once per array or object level of the declared
-    // type. The depth walk keeps an explicit stack, so a deep or wide
-    // declaration never reaches the call stack before it is rejected.
-    let mut type_depth = 0;
-    let mut pending = vec![(ty, 1_usize)];
+    // Normalization recurses once per array, nullable or object level of the
+    // declared type. The depth walk keeps an explicit stack, so a deep or
+    // wide declaration never reaches the call stack before it is rejected.
+    let mut type_depth = PARAMETER_JSON_DEPTH;
+    let mut pending = vec![(ty, PARAMETER_JSON_DEPTH)];
     while let Some((ty, depth)) = pending.pop() {
         type_depth = type_depth.max(depth);
         if type_depth > MAX_REQUEST_JSON_DEPTH {
@@ -1712,7 +1757,7 @@ fn normalize_typed_value(
                 pending.push((inner, depth + 1));
             }
             QueryParamType::Record(fields) => {
-                pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1)));
+                pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 2)));
             }
             QueryParamType::Bool
             | QueryParamType::I64
@@ -1725,7 +1770,12 @@ fn normalize_typed_value(
             | QueryParamType::Object => {}
         }
     }
-    normalize_typed_value_at(ty, value, name, &mut Vec::with_capacity(type_depth))
+    normalize_typed_value_at(
+        ty,
+        value,
+        name,
+        &mut Vec::with_capacity(type_depth - PARAMETER_JSON_DEPTH),
+    )
 }
 
 /// [`normalize_typed_value`] below `segments`, the array positions and
@@ -1917,16 +1967,20 @@ mod tests {
             Err(QueryError::NestingTooDeep { maximum, .. }) if maximum == MAX_REQUEST_JSON_DEPTH
         ));
 
-        let value = |depth: usize| {
-            (1..depth).fold(QueryValue::Null, |inner, _| QueryValue::Array(vec![inner]))
+        // `arrays` JSON levels below the parameter envelope.
+        let value = |arrays: usize| {
+            (1..arrays).fold(QueryValue::Array(Vec::new()), |inner, _| {
+                QueryValue::Array(vec![inner])
+            })
         };
+        let deepest = MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH;
         let mut request = QueryRequest::read(read_batch());
         request
-            .try_insert_untyped_parameter("fits", value(MAX_REQUEST_JSON_DEPTH))
+            .try_insert_untyped_parameter("fits", value(deepest))
             .unwrap();
         assert!(request.check_nesting().is_ok());
         assert!(matches!(
-            request.try_insert_untyped_parameter("deep", value(MAX_REQUEST_JSON_DEPTH + 1)),
+            request.try_insert_untyped_parameter("deep", value(deepest + 1)),
             Err(QueryError::NestingTooDeep { path, .. }) if path.starts_with("deep")
         ));
         // Validation is iterative, so a value far past the limit is rejected
@@ -1935,7 +1989,7 @@ mod tests {
             request.try_insert_untyped_parameter("deeper", value(5_000)),
             Err(QueryError::NestingTooDeep { .. })
         ));
-        let ty = (1..=MAX_REQUEST_JSON_DEPTH).fold(QueryParamType::Bool, |inner, _| {
+        let ty = (0..=deepest).fold(QueryParamType::Bool, |inner, _| {
             QueryParamType::Array(Box::new(inner))
         });
         assert!(matches!(
@@ -1961,15 +2015,130 @@ mod tests {
         let nested = |levels: usize, leaf: QueryValue| {
             (0..levels).fold(leaf, |inner, _| QueryValue::Array(vec![inner]))
         };
-        // 100 declared levels around a 155-level value reach the limit exactly.
-        let at_limit = typed(declared(100), nested(100, nested(154, QueryValue::Null)))
+        // 100 declared levels around 153 more arrays reach the limit exactly:
+        // 2 envelope levels and 253 arrays.
+        let at_limit = typed(declared(100), nested(100, nested(153, QueryValue::Null)))
             .expect("a parameter at the limit is accepted");
         assert!(at_limit.check_nesting().is_ok());
         assert!(matches!(
-            typed(declared(100), nested(100, nested(155, QueryValue::Null))),
+            typed(declared(100), nested(100, nested(154, QueryValue::Null))),
             Err(QueryError::NestingTooDeep { path, maximum })
                 if maximum == MAX_REQUEST_JSON_DEPTH && path.starts_with("value[0][0]")
         ));
+    }
+
+    /// A request at the in-memory bound parses back to itself.
+    #[track_caller]
+    fn assert_parses(request: &QueryRequest) {
+        let json = request.to_json_string().unwrap();
+        assert_eq!(
+            &QueryRequest::from_json_slice(json.as_bytes()).expect("a request at the bound parses"),
+            request
+        );
+    }
+
+    /// Building a parameter and parsing one count the same unit, JSON levels
+    /// of the request body, so every parameter that builds also parses and
+    /// one level more fails both, for values and for each kind of declared
+    /// level. A declared object is two levels (`{"object": {...}}`) and its
+    /// value one.
+    ///
+    /// Unoptimized builds spend about 24 KiB of parser stack per level, so
+    /// the requests at the limit build, serialize and parse on a larger stack.
+    #[test]
+    fn parameters_build_and_parse_within_the_same_json_depth() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(parameters_at_the_json_depth_limit)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn parameters_at_the_json_depth_limit() {
+        let deepest = MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH;
+        let arrays = |levels: usize| {
+            (0..levels).fold(QueryValue::I64(1), |inner, _| QueryValue::Array(vec![inner]))
+        };
+        let objects = |levels: usize| {
+            (0..levels).fold(QueryValue::I64(1), |inner, _| object(vec![("k", inner)]))
+        };
+        let array_types = |levels: usize| {
+            (0..levels).fold(QueryParamType::I64, |inner, _| {
+                QueryParamType::Array(Box::new(inner))
+            })
+        };
+        let record_types = |levels: usize| {
+            (0..levels).fold(QueryParamType::I64, |inner, _| record(vec![("k", inner)]))
+        };
+        let nullable_types =
+            |levels: usize| (0..levels).fold(QueryParamType::I64, |inner, _| nullable(inner));
+        let value_records = |levels: usize| {
+            (0..levels).fold(QueryParamType::Value, |inner, _| record(vec![("k", inner)]))
+        };
+        // Each case at the limit, and one level past it.
+        let cases = [
+            ("untyped arrays", (None, arrays(deepest)), (None, arrays(deepest + 1))),
+            ("untyped objects", (None, objects(deepest)), (None, objects(deepest + 1))),
+            (
+                "typed arrays",
+                (Some(array_types(deepest)), arrays(deepest)),
+                (Some(array_types(deepest + 1)), arrays(deepest + 1)),
+            ),
+            (
+                "typed records",
+                (Some(record_types(deepest / 2)), objects(deepest / 2)),
+                (Some(record_types(deepest / 2 + 1)), objects(deepest / 2 + 1)),
+            ),
+            (
+                "typed nullables",
+                (Some(nullable_types(deepest)), QueryValue::I64(1)),
+                (Some(nullable_types(deepest + 1)), QueryValue::I64(1)),
+            ),
+            (
+                "a value under typed records",
+                (Some(value_records(50)), objects(deepest)),
+                (Some(value_records(50)), objects(deepest + 1)),
+            ),
+        ];
+        let build = |(ty, value): &(Option<QueryParamType>, QueryValue)| {
+            let mut request = QueryRequest::read(read_batch());
+            match ty {
+                Some(ty) => request.try_insert_typed_parameter("value", ty.clone(), value.clone()),
+                None => request.try_insert_untyped_parameter("value", value.clone()),
+            }
+            .map(|()| request)
+        };
+        for (case, at_limit, past) in cases {
+            assert_parses(
+                &build(&at_limit)
+                    .unwrap_or_else(|error| panic!("{case} at the limit builds: {error}")),
+            );
+            assert!(
+                matches!(
+                    build(&past),
+                    Err(QueryError::NestingTooDeep { maximum, .. })
+                        if maximum == MAX_REQUEST_JSON_DEPTH
+                ),
+                "{case} one level past the limit does not build"
+            );
+            // The same request written by hand fails to parse.
+            let (ty, value) = past;
+            let types = ty.map(|ty| {
+                format!(r#"{{"value":{}}}"#, serde_json::to_string(&ty).unwrap())
+            });
+            let json = read_wire(
+                &format!(r#"{{"value":{}}}"#, serde_json::to_string(&value).unwrap()),
+                types.as_deref(),
+            );
+            assert!(
+                QueryRequest::from_json_slice(json.as_bytes())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("nesting"),
+                "{case} one level past the limit does not parse"
+            );
+        }
     }
 
     #[test]
@@ -2993,25 +3162,27 @@ mod tests {
         let nested = |levels: usize, leaf: QueryValue| {
             (0..levels).fold(leaf, |inner, _| object(vec![("k", inner)]))
         };
+        // 2 envelope levels and 253 objects.
         let at_limit = typed(
             declared(100, QueryParamType::Value),
-            nested(100, nested(154, QueryValue::Null)),
+            nested(100, nested(153, QueryValue::Null)),
         )
         .expect("a parameter at the limit is accepted");
         assert!(at_limit.check_nesting().is_ok());
         assert!(matches!(
             typed(
                 declared(100, QueryParamType::Value),
-                nested(100, nested(155, QueryValue::Null))
+                nested(100, nested(154, QueryValue::Null))
             ),
             Err(QueryError::NestingTooDeep { path, maximum })
                 if maximum == MAX_REQUEST_JSON_DEPTH && path.starts_with("value.k.k")
         ));
-        // A deep field in any position bounds the whole declaration.
+        // A deep field in any position bounds the whole declaration: 127
+        // object levels are 254 JSON levels under the envelope's 2.
         let wide = QueryParamType::Record(
             ObjectFields::new([
                 ("a", QueryParamType::I64),
-                ("z", declared(MAX_REQUEST_JSON_DEPTH, QueryParamType::I64)),
+                ("z", declared(126, QueryParamType::I64)),
             ])
             .unwrap(),
         );
@@ -3137,9 +3308,10 @@ mod tests {
         assert!(parse(r#"{"nullable":null}"#, r#"{"value":1}"#).is_err());
         let deep =
             |levels: usize| (0..levels).fold(QueryParamType::I64, |inner, _| nullable(inner));
-        assert!(typed(deep(MAX_REQUEST_JSON_DEPTH - 1), QueryValue::I64(1)).is_ok());
+        let deepest = MAX_REQUEST_JSON_DEPTH - PARAMETER_JSON_DEPTH;
+        assert!(typed(deep(deepest), QueryValue::I64(1)).is_ok());
         assert!(matches!(
-            typed(deep(MAX_REQUEST_JSON_DEPTH), QueryValue::I64(1)),
+            typed(deep(deepest + 1), QueryValue::I64(1)),
             Err(QueryError::NestingTooDeep { .. })
         ));
     }
