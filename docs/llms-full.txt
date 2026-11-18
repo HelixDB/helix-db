@@ -6891,7 +6891,9 @@ A `date_time` parameter (or an array of them) is sent as an RFC3339 string and b
 on the server: UTC epoch milliseconds, with any offset applied and sub-millisecond digits dropped.
 It is stored, compared, and indexed exactly like a datetime literal or `now()`, so
 `2026-06-01T09:00:00+09:00` and `2026-06-01T00:00:00Z` are equal and range filters order by
-instant. Responses render datetimes as `YYYY-MM-DDTHH:MM:SS.sssZ`. Only a declared `date_time`
+instant. Responses render datetimes as `YYYY-MM-DDTHH:MM:SS.sssZ`, and
+[Cypher](/database/helix-db/query-guides/cypher#datetimes) and SQL read and render them the same
+way. Only a declared `date_time`
 turns a string into a datetime: an untyped parameter, a `value` or `string` parameter, and the
 fields of an `object` parameter (including `forEachParam` rows) keep RFC3339 text as a string.
 
@@ -6899,6 +6901,13 @@ Before this, `date_time` parameters were stored as their raw strings. A writer t
 converts it once in the background: each property whose every value is a datetime or an RFC3339
 string with at most millisecond precision becomes datetimes, and any other property is left as
 stored and named in the server log.
+
+After the conversion, a Cypher or SQL filter that compares such a property with text matches no
+rows and raises no error, because a datetime never equals or orders against a string. This covers
+string literals (`WHERE e.at > '2026-01-01'`) and string parameters, including every JSON
+parameter, which has no datetime form. Read the text as a datetime instead: `datetime('…')` or
+`datetime($since)` in [Cypher](/database/helix-db/query-guides/cypher#datetimes), and
+`TIMESTAMP '…'` or `CAST(? AS TIMESTAMP)` in [SQL](/database/helix-db/query-guides/sql).
 
 ## Query names
 
@@ -7631,11 +7640,12 @@ plan = client.explain_cypher(
 | Reading patterns | `MATCH` and `OPTIONAL MATCH`; fixed-length directed and undirected relationships; several patterns in one clause; repeated variables; named paths such as `p = (a)-[:KNOWS]->(b)` |
 | Row clauses | `WHERE`, `WITH`, `RETURN`, `RETURN *` and `WITH *`, aliases, `DISTINCT`, `UNWIND`, `ORDER BY`, `SKIP`, `LIMIT` |
 | Writing | `CREATE`; property and map `SET` (`=` and `+=`); property `REMOVE`; `DELETE`; `DETACH DELETE` |
-| Expressions | Parameters; scalar, list, and map literals; property and index access; list slices such as `xs[1..3]`; arithmetic; comparisons (`<>` or `!=` for inequality) and comparison chains; `AND`, `OR`, `XOR`, `NOT`; `IS NULL` and `IS NOT NULL`; `IN`; `STARTS WITH`, `ENDS WITH`, `CONTAINS`; label tests such as `n:User`; simple and searched `CASE` |
+| Expressions | Parameters; scalar, list, and map literals; property and index access, including [datetime fields](#datetimes) such as `dt.year`; list slices such as `xs[1..3]`; arithmetic; comparisons (`<>` or `!=` for inequality) and comparison chains; `AND`, `OR`, `XOR`, `NOT`; `IS NULL` and `IS NOT NULL`; `IN`; `STARTS WITH`, `ENDS WITH`, `CONTAINS`; label tests such as `n:User`; simple and searched `CASE` |
 | Graph and list functions | `id`, `type`, `labels`, `properties`, `keys`, `exists` (for properties), `size`, `length`, `nodes`, `relationships`, `head`, `last`, `range`, `reverse` |
 | Scalar functions | `coalesce`, `abs`, `toString`, `toInteger` (and `toInt`), `toFloat`, `toBoolean`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
+| Datetime functions | `datetime()`, `datetime(text)`, `datetime({epochMillis: n})`, and `timestamp()`; see [datetimes](#datetimes) |
 | Aggregation | `count` (including `count(*)`), `sum`, `avg`, `min`, `max`, `collect`, each with `DISTINCT` arguments |
-| Values | Nulls, booleans, integers, floats, strings, lists, maps, nodes, relationships, and paths, with [lossless JSON encoding](#values-and-parameters) for large integers and non-finite floats |
+| Values | Nulls, booleans, integers, floats, strings, UTC datetimes, lists, maps, nodes, relationships, and paths, with [lossless JSON encoding](#values-and-parameters) for large integers and non-finite floats |
 
 Create and read a small graph:
 
@@ -7678,7 +7688,8 @@ before anything runs, with the error category `unsupported_feature` and the
 | `LOAD CSV` | `LOAD CSV FROM 'file:///data.csv' AS row` | `load_csv` |
 | Schema commands | `DROP INDEX person_name` | `schema_ddl` |
 | Namespaced functions | `apoc.text.join(...)`, `db.labels()` | `namespaced_function` |
-| Other built-in functions, including temporal, spatial, and most math and string functions | `sqrt(x)`, `round(x)`, `date()`, `point(...)`, `split(s, ',')`, `replace(s, 'a', 'b')`, `startNode(r)`, `endNode(r)`, `tail(xs)` | `function` (the message names the function) |
+| Other built-in functions, including other temporal types, spatial, and most math and string functions | `sqrt(x)`, `round(x)`, `date()`, `localdatetime()`, `duration('P1D')`, `point(...)`, `split(s, ',')`, `replace(s, 'a', 'b')`, `startNode(r)`, `endNode(r)`, `tail(xs)` | `function` (the message names the function) |
+| `datetime` with a component map or literal text outside its grammar | `datetime({year: 2024})`, `datetime('2015-W30-2T21:40Z')`, `datetime('2015-07-21T21:40+01:00[Europe/Stockholm]')` | `function` |
 | More than one label on a node | `CREATE (n:Admin:User)` | `multiple_node_labels` |
 | Adding or removing labels | `SET n:Admin`, `REMOVE n:Admin` | `label_mutation` |
 | Creating a node without exactly one label | `CREATE (n)` | `node_label_required` |
@@ -7726,6 +7737,7 @@ numbers. Larger integers and non-finite floats use tagged values:
 | Node | `{"$type":"node","id":"7","labels":["Person"],"properties":{"name":"Ada"}}` |
 | Relationship | `{"$type":"relationship","id":"9","start":"7","end":"8","type":"KNOWS","properties":{}}` |
 | Path | `{"$type":"path","nodes":[...],"relationships":[...]}` |
+| Datetime | `"2026-06-01T00:00:00.000Z"`: RFC 3339 UTC text with milliseconds, untagged, exactly as native query responses render stored datetimes |
 
 Node and relationship IDs are unsigned decimal strings in separate namespaces;
 keep them as strings. `id()` reports an overflow when an ID does not fit a signed
@@ -7736,6 +7748,11 @@ parameters; nodes, relationships, and paths cannot.
 
 The SDKs keep tagged values in results. TypeScript also accepts `bigint`
 parameters and sends them tagged.
+
+A datetime result is plain text, so it reads the same as a string holding that
+text. A typed `date_time` parameter of an in-process request binds as a
+datetime; JSON parameters have no datetime form, so read datetime text with
+`datetime($at)`, which still uses indexes.
 
 ## Writes and transactions
 
@@ -7822,6 +7839,63 @@ ORDER BY people DESC
 LIMIT 10
 ```
 
+### Datetimes
+
+A datetime is a UTC instant with millisecond precision, the same value native
+queries store from datetime literals, `now()`, and typed `date_time`
+parameters. Cypher reads those stored properties, at any depth in lists and
+maps, and `CREATE` and `SET` store datetimes back as datetimes.
+
+- `datetime()` and `timestamp()` read the statement's clock, once: every call in
+  one statement returns the same instant, as a datetime or as integer epoch
+  milliseconds.
+- `datetime(text)` reads RFC 3339 (`2026-06-01T09:00:00Z`) with a `Z` or
+  `±hh:mm` offset, a date and time without an offset (read as UTC), or a date
+  alone (`2026-06-01`, UTC midnight). Every field is zero-padded, years run
+  from `0000` to `9999`, and seconds are required. A space may separate date
+  and time; digits past milliseconds are dropped.
+  `datetime({epochMillis: n})` converts an integer, and a datetime or null
+  passes through.
+- Datetimes compare in time order. Against any other type, `=` is false and
+  `<`, `>`, `<=`, `>=` are null, as for a string against a number, so a
+  datetime never equals the string of its text. `ORDER BY` places datetimes
+  after paths and before strings. `min`, `max`, `DISTINCT`, and grouping work
+  on datetimes; `sum`, `avg`, and arithmetic reject them.
+- Fields read UTC components as integers: `dt.year`, `dt.quarter`,
+  `dt.month`, `dt.week` and `dt.weekYear` (ISO 8601 weeks, starting Monday),
+  `dt.day`, `dt.ordinalDay`, `dt.dayOfWeek` (Monday is 1), `dt.hour`,
+  `dt.minute`, `dt.second`, `dt.millisecond`, `dt.epochSeconds`, and
+  `dt.epochMillis`. Use them to bucket or compute, such as
+  `b.at.epochMillis - a.at.epochMillis` for a duration in milliseconds. Any
+  other field is a `type_error`.
+- `toString(dt)` returns the same RFC 3339 text a result shows.
+
+Literal text outside that grammar, such as an ISO week date, a time-zone
+name, or `2026-6-1`, is rejected before anything runs (`unsupported_feature`,
+`function`). Literal text in the grammar's form that names no instant, such
+as `2026-02-30` or a leap second, is rejected before anything runs with
+`argument_error` (`invalid_datetime`). Text that arrives at run time and does
+not read fails with `argument_error` (`invalid_datetime`). A stored instant
+outside years `0000`–`9999` compares and sorts, and a result renders it as
+native responses do (`+10000-01-01T00:00:00.000Z`), but `datetime()` does
+not read that text back; use `datetime({epochMillis: n})`. Past about
+262,000 years from year 0, returning it, converting it to text, or reading a
+calendar field fails with `argument_error` (`datetime_out_of_range`), as a
+native response does.
+
+Comparing a datetime property with text never matches. A filter such as
+`e.at > '2026-01-01'` or `e.at >= $since` with a string parameter returns no
+rows, without an error; read the text first with `datetime('2026-01-01')` or
+`datetime($since)`.
+
+```cypher
+MATCH (e:Event)
+WHERE e.at >= datetime($since) AND e.at < datetime()
+RETURN e.name AS name, e.at AS at
+ORDER BY e.at DESC
+LIMIT 10
+```
+
 ## Indexes and performance
 
 Cypher plans use existing native indexes automatically. You do not name an index
@@ -7848,7 +7922,9 @@ in the statement; explain shows which one was chosen.
 An index is only used when every other condition on that node cannot fail.
 Comparisons, string predicates, label and null tests, and their `AND`, `OR`,
 `XOR`, and `NOT` combinations over literals, parameters, variables, and properties
-qualify. Arithmetic and function calls keep the label scan.
+qualify, as do datetime literals, typed datetime parameters, and `datetime($text)`
+of a parameter that reads as a datetime. Arithmetic and other function calls,
+including the clock `datetime()`, keep the label scan.
 
 ## Load and fetch in batches
 
@@ -8170,7 +8246,7 @@ plan = client.explain_sql(
 | Tables | Tables as node labels; `Start_TYPE_End` relationship tables; aliases; schema prefixes; [mappings](#mappings) |
 | Joins | `JOIN .. ON` one column equality, `USING`, `NATURAL JOIN`, chains through a relationship table, comma joins and `CROSS JOIN` |
 | Row clauses | `WHERE`, `DISTINCT`, `GROUP BY`, `HAVING`, `ORDER BY` (including positions), `LIMIT`, `OFFSET`, `FETCH FIRST`, `TOP` |
-| Expressions | Parameters; literals; arithmetic; comparisons; `AND`, `OR`, `XOR`, `NOT`; `IS [NOT] NULL`, `IS [NOT] TRUE`, `IS [NOT] DISTINCT FROM`; `IN` lists; `BETWEEN`; `LIKE` and `ILIKE` with a leading or trailing `%`; `\|\|`; simple and searched `CASE`; `CAST`; row values such as `(a, b) < (1, 2)` |
+| Expressions | Parameters; literals; arithmetic; comparisons; `AND`, `OR`, `XOR`, `NOT`; `IS [NOT] NULL`, `IS [NOT] TRUE`, `IS [NOT] DISTINCT FROM`; `IN` lists; `BETWEEN`; `LIKE` and `ILIKE` with a leading or trailing `%`; `\|\|`; simple and searched `CASE`; `CAST`; [`TIMESTAMP` literals and `EXTRACT`](#expressions-and-functions); row values such as `(a, b) < (1, 2)` |
 | Functions | `lower`, `upper`, `length`, `trim`, `ltrim`, `rtrim`, `substring`, `concat`, `coalesce`, `nvl`, `nullif`, `nvl2`, `abs`, `square`, `power`, `mod`, and the [Cypher functions](/database/helix-db/query-guides/cypher#what-is-supported) under their own names, such as `id(p)` |
 | Aggregation | `count` (including `count(*)`), `sum`, `avg`, `min`, `max`, `array_agg`, each with `DISTINCT` arguments |
 | Values | The [Cypher values](/database/helix-db/query-guides/cypher#values-and-parameters), with the same lossless JSON encoding |
@@ -8346,10 +8422,34 @@ must be a literal, since a computed one fails. `TRIM`, `LTRIM`, and `RTRIM`
 remove all surrounding whitespace, as Cypher's do, not only spaces. Other names
 pass through, so the [Cypher profile](/database/helix-db/query-guides/cypher#what-is-supported)
 decides which functions run. Some renames land on Cypher functions outside the
-profile and are rejected (`function`): `CURRENT_TIMESTAMP` and `NOW()` become
-`localdatetime()`, `CURRENT_DATE` `date()`, `CURRENT_TIME` `localtime()`, `ln`
-`log`, `ceiling` `ceil`, `random` `rand`, and `stddev` `stDev`. Pass the current
-time as a parameter instead.
+profile and are rejected (`function`): `CURRENT_DATE` becomes `date()`,
+`CURRENT_TIME` `localtime()`, `ln` `log`, `ceiling` `ceil`, `random` `rand`,
+and `stddev` `stDev`.
+
+Timestamps are Cypher's [UTC datetimes](/database/helix-db/query-guides/cypher#datetimes).
+`CURRENT_TIMESTAMP` and `NOW()` become `datetime()`, the statement's clock. A
+`TIMESTAMP '2026-06-01 09:00:00'` literal is a datetime, read as UTC unless the
+text has an offset, so it can bound a range index. Text other than RFC 3339, a
+date and time, or a date, each zero-padded with years `0000`–`9999`, is
+rejected (`sql_construct`), and text in that form that names no instant, such
+as `'2026-02-30'`, fails with `argument_error` (`invalid_datetime`).
+`CAST(x AS TIMESTAMP)` becomes `datetime(x)`, which, unlike the other casts,
+fails on text it cannot read. `DATE` and `TIME` literals are not supported.
+
+A timestamp column never equals or orders against text: unlike PostgreSQL,
+`WHERE e.at > '2026-01-01'` does not cast the string, so it matches no rows
+and raises no error. The same holds for a string parameter. Write
+`e.at > TIMESTAMP '2026-01-01'` or `e.at > CAST(? AS TIMESTAMP)`. Properties
+written as `date_time` parameters before datetimes were stored natively are
+[converted to datetimes](/database/helix-db/query-guides/parameters#supported-parameter-families),
+so filters that compared them with text stop matching after the conversion.
+
+`EXTRACT(field FROM x)` reads the datetime field of the same meaning in UTC:
+`YEAR`, `QUARTER`, `MONTH`, `WEEK` and `ISOYEAR` (ISO 8601 weeks), `DAY`,
+`DOY`, `ISODOW` (Monday is 1), `HOUR`, `MINUTE`, and `EPOCH` (seconds, with
+milliseconds as the fraction). `SECOND`, `MILLISECONDS`, `DOW`, and other
+fields are rejected (`sql_construct`): PostgreSQL's `SECOND` and
+`MILLISECONDS` include the fraction of a second and `DOW` counts Sunday as 0.
 
 ## What is not supported
 
