@@ -140,8 +140,7 @@ pub(crate) async fn process_background_step(
     }
     let datetimes_advanced = match (migrations, db.upgrade()) {
         (BackgroundMigrations::All, Some(inner)) => {
-            super::super::datetime_strings::process_once(&crate::HelixDB { inner }, tuning)
-                .await?
+            super::super::datetime_strings::process_once(&crate::HelixDB { inner }, tuning).await?
         }
         (BackgroundMigrations::All, None) | (BackgroundMigrations::LabelIdentity, _) => false,
     };
@@ -163,24 +162,23 @@ async fn run(
             return;
         }
 
-        let delay = match process_background_step(&writer, &db, tuning, migrations, &mut labels)
-            .await
-        {
-            Ok(true) => {
-                failure_backoff.reset();
-                Duration::from_millis(tuning.active_interval_millis().get())
-            }
-            Ok(false) => return,
-            Err(error) => {
-                let delay = failure_backoff.next_delay();
-                tracing::warn!(
-                    %error,
-                    retry_delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                    "background migration batch failed; retrying with capped backoff"
-                );
-                delay
-            }
-        };
+        let delay =
+            match process_background_step(&writer, &db, tuning, migrations, &mut labels).await {
+                Ok(true) => {
+                    failure_backoff.reset();
+                    Duration::from_millis(tuning.active_interval_millis().get())
+                }
+                Ok(false) => return,
+                Err(error) => {
+                    let delay = failure_backoff.next_delay();
+                    tracing::warn!(
+                        %error,
+                        retry_delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                        "background migration batch failed; retrying with capped backoff"
+                    );
+                    delay
+                }
+            };
 
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
@@ -192,6 +190,10 @@ async fn run(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "label_and_datetime_tests.rs"]
+mod label_and_datetime_tests;
 
 #[cfg(test)]
 mod tests {
