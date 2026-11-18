@@ -46,7 +46,7 @@ CODEC_OWNERS = {
     "keys/indexes/text.rs": "struct TextManifestRootKey",
     "keys/indexes/vector/metadata.rs": "struct VectorPartitionMappingKey",
     "values/global.rs": "fn encode_metadata_value",
-    "values/label_migration.rs": "struct LabelCopyProgressValue",
+    "values/label_migration.rs": "enum LabelCopyProgressValue",
     "values/lifecycle/index_record.rs": "fn encode_index_record",
     "values/indexes/equality/mod.rs": "struct SecondaryEqualityBitmapValue",
     "values/indexes/range.rs": "fn encode_entry",

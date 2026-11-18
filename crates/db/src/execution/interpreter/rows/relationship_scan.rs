@@ -9,11 +9,13 @@ use std::sync::Arc;
 
 impl ExecutionContext<'_> {
     /// The nonempty edge bitmaps of the relationship's types, one per stored
-    /// label key. An edge has one type and every type has its own exact label
+    /// label row. An edge has one type and every type has its own exact label
     /// row, so the bitmaps are disjoint and are replayed in turn rather than
-    /// combined. A topology flush makes staged edges visible, and deletes
-    /// remove label memberships in the same transaction, so they name exactly
-    /// the edges a typed expansion reaches.
+    /// combined. Under the retired hash keys two types whose labels share a
+    /// hash share a row, and its bitmap is kept once: a nonempty bitmap equal
+    /// to one already kept is that row read again. A topology flush makes
+    /// staged edges visible, and deletes remove label memberships in the same
+    /// transaction, so they name exactly the edges a typed expansion reaches.
     pub(super) async fn relationship_scan_ids(
         &self,
         relationship: &r::RelationshipPattern,
@@ -27,9 +29,10 @@ impl ExecutionContext<'_> {
         for label in types {
             self.check_execution_deadline()?;
             let edges = self.lookup_global_edge_label_index(label).await?;
-            if !edges.is_empty() {
-                ids.push(edges);
+            if edges.is_empty() || ids.iter().any(|kept: &bitmap::Bitmap| **kept == *edges) {
+                continue;
             }
+            ids.push(edges);
         }
         Ok(ids.into())
     }

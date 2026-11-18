@@ -3543,12 +3543,16 @@ async fn rewrite_legacy_edge_pair_batch(
         mark_legacy_edge_equivalents(txn, scope, &mut rows, &candidates).await?;
     }
 
+    let labels = crate::index_lifecycle::repository::LabelRowLayout::of_stored_version(
+        startup::stored_storage_version(txn).await?,
+    );
     for row in rows {
         if !row.equivalent {
             let edge_id = writer.edge_ids().allocate().await?;
             maintain_current_edge_rows(
                 txn,
                 scope,
+                labels,
                 edge_id,
                 row.from,
                 row.to,
@@ -3623,12 +3627,16 @@ async fn rebuild_edge_endpoint_batch(
         })
         .collect::<Vec<_>>();
     let property_rows = txn.multi_get(&property_keys).await?;
+    let labels = crate::index_lifecycle::repository::LabelRowLayout::of_stored_version(
+        startup::stored_storage_version(txn).await?,
+    );
     for ((edge_id, from, to), property_row) in rows.into_iter().zip(property_rows) {
         let properties = match property_row {
             Some(property_row) => decode_properties(&property_row)?,
             None => Vec::new(),
         };
-        maintain_current_edge_rows(txn, scope, edge_id, from, to, Some(&properties)).await?;
+        maintain_current_edge_rows(txn, scope, labels, edge_id, from, to, Some(&properties))
+            .await?;
     }
     #[cfg(test)]
     trip_migration_failpoint(MigrationFailpoint::BatchReadAfter)?;
@@ -3883,9 +3891,15 @@ async fn mark_legacy_edge_equivalents(
     Ok(())
 }
 
+/// Stages one edge's current rows. Its label rows go in `labels`, the layout
+/// the store files them in: a store before label identity keeps hash rows,
+/// which the label identity migration later in the open copies, and a
+/// published store keeps exact rows only, since nothing copies a hash row
+/// there and its cleanup may already be done.
 async fn maintain_current_edge_rows(
     txn: &DbTransaction,
     scope: DataScope,
+    labels: crate::index_lifecycle::repository::LabelRowLayout,
     edge_id: EdgeId,
     from: NodeId,
     to: NodeId,
@@ -3899,14 +3913,19 @@ async fn maintain_current_edge_rows(
     add_adjacency(txn, scope, from, to, EdgeAdjacencyDirection::Out)?;
     add_adjacency(txn, scope, to, from, EdgeAdjacencyDirection::In)?;
 
-    // The label identity migration later in this open copies these rows to
-    // their exact keys, with every other hash-keyed label row of the store.
-    let properties = properties.unwrap_or(&[]);
-    if let Some(label) = label_of(properties) {
-        search::add_to_legacy_edge_label_index_scoped(txn, from, to, label, scope)?;
-        search::add_to_legacy_global_edge_label_index_scoped(txn, label, edge_id, scope)?;
+    let Some(label) = label_of(properties.unwrap_or(&[])) else {
+        return Ok(());
+    };
+    match labels {
+        crate::index_lifecycle::repository::LabelRowLayout::Hash => {
+            search::add_to_legacy_edge_label_index_scoped(txn, from, to, label, scope)?;
+            search::add_to_legacy_global_edge_label_index_scoped(txn, label, edge_id, scope)
+        }
+        crate::index_lifecycle::repository::LabelRowLayout::Exact => {
+            search::add_to_edge_label_index_scoped(txn, from, to, label, scope)?;
+            search::add_to_global_edge_label_index_scoped(txn, label, edge_id, scope)
+        }
     }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

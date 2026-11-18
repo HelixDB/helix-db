@@ -207,6 +207,18 @@ impl StableRequestReadView {
     }
 }
 
+impl crate::index_lifecycle::repository::LayoutView for StableRequestReadView {
+    type Reads = Self;
+
+    fn reads(&self) -> &Self {
+        self
+    }
+
+    fn compatibility(&self) -> crate::index_lifecycle::repository::ReaderStorageCompatibility {
+        self.storage_compatibility()
+    }
+}
+
 #[async_trait::async_trait]
 impl DbReadOps for StableRequestReadView {
     async fn get_with_options<K: AsRef<[u8]> + Send>(

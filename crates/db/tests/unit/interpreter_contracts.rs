@@ -1564,17 +1564,25 @@ async fn request_read_view_guards_fail_closed() {
     for (error, expected) in [
         (
             context
-                .lookup_out_neighbors_by_label(1, "FOLLOWS")
+                .lookup_neighbors_by_label(
+                    crate::encoding::indexes::EdgeDirection::Out,
+                    1,
+                    "FOLLOWS",
+                )
                 .await
                 .expect_err("out-neighbor reads require a request view"),
-            "out-neighbor label lookup escaped its request read view",
+            "neighbor label lookup escaped its request read view",
         ),
         (
             context
-                .lookup_in_neighbors_by_label(1, "FOLLOWS")
+                .lookup_neighbors_by_label(
+                    crate::encoding::indexes::EdgeDirection::In,
+                    1,
+                    "FOLLOWS",
+                )
                 .await
                 .expect_err("in-neighbor reads require a request view"),
-            "in-neighbor label lookup escaped its request read view",
+            "neighbor label lookup escaped its request read view",
         ),
         (
             context

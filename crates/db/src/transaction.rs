@@ -155,6 +155,20 @@ mod sealed {
     pub trait Sealed {}
 }
 impl sealed::Sealed for DbTransaction {}
+/// Only the interpreter begins an owned transaction, for a request on a
+/// serving writer, and a writer serves only once its store is current.
+impl crate::index_lifecycle::repository::LayoutView for Owned {
+    type Reads = Self;
+
+    fn reads(&self) -> &Self {
+        self
+    }
+
+    fn compatibility(&self) -> crate::index_lifecycle::repository::ReaderStorageCompatibility {
+        crate::index_lifecycle::repository::ReaderStorageCompatibility::Current
+    }
+}
+
 impl sealed::Sealed for Owned {}
 impl sealed::Sealed for View<'_> {}
 impl sealed::Sealed for crate::search::vector::MeasuredVectorTransaction<'_> {}

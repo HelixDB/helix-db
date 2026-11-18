@@ -184,7 +184,11 @@ impl Cursor {
                     let outgoing = if direction != ir::ExpandDirection::In {
                         Some(
                             context
-                                .lookup_out_neighbors_by_label(source, label.as_ref())
+                                .lookup_neighbors_by_label(
+                                    crate::encoding::indexes::EdgeDirection::Out,
+                                    source,
+                                    label.as_ref(),
+                                )
                                 .await?
                                 .into_iter(),
                         )
@@ -194,7 +198,11 @@ impl Cursor {
                     let incoming = if direction != ir::ExpandDirection::Out {
                         Some(
                             context
-                                .lookup_in_neighbors_by_label(source, label.as_ref())
+                                .lookup_neighbors_by_label(
+                                    crate::encoding::indexes::EdgeDirection::In,
+                                    source,
+                                    label.as_ref(),
+                                )
                                 .await?
                                 .into_iter(),
                         )

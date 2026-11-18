@@ -64,23 +64,27 @@ during open, after the blocking startup migrations and before it serves any grap
 write. It copies each node label, edge label, and edge-label neighbor row to its
 exact key, leaving every hash row in place, and publishes version 6 in one commit
 once every scope is copied. A row is named by its lowest live member whose label
-hashes to it; live members whose labels hash elsewhere are stale leftovers of a
-label change and are not copied, and a highest such member with a different label
-(two labels sharing a hash) fails the open closed. Until publication readers of
-any version-5-capable binary keep reading complete hash rows, and a failed or
-interrupted copy leaves an ordinary version-5 store that older binaries still
-open. One iterator walks every scope's hash rows in key order, seeking past
-other rows, so a scope without label rows costs a few seeks, and batches span
-scopes. Each copy batch records its last row, how many hash rows the copy has
-passed, and the newest SlateDB sequence number among them. A later open resumes
-after that row only if the hash rows up to it are still those: as many, and none
-newer. Otherwise another writer (possibly an older binary) changed rows the copy
-had passed, so it clears the partial copy and copies again. Writer epochs play no
-part, so non-consecutive managed epochs and rejected failover opens do not force a
-restart. After publication readers read only exact rows, and the background
-migration worker deletes the hash rows while the writer serves, one tuned batch
-and at most 256 scopes per step beside the other background migrations, resuming
-after the last deleted row or the scope it stopped before. Every writer runs these
+hashes to it; live members whose labels hash elsewhere, or whose records have no
+string `$label`, are stale leftovers of a label change and are not copied, and a
+highest such member with a different label (two labels sharing a hash) fails the
+open closed. Until publication readers of any version-5-capable binary keep
+reading complete hash rows, and a failed or interrupted copy leaves an ordinary
+version-5 store that older binaries still open. One iterator walks every scope's
+hash rows in key order, seeking past other rows, so a scope without label rows
+costs a few seeks, and batches span scopes. Each copy batch records its last row.
+A later open resumes after that row only if that batch is still the store's
+newest commit, which two point reads decide; a writer open commits nothing before
+the copy. Any later commit (possibly an older binary's, which keeps hash rows
+current but not the copy) clears the partial copy, a recorded batch at a time so a
+stopped open resumes the clearing, and copies again. Writer epochs play no part,
+so non-consecutive managed epochs and rejected failover opens do not force a
+restart, and an open deadline shorter than the whole copy still lets every attempt
+keep the batches it commits. On a published store the graph-format rewrite
+stages exact label rows only. After publication readers read only exact rows,
+and the background migration worker deletes the hash rows while the writer
+serves, one tuned batch and at most 256 scopes per step beside the other
+background migrations, resuming after the last deleted row or the scope it
+stopped before. Every writer runs these
 cleanup steps, a managed failover writer included, though it runs no other
 migration; with the worker disabled the hash rows stay until a step is taken.
 Recovery-only managed failover reports `WriterMigrationRequired` for a version-5

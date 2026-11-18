@@ -4410,21 +4410,21 @@ pub(crate) async fn unindexed_label_rows(
         record_equality_point_read();
         match label.kind {
             IndexElementKind::Node => {
-                crate::search::lookup_node_label_index_admitted(
+                crate::search::read_node_label(
                     reader,
+                    compatibility.label_rows(),
                     label.label,
                     label.scope,
-                    compatibility,
                     None,
                 )
                 .await
             }
             IndexElementKind::Edge => {
-                crate::search::lookup_global_edge_label_index_admitted(
+                crate::search::read_global_edge_label(
                     reader,
+                    compatibility.label_rows(),
                     label.label,
                     label.scope,
-                    compatibility,
                     None,
                 )
                 .await

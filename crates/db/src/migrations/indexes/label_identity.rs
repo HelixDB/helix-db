@@ -20,33 +20,34 @@
 //!   copied and flushed, so readers switch from hash rows to complete exact rows
 //!   at once.
 //! - A node or edge row's label is the `$label` of its lowest live member
-//!   whose label hashes to the row. A live member whose label hashes elsewhere
-//!   is a stale leftover of a label change: it is not copied. The highest live
-//!   member whose label hashes to the row must have the same label, else two
-//!   labels share the row's hash and the copy fails closed; so does a member
-//!   with no string `$label`, or a label too long for any exact key. These two
-//!   members name the whole row: the migration relies on no two labels of a
-//!   scope sharing a hash, which production stores were verified to satisfy
-//!   before it shipped, and the second member catches a pair that does unless
-//!   one label holds both ends. A row with no such member indexes nothing and
-//!   is not copied.
+//!   whose label hashes to the row. A live member whose label hashes
+//!   elsewhere, or whose record has no string `$label`, is a stale leftover of
+//!   a label change: it is not copied. The highest live member whose label
+//!   hashes to the row must have the same label, else two labels share the
+//!   row's hash and the copy fails closed; so does a label too long for any
+//!   exact key. These two members name the whole row: the migration relies on
+//!   no two labels of a scope sharing a hash, which production stores were
+//!   verified to satisfy before it shipped, and the second member catches a
+//!   pair that does unless one label holds both ends. A row with no such
+//!   member indexes nothing and is not copied.
 //! - Edge-label neighbor rows name opposite endpoints, not edges. Their labels
 //!   come from the scope's edge label rows, copied first. A neighbor row whose
 //!   hash no live edge label has is not copied. No graph write leaves one: an
 //!   edge enters its neighbor rows and its global row in one commit and leaves
 //!   its global row first, so only an index already damaged holds one.
 //! - Each batch commits [`LABEL_IDENTITY_COPY_PROGRESS`] with its rows: the
-//!   last hash row it copied, how many hash rows the copy has passed up to it,
-//!   and the newest SlateDB sequence number among them. An open resumes after
-//!   that row only if every hash row up to it is one the copy read: as many as
-//!   it counted, and none newer. SlateDB keeps a row's sequence number through
-//!   compaction, a merged row carries its newest operand's, and every later
-//!   write takes a later one. So any writer that changed a hash row the copy had
-//!   passed, a binary before label identity among them, which keeps the hash
-//!   rows current but not the exact copy, leaves a newer row or a missing one,
-//!   and the copy clears every exact row and starts over. Writer epochs play no
-//!   part: managed epochs need not be consecutive, and an open rejected before
-//!   any write still takes one.
+//!   last hash row it copied. An open resumes after that row only if the
+//!   batch is still the store's newest commit: every commit takes a later
+//!   SlateDB sequence number than the last, so nothing, not this open's earlier
+//!   startup steps either, has written since, and every row the copy passed is
+//!   as it was. A store with a later commit may have hash rows the copy no
+//!   longer matches: a binary before label identity keeps them current but not
+//!   the exact copy. So the copy deletes every exact row and starts over. The
+//!   deletion records its last deleted row in the same progress key, so an
+//!   open stopped mid-way resumes it, and no open decides whether to resume by
+//!   reading rows: a fixed open deadline still lets every attempt commit
+//!   batches. Writer epochs play no part: managed epochs need not be
+//!   consecutive, and an open rejected before any write still takes one.
 //! - The publishing commit also deletes [`LABEL_IDENTITY_COPY_PROGRESS`]. Once
 //!   version 6 is published nothing reads the hash rows:
 //!   [`delete_hash_label_rows_once`] removes them in background migration
@@ -66,16 +67,15 @@
 //! costs a few seeks rather than scans of its own, and a batch spans scopes.
 //! The copy reads the records of the two naming members of each node and edge
 //! row (and of any stale or dead members before them), up to
-//! [`NAMING_CONCURRENCY`] at once, and writes every exact row. A resumed copy
-//! first walks the hash rows it passed again, without reading records. An open
-//! that is stopped keeps every committed batch for the next to resume from.
+//! [`NAMING_CONCURRENCY`] at once, and writes every exact row. Deciding to
+//! resume costs two point reads, and an open that is stopped keeps every
+//! committed batch for the next to resume from.
 //! Progress is logged at most every [`PROGRESS_INTERVAL`]. The cleanup walks
 //! the hash rows once more after the writer is serving: each step deletes at
 //! most one batch and enters at most [`CLEANUP_SCOPES_PER_STEP`] scopes, so a
 //! step over many tenants with nothing left to delete stays short too.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroU64;
 use std::ops::Bound;
 use std::time::{Duration, Instant};
 
@@ -89,7 +89,7 @@ use crate::config::MigrationTuning;
 use crate::encoding::indexes::{
     hash_property_value, label, EdgeDirection, PropertyIndexKey, ValueHash,
 };
-use crate::encoding::keys::scope::{DataScope, TenantId, TENANT_KEY_PREFIX};
+use crate::encoding::keys::scope::{DataScope, TenantId};
 use crate::encoding::keys::{EdgePropertyByIdKey, NodePropertyKey};
 use crate::encoding::property::decode_properties;
 use crate::encoding::v2::keys::{DataKey, DataKeyKind};
@@ -161,9 +161,9 @@ pub(crate) struct LabelIdentityMigration {
     /// explains; nothing reads them once the migration is published.
     pub(crate) skipped: u64,
     /// Members left out of their copied row: live records whose label hashes
-    /// to another row.
+    /// to another row, or that have no string `$label`.
     pub(crate) stale_members: u64,
-    /// Exact rows a stale earlier attempt left, deleted before copying.
+    /// Exact rows a stale earlier copy left, deleted before copying again.
     pub(crate) cleared: u64,
 }
 
@@ -289,9 +289,7 @@ impl<F: Copy> LabelRowWalk<F> {
             Some(after) => Bound::Excluded(after.clone()),
             None => Bound::Included(prefix.clone()),
         };
-        // Tenant envelopes sort after every unscoped label row, and last of
-        // every data scope.
-        let end = Bound::Excluded(Bytes::from_static(&[TENANT_KEY_PREFIX + 1]));
+        let end = Bound::Excluded(Bytes::from_static(DataScope::PHYSICAL_KEYS_END));
         // A bulk scan: it fetches blocks ahead, several at once, without
         // filling the block cache. One block per fetch makes every block a
         // round trip.
@@ -328,15 +326,11 @@ impl<F: Copy> LabelRowWalk<F> {
                     row
                 }
             };
-            let row_scope = match DataScope::strip_tenant_envelope(&row.key) {
-                Some((tenant, _)) => DataScope::Tenant(tenant),
-                None if row.key.first() == Some(&TENANT_KEY_PREFIX) => {
-                    return Err(HelixDbError::IndexCatalogCorruption(
-                        "label row walk encountered an invalid tenant envelope".to_string(),
-                    ));
-                }
-                None => DataScope::LegacyUnscoped,
-            };
+            let (row_scope, _) = DataScope::split_physical_key(&row.key).map_err(|error| {
+                HelixDbError::IndexCatalogCorruption(format!(
+                    "label row walk encountered a key outside every data scope: {error}"
+                ))
+            })?;
             if row_scope != self.entered {
                 self.entered = row_scope;
                 match &mut self.scopes_left {
@@ -394,10 +388,10 @@ impl<F: Copy> LabelRowWalk<F> {
 /// The scope and family of `key`, a row or family prefix under one of
 /// `logical_prefixes`.
 fn locate(logical_prefixes: &[Bytes; 3], key: &[u8]) -> Result<(DataScope, usize)> {
-    let (scope, logical) = DataScope::strip_tenant_envelope(key)
-        .map_or((DataScope::LegacyUnscoped, key), |(tenant, logical)| {
-            (DataScope::Tenant(tenant), logical)
-        });
+    let (scope, logical) =
+        DataScope::split_physical_key(key).map_err(|error| HelixDbError::MigrationRequired {
+            reason: format!("label identity progress names no data key: {error}"),
+        })?;
     let Some(family) = logical_prefixes
         .iter()
         .position(|prefix| logical.starts_with(prefix))
@@ -425,38 +419,38 @@ async fn hash_rows(
     .await
 }
 
-/// A walk of every exact label row.
-async fn exact_rows(db: &Db) -> Result<LabelRowWalk<label::LabelScanPrefix>> {
+/// A walk of every exact label row after `after`, or of every one.
+async fn exact_rows(
+    db: &Db,
+    after: Option<&Bytes>,
+) -> Result<LabelRowWalk<label::LabelScanPrefix>> {
     LabelRowWalk::open(
         db,
         label::LabelScanPrefix::ALL,
         label::LabelScanPrefix::to_bytes,
-        None,
+        after,
         None,
     )
     .await
 }
 
-/// Whether the `b"1"` metadata marker `name` is set; a malformed marker
-/// fails closed.
-async fn marker_set(db: &Db, name: &[u8]) -> Result<bool> {
-    match db
+/// Whether [`LABEL_HASH_CLEANUP_READY`] is set; a malformed marker fails
+/// closed.
+async fn cleanup_ready(db: &Db) -> Result<bool> {
+    let Some(marker) = db
         .get(super::super::scoped_metadata_key(
             DataScope::LegacyUnscoped,
-            name,
+            LABEL_HASH_CLEANUP_READY,
         ))
         .await?
-        .as_deref()
-    {
-        None => Ok(false),
-        Some(b"1") => Ok(true),
-        Some(_) => Err(HelixDbError::MigrationRequired {
-            reason: format!(
-                "label identity marker {} is malformed",
-                String::from_utf8_lossy(name)
-            ),
-        }),
-    }
+    else {
+        return Ok(false);
+    };
+    label_migration::LabelCleanupReadyValue::decode(&marker)
+        .map(|_| true)
+        .map_err(|error| HelixDbError::MigrationRequired {
+            reason: format!("label hash cleanup marker is malformed: {error}"),
+        })
 }
 
 /// Copies every hash-keyed label row to its exact key and publishes
@@ -486,29 +480,37 @@ async fn migrate_label_identity_in_batches(
     }
     let progress_key =
         super::super::scoped_metadata_key(DataScope::LegacyUnscoped, LABEL_IDENTITY_COPY_PROGRESS);
+    let newest_commit = db.snapshot().await?.seq();
     let recorded = db
-        .get(&progress_key)
+        .get_key_value(&progress_key)
         .await?
-        .map(|value| {
-            label_migration::LabelCopyProgressValue::decode(&value).map_err(|error| {
-                HelixDbError::MigrationRequired {
+        .map(|row| {
+            label_migration::LabelCopyProgressValue::decode(&row.value)
+                .map(|recorded| (recorded, row.seq))
+                .map_err(|error| HelixDbError::MigrationRequired {
                     reason: format!("label identity copy progress is malformed: {error}"),
-                }
-            })
+                })
         })
         .transpose()?;
 
     let mut progress = Progress::new();
     let resume = match recorded {
         None => None,
-        Some(recorded) => {
-            if copied_rows_unchanged(db, &recorded).await? {
-                progress.rows.resumed = true;
-                Some(recorded)
-            } else {
-                clear_exact_rows(db, &progress_key, &mut progress).await?;
-                None
-            }
+        // Nothing was committed since the copy's last batch, so every row it
+        // copied still matches its hash row.
+        Some((label_migration::LabelCopyProgressValue::Copying(after), seq))
+            if seq == newest_commit =>
+        {
+            progress.rows.resumed = true;
+            Some(after)
+        }
+        Some((label_migration::LabelCopyProgressValue::Copying(_), _)) => {
+            clear_exact_rows(db, &progress_key, None, batch_rows, &mut progress).await?;
+            None
+        }
+        Some((label_migration::LabelCopyProgressValue::Clearing(after), _)) => {
+            clear_exact_rows(db, &progress_key, Some(&after), batch_rows, &mut progress).await?;
+            None
         }
     };
     tracing::info!(
@@ -541,41 +543,37 @@ async fn migrate_label_identity_in_batches(
     Ok(migration)
 }
 
-/// Whether every hash row up to `recorded`'s resume point is one the copy
-/// read: as many as it counted, and none written after the newest it read.
-async fn copied_rows_unchanged(
+/// Deletes every exact label row after `after`, or every one: the rows of a
+/// copy another commit made stale. Each batch of at most `batch_rows` rows
+/// records the last row it deleted, so an open stopped mid-way resumes the
+/// clearing there. The last batch deletes the copy's progress, so the copy
+/// starts over.
+///
+/// Only the copy writes exact rows below version 6, so no commit after the
+/// clearing began can make it stale too.
+async fn clear_exact_rows(
     db: &Db,
-    recorded: &label_migration::LabelCopyProgressValue,
-) -> Result<bool> {
-    let mut walk = hash_rows(db, None, None).await?;
-    let mut rows = 0u64;
-    while let Some((_, _, row)) = walk.next().await? {
-        if row.key.as_ref() > recorded.resume_after().as_ref() {
-            break;
-        }
-        if row.seq > recorded.newest_seq() {
-            return Ok(false);
-        }
-        rows += 1;
-    }
-    Ok(rows == recorded.rows().get())
-}
-
-/// Deletes every exact label row, which a copy another writer made stale left,
-/// and then the copy's progress.
-async fn clear_exact_rows(db: &Db, progress_key: &Bytes, progress: &mut Progress) -> Result<()> {
-    let mut walk = exact_rows(db).await?;
+    progress_key: &Bytes,
+    after: Option<&Bytes>,
+    batch_rows: usize,
+    progress: &mut Progress,
+) -> Result<()> {
+    let mut walk = exact_rows(db, after).await?;
     let mut batch = Batch::begin(db).await?;
     while let Some((_, _, row)) = walk.next().await? {
         batch.transaction.delete(&row.key)?;
         progress.rows.cleared += 1;
-        if batch.staged(row.key.len(), BATCH_ROWS, BATCH_BYTES) {
+        if batch.staged(row.key.len(), batch_rows, BATCH_BYTES) {
+            Mutation::put(
+                &batch.transaction,
+                progress_key,
+                label_migration::LabelCopyProgressValue::clearing(row.key).encode(),
+            )?;
             batch.commit(false).await?;
             batch = Batch::begin(db).await?;
             progress.batch_written();
         }
     }
-    // Last, so an open stopped before it clears again rather than resuming.
     batch.transaction.delete(progress_key)?;
     batch.commit(false).await
 }
@@ -603,21 +601,13 @@ enum ParsedRow {
 /// labels of the edge rows it copied there.
 async fn copy_rows(
     db: &Db,
-    resume: Option<label_migration::LabelCopyProgressValue>,
+    resume: Option<Bytes>,
     batch_rows: usize,
     progress: &mut Progress,
 ) -> Result<()> {
     let progress_key =
         super::super::scoped_metadata_key(DataScope::LegacyUnscoped, LABEL_IDENTITY_COPY_PROGRESS);
-    let (mut newest_seq, mut rows) = resume
-        .as_ref()
-        .map_or((0, 0), |resume| (resume.newest_seq(), resume.rows().get()));
-    let walk = hash_rows(
-        db,
-        resume.as_ref().map(|resume| resume.resume_after()),
-        None,
-    )
-    .await?;
+    let walk = hash_rows(db, resume.as_ref(), None).await?;
     let mut edge_labels = match resume {
         Some(_) => {
             progress.rows.scopes += 1;
@@ -728,13 +718,7 @@ async fn copy_rows(
                 0
             }
         };
-        rows += 1;
-        newest_seq = newest_seq.max(row.seq);
-        let recorded = label_migration::LabelCopyProgressValue::new(
-            newest_seq,
-            NonZeroU64::new(rows).expect("the copy counts this row"),
-            row.key,
-        );
+        let recorded = label_migration::LabelCopyProgressValue::copying(row.key);
         if !batch.staged(staged, batch_rows, BATCH_BYTES) {
             unrecorded = Some(recorded);
             continue;
@@ -783,41 +767,48 @@ async fn copied_edge_labels(
 }
 
 /// The label naming one node or edge hash row, and the live members whose
-/// labels hash to another row.
+/// labels hash to another row or who carry no label.
 struct RowLabel {
     label: label::SharedLabel,
     stale: RoaringTreemap,
 }
 
-/// The `$label` of the live member `id`, or `None` when its record is gone.
-/// `record` names a member's property record.
+/// What one member's record says about its label.
+enum MemberLabel {
+    /// The record is gone: a dead member, which reads skip and the copy keeps.
+    Gone,
+    /// The record has no string `$label`, so the member carries no label: a
+    /// stale leftover, as a member whose label hashes to another row is.
+    Unlabeled,
+    /// The record's `$label`.
+    Labeled(String),
+}
+
+/// What the record of member `id` says about its label. `record` names a
+/// member's property record.
 async fn member_label(
     db: &Db,
     scope: DataScope,
     record: &impl Fn(u64) -> DataKeyKind<'static>,
     id: u64,
-) -> Result<Option<String>> {
-    let record = record(id);
+) -> Result<MemberLabel> {
     let Some(stored) = db
         .get(
             DataKey::Data {
                 scope,
-                kind: record.clone(),
+                kind: record(id),
             }
             .to_bytes(),
         )
         .await?
     else {
-        return Ok(None);
+        return Ok(MemberLabel::Gone);
     };
-    decode_properties(&stored)?
+    Ok(decode_properties(&stored)?
         .into_iter()
         .find(|property| property.name == "$label")
         .and_then(|property| property.value.as_str().map(str::to_owned))
-        .map(Some)
-        .ok_or_else(|| HelixDbError::MigrationRequired {
-            reason: format!("{scope:?} {record:?} is indexed by label but has no string $label"),
-        })
+        .map_or(MemberLabel::Unlabeled, MemberLabel::Labeled))
 }
 
 /// The label of one node or edge hash row; see the module contract. `None`
@@ -833,36 +824,38 @@ async fn row_label(
     let mut stale = RoaringTreemap::new();
     let mut lowest = None;
     for member in members {
-        let Some(label) = member_label(db, scope, &record, member).await? else {
-            continue;
-        };
-        if !hashes_to_row(&label) {
-            stale.insert(member);
-            continue;
+        match member_label(db, scope, &record, member).await? {
+            MemberLabel::Gone => {}
+            MemberLabel::Labeled(label) if hashes_to_row(&label) => {
+                lowest = Some((member, label));
+                break;
+            }
+            MemberLabel::Unlabeled | MemberLabel::Labeled(_) => {
+                stale.insert(member);
+            }
         }
-        lowest = Some((member, label));
-        break;
     }
     let Some((lowest, label)) = lowest else {
         return Ok(None);
     };
     for member in members.iter().rev().take_while(|member| *member > lowest) {
-        let Some(highest) = member_label(db, scope, &record, member).await? else {
-            continue;
-        };
-        if !hashes_to_row(&highest) {
-            stale.insert(member);
-            continue;
+        match member_label(db, scope, &record, member).await? {
+            MemberLabel::Gone => {}
+            MemberLabel::Labeled(highest) if hashes_to_row(&highest) => {
+                if highest != label {
+                    return Err(HelixDbError::MigrationRequired {
+                        reason: format!(
+                            "{scope:?} labels {label:?} and {highest:?} share one label hash \
+                             row; neither can be copied to its exact key"
+                        ),
+                    });
+                }
+                break;
+            }
+            MemberLabel::Unlabeled | MemberLabel::Labeled(_) => {
+                stale.insert(member);
+            }
         }
-        if highest != label {
-            return Err(HelixDbError::MigrationRequired {
-                reason: format!(
-                    "{scope:?} labels {label:?} and {highest:?} share one label hash row; \
-                     neither can be copied to its exact key"
-                ),
-            });
-        }
-        break;
     }
     let Ok(identity) = label::LabelIdentity::new(&label) else {
         return Err(HelixDbError::MigrationRequired {
@@ -914,7 +907,7 @@ pub(crate) async fn delete_hash_label_rows_once(
     db: &Db,
     tuning: MigrationTuning,
 ) -> Result<LabelHashCleanup> {
-    if marker_set(db, LABEL_HASH_CLEANUP_READY).await? {
+    if cleanup_ready(db).await? {
         return Ok(LabelHashCleanup::AlreadyDone);
     }
     if crate::migrations::startup::stored_storage_version(db)
@@ -961,7 +954,7 @@ pub(crate) async fn delete_hash_label_rows_once(
         Mutation::put(
             &batch.transaction,
             super::super::scoped_metadata_key(DataScope::LegacyUnscoped, LABEL_HASH_CLEANUP_READY),
-            Bytes::from_static(b"1"),
+            label_migration::LabelCleanupReadyValue.encode(),
         )?;
         batch.commit(false).await?;
         tracing::info!(
@@ -989,7 +982,7 @@ pub(crate) async fn make_legacy_label_fixture(db: &Db) -> Result<()> {
     use crate::encoding::v2::values::encode_metadata_value;
     use crate::index_lifecycle::IndexV2MetadataValue;
 
-    let mut walk = exact_rows(db).await?;
+    let mut walk = exact_rows(db, None).await?;
     let batch = Batch::begin(db).await?;
     while let Some((scope, _, row)) = walk.next().await? {
         let DataKey::Data {
@@ -1069,6 +1062,7 @@ pub(crate) async fn make_legacy_label_fixture(db: &Db) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
     use std::sync::Arc;
 
     use helix_ast::batch::{read_batch, write_batch};
@@ -1375,18 +1369,48 @@ mod tests {
     }
 
     /// Stops a copy at the malformed row `before`, after it committed every
-    /// hash row before it a batch per row, and removes the row: the store an
-    /// open stopped there leaves. Returns the copy's progress.
-    async fn stop_copy_before(db: &Db, before: Bytes) -> label_migration::LabelCopyProgressValue {
+    /// hash row before it a batch per row, and leaves the store an open
+    /// stopped there leaves (see [`remove_stop_row`]). Returns the last row the
+    /// copy committed.
+    async fn stop_copy_before(db: &Db, before: Bytes) -> Bytes {
         put_legacy_row(db, &before, &[1]).await;
         assert!(matches!(
             migrate_label_identity_in_batches(db, 1).await,
             Err(HelixDbError::Encoding(_))
         ));
-        db.delete(&before).await.unwrap();
-        copy_progress(db)
+        remove_stop_row(db, &before).await
+    }
+
+    /// Removes the malformed row `stop` a copy failed at and commits the
+    /// copy's progress again with it, so the progress is the store's newest
+    /// commit, as an open stopped after its last batch leaves it. Returns the
+    /// last row the copy committed.
+    async fn remove_stop_row(db: &Db, stop: &Bytes) -> Bytes {
+        let progress = copy_progress(db)
             .await
-            .expect("the stopped copy recorded progress")
+            .expect("the stopped copy recorded progress");
+        let batch = Batch::begin(db).await.unwrap();
+        batch.transaction.delete(stop).unwrap();
+        Mutation::put(
+            &batch.transaction,
+            metadata(LABEL_IDENTITY_COPY_PROGRESS),
+            progress.encode(),
+        )
+        .unwrap();
+        batch.commit(false).await.unwrap();
+        let label_migration::LabelCopyProgressValue::Copying(after) = progress else {
+            panic!("a stopped copy is copying");
+        };
+        after
+    }
+
+    /// The sequence number of the row at `key`.
+    async fn row_seq(db: &Db, key: &Bytes) -> u64 {
+        db.get_key_value(key)
+            .await
+            .unwrap()
+            .expect("the row exists")
+            .seq
     }
 
     /// A managed failover writer of the store at `writer_epoch`, with the
@@ -1445,7 +1469,7 @@ mod tests {
 
         // An open was stopped after the unscoped scope's node and edge rows
         // were copied; every hash row stays in place.
-        let stopped = stop_copy_before(
+        stop_copy_before(
             &inner,
             malformed_row(
                 DataScope::LegacyUnscoped,
@@ -1453,7 +1477,7 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(stopped.rows().get(), 4);
+        assert_eq!(label_rows(inner.as_ref()).await.0.len(), 4);
         inner.flush().await.unwrap();
         // Read once the reader's own snapshot holds the partial copy.
         let crate::HelixStorage::Reader(storage) = reader.storage() else {
@@ -1522,7 +1546,7 @@ mod tests {
         let (exact, legacy) = label_rows(inner.as_ref()).await;
         assert_eq!(exact, exact_before);
         assert!(legacy.is_empty());
-        assert!(marker_set(&inner, LABEL_HASH_CLEANUP_READY).await.unwrap());
+        assert!(cleanup_ready(&inner).await.unwrap());
         assert_eq!(
             clean_up(&inner, 1_024).await,
             [LabelHashCleanup::AlreadyDone]
@@ -1533,21 +1557,54 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    /// Writer epochs play no part in resuming: writers that wrote no hash row
-    /// may open between, at any later epoch, a failover rejected for the
+    /// A reader before publication reads hash rows, where two types whose
+    /// labels share a hash share one row: a relationship scan of both reads
+    /// that row twice but binds each edge once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_relationship_scan_binds_a_shared_hash_row_once() {
+        let (store, db, _reads, _exact) = legacy_store().await;
+        let inner = db.inner_db();
+        let knows = label_rows(inner.as_ref()).await.1[&edge_row("KNOWS")].clone();
+        // As if "KNOWS" and "MET" shared a hash.
+        put_legacy_row(&inner, &edge_row("MET"), &knows.iter().collect::<Vec<_>>()).await;
+        db.close().await.unwrap();
+
+        let reader = open_reader(&store).await;
+        assert_eq!(
+            reader.reader_storage_compatibility_for_tests(),
+            ReaderStorageCompatibility::LegacyLabelHash
+        );
+        for (query, count) in [
+            ("MATCH ()-[r:KNOWS]->() RETURN count(r)", 1),
+            ("MATCH ()-[r:KNOWS|MET]->() RETURN count(r)", 1),
+            ("MATCH ()-[r:KNOWS|WORKS_AT|MET]->() RETURN count(r)", 3),
+        ] {
+            let result = reader
+                .cypher(crate::cypher::Request::new(query))
+                .await
+                .unwrap();
+            assert_eq!(result.rows, vec![vec![serde_json::json!(count)]], "{query}");
+        }
+        reader.close().await.unwrap();
+    }
+
+    /// Writer epochs play no part in resuming: opens that commit nothing may
+    /// come between, at any later epoch, a failover rejected for the
     /// version-5 store among them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_copy_resumes_across_writers_that_wrote_no_hash_row() {
+    async fn a_copy_resumes_across_opens_that_committed_nothing() {
         let (store, db, reads, exact_before) = legacy_store().await;
-        let stopped = stop_copy_before(
-            &db.inner_db(),
+        let inner = db.inner_db();
+        stop_copy_before(
+            &inner,
             malformed_row(
                 DataScope::LegacyUnscoped,
                 label_hash::LegacyLabelScanPrefix::EdgeLabelNeighbors,
             ),
         )
         .await;
-        let stopped_epoch = db.inner_db().manifest().writer_epoch();
+        let copied = label_rows(inner.as_ref()).await.0;
+        let stopped_epoch = inner.manifest().writer_epoch();
         db.close().await.unwrap();
 
         open_raw(&store).await.close().await.unwrap();
@@ -1564,14 +1621,46 @@ mod tests {
         let migration = migrate_label_identity(&raw).await.unwrap();
         assert!(migration.resumed);
         assert_eq!(migration.cleared, 0);
-        assert_eq!(
-            migration.copied,
-            exact_before.len() as u64 - stopped.rows().get()
-        );
+        assert_eq!(migration.copied as usize, exact_before.len() - copied.len());
         assert_eq!(label_rows(&raw).await.0, exact_before);
         raw.close().await.unwrap();
 
         let db = open_writer(&store).await;
+        assert_eq!(all_label_reads(&db).await, reads);
+        db.close().await.unwrap();
+    }
+
+    /// A full writer open commits nothing before its label identity copy, so
+    /// an open stopped mid-copy is resumed by the next, however many are
+    /// stopped in turn: each keeps the batches it committed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_writer_open_resumes_the_copy_an_earlier_open_stopped() {
+        let (store, db, reads, exact_before) = legacy_store().await;
+        let inner = db.inner_db();
+        stop_copy_before(
+            &inner,
+            malformed_row(scopes()[1], label_hash::LegacyLabelScanPrefix::NodeLabels),
+        )
+        .await;
+        let copied = label_rows(inner.as_ref()).await.0;
+        assert_eq!(copied.len(), exact_before.len() / scopes().len());
+        let mut seqs = Vec::new();
+        for key in copied.keys() {
+            seqs.push(row_seq(&inner, key).await);
+        }
+        db.close().await.unwrap();
+
+        let db = open_writer(&store).await;
+        let inner = db.inner_db();
+        assert_eq!(
+            storage_version(inner.as_ref()).await.unwrap(),
+            IndexStorageVersion::LABEL_IDENTITY
+        );
+        // The rows the stopped open copied are the very rows it committed.
+        for (key, seq) in copied.keys().zip(seqs) {
+            assert_eq!(row_seq(&inner, key).await, seq);
+        }
+        assert_eq!(label_rows(inner.as_ref()).await.0, exact_before);
         assert_eq!(all_label_reads(&db).await, reads);
         db.close().await.unwrap();
     }
@@ -1707,15 +1796,11 @@ mod tests {
             migrate_label_identity(&raw).await,
             Err(HelixDbError::Encoding(_))
         ));
-        let progress = copy_progress(&raw)
-            .await
-            .expect("the copy recorded progress");
-        let resume_after = progress.resume_after();
+        let resume_after = remove_stop_row(&raw, &malformed).await;
         assert_eq!(
-            label_hash::LegacyLabelScanPrefix::of(resume_after),
+            label_hash::LegacyLabelScanPrefix::of(&resume_after),
             Some(label_hash::LegacyLabelScanPrefix::EdgeLabelNeighbors)
         );
-        raw.delete(&malformed).await.unwrap();
         raw.close().await.unwrap();
 
         let raw = open_raw(&store).await;
@@ -1735,30 +1820,36 @@ mod tests {
         raw.close().await.unwrap();
     }
 
-    /// A writer that changed a hash row the stopped copy had passed, as a
-    /// binary before label identity keeps them current, leaves a newer row, a
-    /// missing one, or a new scope before the resume point, and the copy starts
-    /// over.
+    /// Any commit after the stopped copy's last batch may change a hash row it
+    /// had passed, as a binary before label identity keeps them current: a
+    /// newer row, a missing one, a new scope before the resume point, or a
+    /// row the copy never reads. The copy starts over.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_copy_starts_over_when_a_hash_row_it_passed_changed() {
+    async fn a_copy_starts_over_after_any_later_commit() {
         #[derive(Debug, Clone, Copy)]
         enum Change {
             Rewritten,
             Deleted,
             EarlierScope,
+            Unrelated,
         }
         let earlier =
             DataScope::Tenant(TenantId::from_ulid_str("00000000000000000000000005").unwrap());
-        for change in [Change::Rewritten, Change::Deleted, Change::EarlierScope] {
+        for change in [
+            Change::Rewritten,
+            Change::Deleted,
+            Change::EarlierScope,
+            Change::Unrelated,
+        ] {
             let (store, db, reads, exact_before) = legacy_store().await;
             // The unscoped scope and the first tenant were copied.
-            let stopped = stop_copy_before(
+            stop_copy_before(
                 &db.inner_db(),
                 malformed_row(scopes()[2], label_hash::LegacyLabelScanPrefix::NodeLabels),
             )
             .await;
             let copied = 2 * exact_before.len() / scopes().len();
-            assert_eq!(stopped.rows().get() as usize, copied);
+            assert_eq!(label_rows(db.inner_db().as_ref()).await.0.len(), copied);
             let (ada, bob, _acme) = fixture_nodes(&label_rows(db.inner_db().as_ref()).await.1);
             db.close().await.unwrap();
 
@@ -1778,6 +1869,7 @@ mod tests {
                     )
                     .await;
                 }
+                Change::Unrelated => put_node(&old, 9_999, "Person").await,
             }
             old.close().await.unwrap();
 
@@ -1807,6 +1899,10 @@ mod tests {
                     assert_eq!(migration.scopes, scopes().len() + 1);
                     assert_eq!(exact, exact_before);
                 }
+                Change::Unrelated => {
+                    assert_eq!(migration.copied as usize, exact_before.len());
+                    assert_eq!(exact, exact_before);
+                }
             }
             raw.close().await.unwrap();
 
@@ -1821,7 +1917,7 @@ mod tests {
                     unscoped["companies"] = serde_json::json!(0);
                     unscoped["employees"] = serde_json::json!(0);
                 }
-                Change::EarlierScope => {}
+                Change::EarlierScope | Change::Unrelated => {}
             }
             assert_eq!(
                 label_reads(&db, DataScope::LegacyUnscoped).await,
@@ -1832,8 +1928,56 @@ mod tests {
         }
     }
 
+    /// A store a managed bootstrap started is published and has no
+    /// graph-format rewrite job, so the next migrating open rewrites every
+    /// current edge. On a published store that stages exact label rows only:
+    /// nothing would copy a hash row, and the cleanup may be done.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn public_label_helpers_follow_the_store_layout() {
+    async fn a_graph_rewrite_of_a_published_store_stages_no_hash_row() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::HelixDB::open_writer_inner_with_index_scheduling(
+            DB_PATH.to_string(),
+            Arc::clone(&store),
+            crate::GcBoundaryFiles::AsConfigured,
+            crate::config::DbConfig::new().with_migration_tuning(
+                MigrationTuning::default()
+                    .with_worker_mode(crate::config::MigrationWorkerMode::Disabled),
+            ),
+            crate::WriterOpenMode::Managed {
+                writer_epoch: NonZeroU64::MIN,
+                intent: crate::ManagedWriterOpenIntent::Bootstrap,
+            },
+            crate::IndexLifecycleScheduling::Configured,
+        )
+        .await
+        .expect("a managed bootstrap opens an empty store");
+        write_graph(&db, DataScope::LegacyUnscoped).await;
+        let reads = label_reads(&db, DataScope::LegacyUnscoped).await;
+        assert_eq!(
+            clean_up(&db.inner_db(), 1_024).await,
+            [LabelHashCleanup::Done { deleted: 0 }]
+        );
+        let (exact, legacy) = label_rows(db.inner_db().as_ref()).await;
+        assert!(legacy.is_empty());
+        db.close().await.unwrap();
+
+        let db = open_writer(&store).await;
+        let inner = db.inner_db();
+        assert_eq!(label_rows(inner.as_ref()).await, (exact, Rows::new()));
+        assert_eq!(label_reads(&db, DataScope::LegacyUnscoped).await, reads);
+        assert_eq!(
+            clean_up(&inner, 1_024).await,
+            [LabelHashCleanup::AlreadyDone]
+        );
+        db.close().await.unwrap();
+    }
+
+    /// The public label helpers serve a current store, as graph writes do:
+    /// they read and write exact rows whatever the stored marker says, so a
+    /// write is visible to their reads before publication too, and every
+    /// equality helper serves `$label` from the node label index.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn public_label_helpers_read_and_write_exact_rows() {
         let (_store, db, _reads, _exact) = legacy_store().await;
         let inner = db.inner_db();
         let (ada, bob, acme) = fixture_nodes(&label_rows(inner.as_ref()).await.1);
@@ -1858,8 +2002,47 @@ mod tests {
         };
         let people = RoaringTreemap::from_iter([ada, bob]);
         let expected = (people.clone(), people.clone(), 2, people.clone());
-        // Before publication they read the hash rows, the only complete ones.
-        assert_eq!(lookups().await, expected);
+        // Before publication only the hash rows hold the graph.
+        assert_eq!(
+            lookups().await,
+            (
+                RoaringTreemap::new(),
+                RoaringTreemap::new(),
+                0,
+                RoaringTreemap::new()
+            )
+        );
+        let write = inner
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        crate::search::add_to_equality_index_scoped(&write, "$label", "Ghost", 99, scope).unwrap();
+        crate::search::add_to_global_edge_label_index_scoped(&write, "HAUNTS", 98, scope).unwrap();
+        write.commit().await.unwrap();
+        let read = inner.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert_eq!(
+            crate::search::lookup_equality_index_set_scoped(&read, "$label", "Ghost", scope)
+                .await
+                .unwrap(),
+            RoaringTreemap::from_iter([99])
+        );
+        assert_eq!(
+            crate::search::lookup_global_edge_label_index_scoped(&read, "HAUNTS", scope)
+                .await
+                .unwrap(),
+            RoaringTreemap::from_iter([98])
+        );
+        drop(read);
+        let write = inner
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        crate::search::remove_from_equality_index_scoped(&write, "$label", "Ghost", 99, scope)
+            .unwrap();
+        crate::search::remove_from_global_edge_label_index_scoped(&write, "HAUNTS", 98, scope)
+            .unwrap();
+        write.commit().await.unwrap();
+
         migrate_label_identity(&inner).await.unwrap();
         assert_eq!(lookups().await, expected);
         clean_up(&inner, 1_024).await;
@@ -1885,6 +2068,33 @@ mod tests {
         let people = RoaringTreemap::from_iter([ada, 77]);
         let (by_label, by_equality, _, _) = lookups().await;
         assert_eq!((by_label, by_equality), (people.clone(), people));
+
+        // A `$label` prefix scan reads every node label row, and deleting
+        // `$label`'s rows deletes them.
+        let read = inner.begin(IsolationLevel::Snapshot).await.unwrap();
+        assert_eq!(
+            crate::search::scan_equality_index_property_prefix_limited_filtered_scoped(
+                &read, "$label", 10, None, scope,
+            )
+            .await
+            .unwrap(),
+            RoaringTreemap::from_iter([ada, 77, acme])
+        );
+        drop(read);
+        let write = inner
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        crate::search::delete_equality_index_entries_for_property(&write, "$label")
+            .await
+            .unwrap();
+        write.commit().await.unwrap();
+        let (exact, _legacy) = label_rows(inner.as_ref()).await;
+        assert!(!exact.contains_key(&exact_node_row("Person")));
+        assert!(!exact.contains_key(&exact_node_row("Company")));
+        assert!(exact.contains_key(
+            &ExactRows::Edge.key(scope, label::LabelIdentity::new("WORKS_AT").unwrap())
+        ));
         db.close().await.unwrap();
     }
 
@@ -1937,10 +2147,10 @@ mod tests {
             storage_version(inner.as_ref()).await.unwrap(),
             IndexStorageVersion::OPERATION_QUEUES
         );
-        let progress = copy_progress(&inner)
-            .await
-            .expect("the copy recorded progress");
-        assert_eq!(progress.rows().get(), 2);
+        assert!(matches!(
+            copy_progress(&inner).await,
+            Some(label_migration::LabelCopyProgressValue::Copying(_))
+        ));
         let (exact, legacy) = label_rows(inner.as_ref()).await;
         assert_eq!(exact.len(), 2);
         // Every hash row, and the malformed one beside them.
@@ -1952,13 +2162,13 @@ mod tests {
         );
         assert_eq!(all_label_reads(&reader).await, reads);
 
-        // A retry resumes after the committed rows, in this open as in a later
-        // one.
+        // Removing the row is a commit after the copy's progress, so the retry
+        // clears the two committed rows and copies every row again.
         inner.delete(&malformed).await.unwrap();
         let migration = migrate_label_identity(&inner).await.unwrap();
-        assert!(migration.resumed);
-        assert_eq!(migration.cleared, 0);
-        assert_eq!(migration.copied, exact_before.len() as u64 - 2);
+        assert!(!migration.resumed);
+        assert_eq!(migration.cleared, 2);
+        assert_eq!(migration.copied, exact_before.len() as u64);
         assert_eq!(label_rows(inner.as_ref()).await.0, exact_before);
         reader.close().await.unwrap();
         db.close().await.unwrap();
@@ -2051,29 +2261,84 @@ mod tests {
             .is_none()
         );
 
-        // A labeled record without a string $label fails closed.
+        db.close().await.unwrap();
+    }
+
+    /// A record with no string `$label` carries no label, so like a member
+    /// whose label hashes elsewhere it names no row and is left out of it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn members_without_a_string_label_are_left_out_as_stale() {
+        let (_store, db, reads, exact_before) = legacy_store().await;
+        let inner = db.inner_db();
+        let (_ada, _bob, acme) = fixture_nodes(&label_rows(inner.as_ref()).await.1);
+        for (id, properties) in [
+            (9_001, vec![Property::string("name", "nameless")]),
+            (9_002, vec![Property::i64("$label", 7)]),
+        ] {
+            crate::transaction::put_unbatched(
+                &inner,
+                &DataKey::Data {
+                    scope: DataScope::LegacyUnscoped,
+                    kind: DataKeyKind::NodeProperty(NodePropertyKey::new(id)),
+                }
+                .to_bytes(),
+                &encode_properties(&properties),
+            )
+            .await
+            .unwrap();
+        }
+        // Beside Acme, the row's one labeled member, and alone.
+        put_legacy_row(&inner, &node_row("Company"), &[acme, 9_001, 9_002]).await;
+        put_legacy_row(&inner, &node_row("Nameless"), &[9_001, 9_002]).await;
+
+        let migration = migrate_label_identity(&inner).await.unwrap();
+        // The Company row leaves both out; no member names the other row, so
+        // it is skipped whole.
+        assert_eq!(migration.stale_members, 2);
+        assert_eq!(
+            (migration.copied, migration.skipped),
+            (exact_before.len() as u64, 1)
+        );
+        let (exact, _legacy) = label_rows(inner.as_ref()).await;
+        assert_eq!(exact, exact_before);
+        assert_eq!(
+            exact[&exact_node_row("Company")],
+            RoaringTreemap::from_iter([acme])
+        );
+        assert_eq!(all_label_reads(&db).await, reads);
+        db.close().await.unwrap();
+    }
+
+    /// A copy found stale is deleted a batch at a time, each recording the
+    /// last row it deleted, so an open stopped mid-way resumes the deletion
+    /// there rather than reading the rows before it again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stopped_clearing_resumes_after_its_last_deleted_row() {
+        let (_store, db, reads, exact_before) = legacy_store().await;
+        let inner = db.inner_db();
+        stop_copy_before(
+            &inner,
+            malformed_row(scopes()[2], label_hash::LegacyLabelScanPrefix::NodeLabels),
+        )
+        .await;
+        let copied = label_rows(inner.as_ref()).await.0;
+        // An open stopped after deleting the first three rows of the copy.
+        let deleted = copied.keys().nth(2).unwrap().clone();
         crate::transaction::put_unbatched(
             &inner,
-            &DataKey::Data {
-                scope: DataScope::LegacyUnscoped,
-                kind: record(9_999),
-            }
-            .to_bytes(),
-            &encode_properties(&[Property::string("name", "nameless")]),
+            &metadata(LABEL_IDENTITY_COPY_PROGRESS),
+            &label_migration::LabelCopyProgressValue::clearing(deleted).encode(),
         )
         .await
         .unwrap();
-        assert!(matches!(
-            row_label(
-                &inner,
-                DataScope::LegacyUnscoped,
-                &RoaringTreemap::from_iter([9_999]),
-                record,
-                |_| true
-            )
-            .await,
-            Err(HelixDbError::MigrationRequired { .. })
-        ));
+
+        let migration = migrate_label_identity(&inner).await.unwrap();
+        assert!(!migration.resumed);
+        assert_eq!(migration.cleared as usize, copied.len() - 3);
+        assert_eq!(migration.copied as usize, exact_before.len());
+        assert_eq!(label_rows(inner.as_ref()).await.0, exact_before);
+        assert!(copy_progress(&inner).await.is_none());
+        assert_eq!(all_label_reads(&db).await, reads);
         db.close().await.unwrap();
     }
 
@@ -2161,7 +2426,7 @@ mod tests {
         assert_eq!(batches.len() as u64, remaining / 4);
         assert!(label_rows(inner.as_ref()).await.1.is_empty());
         assert!(!present(&inner, LABEL_HASH_CLEANUP_PROGRESS).await);
-        assert!(marker_set(&inner, LABEL_HASH_CLEANUP_READY).await.unwrap());
+        assert!(cleanup_ready(&inner).await.unwrap());
         db.close().await.unwrap();
     }
 

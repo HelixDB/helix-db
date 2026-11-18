@@ -14,6 +14,7 @@
 //!
 //! Retired hash-keyed rows are decoded only by the legacy label-hash codec.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
@@ -151,75 +152,50 @@ impl std::borrow::Borrow<str> for SharedLabel {
     }
 }
 
-/// Node label index: label -> set of NodeIds.
-///
-/// ```text
-/// Key: [0x03][0x11][len:2][label]
-/// Value: RoaringTreemap<NodeId>
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NodeLabelKey<'a> {
-    identity: LabelIdentity<'a>,
+/// The global label index a [`GlobalLabelKey`] keys: label -> set of IDs.
+pub(crate) trait GlobalLabelFamily {
+    const INDEX_PREFIX: IndexPrefix;
 }
 
-impl<'a> NodeLabelKey<'a> {
+/// The node label index: label -> set of NodeIds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeLabels {}
+
+impl GlobalLabelFamily for NodeLabels {
+    const INDEX_PREFIX: IndexPrefix = IndexPrefix::NodeLabel;
+}
+
+/// The global edge label index: label -> set of EdgeIds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeLabels {}
+
+impl GlobalLabelFamily for EdgeLabels {
+    const INDEX_PREFIX: IndexPrefix = IndexPrefix::EdgeLabel;
+}
+
+/// One exact label's row in the global label index `F`.
+///
+/// ```text
+/// Node label: [0x03][0x11][len:2][label] -> RoaringTreemap<NodeId>
+/// Edge label: [0x03][0x12][len:2][label] -> RoaringTreemap<EdgeId>
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GlobalLabelKey<'a, F> {
+    identity: LabelIdentity<'a>,
+    family: PhantomData<F>,
+}
+
+/// A node label index key.
+pub(crate) type NodeLabelKey<'a> = GlobalLabelKey<'a, NodeLabels>;
+/// A global edge label index key.
+pub(crate) type EdgeLabelKey<'a> = GlobalLabelKey<'a, EdgeLabels>;
+
+impl<'a, F: GlobalLabelFamily> GlobalLabelKey<'a, F> {
     pub(crate) const fn new(identity: LabelIdentity<'a>) -> Self {
-        Self { identity }
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn identity(&self) -> LabelIdentity<'a> {
-        self.identity
-    }
-
-    #[inline]
-    pub(crate) const fn key_prefix() -> KeyPrefix {
-        KeyPrefix::PropertyIndex
-    }
-
-    #[inline]
-    pub(crate) const fn index_prefix() -> IndexPrefix {
-        IndexPrefix::NodeLabel
-    }
-
-    pub(crate) const fn encoded_len(&self) -> usize {
-        PREFIX_LEN + INDEX_PREFIX_LEN + self.identity.encoded_len()
-    }
-
-    pub(crate) fn parse_from_slice(slice: &'a [u8]) -> Result<Self, EncodingError> {
-        // `from_slice` checks the key prefix and that the header bytes exist.
-        let index_prefix = IndexPrefix::from_slice(slice)?;
-        if index_prefix != Self::index_prefix() {
-            return Err(EncodingError::Custom(format!(
-                "expected NodeLabel index prefix, got {index_prefix:?}"
-            )));
+        Self {
+            identity,
+            family: PhantomData,
         }
-        Ok(Self::new(LabelIdentity::decode(
-            &slice[PREFIX_LEN + INDEX_PREFIX_LEN..],
-        )?))
-    }
-
-    pub(crate) fn encode_into<B: BufMut>(&self, buf: &mut B) {
-        buf.put_u8(Self::key_prefix().as_u8());
-        buf.put_slice(Self::index_prefix().as_slice());
-        self.identity.encode_into(buf);
-    }
-}
-
-/// Global edge label index: label -> set of EdgeIds.
-///
-/// ```text
-/// Key: [0x03][0x12][len:2][label]
-/// Value: RoaringTreemap<EdgeId>
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EdgeLabelKey<'a> {
-    identity: LabelIdentity<'a>,
-}
-
-impl<'a> EdgeLabelKey<'a> {
-    pub(crate) const fn new(identity: LabelIdentity<'a>) -> Self {
-        Self { identity }
     }
 
     pub(crate) const fn identity(&self) -> LabelIdentity<'a> {
@@ -233,7 +209,7 @@ impl<'a> EdgeLabelKey<'a> {
 
     #[inline]
     pub(crate) const fn index_prefix() -> IndexPrefix {
-        IndexPrefix::EdgeLabel
+        F::INDEX_PREFIX
     }
 
     pub(crate) const fn encoded_len(&self) -> usize {
@@ -245,7 +221,8 @@ impl<'a> EdgeLabelKey<'a> {
         let index_prefix = IndexPrefix::from_slice(slice)?;
         if index_prefix != Self::index_prefix() {
             return Err(EncodingError::Custom(format!(
-                "expected EdgeLabel index prefix, got {index_prefix:?}"
+                "expected {:?} index prefix, got {index_prefix:?}",
+                Self::index_prefix()
             )));
         }
         Ok(Self::new(LabelIdentity::decode(

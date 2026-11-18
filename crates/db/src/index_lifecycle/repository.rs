@@ -82,6 +82,96 @@ impl ReaderStorageCompatibility {
             Self::Current
         }
     }
+
+    /// Where this format files label index rows.
+    pub(crate) const fn label_rows(self) -> LabelRowLayout {
+        match self {
+            Self::LegacyEqualityUnion | Self::LegacyLabelHash => LabelRowLayout::Hash,
+            Self::Current => LabelRowLayout::Exact,
+        }
+    }
+}
+
+/// A read view and the storage format of the snapshot it reads, so a lookup
+/// always reads a view in that view's own format.
+///
+/// Only views that know their format implement it: a request's stable read
+/// view, which records its snapshot's, and a serving writer's request
+/// transaction, which is always current. Tests that read a live handle outside
+/// any request view use [`LiveView`].
+pub(crate) trait LayoutView: Sync {
+    type Reads: DbReadOps + Send + Sync;
+
+    /// The storage reads the view serves.
+    fn reads(&self) -> &Self::Reads;
+
+    /// The storage format of the snapshot [`Self::reads`] reads.
+    fn compatibility(&self) -> ReaderStorageCompatibility;
+}
+
+/// A live storage handle a test reads outside any request view, in the
+/// format its owner has observed.
+#[cfg(test)]
+pub(crate) struct LiveView<'a, R> {
+    reads: &'a R,
+    compatibility: ReaderStorageCompatibility,
+}
+
+#[cfg(test)]
+impl<'a, R> LiveView<'a, R> {
+    /// A live reader, which reads the format its database last observed.
+    pub(crate) const fn reader(reads: &'a R, compatibility: ReaderStorageCompatibility) -> Self {
+        Self {
+            reads,
+            compatibility,
+        }
+    }
+}
+
+#[cfg(test)]
+impl<'a> LiveView<'a, Db> {
+    /// A live writer, which only serves a current store.
+    pub(crate) const fn writer(reads: &'a Db) -> Self {
+        Self {
+            reads,
+            compatibility: ReaderStorageCompatibility::Current,
+        }
+    }
+}
+
+#[cfg(test)]
+impl<R: DbReadOps + Send + Sync> LayoutView for LiveView<'_, R> {
+    type Reads = R;
+
+    fn reads(&self) -> &R {
+        self.reads
+    }
+
+    fn compatibility(&self) -> ReaderStorageCompatibility {
+        self.compatibility
+    }
+}
+
+/// Where a store files its label index rows: node label, edge label, and
+/// edge-label neighbor rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelRowLayout {
+    /// Under the retired 64-bit hash of the label, before
+    /// [`IndexStorageVersion::LABEL_IDENTITY`].
+    Hash,
+    /// Under the exact label.
+    Exact,
+}
+
+impl LabelRowLayout {
+    /// The layout of a store whose V2 storage marker records `version`, or of
+    /// one no V2 writer has opened (`None`), which files labels by hash.
+    pub(crate) fn of_stored_version(version: Option<IndexStorageVersion>) -> Self {
+        match version {
+            Some(version) if version >= IndexStorageVersion::LABEL_IDENTITY => Self::Exact,
+            Some(_) | None => Self::Hash,
+        }
+    }
 }
 
 /// The compatibility an open reader has observed, by snapshot sequence.

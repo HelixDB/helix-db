@@ -6,12 +6,12 @@
 
 use crate::query_resources::{self, bitmap};
 use helix_planner::{catalog, ir};
-use slatedb::DbReadOps;
 
 use super::super::stream::ast_to_db_value;
 use super::super::ExecutionContext;
 use crate::encoding::property::property_value::PropertyValue as DbPropertyValue;
 use crate::error::{HelixDbError, Result};
+use crate::index_lifecycle::repository::LayoutView;
 #[cfg(test)]
 use crate::HelixStorage;
 
@@ -53,26 +53,11 @@ impl<'db> ExecutionContext<'db> {
             })
             .transpose()?;
         if let Some(active) = self.active_write_tx() {
-            return lookup_equality_in_view(
-                self,
-                &active.txn,
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
-                identity.as_ref(),
-                property,
-                value,
-            )
-            .await;
+            return lookup_equality_in_view(self, &active.txn, identity.as_ref(), property, value)
+                .await;
         }
         if let Some(view) = self.request_read_view() {
-            return lookup_equality_in_view(
-                self,
-                view,
-                view.storage_compatibility(),
-                identity.as_ref(),
-                property,
-                value,
-            )
-            .await;
+            return lookup_equality_in_view(self, view, identity.as_ref(), property, value).await;
         }
         outside_request_view!(
             relaxed: {
@@ -80,8 +65,10 @@ impl<'db> ExecutionContext<'db> {
                     HelixStorage::Reader(reader) => {
                         lookup_equality_in_view(
                             self,
-                            reader.as_ref(),
-                            self.db.reader_storage_compatibility_for_tests(),
+                            &crate::index_lifecycle::repository::LiveView::reader(
+                                reader.as_ref(),
+                                self.db.reader_storage_compatibility_for_tests(),
+                            ),
                             identity.as_ref(),
                             property,
                             value,
@@ -91,8 +78,7 @@ impl<'db> ExecutionContext<'db> {
                     HelixStorage::Writer(writer) => {
                         lookup_equality_in_view(
                             self,
-                            writer.db(),
-                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+                            &crate::index_lifecycle::repository::LiveView::writer(writer.db()),
                             identity.as_ref(),
                             property,
                             value,
@@ -171,11 +157,24 @@ impl<'db> ExecutionContext<'db> {
                 relaxed: {
                     match self.db.storage() {
                         HelixStorage::Reader(reader) => {
-                            lookup_managed_equalities_in_view(self, reader.as_ref(), &identity, values)
+                            lookup_managed_equalities_in_view(
+                                self,
+                                &crate::index_lifecycle::repository::LiveView::reader(
+                                    reader.as_ref(),
+                                    self.db.reader_storage_compatibility_for_tests(),
+                                ),
+                                &identity,
+                                values,
+                            )
                                 .await
                         }
                         HelixStorage::Writer(writer) => {
-                            lookup_managed_equalities_in_view(self, writer.db(), &identity, values)
+                            lookup_managed_equalities_in_view(
+                                self,
+                                &crate::index_lifecycle::repository::LiveView::writer(writer.db()),
+                                &identity,
+                                values,
+                            )
                                 .await
                         }
                     }
@@ -248,7 +247,10 @@ impl<'db> ExecutionContext<'db> {
                     HelixStorage::Reader(reader) => {
                         unindexed_label_rows_in_view(
                             self,
-                            reader.as_ref(),
+                            &crate::index_lifecycle::repository::LiveView::reader(
+                                reader.as_ref(),
+                                self.db.reader_storage_compatibility_for_tests(),
+                            ),
                             &identity,
                             label,
                             accept,
@@ -259,7 +261,7 @@ impl<'db> ExecutionContext<'db> {
                     HelixStorage::Writer(writer) => {
                         unindexed_label_rows_in_view(
                             self,
-                            writer.db(),
+                            &crate::index_lifecycle::repository::LiveView::writer(writer.db()),
                             &identity,
                             label,
                             accept,
@@ -329,7 +331,6 @@ impl<'db> ExecutionContext<'db> {
                 handle,
                 values,
                 unique,
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
             )
             .await;
         }
@@ -344,7 +345,6 @@ impl<'db> ExecutionContext<'db> {
                     handle,
                     values,
                     unique,
-                    view.storage_compatibility(),
                 )
                 .await;
             }
@@ -370,7 +370,6 @@ impl<'db> ExecutionContext<'db> {
                 &handle,
                 values,
                 unique,
-                view.storage_compatibility(),
             )
             .await;
         }
@@ -406,7 +405,6 @@ impl<'db> ExecutionContext<'db> {
                 handle,
                 value,
                 unique,
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
             )
             .await;
         }
@@ -421,7 +419,6 @@ impl<'db> ExecutionContext<'db> {
                     handle,
                     value,
                     unique,
-                    view.storage_compatibility(),
                 )
                 .await;
             }
@@ -447,7 +444,6 @@ impl<'db> ExecutionContext<'db> {
                 &handle,
                 value,
                 unique,
-                view.storage_compatibility(),
             )
             .await;
         }
@@ -465,7 +461,6 @@ impl<'db> ExecutionContext<'db> {
                 &active.txn,
                 label,
                 self.tenant_scope,
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                 self.row_memory.as_ref(),
             )
             .await;
@@ -475,7 +470,6 @@ impl<'db> ExecutionContext<'db> {
                 view,
                 label,
                 self.tenant_scope,
-                view.storage_compatibility(),
                 self.row_memory.as_ref(),
             )
             .await;
@@ -485,20 +479,21 @@ impl<'db> ExecutionContext<'db> {
                 match self.db.storage() {
                     HelixStorage::Reader(reader) => {
                         crate::search::lookup_global_edge_label_index_admitted(
-                            reader.as_ref(),
+                            &crate::index_lifecycle::repository::LiveView::reader(
+                                reader.as_ref(),
+                                self.db.reader_storage_compatibility_for_tests(),
+                            ),
                             label,
                             self.tenant_scope,
-                            self.db.reader_storage_compatibility_for_tests(),
                             self.row_memory.as_ref(),
                         )
                         .await
                     }
                     HelixStorage::Writer(writer) => {
                         crate::search::lookup_global_edge_label_index_admitted(
-                            writer.db(),
+                            &crate::index_lifecycle::repository::LiveView::writer(writer.db()),
                             label,
                             self.tenant_scope,
-                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                             self.row_memory.as_ref(),
                         )
                         .await
@@ -528,26 +523,11 @@ impl<'db> ExecutionContext<'db> {
             })
             .transpose()?;
         if let Some(active) = self.active_write_tx() {
-            return lookup_equality_in_view(
-                self,
-                &active.txn,
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
-                identity.as_ref(),
-                property,
-                value,
-            )
-            .await;
+            return lookup_equality_in_view(self, &active.txn, identity.as_ref(), property, value)
+                .await;
         }
         if let Some(view) = self.request_read_view() {
-            return lookup_equality_in_view(
-                self,
-                view,
-                view.storage_compatibility(),
-                identity.as_ref(),
-                property,
-                value,
-            )
-            .await;
+            return lookup_equality_in_view(self, view, identity.as_ref(), property, value).await;
         }
         outside_request_view!(
             relaxed: {
@@ -555,8 +535,10 @@ impl<'db> ExecutionContext<'db> {
                     HelixStorage::Reader(reader) => {
                         lookup_equality_in_view(
                             self,
-                            reader.as_ref(),
-                            self.db.reader_storage_compatibility_for_tests(),
+                            &crate::index_lifecycle::repository::LiveView::reader(
+                                reader.as_ref(),
+                                self.db.reader_storage_compatibility_for_tests(),
+                            ),
                             identity.as_ref(),
                             property,
                             value,
@@ -566,8 +548,7 @@ impl<'db> ExecutionContext<'db> {
                     HelixStorage::Writer(writer) => {
                         lookup_equality_in_view(
                             self,
-                            writer.db(),
-                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
+                            &crate::index_lifecycle::repository::LiveView::writer(writer.db()),
                             identity.as_ref(),
                             property,
                             value,
@@ -582,19 +563,20 @@ impl<'db> ExecutionContext<'db> {
         )
     }
 
-    pub(in crate::execution::interpreter) async fn lookup_out_neighbors_by_label(
+    /// Opposite endpoints of `node_id`'s `label` edges in `direction`.
+    pub(in crate::execution::interpreter) async fn lookup_neighbors_by_label(
         &self,
+        direction: crate::encoding::indexes::EdgeDirection,
         node_id: u64,
         label: &str,
     ) -> Result<bitmap::Bitmap> {
         if let Some(active) = self.active_write_tx() {
             return crate::search::lookup_neighbors_by_label_admitted(
                 &active.txn,
-                crate::encoding::indexes::EdgeDirection::Out,
+                direction,
                 node_id,
                 label,
                 self.tenant_scope,
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                 self.row_memory.as_ref(),
             )
             .await;
@@ -602,11 +584,10 @@ impl<'db> ExecutionContext<'db> {
         if let Some(view) = self.request_read_view() {
             return crate::search::lookup_neighbors_by_label_admitted(
                 view,
-                crate::encoding::indexes::EdgeDirection::Out,
+                direction,
                 node_id,
                 label,
                 self.tenant_scope,
-                view.storage_compatibility(),
                 self.row_memory.as_ref(),
             )
             .await;
@@ -616,24 +597,25 @@ impl<'db> ExecutionContext<'db> {
                 match self.db.storage() {
                     HelixStorage::Reader(reader) => {
                         crate::search::lookup_neighbors_by_label_admitted(
-                            reader.as_ref(),
-                            crate::encoding::indexes::EdgeDirection::Out,
+                            &crate::index_lifecycle::repository::LiveView::reader(
+                                reader.as_ref(),
+                                self.db.reader_storage_compatibility_for_tests(),
+                            ),
+                            direction,
                             node_id,
                             label,
                             self.tenant_scope,
-                            self.db.reader_storage_compatibility_for_tests(),
                             self.row_memory.as_ref(),
                         )
                         .await
                     }
                     HelixStorage::Writer(writer) => {
                         crate::search::lookup_neighbors_by_label_admitted(
-                            writer.db(),
-                            crate::encoding::indexes::EdgeDirection::Out,
+                            &crate::index_lifecycle::repository::LiveView::writer(writer.db()),
+                            direction,
                             node_id,
                             label,
                             self.tenant_scope,
-                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
                             self.row_memory.as_ref(),
                         )
                         .await
@@ -641,71 +623,7 @@ impl<'db> ExecutionContext<'db> {
                 }
             },
             closed: Err(HelixDbError::InvariantViolation(
-                "out-neighbor label lookup escaped its request read view".to_string(),
-            )),
-        )
-    }
-
-    pub(in crate::execution::interpreter) async fn lookup_in_neighbors_by_label(
-        &self,
-        node_id: u64,
-        label: &str,
-    ) -> Result<bitmap::Bitmap> {
-        if let Some(active) = self.active_write_tx() {
-            return crate::search::lookup_neighbors_by_label_admitted(
-                &active.txn,
-                crate::encoding::indexes::EdgeDirection::In,
-                node_id,
-                label,
-                self.tenant_scope,
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
-                self.row_memory.as_ref(),
-            )
-            .await;
-        }
-        if let Some(view) = self.request_read_view() {
-            return crate::search::lookup_neighbors_by_label_admitted(
-                view,
-                crate::encoding::indexes::EdgeDirection::In,
-                node_id,
-                label,
-                self.tenant_scope,
-                view.storage_compatibility(),
-                self.row_memory.as_ref(),
-            )
-            .await;
-        }
-        outside_request_view!(
-            relaxed: {
-                match self.db.storage() {
-                    HelixStorage::Reader(reader) => {
-                        crate::search::lookup_neighbors_by_label_admitted(
-                            reader.as_ref(),
-                            crate::encoding::indexes::EdgeDirection::In,
-                            node_id,
-                            label,
-                            self.tenant_scope,
-                            self.db.reader_storage_compatibility_for_tests(),
-                            self.row_memory.as_ref(),
-                        )
-                        .await
-                    }
-                    HelixStorage::Writer(writer) => {
-                        crate::search::lookup_neighbors_by_label_admitted(
-                            writer.db(),
-                            crate::encoding::indexes::EdgeDirection::In,
-                            node_id,
-                            label,
-                            self.tenant_scope,
-                            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
-                            self.row_memory.as_ref(),
-                        )
-                        .await
-                    }
-                }
-            },
-            closed: Err(HelixDbError::InvariantViolation(
-                "in-neighbor label lookup escaped its request read view".to_string(),
+                "neighbor label lookup escaped its request read view".to_string(),
             )),
         )
     }
@@ -834,14 +752,13 @@ fn secondary_identity(
 /// Resolves built-in label rows or one exact managed dynamic equality identity.
 async fn lookup_equality_in_view(
     context: &ExecutionContext<'_>,
-    reader: &(impl DbReadOps + Send + Sync),
-    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
+    view: &impl LayoutView,
     identity: Option<&crate::index_lifecycle::IndexIdentity>,
     property: &str,
     value: &DbPropertyValue,
 ) -> Result<bitmap::Bitmap> {
     if let Some(identity) = identity {
-        return lookup_managed_equality_in_view(context, reader, identity, value).await;
+        return lookup_managed_equality_in_view(context, view, identity, value).await;
     }
     if property != "$label" {
         return Err(HelixDbError::IndexLifecycleUnavailable {
@@ -853,10 +770,9 @@ async fn lookup_equality_in_view(
         return bitmap::Bitmap::empty(context.row_memory.as_ref());
     };
     crate::search::lookup_node_label_index_admitted(
-        reader,
+        view,
         value,
         context.tenant_scope,
-        compatibility,
         context.row_memory.as_ref(),
     )
     .await
@@ -865,16 +781,16 @@ async fn lookup_equality_in_view(
 /// Resolves one request-authorized equality generation and reads its physical row.
 async fn lookup_managed_equality_in_view(
     context: &ExecutionContext<'_>,
-    reader: &(impl DbReadOps + Send + Sync),
+    view: &impl LayoutView,
     identity: &crate::index_lifecycle::IndexIdentity,
     value: &DbPropertyValue,
 ) -> Result<bitmap::Bitmap> {
-    lookup_managed_equalities_in_view(context, reader, identity, core::slice::from_ref(value)).await
+    lookup_managed_equalities_in_view(context, view, identity, core::slice::from_ref(value)).await
 }
 
 async fn lookup_managed_equalities_in_view(
     context: &ExecutionContext<'_>,
-    reader: &(impl DbReadOps + Send + Sync),
+    view: &impl LayoutView,
     identity: &crate::index_lifecycle::IndexIdentity,
     values: &[DbPropertyValue],
 ) -> Result<bitmap::Bitmap> {
@@ -885,14 +801,7 @@ async fn lookup_managed_equalities_in_view(
                 reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
             });
         };
-        return lookup_managed_active_equalities_in_view(
-            context,
-            reader,
-            active,
-            values,
-            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
-        )
-        .await;
+        return lookup_managed_active_equalities_in_view(context, view, active, values).await;
     }
 
     if let Some(catalog) = context.request_read_index_catalog() {
@@ -902,22 +811,12 @@ async fn lookup_managed_equalities_in_view(
                 reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
             });
         };
-        return lookup_managed_active_equalities_in_view(
-            context,
-            reader,
-            active,
-            values,
-            context
-                .request_read_view()
-                .expect("prepared catalog requires its exact request read view")
-                .storage_compatibility(),
-        )
-        .await;
+        return lookup_managed_active_equalities_in_view(context, view, active, values).await;
     }
 
     crate::index_lifecycle::secondary::record_equality_point_read();
     let Some(record) = crate::index_lifecycle::repository::load_index_record(
-        reader,
+        view.reads(),
         context.tenant_scope,
         identity,
     )
@@ -936,33 +835,19 @@ async fn lookup_managed_equalities_in_view(
             reason: crate::error::IndexLifecycleUnavailableReason::CanonicalStateUnavailable,
         });
     };
-    lookup_managed_active_equalities_in_view(
-        context,
-        reader,
-        &active,
-        values,
-        context.request_read_view().map_or(
-            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
-            super::super::read_view::StableRequestReadView::storage_compatibility,
-        ),
-    )
-    .await
+    lookup_managed_active_equalities_in_view(context, view, &active, values).await
 }
 
 /// Resolves the request's Active equality generation for `identity`, when
 /// there is one, and returns the verified label rows outside its lane.
 async fn unindexed_label_rows_in_view(
     context: &ExecutionContext<'_>,
-    reader: &(impl DbReadOps + Send + Sync),
+    view: &impl LayoutView,
     identity: &crate::index_lifecycle::IndexIdentity,
     label: crate::index_lifecycle::secondary::UnindexedLabel<'_>,
     accept: impl Fn(Option<&DbPropertyValue>) -> bool,
     within: Option<&roaring::RoaringTreemap>,
 ) -> Result<bitmap::Bitmap> {
-    let compatibility = context.request_read_view().map_or(
-        crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
-        super::super::read_view::StableRequestReadView::storage_compatibility,
-    );
     let loaded;
     let handle = if let Some(active_write) = context.active_write_tx() {
         active_write.index_context.active_handle(identity)
@@ -971,7 +856,7 @@ async fn unindexed_label_rows_in_view(
     } else {
         crate::index_lifecycle::secondary::record_equality_point_read();
         loaded = crate::index_lifecycle::repository::load_index_record(
-            reader,
+            view.reads(),
             context.tenant_scope,
             identity,
         )
@@ -987,9 +872,9 @@ async fn unindexed_label_rows_in_view(
     let deadline = || context.check_execution_deadline();
     let extra = context.shared_index_reads.take(1);
     let candidates = crate::index_lifecycle::secondary::unindexed_label_rows(
-        reader,
+        view.reads(),
         label,
-        compatibility,
+        view.compatibility(),
         handle,
         within,
         match extra.taken {
@@ -1001,7 +886,7 @@ async fn unindexed_label_rows_in_view(
     .await?;
     drop(extra);
     crate::index_lifecycle::secondary::verified_unindexed_rows(
-        reader,
+        view.reads(),
         label,
         candidates,
         accept,
@@ -1013,10 +898,9 @@ async fn unindexed_label_rows_in_view(
 
 async fn lookup_managed_active_equalities_in_view(
     context: &ExecutionContext<'_>,
-    reader: &(impl DbReadOps + Send + Sync),
+    view: &impl LayoutView,
     active: &crate::index_lifecycle::ActiveIndexHandle,
     values: &[DbPropertyValue],
-    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
 ) -> Result<bitmap::Bitmap> {
     if !matches!(
         active,
@@ -1027,10 +911,10 @@ async fn lookup_managed_active_equalities_in_view(
         ));
     }
     crate::index_lifecycle::secondary::lookup_active_equality_generations_admitted(
-        reader,
+        view.reads(),
         active,
         values,
-        compatibility,
+        view.compatibility(),
         context.row_memory.as_ref(),
         &|| context.check_execution_deadline(),
     )
@@ -1039,25 +923,27 @@ async fn lookup_managed_active_equalities_in_view(
 
 async fn lookup_managed_active_literal_batch(
     budget: Option<&query_resources::Budget>,
-    reader: &(impl DbReadOps + Send + Sync),
+    view: &impl LayoutView,
     active: &crate::index_lifecycle::ActiveIndexHandle,
     values: &[DbPropertyValue],
     unique: bool,
-    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
 ) -> Result<bitmap::Bitmap> {
     if unique {
         return Box::pin(
             crate::index_lifecycle::secondary::lookup_active_unique_equality_batch_admitted(
-                reader, active, values, budget,
+                view.reads(),
+                active,
+                values,
+                budget,
             ),
         )
         .await;
     }
     crate::index_lifecycle::secondary::lookup_active_equality_batch_admitted(
-        reader,
+        view.reads(),
         active,
         values,
-        compatibility,
+        view.compatibility(),
         budget,
     )
     .await
@@ -1065,11 +951,10 @@ async fn lookup_managed_active_literal_batch(
 
 async fn lookup_managed_active_point_exact(
     budget: Option<&query_resources::Budget>,
-    reader: &(impl DbReadOps + Send + Sync),
+    view: &impl LayoutView,
     active: &crate::index_lifecycle::ActiveIndexHandle,
     value: &DbPropertyValue,
     unique: bool,
-    compatibility: crate::index_lifecycle::repository::ReaderStorageCompatibility,
 ) -> Result<bitmap::Bitmap> {
     let Some(definition) = active.secondary_definition() else {
         return Err(HelixDbError::IndexCatalogCorruption(
@@ -1092,10 +977,10 @@ async fn lookup_managed_active_point_exact(
         ));
     }
     crate::index_lifecycle::secondary::lookup_active_equality_point_admitted(
-        reader,
+        view.reads(),
         active,
         value,
-        compatibility,
+        view.compatibility(),
         budget,
     )
     .await
@@ -1320,7 +1205,11 @@ pub(super) mod tests {
         );
         assert_eq!(
             context
-                .lookup_out_neighbors_by_label(alice, "FOLLOWS")
+                .lookup_neighbors_by_label(
+                    crate::encoding::indexes::EdgeDirection::Out,
+                    alice,
+                    "FOLLOWS"
+                )
                 .await
                 .expect("reader out-neighbor lookup succeeds")
                 .into_iter()
@@ -1329,7 +1218,11 @@ pub(super) mod tests {
         );
         assert_eq!(
             context
-                .lookup_in_neighbors_by_label(bob, "FOLLOWS")
+                .lookup_neighbors_by_label(
+                    crate::encoding::indexes::EdgeDirection::In,
+                    bob,
+                    "FOLLOWS"
+                )
                 .await
                 .expect("reader in-neighbor lookup succeeds")
                 .into_iter()
@@ -1394,22 +1287,20 @@ pub(super) mod tests {
         );
         assert!(lookup_managed_active_point_exact(
             None,
-            db.inner_db().as_ref(),
+            &crate::index_lifecycle::repository::LiveView::writer(db.inner_db().as_ref()),
             &node_unique,
             &value,
             true,
-            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .expect("matching unique lane reads literally")
         .is_empty());
         assert!(lookup_managed_active_point_exact(
             None,
-            db.inner_db().as_ref(),
+            &crate::index_lifecycle::repository::LiveView::writer(db.inner_db().as_ref()),
             &node_unique,
             &value,
             false,
-            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .is_err());
@@ -1420,22 +1311,20 @@ pub(super) mod tests {
         );
         assert!(lookup_managed_active_point_exact(
             None,
-            db.inner_db().as_ref(),
+            &crate::index_lifecycle::repository::LiveView::writer(db.inner_db().as_ref()),
             &edge_equality,
             &value,
             false,
-            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .expect("edge equality uses its non-unique lane")
         .is_empty());
         assert!(lookup_managed_active_point_exact(
             None,
-            db.inner_db().as_ref(),
+            &crate::index_lifecycle::repository::LiveView::writer(db.inner_db().as_ref()),
             &edge_equality,
             &value,
             true,
-            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .is_err());
@@ -1448,11 +1337,10 @@ pub(super) mod tests {
         ] {
             assert!(lookup_managed_active_point_exact(
                 None,
-                db.inner_db().as_ref(),
+                &crate::index_lifecycle::repository::LiveView::writer(db.inner_db().as_ref()),
                 &secondary_handle(range),
                 &value,
                 false,
-                crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
             )
             .await
             .is_err());
@@ -1483,11 +1371,10 @@ pub(super) mod tests {
         );
         assert!(lookup_managed_active_point_exact(
             None,
-            db.inner_db().as_ref(),
+            &crate::index_lifecycle::repository::LiveView::writer(db.inner_db().as_ref()),
             &vector_handle,
             &value,
             false,
-            crate::index_lifecycle::repository::ReaderStorageCompatibility::Current,
         )
         .await
         .is_err());
@@ -1769,7 +1656,11 @@ pub(super) mod tests {
         );
         assert_eq!(
             context
-                .lookup_in_neighbors_by_label(bob, "FOLLOWS")
+                .lookup_neighbors_by_label(
+                    crate::encoding::indexes::EdgeDirection::In,
+                    bob,
+                    "FOLLOWS"
+                )
                 .await
                 .expect("transaction in-neighbor lookup succeeds")
                 .into_iter()
@@ -1903,7 +1794,11 @@ pub(super) mod tests {
         );
         assert_eq!(
             context
-                .lookup_out_neighbors_by_label(alice, "FOLLOWS")
+                .lookup_neighbors_by_label(
+                    crate::encoding::indexes::EdgeDirection::Out,
+                    alice,
+                    "FOLLOWS"
+                )
                 .await
                 .expect("out-neighbor lookup uses the request snapshot")
                 .into_iter()
@@ -1911,7 +1806,11 @@ pub(super) mod tests {
             vec![bob]
         );
         assert!(context
-            .lookup_in_neighbors_by_label(carol, "FOLLOWS")
+            .lookup_neighbors_by_label(
+                crate::encoding::indexes::EdgeDirection::In,
+                carol,
+                "FOLLOWS"
+            )
             .await
             .expect("in-neighbor lookup uses the request snapshot")
             .is_empty());

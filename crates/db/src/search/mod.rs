@@ -53,7 +53,7 @@ use crate::encoding::v2::values::edge_endpoints::EdgeEndpointsValue;
 use crate::encoding::v2::values::indexes::{BitmapMembershipDelta, SecondaryEqualityValue};
 use crate::encoding::{EdgeId, NodeId};
 use crate::error::HelixDbError;
-use crate::index_lifecycle::repository::ReaderStorageCompatibility;
+use crate::index_lifecycle::repository::{LabelRowLayout, LayoutView};
 use crate::query_resources::{self, bitmap};
 use crate::transaction::Mutation;
 use slatedb::DbReadOps;
@@ -537,18 +537,6 @@ pub async fn lookup_equality_index_set_scoped(
     if property == NODE_LABEL_PROPERTY {
         return lookup_node_label_index_scoped(txn, value, tenant_scope).await;
     }
-    lookup_equality_index_set_admitted(txn, property, value, tenant_scope, None)
-        .await
-        .map(bitmap::Bitmap::into_unbudgeted)
-}
-
-pub(crate) async fn lookup_equality_index_set_admitted(
-    txn: &(impl DbReadOps + Send + Sync),
-    property: &str,
-    value: &str,
-    tenant_scope: DataScope,
-    budget: Option<&query_resources::Budget>,
-) -> Result<bitmap::Bitmap, HelixDbError> {
     let key = DataKey::Data {
         scope: tenant_scope,
         kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(EqualityIndexKey::new(
@@ -557,8 +545,9 @@ pub(crate) async fn lookup_equality_index_set_admitted(
         ))),
     }
     .to_bytes();
-
-    bitmap::Bitmap::read(txn, &key, budget).await
+    bitmap::Bitmap::read(txn, &key, None)
+        .await
+        .map(bitmap::Bitmap::into_unbudgeted)
 }
 
 /// Scan all equality-index values for a property, returning up to `limit` nodes.
@@ -589,6 +578,8 @@ pub async fn scan_equality_index_property_prefix_limited_filtered(
     .await
 }
 
+/// [`scan_equality_index_property_prefix_limited_filtered`] in
+/// `tenant_scope`; `$label` scans the node label index.
 pub async fn scan_equality_index_property_prefix_limited_filtered_scoped(
     txn: &(impl DbReadOps + Send + Sync),
     property: &str,
@@ -600,10 +591,7 @@ pub async fn scan_equality_index_property_prefix_limited_filtered_scoped(
         return Ok(RoaringTreemap::new());
     }
 
-    let prefix = EqualityScanPrefix::Property {
-        property_hash: hash_property_name(property),
-    }
-    .to_bytes();
+    let prefix = equality_property_prefix(property);
     let mut iter = txn
         .scan_prefix(DataKey::data_prefix(tenant_scope, prefix), ..)
         .await?;
@@ -1228,15 +1216,13 @@ pub async fn scan_range_index_prefix_limited(
     Ok(results)
 }
 
-/// Delete all node equality index rows for a property.
+/// Delete all node equality index rows for a property; `$label` deletes the
+/// node label index.
 pub async fn delete_equality_index_entries_for_property(
     txn: &DbTransaction,
     property: &str,
 ) -> Result<(), HelixDbError> {
-    let prefix = EqualityScanPrefix::Property {
-        property_hash: hash_property_name(property),
-    }
-    .to_bytes();
+    let prefix = equality_property_prefix(property);
 
     let mut iter = txn.scan_prefix(prefix, ..).await?;
     while let Some(kv) = iter.next().await? {
@@ -1431,9 +1417,9 @@ pub fn add_to_edge_label_index_scoped(
 
 /// Stages one edge's two retired hash-keyed neighbor rows.
 ///
-/// Only the graph-format V1 rewrite stages hash-keyed label rows: it runs in
-/// the writer open before the label identity migration, while every label row
-/// of the store is still hash-keyed, and that migration then copies them.
+/// Only the graph-format V1 rewrite stages hash-keyed label rows, and only on
+/// a store before label identity: it runs in the writer open before the label
+/// identity migration, which then copies them.
 pub(crate) fn add_to_legacy_edge_label_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
@@ -1514,13 +1500,13 @@ pub async fn lookup_out_neighbors_by_label_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    lookup_neighbors_by_label_admitted(
+    read_neighbors_by_label(
         txn,
+        LabelRowLayout::Exact,
         EdgeRangeDirection::Out,
         source,
         label,
         tenant_scope,
-        stored_label_layout(txn).await?,
         None,
     )
     .await
@@ -1544,36 +1530,53 @@ pub async fn lookup_in_neighbors_by_label_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    lookup_neighbors_by_label_admitted(
+    read_neighbors_by_label(
         txn,
+        LabelRowLayout::Exact,
         EdgeRangeDirection::In,
         target,
         label,
         tenant_scope,
-        stored_label_layout(txn).await?,
         None,
     )
     .await
     .map(bitmap::Bitmap::into_unbudgeted)
 }
 
-/// Opposite endpoints of `node`'s `label` edges in `direction`.
-///
-/// `compatibility` is the request snapshot's storage layout, which decides
-/// whether the row is read by its exact key or its retired hash key (see
-/// [`read_label_row`]).
+/// Opposite endpoints of `node`'s `label` edges in `direction`, read from
+/// `view` in the layout of the snapshot it reads (see [`read_label_row`]).
 pub(crate) async fn lookup_neighbors_by_label_admitted(
-    txn: &(impl DbReadOps + Send + Sync),
+    view: &impl LayoutView,
     direction: EdgeRangeDirection,
     node: NodeId,
     label: &str,
     tenant_scope: DataScope,
-    compatibility: ReaderStorageCompatibility,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap, HelixDbError> {
+    read_neighbors_by_label(
+        view.reads(),
+        view.compatibility().label_rows(),
+        direction,
+        node,
+        label,
+        tenant_scope,
+        budget,
+    )
+    .await
+}
+
+async fn read_neighbors_by_label(
+    txn: &(impl DbReadOps + Send + Sync),
+    layout: LabelRowLayout,
+    direction: EdgeRangeDirection,
+    node: NodeId,
+    label: &str,
+    tenant_scope: DataScope,
     budget: Option<&query_resources::Budget>,
 ) -> Result<bitmap::Bitmap, HelixDbError> {
     read_label_row(
         txn,
-        compatibility,
+        layout,
         budget,
         || {
             label::LabelIdentity::new(label).ok().map(|identity| {
@@ -1603,19 +1606,19 @@ pub(crate) async fn lookup_neighbors_by_label_admitted(
 /// retired hash key (`legacy`): the exact rows may be missing or an incomplete
 /// copy. Once it is published they use the exact key (`exact`). A label too
 /// long for any exact key (`exact` returns `None`) has no exact row.
+///
+/// The public label helpers read and write exact rows only: they serve a
+/// current store, as graph writes do.
 async fn read_label_row(
     txn: &(impl DbReadOps + Send + Sync),
-    compatibility: ReaderStorageCompatibility,
+    layout: LabelRowLayout,
     budget: Option<&query_resources::Budget>,
     exact: impl FnOnce() -> Option<Bytes>,
     legacy: impl FnOnce() -> Bytes,
 ) -> Result<bitmap::Bitmap, HelixDbError> {
-    match compatibility {
-        ReaderStorageCompatibility::LegacyEqualityUnion
-        | ReaderStorageCompatibility::LegacyLabelHash => {
-            bitmap::Bitmap::read(txn, &legacy(), budget).await
-        }
-        ReaderStorageCompatibility::Current => match exact() {
+    match layout {
+        LabelRowLayout::Hash => bitmap::Bitmap::read(txn, &legacy(), budget).await,
+        LabelRowLayout::Exact => match exact() {
             Some(key) => bitmap::Bitmap::read(txn, &key, budget).await,
             None => bitmap::Bitmap::empty(budget),
         },
@@ -1625,6 +1628,18 @@ async fn read_label_row(
 /// Property name the node label index serves in the equality helpers.
 const NODE_LABEL_PROPERTY: &str = "$label";
 
+/// The logical prefix of every node equality row of `property`: of every
+/// node label row for `$label`, which the node label index serves.
+fn equality_property_prefix(property: &str) -> Bytes {
+    if property == NODE_LABEL_PROPERTY {
+        return label::LabelScanPrefix::NodeLabels.to_bytes();
+    }
+    EqualityScanPrefix::Property {
+        property_hash: hash_property_name(property),
+    }
+    .to_bytes()
+}
+
 fn node_label_key(scope: DataScope, identity: label::LabelIdentity<'_>) -> Bytes {
     DataKey::Data {
         scope,
@@ -1633,20 +1648,6 @@ fn node_label_key(scope: DataScope, identity: label::LabelIdentity<'_>) -> Bytes
         ))),
     }
     .to_bytes()
-}
-
-/// The label row layout of the store `txn` reads, for the public lookups,
-/// which have no request view to carry one. A store no V2 writer has opened
-/// still files labels under hash keys.
-async fn stored_label_layout(
-    txn: &(impl DbReadOps + Send + Sync),
-) -> Result<ReaderStorageCompatibility, HelixDbError> {
-    Ok(crate::migrations::startup::stored_storage_version(txn)
-        .await?
-        .map_or(
-            ReaderStorageCompatibility::LegacyLabelHash,
-            ReaderStorageCompatibility::of_version,
-        ))
 }
 
 /// Stages one node's retired hash-keyed label row, the `$label` equality row
@@ -1988,29 +1989,41 @@ pub async fn lookup_global_edge_label_index_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    lookup_global_edge_label_index_admitted(
-        txn,
-        label,
-        tenant_scope,
-        stored_label_layout(txn).await?,
-        None,
-    )
-    .await
-    .map(bitmap::Bitmap::into_unbudgeted)
+    read_global_edge_label(txn, LabelRowLayout::Exact, label, tenant_scope, None)
+        .await
+        .map(bitmap::Bitmap::into_unbudgeted)
 }
 
 /// Every edge of `label`; see [`lookup_neighbors_by_label_admitted`] for
-/// `compatibility`.
+/// `view`.
 pub(crate) async fn lookup_global_edge_label_index_admitted(
-    txn: &(impl DbReadOps + Send + Sync),
+    view: &impl LayoutView,
     label: &str,
     tenant_scope: DataScope,
-    compatibility: ReaderStorageCompatibility,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap, HelixDbError> {
+    read_global_edge_label(
+        view.reads(),
+        view.compatibility().label_rows(),
+        label,
+        tenant_scope,
+        budget,
+    )
+    .await
+}
+
+/// Every edge of `label`, read in `layout`, for managed-equality reads that
+/// carry their snapshot's format beside the reader they read.
+pub(crate) async fn read_global_edge_label(
+    txn: &(impl DbReadOps + Send + Sync),
+    layout: LabelRowLayout,
+    label: &str,
+    tenant_scope: DataScope,
     budget: Option<&query_resources::Budget>,
 ) -> Result<bitmap::Bitmap, HelixDbError> {
     read_label_row(
         txn,
-        compatibility,
+        layout,
         budget,
         || {
             label::LabelIdentity::new(label).ok().map(|identity| {
@@ -2039,29 +2052,40 @@ pub async fn lookup_node_label_index_scoped(
     label: &str,
     tenant_scope: DataScope,
 ) -> Result<RoaringTreemap, HelixDbError> {
-    lookup_node_label_index_admitted(
-        txn,
-        label,
-        tenant_scope,
-        stored_label_layout(txn).await?,
-        None,
-    )
-    .await
-    .map(bitmap::Bitmap::into_unbudgeted)
+    read_node_label(txn, LabelRowLayout::Exact, label, tenant_scope, None)
+        .await
+        .map(bitmap::Bitmap::into_unbudgeted)
 }
 
 /// Every node of `label`; see [`lookup_neighbors_by_label_admitted`] for
-/// `compatibility`.
+/// `view`.
 pub(crate) async fn lookup_node_label_index_admitted(
-    txn: &(impl DbReadOps + Send + Sync),
+    view: &impl LayoutView,
     label: &str,
     tenant_scope: DataScope,
-    compatibility: ReaderStorageCompatibility,
+    budget: Option<&query_resources::Budget>,
+) -> Result<bitmap::Bitmap, HelixDbError> {
+    read_node_label(
+        view.reads(),
+        view.compatibility().label_rows(),
+        label,
+        tenant_scope,
+        budget,
+    )
+    .await
+}
+
+/// Every node of `label`, read in `layout`; see [`read_global_edge_label`].
+pub(crate) async fn read_node_label(
+    txn: &(impl DbReadOps + Send + Sync),
+    layout: LabelRowLayout,
+    label: &str,
+    tenant_scope: DataScope,
     budget: Option<&query_resources::Budget>,
 ) -> Result<bitmap::Bitmap, HelixDbError> {
     read_label_row(
         txn,
-        compatibility,
+        layout,
         budget,
         || {
             label::LabelIdentity::new(label).ok().map(|identity| {
