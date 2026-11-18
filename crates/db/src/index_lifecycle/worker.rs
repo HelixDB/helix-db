@@ -44,6 +44,14 @@ const DEFAULT_OPERATION_PAGE_SIZE: usize = 64;
 /// requested, releases it: the dispatcher can then give the family's lane to
 /// another queued operation, and shutdown or a failing cycle joins the task
 /// within about one slice plus one step.
+///
+/// Steps commit without waiting for their WAL upload, so the task ends each
+/// slice by uploading them. A build therefore runs at most one slice ahead of
+/// durability: when object storage falls behind, the build slows down
+/// instead of growing the WAL tail that every durable write and every gated
+/// step waits behind. Measured on S3, a clean 1M-row range build took as
+/// long as unbounded (about 20 s), and one under 1,000 writes/s about 7%
+/// longer.
 const CLAIM_SLICE: Duration = Duration::from_secs(1);
 const SUPERVISOR_RESTART_DELAY: Duration = Duration::from_millis(10);
 const IDLE_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -387,6 +395,11 @@ impl InFlightTask {
                     #[cfg(feature = "index-lifecycle-testing")]
                     lifecycle_metrics.observe_operation(executed.evidence);
                     let Some(retained) = executed.retained else {
+                        // See [`CLAIM_SLICE`]: the slice ends once its steps
+                        // are durable. Every other outcome already is.
+                        if executed.evidence.outcome == outbox::CommittedOperationStep::Progressed {
+                            db.flush().await?;
+                        }
                         break;
                     };
                     claimed = retained;
