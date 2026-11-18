@@ -116,7 +116,12 @@ pub enum IndexOperationBlockerCode {
     InvalidLegacyPhysical,
 }
 
-/// Monotonic bounded-work counters safe for public progress reporting.
+/// Bounded-work counters safe for public progress reporting.
+///
+/// They grow while one writer runs the operation. A writer reports the steps
+/// it has applied, and progressed steps do not wait for their WAL upload, so
+/// after a crash or failover the counters can fall back to the last durable
+/// step, which the build then redoes. Readers report only durable steps.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct IndexOperationPublicProgress {
     /// Source entities read. A build counts each entity its source scan
@@ -210,7 +215,8 @@ pub struct IndexOperationStatusCommon {
     /// operation runs. Every step that makes progress resets it, so it grows only
     /// while consecutive attempts fail to make progress.
     pub attempt: u32,
-    /// Monotonic bounded-work progress.
+    /// Bounded-work progress; see [`IndexOperationPublicProgress`] for when
+    /// it can fall back.
     pub progress: IndexOperationPublicProgress,
 }
 

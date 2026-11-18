@@ -2331,6 +2331,13 @@ impl HelixDB {
     ///
     /// A wrong scope is intentionally indistinguishable from an unknown or
     /// evicted operation ID.
+    ///
+    /// A writer reads its applied state, so it sees the operation a CREATE
+    /// committed without waiting for durability, and a build's claims and
+    /// progressed steps before their WAL upload. A crash or failover can
+    /// lose those, so the status a writer reported can move back to the last
+    /// durable step (see [`index_lifecycle::IndexOperationPublicProgress`]).
+    /// A reader reports durable state only.
     pub async fn get_index_operation(
         &self,
         scope: DataScope,
@@ -2360,9 +2367,14 @@ impl HelixDB {
     /// Advances at most one immediately eligible secondary lifecycle step.
     ///
     /// This writer-only surface is available only when secondary background
-    /// scheduling is Disabled. It returns `true` after one durable queue or
-    /// operation transition and `false` only after a complete queue scan finds
-    /// no immediately eligible secondary work.
+    /// scheduling is Disabled. It returns `true` after one queue or operation
+    /// transition applied on the writer and `false` only after a complete
+    /// queue scan finds no immediately eligible secondary work.
+    ///
+    /// Completion, blocked and retry transitions are durable when it returns.
+    /// A claim and a progressed step do not wait for their WAL upload: a
+    /// crash before it loses them, and the operation redoes the step from its
+    /// last durable one.
     ///
     /// Cancelling the call while it waits behind another manual step runs
     /// nothing. Once the step starts, cancelling only stops the wait: the step
