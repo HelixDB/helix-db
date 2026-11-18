@@ -13,9 +13,13 @@ async fn native_read_frames_reserve_before_first_poll() {
         .unwrap();
     for admitted in [false, true] {
         let budget = query_resources::Budget::new(1024 * 1024);
-        let transaction = crate::transaction::Owned::begin(&db, admitted.then_some(&budget))
-            .await
-            .unwrap();
+        let transaction = crate::transaction::Owned::begin(
+            &db,
+            admitted.then_some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         let measured = MeasuredVectorTransaction::new(&transaction);
         measured.reads_until_failure.store(0, Ordering::Release);
         let key = GraphEntity::node(1).property_key(DataScope::LegacyUnscoped);
@@ -64,9 +68,13 @@ async fn native_read_frames_reject_without_allocation() {
         .await
         .unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    let transaction = crate::transaction::Owned::begin(&db, Some(&budget))
-        .await
-        .unwrap();
+    let transaction = crate::transaction::Owned::begin(
+        &db,
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let measured = MeasuredVectorTransaction::new(&transaction);
     measured.reads_until_failure.store(0, Ordering::Release);
     let occupied = budget.reserve(budget.available()).unwrap();
@@ -136,9 +144,13 @@ async fn native_read_entries_preserve_values_and_invoke_one_hook_each() {
     let row = CanonicalPropertyRow::new(vec![Property::i64("value", 7)]);
     for admitted in [false, true] {
         let budget = query_resources::Budget::new(1024 * 1024);
-        let transaction = crate::transaction::Owned::begin(&db, admitted.then_some(&budget))
-            .await
-            .unwrap();
+        let transaction = crate::transaction::Owned::begin(
+            &db,
+            admitted.then_some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         let measured = VectorWriteRecorder::new().bind(&transaction);
         measured
             .put_bytes(key.clone(), row.encoded().clone())
@@ -226,9 +238,13 @@ async fn native_read_telemetry_counts_each_entry_once() {
         .await
         .unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    let transaction = crate::transaction::Owned::begin(&db, Some(&budget))
-        .await
-        .unwrap();
+    let transaction = crate::transaction::Owned::begin(
+        &db,
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let measured = MeasuredVectorTransaction::new(&transaction);
     let key = GraphEntity::node(1).property_key(DataScope::LegacyUnscoped);
     let keys = [&key, &key];

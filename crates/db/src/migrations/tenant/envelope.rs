@@ -738,8 +738,8 @@ mod tests {
     }
 
     /// Retired hash label rows parse as no live key kind. A tenant's must
-    /// still move under its envelope, so the label identity migration later in
-    /// the open finds them, and an unscoped or already enveloped one must stay:
+    /// still move under its envelope, so the label identity copy started later
+    /// in the open finds them, and an unscoped or already enveloped one must stay:
     /// read as a legacy tenant envelope, the key's tail can parse as a key.
     #[tokio::test]
     async fn retired_hash_label_rows_move_with_their_tenant_and_unscoped_ones_stay() {

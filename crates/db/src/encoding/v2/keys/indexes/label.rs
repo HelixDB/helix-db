@@ -339,12 +339,15 @@ pub(crate) enum LabelScanPrefix {
     NodeLabels,
     /// Every global edge label row.
     EdgeLabels,
-    /// Every edge-label neighbor row, both directions.
+    /// Every edge-label neighbor row, both directions: only fixtures that
+    /// walk every exact row read them by prefix.
+    #[cfg(test)]
     EdgeLabelNeighbors,
 }
 
 impl LabelScanPrefix {
     /// Every exact label keyspace, in key order.
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 3] =
         [Self::NodeLabels, Self::EdgeLabels, Self::EdgeLabelNeighbors];
 
@@ -354,6 +357,7 @@ impl LabelScanPrefix {
         match self {
             Self::NodeLabels => buf.put_slice(IndexPrefix::NodeLabel.as_slice()),
             Self::EdgeLabels => buf.put_slice(IndexPrefix::EdgeLabel.as_slice()),
+            #[cfg(test)]
             Self::EdgeLabelNeighbors => {
                 buf.put_u8(crate::encoding::indexes::prefix::EDGE_LABEL_NEIGHBOR_INDEX_PREFIX)
             }

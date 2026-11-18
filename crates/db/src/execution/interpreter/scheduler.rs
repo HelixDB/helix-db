@@ -653,9 +653,13 @@ mod tests {
             exec::ExecExecutionStage::Parallel(_)
         ));
 
-        let txn = crate::transaction::Owned::begin(&db.inner_db(), None)
-            .await
-            .expect("request transaction begins");
+        let txn = crate::transaction::Owned::begin(
+            &db.inner_db(),
+            None,
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .expect("request transaction begins");
         let mut context = ExecutionContext::new(&db, context::ParamBindings::default());
         context.request_write_scope = runtime_context::RequestWriteScopeState::Active(Box::new(
             runtime_context::ActiveWriteTx {

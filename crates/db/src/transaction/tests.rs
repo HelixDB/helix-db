@@ -10,7 +10,13 @@ async fn unpolled_read_future_allocations_are_admitted_and_released_with_the_fut
     .await
     .unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+    let transaction = Owned::begin(
+        &db.inner_db(),
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let key = graph_mutation::GraphEntity::node(1).property_key(DataScope::LegacyUnscoped);
     fn contract(reader: &(impl DbReadOps + Sync), budget: &query_resources::Budget, key: &Bytes) {
         fn check<F>(budget: &query_resources::Budget, create: impl FnOnce() -> F) {
@@ -53,7 +59,13 @@ async fn rejected_read_futures_do_not_allocate_before_polling() {
     .await
     .unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+    let transaction = Owned::begin(
+        &db.inner_db(),
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let occupied = budget.reserve(budget.available()).unwrap();
     let key = graph_mutation::GraphEntity::node(1).property_key(DataScope::LegacyUnscoped);
     async fn contract(reader: &(impl DbReadOps + Sync), key: &Bytes) {
@@ -163,9 +175,13 @@ async fn owned_and_borrowed_read_entries_preserve_values_and_admission() {
             .unwrap();
         read_contract(&raw.mutation_view(), &key, &next, row.encoded()).await;
         drop(raw);
-        let transaction = Owned::begin(&db.inner_db(), admitted.then_some(&budget))
-            .await
-            .unwrap();
+        let transaction = Owned::begin(
+            &db.inner_db(),
+            admitted.then_some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         read_contract(&transaction, &key, &next, row.encoded()).await;
         read_contract(&transaction.mutation_view(), &key, &next, row.encoded()).await;
         transaction.mark_read([&key]).unwrap();
@@ -188,7 +204,13 @@ async fn rejected_read_does_not_reach_backend_or_hide_its_memory_error() {
     let next = graph_mutation::GraphEntity::node(2).property_key(DataScope::LegacyUnscoped);
     let row = graph_mutation::CanonicalPropertyRow::new(Vec::new());
     let budget = query_resources::Budget::new(1024 * 1024);
-    let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+    let transaction = Owned::begin(
+        &db.inner_db(),
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let occupied = budget.reserve(budget.available()).unwrap();
     let error = transaction.get(&key).await.unwrap_err();
     assert!(is_admission_failure(&error));
@@ -244,7 +266,13 @@ async fn admitted_point_and_empty_range_reads_keep_serializable_conflicts() {
             .property_key(DataScope::LegacyUnscoped);
         let own = graph_mutation::GraphEntity::node(10 * mode + 2)
             .property_key(DataScope::LegacyUnscoped);
-        let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+        let transaction = Owned::begin(
+            &db.inner_db(),
+            Some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         match mode {
             0 => assert!(transaction.get(&key).await.unwrap().is_none()),
             1 => {
@@ -277,7 +305,13 @@ async fn backend_read_failure_retains_the_conservative_ledger_until_drop() {
     .await
     .unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+    let transaction = Owned::begin(
+        &db.inner_db(),
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let before = budget.available();
     db.close().await.unwrap();
     let key = graph_mutation::GraphEntity::node(1).property_key(DataScope::LegacyUnscoped);
@@ -314,12 +348,23 @@ async fn fresh_transaction_admission_releases_on_open_failure() {
     .await
     .unwrap();
     assert!(matches!(
-        Owned::begin(&db.inner_db(), Some(&query_resources::Budget::new(0))).await,
+        Owned::begin(
+            &db.inner_db(),
+            Some(&query_resources::Budget::new(0)),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact)
+        )
+        .await,
         Err(HelixDbError::QueryMemoryLimitExceeded)
     ));
     db.close().await.unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    assert!(Owned::begin(&db.inner_db(), Some(&budget)).await.is_err());
+    assert!(Owned::begin(
+        &db.inner_db(),
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact)
+    )
+    .await
+    .is_err());
     assert_eq!(budget.available(), 1024 * 1024);
 }
 
@@ -336,7 +381,13 @@ async fn detached_completion_retains_read_admission_and_abort_releases_it() {
     let row = graph_mutation::CanonicalPropertyRow::new(Vec::new());
     for commit in [false, true] {
         let budget = query_resources::Budget::new(1024 * 1024);
-        let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+        let transaction = Owned::begin(
+            &db.inner_db(),
+            Some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         transaction.multi_get(&keys).await.unwrap();
         let written = graph_mutation::GraphEntity::node(if commit { 1001 } else { 1000 })
             .property_key(DataScope::LegacyUnscoped);
@@ -386,7 +437,13 @@ async fn puts_to_rows_without_merges_skip_validation_and_admission() {
     .await
     .unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+    let transaction = Owned::begin(
+        &db.inner_db(),
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let property = graph_mutation::GraphEntity::node(1).property_key(DataScope::LegacyUnscoped);
     // Undecodable as any membership row, and no admission is left to take.
     let value = Bytes::from(vec![0xAB; 64 * 1024]);
@@ -443,7 +500,13 @@ async fn budgeted_membership_puts_admit_the_decode_before_running_it() {
         let row = crate::merge_operator::MembershipRow::of(&key).unwrap();
         let bound = row.base_allocation_bound(&value).unwrap();
         let budget = query_resources::Budget::new(64 * 1024 * 1024);
-        let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+        let transaction = Owned::begin(
+            &db.inner_db(),
+            Some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         let view = transaction.mutation_view();
         let initial = budget.available();
         let (result, allocations) =

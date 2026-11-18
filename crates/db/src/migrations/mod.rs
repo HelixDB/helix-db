@@ -9,7 +9,9 @@
 
 pub(crate) mod background;
 mod indexes;
-pub(crate) use indexes::label_identity::migrate_label_identity;
+pub(crate) use indexes::label_identity::start_label_identity_copy;
+#[cfg(any(test, feature = "index-lifecycle-testing"))]
+pub(crate) use indexes::label_identity::{copy_hash_label_rows_once, LabelCopySession};
 pub(crate) mod startup;
 mod tenant;
 mod vector_properties;
@@ -3543,7 +3545,7 @@ async fn rewrite_legacy_edge_pair_batch(
         mark_legacy_edge_equivalents(txn, scope, &mut rows, &candidates).await?;
     }
 
-    let labels = crate::index_lifecycle::repository::LabelRowLayout::of_stored_version(
+    let labels = crate::index_lifecycle::repository::LabelRowWrites::of_stored_version(
         startup::stored_storage_version(txn).await?,
     );
     for row in rows {
@@ -3627,7 +3629,7 @@ async fn rebuild_edge_endpoint_batch(
         })
         .collect::<Vec<_>>();
     let property_rows = txn.multi_get(&property_keys).await?;
-    let labels = crate::index_lifecycle::repository::LabelRowLayout::of_stored_version(
+    let labels = crate::index_lifecycle::repository::LabelRowWrites::of_stored_version(
         startup::stored_storage_version(txn).await?,
     );
     for ((edge_id, from, to), property_row) in rows.into_iter().zip(property_rows) {
@@ -3891,15 +3893,15 @@ async fn mark_legacy_edge_equivalents(
     Ok(())
 }
 
-/// Stages one edge's current rows. Its label rows go in `labels`, the layout
-/// the store files them in: a store before label identity keeps hash rows,
-/// which the label identity migration later in the open copies, and a
-/// published store keeps exact rows only, since nothing copies a hash row
-/// there and its cleanup may already be done.
+/// Stages one edge's current rows. Its label rows go under the keys `labels`
+/// names, those graph writes use on the store: a store before label identity
+/// keeps hash rows, which the label identity copy copies once it starts; a
+/// store whose copy runs keeps both; a published store keeps exact rows only,
+/// since nothing copies a hash row there and its cleanup may already be done.
 async fn maintain_current_edge_rows(
     txn: &DbTransaction,
     scope: DataScope,
-    labels: crate::index_lifecycle::repository::LabelRowLayout,
+    labels: crate::index_lifecycle::repository::LabelRowWrites,
     edge_id: EdgeId,
     from: NodeId,
     to: NodeId,
@@ -3916,16 +3918,15 @@ async fn maintain_current_edge_rows(
     let Some(label) = label_of(properties.unwrap_or(&[])) else {
         return Ok(());
     };
-    match labels {
-        crate::index_lifecycle::repository::LabelRowLayout::Hash => {
-            search::add_to_legacy_edge_label_index_scoped(txn, from, to, label, scope)?;
-            search::add_to_legacy_global_edge_label_index_scoped(txn, label, edge_id, scope)
-        }
-        crate::index_lifecycle::repository::LabelRowLayout::Exact => {
-            search::add_to_edge_label_index_scoped(txn, from, to, label, scope)?;
-            search::add_to_global_edge_label_index_scoped(txn, label, edge_id, scope)
-        }
+    if labels.hash() {
+        search::add_to_legacy_edge_label_index_scoped(txn, from, to, label, scope)?;
+        search::add_to_legacy_global_edge_label_index_scoped(txn, label, edge_id, scope)?;
     }
+    if labels.exact() {
+        search::add_to_edge_label_index_scoped(txn, from, to, label, scope)?;
+        search::add_to_global_edge_label_index_scoped(txn, label, edge_id, scope)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5035,6 +5036,26 @@ mod tests {
         )
         .await
         .expect("db opens and runs startup migration");
+        // The edges labeled FOLLOWS, read where the store files its label
+        // rows: the hash rows until the label identity copy publishes.
+        async fn follows(db: &HelixDB) -> roaring::RoaringTreemap {
+            let read = db.inner_db().snapshot().await.unwrap();
+            let layout =
+                crate::index_lifecycle::repository::ReaderStorageCompatibility::of_version(
+                    startup::storage_version(read.as_ref()).await.unwrap(),
+                )
+                .label_rows();
+            search::read_global_edge_label(
+                read.as_ref(),
+                layout,
+                "FOLLOWS",
+                DataScope::LegacyUnscoped,
+                None,
+            )
+            .await
+            .expect("label lookup succeeds")
+            .into_unbudgeted()
+        }
 
         let pair_ids = search::lookup_edge_pair_index(db.inner_db().as_ref(), from, to)
             .await
@@ -5054,12 +5075,7 @@ mod tests {
                 .expect("edge properties lookup succeeds"),
             properties
         );
-        assert!(
-            search::lookup_global_edge_label_index(db.inner_db().as_ref(), "FOLLOWS")
-                .await
-                .expect("label lookup succeeds")
-                .contains(edge_id)
-        );
+        assert!(follows(&db).await.contains(edge_id));
         assert!(db
             .inner_db()
             .get(&legacy_key)
@@ -5076,12 +5092,7 @@ mod tests {
             .await
             .expect("legacy key read succeeds")
             .is_none());
-        assert!(
-            search::lookup_global_edge_label_index(db.inner_db().as_ref(), "FOLLOWS")
-                .await
-                .expect("label lookup succeeds")
-                .contains(edge_id)
-        );
+        assert!(follows(&db).await.contains(edge_id));
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::{MigrationTuning, MigrationWorkerMode};
 use crate::encoding::v2::keys::scope::DataScope;
+use crate::migrations::indexes::label_identity::{self, LabelCopySession};
 use crate::HelixWriter;
 
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
@@ -43,10 +44,11 @@ impl FailureBackoff {
 pub(crate) enum BackgroundMigrations {
     /// Every background migration: a writer authorized to migrate storage.
     All,
-    /// Only the deletion of retired hash label rows, which nothing reads once
-    /// label identity is published: a writer that runs no migration, such as
-    /// a failover writer, still finishes the cleanup of the writer before it.
-    LabelHashCleanup,
+    /// Only the label identity copy and the deletion of the hash label rows
+    /// it retires. A migrating writer started the copy, after which every
+    /// writer files label rows under both keys, so a writer that runs no
+    /// migration, such as a failover writer, still finishes both.
+    LabelIdentity,
 }
 
 /// Supervisor retained by the database handle and joined before storage closes.
@@ -84,26 +86,28 @@ impl MigrationWorkerSupervisor {
 }
 
 /// Advances every pending background migration `migrations` names by one
-/// bounded batch: the next runnable migration job, and the deletion of
-/// retired hash label rows. Returns whether either has more to do.
+/// bounded batch: the next runnable migration job, the label identity copy,
+/// and the deletion of the hash label rows it retires. Returns whether any
+/// has more to do. `labels` carries the copy's state between steps.
 ///
-/// Both run every step, so neither waits for the other to finish, and one
-/// failing does not stop the other's batch from committing.
+/// Each runs every step, so none waits for another to finish, and one failing
+/// does not stop another's batch from committing. The cleanup follows the
+/// copy, so the step that publishes the copy starts it.
 pub(crate) async fn process_background_step(
     writer: &HelixWriter,
     tuning: MigrationTuning,
     migrations: BackgroundMigrations,
+    labels: &mut LabelCopySession,
 ) -> crate::error::Result<bool> {
     let job = match migrations {
         BackgroundMigrations::All => {
             super::super::process_migration_once(writer, DataScope::LegacyUnscoped, tuning).await
         }
-        BackgroundMigrations::LabelHashCleanup => Ok(false),
+        BackgroundMigrations::LabelIdentity => Ok(false),
     };
-    let cleanup =
-        super::super::indexes::label_identity::delete_hash_label_rows_once(writer.db(), tuning)
-            .await;
-    Ok(job? | cleanup?.advanced())
+    let copy = label_identity::copy_hash_label_rows_once(writer, labels).await;
+    let cleanup = label_identity::delete_hash_label_rows_once(writer.db(), tuning).await;
+    Ok(job? | copy?.advanced() | cleanup?.advanced())
 }
 
 async fn run(
@@ -114,12 +118,13 @@ async fn run(
 ) {
     let mut failure_backoff =
         FailureBackoff::new(Duration::from_millis(tuning.idle_interval_millis().get()));
+    let mut labels = LabelCopySession::new();
     loop {
         if *shutdown.borrow() {
             return;
         }
 
-        let delay = match process_background_step(&writer, tuning, migrations).await {
+        let delay = match process_background_step(&writer, tuning, migrations, &mut labels).await {
             Ok(true) => {
                 failure_backoff.reset();
                 Duration::from_millis(tuning.active_interval_millis().get())

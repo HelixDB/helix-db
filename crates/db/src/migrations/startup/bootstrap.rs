@@ -16,8 +16,8 @@ use crate::transaction::Mutation;
 /// What one writer open must do to converge the managed-index storage metadata.
 ///
 /// Every plan leaves the marker at most at
-/// [`IndexStorageVersion::OPERATION_QUEUES`]; the label identity migration,
-/// which runs after the blocking startup migrations, publishes later versions
+/// [`IndexStorageVersion::OPERATION_QUEUES`]; the label identity copy, which
+/// starts after the blocking startup migrations, publishes later versions
 /// itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriterBootstrapPlan {
@@ -158,6 +158,10 @@ pub(crate) async fn bootstrap_managed_writer(db: &Db) -> Result<()> {
 }
 
 /// Validates current managed storage using point reads only.
+///
+/// A store whose label identity copy is running counts as current: every
+/// writer of this binary files label rows under both keys and takes the
+/// copy's steps, so a failover writer serves it and finishes the copy.
 pub(crate) async fn require_current_managed_writer(db: &Db) -> Result<()> {
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
     let marker_key = global_key(GlobalKey::StorageVersion);
@@ -188,7 +192,7 @@ pub(crate) async fn require_current_managed_writer(db: &Db) -> Result<()> {
         });
     };
     validate_writer_bootstrap_values(&marker, logical.as_deref(), vector.as_deref())?;
-    if version < IndexStorageVersion::CURRENT {
+    if version < IndexStorageVersion::LABEL_COPY {
         transaction.rollback();
         if version < IndexStorageVersion::EQUALITY_BITMAPS && cleanup_ready {
             return Err(HelixDbError::MigrationRequired {
@@ -312,7 +316,8 @@ async fn initialize_writer_bootstrap(db: &Db) -> Result<()> {
         });
     }
     // The store may hold legacy graph rows, so the label identity migration
-    // publishes the current version once it has moved their label rows.
+    // moves the version on once their label rows are staged (straight to the
+    // current version when there are none).
     stage_writer_bootstrap_initialization(&transaction, IndexStorageVersion::OPERATION_QUEUES)?;
     transaction.commit().await?;
     Ok(())

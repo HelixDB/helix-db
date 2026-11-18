@@ -109,8 +109,13 @@ impl<'db> ExecutionContext<'db> {
         self.check_execution_deadline()?;
         let scope_permit = self.db.index_mutation_scope_permit(self.tenant_scope).await;
         self.check_execution_deadline()?;
-        let transaction =
-            crate::transaction::Owned::begin(self.writer()?.db(), self.row_memory.as_ref()).await?;
+        let writer = self.writer()?;
+        let transaction = crate::transaction::Owned::begin(
+            writer.db(),
+            self.row_memory.as_ref(),
+            writer.known_label_row_writes(),
+        )
+        .await?;
         self.check_execution_deadline()?;
         let mutation_catalog =
             crate::index_lifecycle::mutation_catalog::MutationIndexCatalog::load(
@@ -120,15 +125,14 @@ impl<'db> ExecutionContext<'db> {
             .await?;
         drop(catalog_permit);
         self.check_execution_deadline()?;
-        Ok((
-            transaction,
-            MutationIndexContext::new(
-                scope_permit,
-                mutation_catalog,
-                self.tenant_scope,
-                self.row_memory.as_ref(),
-            ),
-        ))
+        let index_context = MutationIndexContext::new(
+            scope_permit,
+            mutation_catalog,
+            self.tenant_scope,
+            self.row_memory.as_ref(),
+            transaction.label_rows(),
+        );
+        Ok((transaction, index_context))
     }
 
     /// Extracts active request state or begins an isolated mutation scope.

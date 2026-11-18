@@ -1417,9 +1417,9 @@ pub fn add_to_edge_label_index_scoped(
 
 /// Stages one edge's two retired hash-keyed neighbor rows.
 ///
-/// Only the graph-format V1 rewrite stages hash-keyed label rows, and only on
-/// a store before label identity: it runs in the writer open before the label
-/// identity migration, which then copies them.
+/// Only the graph-format V1 rewrite stages hash-keyed label rows here, and
+/// only on a store before label identity is published: it runs in the writer
+/// open that starts the label identity copy, which then copies them.
 pub(crate) fn add_to_legacy_edge_label_index_scoped(
     txn: &DbTransaction,
     from: NodeId,
@@ -1431,10 +1431,7 @@ pub(crate) fn add_to_legacy_edge_label_index_scoped(
         (EdgeRangeDirection::Out, from, to),
         (EdgeRangeDirection::In, to, from),
     ] {
-        let key = DataKey::data_prefix(
-            tenant_scope,
-            label_hash::LegacyEdgeLabelNeighborKey::for_label(direction, node, label).to_bytes(),
-        );
+        let key = hash_label_key(tenant_scope, HashLabelRow::Neighbor(direction, node, label));
         stage_shared_bitmap_membership(txn, &key, neighbor, true)?;
     }
     Ok(())
@@ -1608,7 +1605,8 @@ async fn read_neighbors_by_label(
 /// long for any exact key (`exact` returns `None`) has no exact row.
 ///
 /// The public label helpers read and write exact rows only: they serve a
-/// current store, as graph writes do.
+/// published store. Graph writes go through the interpreter, which files
+/// label rows under both keys while the copy runs.
 async fn read_label_row(
     txn: &(impl DbReadOps + Send + Sync),
     layout: LabelRowLayout,
@@ -1659,14 +1657,41 @@ pub(crate) fn add_to_legacy_node_label_index_scoped(
     node_id: NodeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let key = DataKey::Data {
-        scope: tenant_scope,
-        kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
-            label_hash::LegacyNodeLabelKey::for_label(label),
-        )),
-    }
-    .to_bytes();
+    let key = hash_label_key(tenant_scope, HashLabelRow::Node(label));
     stage_shared_bitmap_membership(txn, &key, node_id, true)
+}
+
+/// One label row a store before label identity files under its label's hash.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum HashLabelRow<'a> {
+    /// The `$label` equality row of a node label.
+    Node(&'a str),
+    /// The global row of an edge label.
+    Edge(&'a str),
+    /// One endpoint's neighbors across edges of a label, in one direction.
+    Neighbor(EdgeRangeDirection, NodeId, &'a str),
+}
+
+/// The retired hash key of `scope`'s `row`, which readers of a store whose
+/// label identity copy has not published still read.
+pub(crate) fn hash_label_key(scope: DataScope, row: HashLabelRow<'_>) -> Bytes {
+    match row {
+        HashLabelRow::Node(label) => DataKey::Data {
+            scope,
+            kind: DataKeyKind::PropertyIndex(PropertyIndexKey::Equality(
+                label_hash::LegacyNodeLabelKey::for_label(label),
+            )),
+        }
+        .to_bytes(),
+        HashLabelRow::Edge(label) => DataKey::data_prefix(
+            scope,
+            label_hash::LegacyEdgeLabelKey::for_label(label).to_bytes(),
+        ),
+        HashLabelRow::Neighbor(direction, node, label) => DataKey::data_prefix(
+            scope,
+            label_hash::LegacyEdgeLabelNeighborKey::for_label(direction, node, label).to_bytes(),
+        ),
+    }
 }
 
 // =============================================================================
@@ -1940,10 +1965,7 @@ pub(crate) fn add_to_legacy_global_edge_label_index_scoped(
     edge_id: EdgeId,
     tenant_scope: DataScope,
 ) -> Result<(), HelixDbError> {
-    let key = DataKey::data_prefix(
-        tenant_scope,
-        label_hash::LegacyEdgeLabelKey::for_label(label).to_bytes(),
-    );
+    let key = hash_label_key(tenant_scope, HashLabelRow::Edge(label));
     stage_shared_bitmap_membership(txn, &key, edge_id, true)
 }
 

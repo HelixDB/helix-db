@@ -72,7 +72,8 @@ impl ReaderStorageCompatibility {
     ///
     /// Versions from EQUALITY_BITMAPS share one equality layout, so a current
     /// reader also serves a store its writer has not upgraded yet. Label rows
-    /// are read by their hash keys until the writer publishes LABEL_IDENTITY.
+    /// are read by their hash keys until the writer publishes LABEL_IDENTITY,
+    /// the copy to exact keys included.
     pub(crate) fn of_version(version: IndexStorageVersion) -> Self {
         if version < IndexStorageVersion::EQUALITY_BITMAPS {
             Self::LegacyEqualityUnion
@@ -96,9 +97,9 @@ impl ReaderStorageCompatibility {
 /// always reads a view in that view's own format.
 ///
 /// Only views that know their format implement it: a request's stable read
-/// view, which records its snapshot's, and a serving writer's request
-/// transaction, which is always current. Tests that read a live handle outside
-/// any request view use [`LiveView`].
+/// view and a serving writer's request transaction, which each record their
+/// snapshot's. Tests that read a live handle outside any request view use
+/// [`LiveView`].
 pub(crate) trait LayoutView: Sync {
     type Reads: DbReadOps + Send + Sync;
 
@@ -163,13 +164,47 @@ pub(crate) enum LabelRowLayout {
     Exact,
 }
 
-impl LabelRowLayout {
-    /// The layout of a store whose V2 storage marker records `version`, or of
-    /// one no V2 writer has opened (`None`), which files labels by hash.
+/// Which keys a graph write files its label index rows under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelRowWrites {
+    /// Hash keys only: a store the label identity copy has not started on,
+    /// which copies them once it does.
+    Hash,
+    /// Hash and exact keys: the copy is running. Readers read the hash rows,
+    /// and the exact rows stay current for every row the copy has passed.
+    HashAndExact,
+    /// Exact keys only: the copy is published and nothing reads hash rows.
+    Exact,
+}
+
+impl LabelRowWrites {
+    /// The writes of a store whose V2 storage marker records `version`, or of
+    /// one no V2 writer has opened (`None`).
     pub(crate) fn of_stored_version(version: Option<IndexStorageVersion>) -> Self {
         match version {
             Some(version) if version >= IndexStorageVersion::LABEL_IDENTITY => Self::Exact,
+            Some(version) if version >= IndexStorageVersion::LABEL_COPY => Self::HashAndExact,
             Some(_) | None => Self::Hash,
+        }
+    }
+
+    /// Whether these writes file label rows under their hash keys.
+    pub(crate) const fn hash(self) -> bool {
+        matches!(self, Self::Hash | Self::HashAndExact)
+    }
+
+    /// Whether these writes file label rows under their exact keys.
+    pub(crate) const fn exact(self) -> bool {
+        matches!(self, Self::HashAndExact | Self::Exact)
+    }
+
+    /// The format a write transaction of these writes reads label rows in:
+    /// the hash rows until the copy is published. A serving writer's store
+    /// has equality bitmaps, so only the label layout differs.
+    pub(crate) const fn reads(self) -> ReaderStorageCompatibility {
+        match self {
+            Self::Hash | Self::HashAndExact => ReaderStorageCompatibility::LegacyLabelHash,
+            Self::Exact => ReaderStorageCompatibility::Current,
         }
     }
 }
@@ -1295,9 +1330,50 @@ mod tests {
     use crate::migrations::startup::bootstrap_writer;
 
     #[test]
+    fn label_row_writes_cover_both_layouts_only_while_the_copy_runs() {
+        let writes = |version: u16| {
+            LabelRowWrites::of_stored_version(Some(IndexStorageVersion::new(version).unwrap()))
+        };
+        assert_eq!(
+            LabelRowWrites::of_stored_version(None),
+            LabelRowWrites::Hash
+        );
+        for before_copy in [0x0002, 0x0004, 0x0005] {
+            assert_eq!(writes(before_copy), LabelRowWrites::Hash);
+        }
+        assert_eq!(writes(0x0006), LabelRowWrites::HashAndExact);
+        assert_eq!(writes(0x0007), LabelRowWrites::Exact);
+        for (writes, hash, exact, reads) in [
+            (
+                LabelRowWrites::Hash,
+                true,
+                false,
+                ReaderStorageCompatibility::LegacyLabelHash,
+            ),
+            (
+                LabelRowWrites::HashAndExact,
+                true,
+                true,
+                ReaderStorageCompatibility::LegacyLabelHash,
+            ),
+            (
+                LabelRowWrites::Exact,
+                false,
+                true,
+                ReaderStorageCompatibility::Current,
+            ),
+        ] {
+            assert_eq!(writes.hash(), hash, "{writes:?}");
+            assert_eq!(writes.exact(), exact, "{writes:?}");
+            assert_eq!(writes.reads(), reads, "{writes:?}");
+        }
+    }
+
+    #[test]
     fn storage_versions_map_to_their_reader_compatibility() {
-        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0006);
-        assert_eq!(IndexStorageVersion::LABEL_IDENTITY.get(), 0x0006);
+        assert_eq!(IndexStorageVersion::CURRENT.get(), 0x0007);
+        assert_eq!(IndexStorageVersion::LABEL_IDENTITY.get(), 0x0007);
+        assert_eq!(IndexStorageVersion::LABEL_COPY.get(), 0x0006);
         assert_eq!(IndexStorageVersion::OPERATION_QUEUES.get(), 0x0005);
         assert_eq!(IndexStorageVersion::EQUALITY_BITMAPS.get(), 0x0004);
         let logical = encode_metadata_value(&IndexV2MetadataValue::LogicalIndexIdWatermark(
@@ -1318,11 +1394,12 @@ mod tests {
                 .expect("storage with V4 equality encoding is accepted"),
             ReaderStorageCompatibility::Current
         );
-        // A writer that has not yet published the label identity migration
-        // leaves version-4 and version-5 stores readable through hash label rows.
+        // A writer that has not yet published the label identity copy leaves
+        // version-4 to version-6 stores readable through hash label rows.
         for pre_label in [
             IndexStorageVersion::EQUALITY_BITMAPS,
             IndexStorageVersion::OPERATION_QUEUES,
+            IndexStorageVersion::LABEL_COPY,
         ] {
             let marker = encode_metadata_value(&IndexV2MetadataValue::StorageVersion(pre_label));
             assert_eq!(
@@ -1420,8 +1497,8 @@ mod tests {
         assert!(matches!(
             validate_bootstrap_values(&marker, None, None),
             Err(HelixDbError::UnsupportedIndexStorageVersion {
-                found: 0x0007,
-                supported: 0x0006,
+                found: 0x0008,
+                supported: 0x0007,
             })
         ));
     }
@@ -1466,7 +1543,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_writer_preflight_preserves_every_byte() {
-        for rejected_state in ["malformed", "partial", "v1", "v7"] {
+        for rejected_state in ["malformed", "partial", "v1", "v8"] {
             let db = Db::builder(
                 format!("writer-preflight-preserves-{rejected_state}"),
                 Arc::new(InMemory::new()),
@@ -1508,8 +1585,8 @@ mod tests {
                 "v1" => {
                     put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0001).unwrap()).await;
                 }
-                "v7" => {
-                    put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0007).unwrap()).await;
+                "v8" => {
+                    put_bootstrap_tuple(&db, IndexStorageVersion::new(0x0008).unwrap()).await;
                 }
                 _ => unreachable!(),
             }

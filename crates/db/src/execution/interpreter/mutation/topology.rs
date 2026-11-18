@@ -4,6 +4,11 @@
 //! transaction conflict metadata names each logical member, so mutations to
 //! disjoint members of one physical row can commit concurrently without a
 //! read/modify/write cycle.
+//!
+//! While the label identity copy runs, each label row's delta is also staged
+//! under the row's retired hash key with the same members, so readers of the
+//! hash rows stay exact and the copy only has to cover rows written before
+//! it began (see [`crate::migrations`]'s label identity contract).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,6 +24,8 @@ use crate::encoding::v2::keys::{AdjacencyKey, DataKey, DataKeyKind, EdgePairInde
 use crate::encoding::v2::values::adjacency as edges;
 #[cfg(test)]
 use crate::encoding::v2::values::indexes as secondary;
+use crate::index_lifecycle::repository::LabelRowWrites;
+use crate::search;
 use crate::{HelixDbError, Result};
 
 use crate::query_resources::{self, membership};
@@ -82,6 +89,31 @@ impl BitmapRow {
                 )),
             },
         }
+    }
+
+    /// The retired hash key of a label row, which a store whose label
+    /// identity copy is running still reads; `None` for an edge pair row,
+    /// which never had one.
+    fn hash_key(&self) -> Option<Bytes> {
+        let (scope, row) = match self {
+            Self::NodeLabel { scope, label } => {
+                (*scope, search::HashLabelRow::Node(label.identity().label()))
+            }
+            Self::EdgePair { .. } => return None,
+            Self::EdgeLabelNeighbor {
+                scope,
+                direction,
+                node,
+                label,
+            } => (
+                *scope,
+                search::HashLabelRow::Neighbor(*direction, *node, label.identity().label()),
+            ),
+            Self::GlobalEdgeLabel { scope, label } => {
+                (*scope, search::HashLabelRow::Edge(label.identity().label()))
+            }
+        };
+        Some(search::hash_label_key(scope, row))
     }
 }
 
@@ -199,12 +231,13 @@ impl TopologyMutationBatch {
 }
 
 /// Transaction-owned topology mutations with a terminal prepared state.
-#[derive(Default)]
 pub(in crate::execution::interpreter) struct TopologyMutationRuntime {
     state: TopologyMutationRuntimeState,
     staged_keys: BTreeSet<Bytes>,
     staged_memory: Option<query_resources::Reservation>,
     budget: Option<query_resources::Budget>,
+    /// The keys label rows go under, as the transaction's snapshot files them.
+    label_rows: LabelRowWrites,
     /// Flushes that staged at least one row.
     #[cfg(test)]
     pub(super) staging_flushes: usize,
@@ -229,12 +262,31 @@ enum TopologyMutationRuntimeState {
     Prepared,
 }
 
+/// A runtime of a store whose label rows are published, without admission.
+#[cfg(test)]
+impl Default for TopologyMutationRuntime {
+    fn default() -> Self {
+        Self::new(None, LabelRowWrites::Exact)
+    }
+}
+
 impl TopologyMutationRuntime {
-    /// Bind collection growth to this request's optional memory admission.
-    pub(super) fn new(budget: Option<&query_resources::Budget>) -> Self {
+    /// Bind collection growth to this request's optional memory admission,
+    /// filing label rows under the keys `label_rows` names.
+    pub(super) fn new(
+        budget: Option<&query_resources::Budget>,
+        label_rows: LabelRowWrites,
+    ) -> Self {
         Self {
+            state: TopologyMutationRuntimeState::default(),
+            staged_keys: BTreeSet::new(),
+            staged_memory: None,
             budget: budget.cloned(),
-            ..Self::default()
+            label_rows,
+            #[cfg(test)]
+            staging_flushes: 0,
+            #[cfg(test)]
+            staged_rows: 0,
         }
     }
 
@@ -560,9 +612,18 @@ impl TopologyMutationRuntime {
             label_bytes: _,
             mut memory,
         } = batch;
+        // A label row goes under its hash key, its exact key, or both.
+        let label_keys = match self.label_rows {
+            LabelRowWrites::Hash | LabelRowWrites::Exact => 0,
+            LabelRowWrites::HashAndExact => bitmaps
+                .keys()
+                .filter(|row| !matches!(row, BitmapRow::EdgePair { .. }))
+                .count(),
+        };
         let count = bitmaps
             .len()
             .checked_add(adjacency.len())
+            .and_then(|rows| rows.checked_add(label_keys))
             .ok_or(HelixDbError::QueryMemoryLimitExceeded)?;
         if count == 0 {
             return Ok(());
@@ -593,7 +654,15 @@ impl TopologyMutationRuntime {
         let mut staged_keys = Vec::with_capacity(count);
         for (row, delta) in bitmaps {
             let (delta, admission) = delta.into_parts();
-            staged_keys.push(merges.bitmap(merges::Key::Typed(row.key()), &delta)?);
+            let hash_key = self.label_rows.hash().then(|| row.hash_key()).flatten();
+            let exact_key = (hash_key.is_none() || self.label_rows.exact()).then(|| row.key());
+            for key in hash_key
+                .iter()
+                .map(merges::Key::Encoded)
+                .chain(exact_key.map(merges::Key::Typed))
+            {
+                staged_keys.push(merges.bitmap(key, &delta)?);
+            }
             let Some(admission) = admission else {
                 continue;
             };

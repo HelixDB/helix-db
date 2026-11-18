@@ -181,8 +181,9 @@ pub(crate) async fn migrate_v3_to_v4(db: &Db) -> Result<()> {
 
     trip(EqualityBitmapMigrationFailpoint::PublicationBefore)?;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
-    // The label identity migration publishes the current version later in the
-    // writer open, once it has moved this store's hash-keyed label rows.
+    // The label identity migration moves the version on later in the writer
+    // open, and its background copy publishes the current version once it has
+    // moved this store's hash-keyed label rows.
     Mutation::put(
         &transaction,
         ManagedIndexKey::Global {
@@ -240,8 +241,8 @@ pub(crate) async fn make_legacy_equality_fixture(db: &Db, version: u16) -> Resul
         ));
     }
 
-    // Before the label identity migration every label row is hash-keyed.
-    if source_version >= IndexStorageVersion::LABEL_IDENTITY {
+    // Before the label identity copy every label row is hash-keyed.
+    if source_version >= IndexStorageVersion::LABEL_COPY {
         super::label_identity::make_legacy_label_fixture(db).await?;
     }
     let catalog = discover_catalog(db).await?;

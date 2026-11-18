@@ -14,9 +14,13 @@ async fn vector_dispatch_does_not_add_an_unadmitted_frame() {
     .await
     .unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    let transaction = crate::transaction::Owned::begin(&db, Some(&budget))
-        .await
-        .unwrap();
+    let transaction = crate::transaction::Owned::begin(
+        &db,
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let key = GraphEntity::node(1).property_key(DataScope::LegacyUnscoped);
     for view in [
         VectorReadView::<crate::transaction::Owned>::transaction(&transaction),
@@ -61,9 +65,13 @@ async fn vector_dispatch_rejects_without_allocation() {
     .await
     .unwrap();
     let budget = query_resources::Budget::new(1024 * 1024);
-    let transaction = crate::transaction::Owned::begin(&db, Some(&budget))
-        .await
-        .unwrap();
+    let transaction = crate::transaction::Owned::begin(
+        &db,
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let key = GraphEntity::node(1).property_key(DataScope::LegacyUnscoped);
     let occupied = budget.reserve(budget.available()).unwrap();
     for view in [
@@ -117,8 +125,20 @@ async fn vector_dispatch_preserves_snapshot_and_transaction_overlays() {
     let original = CanonicalPropertyRow::new(vec![Property::i64("value", 7)]);
     let updated = CanonicalPropertyRow::new(vec![Property::i64("value", 9)]);
     db.put(&key, original.encoded()).await.unwrap();
-    let snapshot = crate::transaction::Owned::begin(&db, None).await.unwrap();
-    let transaction = crate::transaction::Owned::begin(&db, None).await.unwrap();
+    let snapshot = crate::transaction::Owned::begin(
+        &db,
+        None,
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
+    let transaction = crate::transaction::Owned::begin(
+        &db,
+        None,
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     crate::transaction::Mutation::put_bytes(&transaction, key.clone(), updated.encoded().clone())
         .unwrap();
     for (view, expected) in [

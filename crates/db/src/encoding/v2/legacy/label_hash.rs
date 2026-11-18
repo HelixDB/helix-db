@@ -4,10 +4,11 @@
 //! labels with one hash share a bitmap. Current rows key the exact label (see
 //! [`crate::encoding::indexes::label`]). Only this codec builds or parses
 //! them: their index bytes are no live [`crate::encoding::indexes::IndexPrefix`]
-//! kind. Only the graph-format V1 rewrite still stages these keys, earlier in
-//! the same writer open as the startup label identity migration, which then
-//! copies every row to its exact key. Readers consult them only while a
-//! store's marker predates the migration's publication. Each key is built from
+//! kind. The graph-format V1 rewrite stages these keys earlier in the same
+//! writer open that starts the label identity copy, and graph writes stage
+//! them beside the exact keys while the copy runs, until the background copy
+//! has moved every row to its exact key. Readers consult them only while a
+//! store's marker predates the copy's publication. Each key is built from
 //! the label string, never from a bare hash. Code that classifies every stored
 //! key, such as the merge operator and the tenant envelope migration, asks
 //! [`LegacyLabelScanPrefix::of`] or [`is_retired_label_key`], since no live

@@ -224,7 +224,13 @@ async fn batch_and_entry_rejection_precede_encoding_and_backend_writes() {
     .await
     .unwrap();
     let budget = Budget::new(1024 * 1024);
-    let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+    let transaction = Owned::begin(
+        &db.inner_db(),
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let initial = budget.available();
     let held = budget.reserve(initial).unwrap();
     let (result, allocations) = allocation_testing::observe(|| transaction.merge_batch(1));
@@ -293,9 +299,13 @@ async fn canonical_bitmap_and_adjacency_batches_preserve_values_and_epoch_histor
     .unwrap();
     for admitted in [false, true] {
         let budget = Budget::new(16 * 1024 * 1024);
-        let transaction = Owned::begin(&db.inner_db(), admitted.then_some(&budget))
-            .await
-            .unwrap();
+        let transaction = Owned::begin(
+            &db.inner_db(),
+            admitted.then_some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         let mut expected = roaring::RoaringTreemap::new();
         let mut previous = budget.available();
         let key = bitmap_key(u64::from(admitted)).to_bytes();
@@ -424,9 +434,13 @@ async fn rejected_batches_stage_nothing_and_release_admission() {
     ] {
         for budgeted in [false, true] {
             let budget = Budget::new(1024 * 1024);
-            let transaction = Owned::begin(&db.inner_db(), budgeted.then_some(&budget))
-                .await
-                .unwrap();
+            let transaction = Owned::begin(
+                &db.inner_db(),
+                budgeted.then_some(&budget),
+                Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+            )
+            .await
+            .unwrap();
             let mut batch = transaction.merge_batch(2).unwrap();
             drop(batch.bitmap(Key::Typed(bitmap_key(1)), &delta).unwrap());
             let second = match rejection {
@@ -555,7 +569,13 @@ async fn staging_never_reads_the_stored_row() {
                 .await
                 .unwrap();
         }
-        let transaction = Owned::begin(&db.inner_db(), None).await.unwrap();
+        let transaction = Owned::begin(
+            &db.inner_db(),
+            None,
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         let mut batch = transaction.merge_batch(2).unwrap();
         drop(batch.bitmap(Key::Typed(bitmap_key(id)), &delta).unwrap());
         drop(
@@ -586,7 +606,13 @@ async fn staged_entries_apply_in_push_order_across_epochs() {
     .await
     .unwrap();
     for (row, add_first) in [(0, true), (1, false)] {
-        let transaction = Owned::begin(&db.inner_db(), None).await.unwrap();
+        let transaction = Owned::begin(
+            &db.inner_db(),
+            None,
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         for add in [add_first, !add_first] {
             let mut delta = equality::BitmapMembershipDelta::default();
             let mut edges = adjacency::AdjacencyMembershipDelta::default();
@@ -651,7 +677,13 @@ async fn budgeted_staging_admits_validation_before_decoding() {
     }
     for decode_admitted in [false, true] {
         let budget = Budget::new(64 * 1024 * 1024);
-        let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+        let transaction = Owned::begin(
+            &db.inner_db(),
+            Some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         let initial = budget.available();
         let mut batch = transaction.merge_batch(2).unwrap();
         drop(batch.bitmap(Key::Typed(bitmap_key(1)), &delta).unwrap());
@@ -716,8 +748,20 @@ async fn adjacency_conflicts_follow_member_and_direction() {
         (1, true, 5, false),
         (2, false, 6, false),
     ] {
-        let left = Owned::begin(&db.inner_db(), None).await.unwrap();
-        let right = Owned::begin(&db.inner_db(), None).await.unwrap();
+        let left = Owned::begin(
+            &db.inner_db(),
+            None,
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
+        let right = Owned::begin(
+            &db.inner_db(),
+            None,
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         let mut left_edges = adjacency::AdjacencyMembershipDelta::default();
         left_edges.add_out(5);
         let mut right_edges = adjacency::AdjacencyMembershipDelta::default();
@@ -768,7 +812,13 @@ async fn abandoned_batches_and_cancelled_transactions_release_all_merge_owners()
     .unwrap();
     for commit in [false, true] {
         let budget = Budget::new(1024 * 1024);
-        let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+        let transaction = Owned::begin(
+            &db.inner_db(),
+            Some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         let initial = budget.available();
         let mut delta = equality::BitmapMembershipDelta::default();
         delta.add(1);
@@ -834,7 +884,13 @@ async fn typed_entry_construction_fits_admission_for_dense_sparse_and_large_delt
                 delta.add(if sparse { id << 32 } else { id });
             }
             let budget = Budget::new(64 * 1024 * 1024);
-            let transaction = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+            let transaction = Owned::begin(
+                &db.inner_db(),
+                Some(&budget),
+                Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+            )
+            .await
+            .unwrap();
             let initial = budget.available();
             let (batch, allocations) = allocation_testing::observe(|| {
                 let mut batch = transaction.merge_batch(1).unwrap();
@@ -866,8 +922,20 @@ async fn admitted_batches_preserve_disjoint_conflicts_and_concurrent_view_accoun
     .unwrap();
     for overlap in [false, true] {
         let budget = Budget::new(1024 * 1024);
-        let left = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
-        let right = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+        let left = Owned::begin(
+            &db.inner_db(),
+            Some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
+        let right = Owned::begin(
+            &db.inner_db(),
+            Some(&budget),
+            Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+        )
+        .await
+        .unwrap();
         let barrier = std::sync::Barrier::new(2);
         std::thread::scope(|threads| {
             for (view, member) in [
@@ -899,7 +967,13 @@ async fn admitted_batches_preserve_disjoint_conflicts_and_concurrent_view_accoun
     const THREADS: u64 = 8;
     const BATCHES: u64 = 16;
     let budget = Budget::new(16 * 1024 * 1024);
-    let owner = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+    let owner = Owned::begin(
+        &db.inner_db(),
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let initial = budget.available();
     let barrier = std::sync::Barrier::new(THREADS as usize);
     std::thread::scope(|threads| {
@@ -941,7 +1015,13 @@ async fn missing_cardinality_and_key_admission_failure_never_invoke_the_encoder(
     .await
     .unwrap();
     let budget = Budget::new(1024 * 1024);
-    let owner = Owned::begin(&db.inner_db(), Some(&budget)).await.unwrap();
+    let owner = Owned::begin(
+        &db.inner_db(),
+        Some(&budget),
+        Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+    )
+    .await
+    .unwrap();
     let mut batch = owner.merge_batch(1).unwrap();
     let result = batch.push(
         Family::Bitmap,
@@ -1001,8 +1081,20 @@ async fn staging_matches_the_previous_checked_backend_staging() {
             (2, 1, 1, true),
             (3, 1, 2, true),
         ] {
-            let left = Owned::begin(&db.inner_db(), None).await.unwrap();
-            let right = Owned::begin(&db.inner_db(), None).await.unwrap();
+            let left = Owned::begin(
+                &db.inner_db(),
+                None,
+                Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+            )
+            .await
+            .unwrap();
+            let right = Owned::begin(
+                &db.inner_db(),
+                None,
+                Some(crate::index_lifecycle::repository::LabelRowWrites::Exact),
+            )
+            .await
+            .unwrap();
             for (transaction, member, removes) in [
                 (&left, left_member, false),
                 (&right, right_member, right_removes),
