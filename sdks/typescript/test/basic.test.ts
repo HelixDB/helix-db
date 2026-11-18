@@ -576,9 +576,36 @@ assert.deepEqual(seedRequest.parameters.data, [
   { name: "Ada", deletedAt: null },
   { name: "Grace", deletedAt: "2026-05-31T20:00:00.000Z" },
 ]);
-// Nullable is not optional, and a set value is still checked.
-assert.throws(() => writeBatch().toQueryJson(seedParams, { data: [{ name: "Ada" }] } as never), /missing: \["deletedAt"\]/);
+// A nullable field may be omitted (or `undefined`, which JSON drops) and stays
+// absent, as the server keeps it; a field that is not nullable must be
+// present, an undeclared one is rejected, and a set value is still checked.
+assert.deepEqual(
+  JSON.parse(
+    writeBatch().toQueryJson(seedParams, {
+      data: [{ name: "Ada" }, { name: "Bea", deletedAt: undefined }, { name: "Grace", deletedAt: "2026-06-01T05:00:00+09:00" }],
+    }),
+  ).parameters.data,
+  [{ name: "Ada" }, { name: "Bea" }, { name: "Grace", deletedAt: "2026-05-31T20:00:00.000Z" }],
+);
+assert.throws(
+  () => writeBatch().toQueryJson(seedParams, { data: [{ deletedAt: null }] } as never),
+  /missing: \["name"\], undeclared: \[\]/,
+);
+assert.throws(() => writeBatch().toQueryJson(seedParams, { data: [{ name: undefined }] } as never), /missing: \["name"\]/);
+assert.throws(
+  () => writeBatch().toQueryJson(seedParams, { data: [{ name: "Ada", note: 1 }] } as never),
+  /missing: \[\], undeclared: \["note"\]/,
+);
 assert.throws(() => writeBatch().toQueryJson(seedParams, { data: [{ name: "Ada", deletedAt: "2026-06-01" }] }), /RFC3339|datetime/i);
+// The wire type follows the same rule.
+const optionalRows = QueryParamType.array(
+  QueryParamType.object({ at: QueryParamType.nullable(QueryParamType.dateTime()), n: QueryParamType.i64() }),
+);
+assert.deepEqual(
+  parsed(QueryRequest.write(writeBatch()).withTypedParameter("rows", optionalRows, [{ n: 1 }, { at: null, n: 2 }])).parameters,
+  { rows: [{ n: 1 }, { at: null, n: 2 }] },
+);
+assert.throws(() => QueryRequest.write(writeBatch()).withTypedParameter("rows", optionalRows, [{ at: null }]), /missing: \["n"\]/);
 const nullableType = QueryParamType.nullable(QueryParamType.dateTime());
 assert.deepEqual(nullableType.toJSON(), { nullable: "date_time" });
 assert.equal(nullableType.inner?.variant, "DateTime");

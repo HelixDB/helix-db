@@ -2737,10 +2737,26 @@ function declaredFields<T>(fields: Record<string, T>, isField: (field: unknown) 
   return Object.freeze(Object.fromEntries(entries));
 }
 
-/** Fail unless `value` has exactly the declared field names. */
-function checkDeclaredFields(declared: Readonly<Record<string, unknown>>, value: Record<string, unknown>, path: string): void {
-  const missing = Object.keys(declared).filter((name) => !Object.hasOwn(value, name));
-  const extra = Object.keys(value).filter((name) => !Object.hasOwn(declared, name));
+/** Whether `value` holds `name`; `undefined` counts as omitted, as JSON drops it. */
+function holdsField(value: Readonly<Record<string, unknown>>, name: string): boolean {
+  return Object.hasOwn(value, name) && value[name] !== undefined;
+}
+
+/**
+ * Fail unless every field of `value` is declared and every declared field is
+ * present, except a nullable one (`nullable(field)`), which may be omitted
+ * and then stays absent.
+ */
+function checkDeclaredFields<T>(
+  declared: Readonly<Record<string, T>>,
+  nullable: (field: T) => boolean,
+  value: Record<string, unknown>,
+  path: string,
+): void {
+  const missing = Object.entries(declared)
+    .filter(([name, field]) => !nullable(field) && !holdsField(value, name))
+    .map(([name]) => name);
+  const extra = Object.keys(value).filter((name) => holdsField(value, name) && !Object.hasOwn(declared, name));
   if (missing.length > 0 || extra.length > 0)
     throw new TypeError(
       `parameter '${path}' fields do not match its declared fields (missing: ${JSON.stringify(missing.sort())}, undeclared: ${JSON.stringify(extra.sort())})`,
@@ -2788,10 +2804,11 @@ export class QueryParamType implements Encodable {
   }
   /**
    * Any object with no argument, sent as `"object"`. With `fields`, an object
-   * with exactly those fields, each normalized to its type and sent as
+   * with those fields, each normalized to its type and sent as
    * `{ "object": { field: type } }`, so a `dateTime()` field binds as a
-   * datetime on the server. A missing or undeclared field is rejected, and
-   * `null` satisfies only a `value()` field.
+   * datetime on the server. An undeclared field is rejected, and so is a
+   * missing one unless it is `nullable(...)`; `null` satisfies only a
+   * `value()` or `nullable(...)` field.
    */
   static object(fields?: Record<string, QueryParamType>): QueryParamType {
     if (fields === undefined) return new QueryParamType({ variant: "Object" });
@@ -2805,8 +2822,9 @@ export class QueryParamType implements Encodable {
   }
   /**
    * `null`, or a value of `inner`, sent as `{ "nullable": inner }`: an optional
-   * datetime column in bulk rows stays a datetime where it is set. The field
-   * itself must still be present.
+   * datetime column in bulk rows stays a datetime where it is set. As an
+   * object field it may also be omitted (or `undefined`), and then stays
+   * absent rather than becoming `null`.
    */
   static nullable(inner: QueryParamType): QueryParamType {
     return new QueryParamType({ variant: "Nullable", inner });
@@ -2829,8 +2847,18 @@ type ParamKind = "Bool" | "I64" | "F64" | "F32" | "String" | "DateTime" | "Bytes
 export type ParamSchemaInput<T> = T extends ParamSchema<infer Input> ? Input : never;
 /** Declared object fields: each field's schema by name. */
 export type ParamFields = Record<string, ParamSchema>;
-/** The input an object with `F` fields accepts: exactly those fields. */
-export type ParamFieldsInput<F extends ParamFields> = { [K in keyof F]: ParamSchemaInput<F[K]> };
+declare const NULLABLE: unique symbol;
+/** A schema from `param.nullable(inner)`, whose object field may be omitted. */
+export type NullableParamSchema<Input> = ParamSchema<Input | null> & { readonly [NULLABLE]: true };
+/** The fields of `F` declared nullable. */
+type OmittableFields<F extends ParamFields> = { [K in keyof F]: F[K] extends { readonly [NULLABLE]: true } ? K : never }[keyof F];
+/**
+ * The input an object with `F` fields accepts: those fields, where a nullable
+ * one may be omitted.
+ */
+export type ParamFieldsInput<F extends ParamFields> = {
+  [K in Exclude<keyof F, OmittableFields<F>>]: ParamSchemaInput<F[K]>;
+} & { [K in OmittableFields<F>]?: ParamSchemaInput<F[K]> };
 const PARAMS_METADATA: unique symbol = Symbol("@helixdb/enterprise-ql/params-metadata");
 
 type ParamSchemaState =
@@ -2890,8 +2918,9 @@ export class ParamSchema<Input = unknown> implements Encodable {
   static array<Inner extends ParamSchema>(inner: Inner): ParamSchema<ParamSchemaInput<Inner>[]> {
     return new ParamSchema({ kind: "Array", inner });
   }
-  static nullable<Inner extends ParamSchema>(inner: Inner): ParamSchema<ParamSchemaInput<Inner> | null> {
-    return new ParamSchema({ kind: "Nullable", inner });
+  static nullable<Inner extends ParamSchema>(inner: Inner): NullableParamSchema<ParamSchemaInput<Inner>> {
+    // The brand is type-only: it marks the field omittable in `ParamFieldsInput`.
+    return new ParamSchema({ kind: "Nullable", inner }) as NullableParamSchema<ParamSchemaInput<Inner>>;
   }
   toParamType(): QueryParamType {
     switch (this.state.kind) {
@@ -2946,7 +2975,8 @@ export const param = {
   array: ParamSchema.array,
   /**
    * `null`, or a value of `inner`: `param.object({ deletedAt: param.nullable(param.dateTime()) })`
-   * keeps a set `deletedAt` a datetime and accepts `null` where it is unset.
+   * keeps a set `deletedAt` a datetime and accepts `null` or an omitted
+   * `deletedAt` where it is unset; an omitted one stays absent.
    */
   nullable: ParamSchema.nullable,
 };
@@ -3034,12 +3064,12 @@ function convertParamValue(schema: ParamSchema, value: unknown, path: string): J
     case "Record": {
       if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`parameter '${path}' must be object`);
       const fields = schema.fields!;
-      checkDeclaredFields(fields, value as Record<string, unknown>, path);
+      const row = value as Record<string, unknown>;
+      checkDeclaredFields(fields, (field) => field.kind === "Nullable", row, path);
       return Object.fromEntries(
-        Object.entries(fields).map(([key, field]) => [
-          key,
-          convertParamValue(field, (value as Record<string, unknown>)[key], `${path}.${key}`),
-        ]),
+        Object.entries(fields)
+          .filter(([key]) => holdsField(row, key))
+          .map(([key, field]) => [key, convertParamValue(field, row[key], `${path}.${key}`)]),
       );
     }
     case "Array": {
@@ -3103,12 +3133,12 @@ function normalizeTypedQueryValue(type: QueryParamType, value: JsonValue, path: 
     case "Record": {
       if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`parameter '${path}' must be object`);
       const fields = type.fields!;
-      checkDeclaredFields(fields, value as Record<string, JsonValue>, path);
+      const row = value as Record<string, JsonValue>;
+      checkDeclaredFields(fields, (field) => field.variant === "Nullable", row, path);
       return Object.fromEntries(
-        Object.entries(fields).map(([key, field]) => [
-          key,
-          normalizeTypedQueryValue(field, (value as Record<string, JsonValue>)[key], `${path}.${key}`),
-        ]),
+        Object.entries(fields)
+          .filter(([key]) => holdsField(row, key))
+          .map(([key, field]) => [key, normalizeTypedQueryValue(field, row[key], `${path}.${key}`)]),
       );
     }
     case "Array":

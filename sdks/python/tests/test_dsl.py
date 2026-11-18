@@ -362,9 +362,48 @@ class DslAstTests(unittest.TestCase):
                 {"name": "Grace", "deleted_at": "2026-05-31T20:00:00.000Z"},
             ],
         )
-        # Nullable is not optional, and a set value is still checked.
-        with self.assertRaisesRegex(TypeError, r"missing: \['deleted_at'\]"):
-            write_batch().to_query_request(rows, {"data": [{"name": "Ada"}]})
+        # A nullable field may be omitted and stays absent, as the server keeps
+        # it; a field that is not nullable must be present, an undeclared one
+        # is rejected, and a set value is still checked.
+        omitted = parsed(
+            write_batch().to_query_request(
+                rows,
+                {
+                    "data": [
+                        {"name": "Ada"},
+                        {"name": "Grace", "deleted_at": "2026-06-01T05:00:00+09:00"},
+                    ]
+                },
+            )
+        )
+        self.assertEqual(
+            omitted["parameters"]["data"],
+            [{"name": "Ada"}, {"name": "Grace", "deleted_at": "2026-05-31T20:00:00.000Z"}],
+        )
+        with self.assertRaisesRegex(TypeError, r"missing: \['name'\], undeclared: \[\]"):
+            write_batch().to_query_request(rows, {"data": [{"deleted_at": None}]})
+        with self.assertRaisesRegex(TypeError, r"missing: \[\], undeclared: \['note'\]"):
+            write_batch().to_query_request(rows, {"data": [{"name": "Ada", "note": 1}]})
+        optional_rows = QueryParamType.array(
+            QueryParamType.object(
+                {
+                    "at": QueryParamType.nullable(QueryParamType.date_time()),
+                    "n": QueryParamType.i64(),
+                }
+            )
+        )
+        self.assertEqual(
+            parsed(
+                QueryRequest.write(write_batch()).with_typed_parameter(
+                    "rows", optional_rows, [{"n": 1}, {"at": None, "n": 2}]
+                )
+            )["parameters"],
+            {"rows": [{"n": 1}, {"at": None, "n": 2}]},
+        )
+        with self.assertRaisesRegex(TypeError, r"missing: \['n'\]"):
+            QueryRequest.write(write_batch()).with_typed_parameter(
+                "rows", optional_rows, [{"at": None}]
+            )
         with self.assertRaises((TypeError, QueryError)):
             write_batch().to_query_request(
                 rows, {"data": [{"name": "Ada", "deleted_at": "2026-06-01"}]}

@@ -3504,10 +3504,12 @@ def _declared_fields(fields: Any, field_type: type, label: str) -> "Mapping[str,
 
 
 def _check_declared_fields(
-    declared: Mapping[str, Any], value: Mapping[Any, Any], path: str
+    declared: Mapping[str, Any], nullable: set[str], value: Mapping[Any, Any], path: str
 ) -> None:
-    """Fail unless ``value`` has exactly the declared field names."""
-    missing = sorted(name for name in declared if name not in value)
+    """Fail unless every field of ``value`` is declared and every declared
+    field is present, except one named in ``nullable``, which may be omitted
+    and then stays absent."""
+    missing = sorted(name for name in declared if name not in value and name not in nullable)
     extra = sorted(str(name) for name in value if name not in declared)
     if missing or extra:
         raise TypeError(
@@ -3609,10 +3611,11 @@ class QueryParamType:
     def object(cls, fields: "Mapping[str, QueryParamType] | None" = None) -> "QueryParamType":
         """Any object without ``fields``, sent as ``"object"``.
 
-        With ``fields``, an object with exactly those fields, each normalized to
-        its type and sent as ``{"object": {field: type}}``, so a ``date_time()``
-        field binds as a datetime on the server. A missing or undeclared field
-        is rejected, and ``None`` satisfies only a ``value()`` field.
+        With ``fields``, an object with those fields, each normalized to its
+        type and sent as ``{"object": {field: type}}``, so a ``date_time()``
+        field binds as a datetime on the server. An undeclared field is
+        rejected, and so is a missing one unless it is ``nullable(...)``;
+        ``None`` satisfies only a ``value()`` or ``nullable(...)`` field.
         """
         if fields is None:
             return cls._create("Object")
@@ -3629,7 +3632,8 @@ class QueryParamType:
         """``None``, or a value of ``inner``, sent as ``{"nullable": inner}``.
 
         An optional datetime column in bulk rows stays a datetime where it is
-        set. The field itself must still be present.
+        set. As an object field it may also be omitted, and then stays absent
+        rather than becoming ``None``.
         """
         return cls._create("Nullable", inner)
 
@@ -3776,7 +3780,8 @@ class _ParamNamespace:
     def nullable(self, inner: ParamSchema) -> ParamSchema:
         """``None``, or a value of ``inner``: ``param.object({"deleted_at":
         param.nullable(param.date_time())})`` keeps a set ``deleted_at`` a
-        datetime and accepts ``None`` where it is unset."""
+        datetime and accepts ``None`` or an omitted ``deleted_at`` where it is
+        unset; an omitted one stays absent."""
         return ParamSchema._create("Nullable", inner=inner)
 
 
@@ -3875,10 +3880,13 @@ def _convert_param_value(schema: ParamSchema, value: Any, path: str) -> JsonValu
         if not isinstance(value, Mapping):
             raise TypeError(f"parameter '{path}' must be object")
         fields = schema.fields or {}
-        _check_declared_fields(fields, value, path)
+        _check_declared_fields(
+            fields, {key for key, field in fields.items() if field.kind == "Nullable"}, value, path
+        )
         return {
             key: _convert_param_value(field, value[key], f"{path}.{key}")
             for key, field in fields.items()
+            if key in value
         }
     if schema.kind == "Array":
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
@@ -4034,10 +4042,16 @@ def _normalize_typed_query_value(
         if not isinstance(value, Mapping):
             raise TypeError(f"parameter '{path}' must be object")
         fields = parameter_type.fields or {}
-        _check_declared_fields(fields, value, path)
+        _check_declared_fields(
+            fields,
+            {key for key, field in fields.items() if field.variant == "Nullable"},
+            value,
+            path,
+        )
         return {
             key: _normalize_typed_query_value(field, value[key], f"{path}.{key}")
             for key, field in fields.items()
+            if key in value
         }
     if parameter_type.variant == "Array":
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):

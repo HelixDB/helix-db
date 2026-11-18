@@ -66,7 +66,7 @@ writeBatch()
   .toQueryBytes(writeParams, {
     values: [{ id: 1, nested: { ok: true } }],
     rows: [{ at: DateTime.fromMillis(0), n: 1 }],
-    optional: [{ deletedAt: null }, { deletedAt: DateTime.fromMillis(0) }],
+    optional: [{ deletedAt: null }, { deletedAt: DateTime.fromMillis(0) }, {}],
   });
 readBatch().varAs("count", g().nWithLabel("User").count()).toQueryJson();
 readBatch()
@@ -106,6 +106,12 @@ writeBatch().toQueryJson(writeParams, { values: [], rows: [{ at: true, n: 1 }], 
 
 // @ts-expect-error a datetime field rejects null unless declared nullable
 writeBatch().toQueryJson(writeParams, { values: [], rows: [{ at: null, n: 1 }], optional: [] });
+
+// @ts-expect-error only a nullable field may be omitted
+writeBatch().toQueryJson(writeParams, { values: [], rows: [{ n: 1 }], optional: [] });
+
+// @ts-expect-error an omittable field still rejects an undeclared one beside it
+writeBatch().toQueryJson(writeParams, { values: [], rows: [], optional: [{ extra: 1 }] });
 
 // @ts-expect-error write traversal is rejected by read batches
 readBatch().varAs("created", g().addN("User", {}));
