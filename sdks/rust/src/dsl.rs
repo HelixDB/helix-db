@@ -91,17 +91,20 @@ pub mod __private {
     /// datetimes inside an untyped `value` or `object` declaration is declared
     /// with the narrowest type that keeps each one a datetime: objects with
     /// their fields (`value` for fields without datetimes) and arrays with
-    /// one element type that fits every element. A position holding a
-    /// datetime in some elements and `null` in others is declared
-    /// `{"nullable": ...}`, and an empty array fits any element type. A value
-    /// holding no datetime keeps `declared`.
+    /// one element type that fits every element. An empty array fits any
+    /// element type. A value holding no datetime keeps `declared`.
+    ///
+    /// Rows may differ by omitted keys: an object field that is `null` or
+    /// missing in some elements is declared `{"nullable": ...}`, which the
+    /// server accepts as `null` or omitted and keeps omitted, so each row is
+    /// stored as it was given.
     ///
     /// # Errors
     ///
     /// [`crate::QueryError::ParameterTypeMismatch`] at the first array element
-    /// no single element type fits together with the elements before it, such
-    /// as rows with different fields, or a datetime in one row and text in
-    /// another.
+    /// no single element type fits together with the elements before it,
+    /// such as a datetime in one row and text in another under the same key,
+    /// or an object holding a datetime where another row holds an array.
     pub fn declared_type(
         declared: crate::QueryParamType,
         value: &crate::QueryValue,
@@ -142,50 +145,104 @@ pub mod __private {
                 Shape::Object(fields) => {
                     let types = fields
                         .iter()
-                        .map(|(field, shape)| (*field, lower(shape)))
+                        .map(|(field, shape)| (*field, shape, lower(shape)))
                         .collect::<Vec<_>>();
-                    if types.iter().all(|(_, ty)| ty.is_none()) {
+                    if types.iter().all(|(_, _, ty)| ty.is_none()) {
                         return None;
                     }
-                    let fields =
-                        crate::ObjectFields::new(types.into_iter().map(|(field, ty)| {
-                            (field, ty.unwrap_or(crate::QueryParamType::Value))
-                        }))
-                        .expect("an object's field names are distinct and at least one is typed");
+                    // A field `null` or omitted in some rows is declared
+                    // nullable, so the server accepts it omitted too.
+                    let fields = crate::ObjectFields::new(types.into_iter().map(
+                        |(field, shape, ty)| match shape {
+                            Shape::Null | Shape::Nullable(_) => (
+                                field,
+                                ty.unwrap_or(crate::QueryParamType::Nullable(Box::new(
+                                    crate::QueryParamType::Value,
+                                ))),
+                            ),
+                            _ => (field, ty.unwrap_or(crate::QueryParamType::Value)),
+                        },
+                    ))
+                    .expect("an object's field names are distinct and at least one is typed");
                     Some(crate::QueryParamType::Record(fields))
                 }
             }
         }
-        /// The shape both `a` and `b` fit, or `None` when no declaration
-        /// holds both.
-        fn join<'v>(a: Shape<'v>, b: Shape<'v>) -> Option<Shape<'v>> {
-            match (a, b) {
-                (Shape::Unconstrained, other) | (other, Shape::Unconstrained) => Some(other),
-                (a, b) if a == b => Some(a),
+        /// Where two shapes conflict: the fields leading to it inside the
+        /// element, outermost first, the declaration the earlier elements
+        /// need there, and what the new element holds.
+        struct Conflict<'v> {
+            fields: Vec<&'v str>,
+            expected: crate::QueryParamType,
+            actual: &'static str,
+        }
+        /// The shape both `joined`, from earlier elements, and `next` fit.
+        fn join<'v>(joined: Shape<'v>, next: Shape<'v>) -> Result<Shape<'v>, Conflict<'v>> {
+            match (joined, next) {
+                (Shape::Unconstrained, other) | (other, Shape::Unconstrained) => Ok(other),
+                (joined, next) if joined == next => Ok(joined),
                 (Shape::Null, Shape::Nullable(inner)) | (Shape::Nullable(inner), Shape::Null) => {
-                    Some(Shape::Nullable(inner))
+                    Ok(Shape::Nullable(inner))
                 }
                 (Shape::Null, other) | (other, Shape::Null) => {
-                    Some(Shape::Nullable(Box::new(other)))
+                    Ok(Shape::Nullable(Box::new(other)))
                 }
-                (Shape::Nullable(a), Shape::Nullable(b)) => {
-                    join(*a, *b).map(|inner| Shape::Nullable(Box::new(inner)))
+                (Shape::Nullable(joined), Shape::Nullable(next)) => {
+                    join(*joined, *next).map(|inner| Shape::Nullable(Box::new(inner)))
                 }
-                (Shape::Nullable(a), other) | (other, Shape::Nullable(a)) => {
-                    join(*a, other).map(|inner| Shape::Nullable(Box::new(inner)))
+                (Shape::Nullable(joined), next) => {
+                    join(*joined, next).map(|inner| Shape::Nullable(Box::new(inner)))
                 }
-                (Shape::Array(a), Shape::Array(b)) => {
-                    join(*a, *b).map(|element| Shape::Array(Box::new(element)))
+                (joined, Shape::Nullable(next)) => {
+                    join(joined, *next).map(|inner| Shape::Nullable(Box::new(inner)))
                 }
-                (Shape::Object(a), Shape::Object(b)) if a.keys().eq(b.keys()) => a
+                (Shape::Array(joined), Shape::Array(next)) => {
+                    join(*joined, *next).map(|element| Shape::Array(Box::new(element)))
+                }
+                // A key one object omits is absent there, which joins like
+                // `null`: the field is declared nullable.
+                (Shape::Object(mut joined), Shape::Object(mut next)) => joined
+                    .keys()
+                    .chain(next.keys())
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
-                    .zip(b.into_values())
-                    .map(|((field, a), b)| join(a, b).map(|shape| (field, shape)))
-                    .collect::<Option<BTreeMap<_, _>>>()
+                    .map(|field| {
+                        join(
+                            joined.remove(field).unwrap_or(Shape::Null),
+                            next.remove(field).unwrap_or(Shape::Null),
+                        )
+                        .map(|shape| (field, shape))
+                        .map_err(|mut conflict| {
+                            conflict.fields.insert(0, field);
+                            conflict
+                        })
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()
                     .map(Shape::Object),
                 // Differing shapes fit `value` together unless one needs a
                 // datetime declared.
-                (a, b) => (lower(&a).is_none() && lower(&b).is_none()).then_some(Shape::Plain),
+                (joined, next) => match (lower(&joined), lower(&next)) {
+                    (None, None) => Ok(Shape::Plain),
+                    (Some(expected), _) => Err(Conflict {
+                        fields: Vec::new(),
+                        expected,
+                        actual: match next {
+                            Shape::DateTime => "date_time",
+                            Shape::Array(_) => "array",
+                            Shape::Object(_) => "object",
+                            Shape::Unconstrained
+                            | Shape::Null
+                            | Shape::Plain
+                            | Shape::Nullable(_) => "a value without datetimes",
+                        },
+                    }),
+                    (None, Some(_)) => Err(Conflict {
+                        fields: Vec::new(),
+                        expected: crate::QueryParamType::Value,
+                        actual: "a datetime where earlier elements hold none",
+                    }),
+                },
             }
         }
         fn shape<'v>(
@@ -217,19 +274,12 @@ pub mod __private {
                     .try_fold(Shape::Unconstrained, |joined, (index, value)| {
                         segments.push(Segment::Index(index));
                         let element = shape(value, name, segments)?;
-                        let Some(joined) = join(joined, element) else {
-                            // Rebuilt only for the error: the elements
-                            // before this one fit one shape.
-                            let expected = values[..index]
+                        let joined = join(joined, element).map_err(|conflict| {
+                            let path = segments
                                 .iter()
-                                .try_fold(Shape::Unconstrained, |joined, value| {
-                                    join(joined, shape(value, name, &mut Vec::new()).ok()?)
-                                })
-                                .as_ref()
-                                .and_then(lower)
-                                .unwrap_or(crate::QueryParamType::Value);
-                            let path =
-                                segments.iter().fold(name.to_owned(), |mut path, segment| {
+                                .copied()
+                                .chain(conflict.fields.into_iter().map(Segment::Field))
+                                .fold(name.to_owned(), |mut path, segment| {
                                     match segment {
                                         Segment::Index(index) => {
                                             path.push_str(&format!("[{index}]"))
@@ -241,12 +291,12 @@ pub mod __private {
                                     }
                                     path
                                 });
-                            return Err(crate::QueryError::ParameterTypeMismatch {
+                            crate::QueryError::ParameterTypeMismatch {
                                 path,
-                                expected,
-                                actual: "a value of another shape",
-                            });
-                        };
+                                expected: conflict.expected,
+                                actual: conflict.actual,
+                            }
+                        })?;
                         segments.pop();
                         Ok(joined)
                     })
