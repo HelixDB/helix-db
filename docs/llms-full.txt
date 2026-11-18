@@ -8472,8 +8472,9 @@ literals are not supported.
 
 A timestamp column never compares with text: unlike PostgreSQL,
 `WHERE e.at > '2026-01-01'` does not cast the string, and fails with
-`type_error` (`datetime_text_comparison`), as does a string parameter, on
-both [scans and index lookups](/database/helix-db/query-guides/cypher#datetimes).
+`type_error` (`datetime_text_comparison`), as does a string parameter, once it
+compares a stored datetime. An index lookup reads only values of its own type,
+so it [can match nothing instead](/database/helix-db/query-guides/cypher#datetimes).
 Write `e.at > TIMESTAMP '2026-01-01'` or `e.at > CAST(? AS TIMESTAMP)`.
 Properties written as `date_time` parameters before datetimes were stored
 natively are
