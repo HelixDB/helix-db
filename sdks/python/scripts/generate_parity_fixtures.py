@@ -286,7 +286,8 @@ def query_value_shapes() -> Fixture:
                 ),
                 (
                     "nullable",
-                    QueryValue.array([{"at": None}, {"at": "2026-06-01T05:00:00+09:00"}]),
+                    # An omitted nullable field stays absent.
+                    QueryValue.array([{"at": None}, {}, {"at": "2026-06-01T05:00:00+09:00"}]),
                 ),
             ],
             [

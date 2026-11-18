@@ -2850,6 +2850,8 @@ fn json_only_fixtures() -> Vec<Fixture> {
                         "nullable",
                         array(vec![
                             object(vec![("at", QueryValue::Null)]),
+                            // An omitted nullable field stays absent.
+                            object(vec![]),
                             object(vec![("at", string("2026-06-01T05:00:00+09:00"))]),
                         ]),
                     ),
