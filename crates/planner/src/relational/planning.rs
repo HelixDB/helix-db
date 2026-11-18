@@ -56,6 +56,10 @@ pub struct RowPlan {
     consumers: Arc<BTreeMap<usize, BatchConsumer>>,
     #[serde(skip)]
     program: Arc<RowProgram>,
+    /// The statement clock the plan's index bounds were folded from, which
+    /// execution evaluates every `datetime()` and `timestamp()` to.
+    #[serde(skip)]
+    statement_time: i64,
     pub metrics: exec::PlannerMetrics,
 }
 
@@ -65,15 +69,17 @@ impl RowPlan {
     /// without index probes or hash joins, and row operators materialize. This
     /// does no optimizer exploration and preserves expression/effect boundaries.
     /// Estimates are unit placeholders, not production cost diagnostics.
+    /// Execution evaluates the statement clock to `statement_time`.
     ///
     /// ```
     /// use helix_planner::relational as r;
     /// let query = r::Query::new(Vec::new(), Vec::new(), Vec::new()).unwrap();
-    /// let reference = r::RowPlan::reference(query).unwrap();
+    /// let reference = r::RowPlan::reference(query, 7).unwrap();
     /// assert_eq!(reference.pipeline().execution(), r::RowExecution::Materialized);
     /// assert_eq!(reference.metrics.memo_groups, 0);
+    /// assert_eq!(reference.statement_time(), 7);
     /// ```
-    pub fn reference(query: Query) -> Result<Self> {
+    pub fn reference(query: Query, statement_time: i64) -> Result<Self> {
         let matches = Arc::new(super::reference::matches(&query)?);
         let pipeline = Arc::new(RowPipeline::new(
             Arc::new(query),
@@ -91,6 +97,7 @@ impl RowPlan {
             matches,
             consumers,
             program,
+            statement_time,
             metrics: exec::PlannerMetrics::default(),
         })
     }
@@ -130,6 +137,14 @@ impl RowPlan {
     /// plans continue to use the logical query and logical match metadata.
     pub fn program(&self) -> &RowProgram {
         &self.program
+    }
+    /// The statement clock in UTC epoch milliseconds: the planning context's
+    /// [`context::PlannerContext::statement_time`], from which the plan's
+    /// clock-relative index bounds were folded. Execution must evaluate every
+    /// `datetime()` and `timestamp()` to it, or a bound and the residual
+    /// comparison it narrows would disagree.
+    pub fn statement_time(&self) -> i64 {
+        self.statement_time
     }
     /// Validated adjacent consumer. Node cursor availability also depends on the
     /// selected native access primitive; unsupported primitives keep their executor.
@@ -213,6 +228,7 @@ pub fn plan(query: Query, ctx: &context::PlannerContext) -> Result<RowPlan> {
         consumers,
         matches,
         program,
+        statement_time: ctx.statement_time,
         metrics,
     })
 }
@@ -256,14 +272,14 @@ fn plan_accesses(
             query,
             operator_index,
             pattern,
-            &ctx.params,
+            ctx,
             &mut substitution_budget,
         );
         index_predicates.insert(operator_index, predicate.clone());
         let totality = Totality {
             pattern,
             bindings: query.bindings(),
-            params: Parameters::Bound(&ctx.params),
+            params: Parameters::Bound(ctx),
         };
         // An index source skips candidate nodes, so it must not hide an error
         // that another property constraint of this pattern could raise.
@@ -309,8 +325,8 @@ fn plan_accesses(
             // Point reads of the admitted IDs, labelled or not; pattern
             // validation still checks each node's label and existence.
             if constraints_total
-                && let Some(ids) = total_predicate
-                    .and_then(|predicate| conjunct_ids(predicate, node.slot, &ctx.params))
+                && let Some(ids) =
+                    total_predicate.and_then(|predicate| conjunct_ids(predicate, node.slot, ctx))
             {
                 // A scan's source cost omits reading each scanned node, so a
                 // few point reads would lose to it on cost alone.
@@ -358,21 +374,15 @@ fn plan_accesses(
                 if let Some(predicate) = total_predicate {
                     collect_equalities(predicate, node.slot, &mut equalities);
                     collect_memberships(predicate, node.slot, &mut memberships);
-                    collect_ranges(predicate, node.slot, &ctx.params, false, &mut ranges);
-                    collect_ranges(
-                        predicate,
-                        node.slot,
-                        &ctx.params,
-                        true,
-                        &mut datetime_ranges,
-                    );
+                    collect_ranges(predicate, node.slot, ctx, false, &mut ranges);
+                    collect_ranges(predicate, node.slot, ctx, true, &mut datetime_ranges);
                 }
                 let mut exact = BTreeSet::new();
                 let mut unique = false;
                 for (property, value) in equalities {
                     let value = match value {
                         Expression::Literal(v) => literal(v),
-                        value => bound_value(&value, &ctx.params).map(Cow::into_owned),
+                        value => bound_value(&value, ctx).map(Cow::into_owned),
                     };
                     let Some(value) = value else {
                         continue;
@@ -480,7 +490,7 @@ fn plan_accesses(
                     let Some(index) = ctx.indexes.node_eq.get(&key) else {
                         continue;
                     };
-                    let Some(mut values) = membership_values(&list, &ctx.params) else {
+                    let Some(mut values) = membership_values(&list, ctx) else {
                         continue;
                     };
                     // As for an equality, text that reads as a datetime also
@@ -784,7 +794,7 @@ fn plan_accesses(
         let totality = Totality {
             pattern,
             bindings: query.bindings(),
-            params: Parameters::Bound(&ctx.params),
+            params: Parameters::Bound(ctx),
         };
         let constraints_total = pattern
             .nodes
@@ -1116,7 +1126,7 @@ fn index_predicate(
     query: &Query,
     index: usize,
     pattern: &Pattern,
-    params: &context::ParamBindings,
+    ctx: &context::PlannerContext,
     budget: &mut usize,
 ) -> Option<Expression> {
     let Operator::Match {
@@ -1130,7 +1140,7 @@ fn index_predicate(
     let totality = Totality {
         pattern,
         bindings: query.bindings(),
-        params: Parameters::Bound(params),
+        params: Parameters::Bound(ctx),
     };
     let mut conjuncts = predicate
         .iter()
@@ -1247,7 +1257,7 @@ fn index_predicate(
                 let later_totality = Totality {
                     pattern: later,
                     bindings: query.bindings(),
-                    params: Parameters::Bound(params),
+                    params: Parameters::Bound(ctx),
                 };
                 let value_type = |slot: Slot| &query.bindings()[slot.0 as usize].value_type;
                 if !later.nodes.iter().all(|node| {
@@ -1338,8 +1348,9 @@ fn index_predicate(
 /// What a totality proof knows about query parameters.
 #[derive(Clone, Copy)]
 pub(super) enum Parameters<'a> {
-    /// Planning-time values; an unbound parameter could fail on any row.
-    Bound(&'a context::ParamBindings),
+    /// Planning-time values: the bound parameters and the statement clock. An
+    /// unbound parameter could fail on any row.
+    Bound(&'a context::PlannerContext),
     /// Execution rejects a missing parameter before reading any row, but the
     /// values, and so an `IN $list` operand's type, are unknown.
     Validated,
@@ -1375,37 +1386,47 @@ impl Totality<'_> {
 
     /// An operand that evaluates without failing: a literal, a slot, a bound
     /// parameter, a property of a slot that holds properties, the statement
-    /// clock, `datetime()` of bound text it reads, or a list or map built from
-    /// such operands.
+    /// clock, a planning-time value [`bound_value`] reads, such as
+    /// `datetime()` of bound text or integer arithmetic over the clock, or a
+    /// list or map built from such operands.
     pub(super) fn operand(self, operand: &Expression) -> bool {
         match operand {
             Expression::Literal(_) | Expression::Slot(_) => true,
             Expression::List(items) => items.iter().all(|item| self.operand(item)),
             Expression::Map(entries) => entries.iter().all(|(_, value)| self.operand(value)),
             Expression::Parameter(name) => match self.params {
-                Parameters::Bound(params) => {
+                Parameters::Bound(ctx) => {
                     let name = ir::NonEmptyString::new(name.clone()).expect("validated parameter");
-                    params.values.contains_key(&name) || params.query_values.contains_key(&name)
+                    ctx.params.values.contains_key(&name)
+                        || ctx.params.query_values.contains_key(&name)
                 }
                 Parameters::Validated => true,
             },
             Expression::Property(value, _) => {
                 matches!(value.as_ref(), Expression::Slot(slot) if self.has_properties(*slot))
-                    || matches!(self.params, Parameters::Bound(params)
-                        if bound_value(operand, params).is_some())
+                    || matches!(self.params, Parameters::Bound(ctx)
+                        if bound_value(operand, ctx).is_some())
             }
             Expression::Index(..) => {
-                matches!(self.params, Parameters::Bound(params)
-                    if bound_value(operand, params).is_some())
+                matches!(self.params, Parameters::Bound(ctx)
+                    if bound_value(operand, ctx).is_some())
             }
             Expression::Function(Function::DateTime | Function::Timestamp, arguments)
                 if arguments.is_empty() =>
             {
                 true
             }
-            Expression::Function(Function::DateTime, _) => {
-                matches!(self.params, Parameters::Bound(params)
-                    if bound_value(operand, params).is_some())
+            // Bound text, an epochMillis map or integer arithmetic over
+            // planning-time values, such as `timestamp() - $window`, cannot
+            // fail when it evaluates before any row is read.
+            Expression::Function(Function::DateTime, _)
+            | Expression::Binary(
+                Binary::Add | Binary::Subtract | Binary::Multiply | Binary::Divide | Binary::Modulo,
+                ..,
+            )
+            | Expression::Unary(Unary::Negate, _) => {
+                matches!(self.params, Parameters::Bound(ctx)
+                    if bound_value(operand, ctx).is_some())
             }
             // id() of a node, relationship or null cannot fail.
             Expression::Function(Function::Id, arguments) => matches!(
@@ -1439,9 +1460,9 @@ impl Totality<'_> {
                 super::ValueType::Boolean | super::ValueType::Null
             ),
             Expression::Parameter(_) | Expression::Property(..) | Expression::Index(..) => {
-                matches!(self.params, Parameters::Bound(params)
+                matches!(self.params, Parameters::Bound(ctx)
                 if matches!(
-                    bound_value(expression, params).as_deref(),
+                    bound_value(expression, ctx).as_deref(),
                     Some(
                         helix_ast::value::PropertyValue::Bool(_)
                             | helix_ast::value::PropertyValue::Null
@@ -1472,15 +1493,15 @@ impl Totality<'_> {
                         ),
                         Expression::List(items) => items.iter().all(|item| match item {
                             Expression::Literal(_) | Expression::Parameter(_) => self.operand(item),
-                            item => matches!(self.params, Parameters::Bound(params)
-                                if bound_value(item, params).is_some()),
+                            item => matches!(self.params, Parameters::Bound(ctx)
+                                if bound_value(item, ctx).is_some()),
                         }),
                         list @ (Expression::Parameter(_)
                         | Expression::Property(..)
                         | Expression::Index(..)) => {
-                            matches!(self.params, Parameters::Bound(params)
+                            matches!(self.params, Parameters::Bound(ctx)
                             if matches!(
-                                bound_value(list, params).as_deref(),
+                                bound_value(list, ctx).as_deref(),
                                 Some(
                                     helix_ast::value::PropertyValue::Array(_)
                                         | helix_ast::value::PropertyValue::Null
@@ -1514,7 +1535,7 @@ impl Totality<'_> {
 fn conjunct_ids(
     expression: &Expression,
     slot: Slot,
-    params: &context::ParamBindings,
+    ctx: &context::PlannerContext,
 ) -> Option<BTreeSet<u64>> {
     let is_id = |expression: &Expression| {
         matches!(expression, Expression::Function(Function::Id, arguments)
@@ -1536,13 +1557,13 @@ fn conjunct_ids(
     match expression {
         Expression::Connective(Connective::And, operands) => operands
             .iter()
-            .find_map(|operand| conjunct_ids(operand, slot, params)),
+            .find_map(|operand| conjunct_ids(operand, slot, ctx)),
         Expression::Binary(Binary::Equal, a, b) => [(a, b), (b, a)]
             .into_iter()
             .filter(|(target, _)| is_id(target))
             .find_map(|(_, value)| match value.as_ref() {
                 Expression::Literal(value) => ids(std::slice::from_ref(value)),
-                value => match bound_value(value, params)?.as_ref() {
+                value => match bound_value(value, ctx)?.as_ref() {
                     helix_ast::value::PropertyValue::I64(value) => {
                         ids(std::slice::from_ref(&Value::Integer(*value)))
                     }
@@ -1599,22 +1620,24 @@ fn collect_equalities(expression: &Expression, slot: Slot, out: &mut Vec<(String
 }
 
 /// Range bounds on properties of `slot` from the conjuncts of a total
-/// predicate, intersected per property. A parameter resolves to its bound
-/// value at planning time; unorderable, NaN and oversized bounds are skipped,
+/// predicate, intersected per property. A parameter, the statement clock or
+/// an operand built from them resolves to its planning-time value
+/// ([`bound_value`]), so `n.at > datetime({epochMillis: timestamp() - $w})`
+/// bounds `at` below; unorderable, NaN and oversized bounds are skipped,
 /// so a scan never fails where the comparison would yield null. With
 /// `text_as_datetime`, only text bounds that read as datetimes count, as the
 /// datetimes they name.
 fn collect_ranges(
     expression: &Expression,
     slot: Slot,
-    params: &context::ParamBindings,
+    ctx: &context::PlannerContext,
     text_as_datetime: bool,
     out: &mut Vec<(String, ir::IndexRange)>,
 ) {
     let (op, a, b) = match expression {
         Expression::Connective(Connective::And, operands) => {
             for operand in operands {
-                collect_ranges(operand, slot, params, text_as_datetime, out);
+                collect_ranges(operand, slot, ctx, text_as_datetime, out);
             }
             return;
         }
@@ -1636,7 +1659,7 @@ fn collect_ranges(
         }
         let value = match value.as_ref() {
             Expression::Literal(value) => literal(value.clone()),
-            value => bound_value(value, params).map(Cow::into_owned),
+            value => bound_value(value, ctx).map(Cow::into_owned),
         };
         let value = match value {
             Some(helix_ast::value::PropertyValue::String(text)) if text_as_datetime => {
@@ -1745,15 +1768,28 @@ fn equality_disjuncts(
     }
 }
 
-/// The value of a bound parameter, or of a property or element of one, as
-/// `$p`, `$p.key`, `$p['key']` and `$ids[1]` evaluate, and `datetime($text)`
-/// of bound text, as evaluation reads it. Access or conversion that could
-/// fail, such as a property of a list or unreadable text, has no value here.
+/// The value a statement-constant operand evaluates to on every row, known
+/// before any row is read: a bound parameter, or a property or element of
+/// one, as `$p`, `$p.key`, `$p['key']` and `$ids[1]` evaluate; the statement
+/// clock `datetime()` and `timestamp()` ([`context::PlannerContext::statement_time`]);
+/// integer arithmetic and negation over such integers or integer literals,
+/// as `timestamp() - $window` evaluates; and `datetime($text)` of bound text
+/// or `datetime({epochMillis: n})` of such an integer, as evaluation reads
+/// them. Access, arithmetic or conversion that could fail, such as a property
+/// of a list, an overflow or unreadable text, has no value here, so a scan
+/// evaluates it and raises its error.
 fn bound_value<'a>(
     expression: &Expression,
-    params: &'a context::ParamBindings,
+    ctx: &'a context::PlannerContext,
 ) -> Option<Cow<'a, helix_ast::value::PropertyValue>> {
     use helix_ast::value::PropertyValue as P;
+    let integer = |operand: &Expression| match operand {
+        Expression::Literal(Value::Integer(value)) => Some(*value),
+        operand => match bound_value(operand, ctx)?.as_ref() {
+            P::I64(value) => Some(*value),
+            _ => None,
+        },
+    };
     let entry = |value: Cow<'a, P>, key: &str| match value {
         Cow::Borrowed(P::Object(map)) => {
             Some(map.get(key).map_or(Cow::Owned(P::Null), Cow::Borrowed))
@@ -1763,13 +1799,14 @@ fn bound_value<'a>(
         _ => None,
     };
     match expression {
-        Expression::Parameter(name) => params
+        Expression::Parameter(name) => ctx
+            .params
             .values
             .get(&ir::NonEmptyString::new(name.clone()).expect("validated parameter"))
             .map(Cow::Borrowed),
-        Expression::Property(value, key) => entry(bound_value(value, params)?, key),
+        Expression::Property(value, key) => entry(bound_value(value, ctx)?, key),
         Expression::Index(value, index) => {
-            let value = bound_value(value, params)?;
+            let value = bound_value(value, ctx)?;
             match index.as_ref() {
                 Expression::Literal(Value::String(key)) => entry(value, key),
                 Expression::Literal(Value::Integer(index)) => {
@@ -1802,18 +1839,54 @@ fn bound_value<'a>(
                 .iter()
                 .map(|item| match item {
                     Expression::Literal(Value::DateTime(millis)) => Some(P::DateTime(*millis)),
-                    item => match bound_value(item, params)?.into_owned() {
+                    item => match bound_value(item, ctx)?.into_owned() {
                         datetime @ P::DateTime(_) => Some(datetime),
                         _ => None,
                     },
                 })
                 .collect::<Option<_>>()?,
         ))),
+        Expression::Function(Function::DateTime, arguments) if arguments.is_empty() => {
+            Some(Cow::Owned(P::DateTime(ctx.statement_time)))
+        }
+        Expression::Function(Function::Timestamp, arguments) if arguments.is_empty() => {
+            Some(Cow::Owned(P::I64(ctx.statement_time)))
+        }
+        Expression::Binary(
+            op @ (Binary::Add
+            | Binary::Subtract
+            | Binary::Multiply
+            | Binary::Divide
+            | Binary::Modulo),
+            a,
+            b,
+        ) => {
+            let (a, b) = (integer(a)?, integer(b)?);
+            match evaluation::binary(*op, Value::Integer(a), Value::Integer(b)).ok()? {
+                Value::Integer(value) => Some(Cow::Owned(P::I64(value))),
+                _ => None,
+            }
+        }
+        Expression::Unary(Unary::Negate, value) => {
+            Some(Cow::Owned(P::I64(integer(value)?.checked_neg()?)))
+        }
         Expression::Function(Function::DateTime, arguments) => {
             let [argument] = arguments.as_slice() else {
                 return None;
             };
-            let value = bound_value(argument, params)?;
+            let value = match argument {
+                // Only a map of exactly one integer `epochMillis` names an
+                // instant, and only inside the years a datetime renders.
+                Expression::Map(entries) => {
+                    let [(key, millis)] = entries.as_slice() else {
+                        return None;
+                    };
+                    let millis = integer(millis).filter(|_| key == "epochMillis")?;
+                    format_datetime(millis)?;
+                    return Some(Cow::Owned(P::DateTime(millis)));
+                }
+                argument => bound_value(argument, ctx)?,
+            };
             match value.as_ref() {
                 P::String(text) => parse_datetime(text)
                     .ok()
@@ -1840,7 +1913,7 @@ fn bound_value<'a>(
 /// member, and a member that is not a scalar literal prevents index access.
 fn membership_values(
     list: &Expression,
-    params: &context::ParamBindings,
+    ctx: &context::PlannerContext,
 ) -> Option<Vec<helix_ast::value::PropertyValue>> {
     use helix_ast::value::PropertyValue as P;
     let members = match list {
@@ -1853,11 +1926,11 @@ fn membership_values(
             .iter()
             .map(|item| match item {
                 Expression::Literal(value) => literal(value.clone()),
-                item => bound_value(item, params).map(Cow::into_owned),
+                item => bound_value(item, ctx).map(Cow::into_owned),
             })
             .collect::<Option<Vec<_>>>()?,
         Expression::Literal(Value::Null) => Vec::new(),
-        list => match bound_value(list, params)? {
+        list => match bound_value(list, ctx)? {
             Cow::Borrowed(P::Array(values)) => values.clone(),
             Cow::Owned(P::Array(values)) => values,
             value if *value == P::Null => Vec::new(),

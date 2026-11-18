@@ -48,7 +48,7 @@ async fn ranked_windows_filter_projected_bindings_after_ranking() {
         for strategy in [
             plan.clone(),
             plan.clone().with_execution(r::RowExecution::Materialized),
-            r::RowPlan::reference(query).unwrap(),
+            r::RowPlan::reference(query, 0).unwrap(),
         ] {
             for batch_rows in [1, 2, 7] {
                 let response = Interpreter::new(&db, context::ParamBindings::default())

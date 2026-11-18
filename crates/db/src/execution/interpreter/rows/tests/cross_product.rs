@@ -384,7 +384,7 @@ async fn disconnected_products_match_an_independent_model_and_optional_boundarie
             for strategy in [
                 plan.clone(),
                 plan.clone().with_execution(r::RowExecution::Materialized),
-                r::RowPlan::reference(query.clone()).unwrap(),
+                r::RowPlan::reference(query.clone(), 0).unwrap(),
             ] {
                 let mut actual = rows::Interpreter::new(&db, context::ParamBindings::default())
                     .execute_rows(

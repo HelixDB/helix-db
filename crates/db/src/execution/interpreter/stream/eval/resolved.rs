@@ -248,10 +248,10 @@ impl<'db> ExecutionContext<'db> {
                             HelixDbError::Query("id expression has no current element".into())
                         })
                 }
-                F::Timestamp => Ok(DbPropertyValue::I64(chrono::Utc::now().timestamp_millis())),
-                F::DateTimeNow => Ok(DbPropertyValue::DateTime(
-                    chrono::Utc::now().timestamp_millis(),
-                )),
+                // The statement clock, read once, so every row and write of
+                // one request reads the same instant.
+                F::Timestamp => Ok(DbPropertyValue::I64(self.statement_time)),
+                F::DateTimeNow => Ok(DbPropertyValue::DateTime(self.statement_time)),
                 F::HasProperty(key) => {
                     assert_eq!(
                         arguments.as_slice(),

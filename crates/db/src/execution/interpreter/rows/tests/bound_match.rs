@@ -72,7 +72,7 @@ async fn bound_expansions_match_independent_paths_and_optional_outer_rows() {
             for strategy in [
                 plan.clone(),
                 plan.clone().with_execution(r::RowExecution::Materialized),
-                r::RowPlan::reference(query.clone()).unwrap(),
+                r::RowPlan::reference(query.clone(), 0).unwrap(),
             ] {
                 let mut actual = Interpreter::new(&db, context::ParamBindings::default())
                     .execute_rows(
@@ -100,7 +100,7 @@ async fn bound_expansions_match_independent_paths_and_optional_outer_rows() {
         let query=helix_cypher::compile(text).unwrap();
         let plan=r::plan(query.clone(),&db.planner_context(context::ParamBindings::default())).unwrap();
         assert!(matches!(plan.batch_consumer(0),Some(r::BatchConsumer::Pipeline {..})),"{text}");
-        for strategy in [plan.clone(),plan.with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query).unwrap()] {
+        for strategy in [plan.clone(),plan.with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query, 0).unwrap()] {
             assert_eq!(Interpreter::new(&db,context::ParamBindings::default()).execute_rows(&strategy,&BTreeMap::new(),Limits{batch_rows:2,..Default::default()}).await.unwrap().rows,expected,"{text}");
         }
     }
@@ -687,7 +687,7 @@ async fn fallback_patterns_limit_complete_matches_and_keep_supported_prefixes() 
         let plan=r::plan(query.clone(),&db.planner_context(context::ParamBindings::default())).unwrap();
         assert_eq!(plan.batch_consumer(0).is_some(),streamed,"{text}");
         for batch_rows in [1,2,7] {
-            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone()).unwrap()] {
+            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone(), 0).unwrap()] {
                 assert_eq!(Interpreter::new(&db,context::ParamBindings::default()).execute_rows(&strategy,&BTreeMap::new(),Limits{batch_rows,..Default::default()}).await.unwrap().rows,expected,"{text}");
             }
         }

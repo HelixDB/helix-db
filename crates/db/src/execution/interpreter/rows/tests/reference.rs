@@ -278,7 +278,7 @@ async fn optimized_and_full_scan_execution_agree_with_an_independent_multigraph_
                         exec::ExecNodeAccessPlan::Bitmap { .. } | exec::ExecNodeAccessPlan::Unique { .. }
                     )))));
                 }
-                let reference = r::RowPlan::reference(query).unwrap();
+                let reference = r::RowPlan::reference(query, 0).unwrap();
                 assert_eq!(reference.metrics.memo_groups, 0);
                 for plan in reference.matches().values() {
                     assert!(plan.steps.iter().all(|step| matches!(

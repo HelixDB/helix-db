@@ -143,7 +143,7 @@ async fn correlated_pipeline_scopes_paths_nulls_and_fallback_probes_match_refere
         let plan = r::plan(query.clone(), &db.planner_context(context::ParamBindings::default())).unwrap();
         assert!(matches!(plan.batch_consumer(0), Some(r::BatchConsumer::Pipeline { .. })), "{text}");
         for batch_rows in [1,2,7] {
-            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone()).unwrap()] {
+            for strategy in [plan.clone(),plan.clone().with_execution(r::RowExecution::Materialized),r::RowPlan::reference(query.clone(), 0).unwrap()] {
                 let actual = Interpreter::new(&db, context::ParamBindings::default()).execute_rows(&strategy, &BTreeMap::new(), Limits {batch_rows, ..Default::default()}).await.unwrap();
                 assert_eq!(actual.rows, expected, "{text}; batch={batch_rows}");
             }

@@ -95,7 +95,7 @@ async fn label_completion_preserves_stale_owner_filtering_scopes_paths_and_windo
             for plan in [
                 selected.clone(),
                 selected.with_execution(r::RowExecution::Materialized),
-                r::RowPlan::reference(query).unwrap(),
+                r::RowPlan::reference(query, 0).unwrap(),
             ] {
                 for batch_rows in [1, 512] {
                     let response =
@@ -154,7 +154,7 @@ async fn label_completion_preserves_corruption_errors_and_mutation_rollback() {
         for plan in [
             selected.clone(),
             selected.with_execution(r::RowExecution::Materialized),
-            r::RowPlan::reference(query).unwrap(),
+            r::RowPlan::reference(query, 0).unwrap(),
         ] {
             let result = Interpreter::new(&db, context::ParamBindings::default())
                 .execute_rows(&plan, &BTreeMap::new(), Limits::default())
@@ -192,7 +192,7 @@ async fn label_completion_preserves_corruption_errors_and_mutation_rollback() {
     for plan in [
         selected.clone(),
         selected.with_execution(r::RowExecution::Materialized),
-        r::RowPlan::reference(query).unwrap(),
+        r::RowPlan::reference(query, 0).unwrap(),
     ] {
         let result = Interpreter::new(&db, context::ParamBindings::default())
             .execute_rows(&plan, &BTreeMap::new(), Limits::default())

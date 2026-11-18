@@ -245,7 +245,8 @@ async fn initial_source_falls_back_before_opening_incompatible_plans() {
         assert_eq!(ctx.row_budget().available(), 128 * 1024);
     }
     ctx.enable_request_read_view().await.unwrap();
-    let scan = r::RowPlan::reference(helix_cypher::compile("MATCH (n) RETURN n").unwrap()).unwrap();
+    let scan =
+        r::RowPlan::reference(helix_cypher::compile("MATCH (n) RETURN n").unwrap(), 0).unwrap();
     let r::Operator::Match {
         pattern,
         optional,

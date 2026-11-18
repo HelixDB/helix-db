@@ -58,7 +58,7 @@ async fn streamed_hash_joins_match_independent_duplicate_and_numeric_relations()
             for strategy in [
                 plan.clone(),
                 plan.clone().with_execution(r::RowExecution::Materialized),
-                r::RowPlan::reference(query.clone()).unwrap(),
+                r::RowPlan::reference(query.clone(), 0).unwrap(),
             ] {
                 let mut actual = Interpreter::new(&db, context::ParamBindings::default())
                     .execute_rows(
@@ -133,7 +133,7 @@ async fn duplicate_hash_buckets_stream_beyond_the_query_memory_budget() {
     }
     let reference = Interpreter::new(&db, context::ParamBindings::default())
         .execute_rows(
-            &r::RowPlan::reference(query).unwrap(),
+            &r::RowPlan::reference(query, 0).unwrap(),
             &BTreeMap::new(),
             Limits::default(),
         )
@@ -431,7 +431,7 @@ async fn hash_joins_fail_on_nested_datetime_text_pairs_as_nested_loops_do() {
                     .any(|step| matches!(step, r::MatchStep::HashJoin { .. })),
                 "{text}"
             );
-            for strategy in [plan, r::RowPlan::reference(query).unwrap()] {
+            for strategy in [plan, r::RowPlan::reference(query, 0).unwrap()] {
                 let result = Interpreter::new(&db, context::ParamBindings::default())
                     .execute_rows(&strategy, &BTreeMap::new(), Limits::default())
                     .await;
