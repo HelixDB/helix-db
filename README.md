@@ -90,8 +90,8 @@ local instance on `http://localhost:6969`. New to the query model? Start with th
 | SDK | Package | Current release | Setup guide |
 |-----|---------|-----------------|-------------|
 | Rust | [`helix-db`](https://crates.io/crates/helix-db) | `3.0.0` | [Rust setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/rust-project-setup) |
-| TypeScript | [`@helix-db/helix-db`](https://www.npmjs.com/package/@helix-db/helix-db) | `3.1.0` | [TypeScript setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/typescript-project-setup) |
-| Python | [`helix-db`](https://pypi.org/project/helix-db/) | `0.3.4` | [Python setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/python-project-setup) |
+| TypeScript | [`@helix-db/helix-db`](https://www.npmjs.com/package/@helix-db/helix-db) | `4.0.0` | [TypeScript setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/typescript-project-setup) |
+| Python | [`helix-db`](https://pypi.org/project/helix-db/) | `0.4.0` | [Python setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/python-project-setup) |
 | Go | [`github.com/helixdb/helix-db/sdks/go`](https://pkg.go.dev/github.com/helixdb/helix-db/sdks/go) | `v0.3.1` | [Go setup](https://docs.helix-db.com/database/helix-db/start-here/sdk-setup/go-project-setup) |
 
 <details>
@@ -158,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Requires Node.js 20+:
 
 ```bash
-npm init -y && npm install @helix-db/helix-db@3.1.0
+npm init -y && npm install @helix-db/helix-db@4.0.0
 ```
 
 ```ts
@@ -211,7 +211,7 @@ console.log("user:", user);
 <summary><b>Python</b></summary>
 
 ```bash
-python -m pip install helix-db==0.3.4
+python -m pip install helix-db==0.4.0
 ```
 
 ```python
