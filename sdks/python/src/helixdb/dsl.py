@@ -3490,7 +3490,10 @@ def write_batch() -> WriteBatch:
 
 
 def _declared_fields(fields: Any, field_type: type, label: str) -> "Mapping[str, Any]":
-    """Copy declared object fields, rejecting an empty or malformed declaration."""
+    """Copy declared object fields in name order, rejecting an empty or
+    malformed declaration. Values are checked in that order, as the server and
+    every other SDK check them, so the first bad field reported is the same
+    everywhere."""
     if not isinstance(fields, Mapping):
         raise TypeError("object fields must be a mapping of field names to types")
     if not fields:
@@ -3500,7 +3503,7 @@ def _declared_fields(fields: Any, field_type: type, label: str) -> "Mapping[str,
             raise TypeError("object field names must be strings")
         if not isinstance(field, field_type):
             raise TypeError(f"object field '{name}' must be a {label}")
-    return MappingProxyType(dict(fields))
+    return MappingProxyType(dict(sorted(fields.items())))
 
 
 def _check_declared_fields(

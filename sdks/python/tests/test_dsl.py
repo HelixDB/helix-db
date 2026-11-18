@@ -409,6 +409,22 @@ class DslAstTests(unittest.TestCase):
                 rows, {"data": [{"name": "Ada", "deleted_at": "2026-06-01"}]}
             )
 
+        # With several bad fields, the first in name order is reported, as the
+        # server and every other SDK report it, whatever the declared order.
+        with self.assertRaisesRegex(TypeError, r"parameter 'row\.a' must be string"):
+            QueryRequest.read(read_batch()).with_typed_parameter(
+                "row",
+                QueryParamType.object(
+                    {"z": QueryParamType.string(), "a": QueryParamType.string()}
+                ),
+                {"z": 1, "a": 1},
+            )
+        with self.assertRaisesRegex(TypeError, r"parameter 'row\.a' must be string"):
+            read_batch().to_query_request(
+                define_params({"row": param.object({"z": param.string(), "a": param.string()})}),
+                {"row": {"z": 1, "a": 1}},
+            )
+
         nullable = QueryParamType.nullable(QueryParamType.date_time())
         self.assertEqual(parsed(nullable), {"nullable": "date_time"})
         self.assertEqual(nullable.inner, QueryParamType.date_time())

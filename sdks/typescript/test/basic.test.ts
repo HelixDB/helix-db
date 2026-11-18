@@ -606,6 +606,24 @@ assert.deepEqual(
   { rows: [{ n: 1 }, { at: null, n: 2 }] },
 );
 assert.throws(() => QueryRequest.write(writeBatch()).withTypedParameter("rows", optionalRows, [{ at: null }]), /missing: \["n"\]/);
+// With several bad fields, the first in name order is reported, as the server
+// and every other SDK report it, whatever order the fields were declared in.
+assert.throws(
+  () =>
+    QueryRequest.read(readBatch()).withTypedParameter(
+      "row",
+      QueryParamType.object({ z: QueryParamType.string(), a: QueryParamType.string() }),
+      { z: 1, a: 1 },
+    ),
+  /parameter 'row\.a' must be string/,
+);
+assert.throws(
+  () =>
+    readBatch().toQueryJson(defineParams({ row: param.object({ z: param.string(), a: param.string() }) }), {
+      row: { a: 1, z: 1 },
+    } as never),
+  /parameter 'row\.a' must be string/,
+);
 const nullableType = QueryParamType.nullable(QueryParamType.dateTime());
 assert.deepEqual(nullableType.toJSON(), { nullable: "date_time" });
 assert.equal(nullableType.inner?.variant, "DateTime");

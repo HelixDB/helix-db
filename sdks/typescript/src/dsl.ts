@@ -3066,8 +3066,11 @@ function convertParamValue(schema: ParamSchema, value: unknown, path: string): J
       const fields = schema.fields!;
       const row = value as Record<string, unknown>;
       checkDeclaredFields(fields, (field) => field.kind === "Nullable", row, path);
+      // Name order, as the server and every other SDK check fields, so the
+      // first bad field reported is the same everywhere.
       return Object.fromEntries(
         Object.entries(fields)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
           .filter(([key]) => holdsField(row, key))
           .map(([key, field]) => [key, convertParamValue(field, row[key], `${path}.${key}`)]),
       );
@@ -3135,8 +3138,11 @@ function normalizeTypedQueryValue(type: QueryParamType, value: JsonValue, path: 
       const fields = type.fields!;
       const row = value as Record<string, JsonValue>;
       checkDeclaredFields(fields, (field) => field.variant === "Nullable", row, path);
+      // Name order, as the server and every other SDK check fields, so the
+      // first bad field reported is the same everywhere.
       return Object.fromEntries(
         Object.entries(fields)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
           .filter(([key]) => holdsField(row, key))
           .map(([key, field]) => [key, normalizeTypedQueryValue(field, row[key], `${path}.${key}`)]),
       );
