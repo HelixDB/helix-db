@@ -112,7 +112,7 @@ pub mod __private {
     ) -> Result<crate::QueryParamType, crate::QueryError> {
         /// What a value needs from its declaration, joined across the
         /// elements of an array.
-        #[derive(Debug, PartialEq)]
+        #[derive(Debug, Clone, PartialEq)]
         enum Shape<'v> {
             /// The elements of an empty array, which fit any declaration.
             Unconstrained,
@@ -195,8 +195,28 @@ pub mod __private {
                 (joined, Shape::Nullable(next)) => {
                     join(joined, *next).map(|inner| Shape::Nullable(Box::new(inner)))
                 }
+                // The new array's elements were joined among themselves
+                // first, so no index names the one that conflicts: the
+                // conflict is the whole array's, against the array the
+                // earlier elements need. Only differing arrays reach here,
+                // so equal rows clone nothing.
                 (Shape::Array(joined), Shape::Array(next)) => {
-                    join(*joined, *next).map(|element| Shape::Array(Box::new(element)))
+                    let earlier = Shape::Array(joined.clone());
+                    join(*joined, *next)
+                        .map(|element| Shape::Array(Box::new(element)))
+                        .map_err(|_| match lower(&earlier) {
+                            Some(expected) => Conflict {
+                                fields: Vec::new(),
+                                expected,
+                                actual: "an array whose elements do not fit it",
+                            },
+                            None => Conflict {
+                                fields: Vec::new(),
+                                expected: crate::QueryParamType::Value,
+                                actual:
+                                    "an array holding datetimes where earlier elements hold none",
+                            },
+                        })
                 }
                 // A key one object omits is absent there, which joins like
                 // `null`: the field is declared nullable.

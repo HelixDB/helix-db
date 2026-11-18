@@ -1581,6 +1581,46 @@ mod tests {
             let request = q_rows(rows).unwrap();
             assert_eq!(declared_and_reparsed(&request, "rows"), tagged_type);
         }
+        // Array fields that conflict name the array and the array type the
+        // earlier rows need, in either order and through an object element.
+        let tagged_object =
+            |tag: PropertyValue| tagged(vec![PropertyValue::object(vec![("at", tag)])]);
+        for (rows, expected, actual) in [
+            (
+                vec![
+                    tagged(vec![PropertyValue::DateTime(1)]),
+                    tagged(vec![PropertyValue::from("x")]),
+                ],
+                QueryParamType::Array(Box::new(QueryParamType::DateTime)),
+                "an array whose elements do not fit it",
+            ),
+            (
+                vec![
+                    tagged(vec![PropertyValue::from("x")]),
+                    tagged(vec![PropertyValue::DateTime(1)]),
+                ],
+                QueryParamType::Value,
+                "an array holding datetimes where earlier elements hold none",
+            ),
+            (
+                vec![
+                    tagged_object(PropertyValue::DateTime(1)),
+                    tagged_object(PropertyValue::from("x")),
+                ],
+                QueryParamType::Array(Box::new(fields(vec![("at", QueryParamType::DateTime)]))),
+                "an array whose elements do not fit it",
+            ),
+        ] {
+            let error = q_rows(rows).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    QueryError::ParameterTypeMismatch { path, expected: found, actual: got }
+                        if path == "rows[1].tags" && *found == expected && *got == actual
+                ),
+                "{error:?}"
+            );
+        }
         // Rows needing declarations no one type holds fail instead of
         // sending a datetime as text, naming the field where they conflict.
         let mut text = row("b", None);
