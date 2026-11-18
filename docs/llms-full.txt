@@ -6902,8 +6902,8 @@ converts it once in the background: each property whose every value is a datetim
 string with at most millisecond precision becomes datetimes, and any other property is left as
 stored and named in the server log.
 
-After the conversion, a Cypher or SQL filter that compares such a property with text matches no
-rows and raises no error, because a datetime never equals or orders against a string. This covers
+After the conversion, a Cypher or SQL filter that compares such a property with text fails with
+`type_error` (`datetime_text_comparison`), because text is never read as a datetime. This covers
 string literals (`WHERE e.at > '2026-01-01'`) and string parameters, including every JSON
 parameter, which has no datetime form. Read the text as a datetime instead: `datetime('…')` or
 `datetime($since)` in [Cypher](/database/helix-db/query-guides/cypher#datetimes), and
@@ -7642,8 +7642,8 @@ plan = client.explain_cypher(
 | Writing | `CREATE`; property and map `SET` (`=` and `+=`); property `REMOVE`; `DELETE`; `DETACH DELETE` |
 | Expressions | Parameters; scalar, list, and map literals; property and index access, including [datetime fields](#datetimes) such as `dt.year`; list slices such as `xs[1..3]`; arithmetic; comparisons (`<>` or `!=` for inequality) and comparison chains; `AND`, `OR`, `XOR`, `NOT`; `IS NULL` and `IS NOT NULL`; `IN`; `STARTS WITH`, `ENDS WITH`, `CONTAINS`; label tests such as `n:User`; simple and searched `CASE` |
 | Graph and list functions | `id`, `type`, `labels`, `properties`, `keys`, `exists` (for properties), `size`, `length`, `nodes`, `relationships`, `head`, `last`, `range`, `reverse` |
-| Scalar functions | `coalesce`, `abs`, `toString`, `toInteger` (and `toInt`), `toFloat`, `toBoolean`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
-| Datetime functions | `datetime()`, `datetime(text)`, `datetime({epochMillis: n})`, and `timestamp()`; see [datetimes](#datetimes) |
+| Scalar functions | `coalesce`, `abs`, `toString`, `toInteger` (and `toInt`), `toFloat`, `toBoolean`, `toStringOrNull`, `toIntegerOrNull`, `toFloatOrNull`, `toBooleanOrNull`, `trim`, `ltrim`, `rtrim`, `toLower`, `toUpper`, `substring` |
+| Datetime functions | `datetime()`, `datetime(text)`, `datetime({epochMillis: n})`, `datetimeOrNull(x)`, `requireDatetime(x)`, and `timestamp()`; see [datetimes](#datetimes) |
 | Aggregation | `count` (including `count(*)`), `sum`, `avg`, `min`, `max`, `collect`, each with `DISTINCT` arguments |
 | Values | Nulls, booleans, integers, floats, strings, UTC datetimes, lists, maps, nodes, relationships, and paths, with [lossless JSON encoding](#values-and-parameters) for large integers and non-finite floats |
 
@@ -7844,7 +7844,10 @@ LIMIT 10
 A datetime is a UTC instant with millisecond precision, the same value native
 queries store from datetime literals, `now()`, and typed `date_time`
 parameters. Cypher reads those stored properties, at any depth in lists and
-maps, and `CREATE` and `SET` store datetimes back as datetimes.
+maps, and `CREATE` and `SET` store datetimes back as datetimes. A list of
+datetimes, however it is written, is stored as one datetime list, which an
+equality index holds and an equality such as
+`e.slots = [datetime('2026-06-01'), datetime('2026-06-02')]` reads through it.
 
 - `datetime()` and `timestamp()` read the statement's clock, once: every call in
   one statement returns the same instant, as a datetime or as integer epoch
@@ -7852,15 +7855,21 @@ maps, and `CREATE` and `SET` store datetimes back as datetimes.
 - `datetime(text)` reads RFC 3339 (`2026-06-01T09:00:00Z`) with a `Z` or
   `±hh:mm` offset, a date and time without an offset (read as UTC), or a date
   alone (`2026-06-01`, UTC midnight). Every field is zero-padded, years run
-  from `0000` to `9999`, and seconds are required. A space may separate date
-  and time; digits past milliseconds are dropped.
+  from `0000` to `9999`, in the text and in UTC once its offset applies, so
+  `9999-12-31T23:59:59-00:01` is rejected, and seconds are required. A space
+  may separate date and time; digits past milliseconds are dropped.
   `datetime({epochMillis: n})` converts an integer, and a datetime or null
-  passes through.
-- Datetimes compare in time order. Against any other type, `=` is false and
-  `<`, `>`, `<=`, `>=` are null, as for a string against a number, so a
-  datetime never equals the string of its text. `ORDER BY` places datetimes
-  after paths and before strings. `min`, `max`, `DISTINCT`, and grouping work
-  on datetimes; `sum`, `avg`, and arithmetic reject them.
+  passes through. `datetimeOrNull(x)` is `datetime(x)`, except that a value it
+  cannot read is null instead of an error, as `toIntegerOrNull` and the other
+  `…OrNull` conversions are for theirs. `requireDatetime(x)` returns a
+  datetime or null unchanged and fails with `type_error` for anything else.
+- Datetimes compare in time order. Against any type other than text, `=` is
+  false and `<`, `>`, `<=`, `>=` are null, as for a string against a number.
+  Against text, every comparison, `IN`, `CASE` match, and `STARTS WITH`,
+  `ENDS WITH`, or `CONTAINS` fails with `type_error`
+  (`datetime_text_comparison`); see below. `ORDER BY` places datetimes after
+  paths and before strings. `min`, `max`, `DISTINCT`, and grouping work on
+  datetimes; `sum`, `avg`, and arithmetic reject them.
 - Fields read UTC components as integers: `dt.year`, `dt.quarter`,
   `dt.month`, `dt.week` and `dt.weekYear` (ISO 8601 weeks, starting Monday),
   `dt.day`, `dt.ordinalDay`, `dt.dayOfWeek` (Monday is 1), `dt.hour`,
@@ -7883,10 +7892,28 @@ not read that text back; use `datetime({epochMillis: n})`. Past about
 calendar field fails with `argument_error` (`datetime_out_of_range`), as a
 native response does.
 
-Comparing a datetime property with text never matches. A filter such as
-`e.at > '2026-01-01'` or `e.at >= $since` with a string parameter returns no
-rows, without an error; read the text first with `datetime('2026-01-01')` or
-`datetime($since)`.
+Text is never read as a datetime, so comparing a datetime with text fails
+with `type_error` (`datetime_text_comparison`) instead of silently matching
+nothing. A filter such as `e.at > '2026-01-01'`, or `e.at >= $since` with a
+string parameter, fails as soon as it compares a stored datetime; read the
+text first with `datetime('2026-01-01')` or `datetime($since)`, or compare
+`toString(e.at)` as text. When both sides' types are known, such as
+`datetime() > '2026-01-01'`, the error comes before anything runs.
+
+A scan compares every candidate, so it fails at the first datetime it meets.
+An index lookup reads only values of its own type, so a lookup by text does not
+read stored datetimes, except one: text that reads as a datetime also looks up
+the datetime it names, through an equality, an `IN` list, a range bound, or a
+correlated lookup, and a node holding it fails the same comparison. Querying a
+converted property with its old text therefore fails on both paths. Text that
+names no stored instant matches only text through an index.
+
+The store has no schema, so a `SET` of text, such as
+`SET e.at = '2026-06-01T00:00:00Z'`, stores text even where the property
+otherwise holds datetimes. Comparisons over such a mixed property follow the
+same rule: a scan with a datetime fails when it meets the text, and one with
+text fails when it meets a datetime, while an index lookup reads only its own
+type. Write `SET e.at = datetime('…')` to keep the property one type.
 
 ```cypher
 MATCH (e:Event)
@@ -8427,24 +8454,36 @@ profile and are rejected (`function`): `CURRENT_DATE` becomes `date()`,
 and `stddev` `stDev`.
 
 Timestamps are Cypher's [UTC datetimes](/database/helix-db/query-guides/cypher#datetimes).
-`CURRENT_TIMESTAMP` and `NOW()` become `datetime()`, the statement's clock. A
+`CURRENT_TIMESTAMP` and `NOW()` become `datetime()`, the statement's clock.
+Their one optional argument is a fractional-seconds precision from 0 to 6, as
+in PostgreSQL's `CURRENT_TIMESTAMP(p)` and MySQL's `NOW(p)`, which rounds the
+clock; a datetime holds milliseconds, so 3 to 6 change nothing. Any other
+argument fails with `argument_error` (`invalid_argument_type`). A
 `TIMESTAMP '2026-06-01 09:00:00'` literal is a datetime, read as UTC unless the
 text has an offset, so it can bound a range index. Text other than RFC 3339, a
 date and time, or a date, each zero-padded with years `0000`–`9999`, is
 rejected (`sql_construct`), and text in that form that names no instant, such
 as `'2026-02-30'`, fails with `argument_error` (`invalid_datetime`).
 `CAST(x AS TIMESTAMP)` becomes `datetime(x)`, which, unlike the other casts,
-fails on text it cannot read. `DATE` and `TIME` literals are not supported.
+fails on text it cannot read. `TRY_CAST` and `SAFE_CAST` are null wherever
+`CAST` fails, for every type: they become `datetimeOrNull`, `toIntegerOrNull`,
+`toFloatOrNull`, `toBooleanOrNull`, and `toStringOrNull`. `DATE` and `TIME`
+literals are not supported.
 
-A timestamp column never equals or orders against text: unlike PostgreSQL,
-`WHERE e.at > '2026-01-01'` does not cast the string, so it matches no rows
-and raises no error. The same holds for a string parameter. Write
-`e.at > TIMESTAMP '2026-01-01'` or `e.at > CAST(? AS TIMESTAMP)`. Properties
-written as `date_time` parameters before datetimes were stored natively are
+A timestamp column never compares with text: unlike PostgreSQL,
+`WHERE e.at > '2026-01-01'` does not cast the string, and fails with
+`type_error` (`datetime_text_comparison`), as does a string parameter, on
+both [scans and index lookups](/database/helix-db/query-guides/cypher#datetimes).
+Write `e.at > TIMESTAMP '2026-01-01'` or `e.at > CAST(? AS TIMESTAMP)`.
+Properties written as `date_time` parameters before datetimes were stored
+natively are
 [converted to datetimes](/database/helix-db/query-guides/parameters#supported-parameter-families),
-so filters that compared them with text stop matching after the conversion.
+so filters that compared them with text fail after the conversion.
 
-`EXTRACT(field FROM x)` reads the datetime field of the same meaning in UTC:
+`EXTRACT(field FROM x)` reads the datetime field of the same meaning in UTC
+from a datetime only, through `requireDatetime(x)`: any other value, such as
+text or a node with a property named after the field, fails with `type_error`.
+The fields are
 `YEAR`, `QUARTER`, `MONTH`, `WEEK` and `ISOYEAR` (ISO 8601 weeks), `DAY`,
 `DOY`, `ISODOW` (Monday is 1), `HOUR`, `MINUTE`, and `EPOCH` (seconds, with
 milliseconds as the fraction). `SECOND`, `MILLISECONDS`, `DOW`, and other

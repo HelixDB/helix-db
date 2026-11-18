@@ -224,8 +224,8 @@ string with at most millisecond precision becomes datetimes, and any other prope
 stored and named in the server log.
 
 <Warning>
-After the conversion, a Cypher or SQL filter that compares such a property with text matches no
-rows and raises no error, because a datetime never equals or orders against a string. This covers
+After the conversion, a Cypher or SQL filter that compares such a property with text fails with
+`type_error` (`datetime_text_comparison`), because text is never read as a datetime. This covers
 string literals (`WHERE e.at > '2026-01-01'`) and string parameters, including every JSON
 parameter, which has no datetime form. Read the text as a datetime instead: `datetime('…')` or
 `datetime($since)` in [Cypher](/database/helix-db/query-guides/cypher#datetimes), and
