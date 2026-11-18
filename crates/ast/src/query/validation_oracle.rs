@@ -158,24 +158,25 @@ fn normalize_nested(
             Ok(value)
         }
         (QueryParamType::Record(fields), QueryValue::Object(values)) => {
-            let declared = fields
+            let present = values.keys().cloned().collect::<Vec<_>>();
+            let missing_fields = fields
                 .iter()
+                .filter(|(field, ty)| {
+                    !matches!(ty, QueryParamType::Nullable(_))
+                        && !present.contains(&(*field).to_owned())
+                })
                 .map(|(field, _)| field.to_owned())
                 .collect::<Vec<_>>();
-            let present = values.keys().cloned().collect::<Vec<_>>();
-            if declared != present {
+            let extra_fields = present
+                .iter()
+                .filter(|field| fields.get(field).is_none())
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing_fields.is_empty() || !extra_fields.is_empty() {
                 return Err(QueryError::ObjectFieldMismatch {
                     path: path.to_owned(),
-                    missing_fields: declared
-                        .iter()
-                        .filter(|field| !present.contains(field))
-                        .cloned()
-                        .collect(),
-                    extra_fields: present
-                        .iter()
-                        .filter(|field| !declared.contains(field))
-                        .cloned()
-                        .collect(),
+                    missing_fields,
+                    extra_fields,
                 });
             }
             values
@@ -307,6 +308,20 @@ fn lazy_typed_normalization_matches_the_eager_oracle() {
         array(array(QueryParamType::I64)),
         record(vec![("x", QueryParamType::I64)]),
         record(vec![("x", QueryParamType::Value)]),
+        // Omittable fields before, after and between required ones.
+        record(vec![
+            ("x", nullable(QueryParamType::DateTime)),
+            ("y", QueryParamType::I64),
+        ]),
+        record(vec![
+            ("w", nullable(QueryParamType::I64)),
+            ("x", QueryParamType::I64),
+            ("y", nullable(QueryParamType::Value)),
+        ]),
+        array(record(vec![
+            ("w", nullable(QueryParamType::I64)),
+            ("x", nullable(QueryParamType::I64)),
+        ])),
         nullable(QueryParamType::DateTime),
         nullable(QueryParamType::Value),
         nullable(nullable(QueryParamType::I64)),

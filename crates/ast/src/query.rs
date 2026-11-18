@@ -62,15 +62,17 @@ pub enum QueryParamType {
     Value,
     /// Any object; its fields are validated like [`QueryParamType::Value`].
     Object,
-    /// An object with exactly the declared fields, each normalized to its
-    /// declared type. A missing or undeclared field is rejected, and `null`
-    /// satisfies only a [`QueryParamType::Value`] or
-    /// [`QueryParamType::Nullable`] field.
+    /// An object with the declared fields, each normalized to its declared
+    /// type. An undeclared field is rejected, and so is a missing one unless
+    /// it is declared [`QueryParamType::Nullable`]: an omitted nullable field
+    /// stays absent rather than becoming `null`. `null` satisfies only a
+    /// [`QueryParamType::Value`] or [`QueryParamType::Nullable`] field.
     Record(ObjectFields),
     /// Array.
     Array(Box<QueryParamType>),
     /// `null`, or a value of the inner type normalized to it, such as an
-    /// optional datetime column in bulk-imported rows.
+    /// optional datetime column in bulk-imported rows. As a
+    /// [`QueryParamType::Record`] field it may also be omitted.
     Nullable(Box<QueryParamType>),
 }
 
@@ -526,11 +528,11 @@ pub enum QueryError {
     EmptyObjectFields,
     /// An object declaration names a field twice.
     DuplicateObjectField(String),
-    /// An object's fields do not exactly match its declared fields.
+    /// An object's fields do not match its declared fields.
     ObjectFieldMismatch {
         /// The object's path.
         path: String,
-        /// Declared fields the object lacks.
+        /// Declared fields the object lacks that are not nullable.
         missing_fields: Vec<String>,
         /// Object fields that are not declared.
         extra_fields: Vec<String>,
@@ -1834,43 +1836,54 @@ fn normalize_typed_value_at<'t>(
             Ok(value)
         }
         (QueryParamType::Record(fields), QueryValue::Object(mut values)) => {
-            // Both maps order their names the same way, so equal name lists
-            // pair every value with its declaration in one pass.
+            // A field declared nullable may be omitted and stays absent; any
+            // other declared field must be present, and nothing undeclared
+            // may be. Equal name lists, the usual bulk row, need no lookups.
             if !values
                 .keys()
                 .map(String::as_str)
                 .eq(fields.iter().map(|(field, _)| field))
             {
-                return Err(QueryError::ObjectFieldMismatch {
-                    path: path(segments),
-                    missing_fields: fields
-                        .iter()
-                        .filter(|(field, _)| !values.contains_key(*field))
-                        .map(|(field, _)| field.to_owned())
-                        .collect(),
-                    extra_fields: values
-                        .keys()
-                        .filter(|field| fields.get(field).is_none())
-                        .cloned()
-                        .collect(),
-                });
+                let missing_fields = fields
+                    .iter()
+                    .filter(|(field, ty)| {
+                        !matches!(ty, QueryParamType::Nullable(_)) && !values.contains_key(*field)
+                    })
+                    .map(|(field, _)| field.to_owned())
+                    .collect::<Vec<_>>();
+                let extra_fields = values
+                    .keys()
+                    .filter(|field| fields.get(field).is_none())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !missing_fields.is_empty() || !extra_fields.is_empty() {
+                    return Err(QueryError::ObjectFieldMismatch {
+                        path: path(segments),
+                        missing_fields,
+                        extra_fields,
+                    });
+                }
             }
-            // Normalized in place, so a bulk row keeps its map allocation.
-            values
-                .values_mut()
-                .zip(fields.iter())
-                .try_for_each(|(value, (field, ty))| {
-                    segments.push(PathSegment::Field(field));
-                    let normalized = normalize_typed_value_at(
-                        ty,
-                        std::mem::replace(value, QueryValue::Null),
-                        name,
-                        segments,
-                    );
-                    segments.pop();
-                    *value = normalized?;
-                    Ok::<_, QueryError>(())
-                })?;
+            // Both maps order their names the same way and every value is
+            // declared, so one merge pass pairs each value with its
+            // declaration, skipping omitted fields. Normalized in place, so a
+            // bulk row keeps its map allocation.
+            let mut declared = fields.iter();
+            values.iter_mut().try_for_each(|(field, value)| {
+                let (field, ty) = declared
+                    .find(|(declared, _)| *declared == field.as_str())
+                    .expect("every value field was checked to be declared");
+                segments.push(PathSegment::Field(field));
+                let normalized = normalize_typed_value_at(
+                    ty,
+                    std::mem::replace(value, QueryValue::Null),
+                    name,
+                    segments,
+                );
+                segments.pop();
+                *value = normalized?;
+                Ok::<_, QueryError>(())
+            })?;
             Ok(QueryValue::Object(values))
         }
         (QueryParamType::Array(inner), QueryValue::Array(values)) => values
@@ -3234,11 +3247,75 @@ mod tests {
                 ]),
             ])
         );
-        // Nullable is not optional: the field must still be present.
+        // A nullable field may be omitted, and stays absent rather than
+        // becoming null; any other field must still be present, and an
+        // undeclared one is still rejected.
+        let omitted = QueryValue::Array(vec![
+            object(vec![("n", QueryValue::I64(1))]),
+            object(vec![
+                ("deleted_at", rfc3339("2026-07-28T12:34:56Z")),
+                ("n", QueryValue::I64(2)),
+            ]),
+        ]);
+        assert_eq!(
+            typed(rows.clone(), omitted).unwrap().parameters().unwrap()["value"],
+            QueryValue::Array(vec![
+                object(vec![("n", QueryValue::I64(1))]),
+                object(vec![
+                    ("deleted_at", QueryValue::DateTime(millis)),
+                    ("n", QueryValue::I64(2)),
+                ]),
+            ])
+        );
         assert!(matches!(
-            typed(rows.clone(), QueryValue::Array(vec![object(vec![("n", QueryValue::I64(1))])])),
-            Err(QueryError::ObjectFieldMismatch { missing_fields, .. })
-                if missing_fields == ["deleted_at"]
+            typed(
+                rows.clone(),
+                QueryValue::Array(vec![object(vec![(
+                    "deleted_at",
+                    QueryValue::Null
+                )])])
+            ),
+            Err(QueryError::ObjectFieldMismatch { path, missing_fields, extra_fields })
+                if path == "value[0]" && missing_fields == ["n"] && extra_fields.is_empty()
+        ));
+        assert!(matches!(
+            typed(
+                rows.clone(),
+                QueryValue::Array(vec![object(vec![
+                    ("n", QueryValue::I64(1)),
+                    ("note", QueryValue::Null),
+                ])])
+            ),
+            Err(QueryError::ObjectFieldMismatch { missing_fields, extra_fields, .. })
+                if missing_fields.is_empty() && extra_fields == ["note"]
+        ));
+        // Every field nullable: an empty object fits, and only an undeclared
+        // field is reported even when the nullable ones are omitted.
+        let optional = record(vec![
+            ("a", nullable(QueryParamType::DateTime)),
+            ("b", nullable(QueryParamType::I64)),
+        ]);
+        assert_eq!(
+            typed(optional.clone(), object(vec![])).unwrap().parameters().unwrap()["value"],
+            object(vec![])
+        );
+        assert!(matches!(
+            typed(optional.clone(), object(vec![("c", QueryValue::I64(1))])),
+            Err(QueryError::ObjectFieldMismatch { missing_fields, extra_fields, .. })
+                if missing_fields.is_empty() && extra_fields == ["c"]
+        ));
+        // A present field after an omitted one is still normalized and
+        // checked against its own declaration.
+        assert_eq!(
+            typed(optional.clone(), object(vec![("b", QueryValue::I64(3))]))
+                .unwrap()
+                .parameters()
+                .unwrap()["value"],
+            object(vec![("b", QueryValue::I64(3))])
+        );
+        assert!(matches!(
+            typed(optional, object(vec![("b", rfc3339("2026-07-28T12:34:56Z"))])),
+            Err(QueryError::ParameterTypeMismatch { path, .. }) if path == "value.b"
         ));
         // A present value must still be the inner type.
         for (invalid, actual) in [

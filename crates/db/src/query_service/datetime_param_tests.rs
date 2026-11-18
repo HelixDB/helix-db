@@ -616,7 +616,10 @@ async fn foreach_rows_with_nullable_datetime_fields_store_datetimes_or_null() {
         ]
     );
 
-    // A set value must still be a valid datetime, and the field present.
+    // A set value must still be a valid datetime, and a field that is not
+    // nullable present. An omitted nullable row field passes validation, but
+    // the body still reads it, so the import fails as unbound like an
+    // untyped row missing it.
     let db = open("datetime-rows-nullable-rejected").await;
     for (row, expected) in [
         (
@@ -624,8 +627,12 @@ async fn foreach_rows_with_nullable_datetime_fields_store_datetimes_or_null() {
             "'rows[0].at' expected date_time",
         ),
         (
+            json!({ "at": null, "audit": { "seen_at": null } }),
+            r#"missing: [\"name\"]"#,
+        ),
+        (
             json!({ "name": "bad", "audit": { "seen_at": null } }),
-            r#"missing: [\"at\"]"#,
+            "`at` is not bound",
         ),
     ] {
         let error = db
@@ -636,6 +643,44 @@ async fn foreach_rows_with_nullable_datetime_fields_store_datetimes_or_null() {
         assert!(error.contains(expected), "{expected}: {error}");
     }
     assert_eq!(event_count(&db).await, json!(0));
+}
+
+/// A nullable field may be omitted: inside a stored object it stays absent
+/// rather than becoming `null`, and in another row the same field set is
+/// still stored as a datetime.
+#[tokio::test]
+async fn foreach_rows_omitting_nullable_object_fields_store_them_absent() {
+    let db = open("datetime-rows-nullable-omitted").await;
+    db.query_json(&import_json(
+        json!([
+            { "name": "omitted", "at": null, "audit": {} },
+            import_row("set", "2026-06-01T00:00:00Z"),
+        ]),
+        nullable_row_type(),
+    ))
+    .await
+    .unwrap();
+    let stored = db
+        .query(QueryRequest::read(
+            read_batch()
+                .var_as(
+                    "events",
+                    g().n_with_label("Event")
+                        .value_map(Some(vec!["name", "audit"])),
+                )
+                .returning(["events"]),
+        ))
+        .await
+        .unwrap();
+    let mut events = stored["events"].as_array().unwrap().clone();
+    events.sort_by_key(|event| event["name"].as_str().unwrap().to_owned());
+    assert_eq!(
+        events,
+        [
+            json!({ "name": "omitted", "audit": {} }),
+            json!({ "name": "set", "audit": { "seen_at": "2026-06-01T00:00:00.000Z" } }),
+        ]
+    );
 }
 
 /// Rows with every nullable datetime set match through a range index. A
