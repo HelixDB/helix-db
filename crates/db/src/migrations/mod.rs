@@ -28,7 +28,7 @@ pub(crate) use tenant::envelope::legacy_key_requires_migration;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(test)]
 use std::sync::Mutex;
 use std::time::Instant;
@@ -726,6 +726,52 @@ impl MigrationFailpoint {
 static INJECTED_MIGRATION_FAILPOINT: Mutex<Option<MigrationFailpoint>> = Mutex::new(None);
 #[cfg(test)]
 static MIGRATION_FAILPOINT_TRIGGERED: AtomicBool = AtomicBool::new(false);
+/// One-based number of the legacy vector preflight to hold open; 0 holds none.
+#[cfg(test)]
+static LEGACY_VECTOR_PREFLIGHT_HOLD: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static LEGACY_VECTOR_PREFLIGHTS_BEGUN: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+const LEGACY_VECTOR_PREFLIGHT_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Overlaps legacy vector adoption activations with one preflight.
+///
+/// Counting from this call, the `preflight`-th legacy vector preflight stays
+/// open after its reads until another commit changes a reservation, or for
+/// at most two seconds. Every adoption activation waits, before it stages its
+/// writes, until that preflight has begun. So when the index worker can
+/// activate while that preflight runs, the activation commits inside the
+/// preflight's read window and the preflight's commit conflicts.
+#[cfg(test)]
+pub(crate) fn hold_legacy_vector_preflight(preflight: std::num::NonZeroUsize) {
+    LEGACY_VECTOR_PREFLIGHTS_BEGUN.store(0, Ordering::SeqCst);
+    LEGACY_VECTOR_PREFLIGHT_HOLD.store(preflight.get(), Ordering::SeqCst);
+}
+
+/// Waits until the preflight [`hold_legacy_vector_preflight`] holds has begun.
+#[cfg(test)]
+pub(crate) async fn await_held_legacy_vector_preflight() {
+    loop {
+        let held = LEGACY_VECTOR_PREFLIGHT_HOLD.load(Ordering::SeqCst);
+        if held == 0 || LEGACY_VECTOR_PREFLIGHTS_BEGUN.load(Ordering::SeqCst) >= held {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+}
+
+#[cfg(test)]
+async fn reservation_rows_for_test(
+    read: &(impl DbReadOps + Send + Sync),
+    prefix: &Bytes,
+) -> Result<Vec<(Bytes, Bytes)>> {
+    let mut rows = read.scan_prefix(prefix.clone(), ..).await?;
+    let mut collected = Vec::new();
+    while let Some(row) = rows.next().await? {
+        collected.push((row.key, row.value));
+    }
+    Ok(collected)
+}
 
 #[cfg(test)]
 impl MigrationFailpoint {
@@ -1922,6 +1968,8 @@ pub(crate) async fn preflight_legacy_vector_reservations(db: &Db) -> Result<()> 
 
     let scope = DataScope::LegacyUnscoped;
     let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    #[cfg(test)]
+    let preflight_number = LEGACY_VECTOR_PREFLIGHTS_BEGUN.fetch_add(1, Ordering::SeqCst) + 1;
     let reservation_prefix = GlobalKey::logical_prefix(GlobalKind::LegacyVectorPhysicalReservation);
     let mut retiring_owners = BTreeMap::new();
     let mut retiring_rows = transaction
@@ -2164,7 +2212,9 @@ pub(crate) async fn preflight_legacy_vector_reservations(db: &Db) -> Result<()> 
     }
 
     let mut reservations = BTreeMap::new();
-    let mut reservation_rows = transaction.scan_prefix(reservation_prefix, ..).await?;
+    let mut reservation_rows = transaction
+        .scan_prefix(reservation_prefix.clone(), ..)
+        .await?;
     while let Some(row) = reservation_rows.next().await? {
         let GlobalKey::LegacyVectorPhysicalReservation(physical_id) =
             GlobalKey::parse_from_slice(&row.key)?
@@ -2273,6 +2323,16 @@ pub(crate) async fn preflight_legacy_vector_reservations(db: &Db) -> Result<()> 
         )?;
         #[cfg(test)]
         trip_migration_failpoint(MigrationFailpoint::LegacyVectorReservationAfter)?;
+    }
+    #[cfg(test)]
+    if preflight_number == LEGACY_VECTOR_PREFLIGHT_HOLD.load(Ordering::SeqCst) {
+        let read = reservation_rows_for_test(&transaction, &reservation_prefix).await?;
+        let deadline = Instant::now() + LEGACY_VECTOR_PREFLIGHT_HOLD_LIMIT;
+        while Instant::now() < deadline
+            && reservation_rows_for_test(db, &reservation_prefix).await? == read
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
     }
     transaction.commit().await?;
     Ok(())

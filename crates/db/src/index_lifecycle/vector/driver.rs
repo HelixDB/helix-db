@@ -2246,6 +2246,8 @@ async fn step_build<D: Distance>(
                 .map_err(|error| corruption(error.to_string()))?;
                 let legacy = VectorIndex::<D>::for_legacy_migration(source.physical_name(), scope);
                 #[cfg(test)]
+                crate::migrations::await_held_legacy_vector_preflight().await;
+                #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorMetadataPublicationBefore,
                 )?;

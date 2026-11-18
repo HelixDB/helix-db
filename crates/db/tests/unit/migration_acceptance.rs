@@ -334,6 +334,21 @@ fn legacy_vector_adoption_failpoints_preserve_physical_ownership() {
     });
 }
 
+/// A resumed adoption that activates while writer open's last legacy vector
+/// preflight is open must not fail the open with a transaction conflict.
+#[test]
+fn legacy_vector_adoption_recovery_survives_overlapping_activation() {
+    crate::test_isolation::in_own_process(|| {
+        let boundaries = run_contract(
+            super::lifecycle_contracts::run_vector_adoption_recovery_preflight_overlap_contract,
+        );
+        assert_eq!(
+            boundaries,
+            vec!["legacy_vector_metadata_publication_before"]
+        );
+    });
+}
+
 /// Malformed core, hot, and layer-zero rows must preserve their exact sources.
 #[test]
 fn malformed_legacy_vector_lanes_fail_closed() {
