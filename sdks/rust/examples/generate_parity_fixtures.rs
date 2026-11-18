@@ -589,7 +589,7 @@ fn assert_complete_fixture_coverage(coverage: &FixtureCoverage) {
         "QueryValue",
         &coverage.query_values,
         &[
-            "Null", "Bool", "I64", "F64", "F32", "String", "Array", "Object",
+            "Null", "Bool", "I64", "F64", "F32", "DateTime", "String", "Array", "Object",
         ],
     );
 }
