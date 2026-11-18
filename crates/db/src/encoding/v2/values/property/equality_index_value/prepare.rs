@@ -137,18 +137,26 @@ pub(crate) fn prepare_equality_value(
             }
             (Kind::Bytes(value), TAG_LEN + COUNT_LEN + value.len())
         }
-        PropertyValue::I64Array(values) | PropertyValue::DateTimeArray(values) => {
+        PropertyValue::I64Array(values) => {
             if u32::try_from(values.len()).is_err() {
                 return oversized(TAG_LEN);
             }
-            // The same frame under distinct tags: integer and datetime lists
-            // never equal each other, as their members never do.
-            let kind = match value {
-                PropertyValue::DateTimeArray(_) => Kind::DateTimes(values),
-                _ => Kind::Integers(values),
-            };
             (
-                kind,
+                Kind::Integers(values),
+                values
+                    .len()
+                    .saturating_mul(size_of::<i64>())
+                    .saturating_add(TAG_LEN + COUNT_LEN),
+            )
+        }
+        // The integer list's frame under its own tag: a datetime list never
+        // equals an integer list, as a datetime never equals its millis.
+        PropertyValue::DateTimeArray(values) => {
+            if u32::try_from(values.len()).is_err() {
+                return oversized(TAG_LEN);
+            }
+            (
+                Kind::DateTimes(values),
                 values
                     .len()
                     .saturating_mul(size_of::<i64>())

@@ -850,9 +850,10 @@ impl Translator<'_> {
             "current_timestamp" | "now" => {
                 let precision = match arguments.as_slice() {
                     [] => 3,
-                    [argument] => match argument.kind() {
-                        ExprKind::Literal(r::Value::Integer(precision @ 0..=6)) => *precision,
-                        _ => {
+                    [argument] => {
+                        let ExprKind::Literal(r::Value::Integer(precision @ 0..=6)) =
+                            argument.kind()
+                        else {
                             return Err(QueryError::compile(
                                 category::ARGUMENT_ERROR,
                                 detail::INVALID_ARGUMENT_TYPE,
@@ -863,8 +864,9 @@ impl Translator<'_> {
                                 ),
                             )
                             .at(argument.span));
-                        }
-                    },
+                        };
+                        *precision
+                    }
                     _ => {
                         return Err(invalid(
                             detail::INVALID_NUMBER_OF_ARGUMENTS,

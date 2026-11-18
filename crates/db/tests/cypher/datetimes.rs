@@ -681,9 +681,11 @@ async fn sql_safe_casts_clock_arguments_and_extract_operands() {
             db.sql(Request::new(&query))
                 .await
                 .map(|response| response.rows)
-                .map_err(|error| match error {
-                    cypher::Error::Query(error) => error,
-                    other => panic!("{query}: {other:?}"),
+                .map_err(|error| {
+                    let cypher::Error::Query(error) = error else {
+                        panic!("{query}: {error:?}");
+                    };
+                    error
                 })
         }
     };

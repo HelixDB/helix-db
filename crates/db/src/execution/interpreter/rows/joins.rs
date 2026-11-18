@@ -26,7 +26,14 @@ impl HashJoinTable {
         let mismatched = match probe {
             r::Value::DateTime(_) => self.text_keys,
             r::Value::String(_) => self.datetime_keys,
-            _ => false,
+            r::Value::Null
+            | r::Value::Boolean(_)
+            | r::Value::Integer(_)
+            | r::Value::Float(_)
+            | r::Value::List(_)
+            | r::Value::Map(_)
+            | r::Value::Entity(_)
+            | r::Value::Path(_) => false,
         };
         if mismatched {
             return Err(r::datetime_text_comparison().into());

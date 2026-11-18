@@ -69,9 +69,11 @@ pub(super) fn query_value_to_db_value(value: QueryValue) -> DbPropertyValue {
                     .all(|value| matches!(value, QueryValue::DateTime(_)))
             {
                 let mut millis = Vec::with_capacity(values.len());
-                millis.extend(values.iter().filter_map(|value| match value {
-                    QueryValue::DateTime(millis) => Some(*millis),
-                    _ => None,
+                millis.extend(values.iter().filter_map(|value| {
+                    let QueryValue::DateTime(millis) = value else {
+                        return None;
+                    };
+                    Some(*millis)
                 }));
                 return DbPropertyValue::DateTimeArray(millis);
             }
