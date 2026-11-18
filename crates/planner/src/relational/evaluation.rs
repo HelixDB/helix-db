@@ -286,7 +286,7 @@ impl Evaluation<'_> {
                 // Both temporaries are released before the selected result.
                 let remaining = self.remaining(operand.allocated_bytes())?;
                 for (comparison, value) in &case.branches {
-                    let matches = operand.equals(&remaining.eval(comparison)?) == Some(true);
+                    let matches = operand.equals(&remaining.eval(comparison)?)? == Some(true);
                     if matches {
                         drop(operand);
                         return self.eval(value);
@@ -497,7 +497,28 @@ impl Evaluation<'_> {
             .collect()
     }
 
-    fn function(&self, function: Function, mut args: Vec<Value>) -> Result<Value> {
+    fn function(&self, function: Function, args: Vec<Value>) -> Result<Value> {
+        use Function as F;
+        let strict = match function {
+            F::ToStringOrNull => F::ToString,
+            F::ToIntegerOrNull => F::ToInteger,
+            F::ToFloatOrNull => F::ToFloat,
+            F::ToBooleanOrNull => F::ToBoolean,
+            F::DateTimeOrNull => F::DateTime,
+            function => return self.strict_function(function, args),
+        };
+        match self.strict_function(strict, args) {
+            Err(error)
+                if error.category == category::TYPE_ERROR
+                    || error.category == category::ARGUMENT_ERROR =>
+            {
+                Ok(Value::Null)
+            }
+            result => result,
+        }
+    }
+
+    fn strict_function(&self, function: Function, mut args: Vec<Value>) -> Result<Value> {
         use Function as F;
         // The binder admits no arguments to these clock reads only.
         if args.is_empty() {
@@ -837,7 +858,21 @@ impl Evaluation<'_> {
                 _ => return Err(type_error("datetime requires a string, map or datetime")),
             },
             F::Timestamp => return Err(type_error("timestamp takes no arguments")),
+            F::RequireDateTime => match first {
+                Value::DateTime(_) => first,
+                _ => {
+                    return Err(type_error(
+                        "EXTRACT and requireDatetime need a datetime; convert text with \
+                         datetime('…') or CAST(… AS TIMESTAMP)",
+                    ))
+                }
+            },
             F::Coalesce | F::Exists => unreachable!("handled before strict function evaluation"),
+            F::ToStringOrNull
+            | F::ToIntegerOrNull
+            | F::ToFloatOrNull
+            | F::ToBooleanOrNull
+            | F::DateTimeOrNull => unreachable!("evaluated as their strict conversions"),
         })
     }
 
@@ -960,7 +995,7 @@ pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
         };
         let mut unknown = false;
         for x in xs {
-            match a.equals(&x) {
+            match a.equals(&x)? {
                 Some(true) => return Ok(Value::Boolean(true)),
                 None => unknown = true,
                 Some(false) => {}
@@ -973,7 +1008,7 @@ pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
         });
     }
     if matches!(op, B::Equal | B::NotEqual) {
-        return Ok(truth(a.equals(&b).map(|equal| {
+        return Ok(truth(a.equals(&b)?.map(|equal| {
             if op == B::Equal {
                 equal
             } else {
@@ -996,7 +1031,7 @@ pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
         {
             return Ok(Value::Boolean(false));
         }
-        let comparison = predicate_order(&a, &b);
+        let comparison = predicate_order(&a, &b)?;
         return Ok(truth(comparison.map(|o| match op {
             B::Less => o == Ordering::Less,
             B::LessEqual => o != Ordering::Greater,
@@ -1007,6 +1042,15 @@ pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
     }
     if matches!(op, B::StartsWith | B::EndsWith | B::Contains) {
         return Ok(match (&a, &b) {
+            // A datetime is not text, and is never matched as its text.
+            (Value::DateTime(_), Value::String(_)) | (Value::String(_), Value::DateTime(_)) => {
+                return Err(QueryError::runtime(
+                    category::TYPE_ERROR,
+                    detail::DATETIME_TEXT_COMPARISON,
+                    "STARTS WITH, ENDS WITH and CONTAINS match text, not a datetime; \
+                     match toString(datetime) to match its RFC 3339 text",
+                ));
+            }
             (Value::String(a), Value::String(b)) => Value::Boolean(match op {
                 B::StartsWith => a.starts_with(b),
                 B::EndsWith => a.ends_with(b),
@@ -1052,25 +1096,32 @@ pub(super) fn binary(op: Binary, a: Value, b: Value) -> Result<Value> {
     }))
 }
 
-fn predicate_order(a: &Value, b: &Value) -> Option<Ordering> {
-    match (a, b) {
+/// Cypher's ordering comparison: `None` across types, except that a datetime
+/// and text, at any depth, fail as [`Value::equals`] does.
+fn predicate_order(a: &Value, b: &Value) -> Result<Option<Ordering>> {
+    Ok(match (a, b) {
         (Value::Integer(_) | Value::Float(_), Value::Integer(_) | Value::Float(_)) => {
             a.number_cmp(b)
         }
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
         (Value::DateTime(a), Value::DateTime(b)) => Some(a.cmp(b)),
+        (Value::DateTime(_), Value::String(_)) | (Value::String(_), Value::DateTime(_)) => {
+            return Err(super::datetime_text_comparison());
+        }
         (Value::Boolean(a), Value::Boolean(b)) => Some(a.cmp(b)),
         (Value::List(a), Value::List(b)) => {
             for (a, b) in a.iter().zip(b) {
-                let comparison = predicate_order(a, b)?;
+                let Some(comparison) = predicate_order(a, b)? else {
+                    return Ok(None);
+                };
                 if !comparison.is_eq() {
-                    return Some(comparison);
+                    return Ok(Some(comparison));
                 }
             }
             Some(a.len().cmp(&b.len()))
         }
         _ => None,
-    }
+    })
 }
 
 /// A validated integer generator. Overflow at the endpoint terminates normally.

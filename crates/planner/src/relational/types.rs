@@ -115,6 +115,27 @@ impl Expression {
                 let a = infer(a)?;
                 let b = infer(b)?;
                 match op {
+                    Binary::Equal
+                    | Binary::NotEqual
+                    | Binary::Less
+                    | Binary::LessEqual
+                    | Binary::Greater
+                    | Binary::GreaterEqual
+                    | Binary::StartsWith
+                    | Binary::EndsWith
+                    | Binary::Contains
+                        if matches!(
+                            (a, b),
+                            (T::DateTime, T::String) | (T::String, T::DateTime)
+                        ) =>
+                    {
+                        return Err(QueryError::compile(
+                            category::TYPE_ERROR,
+                            detail::DATETIME_TEXT_COMPARISON,
+                            "cannot compare a datetime with text; read the text as a datetime \
+                             with datetime('…') in Cypher or TIMESTAMP '…' in SQL",
+                        ));
+                    }
                     Binary::In => {
                         require(b, &[T::List], category::SYNTAX_ERROR)?;
                         T::Boolean
@@ -294,6 +315,16 @@ impl Expression {
                         T::DateTime
                     }
                     Function::Timestamp => T::Integer,
+                    // Any argument converts or is null.
+                    Function::ToStringOrNull => T::String,
+                    Function::ToIntegerOrNull => T::Integer,
+                    Function::ToFloatOrNull => T::Float,
+                    Function::ToBooleanOrNull => T::Boolean,
+                    Function::DateTimeOrNull => T::DateTime,
+                    Function::RequireDateTime => {
+                        require(first, &[T::DateTime], category::TYPE_ERROR)?;
+                        T::DateTime
+                    }
                 }
             }
         })

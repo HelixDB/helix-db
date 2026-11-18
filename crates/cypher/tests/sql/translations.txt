@@ -937,20 +937,46 @@ SELECT CAST('2024-13-01' AS TIMESTAMP)
 
 # HelixDB: EXTRACT reads the datetime property of the same meaning; EPOCH is fractional seconds
 SELECT EXTRACT(YEAR FROM e.at), EXTRACT(QUARTER FROM e.at), EXTRACT(MONTH FROM e.at), EXTRACT(WEEK FROM e.at), EXTRACT(ISOYEAR FROM e.at), EXTRACT(DAY FROM e.at), EXTRACT(DOY FROM e.at), EXTRACT(ISODOW FROM e.at), EXTRACT(HOUR FROM e.at), EXTRACT(MINUTE FROM e.at), EXTRACT(EPOCH FROM e.at) FROM Event e
-=> MATCH (e:Event) RETURN e.at.year, e.at.quarter, e.at.month, e.at.week, e.at.weekYear, e.at.day, e.at.ordinalDay, e.at.dayOfWeek, e.at.hour, e.at.minute, e.at.epochMillis / 1000.0
+=> MATCH (e:Event) RETURN requireDatetime(e.at).year, requireDatetime(e.at).quarter, requireDatetime(e.at).month, requireDatetime(e.at).week, requireDatetime(e.at).weekYear, requireDatetime(e.at).day, requireDatetime(e.at).ordinalDay, requireDatetime(e.at).dayOfWeek, requireDatetime(e.at).hour, requireDatetime(e.at).minute, requireDatetime(e.at).epochMillis / 1000.0
 
 # HelixDB: EXTRACT groups by a datetime field
 SELECT EXTRACT(YEAR FROM e.at) AS year, COUNT(*) AS events FROM Event e GROUP BY EXTRACT(YEAR FROM e.at)
-=> MATCH (e:Event) RETURN e.at.year AS year, count(*) AS events
+=> MATCH (e:Event) RETURN requireDatetime(e.at).year AS year, count(*) AS events
 
 # HelixDB: EXTRACT of a literal is checked when the translation compiles
 SELECT EXTRACT(MONTH FROM TIMESTAMP '2024-05-06')
-=> RETURN datetime('2024-05-06T00:00:00.000Z').month
+=> RETURN requireDatetime(datetime('2024-05-06T00:00:00.000Z')).month
 
-# HelixDB: EXTRACT from text is a type error, as property access on a string is
+# HelixDB: EXTRACT from text is a type error; text is never read as a datetime
 SELECT EXTRACT(YEAR FROM 'x')
-=> RETURN 'x'.year
+=> RETURN requireDatetime('x').year
 !! type_error invalid_argument_type
+
+# HelixDB: EXTRACT from a node is a type error, never the node's property of the field's name
+SELECT EXTRACT(YEAR FROM e) FROM Event e
+=> MATCH (e:Event) RETURN requireDatetime(e).year
+!! type_error invalid_argument_type
+
+# HelixDB: TRY_CAST and SAFE_CAST are null where CAST fails, for every type
+SELECT TRY_CAST(e.at AS TIMESTAMP), SAFE_CAST(e.n AS INTEGER), TRY_CAST(e.n AS DOUBLE), TRY_CAST(e.b AS BOOLEAN), TRY_CAST(e.n AS VARCHAR) FROM Event e
+=> MATCH (e:Event) RETURN datetimeOrNull(e.at), toIntegerOrNull(e.n), toFloatOrNull(e.n), toBooleanOrNull(e.b), toStringOrNull(e.n)
+
+# HelixDB: a safe cast of unreadable literal text is null when the translation compiles
+SELECT TRY_CAST('yesterday' AS TIMESTAMP)
+=> RETURN datetimeOrNull('yesterday')
+
+# HelixDB: CURRENT_TIMESTAMP and NOW take only a fractional-seconds precision, which rounds the clock
+SELECT CURRENT_TIMESTAMP(3), NOW(1)
+=> RETURN datetime(), datetime({epochMillis: (timestamp() + 50) / 100 * 100})
+
+# HelixDB: no other argument is read, least of all as a datetime
+SELECT NOW('2020-01-01')
+=> error: argument_error invalid_argument_type
+
+# HelixDB: a datetime never compares with text
+SELECT e.seq FROM Event e WHERE e.at > TIMESTAMP '2024-01-01' AND TIMESTAMP '2024-01-01' = '2024-01-01'
+=> MATCH (e:Event) WHERE e.at > datetime('2024-01-01T00:00:00.000Z') AND datetime('2024-01-01T00:00:00.000Z') = '2024-01-01' RETURN e.seq
+!! type_error datetime_text_comparison
 
 # HelixDB: PostgreSQL's SECOND carries the seconds' fraction, which no one property holds
 SELECT EXTRACT(SECOND FROM e.at) FROM Event e

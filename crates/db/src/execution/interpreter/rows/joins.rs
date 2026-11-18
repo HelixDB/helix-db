@@ -9,11 +9,29 @@ use std::collections::{BTreeMap, HashMap};
 
 pub(super) struct HashJoinTable {
     buckets: HashMap<r::GroupingKey, Vec<u64>>,
+    /// Whether any key is a datetime, and whether any is text: a probe of the
+    /// other kind fails as the nested-loop comparison of the pair would,
+    /// rather than silently finding no bucket.
+    datetime_keys: bool,
+    text_keys: bool,
     _memory: memory::Reservation,
 }
 impl HashJoinTable {
     pub(super) fn bucket(&self, key: &r::GroupingKey) -> Option<&[u64]> {
         self.buckets.get(key).map(Vec::as_slice)
+    }
+
+    /// Fails when `probe` and some key are a datetime and text.
+    pub(super) fn check_probe(&self, probe: &r::Value) -> Result<()> {
+        let mismatched = match probe {
+            r::Value::DateTime(_) => self.text_keys,
+            r::Value::String(_) => self.datetime_keys,
+            _ => false,
+        };
+        if mismatched {
+            return Err(r::datetime_text_comparison().into());
+        }
+        Ok(())
     }
 
     pub async fn build(
@@ -55,6 +73,7 @@ impl HashJoinTable {
         S: Stream<Item = Result<memory::Rows>>,
     {
         let mut buckets: HashMap<r::GroupingKey, Vec<u64>> = HashMap::new();
+        let (mut datetime_keys, mut text_keys) = (false, false);
         let fixed = size_of::<Self>().saturating_add(2 * size_of::<usize>());
         let mut memory = context.row_budget().reserve(fixed)?;
         let _source_memory = context.row_budget().reserve(size_of::<S>())?;
@@ -79,9 +98,11 @@ impl HashJoinTable {
                     unreachable!("join hydration rows contain source node IDs");
                 };
                 let value = graph.property(r::Entity::Node(id), property)?;
-                if value.equals(value) != Some(true) {
+                if value.equals(value)? != Some(true) {
                     continue;
                 }
+                datetime_keys |= matches!(value, r::Value::DateTime(_));
+                text_keys |= matches!(value, r::Value::String(_));
                 let _key_memory = context.row_budget().reserve(value.allocated_bytes())?;
                 let key = r::GroupingKey::new(value.clone())?;
                 let new_key = !buckets.contains_key(&key);
@@ -122,6 +143,8 @@ impl HashJoinTable {
         }
         Ok(Self {
             buckets,
+            datetime_keys,
+            text_keys,
             _memory: memory,
         })
     }

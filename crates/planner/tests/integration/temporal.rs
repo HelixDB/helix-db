@@ -106,12 +106,11 @@ fn datetimes_compare_chronologically_in_predicates() {
 #[test]
 fn mixed_domain_comparisons_match_string_against_integer() {
     use r::Binary as B;
-    // A datetime against any other type behaves as a string does against an
-    // integer: equality is false, ordering is null, never an error.
+    // A datetime against any other type but text behaves as a string does
+    // against an integer: equality is false, ordering is null, never an error.
     let others = [
         V::Integer(1),
         V::Float(1.0),
-        V::String("1970-01-01T00:00:00.001Z".into()),
         V::Boolean(true),
         V::List(vec![V::DateTime(1)]),
         V::Map(BTreeMap::from([("epochMillis".into(), V::Integer(1))])),
@@ -149,6 +148,107 @@ fn mixed_domain_comparisons_match_string_against_integer() {
         .unwrap_err();
         assert_eq!(error.category, r::category::TYPE_ERROR, "{op:?}");
     }
+}
+
+/// Text is never read as a datetime, so comparing the two is a type error
+/// wherever they meet: every comparison and text match, membership, a simple
+/// CASE, and inside lists and maps. Null still compares as unknown.
+#[test]
+fn datetimes_and_text_never_compare() {
+    use r::Binary as B;
+    let failure = |op: B, left: V, right: V| {
+        let error = eval(&E::Binary(
+            op,
+            Box::new(E::Literal(left.clone())),
+            Box::new(E::Literal(right.clone())),
+        ))
+        .unwrap_err();
+        assert_eq!(
+            (error.category.as_str(), error.detail.as_str(), error.phase),
+            (
+                r::category::TYPE_ERROR,
+                r::detail::DATETIME_TEXT_COMPARISON,
+                r::ErrorPhase::Runtime
+            ),
+            "{op:?} {left:?} {right:?}"
+        );
+        // The message names the conversion that would make the comparison.
+        assert!(
+            error.message.contains("datetime('…')") || error.message.contains("toString("),
+            "{}",
+            error.message
+        );
+    };
+    let text = || V::String("1970-01-01T00:00:00.001Z".into());
+    let unreadable = || V::String("soon".into());
+    for op in [
+        B::Equal,
+        B::NotEqual,
+        B::Less,
+        B::LessEqual,
+        B::Greater,
+        B::GreaterEqual,
+        B::StartsWith,
+        B::EndsWith,
+        B::Contains,
+    ] {
+        for other in [text(), unreadable(), V::String(String::new())] {
+            failure(op, V::DateTime(1), other.clone());
+            failure(op, other, V::DateTime(1));
+        }
+    }
+    for op in [B::Equal, B::NotEqual, B::Less, B::GreaterEqual] {
+        failure(op, V::List(vec![V::DateTime(1)]), V::List(vec![text()]));
+        failure(
+            op,
+            V::List(vec![V::Integer(1), text()]),
+            V::List(vec![V::Integer(1), V::DateTime(1)]),
+        );
+    }
+    let map = |value: V| V::Map(BTreeMap::from([("at".to_owned(), value)]));
+    failure(B::Equal, map(V::DateTime(1)), map(text()));
+    failure(B::In, V::DateTime(1), V::List(vec![V::Integer(1), text()]));
+    failure(B::In, text(), V::List(vec![V::DateTime(1)]));
+    // A comparison that never reaches the pair does not fail: lists of other
+    // lengths are unequal, and an earlier element decides the order.
+    assert_eq!(
+        binary(
+            B::Equal,
+            V::List(vec![V::DateTime(1)]),
+            V::List(vec![text(), text()])
+        ),
+        V::Boolean(false)
+    );
+    assert_eq!(
+        binary(
+            B::Less,
+            V::List(vec![V::Integer(0), V::DateTime(1)]),
+            V::List(vec![V::Integer(1), text()])
+        ),
+        V::Boolean(true)
+    );
+    assert_eq!(
+        binary(B::In, V::DateTime(1), V::List(vec![V::DateTime(1), text()])),
+        V::Boolean(true)
+    );
+    for op in [B::Equal, B::Less, B::StartsWith] {
+        assert_eq!(binary(op, V::DateTime(1), V::Null), V::Null, "{op:?}");
+        assert_eq!(binary(op, V::Null, text()), V::Null, "{op:?}");
+    }
+    let case = |operand: V, comparison: V| {
+        eval(&E::SimpleCase(Box::new(r::SimpleCase {
+            operand: E::Literal(operand),
+            branches: helix_planner::ir::AtLeast::from_one((
+                E::Literal(comparison),
+                E::Literal(V::Integer(1)),
+            )),
+            otherwise: E::Literal(V::Integer(0)),
+        })))
+    };
+    let error = case(V::DateTime(1), text()).unwrap_err();
+    assert_eq!(error.detail, r::detail::DATETIME_TEXT_COMPARISON);
+    assert_eq!(case(V::DateTime(1), V::DateTime(1)).unwrap(), V::Integer(1));
+    assert_eq!(case(V::DateTime(1), V::Integer(1)).unwrap(), V::Integer(0));
 }
 
 #[test]
@@ -357,6 +457,154 @@ fn datetime_rejects_unreadable_text_maps_and_types() {
     }
 }
 
+/// Each `…OrNull` conversion is its strict conversion, except that a value
+/// the strict one fails to convert, with a type or argument error, is null.
+#[test]
+fn or_null_conversions_are_null_where_strict_conversions_fail() {
+    let text = |value: &str| V::String(value.into());
+    let map = |value: V| V::Map(BTreeMap::from([("epochMillis".to_owned(), value)]));
+    for (strict, or_null, argument, converted) in [
+        (
+            F::ToInteger,
+            F::ToIntegerOrNull,
+            text("12"),
+            Some(V::Integer(12)),
+        ),
+        (F::ToInteger, F::ToIntegerOrNull, text("x"), Some(V::Null)),
+        (F::ToInteger, F::ToIntegerOrNull, V::Boolean(true), None),
+        (F::ToInteger, F::ToIntegerOrNull, V::DateTime(1), None),
+        (
+            F::ToFloat,
+            F::ToFloatOrNull,
+            text("1.5"),
+            Some(V::Float(1.5)),
+        ),
+        (F::ToFloat, F::ToFloatOrNull, V::List(vec![]), None),
+        (
+            F::ToBoolean,
+            F::ToBooleanOrNull,
+            text("TRUE"),
+            Some(V::Boolean(true)),
+        ),
+        (F::ToBoolean, F::ToBooleanOrNull, V::Integer(1), None),
+        (
+            F::ToString,
+            F::ToStringOrNull,
+            V::Integer(7),
+            Some(text("7")),
+        ),
+        (
+            F::ToString,
+            F::ToStringOrNull,
+            V::DateTime(1),
+            Some(text("1970-01-01T00:00:00.001Z")),
+        ),
+        (F::ToString, F::ToStringOrNull, V::DateTime(i64::MAX), None),
+        (
+            F::ToString,
+            F::ToStringOrNull,
+            V::List(vec![V::Integer(1)]),
+            None,
+        ),
+        (
+            F::DateTime,
+            F::DateTimeOrNull,
+            text("1970-01-01T00:00:00.001Z"),
+            Some(V::DateTime(1)),
+        ),
+        (
+            F::DateTime,
+            F::DateTimeOrNull,
+            V::DateTime(1),
+            Some(V::DateTime(1)),
+        ),
+        (
+            F::DateTime,
+            F::DateTimeOrNull,
+            map(V::Integer(1)),
+            Some(V::DateTime(1)),
+        ),
+        (F::DateTime, F::DateTimeOrNull, text("soon"), None),
+        (
+            F::DateTime,
+            F::DateTimeOrNull,
+            text("9999-12-31T23:59:59-00:01"),
+            None,
+        ),
+        (F::DateTime, F::DateTimeOrNull, map(V::Float(1.5)), None),
+        (
+            F::DateTime,
+            F::DateTimeOrNull,
+            map(V::Integer(i64::MAX)),
+            None,
+        ),
+        (F::DateTime, F::DateTimeOrNull, V::Integer(1), None),
+    ] {
+        let strict_result = call(strict, vec![argument.clone()]);
+        match converted {
+            Some(value) => {
+                assert_eq!(strict_result.unwrap(), value, "{strict:?} {argument:?}");
+                assert_eq!(call(or_null, vec![argument.clone()]).unwrap(), value);
+            }
+            None => {
+                let error = strict_result.unwrap_err();
+                assert!(
+                    [r::category::TYPE_ERROR, r::category::ARGUMENT_ERROR]
+                        .contains(&error.category.as_str()),
+                    "{strict:?} {argument:?}: {error}"
+                );
+                assert_eq!(
+                    call(or_null, vec![argument.clone()]).unwrap(),
+                    V::Null,
+                    "{or_null:?} {argument:?}"
+                );
+            }
+        }
+        assert_eq!(call(or_null, vec![V::Null]).unwrap(), V::Null);
+    }
+    // A failure of another kind, such as the memory a conversion's text
+    // needs, still fails.
+    let error = r::Evaluation {
+        row: &[],
+        parameters: &BTreeMap::new(),
+        graph: &NoGraph,
+        group: None,
+        max_collection_items: 100,
+        memory: r::EvaluationMemory::new(size_of::<V>() + 2),
+        statement_time: NOW,
+    }
+    .eval(&E::Function(
+        F::ToStringOrNull,
+        vec![E::Literal(V::Integer(1_234_567_890))],
+    ))
+    .unwrap_err();
+    assert_eq!(error.category, r::category::RESOURCE_LIMIT);
+}
+
+/// `requireDatetime` passes a datetime and null through and rejects every
+/// other value, without reading or converting it.
+#[test]
+fn require_datetime_admits_only_datetimes() {
+    assert_eq!(
+        call(F::RequireDateTime, vec![V::DateTime(-1)]).unwrap(),
+        V::DateTime(-1)
+    );
+    assert_eq!(call(F::RequireDateTime, vec![V::Null]).unwrap(), V::Null);
+    for argument in [
+        V::String("1970-01-01T00:00:00Z".into()),
+        V::Integer(0),
+        V::Map(BTreeMap::from([("year".to_owned(), V::Integer(2024))])),
+        V::List(vec![V::DateTime(0)]),
+    ] {
+        let error = call(F::RequireDateTime, vec![argument.clone()]).unwrap_err();
+        assert_eq!(
+            (error.category.as_str(), error.detail.as_str()),
+            (r::category::TYPE_ERROR, r::detail::INVALID_ARGUMENT_TYPE),
+            "{argument:?}"
+        );
+    }
+}
+
 #[test]
 fn to_string_renders_the_native_response_text() {
     assert_eq!(
@@ -423,15 +671,72 @@ fn static_types_follow_datetime_values() {
     ))
     .unwrap_err();
     assert_eq!(error.phase, r::ErrorPhase::Compile);
+    // A datetime against text fails before anything runs when both types
+    // are known, and runs, to fail on the values, when either is not.
+    for op in [r::Binary::Less, r::Binary::Equal, r::Binary::Contains] {
+        for (left, right) in [
+            (
+                E::Literal(V::DateTime(1)),
+                E::Literal(V::String("x".into())),
+            ),
+            (
+                E::Literal(V::String("x".into())),
+                E::Function(F::DateTime, vec![]),
+            ),
+        ] {
+            let error = infer(E::Binary(op, Box::new(left), Box::new(right))).unwrap_err();
+            assert_eq!(
+                (error.category.as_str(), error.detail.as_str(), error.phase),
+                (
+                    r::category::TYPE_ERROR,
+                    r::detail::DATETIME_TEXT_COMPARISON,
+                    r::ErrorPhase::Compile
+                ),
+                "{op:?}"
+            );
+        }
+        assert_eq!(
+            infer(E::Binary(
+                op,
+                Box::new(E::Literal(V::DateTime(1))),
+                Box::new(E::Parameter("p".into())),
+            ))
+            .unwrap(),
+            r::ValueType::Boolean
+        );
+    }
+    // Conversions that are null where they cannot convert accept any type.
+    for (function, expected) in [
+        (F::ToStringOrNull, r::ValueType::String),
+        (F::ToIntegerOrNull, r::ValueType::Integer),
+        (F::ToFloatOrNull, r::ValueType::Float),
+        (F::ToBooleanOrNull, r::ValueType::Boolean),
+        (F::DateTimeOrNull, r::ValueType::DateTime),
+    ] {
+        for argument in [V::Integer(1), V::List(vec![]), V::DateTime(1)] {
+            assert_eq!(
+                infer(E::Function(function, vec![E::Literal(argument)])).unwrap(),
+                expected,
+                "{function:?}"
+            );
+        }
+    }
+    // requireDatetime admits only a datetime, or a value of unknown type.
     assert_eq!(
-        infer(E::Binary(
-            r::Binary::Less,
-            Box::new(E::Literal(V::DateTime(1))),
-            Box::new(E::Literal(V::String("x".into()))),
+        infer(E::Function(
+            F::RequireDateTime,
+            vec![E::Parameter("p".into())]
         ))
         .unwrap(),
-        r::ValueType::Boolean
+        r::ValueType::DateTime
     );
+    for argument in [V::String("2024-01-01".into()), V::Map(BTreeMap::new())] {
+        let error = infer(E::Function(F::RequireDateTime, vec![E::Literal(argument)])).unwrap_err();
+        assert_eq!(
+            (error.category.as_str(), error.phase),
+            (r::category::TYPE_ERROR, r::ErrorPhase::Compile)
+        );
+    }
     // A datetime's fields are integers; a key it does not have fails before
     // anything runs.
     let property = |value: E, key: &str| infer(E::Property(Box::new(value), key.into()));

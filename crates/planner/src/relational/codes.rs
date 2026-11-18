@@ -71,6 +71,11 @@ pub mod detail {
         /// milliseconds that a response, `toString` or a field such as
         /// `dt.year` must render.
         DATETIME_OUT_OF_RANGE = "datetime_out_of_range",
+        /// A comparison of a datetime with text, such as a datetime property
+        /// against a string literal or parameter, which never converts either
+        /// side: the text must be read as a datetime first, with
+        /// `datetime('…')` in Cypher or `TIMESTAMP '…'` in SQL.
+        DATETIME_TEXT_COMPARISON = "datetime_text_comparison",
         DELETE_CONNECTED_NODE = "delete_connected_node",
         DELETED_ENTITY_ACCESS = "deleted_entity_access",
         DIVISION_BY_ZERO = "division_by_zero",

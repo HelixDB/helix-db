@@ -104,6 +104,22 @@ pub enum Function {
     DateTime,
     /// `timestamp()`: the statement's clock as integer epoch milliseconds.
     Timestamp,
+    /// `toStringOrNull(x)`, `toIntegerOrNull(x)`, `toFloatOrNull(x)`,
+    /// `toBooleanOrNull(x)` and `datetimeOrNull(x)`: the conversion of the
+    /// same name without the suffix, except that a value it cannot convert,
+    /// which fails that conversion with a type or argument error, is null.
+    /// Failures of other kinds, such as resource limits, still fail. SQL's
+    /// `TRY_CAST` and `SAFE_CAST` are these.
+    ToStringOrNull,
+    ToIntegerOrNull,
+    ToFloatOrNull,
+    ToBooleanOrNull,
+    DateTimeOrNull,
+    /// `requireDatetime(x)`: `x` when it is a datetime, null when it is null,
+    /// and a type error for any other value, which it never converts. SQL's
+    /// `EXTRACT` reads its field from this, so a node's or map's property of
+    /// the field's name is never read.
+    RequireDateTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

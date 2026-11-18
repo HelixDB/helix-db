@@ -1147,6 +1147,12 @@ impl Binder {
                         "substring" => (F::Substring, 2, 3),
                         "datetime" => (F::DateTime, 0, 1),
                         "timestamp" => (F::Timestamp, 0, 0),
+                        "tostringornull" => (F::ToStringOrNull, 1, 1),
+                        "tointegerornull" => (F::ToIntegerOrNull, 1, 1),
+                        "tofloatornull" => (F::ToFloatOrNull, 1, 1),
+                        "tobooleanornull" => (F::ToBooleanOrNull, 1, 1),
+                        "datetimeornull" => (F::DateTimeOrNull, 1, 1),
+                        "requiredatetime" => (F::RequireDateTime, 1, 1),
                         _ if DEFERRED_FUNCTIONS.contains(&name.as_str()) => {
                             return Err(QueryError::unsupported(
                                 detail::FUNCTION,
@@ -1225,6 +1231,13 @@ impl Binder {
                                 .at(e.span)
                             })?;
                             r::Expression::Literal(r::Value::DateTime(millis))
+                        }
+                        // Read once as well; text that reads as no instant
+                        // is null, as it is at run time.
+                        (F::DateTimeOrNull, [r::Expression::Literal(r::Value::String(text))]) => {
+                            r::Expression::Literal(
+                                r::parse_datetime(text).map_or(r::Value::Null, r::Value::DateTime),
+                            )
                         }
                         _ => r::Expression::Function(function, arguments),
                     }

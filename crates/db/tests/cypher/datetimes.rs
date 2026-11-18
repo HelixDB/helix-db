@@ -46,8 +46,7 @@ async fn query_error(db: &HelixDB, request: cypher::Request) -> r::QueryError {
     }
 }
 
-/// Ten events an hour apart, written through typed `date_time` parameters,
-/// plus one whose `at` is a string that only looks like a datetime.
+/// Ten events an hour apart, written through typed `date_time` parameters.
 async fn events(db: &HelixDB) {
     for seq in 0..10_i64 {
         db.cypher(request(
@@ -64,6 +63,11 @@ async fn events(db: &HelixDB) {
         .await
         .unwrap();
     }
+}
+
+/// An event whose `at` is a string that only looks like a datetime, as an
+/// untyped write leaves it.
+async fn look_alike(db: &HelixDB) {
     read(
         db,
         "CREATE (:Event {seq: 99, at: '2023-11-15T03:30:00.000Z', tag: 'text'})",
@@ -106,7 +110,6 @@ async fn typed_parameters_store_datetimes_every_response_encodes_alike() {
     assert_eq!(returned[0][1]["properties"]["at"], text(at));
     assert_eq!(returned[0][2], json!([text(at)]));
     assert_eq!(returned[0][3], json!({"at": text(at)}));
-    // Only a stored datetime equals a datetime; the look-alike string does not.
     assert_eq!(
         read(
             &db,
@@ -149,16 +152,19 @@ async fn typed_parameters_store_datetimes_every_response_encodes_alike() {
 }
 
 /// Datetimes filter, order, group and aggregate chronologically; against any
-/// other type, equality is false and ordering is null, never an error.
+/// other type but text, equality is false and ordering is null, never an
+/// error. Ordering and grouping never compare, so a string among them sorts.
 #[tokio::test]
 async fn datetimes_filter_order_and_aggregate_chronologically() {
     let db = database().await;
     events(&db).await;
+    look_alike(&db).await;
     assert_eq!(
         rows(
             &db,
             request(
-                "MATCH (e:Event) WHERE e.at >= $from AND e.at < $to RETURN e.seq ORDER BY e.seq",
+                "MATCH (e:Event) WHERE e.tag <> 'text' AND e.at >= $from AND e.at < $to \
+                 RETURN e.seq ORDER BY e.seq",
                 [
                     ("from", Q::DateTime(BASE + 2 * HOUR)),
                     ("to", Q::DateTime(BASE + 5 * HOUR)),
@@ -170,11 +176,13 @@ async fn datetimes_filter_order_and_aggregate_chronologically() {
     );
     for (query, expected) in [
         (
-            "MATCH (e:Event) WHERE e.at > datetime('2023-11-15T03:00:00Z') RETURN e.seq ORDER BY e.seq",
+            "MATCH (e:Event) WHERE e.tag <> 'text' AND e.at > datetime('2023-11-15T03:00:00Z') \
+             RETURN e.seq ORDER BY e.seq",
             seqs(5..10),
         ),
         (
-            "MATCH (e:Event) WHERE e.at <= datetime('2023-11-14 23:13:20') RETURN e.seq ORDER BY e.seq",
+            "MATCH (e:Event) WHERE e.tag <> 'text' AND e.at <= datetime('2023-11-14 23:13:20') \
+             RETURN e.seq ORDER BY e.seq",
             seqs([0, 1]),
         ),
         (
@@ -218,18 +226,18 @@ async fn datetimes_filter_order_and_aggregate_chronologically() {
                 vec![json!(2), json!(1)],
             ],
         ),
-        // Mixed domains, as a string against an integer.
+        // Mixed domains other than text, as a string against an integer.
         (
-            "MATCH (e:Event) WHERE e.tag <> 'text' AND (e.at = toString(e.at) OR e.at < 'z' OR e.at >= 0) \
+            "MATCH (e:Event) WHERE e.tag <> 'text' AND (e.at = 1 OR e.at >= 0 OR e.at = [e.at]) \
              RETURN count(*)",
             vec![vec![json!(0)]],
         ),
         (
-            "MATCH (e:Event) WHERE e.at <> 1 AND e.at <> toString(e.at) RETURN count(*)",
-            vec![vec![json!(10)]],
+            "MATCH (e:Event) WHERE e.at <> 1 AND e.at <> true RETURN count(*)",
+            vec![vec![json!(11)]],
         ),
         (
-            "RETURN datetime() > '2000-01-01', datetime() = 1, datetime() IN ['x', datetime()]",
+            "RETURN datetime() > 1, datetime() = 1, datetime() IN [1, datetime()]",
             vec![vec![Value::Null, json!(false), json!(true)]],
         ),
         (
@@ -323,7 +331,7 @@ async fn writes_store_datetimes_and_one_statement_reads_one_clock() {
 
 /// Range and equality indexes answer datetime predicates from literals,
 /// typed parameters and `datetime($text)`, exactly as a scan does; datetime
-/// bounds never return the look-alike string.
+/// bounds never return a string.
 #[tokio::test]
 async fn datetime_predicates_read_range_and_equality_indexes() {
     let range = database().await;
@@ -386,13 +394,6 @@ async fn datetime_predicates_read_range_and_equality_indexes() {
             "SecondarySet",
             seqs([2, 7]),
         ),
-        // Text finds only the look-alike string, never the datetimes.
-        (
-            &equality,
-            "MATCH (e:Event) WHERE e.at = '2023-11-15T03:30:00.000Z' RETURN e.seq",
-            "Bitmap",
-            seqs([99]),
-        ),
     ] {
         assert_eq!(
             access(db, request(query, parameters())).await,
@@ -434,6 +435,384 @@ async fn datetime_predicates_read_range_and_equality_indexes() {
     for db in [range, equality, scanned] {
         db.close().await.unwrap();
     }
+}
+
+/// Text is never read as a datetime, so comparing it with a stored datetime
+/// fails with a type error naming the conversion, in Cypher and SQL, rather
+/// than silently matching nothing. A scan raises it at the first such pair.
+/// An index lookup returns only values of the lookup's type, except that text
+/// which reads as a datetime also looks up that datetime (an equality, a
+/// member, a range bound), so a node holding it reaches the same comparison.
+#[tokio::test]
+async fn text_never_compares_with_stored_datetimes() {
+    use cypher::sql::request::Request;
+    let scanned = database().await;
+    let equality = database().await;
+    let range = database().await;
+    for db in [&scanned, &equality, &range] {
+        events(db).await;
+        read(db, "CREATE (:Query {text: '2023-11-15T01:13:20Z'})").await;
+    }
+    create_index(&equality, index::IndexSpec::node_equality("Event", "at")).await;
+    create_index(&range, index::IndexSpec::node_range("Event", "at")).await;
+    let dbs = [
+        ("scan", &scanned),
+        ("equality", &equality),
+        ("range", &range),
+    ];
+    let compared = |error: r::QueryError, query: &str| {
+        assert_eq!(
+            (error.category.as_str(), error.detail.as_str()),
+            (r::category::TYPE_ERROR, r::detail::DATETIME_TEXT_COMPARISON),
+            "{query}: {error}"
+        );
+        assert!(
+            error.message.contains("datetime('…')") || error.message.contains("toString("),
+            "{query}: {}",
+            error.message
+        );
+        error.phase
+    };
+    // '2023-11-15T01:13:20Z' is seq 3's instant.
+    for (query, phase, parameters) in [
+        (
+            "MATCH (e:Event) WHERE e.at = '2023-11-15T01:13:20Z' RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event {at: '2023-11-15 01:13:20'}) RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at IN ['x', '2023-11-15T01:13:20.000Z'] RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at <> '2023-11-15T01:13:20Z' RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at >= '2023-11-15T01:13:20Z' RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at < '2023-11-15' RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at = $text RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![("text", Q::String("2023-11-15T01:13:20Z".into()))],
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at STARTS WITH '2023-11-15' RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at CONTAINS 'T01' RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event {seq: 3}) RETURN CASE e.at WHEN '2023-11-15T01:13:20Z' THEN 1 END",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event {seq: 3}) RETURN [e.at] = ['2023-11-15T01:13:20Z']",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        // A correlated lookup and a join compare stored values with each other.
+        (
+            "MATCH (q:Query) MATCH (e:Event {at: q.text}) RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        (
+            "MATCH (q:Query), (e:Event) WHERE e.at = q.text RETURN e.seq",
+            r::ErrorPhase::Runtime,
+            vec![],
+        ),
+        // Known types fail before anything runs.
+        (
+            "RETURN datetime() > '2000-01-01'",
+            r::ErrorPhase::Compile,
+            vec![],
+        ),
+        (
+            "MATCH (e:Event) WHERE datetime('2024-01-01') = '2024-01-01' RETURN e.seq",
+            r::ErrorPhase::Compile,
+            vec![],
+        ),
+    ] {
+        for (name, db) in dbs {
+            let mut request = cypher::Request::new(query);
+            request.parameters = parameters
+                .iter()
+                .cloned()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect();
+            let error = query_error(db, request).await;
+            assert_eq!(compared(error, query), phase, "{name}: {query}");
+        }
+    }
+    // Each index path also reads the datetime the text names.
+    for (db, query) in [
+        (
+            &equality,
+            "MATCH (e:Event) WHERE e.at = '2023-11-15T01:13:20Z' RETURN e.seq",
+        ),
+        (
+            &equality,
+            "MATCH (e:Event) WHERE e.at IN ['x', '2023-11-15T01:13:20.000Z'] RETURN e.seq",
+        ),
+        (
+            &range,
+            "MATCH (e:Event) WHERE e.at = '2023-11-15T01:13:20Z' RETURN e.seq",
+        ),
+        (
+            &range,
+            "MATCH (e:Event) WHERE e.at < '2023-11-15' RETURN e.seq",
+        ),
+    ] {
+        assert_eq!(
+            access(db, cypher::Request::new(query)).await,
+            "SecondarySet",
+            "{query}"
+        );
+        let explanation = db
+            .explain_cypher(cypher::Request::new(query))
+            .await
+            .unwrap();
+        let [step, ..] = explanation.plan().matches()[&0].sources[0].access.steps() else {
+            panic!("an access step");
+        };
+        let plan = format!("{:?}", step.op);
+        assert!(plan.contains("DateTime("), "{query}: {plan}");
+    }
+    for (name, db) in dbs {
+        for query in [
+            "SELECT e.seq FROM Event e WHERE e.at = '2023-11-15 01:13:20'",
+            "SELECT e.seq FROM Event e WHERE e.at BETWEEN '2023-11-15' AND '2023-11-16'",
+        ] {
+            let Err(cypher::Error::Query(error)) = db.sql(Request::new(query)).await else {
+                panic!("{name}: {query} compares text with datetimes");
+            };
+            compared(error, query);
+        }
+        // The forms that read the text as a datetime, or the datetime as
+        // text, compare as intended.
+        for query in [
+            "MATCH (e:Event) WHERE e.at = datetime('2023-11-15T01:13:20Z') RETURN e.seq",
+            "MATCH (e:Event) WHERE toString(e.at) STARTS WITH '2023-11-15T01' RETURN e.seq",
+            "MATCH (q:Query) MATCH (e:Event {at: datetime(q.text)}) RETURN e.seq",
+        ] {
+            assert_eq!(read(db, query).await, seqs([3]), "{name}: {query}");
+        }
+        let sql = db
+            .sql(Request::new(
+                "SELECT e.seq FROM Event e WHERE e.at = TIMESTAMP '2023-11-15 01:13:20'",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sql.rows, seqs([3]), "{name}");
+    }
+    // Text naming no stored instant: a scan still compares it with each
+    // datetime and fails, while an index returns only what it holds, here
+    // nothing, as it reads no node whose value is of another type.
+    let elsewhere = "MATCH (e:Event) WHERE e.at = '2023-11-15T01:00:00Z' RETURN e.seq";
+    compared(
+        query_error(&scanned, cypher::Request::new(elsewhere)).await,
+        elsewhere,
+    );
+    assert_eq!(read(&equality, elsewhere).await, seqs([]));
+    assert_eq!(read(&range, elsewhere).await, seqs([]));
+    // An untyped SET stores text, as the store is schemaless. The property
+    // then holds datetimes and text, and every comparison that meets the
+    // pair fails as above: the scan does; an index reads only its own type.
+    for (_, db) in dbs {
+        read(
+            db,
+            "MATCH (e:Event {seq: 3}) SET e.at = '2023-11-15T01:13:20Z'",
+        )
+        .await;
+        assert_eq!(
+            read(db, "MATCH (e:Event {seq: 3}) RETURN e.at").await,
+            vec![vec![json!("2023-11-15T01:13:20Z")]]
+        );
+    }
+    let by_datetime = "MATCH (e:Event) WHERE e.at = datetime('2023-11-15T02:13:20Z') RETURN e.seq";
+    compared(
+        query_error(&scanned, cypher::Request::new(by_datetime)).await,
+        by_datetime,
+    );
+    assert_eq!(read(&equality, by_datetime).await, seqs([4]));
+    assert_eq!(read(&range, by_datetime).await, seqs([4]));
+    for db in [scanned, equality, range] {
+        db.close().await.unwrap();
+    }
+}
+
+/// `TRY_CAST` and `SAFE_CAST` are null where `CAST` fails, for every target
+/// type; `CURRENT_TIMESTAMP` and `NOW` take only a precision; `EXTRACT` reads
+/// fields only from a datetime, never a node's property of the field's name.
+#[tokio::test]
+async fn sql_safe_casts_clock_arguments_and_extract_operands() {
+    use cypher::sql::request::Request;
+    let db = database().await;
+    read(
+        &db,
+        "CREATE (:Row {seq: 1, at: datetime('2024-05-06T07:08:09.123Z'), text: 'soon', \
+         n: '12', b: 'true', list: [1], year: 1999})",
+    )
+    .await;
+    let sql = |query: &str| {
+        let db = &db;
+        let query = query.to_owned();
+        async move {
+            db.sql(Request::new(&query))
+                .await
+                .map(|response| response.rows)
+                .map_err(|error| match error {
+                    cypher::Error::Query(error) => error,
+                    other => panic!("{query}: {other:?}"),
+                })
+        }
+    };
+    assert_eq!(
+        sql(
+            "SELECT TRY_CAST(r.text AS TIMESTAMP), SAFE_CAST(r.at AS TIMESTAMP), \
+             TRY_CAST('2024-01-01' AS TIMESTAMP), TRY_CAST('2024-02-30' AS TIMESTAMP), \
+             TRY_CAST(r.seq AS TIMESTAMP), TRY_CAST(r.list AS INTEGER), TRY_CAST(r.n AS INTEGER), \
+             TRY_CAST(r.at AS INTEGER), SAFE_CAST(r.list AS DOUBLE), TRY_CAST(r.seq AS BOOLEAN), \
+             TRY_CAST(r.b AS BOOLEAN), TRY_CAST(r.list AS TEXT), TRY_CAST(r.at AS TEXT), \
+             TRY_CAST(r.missing AS INTEGER) FROM Row r"
+        )
+        .await
+        .unwrap(),
+        vec![vec![
+            Value::Null,
+            json!("2024-05-06T07:08:09.123Z"),
+            json!("2024-01-01T00:00:00.000Z"),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            json!(12),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            json!(true),
+            Value::Null,
+            json!("2024-05-06T07:08:09.123Z"),
+            Value::Null,
+        ]]
+    );
+    // The plain casts still fail on the same values.
+    for query in [
+        "SELECT CAST(r.text AS TIMESTAMP) FROM Row r",
+        "SELECT CAST(r.seq AS TIMESTAMP) FROM Row r",
+        "SELECT CAST(r.list AS INTEGER) FROM Row r",
+        "SELECT r.seq::BOOLEAN FROM Row r",
+    ] {
+        let error = sql(query).await.unwrap_err();
+        assert!(
+            [r::category::TYPE_ERROR, r::category::ARGUMENT_ERROR]
+                .contains(&error.category.as_str()),
+            "{query}: {error}"
+        );
+    }
+    // The clock: a precision rounds it, and nothing else is an argument.
+    let clock = sql("SELECT NOW(), CURRENT_TIMESTAMP(3), NOW(6), \
+         EXTRACT(EPOCH FROM CURRENT_TIMESTAMP(0)) * 1000 % 1000, \
+         EXTRACT(EPOCH FROM CURRENT_TIMESTAMP(2)) * 1000 % 10")
+    .await
+    .unwrap();
+    assert_eq!(clock[0][0], clock[0][1]);
+    assert_eq!(clock[0][0], clock[0][2]);
+    assert_eq!(clock[0][3], json!(0.0));
+    assert_eq!(clock[0][4], json!(0.0));
+    for (query, category, detail) in [
+        (
+            "SELECT NOW('2020-01-01')",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_ARGUMENT_TYPE,
+        ),
+        (
+            "SELECT CURRENT_TIMESTAMP(3.0)",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_ARGUMENT_TYPE,
+        ),
+        (
+            "SELECT CURRENT_TIMESTAMP(7)",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_ARGUMENT_TYPE,
+        ),
+        (
+            "SELECT NOW(r.seq) FROM Row r",
+            r::category::ARGUMENT_ERROR,
+            r::detail::INVALID_ARGUMENT_TYPE,
+        ),
+        (
+            "SELECT NOW(1, 2)",
+            r::category::SYNTAX_ERROR,
+            r::detail::INVALID_NUMBER_OF_ARGUMENTS,
+        ),
+    ] {
+        let error = sql(query).await.unwrap_err();
+        assert_eq!(
+            (error.category.as_str(), error.detail.as_str(), error.phase),
+            (category, detail, r::ErrorPhase::Compile),
+            "{query}"
+        );
+    }
+    // EXTRACT reads the datetime's year, and fails on the node, which has a
+    // property named year, on a map that has one, and on text.
+    assert_eq!(
+        sql("SELECT EXTRACT(YEAR FROM r.at), EXTRACT(MONTH FROM r.at) FROM Row r")
+            .await
+            .unwrap(),
+        vec![vec![json!(2024), json!(5)]]
+    );
+    for (query, phase) in [
+        (
+            "SELECT EXTRACT(YEAR FROM r) FROM Row r",
+            r::ErrorPhase::Compile,
+        ),
+        (
+            "SELECT EXTRACT(YEAR FROM r.text) FROM Row r",
+            r::ErrorPhase::Runtime,
+        ),
+        (
+            "SELECT EXTRACT(YEAR FROM r.seq) FROM Row r",
+            r::ErrorPhase::Runtime,
+        ),
+        (
+            "SELECT EXTRACT(YEAR FROM '2024-01-01')",
+            r::ErrorPhase::Compile,
+        ),
+    ] {
+        let error = sql(query).await.unwrap_err();
+        assert_eq!(
+            (error.category.as_str(), error.phase),
+            (r::category::TYPE_ERROR, phase),
+            "{query}: {error}"
+        );
+    }
+    let error = query_error(
+        &db,
+        cypher::Request::new("MATCH (r:Row) WITH {year: 1} AS m RETURN requireDatetime(m).year"),
+    )
+    .await;
+    assert_eq!(error.category, r::category::TYPE_ERROR);
+    db.close().await.unwrap();
 }
 
 /// A datetime list is stored in one typed form however it is written —
@@ -968,6 +1347,7 @@ async fn datetime_fields_bucket_and_compute_stored_datetimes() {
         assert_eq!(body["rows"], json!(expected), "{query}");
     }
     // The string holds no datetime, so it has no fields.
+    look_alike(&db).await;
     let error = query_error(
         &db,
         cypher::Request::new("MATCH (e:Event {seq: 99}) RETURN e.at.year"),

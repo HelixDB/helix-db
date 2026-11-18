@@ -239,17 +239,34 @@ impl Value {
     }
 
     /// Cypher predicate equality propagates unknown through nested containers.
-    pub fn equals(&self, other: &Self) -> Option<bool> {
-        match (self, other) {
+    /// Values of different types are unequal, except that a datetime and
+    /// text, at any depth, fail with [`datetime_text_comparison`]: text is
+    /// never read as a datetime, so such a comparison is a mistake, not a
+    /// mismatch.
+    ///
+    /// ```
+    /// use helix_planner::relational::{detail, Value};
+    /// assert_eq!(Value::DateTime(0).equals(&Value::DateTime(0)), Ok(Some(true)));
+    /// assert_eq!(Value::DateTime(0).equals(&Value::Integer(0)), Ok(Some(false)));
+    /// let text = Value::String("1970-01-01T00:00:00Z".into());
+    /// let error = Value::DateTime(0).equals(&text).unwrap_err();
+    /// assert_eq!(error.detail, detail::DATETIME_TEXT_COMPARISON);
+    /// assert!(Value::List(vec![text]).equals(&Value::List(vec![Value::DateTime(0)])).is_err());
+    /// ```
+    pub fn equals(&self, other: &Self) -> Result<Option<bool>> {
+        Ok(match (self, other) {
             (Self::Null, _) | (_, Self::Null) => None,
+            (Self::DateTime(_), Self::String(_)) | (Self::String(_), Self::DateTime(_)) => {
+                return Err(datetime_text_comparison());
+            }
             (Self::List(a), Self::List(b)) => {
                 if a.len() != b.len() {
-                    return Some(false);
+                    return Ok(Some(false));
                 }
                 let mut unknown = false;
                 for (a, b) in a.iter().zip(b) {
-                    match a.equals(b) {
-                        Some(false) => return Some(false),
+                    match a.equals(b)? {
+                        Some(false) => return Ok(Some(false)),
                         None => unknown = true,
                         Some(true) => {}
                     }
@@ -258,12 +275,12 @@ impl Value {
             }
             (Self::Map(a), Self::Map(b)) => {
                 if a.keys().ne(b.keys()) {
-                    return Some(false);
+                    return Ok(Some(false));
                 }
                 let mut unknown = false;
                 for (a, b) in a.values().zip(b.values()) {
-                    match a.equals(b) {
-                        Some(false) => return Some(false),
+                    match a.equals(b)? {
+                        Some(false) => return Ok(Some(false)),
                         None => unknown = true,
                         Some(true) => {}
                     }
@@ -274,7 +291,7 @@ impl Value {
                 Some(self.number_cmp(other) == Some(Ordering::Equal))
             }
             _ => Some(self == other),
-        }
+        })
     }
 
     pub fn number_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -460,4 +477,15 @@ impl std::hash::Hash for GroupingKey {
         }
         hash_value(&self.0, state);
     }
+}
+
+/// The type error of comparing a datetime with text, which never reads the
+/// text as a datetime.
+pub fn datetime_text_comparison() -> QueryError {
+    QueryError::runtime(
+        category::TYPE_ERROR,
+        detail::DATETIME_TEXT_COMPARISON,
+        "cannot compare a datetime with text; read the text as a datetime with \
+         datetime('…') in Cypher or TIMESTAMP '…' in SQL",
+    )
 }
