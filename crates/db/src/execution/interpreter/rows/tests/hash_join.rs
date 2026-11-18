@@ -355,3 +355,96 @@ async fn hash_table_builds_admit_every_source_row_or_release_everything() {
     drop(ctx);
     db.close().await.unwrap();
 }
+
+/// A hash join finds no bucket for a list or map key of the other type, so it
+/// compares such a probe with the keys itself: on either build side it fails
+/// with `datetime_text_comparison` exactly where the nested loop's comparison
+/// of some pair does, including past a null, and otherwise returns its rows.
+#[tokio::test]
+async fn hash_joins_fail_on_nested_datetime_text_pairs_as_nested_loops_do() {
+    use helix_ast::value::PropertyValue as P;
+    let db = test_support::open_db("hash-probe-nested-datetimes").await;
+    let at = P::DateTime(1_700_000_000_000);
+    let text = |s: &str| P::String(s.to_owned());
+    let map = |value: P| P::Object([("a".to_owned(), value)].into_iter().collect());
+    // (left key, right key, whether comparing them fails, rows)
+    let cases = [
+        (
+            P::array([at.clone()]),
+            P::array([text("2023-11-14T22:13:20Z")]),
+            true,
+            0,
+        ),
+        (P::array([at.clone()]), P::array([at.clone()]), false, 1),
+        (P::array([text("a")]), P::array([text("a")]), false, 1),
+        // Members after the first unequal pair are never compared.
+        (
+            P::array([P::I64(1), at.clone()]),
+            P::array([P::I64(2), text("x")]),
+            false,
+            0,
+        ),
+        // Lists of different lengths are unequal without comparing members.
+        (
+            P::array([at.clone()]),
+            P::array([text("a"), text("b")]),
+            false,
+            0,
+        ),
+        // Null makes the comparison unknown, not over.
+        (
+            P::array([P::Null, at.clone()]),
+            P::array([text("x"), text("y")]),
+            true,
+            0,
+        ),
+        (map(at.clone()), map(text("x")), true, 0),
+        (
+            P::array([P::array([at.clone()])]),
+            P::array([P::array([text("x")])]),
+            true,
+            0,
+        ),
+    ];
+    for (case, (left, right, fails, rows)) in cases.into_iter().enumerate() {
+        for (side, (a, b)) in [(left.clone(), right.clone()), (right, left)]
+            .into_iter()
+            .enumerate()
+        {
+            let labels = (format!("L{case}x{side}"), format!("R{case}x{side}"));
+            test_support::add_node_with_properties(&db, &labels.0, vec![("k", a)]).await;
+            test_support::add_node_with_properties(&db, &labels.1, vec![("k", b)]).await;
+            let text = format!(
+                "MATCH (a:{}),(b:{}) WHERE a.k=b.k RETURN 1",
+                labels.0, labels.1
+            );
+            let query = helix_cypher::compile(&text).unwrap();
+            let plan = r::plan(
+                query.clone(),
+                &db.planner_context(context::ParamBindings::default()),
+            )
+            .unwrap();
+            assert!(
+                plan.matches()[&0]
+                    .steps
+                    .iter()
+                    .any(|step| matches!(step, r::MatchStep::HashJoin { .. })),
+                "{text}"
+            );
+            for strategy in [plan, r::RowPlan::reference(query).unwrap()] {
+                let result = Interpreter::new(&db, context::ParamBindings::default())
+                    .execute_rows(&strategy, &BTreeMap::new(), Limits::default())
+                    .await;
+                match result {
+                    Err(Error::Query(error)) if fails => {
+                        assert_eq!(error.detail, "datetime_text_comparison", "{text}");
+                    }
+                    Ok(response) if !fails => assert_eq!(response.rows.len(), rows, "{text}"),
+                    Err(error) => panic!("{text}: {error:?}"),
+                    Ok(response) => panic!("{text}: expected an error, got {:?}", response.rows),
+                }
+            }
+        }
+    }
+    db.close().await.unwrap();
+}

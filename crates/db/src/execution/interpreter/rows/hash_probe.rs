@@ -65,11 +65,13 @@ impl ProbeCursor {
                     continue;
                 };
                 let value = self.graph.property(entity, property)?;
+                // Before the null check: a list holding null matches nothing,
+                // yet its other members still compare with the keys'.
+                table.check_probe(value)?;
                 if value.equals(value)? != Some(true) {
                     self.parent += 1;
                     continue;
                 }
-                table.check_probe(value)?;
                 let _key_memory = context.row_budget().reserve(value.allocated_bytes())?;
                 let Some(ids) = table.bucket(&r::GroupingKey::new(value.clone())?) else {
                     self.parent += 1;

@@ -14,24 +14,70 @@ pub(super) struct HashJoinTable {
     /// rather than silently finding no bucket.
     datetime_keys: bool,
     text_keys: bool,
+    /// The same for list and map keys, at any depth. A list or map probe
+    /// holding the other kind is compared with each list and map key, so it
+    /// fails exactly where the nested loop's comparison of some pair would.
+    nested_datetimes: bool,
+    nested_text: bool,
+    /// List and map keys holding null, which no probe equals, so they have no
+    /// bucket, but which hold a datetime or text a probe may still compare
+    /// with before the null.
+    unmatched: Vec<r::Value>,
     _memory: memory::Reservation,
+}
+
+/// Whether `value` holds a datetime, and whether it holds text, at any depth.
+fn kinds(value: &r::Value) -> (bool, bool) {
+    let any = |values: &mut dyn Iterator<Item = &r::Value>| {
+        values
+            .map(kinds)
+            .fold((false, false), |(datetime, text), (d, t)| {
+                (datetime || d, text || t)
+            })
+    };
+    match value {
+        r::Value::DateTime(_) => (true, false),
+        r::Value::String(_) => (false, true),
+        r::Value::List(items) => any(&mut items.iter()),
+        r::Value::Map(entries) => any(&mut entries.values()),
+        r::Value::Null
+        | r::Value::Boolean(_)
+        | r::Value::Integer(_)
+        | r::Value::Float(_)
+        | r::Value::Entity(_)
+        | r::Value::Path(_) => (false, false),
+    }
 }
 impl HashJoinTable {
     pub(super) fn bucket(&self, key: &r::GroupingKey) -> Option<&[u64]> {
         self.buckets.get(key).map(Vec::as_slice)
     }
 
-    /// Fails when `probe` and some key are a datetime and text.
+    /// Fails when comparing `probe` with some key fails because the pair, or
+    /// a pair of their members, is a datetime and text. A list or map probe
+    /// that holds one kind is compared with every list and map key only when
+    /// some such key holds the other, so this costs nothing unless both sides
+    /// hold datetimes and text inside lists or maps.
     pub(super) fn check_probe(&self, probe: &r::Value) -> Result<()> {
         let mismatched = match probe {
             r::Value::DateTime(_) => self.text_keys,
             r::Value::String(_) => self.datetime_keys,
+            r::Value::List(_) | r::Value::Map(_) => {
+                let (datetime, text) = kinds(probe);
+                if (datetime && self.nested_text) || (text && self.nested_datetimes) {
+                    self.buckets
+                        .keys()
+                        .map(r::GroupingKey::value)
+                        .filter(|key| matches!(key, r::Value::List(_) | r::Value::Map(_)))
+                        .chain(&self.unmatched)
+                        .try_for_each(|key| probe.equals(key).map(drop))?;
+                }
+                false
+            }
             r::Value::Null
             | r::Value::Boolean(_)
             | r::Value::Integer(_)
             | r::Value::Float(_)
-            | r::Value::List(_)
-            | r::Value::Map(_)
             | r::Value::Entity(_)
             | r::Value::Path(_) => false,
         };
@@ -81,6 +127,8 @@ impl HashJoinTable {
     {
         let mut buckets: HashMap<r::GroupingKey, Vec<u64>> = HashMap::new();
         let (mut datetime_keys, mut text_keys) = (false, false);
+        let (mut nested_datetimes, mut nested_text) = (false, false);
+        let mut unmatched = Vec::new();
         let fixed = size_of::<Self>().saturating_add(2 * size_of::<usize>());
         let mut memory = context.row_budget().reserve(fixed)?;
         let _source_memory = context.row_budget().reserve(size_of::<S>())?;
@@ -105,11 +153,29 @@ impl HashJoinTable {
                     unreachable!("join hydration rows contain source node IDs");
                 };
                 let value = graph.property(r::Entity::Node(id), property)?;
+                let (datetime, text) = kinds(value);
+                let nested = matches!(value, r::Value::List(_) | r::Value::Map(_));
+                if nested {
+                    nested_datetimes |= datetime;
+                    nested_text |= text;
+                } else {
+                    datetime_keys |= datetime;
+                    text_keys |= text;
+                }
                 if value.equals(value)? != Some(true) {
+                    if nested && (datetime || text) {
+                        let bytes = value
+                            .allocated_bytes()
+                            .saturating_add(size_of::<r::Value>());
+                        payload = payload.saturating_add(bytes);
+                        memory.resize(memory.bytes().saturating_add(bytes))?;
+                        unmatched.try_reserve(1).map_err(|_| {
+                            super::resource(detail::MEMORY_LIMIT, "join allocation failed")
+                        })?;
+                        unmatched.push(value.clone());
+                    }
                     continue;
                 }
-                datetime_keys |= matches!(value, r::Value::DateTime(_));
-                text_keys |= matches!(value, r::Value::String(_));
                 let _key_memory = context.row_budget().reserve(value.allocated_bytes())?;
                 let key = r::GroupingKey::new(value.clone())?;
                 let new_key = !buckets.contains_key(&key);
@@ -152,6 +218,9 @@ impl HashJoinTable {
             buckets,
             datetime_keys,
             text_keys,
+            nested_datetimes,
+            nested_text,
+            unmatched,
             _memory: memory,
         })
     }
