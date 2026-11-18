@@ -948,7 +948,7 @@ async fn a_relationship_scan_binds_a_shared_hash_row_once() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_graph_rewrite_of_a_published_store_stages_no_hash_row() {
+async fn a_migrating_open_of_a_bootstrapped_store_rewrites_nothing() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let db = crate::HelixDB::open_writer_inner_with_index_scheduling(
         DB_PATH.to_string(),
@@ -966,20 +966,50 @@ async fn a_graph_rewrite_of_a_published_store_stages_no_hash_row() {
     )
     .await
     .expect("a managed bootstrap opens an empty store");
-    write_graph(&db, DataScope::LegacyUnscoped).await;
-    let reads = label_reads(&db, DataScope::LegacyUnscoped).await;
+    let scope = DataScope::LegacyUnscoped;
+    write_graph(&db, scope).await;
+    let reads = label_reads(&db, scope).await;
     assert_eq!(
         clean_up(&db.inner_db(), 1_024).await,
         [LabelHashCleanup::Done { deleted: 0 }]
     );
     let (exact, legacy) = label_rows(db.inner_db().as_ref()).await;
     assert!(legacy.is_empty());
+    // As an earlier migrating open left it, stopped before its rewrite ran.
+    super::super::super::ensure_migration_job(
+        &db.inner_db(),
+        scope,
+        super::super::super::MigrationId::GraphFormatV1Rewrite,
+        super::super::super::MigrationMode::BlockingStartup,
+    )
+    .await
+    .unwrap();
     db.close().await.unwrap();
 
     let db = open_writer(&store).await;
     let inner = db.inner_db();
+    // The store bootstrapped in the current graph format, so the migrating
+    // open records the graph rewrite and the vector property restore complete
+    // without reading a row, and stages no label row.
+    for id in [
+        super::super::super::MigrationId::GraphFormatV1Rewrite,
+        super::super::super::MigrationId::LegacyVectorPropertyMaterialization,
+    ] {
+        assert!(
+            super::super::super::migration_completed(inner.as_ref(), scope, id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            super::super::super::migration_processed_rows(&inner, scope, id)
+                .await
+                .unwrap(),
+            0,
+            "{id:?}"
+        );
+    }
     assert_eq!(label_rows(inner.as_ref()).await, (exact, Rows::new()));
-    assert_eq!(label_reads(&db, DataScope::LegacyUnscoped).await, reads);
+    assert_eq!(label_reads(&db, scope).await, reads);
     assert_eq!(
         clean_up(&inner, 1_024).await,
         [LabelHashCleanup::AlreadyDone]

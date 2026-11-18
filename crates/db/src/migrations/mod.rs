@@ -1176,6 +1176,37 @@ pub(crate) async fn ensure_migration_job(
     Ok(())
 }
 
+/// Records `id` complete without running it, because the store already holds
+/// what it would produce. A completed job is left alone; one an earlier open
+/// began keeps the rows it counted.
+async fn complete_migration_job(
+    db: &Db,
+    scope: DataScope,
+    id: MigrationId,
+    mode: MigrationMode,
+) -> Result<()> {
+    let key = MigrationJobKey::new(scope, id);
+    let txn = db.begin(IsolationLevel::Snapshot).await?;
+    let mut job = match txn.get(key.as_ref()).await? {
+        Some(value) => decode_json::<MigrationJob>(&value)?,
+        None => MigrationJob::new(id, mode),
+    };
+    if job.is_completed() {
+        txn.rollback();
+        return Ok(());
+    }
+    job.complete();
+    Mutation::put(&txn, key.into_bytes(), encode_json(&job)?)?;
+    txn.commit().await?;
+    tracing::info!(
+        migration_id = id.log_name(),
+        migration_mode = mode.log_name(),
+        scope = ?scope,
+        "kv migration job had nothing to do and is recorded complete"
+    );
+    Ok(())
+}
+
 /// Return true when the migration has completed for this scope.
 pub(crate) async fn migration_completed(
     read: &(impl DbReadOps + Send + Sync),
@@ -1454,19 +1485,36 @@ async fn publish_storage_schema_completion(db: &Db, scope: DataScope) -> Result<
 }
 
 /// Runs graph rewrite before converging every persisted legacy definition.
+///
+/// Each step that has nothing to do is recorded complete in one commit
+/// instead of being run: a store whose graph is already in the current
+/// format, as a managed store is from its bootstrap, has nothing to rewrite
+/// and no allocator to reserve, and a store without legacy vector definitions
+/// has no vector property to restore. Running either would rewrite or scan
+/// every node and edge while the writer serves nothing.
 pub(crate) async fn run_blocking_startup_migration(
     writer: &HelixWriter,
     tuning: config::MigrationTuning,
 ) -> Result<()> {
     let started = Instant::now();
     let scope = DataScope::LegacyUnscoped;
-    ensure_migration_job(
-        writer.db(),
-        scope,
-        MigrationId::GraphFormatV1Rewrite,
-        MigrationMode::BlockingStartup,
-    )
-    .await?;
+    if graph_format_v1_ready(writer.db(), scope).await? {
+        complete_migration_job(
+            writer.db(),
+            scope,
+            MigrationId::GraphFormatV1Rewrite,
+            MigrationMode::BlockingStartup,
+        )
+        .await?;
+    } else {
+        ensure_migration_job(
+            writer.db(),
+            scope,
+            MigrationId::GraphFormatV1Rewrite,
+            MigrationMode::BlockingStartup,
+        )
+        .await?;
+    }
     let rewrite_completed =
         migration_completed(writer.db(), scope, MigrationId::GraphFormatV1Rewrite).await?;
     if !rewrite_completed {
@@ -1482,15 +1530,25 @@ pub(crate) async fn run_blocking_startup_migration(
         }
     }
     ensure_graph_format_v1_ready(writer.db(), scope).await?;
-    ensure_migration_job(
-        writer.db(),
-        scope,
-        MigrationId::LegacyVectorPropertyMaterialization,
-        MigrationMode::BlockingStartup,
-    )
-    .await?;
     let vector_property_catalog =
         vector_properties::LegacyVectorPropertyCatalog::load(writer.db(), scope).await?;
+    if vector_property_catalog.is_empty() {
+        complete_migration_job(
+            writer.db(),
+            scope,
+            MigrationId::LegacyVectorPropertyMaterialization,
+            MigrationMode::BlockingStartup,
+        )
+        .await?;
+    } else {
+        ensure_migration_job(
+            writer.db(),
+            scope,
+            MigrationId::LegacyVectorPropertyMaterialization,
+            MigrationMode::BlockingStartup,
+        )
+        .await?;
+    }
     while !migration_completed(
         writer.db(),
         scope,

@@ -82,6 +82,12 @@ impl LegacyVectorPropertyCatalog {
         Ok(Self { by_scope })
     }
 
+    /// Whether no legacy vector definition is persisted, so no graph row has
+    /// a vector property to restore.
+    pub(super) fn is_empty(&self) -> bool {
+        self.by_scope.is_empty()
+    }
+
     fn definitions(
         &self,
         element_kind: IndexElementKind,
