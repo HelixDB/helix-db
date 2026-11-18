@@ -8952,6 +8952,120 @@ mod tests {
         drive_to_terminal(&db, &driver, operation_id, &mut claim_sequence).await;
     }
 
+    /// Activation's complete observation, taken under the lifecycle
+    /// permit, survives its ledger being evicted by other scopes' writers
+    /// after it verified one chunk: it reads every pending delta, and the
+    /// generation activates equal to its source. Before, it took the one
+    /// chunk for the whole backlog and activated with the rest unreconciled.
+    #[tokio::test]
+    async fn activation_reconciles_every_delta_when_its_ledger_is_evicted_mid_observation() {
+        let db = test_db("secondary-ledger-evicted-at-activation").await;
+        let scope = DataScope::LegacyUnscoped;
+        let definition = validated(
+            SecondaryIndexDefinition::node_equality("User", "email")
+                .expect("node equality definition"),
+        );
+        // More pending deltas than one verification chunk.
+        let entities = 1_100_u64;
+        let mut sources = (0..entities)
+            .map(|entity_id| {
+                (
+                    entity_id,
+                    user_properties(&format!("seed-{entity_id}@example.com")),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut seed = slatedb::WriteBatch::new();
+        for (&entity_id, properties) in &sources {
+            seed.put(
+                source_key(scope, IndexElementKind::Node, entity_id),
+                encode_properties(properties),
+            );
+        }
+        db.write(seed).await.expect("sources are seeded");
+        let (operation_id, index_id, generation) =
+            create_build(&db, scope, &definition, entities - 1).await;
+        let ledger = delta_ledger::DeltaGeneration {
+            scope,
+            index_id,
+            generation,
+        };
+        let generous = 64 * 1024 * 1024;
+        let limits = batch_limits(4096, generous, 1 << 16, generous);
+        let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
+        let mut claim_sequence = 1;
+        for _ in 0..16 {
+            if matches!(
+                build_stage(&db, operation_id).await,
+                SecondaryBuildStage::Activate(_)
+            ) {
+                break;
+            }
+            assert_eq!(
+                drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits)
+                    .await,
+                CommittedOperationStep::Progressed
+            );
+        }
+        assert!(matches!(
+            build_stage(&db, operation_id).await,
+            SecondaryBuildStage::Activate(_)
+        ));
+
+        // One write moves every entity, so every one has a pending delta.
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .expect("the write begins");
+        let mutations = load_mutation_set(&transaction, scope)
+            .await
+            .expect("the mutation set loads");
+        let mut staged = delta_ledger::StagedBuildDeltas::default();
+        for entity_id in 0..entities {
+            let after = user_properties(&format!("moved-{entity_id}@example.com"));
+            staged.append(
+                maintain_entity(
+                    &transaction,
+                    scope,
+                    &mutations,
+                    IndexElementKind::Node,
+                    entity_id,
+                    &sources[&entity_id],
+                    &after,
+                )
+                .await
+                .expect("the write maintains the building index"),
+            );
+            transaction
+                .put(
+                    source_key(scope, IndexElementKind::Node, entity_id),
+                    encode_properties(&after),
+                )
+                .expect("the source write stages");
+            sources.insert(entity_id, after);
+        }
+        transaction.commit().await.expect("the write commits");
+        let ledgers = driver.scope_gates.delta_ledgers();
+        ledgers.record(staged);
+        // Activation's first observation then reads the deltas by scanning,
+        // so the first chunk it verifies is the complete observation's.
+        ledgers.forget(ledger);
+        *ledgers.evict_after_chunk.lock() = Some(ledger);
+
+        assert_eq!(
+            drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await,
+            CommittedOperationStep::Completed
+        );
+        assert_eq!(
+            *ledgers.evict_after_chunk.lock(),
+            None,
+            "the ledger was evicted mid-observation"
+        );
+        assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources)
+            .await;
+        db.close().await.expect("secondary test database closes");
+    }
+
     /// Aborting a build drops its ledger along with its rows.
     #[tokio::test]
     async fn aborting_a_build_drops_its_ledger() {

@@ -33,16 +33,22 @@
 //!
 //! The ledger lives only in memory. A restarted process, or a generation
 //! whose ledger was dropped, starts again from one scan of the whole prefix.
+//! That includes an observation whose ledger is dropped while it verifies
+//! the ledger's keys: the keys it had not verified left with the ledger, so
+//! it starts again from one scan of the whole prefix rather than return part
+//! of the backlog.
 //!
 //! # Memory
 //!
 //! A ledger lives from its generation's first observation until activation,
 //! a block, an abort or cleanup drops it, and each key costs about two
 //! hundred bytes. One ledger is dropped once it holds more than
-//! [`LEDGER_CAPACITY`] keys, and the largest are dropped while all of them
-//! together hold more than [`LEDGERS_CAPACITY`], so a database handle never
-//! holds more than about 50 MB of ledgers. Dropping one only costs its
-//! generation one scan of its prefix.
+//! [`LEDGER_CAPACITY`] keys, or an observation would take it past that, and
+//! the largest are dropped while all of them together hold more than
+//! [`LEDGERS_CAPACITY`], so a database handle never holds more than about
+//! 50 MB of ledgers. Dropping one only costs its generation one scan of its
+//! prefix. Dropped ledgers are freed after the lock is released, so writers
+//! of other scopes never wait on freeing one.
 
 use std::collections::{btree_map, BTreeMap, HashMap};
 use std::ops::Bound;
@@ -146,23 +152,34 @@ struct LedgerState {
 }
 
 impl LedgerState {
-    /// Drops `generation`'s ledger, if any.
-    fn remove(&mut self, generation: &DeltaGeneration) {
-        let Some(ledger) = self.ledgers.remove(generation) else {
-            return;
-        };
-        self.keys -= ledger.keys.len();
+    /// Takes the next sequence. A sequence is never handed out twice, so a
+    /// ledger id never names two ledgers.
+    fn sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence
+            .checked_add(1)
+            .expect("a process never takes 2^64 ledger sequences");
+        sequence
     }
 
-    /// Drops `generation`'s ledger if it outgrew [`LEDGER_CAPACITY`], then
-    /// the largest ledgers until all fit [`LEDGERS_CAPACITY`] together.
-    fn bound(&mut self, generation: &DeltaGeneration) {
+    /// Takes `generation`'s ledger, if any, out of the state; the caller
+    /// frees it once the lock is released.
+    fn remove(&mut self, generation: &DeltaGeneration) -> Option<Ledger> {
+        let ledger = self.ledgers.remove(generation)?;
+        self.keys -= ledger.keys.len();
+        Some(ledger)
+    }
+
+    /// Takes `generation`'s ledger out if it outgrew [`LEDGER_CAPACITY`],
+    /// then the largest ledgers until all fit [`LEDGERS_CAPACITY`] together,
+    /// into `dropped`, which the caller frees once the lock is released.
+    fn bound(&mut self, generation: &DeltaGeneration, dropped: &mut Vec<Ledger>) {
         if self
             .ledgers
             .get(generation)
             .is_some_and(|ledger| ledger.keys.len() > LEDGER_CAPACITY)
         {
-            self.remove(generation);
+            dropped.extend(self.remove(generation));
         }
         while self.keys > LEDGERS_CAPACITY {
             let largest = *self
@@ -171,7 +188,7 @@ impl LedgerState {
                 .max_by_key(|(_, ledger)| ledger.keys.len())
                 .map(|(generation, _)| generation)
                 .expect("ledgers hold every counted key");
-            self.remove(&largest);
+            dropped.extend(self.remove(&largest));
         }
     }
 }
@@ -180,6 +197,23 @@ impl LedgerState {
 #[derive(Debug, Default)]
 pub(crate) struct DeltaLedgers {
     state: parking_lot::Mutex<LedgerState>,
+    /// Tests set a generation here to evict its ledger, by filling the
+    /// handle's capacity with other ledgers, once an observation of it has
+    /// verified one chunk of its keys.
+    #[cfg(test)]
+    pub(super) evict_after_chunk: parking_lot::Mutex<Option<DeltaGeneration>>,
+}
+
+/// What [`DeltaLedgers::candidates`] found in an observation's ledger.
+#[derive(Debug, PartialEq, Eq)]
+enum Candidates {
+    /// The next keys to verify, in key order; never empty.
+    Chunk(Vec<Bytes>),
+    /// The observation has verified every key of its ledger.
+    Exhausted,
+    /// The observation's ledger was dropped, and with it every key the
+    /// observation had not verified yet.
+    Dropped,
 }
 
 /// How much of the backlog an observation reads before it stops counting.
@@ -237,9 +271,9 @@ impl DeltaLedgers {
         if staged.is_empty() {
             return;
         }
+        let mut dropped = Vec::new();
         let mut state = self.state.lock();
-        let sequence = state.next_sequence;
-        state.next_sequence = sequence.saturating_add(1);
+        let sequence = state.sequence();
         for (generation, key) in staged.0 {
             let LedgerState { ledgers, keys, .. } = &mut *state;
             let Some(ledger) = ledgers.get_mut(&generation) else {
@@ -248,14 +282,17 @@ impl DeltaLedgers {
             if ledger.keys.insert(key, sequence).is_none() {
                 *keys += 1;
             }
-            state.bound(&generation);
+            state.bound(&generation, &mut dropped);
         }
+        drop(state);
+        drop(dropped);
     }
 
     /// Drops `generation`'s ledger; its next observation scans the whole
-    /// prefix again.
+    /// prefix again, and so does one under way (see [`Self::observe`]).
     pub(super) fn forget(&self, generation: DeltaGeneration) {
-        self.state.lock().remove(&generation);
+        let dropped = self.state.lock().remove(&generation);
+        drop(dropped);
     }
 
     /// Observes `generation`'s pending deltas outside any transaction, until
@@ -266,6 +303,14 @@ impl DeltaLedgers {
     /// is scanned; deltas the scan reads join the ledger, which then covers
     /// the prefix through the last of them, or all of it once the scan
     /// reaches the end.
+    ///
+    /// The returned backlog is never cut short by its ledger being dropped
+    /// (by [`Self::forget`] or by the capacity bounds) while the observation
+    /// runs. Once verification has passed every key, a drop changes nothing
+    /// the observation returns. Before that, the keys it had not verified are
+    /// gone, so it discards what it read and starts again on a new ledger
+    /// from one scan of the whole prefix, which needs no ledger to be
+    /// complete. The restart happens at most once.
     pub(super) async fn observe(
         &self,
         db: &slatedb::Db,
@@ -273,31 +318,51 @@ impl DeltaLedgers {
         limits: SearchIndexBatchLimits,
         reach: Reach,
     ) -> Result<ObservedBacklog> {
-        let observation = self.begin(generation);
+        let mut observation = self.begin(generation);
         let mut observed = ObservedBacklog::default();
         let mut absent = Vec::new();
         let mut verified = None::<Bytes>;
+        // Where the scan starts: the observation's unobserved rest, or the
+        // whole prefix once its ledger was dropped.
+        let mut unobserved = observation.unobserved.clone();
         while !observed.reached(limits, reach) {
-            let chunk = self.candidates(
+            let chunk = match self.candidates(
                 &observation,
                 verified.as_ref().map_or(Bound::Unbounded, Bound::Excluded),
-            );
-            let Some(last) = chunk.last().cloned() else {
-                break;
+            ) {
+                Candidates::Chunk(chunk) => chunk,
+                Candidates::Exhausted => break,
+                Candidates::Dropped => {
+                    observation = self.begin(generation);
+                    observed = ObservedBacklog::default();
+                    absent.clear();
+                    unobserved = Unobserved::From(Bound::Unbounded);
+                    break;
+                }
             };
             let values = db.multi_get(&chunk).await?;
+            verified = chunk.last().cloned();
             for (key, value) in chunk.into_iter().zip(values) {
                 match value {
                     Some(value) => observed.insert(key, value),
                     None => absent.push(key),
                 }
             }
-            verified = Some(last);
+            #[cfg(test)]
+            {
+                let evicted = self
+                    .evict_after_chunk
+                    .lock()
+                    .take_if(|evicted| *evicted == generation);
+                evicted
+                    .into_iter()
+                    .for_each(|evicted| self.crowd_out(evicted));
+            }
         }
         let mut scanned = Vec::new();
         let mut advanced = observation.unobserved.clone();
         // Ledger keys verified to the reach make the scan unnecessary.
-        if let Unobserved::From(start) = &observation.unobserved
+        if let Unobserved::From(start) = &unobserved
             && !observed.reached(limits, reach)
         {
             let prefix = super::generation_prefix(
@@ -336,22 +401,19 @@ impl DeltaLedgers {
     /// use, and notes where the scan of the unobserved rest starts.
     fn begin(&self, generation: DeltaGeneration) -> Observation {
         let mut state = self.state.lock();
-        let LedgerState {
-            next_sequence,
-            ledgers,
-            ..
-        } = &mut *state;
-        let ledger = ledgers.entry(generation).or_insert_with(|| {
-            let id = *next_sequence;
-            *next_sequence = next_sequence.saturating_add(1);
-            Ledger {
-                id,
-                unobserved: Unobserved::From(Bound::Unbounded),
-                keys: BTreeMap::new(),
-            }
-        });
-        let began = *next_sequence;
-        *next_sequence = next_sequence.saturating_add(1);
+        if !state.ledgers.contains_key(&generation) {
+            let id = state.sequence();
+            state.ledgers.insert(
+                generation,
+                Ledger {
+                    id,
+                    unobserved: Unobserved::From(Bound::Unbounded),
+                    keys: BTreeMap::new(),
+                },
+            );
+        }
+        let began = state.sequence();
+        let ledger = &state.ledgers[&generation];
         Observation {
             generation,
             ledger: ledger.id,
@@ -361,26 +423,32 @@ impl DeltaLedgers {
     }
 
     /// The next [`VERIFY_CHUNK`] keys of `observation`'s ledger after
-    /// `after`, in key order; none once that ledger was dropped.
+    /// `after`, in key order, or whether there are none left or the ledger
+    /// was dropped since the observation began.
     ///
     /// The ledger is read as it stands, so keys recorded since the
     /// observation began are verified too, and keys another observation
     /// forgot are skipped: those were read absent after their last record.
-    fn candidates(&self, observation: &Observation, after: Bound<&Bytes>) -> Vec<Bytes> {
+    fn candidates(&self, observation: &Observation, after: Bound<&Bytes>) -> Candidates {
         let state = self.state.lock();
         let Some(ledger) = state
             .ledgers
             .get(&observation.generation)
             .filter(|ledger| ledger.id == observation.ledger)
         else {
-            return Vec::new();
+            return Candidates::Dropped;
         };
-        ledger
+        let chunk = ledger
             .keys
             .range::<Bytes, _>((after, Bound::Unbounded))
             .take(VERIFY_CHUNK)
             .map(|(key, _)| key.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        if chunk.is_empty() {
+            Candidates::Exhausted
+        } else {
+            Candidates::Chunk(chunk)
+        }
     }
 
     /// Applies what `observation` read: the keys it read `absent`, the delta
@@ -393,7 +461,8 @@ impl DeltaLedgers {
     /// recorded again, after it. Concurrent observations stay sound: only one
     /// of them advances the unobserved rest from where it started, and the
     /// others add only keys that were present. An observation of a ledger
-    /// since dropped changes nothing.
+    /// since dropped changes nothing. A ledger the scanned keys could take
+    /// past [`LEDGER_CAPACITY`] is dropped instead of grown.
     fn finish(
         &self,
         observation: Observation,
@@ -401,6 +470,7 @@ impl DeltaLedgers {
         scanned: Vec<Bytes>,
         advanced: Unobserved,
     ) {
+        let mut dropped = Vec::new();
         let mut state = self.state.lock();
         let LedgerState { ledgers, keys, .. } = &mut *state;
         let Some(current) = ledgers
@@ -419,6 +489,14 @@ impl DeltaLedgers {
                 *keys -= 1;
             }
         }
+        // Counts scanned keys the ledger already holds too, so it may drop a
+        // ledger that would just fit; that costs one scan of the prefix.
+        if current.keys.len().saturating_add(scanned.len()) > LEDGER_CAPACITY {
+            dropped.extend(state.remove(&observation.generation));
+            drop(state);
+            drop(dropped);
+            return;
+        }
         for key in scanned {
             let btree_map::Entry::Vacant(vacant) = current.keys.entry(key) else {
                 continue;
@@ -429,7 +507,45 @@ impl DeltaLedgers {
         if current.unobserved == observation.unobserved {
             current.unobserved = advanced;
         }
-        state.bound(&observation.generation);
+        state.bound(&observation.generation, &mut dropped);
+        drop(state);
+        drop(dropped);
+    }
+
+    /// Evicts `generation`'s ledger the way a busy handle does: records
+    /// into other generations' ledgers, each smaller than it, until the
+    /// handle's capacity bound drops it as the largest.
+    #[cfg(test)]
+    pub(super) fn crowd_out(&self, generation: DeltaGeneration) {
+        let size = self
+            .state
+            .lock()
+            .ledgers
+            .get(&generation)
+            .map(|ledger| ledger.keys.len())
+            .expect("the crowded-out ledger exists");
+        assert!(size > 1, "a crowded-out ledger holds more than one key");
+        let filler = u64::try_from(size - 1).expect("fits");
+        for other in 1_u64.. {
+            if !self.state.lock().ledgers.contains_key(&generation) {
+                return;
+            }
+            assert!(
+                other <= u64::try_from(LEDGERS_CAPACITY).expect("fits"),
+                "crowding out a ledger takes at most one ledger per key"
+            );
+            let other = DeltaGeneration {
+                index_id: IndexId::new((1 << 40) + other).expect("positive index id"),
+                ..generation
+            };
+            let observation = self.begin(other);
+            self.finish(observation, Vec::new(), Vec::new(), Unobserved::Nothing);
+            let mut staged = StagedBuildDeltas::default();
+            (0..filler).for_each(|key| {
+                staged.push(other, Bytes::copy_from_slice(&key.to_be_bytes()));
+            });
+            self.record(staged);
+        }
     }
 
     /// The keys `generation`'s ledger holds and where its unobserved rest
@@ -509,6 +625,23 @@ mod tests {
         db.delete(delta_key(entity_id))
             .await
             .expect("delta row is deleted");
+    }
+
+    /// Writes (`Some`) or deletes (`None`) many delta rows in one batch, so
+    /// a large backlog costs one commit rather than one per row.
+    async fn write_deltas(
+        db: &slatedb::Db,
+        entity_ids: impl IntoIterator<Item = u64>,
+        value: Option<&'static [u8]>,
+    ) {
+        let mut batch = slatedb::WriteBatch::new();
+        for entity_id in entity_ids {
+            match value {
+                Some(value) => batch.put(delta_key(entity_id), value),
+                None => batch.delete(delta_key(entity_id)),
+            }
+        }
+        db.write(batch).await.expect("delta rows are written");
     }
 
     fn record(ledgers: &DeltaLedgers, entity_ids: impl IntoIterator<Item = u64>) {
@@ -759,36 +892,37 @@ mod tests {
         let ledgers = DeltaLedgers::default();
         let limits = SearchIndexBackfillLimits::default().batch();
         let entities = u64::try_from(2 * VERIFY_CHUNK + 5).expect("fits");
-        for entity_id in 0..entities {
-            put_delta(&db, entity_id).await;
-        }
+        let chunk = u64::try_from(VERIFY_CHUNK).expect("fits");
+        write_deltas(&db, 0..entities, Some(b"delta")).await;
         assert_eq!(
             observe(&ledgers, &db, limits, Reach::Complete).await,
             keys(0..entities)
         );
 
         let observation = ledgers.begin(generation());
-        let first = ledgers.candidates(&observation, Bound::Unbounded);
-        assert_eq!(first, keys(0..1024), "one lock copies one chunk");
+        let Candidates::Chunk(first) = ledgers.candidates(&observation, Bound::Unbounded) else {
+            panic!("a ledger with keys yields a chunk");
+        };
+        assert_eq!(first, keys(0..chunk), "one lock copies one chunk");
         record(&ledgers, [entities + 1]);
         let rest = std::iter::successors(Some(first), |chunk| {
-            let after = chunk.last()?;
-            Some(ledgers.candidates(&observation, Bound::Excluded(after)))
-                .filter(|next| !next.is_empty())
+            match ledgers.candidates(&observation, Bound::Excluded(chunk.last()?)) {
+                Candidates::Chunk(next) => Some(next),
+                Candidates::Exhausted => None,
+                Candidates::Dropped => panic!("the ledger stays"),
+            }
         })
         .skip(1)
         .collect::<Vec<_>>();
         assert!(rest.iter().all(|chunk| chunk.len() <= VERIFY_CHUNK));
         assert_eq!(
             rest.concat(),
-            keys((1024..entities).chain([entities + 1])),
+            keys((chunk..entities).chain([entities + 1])),
             "a key recorded after the observation began is verified too"
         );
         ledgers.finish(observation, Vec::new(), Vec::new(), Unobserved::Nothing);
 
-        for entity_id in (0..entities).step_by(2) {
-            delete_delta(&db, entity_id).await;
-        }
+        write_deltas(&db, (0..entities).step_by(2), None).await;
         let pending = keys((1..entities).step_by(2));
         assert_eq!(
             observe(&ledgers, &db, limits, Reach::Complete).await,
@@ -796,6 +930,125 @@ mod tests {
         );
         assert_eq!(ledgers.snapshot(generation()), Some((pending, None)));
         assert_eq!(ledgers.key_count(), VERIFY_CHUNK + 2);
+        db.close().await.expect("test database closes");
+    }
+
+    /// An observation whose ledger is dropped before it has verified every
+    /// key sees the drop, whether the ledger was crowded out, forgotten, or
+    /// forgotten and created again, and never mistakes the drop for the end
+    /// of its keys. Ledger ids are never reused.
+    #[test]
+    fn an_observation_sees_its_ledger_dropped() {
+        let ledgers = DeltaLedgers::default();
+        let observation = ledgers.begin(generation());
+        ledgers.finish(observation, Vec::new(), Vec::new(), Unobserved::Nothing);
+        let entities = u64::try_from(VERIFY_CHUNK + 1).expect("fits");
+        record(&ledgers, 0..entities);
+        let next = |observation: &Observation| {
+            ledgers.candidates(observation, Bound::Excluded(&delta_key(0)))
+        };
+
+        let observation = ledgers.begin(generation());
+        assert!(matches!(next(&observation), Candidates::Chunk(_)));
+        ledgers.crowd_out(generation());
+        assert_eq!(next(&observation), Candidates::Dropped);
+
+        let observation = ledgers.begin(generation());
+        assert_eq!(next(&observation), Candidates::Exhausted);
+        ledgers.forget(generation());
+        assert_eq!(next(&observation), Candidates::Dropped);
+
+        let stale = ledgers.begin(generation());
+        ledgers.forget(generation());
+        let fresh = ledgers.begin(generation());
+        assert_ne!(stale.ledger, fresh.ledger, "a new ledger gets a new id");
+        assert_eq!(next(&stale), Candidates::Dropped);
+        assert_eq!(next(&fresh), Candidates::Exhausted);
+    }
+
+    /// A complete observation whose ledger is evicted after it verified one
+    /// chunk, of a ledger that had read the whole prefix, still returns
+    /// every pending delta: it starts again from one scan of the prefix.
+    /// Before, it returned the one chunk as the whole backlog.
+    #[tokio::test]
+    async fn a_complete_observation_survives_its_ledger_being_evicted() {
+        let db = super::super::tests::test_db("delta-ledger-evicted").await;
+        let ledgers = DeltaLedgers::default();
+        let limits = SearchIndexBackfillLimits::default().batch();
+        let entities = u64::try_from(2 * VERIFY_CHUNK + 5).expect("fits");
+        write_deltas(&db, 0..entities, Some(b"delta")).await;
+        assert_eq!(
+            observe(&ledgers, &db, limits, Reach::Complete).await,
+            keys(0..entities)
+        );
+        assert_eq!(
+            ledgers.snapshot(generation()),
+            Some((keys(0..entities), None)),
+            "the ledger read the whole prefix"
+        );
+
+        *ledgers.evict_after_chunk.lock() = Some(generation());
+        assert_eq!(
+            observe(&ledgers, &db, limits, Reach::Complete).await,
+            keys(0..entities),
+            "an evicted ledger never cuts the backlog short"
+        );
+        assert_eq!(
+            *ledgers.evict_after_chunk.lock(),
+            None,
+            "the ledger was evicted"
+        );
+
+        // A bounded observation restarts the same way, from the start of
+        // the prefix. A new handle holds no ledger the eviction filled.
+        let one_entity = one_entity_limits();
+        let ledgers = DeltaLedgers::default();
+        observe(&ledgers, &db, limits, Reach::Complete).await;
+        *ledgers.evict_after_chunk.lock() = Some(generation());
+        let observed = ledgers
+            .observe(
+                &db,
+                generation(),
+                one_entity,
+                Reach::Batches(VERIFY_CHUNK + 1),
+            )
+            .await
+            .expect("backlog is observed");
+        assert_eq!(
+            *ledgers.evict_after_chunk.lock(),
+            None,
+            "the ledger was evicted"
+        );
+        assert!(observed.exceeds(one_entity, VERIFY_CHUNK + 1));
+        assert_eq!(
+            observed.rows.into_keys().collect::<Vec<_>>(),
+            keys(0..=u64::try_from(VERIFY_CHUNK + 1).expect("fits"))
+        );
+        db.close().await.expect("test database closes");
+    }
+
+    /// An observation that would take its ledger past [`LEDGER_CAPACITY`]
+    /// drops it rather than grow it, and still returns what it read.
+    #[tokio::test]
+    async fn an_observation_drops_a_ledger_it_would_overfill() {
+        let db = super::super::tests::test_db("delta-ledger-overfill").await;
+        let ledgers = DeltaLedgers::default();
+        let limits = SearchIndexBackfillLimits::default().batch();
+        let entities = u64::try_from(LEDGER_CAPACITY + 1).expect("fits");
+        write_deltas(&db, 0..entities, Some(b"delta")).await;
+        assert_eq!(
+            observe(&ledgers, &db, limits, Reach::Complete).await.len(),
+            LEDGER_CAPACITY + 1
+        );
+        assert_eq!(ledgers.snapshot(generation()), None);
+        assert_eq!(ledgers.key_count(), 0);
+
+        write_deltas(&db, [entities - 1], None).await;
+        assert_eq!(
+            observe(&ledgers, &db, limits, Reach::Complete).await.len(),
+            LEDGER_CAPACITY
+        );
+        assert_eq!(ledgers.key_count(), LEDGER_CAPACITY);
         db.close().await.expect("test database closes");
     }
 
