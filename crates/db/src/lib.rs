@@ -2496,8 +2496,14 @@ impl HelixDB {
             .await
     }
 
-    /// Conflicted DROP attempts retried before the conflict reaches the caller.
-    const DROP_CONFLICT_RETRIES: u32 = 8;
+    /// Conflicted DROP or abort attempts retried before the conflict reaches
+    /// the caller.
+    ///
+    /// A build step that commits between the command's reads and its commit
+    /// wins the serializable conflict. The losing command wrote nothing, and
+    /// it learns of the conflict just after a step committed, so it retries
+    /// at once: the next step's whole preparation is its window.
+    const DDL_CONFLICT_RETRIES: u32 = 8;
 
     /// Enqueues one request-owned DROP at its exact durable commit boundary.
     pub(crate) async fn enqueue_index_drop_with_control(
@@ -2569,7 +2575,7 @@ impl HelixDB {
                     {
                         Err(error)
                             if error.is_transaction_conflict()
-                                && retries < Self::DROP_CONFLICT_RETRIES =>
+                                && retries < Self::DDL_CONFLICT_RETRIES =>
                         {
                             retries += 1;
                             tokio::task::yield_now().await;
@@ -2652,13 +2658,27 @@ impl HelixDB {
                 actual: self.mode().as_str(),
             });
         };
-        let operation = index_lifecycle::outbox::abort_operation_with_control(
-            writer.db(),
-            scope,
-            operation_id,
-            execution_control,
-        )
-        .await?;
+        // A running build's retained steps rewrite its operation back to
+        // back; see [`Self::DDL_CONFLICT_RETRIES`].
+        let mut retries = 0;
+        let operation = loop {
+            match index_lifecycle::outbox::abort_operation_with_control(
+                writer.db(),
+                scope,
+                operation_id,
+                execution_control,
+            )
+            .await
+            {
+                Err(error)
+                    if error.is_transaction_conflict() && retries < Self::DDL_CONFLICT_RETRIES =>
+                {
+                    retries += 1;
+                    tokio::task::yield_now().await;
+                }
+                outcome => break outcome,
+            }
+        }?;
         if matches!(
             operation.execution_state(),
             index_lifecycle::IndexOperationExecutionState::Queued { .. }
@@ -6713,6 +6733,87 @@ mod tests {
             Err(HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode)
         ));
         enabled.close().await.expect("Enabled-mode writer closes");
+    }
+
+    /// A running build's retained steps rewrite its operation back to back,
+    /// with no claim transaction or WAL wait between them, so an abort or a
+    /// DROP that read the operation often loses the serializable conflict to
+    /// the next step. Both retry against the new state and land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn abort_and_drop_land_between_retained_build_steps() {
+        const TRIALS: usize = 16;
+        let scope = DataScope::LegacyUnscoped;
+        let spec = helix_ast::index::IndexSpec::node_equality("User", "rank");
+        // One entity per step keeps the build's steps short and back to back.
+        let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
+            config::SecondaryIndexLifecycleTuning::default().with_batch_rows(
+                config::SecondaryIndexLifecycleBatchRows::new(1).expect("one row is positive"),
+            ),
+        );
+        for trial in 0..TRIALS {
+            let db = HelixDB::open_with_config(
+                HelixDbSource::InMemory {
+                    database: format!("ddl-between-retained-steps-{trial}"),
+                },
+                config.clone(),
+            )
+            .await
+            .expect("writer opens");
+            db.cypher(cypher::Request::new(
+                "UNWIND range(0, 4999) AS rank CREATE (:User {rank: rank})",
+            ))
+            .await
+            .expect("users load");
+            let created = db
+                .query(QueryRequest::write(
+                    write_batch()
+                        .var_as("index", g().create_index_if_not_exists(spec.clone()))
+                        .returning(["index"]),
+                ))
+                .await
+                .expect("the build enqueues");
+            let operation_id = index_lifecycle::IndexOperationId::new(
+                uuid::Uuid::parse_str(
+                    created["index"]["operation_id"]
+                        .as_str()
+                        .expect("the receipt names its operation"),
+                )
+                .expect("operation ids are uuids"),
+            )
+            .expect("operation ids are not nil");
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    let status = db
+                        .get_index_operation(scope, operation_id)
+                        .await
+                        .expect("status reads");
+                    if matches!(
+                        status,
+                        index_lifecycle::IndexOperationStatus::Running { .. }
+                    ) && status.common().progress.entities > 0
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the build runs its steps");
+            if trial % 2 == 0 {
+                db.abort_index_operation(scope, operation_id)
+                    .await
+                    .expect("the abort lands between steps");
+            } else {
+                db.query(QueryRequest::write(
+                    write_batch()
+                        .var_as("dropped", g().drop_index(spec.clone()))
+                        .returning(["dropped"]),
+                ))
+                .await
+                .expect("the DROP lands between steps");
+            }
+            db.close().await.expect("writer closes");
+        }
     }
 
     #[tokio::test]
