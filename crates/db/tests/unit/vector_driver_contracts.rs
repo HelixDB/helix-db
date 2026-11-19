@@ -2374,6 +2374,10 @@ pub(super) async fn unpartitioned_drop_resumes_past_deleted_rows_and_sweeps_befo
         .expect("fixture row is written");
     let mut deleted = 3;
     while position(&driver).is_some() {
+        assert!(
+            deleted < keys.len(),
+            "a resumed scan that reached the end still handed on a position"
+        );
         assert_eq!(
             drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
             CommittedOperationStep::Progressed
@@ -2877,6 +2881,7 @@ pub(super) async fn drop_delete_steps_hold_no_write_fence_and_aborts_keep_theirs
             break;
         }
         assert_eq!(step, CommittedOperationStep::Progressed);
+        assert!(stages.len() < 64, "drop exceeded its bounded steps");
     }
     stages.dedup();
     assert_eq!(
@@ -2936,6 +2941,7 @@ pub(super) async fn drop_delete_steps_hold_no_write_fence_and_aborts_keep_theirs
             break;
         }
         assert_eq!(step, CommittedOperationStep::Progressed);
+        assert!(stages.len() < 64, "abort exceeded its bounded steps");
     }
     stages.dedup();
     assert_eq!(
