@@ -4785,7 +4785,8 @@ mod tests {
     /// label's rows, written before the stage and after it, and no other:
     /// its steps read the label rows in the layout their snapshot names, so
     /// a build while the copy runs reads the complete hash rows rather than
-    /// the incomplete exact ones.
+    /// the incomplete exact ones, and a build the copy publishes under
+    /// reads the hash rows before the publication and the exact rows after.
     #[tokio::test]
     async fn builds_index_their_label_at_every_label_identity_stage() {
         let scope = DataScope::LegacyUnscoped;
@@ -4802,13 +4803,21 @@ mod tests {
             row[0] = Property::new("$label", PropertyValue::String(label.into()));
             row
         };
-        for stage in crate::migrations::LabelStage::ALL {
-            let db = test_db(&format!("vector-label-stage-{stage:?}")).await;
+        let one_entity = SearchIndexBatchLimits::try_new(
+            NonZeroUsize::MIN,
+            NonZeroU64::new(1024 * 1024).expect("one MiB is positive"),
+            NonZeroU64::new(1024).expect("operation limit is positive"),
+            NonZeroU64::new(16 * 1024 * 1024).expect("output limit is positive"),
+            NonZeroU64::new(16 * 1024 * 1024).expect("entity output is positive"),
+        )
+        .expect("one-entity limits validate");
+        for timeline in crate::migrations::LabelTimeline::ALL {
+            let db = test_db(&format!("vector-label-stage-{timeline:?}")).await;
             crate::migrations::LabelStage::rewind(&db).await;
             for id in 0..40_u64 {
                 put_source(&db, scope, id, &row(id, label_of(id))).await;
             }
-            stage.reach(&db).await;
+            timeline.start().reach(&db).await;
             for id in 40..80_u64 {
                 put_source(&db, scope, id, &row(id, label_of(id))).await;
             }
@@ -4847,10 +4856,20 @@ mod tests {
             let definition = definition(None);
             let (build_id, _, _) = create_build(&db, scope, &definition, 79).await;
             let mut claim_sequence = 1;
+            // Three steps of at most one entity each, then the rest of the
+            // build: most of the 38 Documents are read after the publication.
+            for _ in 0..3 {
+                assert_eq!(
+                    drive_one(&db, &driver(), build_id, &mut claim_sequence, one_entity).await,
+                    CommittedOperationStep::Progressed,
+                    "{timeline:?}"
+                );
+            }
+            timeline.between_steps(&db).await;
             assert_eq!(
                 drive_to_terminal(&db, &driver(), build_id, &mut claim_sequence).await,
                 CommittedOperationStep::Completed,
-                "{stage:?}"
+                "{timeline:?}"
             );
             let active = read_index(&db, scope, &definition).await;
             let IndexStateV2::Active {
@@ -4875,7 +4894,7 @@ mod tests {
                 assert_eq!(
                     index.get_item(&db, id).await.unwrap().is_some(),
                     label_of(id) == "Document" && id != 2 && id != 4,
-                    "{stage:?} row {id}"
+                    "{timeline:?} row {id}"
                 );
             }
             db.close().await.expect("database closes");
