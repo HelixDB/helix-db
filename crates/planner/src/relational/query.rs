@@ -610,11 +610,12 @@ impl Query {
                 expression.try_visit(&mut |expression| match expression {
                     Expression::Binary(B::In, a, list) => {
                         let a_bound = bound(a).is_some();
-                        let a_type = value_type(a);
+                        // Inferred only for a pair that needs it.
+                        let a_type = std::cell::LazyCell::new(|| value_type(a));
                         let values = |members: &[Value]| {
                             members
                                 .iter()
-                                .try_for_each(|member| check(a_type, Some(T::of(member))))
+                                .try_for_each(|member| check(*a_type, Some(T::of(member))))
                         };
                         match (list.as_ref(), bound(list)) {
                             (_, Some(Value::List(members))) => values(members),
@@ -624,7 +625,7 @@ impl Query {
                             (Expression::List(members), _) => members
                                 .iter()
                                 .filter(|member| a_bound || bound(member).is_some())
-                                .try_for_each(|member| check(a_type, value_type(member))),
+                                .try_for_each(|member| check(*a_type, value_type(member))),
                             _ => Ok(()),
                         }
                     }
@@ -645,12 +646,12 @@ impl Query {
                     }
                     Expression::SimpleCase(case) => {
                         let operand_bound = bound(&case.operand).is_some();
-                        let operand_type = value_type(&case.operand);
+                        let operand_type = std::cell::LazyCell::new(|| value_type(&case.operand));
                         case.branches
                             .iter()
                             .map(|(comparison, _)| comparison)
                             .filter(|comparison| operand_bound || bound(comparison).is_some())
-                            .try_for_each(|comparison| check(operand_type, value_type(comparison)))
+                            .try_for_each(|comparison| check(*operand_type, value_type(comparison)))
                     }
                     _ => Ok(()),
                 })
