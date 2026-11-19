@@ -1555,10 +1555,10 @@ impl LabelStage {
     /// Moves `db`, rewound by [`Self::rewind`] and holding hash rows, to
     /// this stage through the migration's own steps.
     pub(crate) async fn reach(self, db: &Db) {
-        let writer = crate::HelixWriter::new(std::sync::Arc::new(db.clone()), 4, 2);
         let version = match self {
             Self::BeforeCopy => IndexStorageVersion::OPERATION_QUEUES,
             Self::Copying => {
+                let writer = crate::HelixWriter::new(std::sync::Arc::new(db.clone()), 4, 2);
                 start_label_identity_copy(db)
                     .await
                     .expect("the copy starts");
@@ -1575,34 +1575,86 @@ impl LabelStage {
                 IndexStorageVersion::LABEL_COPY
             }
             Self::Published => {
-                start_label_identity_copy(db)
-                    .await
-                    .expect("the copy starts");
-                let mut session = LabelCopySession::new();
-                while copy_hash_label_rows_once(&writer, &mut session)
-                    .await
-                    .expect("a copy step runs")
-                    .advanced()
-                {}
-                while delete_hash_label_rows_once(db, &mut session)
-                    .await
-                    .expect("a cleanup step runs")
-                    .advanced()
-                {}
-                assert!(
-                    hash_rows(db, None, None)
-                        .await
-                        .unwrap()
-                        .next()
-                        .await
-                        .unwrap()
-                        .is_none(),
-                    "the cleanup deletes every hash row"
-                );
+                Self::publish(db).await;
                 IndexStorageVersion::LABEL_IDENTITY
             }
         };
         assert_eq!(storage_version(db).await.unwrap(), version);
+    }
+
+    /// Takes `db`, rewound by [`Self::rewind`] or moved to any stage since,
+    /// to [`Self::Published`]: starts the copy unless it runs, copies what
+    /// is left, publishes, and deletes every hash row.
+    pub(crate) async fn publish(db: &Db) {
+        let writer = crate::HelixWriter::new(std::sync::Arc::new(db.clone()), 4, 2);
+        start_label_identity_copy(db)
+            .await
+            .expect("the copy starts");
+        let mut session = LabelCopySession::new();
+        while copy_hash_label_rows_once(&writer, &mut session)
+            .await
+            .expect("a copy step runs")
+            .advanced()
+        {}
+        while delete_hash_label_rows_once(db, &mut session)
+            .await
+            .expect("a cleanup step runs")
+            .advanced()
+        {}
+        assert!(
+            hash_rows(db, None, None)
+                .await
+                .unwrap()
+                .next()
+                .await
+                .unwrap()
+                .is_none(),
+            "the cleanup deletes every hash row"
+        );
+        assert_eq!(
+            storage_version(db).await.unwrap(),
+            IndexStorageVersion::LABEL_IDENTITY
+        );
+    }
+}
+
+/// Where a test build's store stands in the label identity migration while
+/// the build runs.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelTimeline {
+    /// The store stays at one stage for the whole build.
+    Fixed(LabelStage),
+    /// The store is [`LabelStage::Copying`] when the build starts, and the
+    /// copy publishes and cleans up between two of its steps
+    /// ([`Self::between_steps`]): steps before read the hash rows, steps
+    /// after the exact ones.
+    PublishedMidBuild,
+}
+
+#[cfg(test)]
+impl LabelTimeline {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Fixed(LabelStage::BeforeCopy),
+        Self::Fixed(LabelStage::Copying),
+        Self::Fixed(LabelStage::Published),
+        Self::PublishedMidBuild,
+    ];
+
+    /// The stage the store reaches before the build starts.
+    pub(crate) fn start(self) -> LabelStage {
+        match self {
+            Self::Fixed(stage) => stage,
+            Self::PublishedMidBuild => LabelStage::Copying,
+        }
+    }
+
+    /// Moves `db` as this timeline does between a build's steps.
+    pub(crate) async fn between_steps(self, db: &Db) {
+        match self {
+            Self::Fixed(_) => {}
+            Self::PublishedMidBuild => LabelStage::publish(db).await,
+        }
     }
 }
 

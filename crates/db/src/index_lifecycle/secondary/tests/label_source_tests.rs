@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::index_lifecycle::label_source::testing;
+use crate::migrations::{LabelStage, LabelTimeline};
 
 /// A deterministic xorshift sequence, so a failing seed replays.
 struct Seeded(u64);
@@ -164,10 +165,11 @@ async fn each_of_many_labels_scans_only_its_own_rows() {
 /// a label-hash collision leaves), rows above the build's bound, id gaps,
 /// and rows of other labels too large for any batch, which no longer block
 /// the build. Each seed writes half its graph before one stage of the label
-/// identity migration and half after it (see [`build_random_graph`]).
+/// identity migration and half after it, and one publishes the migration
+/// between two of the build's steps (see [`build_random_graph`]).
 #[tokio::test]
 async fn builds_match_a_scan_of_every_row_on_random_graphs() {
-    for seed_value in 1..=3_u64 {
+    for seed_value in 1..=4_u64 {
         build_random_graph(
             IndexElementKind::Node,
             ["User", "Other", "Account"],
@@ -182,7 +184,7 @@ async fn builds_match_a_scan_of_every_row_on_random_graphs() {
 /// edge row builds on the same random graphs.
 #[tokio::test]
 async fn edge_builds_match_a_scan_of_every_row_on_random_graphs() {
-    for seed_value in 1..=3_u64 {
+    for seed_value in 1..=4_u64 {
         build_random_graph(
             IndexElementKind::Edge,
             ["FOLLOWS", "LIKES", "OWNS"],
@@ -199,9 +201,11 @@ async fn edge_builds_match_a_scan_of_every_row_on_random_graphs() {
 /// of `labels` and checks the generation against every row up to the bound.
 ///
 /// The store starts before the label identity copy, and half the graph is
-/// written there; the seed then picks the stage the store moves to (before
-/// the copy, copying, or published and cleaned up) and the other half, and
-/// every bitmap member without a row of its label, is written at that stage.
+/// written there; the seed then picks the [`LabelTimeline`]: the stage the
+/// store moves to (before the copy, copying, or published and cleaned up),
+/// where the other half, and every bitmap member without a row of its label,
+/// is written, and whether the copy publishes and cleans up after the
+/// build's first step, so the steps after it read the exact rows.
 async fn build_random_graph(
     kind: IndexElementKind,
     labels: [&str; 3],
@@ -212,14 +216,14 @@ async fn build_random_graph(
     let [label, other, third] = labels;
     let mut random = Seeded(0x9E37_79B9_7F4A_7C15 ^ seed_value);
     let db = test_db(&format!("label-source-differential-{kind:?}-{seed_value}")).await;
-    let stage = crate::migrations::LabelStage::ALL[usize::try_from(seed_value % 3).expect("fits")];
-    crate::migrations::LabelStage::rewind(&db).await;
+    let timeline = LabelTimeline::ALL[usize::try_from((seed_value - 1) % 4).expect("fits")];
+    LabelStage::rewind(&db).await;
     let mut sources = BTreeMap::new();
     let mut id = 0_u64;
     let mut absent = Vec::new();
     for written in 0..600 {
         if written == 300 {
-            stage.reach(&db).await;
+            timeline.start().reach(&db).await;
         }
         id += 1 + random.next(3);
         if random.next(40) == 0 {
@@ -276,14 +280,30 @@ async fn build_random_graph(
     let (operation_id, index_id, generation) = create_build(&db, scope, &definition, upper).await;
     let driver = SecondaryIndexDriver::new(Arc::new(IndexScopeGates::default()));
     let mut claim_sequence = 1;
-    let (scan_steps, end) =
-        drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
+    assert!(matches!(
+        build_stage(&db, operation_id).await,
+        SecondaryBuildStage::Scan(_)
+    ));
+    assert_eq!(
+        drive_one_with_limits(&db, &driver, operation_id, &mut claim_sequence, limits).await,
+        CommittedOperationStep::Progressed
+    );
+    if timeline == LabelTimeline::PublishedMidBuild {
+        assert!(
+            matches!(
+                build_stage(&db, operation_id).await,
+                SecondaryBuildStage::Scan(_)
+            ),
+            "{kind:?} seed {seed_value}: the scan goes on past the publication"
+        );
+    }
+    timeline.between_steps(&db).await;
+    let (_, end) = drive_build(&db, &driver, operation_id, &mut claim_sequence, limits).await;
     assert_eq!(
         end,
         CommittedOperationStep::Completed,
-        "{kind:?} seed {seed_value} at {stage:?}"
+        "{kind:?} seed {seed_value} at {timeline:?}"
     );
-    assert!(scan_steps >= 1);
     sources.retain(|&id, _| id <= upper);
     assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources).await;
     db.close().await.expect("database closes");
@@ -315,18 +335,7 @@ async fn an_edge_build_resumes_after_a_retired_pair_key_cursor() {
         .await
         .expect("operation reads")
         .expect("operation exists");
-    let legacy = IndexCursor::try_new(
-        DataKey::Data {
-            scope,
-            kind: DataKeyKind::EdgePropertyPair(
-                crate::encoding::v2::legacy::edge_property_pair::LegacyEdgePropertyPairKey::new(
-                    17, 2,
-                ),
-            ),
-        }
-        .to_bytes(),
-    )
-    .expect("a retired key is a cursor");
+    let legacy = crate::index_lifecycle::cursor_contracts::legacy_edge_pair_cursor(scope, 17, 2);
     let mut progress = SourceScanProgress {
         inclusive_upper_bound: source_cursor(scope, edge, 39),
         cursor: Some(legacy),

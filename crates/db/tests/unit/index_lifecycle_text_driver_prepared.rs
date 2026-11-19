@@ -3302,7 +3302,8 @@ async fn source_scan_steps_resume_on_a_reopened_database() {
 /// label's rows, written before the stage and after it, and no other: its
 /// steps read the label rows in the layout their snapshot names, so a build
 /// while the copy runs reads the complete hash rows rather than the
-/// incomplete exact ones.
+/// incomplete exact ones, and a build the copy publishes under reads the
+/// hash rows before the publication and the exact rows after it.
 #[tokio::test]
 async fn source_scans_read_their_label_at_every_label_identity_stage() {
     let scope = DataScope::LegacyUnscoped;
@@ -3314,9 +3315,9 @@ async fn source_scans_read_their_label_at_every_label_identity_stage() {
             property::Property::string("body", "searchable text"),
         ]
     };
-    for stage in crate::migrations::LabelStage::ALL {
+    for timeline in crate::migrations::LabelTimeline::ALL {
         let db = open_graph_db(
-            &format!("text-driver-label-stage-{stage:?}"),
+            &format!("text-driver-label-stage-{timeline:?}"),
             Arc::new(InMemory::new()),
         )
         .await
@@ -3332,7 +3333,7 @@ async fn source_scans_read_their_label_at_every_label_identity_stage() {
             )
             .await;
         }
-        stage.reach(&db).await;
+        timeline.start().reach(&db).await;
         for id in 96..192_u64 {
             crate::index_lifecycle::label_source::testing::put_source_row(
                 &db,
@@ -3384,7 +3385,12 @@ async fn source_scans_read_their_label_at_every_label_identity_stage() {
             cursor: None,
             counters: OperationCounters::default(),
         };
+        let mut steps = 0;
         let scanned = loop {
+            if steps == 1 {
+                timeline.between_steps(&db).await;
+            }
+            steps += 1;
             let transaction = db
                 .begin(IsolationLevel::SerializableSnapshot)
                 .await
@@ -3425,8 +3431,11 @@ async fn source_scans_read_their_label_at_every_label_identity_stage() {
         assert_eq!(
             scanned.counters.entities,
             (0..192_u64).filter(|id| documents(*id)).count() as u64,
-            "{stage:?}"
+            "{timeline:?}"
         );
+        // 64 Documents up to the bound at 16 a step: the publication falls
+        // between the first step and the rest.
+        assert_eq!(steps, 4, "{timeline:?}");
         for id in 0..192_u64 {
             let applied = scoped_index_key(
                 scope,
@@ -3439,7 +3448,7 @@ async fn source_scans_read_their_label_at_every_label_identity_stage() {
             assert_eq!(
                 db.get(&applied).await.unwrap().is_some(),
                 documents(id),
-                "{stage:?} row {id}"
+                "{timeline:?} row {id}"
             );
         }
         db.close().await.unwrap();
