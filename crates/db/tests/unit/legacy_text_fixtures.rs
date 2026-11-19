@@ -279,7 +279,7 @@ fn cases() -> Vec<LegacyTextFixtureCase> {
     cases
 }
 
-fn put_entity(
+async fn put_entity(
     transaction: &slatedb::DbTransaction,
     definition: &TextIndexDefinition,
     entity_id: u64,
@@ -292,6 +292,18 @@ fn put_entity(
             properties(definition, text, tenant),
         )
         .expect("legacy graph row stages");
+    // Legacy writers kept the label bitmap with each row, as label scans need.
+    crate::index_lifecycle::label_source::testing::stage_member(
+        transaction,
+        DataScope::LegacyUnscoped,
+        match definition.element_type() {
+            TextElementType::Node => crate::index_lifecycle::IndexElementKind::Node,
+            TextElementType::Edge => crate::index_lifecycle::IndexElementKind::Edge,
+        },
+        definition.label(),
+        entity_id,
+    )
+    .await;
     if definition.element_type() == TextElementType::Edge {
         transaction
             .put(
@@ -344,7 +356,8 @@ async fn seed_legacy_text_fixture(
                 document.entity_id,
                 Some(initial_text),
                 initial_tenant.as_ref(),
-            );
+            )
+            .await;
         }
         for document in &case.other_partition_documents {
             put_entity(
@@ -353,7 +366,8 @@ async fn seed_legacy_text_fixture(
                 document.entity_id,
                 Some(&document.text),
                 Some(&PropertyValue::String(OTHER_TENANT.to_string())),
-            );
+            )
+            .await;
         }
         put_entity(
             &initial,
@@ -361,7 +375,8 @@ async fn seed_legacy_text_fixture(
             case.absent_entity_id,
             None,
             target_tenant.as_ref(),
-        );
+        )
+        .await;
     }
     initial.commit().await?;
 
@@ -377,7 +392,8 @@ async fn seed_legacy_text_fixture(
             case.documents[2].entity_id,
             Some(&case.documents[2].text),
             target_tenant.as_ref(),
-        );
+        )
+        .await;
         updates.delete(graph_key(
             case.definition.element_type(),
             case.documents[1].entity_id,
@@ -397,7 +413,8 @@ async fn seed_legacy_text_fixture(
             case.documents[1].entity_id,
             Some(&case.documents[1].text),
             target_tenant.as_ref(),
-        );
+        )
+        .await;
     }
     reinserts.commit().await?;
 

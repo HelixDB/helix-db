@@ -18,6 +18,9 @@ HTTP endpoints:
 - `GET /v2/diagnostics` runs read-only checks of the setup (storage, the S3
   bucket's region, the disk cache's device and room, memory, index
   publication, and recent queries' missing indexes); `helix doctor` renders it.
+  `?audit=labels` adds `indexes.label_bitmaps`, which reads every node and
+  edge row once to check that each is in its label's bitmap, the set label
+  scans and index builds read.
 
 The `x-helix-warm`, `x-helix-require-writer`, and
 `x-helix-await-durable` headers select the corresponding request contract.

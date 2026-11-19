@@ -38,7 +38,7 @@ use crate::encoding::v2::keys::indexes::vector::{
 };
 use crate::encoding::v2::keys::scope::DataScope;
 use crate::encoding::v2::keys::ManagedIndexKey as IndexKey;
-use crate::encoding::v2::keys::{DataKey, DataKeyKind, KeyPrefix};
+use crate::encoding::v2::keys::{DataKey, DataKeyKind};
 use crate::encoding::v2::keys::{
     GlobalKey, IndexEntity, IndexEntityStateKey, RecordKind, ScopedKey,
 };
@@ -2791,55 +2791,51 @@ async fn scan_source<D: Distance>(
     batch_reads: crate::batch_reads::BatchReads,
     build_session: &mut CheckedOutSession<D>,
 ) -> Result<VectorStepResult> {
-    let source_prefix = source_prefix(scope, definition.element_kind());
-    let start = cursor_suffix(&source_prefix, progress.cursor.as_ref())?;
-    let upper = cursor_suffix(&source_prefix, Some(&progress.inclusive_upper_bound))?
-        .ok_or_else(|| corruption("vector source upper bound is absent"))?;
-    match start.as_ref().map(|start| start.cmp(&upper)) {
-        Some(std::cmp::Ordering::Greater) => {
-            return Err(corruption(
-                "vector source cursor exceeds its inclusive upper bound",
-            ));
-        }
-        Some(std::cmp::Ordering::Equal) => {
-            return Ok(VectorStepResult::ordinary(progressed_build(
-                VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
-                    cursor: None,
-                    counters: progress.counters,
-                }),
-            )));
-        }
-        Some(std::cmp::Ordering::Less) | None => {}
-    }
-    let start = start.map_or(Bound::Unbounded, Bound::Excluded);
-    let scan_options = scan_tuning.scan_options();
     let planning = db.begin(IsolationLevel::Snapshot).await?;
     // Source rows are read untracked, from the planning snapshot; see
     // "Build source reads" in [`crate::index_lifecycle::queue`]. A blocker
     // is durable, so each one first reads its row through `transaction`: a
     // write that repairs the row before this step commits fails the commit.
-    let mut rows = planning
-        .scan_prefix_with_options(
-            &source_prefix,
-            (start, Bound::Included(upper)),
-            &scan_options,
-        )
-        .await?;
+    let Some(mut rows) = crate::index_lifecycle::label_source::LabelSource::open(
+        &planning,
+        scope,
+        definition.element_kind(),
+        definition.label().as_str(),
+        progress,
+        limits,
+        scan_tuning,
+    )
+    .await?
+    else {
+        return Ok(VectorStepResult::ordinary(progressed_build(
+            VectorBuildStage::ValidateDescriptor(PrefixScanProgress {
+                cursor: None,
+                counters: progress.counters,
+            }),
+        )));
+    };
     let target = VectorPlanTarget::build(scope, operation, record)?;
     let planning_recorder = VectorWriteRecorder::new();
     let mut accounting = VectorBatchAccounting::new(progress.counters, limits);
     let mut cursor = progress.cursor.clone();
     let mut exhausted = true;
     let mut scratch = view::Scratch::new();
-    while accounting.can_read_another() {
-        let Some(row) = rows.next().await? else {
-            break;
+    // The label source takes at most `max_entities` ids, so its end ends the
+    // step.
+    loop {
+        let row = match rows.next().await? {
+            crate::index_lifecycle::label_source::LabelRead::Row(row) => row,
+            crate::index_lifecycle::label_source::LabelRead::Exhausted => break,
+            crate::index_lifecycle::label_source::LabelRead::Paused(paused) => {
+                cursor = Some(paused);
+                exhausted = false;
+                break;
+            }
         };
+        let entity_id = row.entity_id;
         let input_bytes = row.key.len().saturating_add(row.value.len()) as u64;
         if !accounting.can_admit_input(input_bytes) {
             if accounting.is_empty() {
-                let entity_id = source_entity(scope, definition.element_kind(), &row.key)?
-                    .unwrap_or(IndexEntityId::initial());
                 transaction.get(&row.key).await?;
                 return Ok(VectorStepResult::ordinary(
                     IndexOperationStepResult::Blocked(IndexOperationBlocker::OversizedEntity {
@@ -2854,11 +2850,6 @@ async fn scan_source<D: Distance>(
             break;
         }
         let complete_cursor = IndexCursor::try_new(row.key.clone()).map_err(operation_error)?;
-        let Some(entity_id) = source_entity(scope, definition.element_kind(), &row.key)? else {
-            accounting.admit(input_bytes, VectorWriteMeasurement::zero(), 0, 0, 0)?;
-            cursor = Some(complete_cursor);
-            continue;
-        };
         let Ok(document) = stored_vector_document(definition, &row.value, &mut scratch) else {
             if !accounting.is_empty() {
                 exhausted = false;
@@ -2940,9 +2931,6 @@ async fn scan_source<D: Distance>(
             lifecycle_bytes,
         )?;
         cursor = Some(complete_cursor);
-    }
-    if !accounting.can_read_another() {
-        exhausted = false;
     }
     let vector_planning = accounting.planning_usage(build_session.stats());
     let (counters, single_vector_output_bytes) = accounting.finish_with_max()?;
@@ -4248,42 +4236,6 @@ async fn generation_has_rows(
     Ok(rows.next().await?.is_some())
 }
 
-fn source_prefix(scope: DataScope, kind: IndexElementKind) -> Bytes {
-    let prefix = match kind {
-        IndexElementKind::Node => KeyPrefix::NodeProperty,
-        IndexElementKind::Edge => KeyPrefix::EdgePropertyById,
-    };
-    DataKey::data_prefix(scope, Bytes::copy_from_slice(prefix.as_slice()))
-}
-
-fn source_entity(
-    scope: DataScope,
-    expected: IndexElementKind,
-    key: &[u8],
-) -> Result<Option<IndexEntityId>> {
-    let parsed = DataKey::parse_from_slice(scope, key)?;
-    Ok(match (expected, parsed) {
-        (
-            IndexElementKind::Node,
-            DataKey::Data {
-                kind: DataKeyKind::NodeProperty(key),
-                ..
-            },
-        ) => Some(IndexEntityId::new(key.node_id())),
-        (
-            IndexElementKind::Edge,
-            DataKey::Data {
-                kind: DataKeyKind::EdgePropertyById(key),
-                ..
-            },
-        ) => Some(IndexEntityId::new(key.edge_id())),
-        (IndexElementKind::Edge, DataKey::Data { .. }) => None,
-        (IndexElementKind::Node, DataKey::Data { .. }) | (_, DataKey::Global { .. }) => {
-            return Err(corruption("vector source prefix yielded another key kind"));
-        }
-    })
-}
-
 fn generation_prefix(
     scope: DataScope,
     kind: RecordKind,
@@ -4662,6 +4614,308 @@ mod tests {
         assert_eq!(counters.output_bytes, 24);
     }
 
+    /// A build reads only its label's rows: among 3,000 rows of another
+    /// label, an empty label finishes its scan in one step, and ten rows of
+    /// the label take one step, which indexes those ten and no other row.
+    #[tokio::test]
+    async fn builds_scan_only_their_label() {
+        let scope = DataScope::LegacyUnscoped;
+        for (members, name) in [(0_u64, "vector-label-empty"), (10, "vector-label-small")] {
+            let db = test_db(name).await;
+            for id in 0..3_000_u64 {
+                let mut row = properties([id as f32, 1.0, 0.0], None);
+                if !(members > 0 && id % 300 == 7) {
+                    row[0] = Property::new("$label", PropertyValue::String("Other".into()));
+                }
+                put_source(&db, scope, id, &row).await;
+            }
+            let definition = definition(None);
+            let (build_id, _, _) = create_build(&db, scope, &definition, 2_999).await;
+            let mut claim_sequence = 1;
+            assert_eq!(
+                drive_one(
+                    &db,
+                    &driver(),
+                    build_id,
+                    &mut claim_sequence,
+                    SearchIndexBackfillLimits::default().batch(),
+                )
+                .await,
+                CommittedOperationStep::Progressed
+            );
+            let IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                VectorBuildStage::ValidateDescriptor(progress),
+            )) = read_operation(&db, scope, build_id)
+                .await
+                .progress()
+                .clone()
+            else {
+                panic!("one step ends the scan of {members} rows");
+            };
+            assert_eq!(progress.counters.entities, members);
+            assert_eq!(
+                drive_to_terminal(&db, &driver(), build_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+            let active = read_index(&db, scope, &definition).await;
+            let IndexStateV2::Active {
+                physical:
+                    PhysicalGeneration::Vector {
+                        layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                        ..
+                    },
+                ..
+            } = active.state()
+            else {
+                panic!("completed vector build is active and unpartitioned");
+            };
+            let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
+                .expect("active vector record projects a handle");
+            let generation = ValidatedVectorGenerationHandle::try_from_active::<
+                vector::distance::Euclidean,
+            >(&active_handle, *physical_index_id)
+            .expect("active physical generation validates");
+            let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
+            for id in 0..3_000_u64 {
+                assert_eq!(
+                    index.get_item(&db, id).await.unwrap().is_some(),
+                    members > 0 && id % 300 == 7,
+                    "row {id}"
+                );
+            }
+            db.close().await.expect("database closes");
+        }
+    }
+
+    /// Builds of several labels each index only their own rows, over many
+    /// steps on a database reopened between steps, and a last step that
+    /// takes exactly a batch ends the scan without another.
+    #[tokio::test]
+    async fn builds_of_many_labels_scan_their_own_rows_across_reopens() {
+        let scope = DataScope::LegacyUnscoped;
+        let store = Arc::new(InMemory::new());
+        let open = || {
+            Db::builder("vector-label-many-reopened", store.clone())
+                .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+                .build()
+        };
+        let mut db = open().await.expect("database opens");
+        bootstrap_writer(&db).await.expect("database bootstraps");
+        let labels = ["Document", "Note", "Image"];
+        let label_of = |id: u64| labels[usize::try_from(id % 3).expect("label index fits")];
+        let transaction = db
+            .begin(IsolationLevel::Snapshot)
+            .await
+            .expect("sources begin");
+        for id in 0..192_u64 {
+            let mut row = properties([id as f32, 1.0, 0.0], None);
+            row[0] = Property::new("$label", PropertyValue::String(label_of(id).into()));
+            transaction
+                .put(source_key(scope, id), encode_properties(&row))
+                .expect("source stages");
+            crate::index_lifecycle::label_source::testing::stage_member(
+                &transaction,
+                scope,
+                IndexElementKind::Node,
+                label_of(id),
+                id,
+            )
+            .await;
+        }
+        transaction.commit().await.expect("sources commit");
+        let sixteen = SearchIndexBatchLimits::try_new(
+            NonZeroUsize::new(16).expect("entity limit is positive"),
+            NonZeroU64::new(1 << 20).expect("input limit is positive"),
+            NonZeroU64::new(1 << 20).expect("operation limit is positive"),
+            NonZeroU64::new(1 << 30).expect("output limit is positive"),
+            NonZeroU64::new(16 << 20).expect("entity output is positive"),
+        )
+        .expect("step limits validate");
+        for label in labels {
+            let runtime = VectorIndexDefinition::new_node(
+                label,
+                "embedding",
+                3,
+                VectorDistanceMetric::Euclidean,
+            )
+            .expect("vector definition validates");
+            let definition = ValidatedDynamicIndexDefinition::Vector(
+                ValidatedVectorIndexDefinition::try_from_runtime(&runtime)
+                    .expect("V2 vector definition validates"),
+            );
+            let (build_id, _, _) = create_build(&db, scope, &definition, 191).await;
+            let mut claim_sequence = 1;
+            let mut scan_steps = 0;
+            while matches!(
+                read_operation(&db, scope, build_id).await.progress(),
+                IndexOperationProgress::VectorBuild(VectorBuildProgress::Constructing(
+                    VectorBuildStage::Scan(_)
+                ))
+            ) {
+                assert_eq!(
+                    drive_one(&db, &driver(), build_id, &mut claim_sequence, sixteen).await,
+                    CommittedOperationStep::Progressed
+                );
+                scan_steps += 1;
+                db.close().await.expect("database closes");
+                db = open().await.expect("database reopens");
+            }
+            // Sixty-four rows of the label at sixteen a step.
+            assert_eq!(scan_steps, 4, "{label}");
+            assert_eq!(
+                drive_to_terminal(&db, &driver(), build_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed
+            );
+            let active = read_index(&db, scope, &definition).await;
+            let IndexStateV2::Active {
+                physical:
+                    PhysicalGeneration::Vector {
+                        layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                        ..
+                    },
+                ..
+            } = active.state()
+            else {
+                panic!("completed vector build is active and unpartitioned");
+            };
+            let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
+                .expect("active vector record projects a handle");
+            let generation = ValidatedVectorGenerationHandle::try_from_active::<
+                vector::distance::Euclidean,
+            >(&active_handle, *physical_index_id)
+            .expect("active physical generation validates");
+            let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
+            for id in 0..192_u64 {
+                assert_eq!(
+                    index.get_item(&db, id).await.unwrap().is_some(),
+                    label_of(id) == label,
+                    "{label} row {id}"
+                );
+            }
+        }
+        db.close().await.expect("database closes");
+    }
+
+    /// At every stage of the label identity migration a build indexes its
+    /// label's rows, written before the stage and after it, and no other:
+    /// its steps read the label rows in the layout their snapshot names, so
+    /// a build while the copy runs reads the complete hash rows rather than
+    /// the incomplete exact ones, and a build the copy publishes under
+    /// reads the hash rows before the publication and the exact rows after.
+    #[tokio::test]
+    async fn builds_index_their_label_at_every_label_identity_stage() {
+        let scope = DataScope::LegacyUnscoped;
+        let node = IndexElementKind::Node;
+        let label_of = |id: u64| {
+            if id.is_multiple_of(2) {
+                "Document"
+            } else {
+                "Other"
+            }
+        };
+        let row = |id: u64, label: &str| {
+            let mut row = properties([id as f32, 1.0, 0.0], None);
+            row[0] = Property::new("$label", PropertyValue::String(label.into()));
+            row
+        };
+        let one_entity = SearchIndexBatchLimits::try_new(
+            NonZeroUsize::MIN,
+            NonZeroU64::new(1024 * 1024).expect("one MiB is positive"),
+            NonZeroU64::new(1024).expect("operation limit is positive"),
+            NonZeroU64::new(16 * 1024 * 1024).expect("output limit is positive"),
+            NonZeroU64::new(16 * 1024 * 1024).expect("entity output is positive"),
+        )
+        .expect("one-entity limits validate");
+        for timeline in crate::migrations::LabelTimeline::ALL {
+            let db = test_db(&format!("vector-label-stage-{timeline:?}")).await;
+            crate::migrations::LabelStage::rewind(&db).await;
+            for id in 0..40_u64 {
+                put_source(&db, scope, id, &row(id, label_of(id))).await;
+            }
+            timeline.start().reach(&db).await;
+            for id in 40..80_u64 {
+                put_source(&db, scope, id, &row(id, label_of(id))).await;
+            }
+            // After the stage, Document 2 becomes Other and Document 4 is
+            // deleted.
+            let transaction = db
+                .begin(IsolationLevel::Snapshot)
+                .await
+                .expect("write begins");
+            crate::index_lifecycle::label_source::testing::stage_labels(
+                &transaction,
+                scope,
+                node,
+                2,
+                &row(2, "Document"),
+                &row(2, "Other"),
+            )
+            .await;
+            transaction
+                .put(source_key(scope, 2), encode_properties(&row(2, "Other")))
+                .expect("relabel stages");
+            crate::index_lifecycle::label_source::testing::stage_labels(
+                &transaction,
+                scope,
+                node,
+                4,
+                &row(4, "Document"),
+                &[],
+            )
+            .await;
+            transaction
+                .delete(source_key(scope, 4))
+                .expect("delete stages");
+            transaction.commit().await.expect("writes commit");
+
+            let definition = definition(None);
+            let (build_id, _, _) = create_build(&db, scope, &definition, 79).await;
+            let mut claim_sequence = 1;
+            // Three steps of at most one entity each, then the rest of the
+            // build: most of the 38 Documents are read after the publication.
+            for _ in 0..3 {
+                assert_eq!(
+                    drive_one(&db, &driver(), build_id, &mut claim_sequence, one_entity).await,
+                    CommittedOperationStep::Progressed,
+                    "{timeline:?}"
+                );
+            }
+            timeline.between_steps(&db).await;
+            assert_eq!(
+                drive_to_terminal(&db, &driver(), build_id, &mut claim_sequence).await,
+                CommittedOperationStep::Completed,
+                "{timeline:?}"
+            );
+            let active = read_index(&db, scope, &definition).await;
+            let IndexStateV2::Active {
+                physical:
+                    PhysicalGeneration::Vector {
+                        layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                        ..
+                    },
+                ..
+            } = active.state()
+            else {
+                panic!("completed vector build is active and unpartitioned");
+            };
+            let active_handle = ActiveIndexHandle::try_from_record(scope, &active)
+                .expect("active vector record projects a handle");
+            let generation = ValidatedVectorGenerationHandle::try_from_active::<
+                vector::distance::Euclidean,
+            >(&active_handle, *physical_index_id)
+            .expect("active physical generation validates");
+            let index = VectorIndex::<vector::distance::Euclidean>::from_generation(&generation);
+            for id in 0..80_u64 {
+                assert_eq!(
+                    index.get_item(&db, id).await.unwrap().is_some(),
+                    label_of(id) == "Document" && id != 2 && id != 4,
+                    "{timeline:?} row {id}"
+                );
+            }
+            db.close().await.expect("database closes");
+        }
+    }
+
     #[tokio::test]
     async fn unpartitioned_build_restarts_activates_and_drop_removes_physical_rows() {
         let db = test_db("vector-driver-unpartitioned-build-drop").await;
@@ -4923,9 +5177,15 @@ mod tests {
         let db = test_db("vector-driver-scan-repaired-blocker").await;
         let scope = DataScope::LegacyUnscoped;
         let definition = definition(None);
-        db.put(source_key(scope, 0), Bytes::from_static(b"malformed"))
-            .await
-            .expect("invalid vector source is written");
+        crate::index_lifecycle::label_source::testing::put_raw_source_row(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            0,
+            "Document",
+            Bytes::from_static(b"malformed"),
+        )
+        .await;
         for entity_id in 1..4_u8 {
             let vector = [f32::from(entity_id), 1.0, 2.0];
             put_source(&db, scope, u64::from(entity_id), &properties(vector, None)).await;

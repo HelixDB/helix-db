@@ -90,7 +90,7 @@ fn graph_cursor(scope: DataScope, element_kind: IndexElementKind, id: u64) -> In
     cursor(GraphKey::Data { scope, kind }.to_bytes())
 }
 
-fn legacy_edge_pair_cursor(scope: DataScope, from: u64, to: u64) -> IndexCursor {
+pub(super) fn legacy_edge_pair_cursor(scope: DataScope, from: u64, to: u64) -> IndexCursor {
     cursor(
         GraphKey::Data {
             scope,

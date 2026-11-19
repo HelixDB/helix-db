@@ -1669,6 +1669,24 @@ pub(crate) fn add_to_legacy_node_label_index_scoped(
     stage_shared_bitmap_membership(txn, &key, node_id, true)
 }
 
+/// Stages `entity_id` joining (`present`) or leaving one retired hash-keyed
+/// label row, as a graph write on a store that still files hash rows does,
+/// for fixtures that write graph rows directly.
+#[cfg(any(
+    test,
+    feature = "index-lifecycle-testing",
+    feature = "production-scale"
+))]
+pub(crate) fn stage_hash_label_membership(
+    txn: &DbTransaction,
+    row: HashLabelRow<'_>,
+    entity_id: u64,
+    present: bool,
+    tenant_scope: DataScope,
+) -> Result<(), HelixDbError> {
+    stage_shared_bitmap_membership(txn, &hash_label_key(tenant_scope, row), entity_id, present)
+}
+
 /// One label row a store before label identity files under its label's hash.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HashLabelRow<'a> {

@@ -31,6 +31,12 @@
 //! have a `fix`. IDs and categories are stable; summaries, details and fixes
 //! are prose and may change. A fix may contain `<instance>`, which a client
 //! that knows the instance's name substitutes.
+//!
+//! An [`Audit`] reads stored data rather than the setup, so it runs only
+//! when a request names it (`GET /v2/diagnostics?audit=labels`) and adds its
+//! check after the others. It changes nothing either, leaves the block cache
+//! to queries, and runs one at a time: requests that arrive while one runs
+//! share its check ([`AuditFlight`]).
 
 mod aws;
 mod backing;
@@ -133,6 +139,8 @@ pub(crate) enum CheckId {
     Memory,
     #[serde(rename = "indexes.publication")]
     IndexPublication,
+    #[serde(rename = "indexes.label_bitmaps")]
+    LabelBitmaps,
     #[serde(rename = "queries.missing_indexes")]
     MissingIndexes,
     #[serde(rename = "queries.unbounded_scans")]
@@ -147,7 +155,7 @@ impl CheckId {
             }
             Self::CacheDevice | Self::CacheSpace | Self::CacheWarm => Category::Cache,
             Self::Memory => Category::Resources,
-            Self::IndexPublication => Category::Indexes,
+            Self::IndexPublication | Self::LabelBitmaps => Category::Indexes,
             Self::MissingIndexes | Self::UnboundedScans => Category::Queries,
         }
     }
@@ -212,6 +220,34 @@ impl FactCache {
     }
 }
 
+/// The newest label audit's check and when it finished. Audits run one at a
+/// time, and a request that waited while one ran takes its check, so
+/// concurrent requests read the store once.
+#[derive(Default)]
+pub(crate) struct AuditFlight(tokio::sync::Mutex<Option<(tokio::time::Instant, Check)>>);
+
+impl AuditFlight {
+    /// The check of an audit that finished after `asked`, or the one `audit`
+    /// yields.
+    async fn get(
+        &self,
+        asked: tokio::time::Instant,
+        audit: impl std::future::Future<Output = Check>,
+    ) -> Check {
+        let mut last = self.0.lock().await;
+        let shared = last
+            .as_ref()
+            .filter(|(finished, _)| *finished >= asked)
+            .map(|(_, check)| check.clone());
+        let Some(check) = shared else {
+            let check = audit.await;
+            *last = Some((tokio::time::Instant::now(), check.clone()));
+            return check;
+        };
+        check
+    }
+}
+
 /// Gathers the [`Facts`] for `storage`: filesystem facts on a blocking
 /// thread, network probes concurrently, each bounded by its own timeout.
 async fn gather(storage: &StorageConfig, db: &db::HelixDB) -> Facts {
@@ -271,8 +307,19 @@ async fn gather(storage: &StorageConfig, db: &db::HelixDB) -> Facts {
     Facts { data, cache, s3 }
 }
 
-/// Runs every check that applies to `state`'s storage.
-pub(crate) async fn report(state: &ServerState) -> Report {
+/// Audits of stored data a request may ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Audit {
+    /// Compares every label bitmap with the rows carrying its label
+    /// ([`label_bitmaps`]). It reads every node and edge row once.
+    Labels,
+}
+
+/// Runs every check that applies to `state`'s storage, then `audit` when
+/// one is asked for.
+pub(crate) async fn report(state: &ServerState, audit: Option<Audit>) -> Report {
+    let asked = tokio::time::Instant::now();
     let storage = state.storage();
     let db = state.db();
     let facts = state.diagnostic_facts().get(gather(storage, db)).await;
@@ -305,6 +352,22 @@ pub(crate) async fn report(state: &ServerState) -> Report {
             .then(|| index_publication(&db.index_operation_queue_stats())),
         Some(missing_indexes(&insights)),
         Some(unbounded_scans(&insights)),
+        match audit {
+            Some(Audit::Labels) => Some(
+                state
+                    .label_audits()
+                    .get(asked, async {
+                        label_bitmaps(
+                            db.audit_label_bitmaps(
+                                db::encoding::v2::keys::scope::DataScope::LegacyUnscoped,
+                            )
+                            .await,
+                        )
+                    })
+                    .await,
+            ),
+            None => None,
+        },
     ]
     .into_iter()
     .flatten()
@@ -815,6 +878,115 @@ fn memory(
                 bytes(budgets.saturating_mul(100) / CACHE_MEMORY_PERCENT_LIMIT)
             ),
         },
+    )
+}
+
+/// Most missing ids one label's line of [`label_bitmaps`] lists.
+const LISTED_MISSING_IDS: usize = 5;
+
+/// Whether every node and edge row is in its label's bitmap. Label scans and
+/// index builds read a label's rows through that bitmap, so a row it lacks is
+/// left out of both. Members whose row is gone are harmless; every reader
+/// skips them.
+fn label_bitmaps(audit: db::error::Result<db::index_lifecycle::LabelBitmapAudit>) -> Check {
+    let audit = match audit {
+        Ok(audit) => audit,
+        Err(error) => {
+            return Check::new(
+                CheckId::LabelBitmaps,
+                "Label bitmaps could not be audited",
+                Outcome::Skip {
+                    detail: format!("Reading the rows or a label bitmap failed: {error}"),
+                },
+            );
+        }
+    };
+    let rows = audit
+        .findings
+        .iter()
+        .fold(0_u64, |rows, finding| rows.saturating_add(finding.rows));
+    let incomplete = audit
+        .findings
+        .iter()
+        .filter(|finding| !finding.missing.is_empty())
+        .map(|finding| {
+            let listed = finding
+                .missing
+                .iter()
+                .take(LISTED_MISSING_IDS)
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = if finding.missing.len() > LISTED_MISSING_IDS as u64 {
+                ", ..."
+            } else {
+                ""
+            };
+            format!(
+                "{} {}: {} of {} {} missing (ids {listed}{more})",
+                match finding.kind {
+                    db::index_lifecycle::IndexElementKind::Node => "node",
+                    db::index_lifecycle::IndexElementKind::Edge => "edge",
+                },
+                json_string(&finding.label),
+                finding.missing.len(),
+                finding.rows,
+                plural(finding.rows, "row", "rows"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let unreadable = match audit.unreadable_rows {
+        0 => String::new(),
+        count => format!(
+            " {count} {} could not be decoded, so {} not checked.",
+            plural(count, "row", "rows"),
+            plural(count, "its label was", "their labels were"),
+        ),
+    };
+    if !incomplete.is_empty() {
+        return Check::new(
+            CheckId::LabelBitmaps,
+            format!(
+                "{} {} missing rows",
+                incomplete.len(),
+                plural(
+                    incomplete.len() as u64,
+                    "label bitmap is",
+                    "label bitmaps are"
+                )
+            ),
+            Outcome::Fail {
+                detail: format!("{}.{unreadable}", incomplete.join("; ")),
+                fix: "Label scans and index builds leave these rows out. Keep this report and \
+                      contact Helix support before building or rebuilding indexes on these \
+                      labels: restoring a bitmap rewrites stored data."
+                    .into(),
+            },
+        );
+    }
+    let detail = format!(
+        "{rows} {} carrying {} {}, each in its label's bitmap.{unreadable}",
+        plural(rows, "row", "rows"),
+        audit.findings.len(),
+        plural(audit.findings.len() as u64, "label", "labels"),
+    );
+    if audit.unreadable_rows > 0 {
+        return Check::new(
+            CheckId::LabelBitmaps,
+            "Some rows could not be audited",
+            Outcome::Warn {
+                detail,
+                fix: "Rows that cannot be decoded are corrupt; the server log names them when \
+                      a query or an index build reads them. Keep this report and contact Helix \
+                      support."
+                    .into(),
+            },
+        );
+    }
+    Check::new(
+        CheckId::LabelBitmaps,
+        "Every row is in its label's bitmap",
+        Outcome::Pass { detail },
     )
 }
 

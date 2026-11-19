@@ -16,7 +16,6 @@ use crate::encoding::property::property_value::PropertyValue;
 use crate::encoding::property::Property;
 use crate::encoding::v2::keys::NodePropertyKey;
 use crate::encoding::v2::values::encode_build_delta;
-use crate::encoding::v2::values::property::encode_properties;
 use crate::index_lifecycle::lifecycle::{
     create_index_operation, create_legacy_vector_adoption_operation, drop_index_operation,
     InitialBuildProgress,
@@ -39,6 +38,7 @@ pub(super) const NOW_MILLIS: u64 = 1;
 
 pub(super) async fn test_db(name: &str) -> Db {
     let db = Db::builder(name, Arc::new(InMemory::new()))
+        .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
         .build()
         .await
         .expect("vector driver test database opens");
@@ -100,9 +100,14 @@ pub(super) fn source_cursor(scope: DataScope, entity_id: u64) -> IndexCursor {
 }
 
 pub(super) async fn put_source(db: &Db, scope: DataScope, entity_id: u64, properties: &[Property]) {
-    db.put(source_key(scope, entity_id), encode_properties(properties))
-        .await
-        .expect("vector source is written");
+    crate::index_lifecycle::label_source::testing::put_source_row(
+        db,
+        scope,
+        IndexElementKind::Node,
+        entity_id,
+        properties,
+    )
+    .await;
 }
 
 pub(super) async fn create_build(
@@ -1304,33 +1309,7 @@ pub(super) async fn typed_row_decoders_and_batch_accounting_fail_closed() {
     .await
     .unwrap());
 
-    let edge = IndexEntity {
-        kind: IndexElementKind::Edge,
-        id: IndexEntityId::new(7),
-    };
-    let edge_key = DataKey::Data {
-        scope,
-        kind: DataKeyKind::EdgePropertyById(crate::encoding::v2::keys::EdgePropertyByIdKey::new(
-            edge.id.get(),
-        )),
-    }
-    .to_bytes();
-    assert_eq!(
-        source_entity(scope, IndexElementKind::Edge, &edge_key).unwrap(),
-        Some(edge.id)
-    );
-    assert_eq!(
-        source_entity(scope, IndexElementKind::Edge, &source_key(scope, 0)).unwrap(),
-        None
-    );
-    assert!(source_entity(scope, IndexElementKind::Node, &edge_key).is_err());
-    let global = IndexKey::Global {
-        kind: GlobalKey::StorageVersion,
-    }
-    .to_bytes();
-    assert!(source_entity(scope, IndexElementKind::Node, &global).is_err());
-
-    let prefix = source_prefix(scope, IndexElementKind::Node);
+    let prefix = crate::index_lifecycle::secondary::source_prefix(scope, IndexElementKind::Node);
     assert_eq!(cursor_suffix(&prefix, None).unwrap(), None);
     assert_eq!(
         cursor_suffix(&prefix, Some(&source_cursor(scope, 0))).unwrap(),

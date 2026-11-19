@@ -84,6 +84,30 @@ fn record() -> IndexRecordV2 {
     .unwrap()
 }
 
+/// Opens a raw database with Helix's merge operator, which the label
+/// bitmaps that builds read their rows through need.
+async fn open_graph_db(
+    path: &str,
+    store: Arc<InMemory>,
+) -> std::result::Result<Db, slatedb::Error> {
+    Db::builder(path, store)
+        .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+        .build()
+        .await
+}
+
+/// Stages node `id` joining `Document`'s label bitmap, as its row's write does.
+async fn stage_document(transaction: &DbTransaction, scope: DataScope, id: u64) {
+    crate::index_lifecycle::label_source::testing::stage_member(
+        transaction,
+        scope,
+        IndexElementKind::Node,
+        "Document",
+        id,
+    )
+    .await;
+}
+
 /// The default policy's per-document publication limits.
 fn document_limits() -> crate::config::ActiveTextMutationLimits {
     crate::config::SearchIndexBackfillLimits::default().active_text_mutation()
@@ -303,7 +327,9 @@ async fn validation_head_fixture(
         operation.operation_id(),
     )
     .unwrap();
-    let db = Db::open(database, Arc::new(InMemory::new())).await.unwrap();
+    let db = open_graph_db(database, Arc::new(InMemory::new()))
+        .await
+        .unwrap();
     db.put(
         scoped_index_key(scope, ScopedKey::index_record(record.identity().clone())),
         crate::encoding::v2::values::encode_index_record(&record),
@@ -551,7 +577,7 @@ fn upload(
 
 #[tokio::test]
 async fn repository_and_upload_preparations_obey_exact_observations_and_variants() {
-    let db = Db::open(
+    let db = open_graph_db(
         "text-driver-prepared-operation-contracts",
         Arc::new(InMemory::new()),
     )
@@ -720,7 +746,7 @@ async fn repository_and_upload_preparations_obey_exact_observations_and_variants
 
 #[tokio::test]
 async fn compaction_retirement_and_manifest_roots_fail_closed_at_every_boundary() {
-    let db = Db::open(
+    let db = open_graph_db(
         "text-driver-prepared-root-contracts",
         Arc::new(InMemory::new()),
     )
@@ -1046,30 +1072,6 @@ fn text_driver_key_projection_and_counter_helpers_fail_closed() {
     )
     .is_err());
 
-    let node_key = authoritative_property_key(scope, entity);
-    assert_eq!(
-        source_entity(scope, IndexElementKind::Node, &node_key).unwrap(),
-        Some(entity.id)
-    );
-    let edge = IndexEntity {
-        kind: IndexElementKind::Edge,
-        id: IndexEntityId::new(9),
-    };
-    let edge_key = authoritative_property_key(scope, edge);
-    assert_eq!(
-        source_entity(scope, IndexElementKind::Edge, &edge_key).unwrap(),
-        Some(edge.id)
-    );
-    assert_eq!(
-        source_entity(scope, IndexElementKind::Edge, &node_key).unwrap(),
-        None
-    );
-    assert!(source_entity(scope, IndexElementKind::Node, &edge_key).is_err());
-    assert_ne!(
-        source_prefix(scope, IndexElementKind::Node),
-        source_prefix(scope, IndexElementKind::Edge)
-    );
-
     let prefix = Bytes::from_static(b"prefix/");
     assert_eq!(cursor_suffix(&prefix, None).unwrap(), None);
     let complete = IndexCursor::try_new(Bytes::from_static(b"prefix/suffix")).unwrap();
@@ -1090,7 +1092,9 @@ async fn scan_source_case(
     limits: SearchIndexBatchLimits,
     preexisting_state: bool,
 ) -> Result<IndexOperationStepResult> {
-    let db = Db::open(database, Arc::new(InMemory::new())).await.unwrap();
+    let db = open_graph_db(database, Arc::new(InMemory::new()))
+        .await
+        .unwrap();
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let operation = operation();
     let scope = DataScope::LegacyUnscoped;
@@ -1100,6 +1104,7 @@ async fn scan_source_case(
     };
     let source_key = authoritative_property_key(scope, entity);
     transaction.put(&source_key, value).unwrap();
+    stage_document(&transaction, scope, entity.id.get()).await;
     if preexisting_state {
         transaction
             .put(
@@ -1236,7 +1241,7 @@ async fn source_scan_attributes_every_input_output_and_corruption_boundary() {
     .await
     .is_err());
 
-    let db = Db::open("text-driver-source-cursors", Arc::new(InMemory::new()))
+    let db = open_graph_db("text-driver-source-cursors", Arc::new(InMemory::new()))
         .await
         .unwrap();
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
@@ -1343,7 +1348,7 @@ async fn source_scan_step_commits_through_writes_to_its_source_range() {
         WriteDuringStepDriver,
     };
 
-    let db = Db::open(
+    let db = open_graph_db(
         "text-driver-source-concurrent-writes",
         Arc::new(InMemory::new()),
     )
@@ -1361,7 +1366,15 @@ async fn source_scan_step_commits_through_writes_to_its_source_range() {
         ])
     };
     for id in 0..8 {
-        db.put(key(id), row(&format!("alpha {id}"))).await.unwrap();
+        crate::index_lifecycle::label_source::testing::put_raw_source_row(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            id,
+            "Document",
+            row(&format!("alpha {id}")),
+        )
+        .await;
     }
     let crate::index_lifecycle::IndexDdlReceipt::Accepted {
         operation_id,
@@ -1385,8 +1398,9 @@ async fn source_scan_step_commits_through_writes_to_its_source_range() {
         writes: vec![(key(1), row("omega")), (key(6), row("omega"))],
     };
     let writer_epoch = WriterEpoch::from_bytes([0x7C; 16]).unwrap();
-    let steps: [(&dyn IndexOperationDriver, u64); 2] = [(&racing, 3), (&inner, 7)];
-    for (sequence, (driver, cursor)) in (1..).zip(steps) {
+    // The second step takes the label's last four rows, which ends the scan.
+    let steps: [(&dyn IndexOperationDriver, Option<u64>); 2] = [(&racing, Some(3)), (&inner, None)];
+    for (sequence, (driver, cursor)) in (1_u64..).zip(steps) {
         let OperationPointerObservation::Eligible(eligible) =
             observe_operation_pointer(&db, operation_id, writer_epoch, 1)
                 .await
@@ -1421,17 +1435,23 @@ async fn source_scan_step_commits_through_writes_to_its_source_range() {
             .await
             .unwrap()
             .unwrap();
-        let IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
-            TextBuildStage::ScanSource(progress),
-        )) = operation.progress()
+        let IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(stage)) =
+            operation.progress()
         else {
-            panic!("the build is still scanning its source");
+            panic!("the build is constructing");
         };
-        assert_eq!(
-            progress.cursor,
-            Some(IndexCursor::try_new(key(cursor)).unwrap())
-        );
-        assert_eq!(progress.counters.entities, cursor + 1);
+        let counters = match (stage, cursor) {
+            (TextBuildStage::ScanSource(progress), Some(cursor)) => {
+                assert_eq!(
+                    progress.cursor,
+                    Some(IndexCursor::try_new(key(cursor)).unwrap())
+                );
+                progress.counters
+            }
+            (TextBuildStage::ScanPartitions(progress), None) => progress.counters,
+            (stage, cursor) => panic!("step {sequence} expected cursor {cursor:?}: {stage:?}"),
+        };
+        assert_eq!(counters.entities, 4 * sequence);
     }
 
     let snapshot = db.begin(IsolationLevel::Snapshot).await.unwrap();
@@ -1476,7 +1496,7 @@ async fn source_scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
         WriteDuringStepDriver,
     };
 
-    let db = Db::open(
+    let db = open_graph_db(
         "text-driver-source-repaired-blocker",
         Arc::new(InMemory::new()),
     )
@@ -1493,9 +1513,25 @@ async fn source_scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
             property::Property::string("body", body),
         ])
     };
-    db.put(key(0), b"malformed").await.unwrap();
+    crate::index_lifecycle::label_source::testing::put_raw_source_row(
+        &db,
+        scope,
+        IndexElementKind::Node,
+        0,
+        "Document",
+        Bytes::from_static(b"malformed"),
+    )
+    .await;
     for id in 1..4 {
-        db.put(key(id), row(&format!("alpha {id}"))).await.unwrap();
+        crate::index_lifecycle::label_source::testing::put_raw_source_row(
+            &db,
+            scope,
+            IndexElementKind::Node,
+            id,
+            "Document",
+            row(&format!("alpha {id}")),
+        )
+        .await;
     }
     let crate::index_lifecycle::IndexDdlReceipt::Accepted {
         operation_id,
@@ -1583,13 +1619,13 @@ async fn source_scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
         .await
         .unwrap()
         .unwrap();
+    // The step took the label's last row, which ends the scan.
     let IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(
-        TextBuildStage::ScanSource(progress),
+        TextBuildStage::ScanPartitions(progress),
     )) = operation.progress()
     else {
-        panic!("the build is still scanning its source");
+        panic!("the build has scanned its source");
     };
-    assert_eq!(progress.cursor, Some(IndexCursor::try_new(key(3)).unwrap()));
     assert_eq!(progress.counters.entities, 4);
     let snapshot = db.begin(IsolationLevel::Snapshot).await.unwrap();
     let (_, marker) = crate::index_lifecycle::text::statistics::read_marker(
@@ -1624,7 +1660,7 @@ async fn source_scan_step_does_not_commit_a_blocker_repaired_in_its_window() {
 async fn partition_blocker_retries_once_its_graph_row_is_repaired() {
     let scope = DataScope::LegacyUnscoped;
     let operation = claimed_operation();
-    let db = Db::open(
+    let db = open_graph_db(
         "text-driver-partition-repaired-blocker",
         Arc::new(InMemory::new()),
     )
@@ -1645,6 +1681,7 @@ async fn partition_blocker_retries_once_its_graph_row_is_repaired() {
         )
         .unwrap();
     transaction.put(&graph_key, row("alpha")).unwrap();
+    stage_document(&transaction, scope, 7).await;
     assert!(matches!(
         scan_source(
             &transaction,
@@ -1740,7 +1777,7 @@ async fn partition_blocker_retries_once_its_graph_row_is_repaired() {
 #[tokio::test]
 async fn partition_scan_separates_root_creation_document_upload_and_empty_exhaustion() {
     let empty_operation = operation();
-    let db = Db::open(
+    let db = open_graph_db(
         "text-driver-partition-scan-contracts",
         Arc::new(InMemory::new()),
     )
@@ -2020,7 +2057,7 @@ async fn partition_scan_separates_root_creation_document_upload_and_empty_exhaus
     drop(transaction);
     db.close().await.unwrap();
 
-    let empty_db = Db::open(
+    let empty_db = open_graph_db(
         "text-driver-partition-empty-contracts",
         Arc::new(InMemory::new()),
     )
@@ -2163,7 +2200,7 @@ fn tenant_state_key(
 }
 
 /// Writes graph rows; `Some("")` keeps the entity but drops the indexed text.
-fn put_reconciliation_rows(
+async fn put_reconciliation_rows(
     transaction: &DbTransaction,
     scope: DataScope,
     rows: &[(u64, &'static str, Option<&'static str>)],
@@ -2184,6 +2221,7 @@ fn put_reconciliation_rows(
         transaction
             .put(&key, property::encode_properties(&properties))
             .unwrap();
+        stage_document(transaction, scope, *id).await;
     }
 }
 
@@ -2194,9 +2232,11 @@ async fn scanned_generation(
     operation: &IndexOperationRecord,
     rows: &[(u64, &'static str, Option<&'static str>)],
 ) -> Db {
-    let db = Db::open(database, Arc::new(InMemory::new())).await.unwrap();
+    let db = open_graph_db(database, Arc::new(InMemory::new()))
+        .await
+        .unwrap();
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    put_reconciliation_rows(&transaction, scope, rows);
+    put_reconciliation_rows(&transaction, scope, rows).await;
     let upper = rows.iter().map(|(id, _, _)| *id).max().unwrap();
     assert!(matches!(
         scan_source(
@@ -2274,7 +2314,7 @@ async fn partition_scan_reconciles_entities_changed_after_the_source_scan() {
     )
     .await;
     let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
-    put_reconciliation_rows(&transaction, scope, &CURRENT_ROWS);
+    put_reconciliation_rows(&transaction, scope, &CURRENT_ROWS).await;
     transaction.commit().await.unwrap();
     let progress = initial_partition_scan(&operation, scope, OperationCounters::default()).unwrap();
     let state_key = |id| tenant_state_key(scope, &operation, "a", id);
@@ -2644,7 +2684,8 @@ async fn lone_reconciliation_generation(
         &transaction,
         scope,
         &[(7, "a", Some(LONE_AFTER)), (8, "a", None)],
-    );
+    )
+    .await;
     transaction.commit().await.unwrap();
     db
 }
@@ -2853,7 +2894,7 @@ async fn compaction_preparation_requires_a_claim_and_exhaustion_advances_exactly
         db_path: "text-driver-empty-compaction".to_string(),
         compaction_limits: crate::config::SearchIndexBackfillLimits::default().text_compaction(),
     };
-    let db = Db::open("text-driver-empty-compaction", Arc::new(InMemory::new()))
+    let db = open_graph_db("text-driver-empty-compaction", Arc::new(InMemory::new()))
         .await
         .unwrap();
     assert!(prepare_compaction_step(
@@ -3069,4 +3110,355 @@ async fn compaction_preparation_requires_a_claim_and_exhaustion_advances_exactly
     assert!(prepared.uploaded_bytes > 0);
     assert!(prepared.expected_reads.len() >= 3);
     db.close().await.unwrap();
+}
+
+/// A text build reads only its label's rows: among 3,000 rows of another
+/// label, an empty label goes to `ScanPartitions` in one step, and ten rows
+/// of the label take one step that stages those ten and no other row.
+#[tokio::test]
+async fn source_scan_reads_only_its_label() {
+    let scope = DataScope::LegacyUnscoped;
+    for members in [0_u64, 10] {
+        let db = Db::builder(
+            format!("text-driver-label-scan-{members}"),
+            Arc::new(InMemory::new()),
+        )
+        .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
+        .build()
+        .await
+        .unwrap();
+        let member = |id: u64| members > 0 && id % 300 == 7;
+        for id in 0..3_000_u64 {
+            let label = if member(id) { "Document" } else { "Other" };
+            crate::index_lifecycle::label_source::testing::put_source_row(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                id,
+                &[
+                    property::Property::string("$label", label),
+                    property::Property::string("body", "searchable text"),
+                ],
+            )
+            .await;
+        }
+        let operation = operation();
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let source = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let result = scan_source(
+            &source,
+            &transaction,
+            scope,
+            &operation,
+            &record(),
+            &SourceScanProgress {
+                inclusive_upper_bound: IndexCursor::try_new(authoritative_property_key(
+                    scope,
+                    reconciliation_entity(2_999),
+                ))
+                .unwrap(),
+                cursor: None,
+                counters: OperationCounters::default(),
+            },
+            crate::config::SearchIndexBackfillLimits::default().batch(),
+            document_limits(),
+            IndexLifecycleScanTuning::default(),
+        )
+        .await
+        .unwrap();
+        let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+            TextBuildProgress::Constructing(TextBuildStage::ScanPartitions(progress)),
+        )) = result
+        else {
+            panic!("one step ends the scan of {members} rows: {result:?}");
+        };
+        assert_eq!(progress.counters.entities, members);
+        transaction.commit().await.unwrap();
+        let prefix = IndexKey::data_prefix(
+            scope,
+            ScopedKey::generation_prefix(
+                RecordKind::TextEntityState,
+                operation.index_id(),
+                operation.generation(),
+            ),
+        );
+        let mut staged = db.scan_prefix(&prefix, ..).await.unwrap();
+        let mut entities = Vec::new();
+        while let Some(row) = staged.next().await.unwrap() {
+            entities.push(row.key);
+        }
+        assert_eq!(
+            entities.len(),
+            usize::try_from(members).unwrap(),
+            "one entity state per row of the label"
+        );
+        db.close().await.unwrap();
+    }
+}
+
+/// A text build of one label among several scans only that label's rows,
+/// over several steps on a database reopened between steps, and a last step
+/// that takes exactly a batch ends the scan without another.
+#[tokio::test]
+async fn source_scan_steps_resume_on_a_reopened_database() {
+    let scope = DataScope::LegacyUnscoped;
+    let store = Arc::new(InMemory::new());
+    let path = "text-driver-label-scan-reopened";
+    let mut db = open_graph_db(path, store.clone()).await.unwrap();
+    let labels = ["Document", "Note", "Image"];
+    let label_of = |id: u64| labels[usize::try_from(id % 3).unwrap()];
+    let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+    for id in 0..288_u64 {
+        transaction
+            .put(
+                authoritative_property_key(scope, reconciliation_entity(id)),
+                property::encode_properties(&[
+                    property::Property::string("$label", label_of(id)),
+                    property::Property::string("body", "searchable text"),
+                ]),
+            )
+            .unwrap();
+        crate::index_lifecycle::label_source::testing::stage_member(
+            &transaction,
+            scope,
+            IndexElementKind::Node,
+            label_of(id),
+            id,
+        )
+        .await;
+    }
+    transaction.commit().await.unwrap();
+    let operation = operation();
+    let mut progress = SourceScanProgress {
+        inclusive_upper_bound: IndexCursor::try_new(authoritative_property_key(
+            scope,
+            reconciliation_entity(287),
+        ))
+        .unwrap(),
+        cursor: None,
+        counters: OperationCounters::default(),
+    };
+    let mut steps = 0;
+    let scanned = loop {
+        let transaction = db
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await
+            .unwrap();
+        let source = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let result = scan_source(
+            &source,
+            &transaction,
+            scope,
+            &operation,
+            &record(),
+            &progress,
+            batch_limits(16, u64::MAX, u64::MAX, u64::MAX),
+            document_limits(),
+            IndexLifecycleScanTuning::default(),
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        drop(source);
+        steps += 1;
+        db.close().await.unwrap();
+        db = open_graph_db(path, store.clone()).await.unwrap();
+        let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+            TextBuildProgress::Constructing(stage),
+        )) = result
+        else {
+            panic!("a scan step progresses: {result:?}");
+        };
+        match stage {
+            TextBuildStage::ScanSource(next) => progress = next,
+            TextBuildStage::ScanPartitions(scanned) => break scanned,
+            stage @ (TextBuildStage::CatchUp(_)
+            | TextBuildStage::Compact(_)
+            | TextBuildStage::PrepareManifests(_)
+            | TextBuildStage::ValidateManifests(_)
+            | TextBuildStage::Activate(_)) => {
+                panic!("a scan step leads to ScanSource or ScanPartitions: {stage:?}")
+            }
+        }
+    };
+    // Ninety-six Documents at sixteen a step.
+    assert_eq!(steps, 6);
+    assert_eq!(scanned.counters.entities, 96);
+    for id in 0..288_u64 {
+        let applied = scoped_index_key(
+            scope,
+            ScopedKey::AppliedState(IndexEntityStateKey {
+                index_id: operation.index_id(),
+                generation: operation.generation(),
+                entity: reconciliation_entity(id),
+            }),
+        );
+        assert_eq!(
+            db.get(&applied).await.unwrap().is_some(),
+            label_of(id) == "Document",
+            "row {id}"
+        );
+    }
+    db.close().await.unwrap();
+}
+
+/// At every stage of the label identity migration a text build stages its
+/// label's rows, written before the stage and after it, and no other: its
+/// steps read the label rows in the layout their snapshot names, so a build
+/// while the copy runs reads the complete hash rows rather than the
+/// incomplete exact ones, and a build the copy publishes under reads the
+/// hash rows before the publication and the exact rows after it.
+#[tokio::test]
+async fn source_scans_read_their_label_at_every_label_identity_stage() {
+    let scope = DataScope::LegacyUnscoped;
+    let labels = ["Document", "Note", "Image"];
+    let label_of = |id: u64| labels[usize::try_from(id % 3).unwrap()];
+    let row = |label: &str| {
+        [
+            property::Property::string("$label", label),
+            property::Property::string("body", "searchable text"),
+        ]
+    };
+    for timeline in crate::migrations::LabelTimeline::ALL {
+        let db = open_graph_db(
+            &format!("text-driver-label-stage-{timeline:?}"),
+            Arc::new(InMemory::new()),
+        )
+        .await
+        .unwrap();
+        crate::migrations::LabelStage::rewind(&db).await;
+        for id in 0..96_u64 {
+            crate::index_lifecycle::label_source::testing::put_source_row(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                id,
+                &row(label_of(id)),
+            )
+            .await;
+        }
+        timeline.start().reach(&db).await;
+        for id in 96..192_u64 {
+            crate::index_lifecycle::label_source::testing::put_source_row(
+                &db,
+                scope,
+                IndexElementKind::Node,
+                id,
+                &row(label_of(id)),
+            )
+            .await;
+        }
+        // After the stage, Document 3 becomes a Note and Document 6 is deleted.
+        let transaction = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        crate::index_lifecycle::label_source::testing::stage_labels(
+            &transaction,
+            scope,
+            IndexElementKind::Node,
+            3,
+            &row("Document"),
+            &row("Note"),
+        )
+        .await;
+        transaction
+            .put(
+                authoritative_property_key(scope, reconciliation_entity(3)),
+                property::encode_properties(&row("Note")),
+            )
+            .unwrap();
+        crate::index_lifecycle::label_source::testing::stage_labels(
+            &transaction,
+            scope,
+            IndexElementKind::Node,
+            6,
+            &row("Document"),
+            &[],
+        )
+        .await;
+        transaction
+            .delete(authoritative_property_key(scope, reconciliation_entity(6)))
+            .unwrap();
+        transaction.commit().await.unwrap();
+
+        let operation = operation();
+        let mut progress = SourceScanProgress {
+            inclusive_upper_bound: IndexCursor::try_new(authoritative_property_key(
+                scope,
+                reconciliation_entity(191),
+            ))
+            .unwrap(),
+            cursor: None,
+            counters: OperationCounters::default(),
+        };
+        let mut steps = 0;
+        let scanned = loop {
+            if steps == 1 {
+                timeline.between_steps(&db).await;
+            }
+            steps += 1;
+            let transaction = db
+                .begin(IsolationLevel::SerializableSnapshot)
+                .await
+                .unwrap();
+            let source = db.begin(IsolationLevel::Snapshot).await.unwrap();
+            let result = scan_source(
+                &source,
+                &transaction,
+                scope,
+                &operation,
+                &record(),
+                &progress,
+                batch_limits(16, u64::MAX, u64::MAX, u64::MAX),
+                document_limits(),
+                IndexLifecycleScanTuning::default(),
+            )
+            .await
+            .unwrap();
+            transaction.commit().await.unwrap();
+            let IndexOperationStepResult::Progressed(IndexOperationProgress::TextBuild(
+                TextBuildProgress::Constructing(next),
+            )) = result
+            else {
+                panic!("a scan step progresses: {result:?}");
+            };
+            match next {
+                TextBuildStage::ScanSource(next) => progress = next,
+                TextBuildStage::ScanPartitions(scanned) => break scanned,
+                next @ (TextBuildStage::CatchUp(_)
+                | TextBuildStage::Compact(_)
+                | TextBuildStage::PrepareManifests(_)
+                | TextBuildStage::ValidateManifests(_)
+                | TextBuildStage::Activate(_)) => {
+                    panic!("a scan step leads to ScanSource or ScanPartitions: {next:?}")
+                }
+            }
+        };
+        let documents = |id: u64| label_of(id) == "Document" && id != 3 && id != 6;
+        assert_eq!(
+            scanned.counters.entities,
+            (0..192_u64).filter(|id| documents(*id)).count() as u64,
+            "{timeline:?}"
+        );
+        // 64 Documents up to the bound at 16 a step: the publication falls
+        // between the first step and the rest.
+        assert_eq!(steps, 4, "{timeline:?}");
+        for id in 0..192_u64 {
+            let applied = scoped_index_key(
+                scope,
+                ScopedKey::AppliedState(IndexEntityStateKey {
+                    index_id: operation.index_id(),
+                    generation: operation.generation(),
+                    entity: reconciliation_entity(id),
+                }),
+            );
+            assert_eq!(
+                db.get(&applied).await.unwrap().is_some(),
+                documents(id),
+                "{timeline:?} row {id}"
+            );
+        }
+        db.close().await.unwrap();
+    }
 }

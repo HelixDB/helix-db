@@ -86,6 +86,14 @@ async fn seed_sources(db: &Db, scope: DataScope, count: u64, vector: impl Fn(u64
                     ]),
                 )
                 .expect("fixture source stages");
+            crate::index_lifecycle::label_source::testing::stage_member(
+                &transaction,
+                scope,
+                IndexElementKind::Node,
+                "Document",
+                entity_id,
+            )
+            .await;
         }
         transaction
             .commit()
@@ -526,6 +534,7 @@ async fn a_lost_wal_tail_is_redone_to_the_golden_graph() {
                 name.clone(),
                 Arc::clone(store) as Arc<dyn slatedb::object_store::ObjectStore>,
             )
+            .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
             .build()
         };
         let store = Arc::new(GatedWalStore::new());
@@ -2898,6 +2907,7 @@ async fn mutated_build_digests(
     // Every step commits, and each commit waits for the next WAL flush; a
     // short interval keeps the six builds from waiting out 100 ms each time.
     let db = Db::builder(name, Arc::new(InMemory::new()))
+        .with_merge_operator(Arc::new(crate::merge_operator::HelixMergeOperator::new()))
         .with_settings(slatedb::config::Settings {
             flush_interval: Some(Duration::from_millis(1)),
             ..Default::default()
@@ -2953,6 +2963,14 @@ async fn mutated_build_digests(
                 encode_properties(&source(entity_id, tenant)),
             )
             .expect("fixture source stages");
+        crate::index_lifecycle::label_source::testing::stage_member(
+            &transaction,
+            scope,
+            IndexElementKind::Node,
+            "Document",
+            entity_id,
+        )
+        .await;
     }
     transaction.commit().await.expect("fixture sources commit");
     let (operation_id, index_id, generation) =
@@ -3029,6 +3047,14 @@ async fn mutated_build_digests(
             transaction
                 .put(source_key(scope, entity_id), encode_properties(&after))
                 .expect("fixture change stages");
+            crate::index_lifecycle::label_source::testing::stage_member(
+                &transaction,
+                scope,
+                IndexElementKind::Node,
+                "Document",
+                entity_id,
+            )
+            .await;
         }
         transaction.commit().await.expect("fixture changes commit");
     }

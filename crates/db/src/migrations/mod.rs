@@ -23,6 +23,8 @@ mod vector_simhash_directory;
 
 #[cfg(test)]
 pub(crate) use indexes::equality_bitmap::make_legacy_equality_fixture;
+#[cfg(test)]
+pub(crate) use indexes::label_identity::{LabelStage, LabelTimeline};
 pub(crate) use tenant::envelope::legacy_key_requires_migration;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -5418,3 +5420,6 @@ mod v1_contracts;
 #[cfg(test)]
 #[path = "../../tests/unit/migrations_contracts.rs"]
 mod external_contracts;
+#[cfg(all(test, feature = "index-lifecycle-testing"))]
+#[path = "../../tests/unit/index_builds_beside_migrations.rs"]
+mod lifecycle_testing_tests;
