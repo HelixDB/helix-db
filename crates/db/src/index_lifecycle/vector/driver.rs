@@ -59,9 +59,9 @@ use crate::error::{HelixDbError, Result};
 use crate::search::vector::{
     self, Distance, MeasuredVectorTransaction, PlannedVectorMutation,
     ValidatedVectorBuildGenerationHandle, ValidatedVectorCleanupAuthority,
-    ValidatedVectorGenerationHandle, VectorBuildSession, VectorBuildSessionStats, VectorCleanupRow,
-    VectorDistanceMetric, VectorIndex, VectorIndexConfig, VectorWriteMeasurement,
-    VectorWriteRecorder,
+    ValidatedVectorGenerationHandle, VectorBuildSession, VectorBuildSessionStats,
+    VectorCleanupFrom, VectorCleanupRow, VectorDistanceMetric, VectorIndex, VectorIndexConfig,
+    VectorWriteMeasurement, VectorWriteRecorder,
 };
 
 #[cfg(test)]
@@ -107,12 +107,13 @@ pub(crate) struct VectorIndexDriver {
     build_cache: Arc<VectorBuildCache>,
     /// In-memory graphs of the source scans that build in bulk.
     bulk: bulk::BulkBuilds,
-    /// Where each cleanup or abort operation's next delete step resumes.
+    /// Where each cleanup or abort operation's next delete step scans.
     ///
-    /// An entry is set only by [`IndexOperationDriver::after_commit`], from
-    /// the step that committed, and removed by the next committed step that
-    /// hands on none, blocks, or completes the operation. The map therefore
-    /// holds at most one key per cleanup this writer has not finished.
+    /// [`IndexOperationDriver::prepare_step`] and
+    /// [`IndexOperationDriver::after_commit`] keep an operation's entry, and
+    /// a committed step that hands on none, blocks, or completes the
+    /// operation removes it. The map therefore holds at most one key per
+    /// cleanup this writer has not finished.
     cleanup_resume: Mutex<HashMap<IndexOperationId, VectorCleanupResume>>,
     /// Builds whose activation step was prepared with no applied state left.
     ///
@@ -131,21 +132,41 @@ enum AppliedStateCheck {
     InTransaction,
 }
 
-/// Process-local position a cleanup operation's next delete step resumes at.
+/// Process-local knowledge of where a cleanup operation's next delete step
+/// starts its scan.
 ///
-/// Every row at or before the position, in the scan order of the stage that
-/// produced it, was deleted by a committed step of the same operation. It is
-/// never persisted: a restart, a blocked step, or a position that does not
-/// name the namespace or stage the next step runs in is simply no position,
-/// and that step scans from the start. A stage is left only by a scan from
-/// the start that finds nothing more to delete, so a lost, stale, or wrong
-/// position can cost a rescan but never leave a row behind.
+/// A delete step never reads a range of deleted rows inside its transaction:
+/// SlateDB keeps the conflict state of every commit made while a transaction
+/// is open, and a range of deleted rows takes time in proportion to the rows
+/// a drop has already removed. So a step either scans just past the last row
+/// a committed step deleted, or starts at the first row its preparation read
+/// from the start of the target, before the step's transaction opened.
+///
+/// Only a scan from the start proves a target empty. A scan from a committed
+/// position that reaches the end hands on nothing, so the next preparation
+/// reads from the start again, finds any row left behind the position like
+/// any other, and a stage is never left on a position's word alone.
+///
+/// Nothing here is persisted. A restart, a blocked step, or an entry that
+/// does not name the namespace or stage the next step runs in is no entry,
+/// and costs one more read from the start.
 #[derive(Debug, Clone)]
 pub(crate) enum VectorCleanupResume {
-    /// The last physical row deleted in one vector namespace.
+    /// The last physical row a committed step deleted in one namespace.
     Physical(VectorCleanupRow),
-    /// The key of the last build-delta or applied-state row deleted.
+    /// The key of the last build-delta or applied-state row a committed step
+    /// deleted.
     Work(Bytes),
+    /// The first physical row of one namespace, or that it holds none, read
+    /// from its start while the next step was prepared.
+    FirstPhysical {
+        physical_index_id: VectorPhysicalIndexId,
+        row: Option<VectorCleanupRow>,
+    },
+    /// The key of the generation's first build-delta or applied-state row,
+    /// or that it has none, read from the start while the next step was
+    /// prepared.
+    FirstWork(Option<Bytes>),
 }
 
 /// Exact durable checkpoint a retained build planning cache mirrors.
@@ -1190,10 +1211,6 @@ impl IndexOperationDriver for VectorIndexDriver {
             // - Dropping is left only by this operation's own completion,
             //   and the index is recreated, as a new generation with new
             //   physical ids, only once it is Dropped.
-            //
-            // Each delete step still scans in a serializable transaction, so
-            // a row written into its range by anything else would fail its
-            // commit rather than be left behind.
             IndexOperationProgress::VectorCleanup(
                 VectorCleanupProgress::RetireCache(_)
                 | VectorCleanupProgress::DeletePhysical(_)
@@ -1252,6 +1269,31 @@ impl IndexOperationDriver for VectorIndexDriver {
             }
         }
         let permit = self.acquire_step_permit(db, scope, operation).await?;
+        // A delete step's scan starts where `VectorCleanupResume` says. With
+        // no committed position to start past, the target is read from its
+        // start here, before the step's transaction opens, and under the
+        // permit, so an abort still reads with its writers fenced.
+        let (IndexOperationProgress::VectorBuild(VectorBuildProgress::Aborting(progress))
+        | IndexOperationProgress::VectorCleanup(progress)) = operation.progress()
+        else {
+            return Ok(PreparedIndexOperationStep::driver_owned(
+                self.family(),
+                permit,
+            ));
+        };
+        let committed = self
+            .cleanup_resume
+            .lock()
+            .get(&operation.operation_id())
+            .cloned();
+        let start = cleanup_scan_start(db, scope, operation, progress, committed).await?;
+        {
+            let mut positions = self.cleanup_resume.lock();
+            match start {
+                Some(start) => positions.insert(operation.operation_id(), start),
+                None => positions.remove(&operation.operation_id()),
+            };
+        }
         Ok(PreparedIndexOperationStep::driver_owned(
             self.family(),
             permit,
@@ -1582,12 +1624,6 @@ async fn step_cleanup<D: Distance>(
     ) {
         cache_registry.retire_cleanup_generation(&authority).await;
     }
-    // A position is one of the stage that handed it on.
-    let (physical_resume, work_resume) = match resume {
-        Some(VectorCleanupResume::Physical(row)) => (Some(row), None),
-        Some(VectorCleanupResume::Work(key)) => (None, Some(key)),
-        None => (None, None),
-    };
     // The persisted progress and the position each step hands to the next
     // once it commits.
     let (next, resume) = match progress {
@@ -1712,7 +1748,7 @@ async fn step_cleanup<D: Distance>(
                     transaction,
                     &handle,
                     None,
-                    physical_resume,
+                    resume,
                     definition.element_kind(),
                     progress.counters,
                     limits,
@@ -1784,7 +1820,7 @@ async fn step_cleanup<D: Distance>(
                     transaction,
                     &handle,
                     Some(&mapping),
-                    physical_resume,
+                    resume,
                     definition.element_kind(),
                     progress.counters,
                     limits,
@@ -1819,7 +1855,7 @@ async fn step_cleanup<D: Distance>(
                 scope,
                 operation,
                 &[RecordKind::BuildDelta, RecordKind::AppliedState],
-                work_resume,
+                resume,
                 progress.counters,
                 limits,
             )
@@ -1888,6 +1924,128 @@ async fn step_cleanup<D: Distance>(
     Ok(step)
 }
 
+/// Decides where the operation's next delete step starts its scan.
+///
+/// `committed` is kept when it is a position in the target the step scans.
+/// Otherwise the target is read from its start through `db`, outside any
+/// transaction, for its first row. A step that deletes nothing gets no start.
+async fn cleanup_scan_start(
+    db: &Db,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    progress: &VectorCleanupProgress,
+    committed: Option<VectorCleanupResume>,
+) -> Result<Option<VectorCleanupResume>> {
+    match progress {
+        VectorCleanupProgress::RetireCache(_) | VectorCleanupProgress::Finalize(_) => Ok(None),
+        VectorCleanupProgress::DeletePhysical(progress) => {
+            // A record this claim no longer matches was superseded: the step
+            // finds that in its transaction and stages nothing.
+            let Some(record) =
+                super::super::repository::load_index_record(db, scope, operation.identity())
+                    .await?
+            else {
+                return Ok(None);
+            };
+            if record.revision() != operation.index_record_revision() {
+                return Ok(None);
+            }
+            let ValidatedDynamicIndexDefinition::Vector(definition) = record.definition() else {
+                return Err(corruption("vector operation loaded another family"));
+            };
+            match definition.metric() {
+                VectorDistanceMetric::Cosine => {
+                    physical_scan_start::<vector::distance::Cosine>(
+                        db, scope, operation, &record, progress, committed,
+                    )
+                    .await
+                }
+                VectorDistanceMetric::Euclidean => {
+                    physical_scan_start::<vector::distance::Euclidean>(
+                        db, scope, operation, &record, progress, committed,
+                    )
+                    .await
+                }
+                VectorDistanceMetric::Manhattan => {
+                    physical_scan_start::<vector::distance::Manhattan>(
+                        db, scope, operation, &record, progress, committed,
+                    )
+                    .await
+                }
+            }
+        }
+        VectorCleanupProgress::DeleteDeltas(_) => {
+            let prefixes = [RecordKind::BuildDelta, RecordKind::AppliedState].map(|kind| {
+                generation_prefix(scope, kind, operation.index_id(), operation.generation())
+            });
+            if matches!(
+                &committed,
+                Some(VectorCleanupResume::Work(key))
+                    if prefixes.iter().any(|prefix| key.starts_with(prefix))
+            ) {
+                return Ok(committed);
+            }
+            for prefix in &prefixes {
+                let mut rows = db.scan_prefix(prefix, ..).await?;
+                let Some(row) = rows.next().await? else {
+                    continue;
+                };
+                return Ok(Some(VectorCleanupResume::FirstWork(Some(row.key))));
+            }
+            Ok(Some(VectorCleanupResume::FirstWork(None)))
+        }
+    }
+}
+
+/// [`cleanup_scan_start`] for the physical namespace a delete step scans:
+/// the unpartitioned one, or the one of the mapping the persisted cursor
+/// names or precedes.
+async fn physical_scan_start<D: Distance>(
+    db: &Db,
+    scope: DataScope,
+    operation: &IndexOperationRecord,
+    record: &IndexRecordV2,
+    progress: &PrefixScanProgress,
+    committed: Option<VectorCleanupResume>,
+) -> Result<Option<VectorCleanupResume>> {
+    let authority = ValidatedVectorCleanupAuthority::try_from_cleaning::<D>(
+        scope,
+        record,
+        operation.operation_id(),
+    )
+    .map_err(|error| corruption(error.to_string()))?;
+    let physical_index_id = match authority.layout() {
+        VectorPhysicalLayout::Unpartitioned { physical_index_id } => physical_index_id,
+        VectorPhysicalLayout::Partitioned => {
+            let Some(mapping) =
+                current_or_next_mapping(db, scope, operation, progress.cursor.as_ref()).await?
+            else {
+                return Ok(None);
+            };
+            mapping.value.physical_index_id
+        }
+    };
+    let handle = authority
+        .physical_generation::<D>(physical_index_id)
+        .map_err(|error| corruption(error.to_string()))?;
+    let index = VectorIndex::<D>::from_generation(&handle);
+    if matches!(
+        &committed,
+        Some(VectorCleanupResume::Physical(row)) if index.owns_cleanup_row(row)
+    ) {
+        return Ok(committed);
+    }
+    let row = index
+        .cleanup_scan(db, VectorCleanupFrom::Start)
+        .await?
+        .next()
+        .await?;
+    Ok(Some(VectorCleanupResume::FirstPhysical {
+        physical_index_id,
+        row,
+    }))
+}
+
 /// One partition mapping retained until its physical namespace is empty.
 struct MappingCleanupRow {
     key: Bytes,
@@ -1897,7 +2055,7 @@ struct MappingCleanupRow {
 }
 
 async fn current_or_next_mapping(
-    transaction: &DbTransaction,
+    transaction: &(impl slatedb::DbReadOps + Sync),
     scope: DataScope,
     operation: &IndexOperationRecord,
     cursor: Option<&IndexCursor>,
@@ -2046,18 +2204,17 @@ async fn delete_simhash_directory<D: Distance>(
 /// Deletes one bounded batch of a physical namespace, and its mapping once
 /// the namespace is proven empty.
 ///
-/// `resume` is the last row an earlier committed step of this operation
-/// deleted. The scan starts just past it, so a step does not read the
-/// tombstones of every step before it. Only a scan from the start of every
-/// lane proves the namespace empty, so a resumed scan that reaches the end
-/// reports the namespace as not yet empty and hands on no position: the next
-/// step scans from the start, deletes any row left behind the position like
-/// any other, and alone can report the namespace empty.
+/// `resume` says where the scan starts; see [`VectorCleanupResume`]. Only a
+/// scan from the start of every lane proves the namespace empty: one from a
+/// committed position that reaches the end reports the namespace as not yet
+/// empty and hands on no position. An entry for another namespace or stage,
+/// or none, scans from the start in `transaction`, which the outbox avoids
+/// by preparing every step.
 async fn delete_physical_namespace<D: Distance>(
     transaction: &DbTransaction,
     handle: &crate::search::vector::ValidatedVectorGenerationHandle,
     mapping: Option<&MappingCleanupRow>,
-    resume: Option<&VectorCleanupRow>,
+    resume: Option<&VectorCleanupResume>,
     entity_kind: IndexElementKind,
     counters: OperationCounters,
     limits: SearchIndexBatchLimits,
@@ -2074,10 +2231,36 @@ async fn delete_physical_namespace<D: Distance>(
         ));
     }
     let index = VectorIndex::<D>::from_generation(handle);
-    // A position in another namespace, such as the partition an earlier step
-    // finished, is no position in this one.
-    let resume = resume.filter(|row| index.owns_cleanup_row(row));
-    let mut scan = index.cleanup_scan(transaction, resume).await?;
+    // Where the scan starts, if anything is left to scan, and whether
+    // reaching the end from there covers the namespace from its start.
+    let (from, from_start) = match resume {
+        Some(VectorCleanupResume::Physical(row)) if index.owns_cleanup_row(row) => {
+            (Some(VectorCleanupFrom::After(row)), false)
+        }
+        Some(VectorCleanupResume::FirstPhysical {
+            physical_index_id,
+            row: Some(row),
+        }) if physical_index_id.get() == handle.physical_index_id()
+            && index.owns_cleanup_row(row) =>
+        {
+            (Some(VectorCleanupFrom::At(row)), true)
+        }
+        Some(VectorCleanupResume::FirstPhysical {
+            physical_index_id,
+            row: None,
+        }) if physical_index_id.get() == handle.physical_index_id() => (None, true),
+        Some(
+            VectorCleanupResume::Physical(_)
+            | VectorCleanupResume::FirstPhysical { .. }
+            | VectorCleanupResume::Work(_)
+            | VectorCleanupResume::FirstWork(_),
+        )
+        | None => (Some(VectorCleanupFrom::Start), true),
+    };
+    let mut scan = match from {
+        Some(from) => Some(index.cleanup_scan(transaction, from).await?),
+        None => None,
+    };
     let mut rows = Vec::<VectorCleanupRow>::new();
     let mut input_bytes = mapping_input_bytes;
     let mut predicted_output_bytes = 0_u64;
@@ -2086,7 +2269,10 @@ async fn delete_physical_namespace<D: Distance>(
     // only typed delete tokens and is bounded by the transaction's input,
     // output-operation, and output-byte ceilings below.
     loop {
-        let Some(row) = scan.next().await? else {
+        let Some(row) = (match scan.as_mut() {
+            Some(scan) => scan.next().await?,
+            None => None,
+        }) else {
             break;
         };
         let next_input = input_bytes.saturating_add(row.input_bytes());
@@ -2116,7 +2302,7 @@ async fn delete_physical_namespace<D: Distance>(
         predicted_output_bytes = next_output_bytes;
         rows.push(row);
     }
-    let namespace_empty = exhausted && resume.is_none();
+    let namespace_empty = exhausted && from_start;
 
     let mapping_delete_bytes = mapping.map_or(0, |mapping| mapping.key.len() as u64);
     let can_delete_mapping = namespace_empty
@@ -2202,16 +2388,15 @@ enum CleanupWorkOutcome {
 /// Deletes one bounded batch of the generation's rows of `kinds`, which are
 /// drawn from `BuildDelta` and `AppliedState`, in that order.
 ///
-/// `resume` is the key of the last row an earlier committed step of this
-/// operation deleted; see [`delete_physical_namespace`] for why the scan
-/// starts just past it and why only a scan from the start reports the rows
-/// exhausted.
+/// `resume` says where the scan starts, exactly as for
+/// [`delete_physical_namespace`]: only a scan from the start of the delta
+/// prefix reports the rows exhausted.
 async fn delete_delta_and_applied_rows(
     transaction: &DbTransaction,
     scope: DataScope,
     operation: &IndexOperationRecord,
     kinds: &[RecordKind],
-    resume: Option<&Bytes>,
+    resume: Option<&VectorCleanupResume>,
     counters: OperationCounters,
     limits: SearchIndexBatchLimits,
 ) -> Result<CleanupWorkOutcome> {
@@ -2226,17 +2411,42 @@ async fn delete_delta_and_applied_rows(
         })
         .collect::<Vec<_>>();
     // A key outside every prefix is no position in these rows.
-    let resume = resume.filter(|key| lanes.iter().any(|(_, prefix)| key.starts_with(prefix)));
+    let within = |key: &Bytes| lanes.iter().any(|(_, prefix)| key.starts_with(prefix));
+    // The key the scan starts at, whether that row is read too, and whether
+    // reaching the end from there covers every prefix from its start.
+    let (start_key, includes_start, from_start) = match resume {
+        Some(VectorCleanupResume::Work(key)) if within(key) => (Some(key), false, false),
+        Some(VectorCleanupResume::FirstWork(Some(key))) if within(key) => (Some(key), true, true),
+        Some(VectorCleanupResume::FirstWork(None)) => {
+            return Ok(CleanupWorkOutcome::Progress {
+                counters: accounting.finish()?,
+                exhausted: true,
+                resume: None,
+            });
+        }
+        Some(
+            VectorCleanupResume::Work(_)
+            | VectorCleanupResume::FirstWork(Some(_))
+            | VectorCleanupResume::Physical(_)
+            | VectorCleanupResume::FirstPhysical { .. },
+        )
+        | None => (None, false, true),
+    };
     let mut last_deleted = None;
     let mut reached_end = true;
     for (kind, prefix) in lanes
         .iter()
-        .skip_while(|(_, prefix)| resume.is_some_and(|key| !key.starts_with(prefix)))
+        .skip_while(|(_, prefix)| start_key.is_some_and(|key| !key.starts_with(prefix)))
     {
-        let start = resume
+        let start = start_key
             .and_then(|key| key.strip_prefix(prefix.as_ref()))
+            .map(Bytes::copy_from_slice)
             .map_or(Bound::Unbounded, |suffix| {
-                Bound::Excluded(Bytes::copy_from_slice(suffix))
+                if includes_start {
+                    Bound::Included(suffix)
+                } else {
+                    Bound::Excluded(suffix)
+                }
             });
         let mut rows = transaction
             .scan_prefix(prefix, (start, Bound::Unbounded))
@@ -2290,7 +2500,7 @@ async fn delete_delta_and_applied_rows(
     }
     Ok(CleanupWorkOutcome::Progress {
         counters: accounting.finish()?,
-        exhausted: reached_end && resume.is_none(),
+        exhausted: reached_end && from_start,
         resume: if reached_end { None } else { last_deleted },
     })
 }
@@ -4995,6 +5205,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_steps_start_at_the_row_their_preparation_read() {
+        super::driver_contracts::delete_steps_start_at_the_row_their_preparation_read().await;
+    }
+
+    #[tokio::test]
     async fn a_drop_that_loses_its_position_rescans_from_the_start() {
         super::driver_contracts::a_drop_that_loses_its_position_rescans_from_the_start().await;
     }
@@ -5605,7 +5820,7 @@ mod tests {
         ));
         assert!(index.get_metadata(&db).await.unwrap().is_none());
         assert!(index
-            .cleanup_scan(&db, None)
+            .cleanup_scan(&db, VectorCleanupFrom::Start)
             .await
             .unwrap()
             .next()

@@ -70,8 +70,8 @@ use crate::search::vector::simhash::{order_code_from_simhash_bits, SimHashCache}
 use crate::search::vector::storage::{
     CanonicalVectorDirectoryBackfillOutcome, CanonicalVectorRowKey, LegacyVectorMigrationRead,
     LegacyVectorValidationOutcome, LegacyVectorValidationPass, SimHashDirectoryValidationMode,
-    SimHashDirectoryValidationOutcome, VectorCleanupRow, VectorCleanupScan, VectorRowKeyspace,
-    VectorRows, VectorSimHashDirectoryCleanupScan, VectorWriteRows,
+    SimHashDirectoryValidationOutcome, VectorCleanupFrom, VectorCleanupRow, VectorCleanupScan,
+    VectorRowKeyspace, VectorRows, VectorSimHashDirectoryCleanupScan, VectorWriteRows,
 };
 use crate::search::vector::{
     decode_item, MeasuredVectorTransaction, SearchParams, SearchResult, VectorIndexConfig,
@@ -226,16 +226,13 @@ impl<D: Distance> VectorIndex<D> {
         self
     }
 
-    /// Opens a typed scan for bounded lifecycle cleanup: exhaustive without
-    /// `after`, otherwise resumed just past that row of this namespace.
+    /// Opens a typed scan for bounded lifecycle cleanup from `from`.
     pub(crate) async fn cleanup_scan(
         &self,
         reader: &(impl DbReadOps + Send + Sync),
-        after: Option<&VectorCleanupRow>,
+        from: VectorCleanupFrom<'_>,
     ) -> Result<VectorCleanupScan, HelixDbError> {
-        VectorRows::new(reader, &self.rows)
-            .cleanup_scan(after)
-            .await
+        VectorRows::new(reader, &self.rows).cleanup_scan(from).await
     }
 
     /// Returns whether `row` is a cleanup token of this physical namespace.

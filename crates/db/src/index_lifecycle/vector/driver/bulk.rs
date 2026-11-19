@@ -447,7 +447,8 @@ use super::{
     corruption, delete_delta_and_applied_rows, delete_physical_namespace, deterministic_layer,
     lifecycle_write_measurement, measurement_error, operation_error, progressed_build,
     stage_applied, AppliedStateTransition, CleanupWorkOutcome, IndexStateVectorPhysical,
-    PhysicalCleanupOutcome, VectorBatchAccounting, VectorPlanTarget, VectorStepResult,
+    PhysicalCleanupOutcome, VectorBatchAccounting, VectorCleanupResume, VectorPlanTarget,
+    VectorStepResult,
 };
 use crate::config::{
     self, IndexLifecycleScanTuning, SearchIndexBatchLimits, VectorBulkBuildMemory,
@@ -2957,8 +2958,12 @@ async fn discard<D: Distance>(
     let nothing = OperationCounters::default();
     let (applied_resume, physical_resume) = match resume {
         None => (None, None),
-        Some(DiscardResume::AppliedState(key)) => (Some(key), None),
-        Some(DiscardResume::Physical(row)) => (None, Some(row)),
+        Some(DiscardResume::AppliedState(key)) => {
+            (Some(VectorCleanupResume::Work(key.clone())), None)
+        }
+        Some(DiscardResume::Physical(row)) => {
+            (None, Some(VectorCleanupResume::Physical(row.clone())))
+        }
     };
     // A physical position follows a scan of the applied state from its start
     // that found nothing, and no later step writes applied state.
@@ -2968,7 +2973,7 @@ async fn discard<D: Distance>(
             step.scope,
             step.operation,
             &[RecordKind::AppliedState],
-            applied_resume,
+            applied_resume.as_ref(),
             nothing,
             step.limits,
         )
@@ -2995,7 +3000,7 @@ async fn discard<D: Distance>(
         step.transaction,
         handle.generation(),
         None,
-        physical_resume,
+        physical_resume.as_ref(),
         step.definition.element_kind(),
         nothing,
         step.limits,

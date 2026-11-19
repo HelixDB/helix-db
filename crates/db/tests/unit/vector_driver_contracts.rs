@@ -445,7 +445,7 @@ pub(super) async fn partitioned_drop_resumes_each_mapping_and_removes_every_name
         .is_empty());
     for index in indexes {
         assert!(index
-            .cleanup_scan(&db, None)
+            .cleanup_scan(&db, VectorCleanupFrom::Start)
             .await
             .unwrap()
             .next()
@@ -2426,6 +2426,170 @@ pub(super) async fn unpartitioned_drop_resumes_past_deleted_rows_and_sweeps_befo
     db.close().await.expect("vector test database closes");
 }
 
+/// Proves a delete step reads the rows a drop already deleted outside its
+/// transaction: its preparation reads the namespace from the start, and the
+/// step begins at the row that read found.
+///
+/// A committed position is kept, so nothing is read from the start while
+/// steps resume. With no position, the preparation hands on the first row or
+/// that there is none, and a step handed "none" leaves the stage without
+/// scanning. A start read for another namespace is no start.
+pub(super) async fn delete_steps_start_at_the_row_their_preparation_read() {
+    let db = test_db("vector-driver-cleanup-prepared-start").await;
+    let scope = DataScope::LegacyUnscoped;
+    let driver = driver();
+    let (drop_id, physical_index_id, mut claim_sequence) = unpartitioned_drop(&db, &driver).await;
+    let keys = physical_keys(&db, scope, physical_index_id).await;
+    let three_rows = batch_limits(1024, 1024 * 1024, 3, 16 * 1024 * 1024);
+    let position = |driver: &VectorIndexDriver| driver.cleanup_resume.lock().get(&drop_id).cloned();
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+        CommittedOperationStep::Progressed
+    );
+
+    // No position yet: the preparation reads the first row from the start.
+    let operation = read_operation(&db, scope, drop_id).await;
+    let prepared = driver
+        .prepare_step(&db, scope, &operation, three_rows)
+        .await
+        .expect("first delete step prepares");
+    assert!(matches!(
+        position(&driver),
+        Some(VectorCleanupResume::FirstPhysical {
+            physical_index_id: located,
+            row: Some(_),
+        }) if located.get() == physical_index_id
+    ));
+    drop(prepared);
+    // A start read for another namespace is ignored: the step scans this
+    // one from its start instead of taking it for empty.
+    let record = read_index(&db, scope, &definition(None)).await;
+    let ValidatedDynamicIndexDefinition::Vector(vector_definition) = record.definition() else {
+        unreachable!("fixture definition is vector");
+    };
+    let IndexOperationProgress::VectorCleanup(progress) = operation.progress() else {
+        panic!("a drop runs cleanup stages");
+    };
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    let foreign = VectorCleanupResume::FirstPhysical {
+        physical_index_id: VectorPhysicalIndexId::new(physical_index_id + 1).unwrap(),
+        row: None,
+    };
+    step_cleanup::<vector::distance::Euclidean>(
+        &transaction,
+        scope,
+        &operation,
+        &record,
+        vector_definition,
+        progress,
+        Some(&foreign),
+        false,
+        three_rows,
+        driver.cache_registry.as_ref(),
+    )
+    .await
+    .expect("a foreign start is ignored");
+    assert_eq!(
+        physical_keys(&transaction, scope, physical_index_id).await,
+        keys[3..]
+    );
+    drop(transaction);
+
+    // A committed position is kept by the next preparation.
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+        CommittedOperationStep::Progressed
+    );
+    assert!(matches!(
+        position(&driver),
+        Some(VectorCleanupResume::Physical(_))
+    ));
+    let operation = read_operation(&db, scope, drop_id).await;
+    drop(
+        driver
+            .prepare_step(&db, scope, &operation, three_rows)
+            .await
+            .expect("resumed delete step prepares"),
+    );
+    assert!(matches!(
+        position(&driver),
+        Some(VectorCleanupResume::Physical(_))
+    ));
+    for _ in 0..64 {
+        if position(&driver).is_none() {
+            break;
+        }
+        assert_eq!(
+            drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+            CommittedOperationStep::Progressed
+        );
+    }
+    assert!(
+        position(&driver).is_none(),
+        "the resumed scans reached the end"
+    );
+    assert!(physical_keys(&db, scope, physical_index_id)
+        .await
+        .is_empty());
+
+    // No position again: the preparation reads the whole namespace from the
+    // start and finds nothing. A row put back after that read, which nothing
+    // can do while the drop owns its generation, goes unseen: the step leaves
+    // the stage without reading the namespace in its transaction.
+    let operation = read_operation(&db, scope, drop_id).await;
+    let prepared = driver
+        .prepare_step(&db, scope, &operation, three_rows)
+        .await
+        .expect("closing delete step prepares");
+    assert!(matches!(
+        position(&driver),
+        Some(VectorCleanupResume::FirstPhysical {
+            physical_index_id: located,
+            row: None,
+        }) if located.get() == physical_index_id
+    ));
+    db.put(&keys[0], b"left behind")
+        .await
+        .expect("fixture row is written");
+    let transaction = db
+        .begin(IsolationLevel::SerializableSnapshot)
+        .await
+        .unwrap();
+    assert!(matches!(
+        driver
+            .step(&db, &transaction, scope, &operation, three_rows)
+            .await
+            .expect("prepared delete step stages")
+            .result(),
+        IndexOperationStepResult::Progressed(IndexOperationProgress::VectorCleanup(
+            VectorCleanupProgress::DeleteDeltas(_)
+        ))
+    ));
+    drop(transaction);
+    drop(prepared);
+
+    // Every step the outbox runs is prepared, so the row is read and deleted.
+    assert_eq!(
+        drive_one(&db, &driver, drop_id, &mut claim_sequence, three_rows).await,
+        CommittedOperationStep::Progressed
+    );
+    assert!(physical_keys(&db, scope, physical_index_id)
+        .await
+        .is_empty());
+    assert_eq!(
+        drive_to_terminal(&db, &driver, drop_id, &mut claim_sequence).await,
+        CommittedOperationStep::Completed
+    );
+    assert!(matches!(
+        read_index(&db, scope, &definition(None)).await.state(),
+        IndexStateV2::Dropped { .. }
+    ));
+    db.close().await.expect("vector test database closes");
+}
+
 /// Proves a drop that loses its position mid-way still removes every row.
 ///
 /// A new driver, as after a restart, holds no position, so its first step
@@ -2545,7 +2709,7 @@ pub(super) async fn partitioned_drop_resumes_within_each_namespace() {
         VectorIndex::<vector::distance::Euclidean>::from_generation(&first_generation);
     let first_position = VectorCleanupResume::Physical(
         first_index
-            .cleanup_scan(&db, None)
+            .cleanup_scan(&db, VectorCleanupFrom::Start)
             .await
             .unwrap()
             .next()
@@ -2633,7 +2797,11 @@ pub(super) async fn partitioned_drop_resumes_within_each_namespace() {
                 Some(CommittedStepState::VectorCleanup(VectorCleanupResume::Physical(row))) =>
                     !first_index.owns_cleanup_row(row),
                 Some(
-                    CommittedStepState::VectorCleanup(VectorCleanupResume::Work(_))
+                    CommittedStepState::VectorCleanup(
+                        VectorCleanupResume::Work(_)
+                        | VectorCleanupResume::FirstPhysical { .. }
+                        | VectorCleanupResume::FirstWork(_),
+                    )
                     | CommittedStepState::VectorBuild(_),
                 ) => false,
                 None => true,
@@ -2720,23 +2888,26 @@ pub(super) async fn delta_cleanup_resumes_past_deleted_rows_and_sweeps_before_fi
         index_id,
         generation,
     );
-    // (position, limits) => (rows left, exhausted, position handed on):
-    // deltas sort before applied state.
+    let after = |key: &Bytes| Some(VectorCleanupResume::Work(key.clone()));
+    let first = |key: Option<&Bytes>| Some(VectorCleanupResume::FirstWork(key.cloned()));
+    // (start, limits) => (rows left, exhausted, position handed on): deltas
+    // sort before applied state.
     for (resume, limits, left, exhausted, next) in [
         // From the start, one row: the delta goes, the rest waits.
         (None, one_row, applied.clone(), false, Some(&delta_key)),
-        // From the start, everything: only this reports the rows exhausted.
+        // From the start, everything: this reports the rows exhausted.
         (None, all_rows, Vec::new(), true, None),
-        // Past the delta: the scan reaches the end without rereading it.
+        // Past the delta: the scan reaches the end without rereading it,
+        // which proves nothing about the rows before it.
         (
-            Some(&delta_key),
+            after(&delta_key),
             all_rows,
             vec![delta_key.clone()],
             false,
             None,
         ),
         (
-            Some(&delta_key),
+            after(&delta_key),
             one_row,
             vec![delta_key.clone(), applied[1].clone()],
             false,
@@ -2744,21 +2915,58 @@ pub(super) async fn delta_cleanup_resumes_past_deleted_rows_and_sweeps_before_fi
         ),
         // Past an applied row: the delta prefix is not scanned at all.
         (
-            Some(&applied[0]),
+            after(&applied[0]),
             all_rows,
             vec![delta_key.clone(), applied[0].clone()],
             false,
             None,
         ),
         (
-            Some(&applied[1]),
+            after(&applied[1]),
             all_rows,
             vec![delta_key.clone(), applied[0].clone(), applied[1].clone()],
             false,
             None,
         ),
         // A key of neither prefix is no position: the scan starts over.
-        (Some(&outside), all_rows, Vec::new(), true, None),
+        (after(&outside), all_rows, Vec::new(), true, None),
+        // From the first row a preparation read: that row goes too, and
+        // reaching the end reports the rows exhausted.
+        (first(Some(&delta_key)), all_rows, Vec::new(), true, None),
+        (
+            first(Some(&delta_key)),
+            one_row,
+            applied.clone(),
+            false,
+            Some(&delta_key),
+        ),
+        (
+            first(Some(&applied[0])),
+            all_rows,
+            vec![delta_key.clone()],
+            true,
+            None,
+        ),
+        (first(Some(&outside)), all_rows, Vec::new(), true, None),
+        // A preparation that read no row: the step reads nothing either.
+        (
+            first(None),
+            all_rows,
+            vec![delta_key.clone(), applied[0].clone(), applied[1].clone()],
+            true,
+            None,
+        ),
+        // A start of the physical stage is none here.
+        (
+            Some(VectorCleanupResume::FirstPhysical {
+                physical_index_id: VectorPhysicalIndexId::new(1).unwrap(),
+                row: None,
+            }),
+            all_rows,
+            Vec::new(),
+            true,
+            None,
+        ),
     ] {
         let transaction = db
             .begin(IsolationLevel::SerializableSnapshot)
@@ -2772,7 +2980,7 @@ pub(super) async fn delta_cleanup_resumes_past_deleted_rows_and_sweeps_before_fi
             &transaction,
             scope,
             &operation,
-            resume,
+            resume.as_ref(),
             OperationCounters::default(),
             limits,
         )
@@ -2793,8 +3001,8 @@ pub(super) async fn delta_cleanup_resumes_past_deleted_rows_and_sweeps_before_fi
             )
             .await,
         );
-        assert_eq!(rows_left, left, "rows left resuming after {resume:?}");
-        assert_eq!(reported, exhausted, "exhaustion resuming after {resume:?}");
+        assert_eq!(rows_left, left, "rows left starting from {resume:?}");
+        assert_eq!(reported, exhausted, "exhaustion starting from {resume:?}");
         assert_eq!(handed_on.as_ref(), next, "position after {resume:?}");
     }
 
@@ -2814,7 +3022,12 @@ pub(super) async fn delta_cleanup_resumes_past_deleted_rows_and_sweeps_before_fi
         .iter()
         .filter_map(|position| match position {
             Some(VectorCleanupResume::Work(key)) => Some(key.clone()),
-            Some(VectorCleanupResume::Physical(_)) | None => None,
+            Some(
+                VectorCleanupResume::Physical(_)
+                | VectorCleanupResume::FirstPhysical { .. }
+                | VectorCleanupResume::FirstWork(_),
+            )
+            | None => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(work, [delta_key, applied[0].clone(), applied[1].clone()]);
