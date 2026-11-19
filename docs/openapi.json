@@ -2602,7 +2602,7 @@
     },
     "headers": {
       "ServerTiming": {
-        "description": "Where the server time of the request went, in milliseconds, measured from the fully received body. `exec` is parsing, planning and execution. `commit` (writes) is applying the commit on the writer. `durable` is the wait for the WAL upload, present when the request waited: a write unless X-Helix-Await-Durable is false, and index DDL always. The three never overlap. Sent by local servers; an error response or an explain response reports `exec` alone.",
+        "description": "Where the server time of the request went, in milliseconds, measured from the fully received body. `exec` is parsing, planning and execution. `commit` (graph writes) is applying the commit on the writer. `durable` is the wait for the WAL upload, present when the request waited: a graph write unless X-Helix-Await-Durable is false, and index creation or removal always. The three never overlap. Sent by local servers; an error response or an explain response reports `exec` alone.",
         "schema": {
           "type": "string"
         },
