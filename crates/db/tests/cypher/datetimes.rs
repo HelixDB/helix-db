@@ -578,6 +578,7 @@ async fn text_never_matches_stored_datetimes_whatever_the_indexes() {
             ("text", text()),
             ("texts", Q::Array(vec![Q::String("x".into()), text()])),
             ("at", Q::DateTime(BASE + 3 * HOUR)),
+            ("object", Q::Object([("text".to_owned(), text())].into())),
         ]
     };
     let none = Vec::<Vec<Value>>::new;
@@ -761,7 +762,9 @@ async fn text_never_matches_stored_datetimes_whatever_the_indexes() {
         );
     }
     // Operands whose types are both known, a bound parameter's among them,
-    // fail before anything runs, naming the conversion.
+    // fail before anything runs, naming the conversion: in a comparison, a
+    // text match, an IN member or a simple CASE's WHEN value. A parameter's
+    // type reaches a property of it and a variable set to either.
     for query in [
         "RETURN datetime() > '2000-01-01'",
         "MATCH (e:Event) WHERE datetime('2024-01-01') = '2024-01-01' RETURN e.seq",
@@ -769,6 +772,19 @@ async fn text_never_matches_stored_datetimes_whatever_the_indexes() {
         "MATCH (e:Event) WHERE datetime() >= $text RETURN e.seq",
         "RETURN $at STARTS WITH '2023'",
         "RETURN $at = $text",
+        "RETURN datetime() IN ['x']",
+        "MATCH (e:Event) WHERE '2024' IN [e.seq, datetime()] RETURN e.seq",
+        "RETURN CASE datetime() WHEN '2024-01-01' THEN 1 ELSE 0 END",
+        "RETURN CASE 'x' WHEN 1 THEN 1 WHEN datetime() THEN 2 END",
+        "RETURN $at IN ['x']",
+        "RETURN datetime() IN $texts",
+        "RETURN datetime() IN [1, $text]",
+        "RETURN CASE $at WHEN 'x' THEN 1 ELSE 0 END",
+        "RETURN CASE datetime() WHEN $text THEN 1 ELSE 0 END",
+        "RETURN datetime() = $object.text",
+        "WITH $at AS a RETURN a = 'x'",
+        "WITH $at AS a WITH a AS b WHERE b < 'x' RETURN b",
+        "WITH $object AS o RETURN o.text IN [datetime()]",
     ] {
         for (name, db) in dbs {
             let error = query_error(db, request(query, parameters())).await;
@@ -858,6 +874,22 @@ async fn text_never_matches_stored_datetimes_whatever_the_indexes() {
             "SELECT e.seq FROM Event e WHERE CURRENT_TIMESTAMP > ?",
             vec![text()],
         ),
+        (
+            "SELECT e.seq FROM Event e WHERE CURRENT_TIMESTAMP IN ('x', 'y')",
+            vec![],
+        ),
+        (
+            "SELECT CASE CURRENT_TIMESTAMP WHEN 'x' THEN 1 ELSE 0 END",
+            vec![],
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE ? IN ('x')",
+            vec![Q::DateTime(BASE)],
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE CURRENT_TIMESTAMP IN (?)",
+            vec![Q::Array(vec![text()])],
+        ),
     ] {
         for (name, db) in dbs {
             let Err(cypher::Error::Query(error)) = db.sql(sql(query, parameters.clone())).await
@@ -922,6 +954,16 @@ async fn text_never_matches_stored_datetimes_whatever_the_indexes() {
             "MATCH (e:Event) WHERE e.seq IN [3, 4] AND e.at < datetime() RETURN e.seq",
             seqs([4]),
         ),
+        // A datetime bound folded from the clock or a literal skips the text.
+        (
+            "MATCH (e:Event) WHERE e.at < datetime() RETURN e.seq ORDER BY e.seq",
+            seqs([0, 1, 2, 4, 5, 6, 7, 8, 9]),
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at >= datetime({epochMillis: timestamp() - timestamp()}) \
+             AND e.at <= datetime('2023-11-15T02:13:20Z') RETURN e.seq ORDER BY e.seq",
+            seqs([0, 1, 2, 4]),
+        ),
         (
             "MATCH (q:Query), (e:Event) WHERE e.at = q.text RETURN e.seq",
             seqs([3]),
@@ -939,6 +981,14 @@ async fn text_never_matches_stored_datetimes_whatever_the_indexes() {
             assert_eq!(read(db, query).await, expected, "{name}: {query}");
         }
     }
+    assert_eq!(
+        access(
+            &range,
+            cypher::Request::new("MATCH (e:Event) WHERE e.at < datetime() RETURN e.seq")
+        )
+        .await,
+        "RangeIndex"
+    );
     for db in [scanned, equality, range, other] {
         db.close().await.unwrap();
     }
