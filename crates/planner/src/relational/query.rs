@@ -492,6 +492,92 @@ impl Query {
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings
     }
+    /// Fails before anything runs where a comparison holds a parameter and its
+    /// operands are a datetime and text once each parameter has the type of
+    /// its bound value, as for a `date_time` parameter against a string
+    /// literal. The binder rejects the pairs whose types it knows without
+    /// parameters; any other datetime and text compare as unknown at run time.
+    ///
+    /// ```
+    /// use helix_planner::relational as r;
+    /// let compare = |left: r::Expression, right: r::Expression| {
+    ///     r::Query::new(
+    ///         vec![r::Binding {
+    ///             name: "x".into(), kind: r::BindingType::Scalar,
+    ///             nullable: true, value_type: r::ValueType::Any,
+    ///         }],
+    ///         vec![r::Operator::Unwind {
+    ///             expression: r::Expression::List(vec![r::Expression::Binary(
+    ///                 r::Binary::Equal, Box::new(left), Box::new(right),
+    ///             )]),
+    ///             slot: r::Slot(0),
+    ///         }],
+    ///         vec![],
+    ///     )
+    ///     .unwrap()
+    /// };
+    /// let at = || r::Expression::Parameter("at".into());
+    /// let text = r::Expression::Literal(r::Value::String("2026-01-01".into()));
+    /// let parameters = [("at".to_owned(), r::Value::DateTime(0))].into();
+    /// let error = compare(at(), text.clone()).check_parameter_comparisons(&parameters).unwrap_err();
+    /// assert_eq!(error.detail, r::detail::DATETIME_TEXT_COMPARISON);
+    /// assert_eq!(error.phase, r::ErrorPhase::Compile);
+    /// let clock = r::Expression::Function(r::Function::DateTime, vec![]);
+    /// let text_parameter = [("at".to_owned(), r::Value::String("x".into()))].into();
+    /// assert!(compare(clock.clone(), at()).check_parameter_comparisons(&text_parameter).is_err());
+    /// // A parameter of another type, or a pair with no parameter, is left to run.
+    /// assert!(compare(clock, at()).check_parameter_comparisons(&parameters).is_ok());
+    /// let integer = [("at".to_owned(), r::Value::Integer(0))].into();
+    /// assert!(compare(at(), text).check_parameter_comparisons(&integer).is_ok());
+    /// ```
+    pub fn check_parameter_comparisons(
+        &self,
+        parameters: &std::collections::BTreeMap<String, super::Value>,
+    ) -> Result<()> {
+        use super::{Binary as B, ValueType as T};
+        let value_type = |operand: &Expression| match operand {
+            Expression::Parameter(name) => match parameters.get(name) {
+                Some(super::Value::DateTime(_)) => Some(T::DateTime),
+                Some(super::Value::String(_)) => Some(T::String),
+                _ => None,
+            },
+            operand => operand.value_type(&self.bindings).ok(),
+        };
+        self.operators
+            .iter()
+            .flat_map(Operator::expressions)
+            .try_for_each(|expression| {
+                expression.try_visit(&mut |expression| {
+                    let Expression::Binary(
+                        B::Equal
+                        | B::NotEqual
+                        | B::Less
+                        | B::LessEqual
+                        | B::Greater
+                        | B::GreaterEqual
+                        | B::StartsWith
+                        | B::EndsWith
+                        | B::Contains,
+                        a,
+                        b,
+                    ) = expression
+                    else {
+                        return Ok(());
+                    };
+                    let parameter = |e: &Expression| matches!(e, Expression::Parameter(_));
+                    if !parameter(a) && !parameter(b) {
+                        return Ok(());
+                    }
+                    match (value_type(a), value_type(b)) {
+                        (Some(T::DateTime), Some(T::String))
+                        | (Some(T::String), Some(T::DateTime)) => {
+                            Err(super::types::datetime_text_comparison())
+                        }
+                        _ => Ok(()),
+                    }
+                })
+            })
+    }
     pub fn operators(&self) -> &[Operator] {
         &self.operators
     }

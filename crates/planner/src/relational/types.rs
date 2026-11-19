@@ -129,12 +129,7 @@ impl Expression {
                             (T::DateTime, T::String) | (T::String, T::DateTime)
                         ) =>
                     {
-                        return Err(QueryError::compile(
-                            category::TYPE_ERROR,
-                            detail::DATETIME_TEXT_COMPARISON,
-                            "cannot compare a datetime with text; read the text as a datetime \
-                             with datetime('…') in Cypher or TIMESTAMP '…' in SQL",
-                        ));
+                        return Err(datetime_text_comparison());
                     }
                     Binary::In => {
                         require(b, &[T::List], category::SYNTAX_ERROR)?;
@@ -329,4 +324,16 @@ impl Expression {
             }
         })
     }
+}
+
+/// The compile-time type error of comparing operands statically known to be a
+/// datetime and text. Only these fail: at run time the pair compares as
+/// unknown, so whether a row matches never depends on an index.
+pub(super) fn datetime_text_comparison() -> QueryError {
+    QueryError::compile(
+        category::TYPE_ERROR,
+        detail::DATETIME_TEXT_COMPARISON,
+        "cannot compare a datetime with text; read the text as a datetime with \
+         datetime('…') in Cypher or TIMESTAMP '…' in SQL",
+    )
 }
