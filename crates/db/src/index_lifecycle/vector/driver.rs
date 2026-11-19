@@ -110,8 +110,9 @@ pub(crate) struct VectorIndexDriver {
     /// Where each cleanup or abort operation's next delete step resumes.
     ///
     /// An entry is set only by [`IndexOperationDriver::after_commit`], from
-    /// the step that committed, and removed once the operation leaves its
-    /// queue, so the map holds at most one key per running cleanup.
+    /// the step that committed, and removed by the next committed step that
+    /// hands on none, blocks, or completes the operation. The map therefore
+    /// holds at most one key per cleanup this writer has not finished.
     cleanup_resume: Mutex<HashMap<IndexOperationId, VectorCleanupResume>>,
 }
 
@@ -1522,6 +1523,12 @@ async fn step_cleanup<D: Distance>(
     ) {
         cache_registry.retire_cleanup_generation(&authority).await;
     }
+    // A position is one of the stage that handed it on.
+    let (physical_resume, work_resume) = match resume {
+        Some(VectorCleanupResume::Physical(row)) => (Some(row), None),
+        Some(VectorCleanupResume::Work(key)) => (None, Some(key)),
+        None => (None, None),
+    };
     // The persisted progress and the position each step hands to the next
     // once it commits.
     let (next, resume) = match progress {
@@ -1537,10 +1544,6 @@ async fn step_cleanup<D: Distance>(
         }
         VectorCleanupProgress::DeletePhysical(progress) => match authority.layout() {
             VectorPhysicalLayout::Unpartitioned { physical_index_id } => {
-                let physical_resume = match resume {
-                    Some(VectorCleanupResume::Physical(row)) => Some(row),
-                    Some(VectorCleanupResume::Work(_)) | None => None,
-                };
                 if progress.cursor.is_some() {
                     return Err(corruption(
                         "unpartitioned vector cleanup retained a mapping cursor",
@@ -1699,10 +1702,6 @@ async fn step_cleanup<D: Distance>(
                 }
             }
             VectorPhysicalLayout::Partitioned => {
-                let physical_resume = match resume {
-                    Some(VectorCleanupResume::Physical(row)) => Some(row),
-                    Some(VectorCleanupResume::Work(_)) | None => None,
-                };
                 let mapping = current_or_next_mapping(
                     transaction,
                     scope,
@@ -1761,10 +1760,7 @@ async fn step_cleanup<D: Distance>(
                 scope,
                 operation,
                 &[RecordKind::BuildDelta, RecordKind::AppliedState],
-                match resume {
-                    Some(VectorCleanupResume::Work(key)) => Some(key),
-                    Some(VectorCleanupResume::Physical(_)) | None => None,
-                },
+                work_resume,
                 progress.counters,
                 limits,
             )

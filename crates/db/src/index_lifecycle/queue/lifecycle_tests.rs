@@ -33,9 +33,7 @@ use crate::config::{
 };
 use crate::encoding::v2::keys::indexes::vector::VectorKey;
 use crate::encoding::v2::keys::scope::DataScope;
-use crate::encoding::v2::keys::{
-    DataKey, DataKeyKind, IndexEntity, ManagedIndexKey, RecordKind, ScopedKey,
-};
+use crate::encoding::v2::keys::{self, DataKey, DataKeyKind, IndexEntity};
 use crate::encoding::v2::values::indexes::operation_queue::{QueueFamily, QueuedOperationId};
 use crate::index_lifecycle::outbox::step_pause::{self, StepPause};
 use crate::index_lifecycle::{
@@ -1903,13 +1901,13 @@ fn narrow_cleanup_config() -> DbConfig {
 async fn assert_no_vector_generation_rows(db: &HelixDB) {
     assert!(rows(db, is_vector_row).await.is_empty());
     for kind in [
-        RecordKind::VectorPartitionMapping,
-        RecordKind::AppliedState,
-        RecordKind::BuildDelta,
+        keys::RecordKind::VectorPartitionMapping,
+        keys::RecordKind::AppliedState,
+        keys::RecordKind::BuildDelta,
     ] {
-        let prefix = ManagedIndexKey::data_prefix(
+        let prefix = keys::ManagedIndexKey::data_prefix(
             DataScope::LegacyUnscoped,
-            ScopedKey::logical_prefix(kind),
+            keys::ScopedKey::logical_prefix(kind),
         );
         let mut generation_rows = db.inner_db().scan_prefix(&prefix, ..).await.unwrap();
         assert!(

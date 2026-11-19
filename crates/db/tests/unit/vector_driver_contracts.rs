@@ -2627,9 +2627,13 @@ pub(super) async fn partitioned_drop_resumes_within_each_namespace() {
             "the step deleted the second namespace's first rows"
         );
         assert!(
-            match &stepped.cleanup_resume {
-                Some(VectorCleanupResume::Physical(row)) => !first_index.owns_cleanup_row(row),
-                Some(VectorCleanupResume::Work(_)) => false,
+            match &stepped.committed_state {
+                Some(CommittedStepState::VectorCleanup(VectorCleanupResume::Physical(row))) =>
+                    !first_index.owns_cleanup_row(row),
+                Some(
+                    CommittedStepState::VectorCleanup(VectorCleanupResume::Work(_))
+                    | CommittedStepState::VectorBuild(_),
+                ) => false,
                 None => true,
             },
             "the position handed on is in the namespace the step deleted from"
