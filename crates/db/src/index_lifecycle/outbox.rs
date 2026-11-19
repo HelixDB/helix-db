@@ -29,7 +29,7 @@ use crate::encoding::v2::values::{
 };
 use crate::error::{HelixDbError, Result};
 use crate::execution_control;
-use crate::transaction::Mutation;
+use crate::transaction::{CommitDurability, Mutation};
 
 mod failure;
 #[cfg(test)]
@@ -37,11 +37,11 @@ pub(crate) mod step_pause;
 
 use super::failpoints::{self, IndexOutboxFailpoint};
 use super::{
-    BuildOperationOutcome, ClaimSequence, IndexOperationBlocker, IndexOperationExecutionState,
-    IndexOperationFamily, IndexOperationId, IndexOperationOutcome, IndexOperationProgress,
-    IndexOperationRecord, IndexOperationRevision, IndexOperationStage, IndexOperationStatus,
-    IndexRecordV2, IndexRevision, IndexStateTransition, IndexStateV2, IndexV2MetadataValue,
-    OperationClaim, OperationQueuePointerValue, WriterEpoch,
+    BuildOperationOutcome, ClaimContinuation, ClaimSequence, IndexOperationBlocker,
+    IndexOperationExecutionState, IndexOperationFamily, IndexOperationId, IndexOperationOutcome,
+    IndexOperationProgress, IndexOperationRecord, IndexOperationRevision, IndexOperationStage,
+    IndexOperationStatus, IndexRecordV2, IndexRevision, IndexStateTransition, IndexStateV2,
+    IndexV2MetadataValue, OperationClaim, OperationQueuePointerValue, WriterEpoch,
 };
 
 /// Maximum scheduling delay used for one observation of a persisted deadline.
@@ -131,7 +131,8 @@ pub(crate) enum ClaimPermission {
     SameEpochRecovery(SameEpochRecoveryProof),
 }
 
-/// Exact claimed operation returned after its claim transaction commits.
+/// Exact claimed operation returned after its claim transaction commits, or
+/// after a step that kept its claim committed.
 #[derive(Debug, Clone)]
 pub(crate) struct ClaimedOperation {
     pub(crate) scope: DataScope,
@@ -141,7 +142,8 @@ pub(crate) struct ClaimedOperation {
 /// Closed family-driver result for one bounded claimed step.
 #[derive(Debug, Clone)]
 pub(crate) enum IndexOperationStepResult {
-    /// Physical work and the supplied next checkpoint commit together.
+    /// Physical work and the supplied next checkpoint commit together,
+    /// without waiting for the WAL upload (see [`execute_claimed_step_with_evidence`]).
     Progressed(IndexOperationProgress),
     /// No physical work commits; the exact checkpoint is durably backed off.
     TransientFailure,
@@ -150,9 +152,10 @@ pub(crate) enum IndexOperationStepResult {
     /// The step's transaction commits the blocker beside the operation's
     /// unchanged checkpoint, so anything the driver staged commits too and a
     /// retry rescans it: a driver stages before blocking only work that a
-    /// rescan from that checkpoint reconciles.
+    /// rescan from that checkpoint reconciles. The commit is durable.
     Blocked(IndexOperationBlocker),
-    /// The canonical lifecycle state and terminal operation commit together.
+    /// The canonical lifecycle state and terminal operation commit together,
+    /// durably.
     Completed(IndexOperationOutcome),
 }
 
@@ -454,7 +457,10 @@ impl PreparedIndexOperationStep {
         }
     }
 
-    /// Performs post-commit external work only after durability is proven.
+    /// Performs post-commit external work once the step's commit is applied.
+    ///
+    /// A progressed step's commit is not yet durable here, so this work must
+    /// stay sound if a crash loses that commit.
     async fn after_commit(self) {
         if let Self::Text(step) = self {
             (*step).after_commit().await;
@@ -490,6 +496,7 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
     /// permit supplied by this default implementation.
     async fn acquire_step_permit(
         &self,
+        _db: &Db,
         _scope: DataScope,
         _operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
@@ -503,12 +510,12 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
     /// all other stages on the ordinary path.
     async fn prepare_step(
         &self,
-        _db: &Db,
+        db: &Db,
         scope: DataScope,
         operation: &IndexOperationRecord,
         _limits: SearchIndexBatchLimits,
     ) -> Result<PreparedIndexOperationStep> {
-        let permit = self.acquire_step_permit(scope, operation).await?;
+        let permit = self.acquire_step_permit(db, scope, operation).await?;
         Ok(PreparedIndexOperationStep::driver_owned(
             self.family(),
             permit,
@@ -525,9 +532,12 @@ pub(crate) trait IndexOperationDriver: Send + Sync {
         limits: SearchIndexBatchLimits,
     ) -> Result<IndexOperationStepExecution>;
 
-    /// Applies disposable runtime cleanup only after the staged step is durable.
+    /// Applies disposable runtime cleanup once the staged step committed.
     ///
-    /// This hook must not write database state. Its default is intentionally a
+    /// It runs after every progressed, blocked or completed step, including a
+    /// driver failure recorded as a blocker; a progressed step's commit is
+    /// applied but may not be durable yet. This hook must not write database
+    /// state. Its default is intentionally a
     /// no-op; vector cleanup uses it to forget a process-local retirement fence
     /// only after the canonical `Dropped` transition has committed, and vector
     /// builds use it to retain planning state the committed step returned.
@@ -562,10 +572,32 @@ pub(crate) struct CommittedOperationStepEvidence {
     pub(crate) elapsed_micros: u64,
 }
 
+/// One executed step and the claim it left for its worker.
+#[derive(Debug)]
+pub(crate) struct ExecutedOperationStep {
+    pub(crate) evidence: CommittedOperationStepEvidence,
+    /// The committed record, still claimed, when the step ran with
+    /// [`ClaimContinuation::Retain`] and progressed. Its holder runs the next
+    /// step from it without claiming again. `None` after every other step.
+    pub(crate) retained: Option<ClaimedOperation>,
+}
+
+impl ExecutedOperationStep {
+    /// A step that left no claim behind for its worker.
+    const fn released(evidence: CommittedOperationStepEvidence) -> Self {
+        Self {
+            evidence,
+            retained: None,
+        }
+    }
+}
+
 struct StagedOperationStep {
     transaction: DbTransaction,
     index: IndexRecordV2,
     operation: IndexOperationRecord,
+    /// The next record when it keeps the step's claim.
+    retained: Option<IndexOperationRecord>,
     committed: CommittedOperationStep,
     before_stage: IndexOperationStage,
     after_stage: IndexOperationStage,
@@ -1018,7 +1050,12 @@ pub(crate) async fn claim_operation(
         pointer_key,
         encode_metadata_value(&IndexV2MetadataValue::OperationQueuePointer(next_pointer)),
     )?;
-    transaction.commit().await?;
+    // A claim settles nothing: the WAL uploads in sequence order, so a crash
+    // that loses it loses every step that ran under it too, and the operation
+    // is claimed again from its last durable record.
+    transaction
+        .commit_with_options(&CommitDurability::Applied.write_options())
+        .await?;
     failpoints::trip(IndexOutboxFailpoint::ClaimAfter)?;
     Ok(Some(ClaimedOperation {
         scope: pointer.scope,
@@ -1041,21 +1078,52 @@ pub(crate) async fn execute_claimed_step(
     limits: SearchIndexBatchLimits,
     now_unix_millis: u64,
 ) -> Result<CommittedOperationStep> {
-    Ok(
-        execute_claimed_step_with_evidence(db, claimed, driver, limits, now_unix_millis)
-            .await?
-            .outcome,
+    Ok(execute_claimed_step_with_evidence(
+        db,
+        claimed,
+        driver,
+        limits,
+        now_unix_millis,
+        ClaimContinuation::Release,
     )
+    .await?
+    .evidence
+    .outcome)
 }
 
 /// Runs one claimed step and returns disposable resource and stage evidence.
+///
+/// # Durability
+///
+/// A progressed step commits without waiting for the WAL upload. Its
+/// physical writes and checkpoint commit in one transaction, and the WAL
+/// uploads in sequence order, so a crash loses a suffix of steps whole, and
+/// the operation resumes from its last durable checkpoint and redoes them.
+/// Any later durable commit, such as a user write or this operation's own
+/// blocker or completion, makes every earlier step durable first. Blocked and
+/// completed steps decide the operation's fate, so they wait for the upload:
+/// an activation is never acknowledged before it is durable. They force that
+/// upload instead of waiting for the next WAL flush tick, because a gated
+/// step holds its permit until then.
+///
+/// # Claims
+///
+/// With [`ClaimContinuation::Retain`], a progressed step keeps its claim and
+/// returns the committed record as [`ExecutedOperationStep::retained`], so the
+/// worker runs the next step without a claim transaction. Every step,
+/// including a retained one, first rereads the operation in its own
+/// serializable transaction and runs only while the persisted record is the
+/// exact claimed revision. An abort, a retry, or another writer's claim
+/// advances the revision, so the holder's next step finds it superseded,
+/// commits nothing, and reports a transient failure.
 pub(crate) async fn execute_claimed_step_with_evidence(
     db: &Db,
     claimed: &ClaimedOperation,
     driver: &dyn IndexOperationDriver,
     limits: SearchIndexBatchLimits,
     now_unix_millis: u64,
-) -> Result<CommittedOperationStepEvidence> {
+    claim: ClaimContinuation,
+) -> Result<ExecutedOperationStep> {
     let started = Instant::now();
     if driver.family() != claimed.record.family() {
         return Err(corruption(
@@ -1066,13 +1134,44 @@ pub(crate) async fn execute_claimed_step_with_evidence(
     let _ownership = driver
         .acquire_generation_ownership(claimed.scope, &claimed.record)
         .await;
+    // A retained claim reaches its next step without a claim transaction,
+    // so an abort, a retry or another writer's claim that landed during its
+    // slice is caught here, before a preparation that may scan the whole
+    // generation or fence writers. The step transaction below still checks
+    // the exact revision; this read only skips work that cannot commit.
+    let current = db
+        .get(scoped_operation_key(
+            claimed.scope,
+            claimed.record.operation_id(),
+        ))
+        .await?
+        .map(|value| decode_operation_record(&value))
+        .transpose()?;
+    if current
+        .is_some_and(|current| current.operation_revision() != claimed.record.operation_revision())
+    {
+        let stage = IndexOperationStatus::from_record(&claimed.record)
+            .common()
+            .stage;
+        return Ok(ExecutedOperationStep::released(
+            CommittedOperationStepEvidence {
+                outcome: CommittedOperationStep::TransientFailure,
+                before_stage: stage,
+                after_stage: stage,
+                resources: StepResourceUsage::default(),
+                elapsed_micros: elapsed_micros(started),
+            },
+        ));
+    }
     let prepared = match driver
         .prepare_step(db, claimed.scope, &claimed.record, limits)
         .await
     {
         Ok(prepared) => prepared,
         Err(error) => {
-            return record_driver_failure(db, claimed, error, now_unix_millis, started).await
+            return record_driver_failure(db, claimed, driver, error, now_unix_millis, started)
+                .await
+                .map(ExecutedOperationStep::released);
         }
     };
     if prepared.family() != driver.family() {
@@ -1091,11 +1190,15 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         else {
             return Err(corruption("claimed operation disappeared before dispatch"));
         };
-        if operation.operation_revision() != claimed.record.operation_revision()
-            || operation.execution_state() != claimed.record.execution_state()
-        {
+        if operation.operation_revision() != claimed.record.operation_revision() {
+            // An abort, a retry, or another writer's claim superseded this
+            // claim after it was taken: nothing runs, and the transient
+            // release below finds the newer revision and writes nothing.
+            return Ok(None);
+        }
+        if operation.execution_state() != claimed.record.execution_state() {
             return Err(corruption(
-                "claimed operation revision changed before family dispatch",
+                "one operation revision holds two execution states",
             ));
         }
         failpoints::trip(IndexOutboxFailpoint::BatchReadAfter)?;
@@ -1125,10 +1228,10 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         let pointer_key = global_operation_key(operation.operation_id());
         let before_status = IndexOperationStatus::from_record(&operation);
         let before_stage = before_status.common().stage;
-        let (committed, after_stage, counter_resources) = match step {
+        let (committed, after_stage, counter_resources, retained) = match step {
             IndexOperationStepResult::Progressed(progress) => {
                 let next = operation
-                    .progressed(progress)
+                    .progressed(progress, claim)
                     .map_err(operation_model_error)?;
                 let next_pointer = pointer_for(claimed.scope, &next);
                 validate_link(claimed.scope, &index, &next, Some(&next_pointer))?;
@@ -1145,6 +1248,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                     CommittedOperationStep::Progressed,
                     after_status.common().stage,
                     step_counter_resources(&before_status, &after_status)?,
+                    (claim == ClaimContinuation::Retain).then_some(next),
                 )
             }
             IndexOperationStepResult::Blocked(blocker) => {
@@ -1158,6 +1262,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                     CommittedOperationStep::Blocked,
                     IndexOperationStatus::from_record(&next).common().stage,
                     StepResourceUsage::default(),
+                    None,
                 )
             }
             IndexOperationStepResult::Completed(outcome) => {
@@ -1198,6 +1303,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
                         &before_status,
                         &IndexOperationStatus::from_record(&next),
                     )?,
+                    None,
                 )
             }
             IndexOperationStepResult::TransientFailure => return Ok(None),
@@ -1211,6 +1317,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             transaction,
             index,
             operation,
+            retained,
             committed,
             before_stage,
             after_stage,
@@ -1227,6 +1334,7 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         transaction,
         index,
         operation,
+        retained,
         committed,
         before_stage,
         after_stage,
@@ -1237,7 +1345,9 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         Err(error) => {
             prepared.discard().await?;
             if driver_failed {
-                return record_driver_failure(db, claimed, error, now_unix_millis, started).await;
+                return record_driver_failure(db, claimed, driver, error, now_unix_millis, started)
+                    .await
+                    .map(ExecutedOperationStep::released);
             }
             return Err(error);
         }
@@ -1248,16 +1358,30 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         let stage = IndexOperationStatus::from_record(&claimed.record)
             .common()
             .stage;
-        return Ok(CommittedOperationStepEvidence {
-            outcome: CommittedOperationStep::TransientFailure,
-            before_stage: stage,
-            after_stage: stage,
-            resources: StepResourceUsage::default(),
-            elapsed_micros: elapsed_micros(started),
-        });
+        return Ok(ExecutedOperationStep::released(
+            CommittedOperationStepEvidence {
+                outcome: CommittedOperationStep::TransientFailure,
+                before_stage: stage,
+                after_stage: stage,
+                resources: StepResourceUsage::default(),
+                elapsed_micros: elapsed_micros(started),
+            },
+        ));
     };
 
-    match transaction.commit().await {
+    let durability = match committed {
+        CommittedOperationStep::Progressed => CommitDurability::Applied,
+        CommittedOperationStep::TransientFailure
+        | CommittedOperationStep::Blocked
+        | CommittedOperationStep::Completed => CommitDurability::Durable,
+    };
+    // A durable outcome forces its upload below rather than waiting for the
+    // next WAL flush tick: a gated step holds writers, and an activation
+    // planning too, until it is durable.
+    match transaction
+        .commit_with_options(&CommitDurability::Applied.write_options())
+        .await
+    {
         Ok(_) => {}
         Err(commit) => {
             prepared.discard().await?;
@@ -1272,14 +1396,20 @@ pub(crate) async fn execute_claimed_step_with_evidence(
             let stage = IndexOperationStatus::from_record(&claimed.record)
                 .common()
                 .stage;
-            return Ok(CommittedOperationStepEvidence {
-                outcome: CommittedOperationStep::TransientFailure,
-                before_stage: stage,
-                after_stage: stage,
-                resources: StepResourceUsage::default(),
-                elapsed_micros: elapsed_micros(started),
-            });
+            return Ok(ExecutedOperationStep::released(
+                CommittedOperationStepEvidence {
+                    outcome: CommittedOperationStep::TransientFailure,
+                    before_stage: stage,
+                    after_stage: stage,
+                    resources: StepResourceUsage::default(),
+                    elapsed_micros: elapsed_micros(started),
+                },
+            ));
         }
+    }
+    if durability == CommitDurability::Durable {
+        // A failed upload closes the database, like a failed durable commit.
+        db.flush().await?;
     }
     prepared.after_commit().await;
     driver
@@ -1292,21 +1422,30 @@ pub(crate) async fn execute_claimed_step_with_evidence(
         )
         .await;
     failpoints::trip_for_operation(IndexOutboxFailpoint::CommitAfter, operation.operation_id())?;
-    Ok(CommittedOperationStepEvidence {
-        outcome: committed,
-        before_stage,
-        after_stage,
-        resources,
-        elapsed_micros: elapsed_micros(started),
+    Ok(ExecutedOperationStep {
+        evidence: CommittedOperationStepEvidence {
+            outcome: committed,
+            before_stage,
+            after_stage,
+            resources,
+            elapsed_micros: elapsed_micros(started),
+        },
+        retained: retained.map(|record| ClaimedOperation {
+            scope: claimed.scope,
+            record,
+        }),
     })
 }
 
 /// Records failures only after failed preparation and staging have been discarded.
 /// The exact claim is rechecked in a fresh serializable transaction so a stale
 /// worker cannot block an operation that another writer or an abort has advanced.
+/// A failure recorded as a blocker reaches the driver's
+/// [`IndexOperationDriver::after_commit`] like any other blocked step.
 async fn record_driver_failure(
     db: &Db,
     claimed: &ClaimedOperation,
+    driver: &dyn IndexOperationDriver,
     error: HelixDbError,
     now_unix_millis: u64,
     started: Instant,
@@ -1364,6 +1503,15 @@ async fn record_driver_failure(
         )?;
         transaction.delete(global_operation_key(next.operation_id()))?;
         transaction.commit().await?;
+        driver
+            .after_commit(
+                claimed.scope,
+                &index,
+                &claimed.record,
+                CommittedOperationStep::Blocked,
+                None,
+            )
+            .await;
         CommittedOperationStep::Blocked
     };
     Ok(CommittedOperationStepEvidence {
@@ -1689,14 +1837,24 @@ fn operation_not_found(operation_id: IndexOperationId) -> HelixDbError {
 }
 
 /// How long a released claim waits before it is runnable again.
+///
+/// Both delays read the same attempt counter, which counts consecutive claims
+/// at the current checkpoint and resets whenever a step makes progress (see
+/// [`IndexOperationRecord::attempt`]). A lost conflict is one of those
+/// attempts, so it also grows the backoff of a later failure at the same
+/// checkpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransientRetry {
-    /// Exponential in the operation's claim attempts.
+    /// Exponential in the attempts since the last progress: the first
+    /// failure after progress waits the base delay however long the
+    /// operation has run, and only repeated failures at one checkpoint grow
+    /// towards the maximum.
     Backoff,
-    /// The base delay: a commit lost a serializable conflict, which a later
-    /// attempt usually wins. The attempt counter counts every claim, so
-    /// scaling by it would stall a long build for the maximum delay after
-    /// one conflict.
+    /// The base delay: a commit lost a serializable conflict to a concurrent
+    /// writer. Waiting longer does not make writers conflict less, and the
+    /// secondary driver bounds a run of conflicts itself by fencing writers
+    /// after `PREPARATIONS_BEFORE_FENCE` stalled preparations, so a growing
+    /// delay would only stretch that bounded wait.
     Conflict,
 }
 
@@ -2086,6 +2244,36 @@ mod tests {
         }
     }
 
+    /// Fails the test if a step reaches preparation or staging.
+    struct UnpreparedDriver;
+
+    #[async_trait]
+    impl IndexOperationDriver for UnpreparedDriver {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn acquire_step_permit(
+            &self,
+            _db: &Db,
+            _scope: DataScope,
+            _operation: &IndexOperationRecord,
+        ) -> Result<Box<dyn IndexOperationStepPermit>> {
+            panic!("a superseded claim must not prepare a step");
+        }
+
+        async fn step(
+            &self,
+            _db: &Db,
+            _transaction: &DbTransaction,
+            _scope: DataScope,
+            _operation: &IndexOperationRecord,
+            _limits: SearchIndexBatchLimits,
+        ) -> Result<IndexOperationStepExecution> {
+            panic!("a superseded claim must not stage a step");
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum FailureMode {
         PrepareCorruption,
@@ -2104,6 +2292,8 @@ mod tests {
     struct FailingDriver {
         mode: FailureMode,
         probe_key: Bytes,
+        /// Outcomes [`IndexOperationDriver::after_commit`] saw.
+        committed: std::sync::Mutex<Vec<CommittedOperationStep>>,
     }
 
     #[async_trait]
@@ -2114,6 +2304,7 @@ mod tests {
 
         async fn acquire_step_permit(
             &self,
+            _db: &Db,
             _scope: DataScope,
             _operation: &IndexOperationRecord,
         ) -> Result<Box<dyn IndexOperationStepPermit>> {
@@ -2137,6 +2328,17 @@ mod tests {
                 ));
             }
             Ok(Box::new(()))
+        }
+
+        async fn after_commit(
+            &self,
+            _scope: DataScope,
+            _index: &IndexRecordV2,
+            _operation: &IndexOperationRecord,
+            committed: CommittedOperationStep,
+            _state: Option<CommittedStepState>,
+        ) {
+            self.committed.lock().unwrap().push(committed);
         }
 
         async fn step(
@@ -2269,19 +2471,31 @@ mod tests {
             .unwrap();
             let probe_key = scoped_index_key(scope, &index);
             let before = db.get(&probe_key).await.unwrap();
+            let driver = FailingDriver {
+                mode,
+                probe_key: probe_key.clone(),
+                committed: std::sync::Mutex::default(),
+            };
             let result = execute_claimed_step(
                 &db,
                 &claimed,
-                &FailingDriver {
-                    mode,
-                    probe_key: probe_key.clone(),
-                },
+                &driver,
                 SearchIndexBackfillLimits::default().batch(),
                 0,
             )
             .await
             .unwrap();
             assert_eq!(result, expected);
+            assert_eq!(
+                *driver.committed.lock().unwrap(),
+                match expected {
+                    CommittedOperationStep::Blocked => vec![CommittedOperationStep::Blocked],
+                    CommittedOperationStep::Progressed
+                    | CommittedOperationStep::TransientFailure
+                    | CommittedOperationStep::Completed => Vec::new(),
+                },
+                "a failure recorded as a blocker reaches the driver like a blocked step"
+            );
             assert_eq!(
                 db.get(probe_key).await.unwrap(),
                 before,
@@ -2379,11 +2593,16 @@ mod tests {
                 slatedb::CloseReason::Fenced,
             )),
         ] {
-            assert!(
-                record_driver_failure(&db, &claimed, error, 0, Instant::now())
-                    .await
-                    .is_err()
-            );
+            assert!(record_driver_failure(
+                &db,
+                &claimed,
+                &StaticDriver(IndexOperationStepResult::TransientFailure),
+                error,
+                0,
+                Instant::now()
+            )
+            .await
+            .is_err());
             assert_eq!(
                 db.get(scoped_operation_key(scope, operation.operation_id()))
                     .await
@@ -2402,6 +2621,7 @@ mod tests {
             record_driver_failure(
                 &db,
                 &claimed,
+                &StaticDriver(IndexOperationStepResult::TransientFailure),
                 corruption("stale failure"),
                 0,
                 Instant::now()
@@ -3291,7 +3511,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(aborted.operation_id(), operation.operation_id());
-            assert_eq!(aborted.attempt(), before_abort.attempt());
+            assert_eq!(aborted.attempt(), 0, "cleanup starts a new checkpoint");
             assert_eq!(
                 aborted.operation_revision().get(),
                 before_abort.operation_revision().get() + 1
@@ -3428,12 +3648,63 @@ mod tests {
     }
 
     /// A step whose commit loses a serializable conflict requeues its claim
-    /// after the base delay, however many claims it took, instead of failing
-    /// the worker cycle with the error.
+    /// after the base delay instead of failing the worker cycle. Transient
+    /// failures back off exponentially in the attempts since the last
+    /// progress, conflicts included: a long build waits the base delay after
+    /// its first failure however many steps and claims it has run.
     #[tokio::test]
-    async fn a_lost_commit_conflict_requeues_the_claim_after_the_base_delay() {
+    async fn transient_backoff_counts_failures_since_the_last_progress() {
+        /// Observes `operation` at `now` and claims it for `epoch`.
+        async fn claim_at(
+            db: &Db,
+            operation: IndexOperationId,
+            epoch: WriterEpoch,
+            sequence: u64,
+            now: u64,
+        ) -> ClaimedOperation {
+            let OperationPointerObservation::Eligible(eligible) =
+                observe_operation_pointer(db, operation, epoch, now)
+                    .await
+                    .unwrap()
+            else {
+                panic!("the operation is eligible at {now}");
+            };
+            claim_operation(
+                db,
+                &eligible,
+                epoch,
+                ClaimSequence::new(sequence).unwrap(),
+                now,
+                ClaimPermission::Normal,
+            )
+            .await
+            .unwrap()
+            .expect("the observed revision is claimable")
+        }
+
+        /// The delay a failed claim of `operation` still waits at `now`.
+        async fn delay_at(
+            db: &Db,
+            operation: IndexOperationId,
+            epoch: WriterEpoch,
+            now: u64,
+        ) -> u64 {
+            match observe_operation_pointer(db, operation, epoch, now)
+                .await
+                .unwrap()
+            {
+                OperationPointerObservation::Delayed { delay_millis } => delay_millis,
+                observation @ (OperationPointerObservation::Eligible(_)
+                | OperationPointerObservation::ClaimedByCurrentWriter(_)
+                | OperationPointerObservation::StalePointerRemoved) => {
+                    panic!("a failed claim waits: {observation:?}")
+                }
+            }
+        }
+
         let db = db("outbox-commit-conflict").await;
         let (index, operation) = fixture(15);
+        let operation_id = operation.operation_id();
         enqueue_operation(
             &db,
             DataScope::LegacyUnscoped,
@@ -3444,71 +3715,135 @@ mod tests {
         .await
         .unwrap();
         let epoch = WriterEpoch::from_bytes([16; 16]).unwrap();
-        let mut claimed = None;
-        for sequence in 1..=6 {
-            let eligible =
-                match observe_operation_pointer(&db, operation.operation_id(), epoch, 100)
-                    .await
-                    .unwrap()
-                {
-                    OperationPointerObservation::Eligible(eligible)
-                    | OperationPointerObservation::ClaimedByCurrentWriter(eligible) => eligible,
-                    observation @ (OperationPointerObservation::Delayed { .. }
-                    | OperationPointerObservation::StalePointerRemoved) => {
-                        panic!("the operation stays claimable: {observation:?}")
-                    }
+        let conflicting = ConflictingDriver {
+            probe: Bytes::from_static(b"outbox-commit-conflict-probe"),
+        };
+        let limits = SearchIndexBackfillLimits::default().batch();
+
+        // A long build: many slices, each claimed once and progressed under
+        // a kept claim before releasing it.
+        let mut sequence = 0;
+        let mut entities = 0;
+        for _ in 0..6 {
+            sequence += 1;
+            let mut claimed = claim_at(&db, operation_id, epoch, sequence, 0).await;
+            for continuation in [ClaimContinuation::Retain, ClaimContinuation::Release] {
+                entities += 1;
+                let executed = step(
+                    &db,
+                    &claimed,
+                    IndexOperationStepResult::Progressed(activate_progress(entities)),
+                    continuation,
+                )
+                .await;
+                let Some(retained) = executed.retained else {
+                    break;
                 };
-            let permission = if claimed.is_none() {
-                ClaimPermission::Normal
-            } else {
-                ClaimPermission::SameEpochRecovery(SameEpochRecoveryProof::after_join(epoch))
-            };
-            claimed = claim_operation(
-                &db,
-                &eligible,
-                epoch,
-                ClaimSequence::new(sequence).unwrap(),
-                100,
-                permission,
-            )
-            .await
-            .unwrap();
+                assert_eq!(retained.record.attempt(), 1);
+                claimed = retained;
+            }
+            let released = read_operation(&db, DataScope::LegacyUnscoped, operation_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(released.attempt(), 0, "progress resets the attempts");
         }
-        let claimed = claimed.expect("the last claim succeeds");
+
+        // The first failure after progress waits the base delay; repeated
+        // failures at one checkpoint double it, counting lost conflicts,
+        // which themselves always wait the base delay.
+        let failures: [(u32, bool, &dyn IndexOperationDriver); 5] = [
+            (1, true, &conflicting),
+            (
+                2,
+                false,
+                &StaticDriver(IndexOperationStepResult::TransientFailure),
+            ),
+            (3, true, &conflicting),
+            (
+                4,
+                false,
+                &FailingDriver {
+                    mode: FailureMode::StorageUnavailable,
+                    probe_key: Bytes::from_static(b"outbox-commit-conflict-probe"),
+                    committed: std::sync::Mutex::default(),
+                },
+            ),
+            (
+                5,
+                true,
+                &FailingDriver {
+                    mode: FailureMode::Conflict,
+                    probe_key: Bytes::from_static(b"outbox-commit-conflict-probe"),
+                    committed: std::sync::Mutex::default(),
+                },
+            ),
+        ];
+        let mut now = 0;
+        for (attempt, conflict, driver) in failures {
+            sequence += 1;
+            let claimed = claim_at(&db, operation_id, epoch, sequence, now).await;
+            assert_eq!(claimed.record.attempt(), attempt);
+            assert_eq!(
+                execute_claimed_step(&db, &claimed, driver, limits, now)
+                    .await
+                    .expect("a transient failure is not a worker failure"),
+                CommittedOperationStep::TransientFailure
+            );
+            let retained = read_operation(&db, DataScope::LegacyUnscoped, operation_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(retained.progress(), &activate_progress(entities));
+            assert_eq!(retained.attempt(), attempt, "failures accumulate");
+            let expected = if conflict {
+                BASE_OPERATION_BACKOFF_MILLIS
+            } else {
+                BASE_OPERATION_BACKOFF_MILLIS << (attempt - 1)
+            };
+            assert_eq!(delay_at(&db, operation_id, epoch, now).await, expected);
+            now += expected;
+        }
+
+        // Progress resets the backoff: the next transient failure waits the
+        // base delay again.
+        sequence += 1;
+        let claimed = claim_at(&db, operation_id, epoch, sequence, now).await;
         assert_eq!(claimed.record.attempt(), 6);
+        assert!(step(
+            &db,
+            &claimed,
+            IndexOperationStepResult::Progressed(activate_progress(entities + 1)),
+            ClaimContinuation::Release,
+        )
+        .await
+        .retained
+        .is_none());
+        sequence += 1;
+        let claimed = claim_at(&db, operation_id, epoch, sequence, now).await;
+        assert_eq!(claimed.record.attempt(), 1);
         assert_eq!(
             execute_claimed_step(
                 &db,
                 &claimed,
-                &ConflictingDriver {
-                    probe: Bytes::from_static(b"outbox-commit-conflict-probe"),
-                },
-                SearchIndexBackfillLimits::default().batch(),
-                100,
+                &StaticDriver(IndexOperationStepResult::TransientFailure),
+                limits,
+                now
             )
             .await
-            .expect("a lost conflict is not a worker failure"),
+            .unwrap(),
             CommittedOperationStep::TransientFailure
         );
-        let retained = read_operation(&db, DataScope::LegacyUnscoped, operation.operation_id())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(retained.progress(), claimed.record.progress());
-        assert!(matches!(
-            observe_operation_pointer(&db, operation.operation_id(), epoch, 100)
-                .await
-                .unwrap(),
-            OperationPointerObservation::Delayed {
-                delay_millis: BASE_OPERATION_BACKOFF_MILLIS
-            }
-        ));
+        assert_eq!(
+            delay_at(&db, operation_id, epoch, now).await,
+            BASE_OPERATION_BACKOFF_MILLIS
+        );
         assert!(matches!(
             observe_operation_pointer(
                 &db,
-                operation.operation_id(),
+                operation_id,
                 epoch,
-                100 + BASE_OPERATION_BACKOFF_MILLIS
+                now + BASE_OPERATION_BACKOFF_MILLIS
             )
             .await
             .unwrap(),
@@ -3710,6 +4045,471 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+        db.close().await.unwrap();
+    }
+
+    /// Activation progress whose entity counter is `entities`.
+    fn activate_progress(entities: u64) -> IndexOperationProgress {
+        IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+            SecondaryBuildStage::Activate(NoCursorProgress {
+                counters: OperationCounters {
+                    entities,
+                    ..OperationCounters::default()
+                },
+            }),
+        ))
+    }
+
+    async fn gated_db(
+        name: &str,
+        store: &Arc<crate::search::vector::gated_wal::GatedWalStore>,
+    ) -> Db {
+        Db::builder(
+            name,
+            Arc::clone(store) as Arc<dyn slatedb::object_store::ObjectStore>,
+        )
+        .build()
+        .await
+        .unwrap()
+    }
+
+    /// Claims the enqueued `operation` for `epoch` with its next sequence.
+    async fn claim(
+        db: &Db,
+        operation: &IndexOperationRecord,
+        epoch: WriterEpoch,
+        sequence: u64,
+    ) -> ClaimedOperation {
+        let OperationPointerObservation::Eligible(eligible) =
+            observe_operation_pointer(db, operation.operation_id(), epoch, 0)
+                .await
+                .unwrap()
+        else {
+            panic!("the operation is eligible for {epoch:?}");
+        };
+        claim_operation(
+            db,
+            &eligible,
+            epoch,
+            ClaimSequence::new(sequence).unwrap(),
+            0,
+            ClaimPermission::Normal,
+        )
+        .await
+        .unwrap()
+        .expect("the observed revision is claimable")
+    }
+
+    async fn step(
+        db: &Db,
+        claimed: &ClaimedOperation,
+        result: IndexOperationStepResult,
+        claim: ClaimContinuation,
+    ) -> ExecutedOperationStep {
+        execute_claimed_step_with_evidence(
+            db,
+            claimed,
+            &StaticDriver(result),
+            SearchIndexBackfillLimits::default().batch(),
+            0,
+            claim,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Claims and progressed steps return while WAL uploads are held;
+    /// blocked and completed steps return only once their commit is durable.
+    #[tokio::test]
+    async fn progress_skips_the_wal_wait_and_fate_waits_for_it() {
+        use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+        const RETURNS: std::time::Duration = std::time::Duration::from_secs(10);
+        const WAITS: std::time::Duration = std::time::Duration::from_millis(300);
+
+        for (name, id_byte, fate) in [
+            (
+                "outbox-durability-complete",
+                90,
+                IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
+                    BuildOperationOutcome::Succeeded,
+                )),
+            ),
+            (
+                "outbox-durability-block",
+                91,
+                IndexOperationStepResult::Blocked(IndexOperationBlocker::InvariantViolation),
+            ),
+        ] {
+            let store = Arc::new(GatedWalStore::new());
+            let db = gated_db(name, &store).await;
+            let (index, operation) = fixture(id_byte);
+            enqueue_operation(
+                &db,
+                DataScope::LegacyUnscoped,
+                ExpectedCanonicalRevision::Absent,
+                &index,
+                &operation,
+            )
+            .await
+            .unwrap();
+            store.uploads.send_replace(WalUploads::Held);
+            let epoch = WriterEpoch::from_bytes([id_byte; 16]).unwrap();
+
+            let claimed = tokio::time::timeout(RETURNS, claim(&db, &operation, epoch, 1))
+                .await
+                .expect("a claim does not wait for the WAL upload");
+            let first = tokio::time::timeout(
+                RETURNS,
+                step(
+                    &db,
+                    &claimed,
+                    IndexOperationStepResult::Progressed(activate_progress(1)),
+                    ClaimContinuation::Retain,
+                ),
+            )
+            .await
+            .expect("a progressed step does not wait for the WAL upload");
+            let retained = first.retained.expect("a retained claim continues");
+            let second = tokio::time::timeout(
+                RETURNS,
+                step(
+                    &db,
+                    &retained,
+                    IndexOperationStepResult::Progressed(activate_progress(2)),
+                    ClaimContinuation::Retain,
+                ),
+            )
+            .await
+            .expect("a step under a retained claim does not wait either");
+            let retained = second.retained.expect("the claim is still retained");
+
+            let deciding = step(&db, &retained, fate.clone(), ClaimContinuation::Retain);
+            tokio::pin!(deciding);
+            assert!(
+                tokio::time::timeout(WAITS, &mut deciding).await.is_err(),
+                "a step that decides the operation's fate waits for its WAL upload"
+            );
+            store.uploads.send_replace(WalUploads::Open);
+            let decided = tokio::time::timeout(RETURNS, deciding)
+                .await
+                .expect("the step returns once its upload lands");
+            assert!(
+                decided.retained.is_none(),
+                "a decided operation holds no claim"
+            );
+            assert_eq!(
+                decided.evidence.outcome,
+                match fate {
+                    IndexOperationStepResult::Completed(_) => CommittedOperationStep::Completed,
+                    IndexOperationStepResult::Progressed(_)
+                    | IndexOperationStepResult::TransientFailure
+                    | IndexOperationStepResult::Blocked(_) => CommittedOperationStep::Blocked,
+                }
+            );
+            db.close().await.unwrap();
+        }
+    }
+
+    /// A crash loses exactly the steps after the last durable commit, and a
+    /// new writer resumes from the last durable checkpoint.
+    #[tokio::test]
+    async fn a_crash_loses_only_the_steps_after_the_last_durable_commit() {
+        use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+
+        let name = "outbox-durability-crash";
+        let store = Arc::new(GatedWalStore::new());
+        let db = gated_db(name, &store).await;
+        let scope = DataScope::LegacyUnscoped;
+        let (index, operation) = fixture(92);
+        enqueue_operation(
+            &db,
+            scope,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let crashed = WriterEpoch::from_bytes([92; 16]).unwrap();
+        let claimed = claim(&db, &operation, crashed, 1).await;
+        let retained = step(
+            &db,
+            &claimed,
+            IndexOperationStepResult::Progressed(activate_progress(1)),
+            ClaimContinuation::Retain,
+        )
+        .await
+        .retained
+        .unwrap();
+        let released = step(
+            &db,
+            &retained,
+            IndexOperationStepResult::Progressed(activate_progress(2)),
+            ClaimContinuation::Release,
+        )
+        .await;
+        assert!(released.retained.is_none());
+        // A durable commit of anything makes every earlier step durable.
+        db.put(b"unrelated durable write", b"x").await.unwrap();
+        let durable = read_operation(&db, scope, operation.operation_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable.progress(), &activate_progress(2));
+
+        store.uploads.send_replace(WalUploads::Held);
+        let lost = claim(&db, &durable, crashed, 2).await;
+        let lost = step(
+            &db,
+            &lost,
+            IndexOperationStepResult::Progressed(activate_progress(3)),
+            ClaimContinuation::Retain,
+        )
+        .await
+        .retained
+        .unwrap();
+        assert_eq!(lost.record.progress(), &activate_progress(3));
+        drop(lost);
+        drop(db);
+
+        let restarted = Arc::new(store.restarted());
+        let db = gated_db(name, &restarted).await;
+        let recovered = read_operation(&db, scope, operation.operation_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered, durable,
+            "the newest claim and step are lost whole"
+        );
+        let recovering = WriterEpoch::from_bytes([93; 16]).unwrap();
+        let resumed = claim(&db, &recovered, recovering, 1).await;
+        assert_eq!(resumed.record.progress(), &activate_progress(2));
+        let completed = step(
+            &db,
+            &resumed,
+            IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
+                BuildOperationOutcome::Succeeded,
+            )),
+            ClaimContinuation::Retain,
+        )
+        .await;
+        assert_eq!(
+            completed.evidence.outcome,
+            CommittedOperationStep::Completed
+        );
+        db.close().await.unwrap();
+    }
+
+    /// A retained claim keeps its exact claim and attempt; it is runnable
+    /// only by its holder, and an abort or another writer's claim supersedes
+    /// it without a write, an error, or a preparation.
+    #[tokio::test]
+    async fn a_retained_claim_is_exclusive_and_superseded_cleanly() {
+        let scope = DataScope::LegacyUnscoped;
+        let db = db("outbox-retained-claim").await;
+        let (index, operation) = fixture(94);
+        enqueue_operation(
+            &db,
+            scope,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let holder = WriterEpoch::from_bytes([94; 16]).unwrap();
+        let claimed = claim(&db, &operation, holder, 1).await;
+        let retained = step(
+            &db,
+            &claimed,
+            IndexOperationStepResult::Progressed(activate_progress(1)),
+            ClaimContinuation::Retain,
+        )
+        .await
+        .retained
+        .unwrap();
+        assert_eq!(
+            retained.record.execution_state(),
+            claimed.record.execution_state()
+        );
+        assert_eq!(retained.record.attempt(), claimed.record.attempt());
+        assert_eq!(
+            read_operation(&db, scope, operation.operation_id())
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&retained.record)
+        );
+        // The holder's own writer needs a supervised restart to take it.
+        let OperationPointerObservation::ClaimedByCurrentWriter(same) =
+            observe_operation_pointer(&db, operation.operation_id(), holder, 0)
+                .await
+                .unwrap()
+        else {
+            panic!("the retained claim belongs to its writer");
+        };
+        assert!(claim_operation(
+            &db,
+            &same,
+            holder,
+            ClaimSequence::new(2).unwrap(),
+            0,
+            ClaimPermission::Normal,
+        )
+        .await
+        .unwrap()
+        .is_none());
+
+        // Another writer takes the operation over; the holder's next step
+        // finds its claim superseded before it prepares and writes nothing.
+        let taker = WriterEpoch::from_bytes([95; 16]).unwrap();
+        let taken = claim(&db, &retained.record, taker, 1).await;
+        let superseded = execute_claimed_step_with_evidence(
+            &db,
+            &retained,
+            &UnpreparedDriver,
+            SearchIndexBackfillLimits::default().batch(),
+            0,
+            ClaimContinuation::Retain,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            superseded.evidence.outcome,
+            CommittedOperationStep::TransientFailure
+        );
+        assert!(superseded.retained.is_none());
+        assert_eq!(
+            read_operation(&db, scope, operation.operation_id())
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&taken.record)
+        );
+
+        // An abort supersedes the new holder's retained claim the same way.
+        let retained = step(
+            &db,
+            &taken,
+            IndexOperationStepResult::Progressed(activate_progress(2)),
+            ClaimContinuation::Retain,
+        )
+        .await
+        .retained
+        .unwrap();
+        let aborted = abort_operation(&db, scope, operation.operation_id())
+            .await
+            .unwrap();
+        let superseded = execute_claimed_step_with_evidence(
+            &db,
+            &retained,
+            &UnpreparedDriver,
+            SearchIndexBackfillLimits::default().batch(),
+            0,
+            ClaimContinuation::Retain,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            superseded.evidence.outcome,
+            CommittedOperationStep::TransientFailure
+        );
+        assert_eq!(
+            read_operation(&db, scope, operation.operation_id())
+                .await
+                .unwrap()
+                .as_ref(),
+            Some(&aborted),
+            "an aborted build never activates from a stale claim"
+        );
+        db.close().await.unwrap();
+    }
+
+    /// An abort that commits while a step prepares, after the early revision
+    /// check, is caught by the step transaction: nothing is staged, nothing
+    /// commits, and the build never activates.
+    #[tokio::test]
+    async fn an_abort_during_preparation_supersedes_the_step() {
+        struct AbortingDriver;
+
+        #[async_trait]
+        impl IndexOperationDriver for AbortingDriver {
+            fn family(&self) -> IndexOperationFamily {
+                IndexOperationFamily::Secondary
+            }
+
+            async fn prepare_step(
+                &self,
+                db: &Db,
+                scope: DataScope,
+                operation: &IndexOperationRecord,
+                _limits: SearchIndexBatchLimits,
+            ) -> Result<PreparedIndexOperationStep> {
+                abort_operation(db, scope, operation.operation_id()).await?;
+                Ok(PreparedIndexOperationStep::driver_owned(
+                    self.family(),
+                    Box::new(()),
+                ))
+            }
+
+            async fn step(
+                &self,
+                _db: &Db,
+                _transaction: &DbTransaction,
+                _scope: DataScope,
+                _operation: &IndexOperationRecord,
+                _limits: SearchIndexBatchLimits,
+            ) -> Result<IndexOperationStepExecution> {
+                panic!("a superseded claim must not stage a step");
+            }
+        }
+
+        let scope = DataScope::LegacyUnscoped;
+        let db = db("outbox-abort-during-prepare").await;
+        let (index, operation) = fixture(96);
+        enqueue_operation(
+            &db,
+            scope,
+            ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        let claimed = claim(
+            &db,
+            &operation,
+            WriterEpoch::from_bytes([96; 16]).unwrap(),
+            1,
+        )
+        .await;
+        let executed = execute_claimed_step_with_evidence(
+            &db,
+            &claimed,
+            &AbortingDriver,
+            SearchIndexBackfillLimits::default().batch(),
+            0,
+            ClaimContinuation::Retain,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            executed.evidence.outcome,
+            CommittedOperationStep::TransientFailure
+        );
+        assert!(executed.retained.is_none());
+        let current = read_operation(&db, scope, operation.operation_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                current.progress(),
+                IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Aborting(_))
+            ),
+            "the abort stands and the build never activates"
+        );
         db.close().await.unwrap();
     }
 }

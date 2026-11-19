@@ -154,17 +154,56 @@ pub(super) async fn wait_terminal(db: &HelixDB, operation: &str) -> String {
     }
 }
 
-/// Lets the build take steps one ownership handoff at a time until `ready`
-/// holds, then returns with ownership held so no further step runs.
+/// Creates `spec`'s index, the `index_id`th of a fresh database, while
+/// holding its first generation's ownership, so no build step runs until
+/// [`pause_when`] hands it over. Unheld, a build runs its first steps while
+/// the DDL still waits for its WAL upload.
+pub(super) async fn create_held(
+    db: &HelixDB,
+    spec: IndexSpec,
+    family: QueueFamily,
+    index_id: u64,
+) -> (String, QueueTarget, IndexGenerationPublicationPermit) {
+    let predicted = QueueTarget::new(
+        DataScope::LegacyUnscoped,
+        crate::index_lifecycle::IndexId::new(index_id).unwrap(),
+        crate::index_lifecycle::IndexGenerationId::initial(),
+    );
+    let held = db
+        .inner
+        .index_scope_gates
+        .publication_permit(predicted)
+        .await;
+    let operation = create(db, spec).await;
+    assert_eq!(
+        target(db, family).await,
+        predicted,
+        "the held target is the build's"
+    );
+    (operation, predicted, held)
+}
+
+/// Lets the build take steps one ownership handoff at a time, starting from
+/// the `held` ownership of its generation, until `ready` holds, then returns
+/// with ownership held so no further step runs.
+///
+/// Ownership is a fair lock: it is handed over only once the build queues
+/// for it, and taken back by queueing right behind the build, so exactly one
+/// step runs per handoff however fast steps are.
 pub(super) async fn pause_when(
     db: &HelixDB,
     operation: &str,
-    target: QueueTarget,
+    held: IndexGenerationPublicationPermit,
     ready: impl Fn(&serde_json::Value) -> bool,
 ) -> IndexGenerationPublicationPermit {
     let deadline = Instant::now() + Duration::from_secs(60);
+    let target = held.target();
+    let mut held = Some(held);
     loop {
-        let permit = db.inner.index_scope_gates.publication_permit(target).await;
+        let permit = match held.take() {
+            Some(permit) => permit,
+            None => db.inner.index_scope_gates.publication_permit(target).await,
+        };
         let current = status(db, operation).await;
         if ready(&current) {
             return permit;
@@ -173,12 +212,19 @@ pub(super) async fn pause_when(
             matches!(current["status"].as_str(), Some("queued" | "running")),
             "build finished before pausing: {current}"
         );
-        assert!(
-            Instant::now() < deadline,
-            "build did not progress: {current}"
-        );
+        while db
+            .inner
+            .index_scope_gates
+            .publication_permit_holders(target)
+            < 2
+        {
+            assert!(
+                Instant::now() < deadline,
+                "build did not progress: {current}"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
         drop(permit);
-        tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
 
@@ -267,10 +313,9 @@ async fn concurrent_vector_writes(db: &HelixDB, ids: &[u64], state: &mut VectorS
 async fn vector_build_with_concurrent_writes_matches_exact_search_through_publication() {
     let db = open("build-vector", Arc::new(InMemory::new()), config()).await;
     let (ids, mut state) = seed_vectors(&db, 120).await;
-    let operation = create(&db, vector_spec()).await;
-    let target = target(&db, QueueFamily::Vector).await;
+    let (operation, target, held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
 
-    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 40).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 40).await;
     assert!(
         scanned(&status(&db, &operation).await) < 120,
         "paused mid-scan"
@@ -309,7 +354,13 @@ async fn vector_build_with_concurrent_writes_matches_exact_search_through_public
     assert_eq!(db.index_operation_queue_stats().deferred_attempts, 1);
     drop(paused);
 
-    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 110).await;
+    let paused = pause_when(
+        &db,
+        &operation,
+        db.inner.index_scope_gates.publication_permit(target).await,
+        |status| scanned(status) >= 110,
+    )
+    .await;
     concurrent_vector_writes(&db, &ids, &mut state, 1).await;
     set_tenant(&db, ids[101], "c").await;
     state.get_mut(&ids[101]).unwrap().0 = "c";
@@ -338,9 +389,8 @@ async fn restart_during_a_build_and_after_activation_recovers_queued_operations(
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let db = open("build-restart", Arc::clone(&store), config()).await;
     let (ids, mut state) = seed_vectors(&db, 120).await;
-    let operation = create(&db, vector_spec()).await;
-    let target = target(&db, QueueFamily::Vector).await;
-    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 40).await;
+    let (operation, target, held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 40).await;
     concurrent_vector_writes(&db, &ids, &mut state, 0).await;
     drop(paused);
     db.close().await.unwrap();
@@ -407,14 +457,15 @@ async fn text_build_with_concurrent_writes_matches_a_fresh_build_through_publica
         ids.push(id);
         state.insert(id, body);
     }
-    let operation = create(&db, text_spec()).await;
-    let target = target(&db, QueueFamily::Text).await;
+    let (operation, target, held) = create_held(&db, text_spec(), QueueFamily::Text, 1).await;
 
+    let mut held = Some(held);
     for (round, threshold) in [(0_usize, 24_u64), (1, 64)] {
-        let paused = pause_when(&db, &operation, target, |status| {
-            scanned(status) >= threshold
-        })
-        .await;
+        let held = match held.take() {
+            Some(held) => held,
+            None => db.inner.index_scope_gates.publication_permit(target).await,
+        };
+        let paused = pause_when(&db, &operation, held, |status| scanned(status) >= threshold).await;
         for position in [1 + round, 50 + round] {
             let body = format!("revision {round} rust engine rewritten");
             update(&db, ids[position], [0.0, 0.0], &body).await;
@@ -792,6 +843,98 @@ async fn builds_under_continuous_writes_match_cold_builds_once_the_queue_drains(
             documents
         });
     assert_matches_cold_builds(&db, &documents, "build-continuous-writes-reference").await;
+    db.close().await.unwrap();
+}
+
+/// A crash that loses the WAL tail of running vector and text builds,
+/// whose progressed steps do not wait for their upload, resumes both from
+/// their last durable step. The lost steps uploaded text splits and retained
+/// vector planning state; neither survives into the recovered builds, which
+/// redo the steps and still equal cold builds once their queues drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn builds_resume_from_their_last_durable_step_after_losing_their_wal_tail() {
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+    const NAME: &str = "build-lost-wal-tail";
+    const BOUND: Duration = Duration::from_secs(60);
+
+    let store = Arc::new(GatedWalStore::new());
+    let db = open(NAME, Arc::clone(&store) as Arc<dyn ObjectStore>, config()).await;
+    let mut documents = Documents::default();
+    documents.add(&db, (0..120).map(seeded).collect()).await;
+    let (vector, _, vector_held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
+    let (text, _, text_held) = create_held(&db, text_spec(), QueueFamily::Text, 2).await;
+    let mut permits = Vec::new();
+    for (operation, held) in [(&vector, vector_held), (&text, text_held)] {
+        permits.push(pause_when(&db, operation, held, |status| scanned(status) >= 40).await);
+    }
+    let operations = [vector, text];
+    // Writes on both sides of both cursors, queued for publication.
+    for round in 0..8_u64 {
+        let id = documents.live[usize::try_from(round * 37).unwrap() % documents.live.len()];
+        documents.change(&db, id, round, round).await;
+    }
+    // Everything so far is durable, and nothing after it ever uploads.
+    tokio::time::timeout(BOUND, db.inner_db().flush())
+        .await
+        .expect("the paused builds flush")
+        .unwrap();
+    // Read without planning: an activation holds the planning gate through
+    // its WAL wait, which a held upload never ends.
+    let ids = operations.each_ref().map(|operation| {
+        crate::index_lifecycle::IndexOperationId::new(uuid::Uuid::parse_str(operation).unwrap())
+            .unwrap()
+    });
+    async fn progress(
+        db: &HelixDB,
+        id: crate::index_lifecycle::IndexOperationId,
+    ) -> crate::index_lifecycle::IndexOperationPublicProgress {
+        db.get_index_operation(DataScope::LegacyUnscoped, id)
+            .await
+            .unwrap()
+            .common()
+            .progress
+    }
+    let mut durable = Vec::new();
+    for id in ids {
+        durable.push(progress(&db, id).await);
+    }
+    store.uploads.send_replace(WalUploads::Held);
+    drop(permits);
+    let deadline = Instant::now() + BOUND;
+    for (id, durable) in ids.into_iter().zip(&durable) {
+        while progress(&db, id).await == *durable {
+            assert!(
+                Instant::now() < deadline,
+                "{id:?} advanced without its WAL upload: {:?}",
+                db.get_index_operation(DataScope::LegacyUnscoped, id).await
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+    // The crash: the old writer never uploads again.
+    drop(db);
+
+    let db = tokio::time::timeout(
+        BOUND,
+        open(
+            NAME,
+            Arc::new(store.restarted()) as Arc<dyn ObjectStore>,
+            config(),
+        ),
+    )
+    .await
+    .expect("a new writer opens over the crashed one");
+    for (id, durable) in ids.into_iter().zip(&durable) {
+        assert_eq!(
+            progress(&db, id).await,
+            *durable,
+            "{id:?} resumes from its last durable step"
+        );
+    }
+    for operation in &operations {
+        assert_eq!(wait_terminal(&db, operation).await, "succeeded");
+    }
+    assert_matches_cold_builds(&db, &documents, "build-lost-wal-tail-reference").await;
     db.close().await.unwrap();
 }
 
@@ -1173,9 +1316,8 @@ async fn dropping_a_text_index_releases_its_cached_pending_analyses() {
 async fn aborting_a_build_discards_operations_written_during_it() {
     let db = open("abort-discard", Arc::new(InMemory::new()), config()).await;
     let (ids, _) = seed_vectors(&db, 60).await;
-    let operation = create(&db, vector_spec()).await;
-    let target = target(&db, QueueFamily::Vector).await;
-    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 8).await;
+    let (operation, target, held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 8).await;
     update(&db, ids[1], [4.0, 4.0], "doc").await;
     update(&db, ids[50], [5.0, 5.0], "doc").await;
     add(&db, [6.0, 6.0], "doc", Some("a")).await;
@@ -1229,9 +1371,8 @@ async fn discard_acknowledgements_fit_the_producer_operand_bound() {
 async fn a_building_generation_defers_without_waiting_for_its_build_step() {
     let db = open("build-defer", Arc::new(InMemory::new()), config()).await;
     let (ids, _) = seed_vectors(&db, 60).await;
-    let operation = create(&db, vector_spec()).await;
-    let target = target(&db, QueueFamily::Vector).await;
-    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 8).await;
+    let (operation, target, held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 8).await;
     update(&db, ids[1], [4.0, 4.0], "doc").await;
     // The paused build step holds the generation's ownership. Deferring a
     // hidden build must not occupy a worker task until that step ends.
@@ -1256,9 +1397,8 @@ async fn a_building_generation_defers_without_waiting_for_its_build_step() {
 async fn uncertain_charges_of_a_hidden_build_reconcile_while_it_runs() {
     let db = open("build-reconcile", Arc::new(InMemory::new()), config()).await;
     let (ids, _) = seed_vectors(&db, 60).await;
-    let operation = create(&db, vector_spec()).await;
-    let target = target(&db, QueueFamily::Vector).await;
-    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 8).await;
+    let (operation, target, held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 8).await;
     update(&db, ids[1], [4.0, 4.0], "doc").await;
     // A request cancelled during its commit leaves an uncertain charge; this
     // one never committed.
@@ -1374,9 +1514,8 @@ async fn uncertain_charges_of_an_active_generation_reconcile_while_its_ownership
 async fn a_retired_generation_discards_without_waiting_for_its_cleanup_step() {
     let db = open("abort-discard-unowned", Arc::new(InMemory::new()), config()).await;
     let (ids, _) = seed_vectors(&db, 60).await;
-    let operation = create(&db, vector_spec()).await;
-    let target = target(&db, QueueFamily::Vector).await;
-    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 8).await;
+    let (operation, target, held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 8).await;
     update(&db, ids[1], [4.0, 4.0], "doc").await;
     add(&db, [6.0, 6.0], "doc", Some("a")).await;
     let abort = drop_index(&db, vector_spec())
@@ -2516,9 +2655,8 @@ async fn running_build_beyond_the_member_cap_is_retryable_backpressure() {
     )
     .await;
     let (ids, mut state) = seed_vectors(&db, 12).await;
-    let operation = create(&db, vector_spec()).await;
-    let target = target(&db, QueueFamily::Vector).await;
-    let paused = pause_when(&db, &operation, target, |status| scanned(status) >= 4).await;
+    let (operation, target, held) = create_held(&db, vector_spec(), QueueFamily::Vector, 1).await;
+    let paused = pause_when(&db, &operation, held, |status| scanned(status) >= 4).await;
     for position in [1_usize, 2] {
         update(&db, ids[position], [7.0, 7.0], "doc").await;
         state.get_mut(&ids[position]).unwrap().1 = [7.0, 7.0];

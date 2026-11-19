@@ -30,12 +30,35 @@ use tokio::sync::{
     Mutex as AsyncMutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
 };
 
+use super::secondary::delta_ledger::{DeltaLedgers, StagedBuildDeltas};
 use crate::encoding::v2::keys::scope::DataScope;
 
 /// Shared authority retained by one graph mutation transaction.
+///
+/// It also carries the build deltas the transaction staged, and records them
+/// in their generations' ledgers when dropped, before the gate unlocks: the
+/// holder keeps it until its commit has applied or failed, so a delta is
+/// recorded after it can be read and before a fenced step can run (see
+/// [`DeltaLedgers`]).
 #[derive(Debug)]
 pub(crate) struct IndexScopeMutationPermit {
+    staged: StagedBuildDeltas,
+    ledgers: Arc<DeltaLedgers>,
     _guard: OwnedRwLockReadGuard<()>,
+}
+
+impl IndexScopeMutationPermit {
+    /// Adds deltas this permit's transaction staged, recorded once it is
+    /// dropped.
+    pub(crate) fn stage_build_deltas(&mut self, staged: StagedBuildDeltas) {
+        self.staged.append(staged);
+    }
+}
+
+impl Drop for IndexScopeMutationPermit {
+    fn drop(&mut self) {
+        self.ledgers.record(std::mem::take(&mut self.staged));
+    }
 }
 
 /// Version of one scope's planner-visible canonical catalog.
@@ -175,14 +198,22 @@ pub(crate) struct IndexScopeGates {
     catalog_refreshes: Mutex<HashMap<DataScope, Weak<AsyncMutex<()>>>>,
     publications: Mutex<HashMap<super::queue::QueueTarget, Weak<AsyncMutex<()>>>>,
     build_steps: Mutex<HashMap<DataScope, Weak<AsyncMutex<()>>>>,
+    delta_ledgers: Arc<DeltaLedgers>,
 }
 
 impl IndexScopeGates {
     /// Acquires shared scope authority before a graph transaction takes its snapshot.
     pub(crate) async fn mutation_permit(&self, scope: DataScope) -> IndexScopeMutationPermit {
         IndexScopeMutationPermit {
+            staged: StagedBuildDeltas::default(),
+            ledgers: Arc::clone(&self.delta_ledgers),
             _guard: self.mutation_gate(scope).read_owned().await,
         }
+    }
+
+    /// Every building secondary generation's pending-delta ledger.
+    pub(crate) fn delta_ledgers(&self) -> &DeltaLedgers {
+        &self.delta_ledgers
     }
 
     /// Acquires shared authority before refreshing the catalog used for planning.
@@ -240,22 +271,33 @@ impl IndexScopeGates {
     /// wait however many of the scope's builds run. Nothing waits for the
     /// build-step gate while holding a scope gate, so it adds no lock cycle.
     /// The tuple drops the scope permit before the build-step gate.
+    ///
+    /// Once queued, a gated step uploads every commit applied so far before
+    /// it fences anyone. Build steps commit without waiting for their WAL
+    /// upload, and a durable commit under the gate (an activation, a
+    /// blocker, a cleanup's completion) waits for every lower sequence: it
+    /// would otherwise hold writers, and for activation planning, through
+    /// the upload of the build's whole unflushed tail instead of only what
+    /// committed while the gate was held. A failed upload fails the step.
     pub(crate) async fn step_permit(
         &self,
+        db: &slatedb::Db,
         scope: DataScope,
         gate: StepGate,
-    ) -> Box<dyn super::outbox::IndexOperationStepPermit> {
-        match gate {
+    ) -> crate::error::Result<Box<dyn super::outbox::IndexOperationStepPermit>> {
+        Ok(match gate {
             StepGate::None => Box::new(()),
             StepGate::WriteFence => {
                 let queued = self.build_step_gate(scope).lock_owned().await;
+                db.flush().await?;
                 Box::new((self.write_fence_permit(scope).await, queued))
             }
             StepGate::Lifecycle => {
                 let queued = self.build_step_gate(scope).lock_owned().await;
+                db.flush().await?;
                 Box::new((self.lifecycle_permit(scope).await, queued))
             }
-        }
+        })
     }
 
     /// Serializes persisted-catalog refreshes for one handle and scope.
@@ -371,6 +413,15 @@ mod tests {
 
     use super::*;
 
+    async fn test_db(name: &str) -> slatedb::Db {
+        slatedb::Db::open(
+            name,
+            Arc::new(slatedb::object_store::memory::InMemory::new()),
+        )
+        .await
+        .expect("scope gate test database opens")
+    }
+
     #[tokio::test]
     async fn lifecycle_scope_waits_for_catalog_and_mutations_but_not_other_scopes() {
         let gates = Arc::new(IndexScopeGates::default());
@@ -422,6 +473,7 @@ mod tests {
     #[tokio::test]
     async fn graph_writes_wait_behind_one_queued_build_step() {
         let gates = Arc::new(IndexScopeGates::default());
+        let db = Arc::new(test_db("graph-writes-wait-behind-one-step").await);
         let scope = DataScope::LegacyUnscoped;
         let settle = Duration::from_millis(20);
         let writing = gates.mutation_permit(scope).await;
@@ -430,9 +482,12 @@ mod tests {
         for step in 0..3 {
             let (release, released) = tokio::sync::oneshot::channel::<()>();
             releases.push(release);
-            let (gates, acquired) = (Arc::clone(&gates), acquired.clone());
+            let (gates, db, acquired) = (Arc::clone(&gates), Arc::clone(&db), acquired.clone());
             tokio::spawn(async move {
-                let permit = gates.step_permit(scope, StepGate::WriteFence).await;
+                let permit = gates
+                    .step_permit(&db, scope, StepGate::WriteFence)
+                    .await
+                    .expect("the step uploads nothing");
                 acquired.send(step).expect("the test awaits acquisitions");
                 let _ = released.await;
                 drop(permit);
@@ -475,6 +530,7 @@ mod tests {
     #[tokio::test]
     async fn step_gates_exclude_only_what_their_step_needs() {
         let gates = Arc::new(IndexScopeGates::default());
+        let db = test_db("step-gates-exclude-only-their-needs").await;
         let scope = DataScope::LegacyUnscoped;
         let wait = Duration::from_millis(50);
         for (gate, fences_writers, gates_planning) in [
@@ -483,7 +539,10 @@ mod tests {
             (StepGate::Lifecycle, true, true),
         ] {
             let before = gates.catalog_permit(scope).await.version();
-            let held = gates.step_permit(scope, gate).await;
+            let held = gates
+                .step_permit(&db, scope, gate)
+                .await
+                .expect("the step uploads nothing");
             let mutation = tokio::time::timeout(wait, gates.mutation_permit(scope)).await;
             assert_eq!(
                 mutation.is_err(),

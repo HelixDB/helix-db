@@ -23,10 +23,13 @@ mod tests;
 ///
 /// SlateDB's WAL uploads in sequence order, so a crash loses only a suffix of
 /// applied commits: a durable commit makes every lower sequence durable too.
-/// That is what lets internal commits, which are always [`Self::Durable`],
-/// build on an [`Self::Applied`] request commit: index publication reads a
-/// queued operation and acknowledges it at a higher sequence, so the
-/// acknowledgement can never outlive the enqueue.
+/// That is what lets internal commits build on an [`Self::Applied`] request
+/// commit: index publication reads a queued operation and acknowledges it at
+/// a higher sequence, so the acknowledgement can never outlive the enqueue.
+/// The same order lets index build steps commit [`Self::Applied`]: a crash
+/// loses the newest steps whole and the build redoes them, while the steps
+/// that settle an operation's fate wait for durability (see
+/// `index_lifecycle::outbox::execute_claimed_step_with_evidence`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CommitDurability {
     /// Return once the commit is durable in object storage.

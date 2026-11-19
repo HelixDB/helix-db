@@ -510,6 +510,107 @@ async fn uncommitted_step_drops_its_session_and_the_retry_matches_golden() {
     );
 }
 
+/// Progressed steps do not wait for their WAL upload, so a crash can lose
+/// the newest committed steps. The build resumes from its last durable
+/// checkpoint and redoes them to the golden graph, whether the planning
+/// session retained from a lost step survives in the driver or not: it
+/// mirrors rows that no longer exist, and its checkpoint never matches again.
+#[tokio::test]
+async fn a_lost_wal_tail_is_redone_to_the_golden_graph() {
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+
+    for keep_driver in [false, true] {
+        let name = format!("vector-build-lost-wal-tail-{keep_driver}");
+        let open = |store: &Arc<GatedWalStore>| {
+            Db::builder(
+                name.clone(),
+                Arc::clone(store) as Arc<dyn slatedb::object_store::ObjectStore>,
+            )
+            .build()
+        };
+        let store = Arc::new(GatedWalStore::new());
+        let db = open(&store).await.expect("lost-tail database opens");
+        bootstrap_writer(&db)
+            .await
+            .expect("lost-tail database bootstraps V2 metadata");
+        let scope = DataScope::LegacyUnscoped;
+        let definition = vector_definition(GOLDEN_DIMENSION, VectorDistanceMetric::Euclidean);
+        seed_sources(&db, scope, GOLDEN_ENTITIES, |entity_id| {
+            integral_vector(entity_id, GOLDEN_DIMENSION)
+        })
+        .await;
+        let (operation_id, _, _) = create_build(&db, scope, &definition, GOLDEN_ENTITIES - 1).await;
+        let limits = limits_with_output_operations(2_048);
+        let mut stepping = driver();
+        let mut claim_sequence = 1;
+        for _ in 0..3 {
+            assert_eq!(
+                drive_one(&db, &stepping, operation_id, &mut claim_sequence, limits).await,
+                CommittedOperationStep::Progressed
+            );
+        }
+        db.flush().await.expect("the first steps upload");
+        let durable = read_operation(&db, scope, operation_id).await;
+
+        store.uploads.send_replace(WalUploads::Held);
+        for _ in 0..3 {
+            let step = tokio::time::timeout(
+                Duration::from_secs(30),
+                drive_one(&db, &stepping, operation_id, &mut claim_sequence, limits),
+            )
+            .await
+            .expect("a progressed step does not wait for its WAL upload");
+            assert_eq!(step, CommittedOperationStep::Progressed);
+        }
+        let lost = read_operation(&db, scope, operation_id).await;
+        assert_ne!(lost.progress(), durable.progress());
+        assert_eq!(
+            retained_checkpoint(&stepping).map(|checkpoint| checkpoint.progress),
+            Some(lost.progress().clone()),
+            "the driver retains the session of the newest, lost step"
+        );
+        drop(db);
+
+        let store = Arc::new(store.restarted());
+        let db = open(&store).await.expect("lost-tail database reopens");
+        assert_eq!(
+            read_operation(&db, scope, operation_id).await,
+            durable,
+            "the build resumes from its last durable checkpoint"
+        );
+        if !keep_driver {
+            stepping = driver();
+        }
+        loop {
+            match drive_one(&db, &stepping, operation_id, &mut claim_sequence, limits).await {
+                CommittedOperationStep::Progressed => {}
+                CommittedOperationStep::Completed => break,
+                stopped @ (CommittedOperationStep::Blocked
+                | CommittedOperationStep::TransientFailure) => {
+                    panic!("recovered build stopped at {stopped:?}")
+                }
+            }
+        }
+        let active = read_index(&db, scope, &definition).await;
+        let IndexStateV2::Active {
+            physical:
+                PhysicalGeneration::Vector {
+                    layout: VectorPhysicalLayout::Unpartitioned { physical_index_id },
+                    ..
+                },
+            ..
+        } = active.state()
+        else {
+            panic!("recovered build is active and unpartitioned");
+        };
+        assert_golden(
+            physical_digest(&db, scope, *physical_index_id).await,
+            &format!("redone lost tail (driver kept: {keep_driver})"),
+        );
+        db.close().await.expect("lost-tail database closes");
+    }
+}
+
 #[tokio::test]
 async fn session_is_not_reused_after_another_driver_commits() {
     let first = driver();

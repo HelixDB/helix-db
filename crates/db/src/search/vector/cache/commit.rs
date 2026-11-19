@@ -257,6 +257,8 @@ mod contract_tests {
 /// Object store that holds or fails WAL uploads, shared by fenced-commit tests.
 #[cfg(test)]
 pub(crate) mod gated_wal {
+    use std::sync::Arc;
+
     use futures::stream::BoxStream;
     use slatedb::object_store::memory::InMemory;
     use slatedb::object_store::{
@@ -281,7 +283,7 @@ pub(crate) mod gated_wal {
     /// test observe a batch that reached the memtable but is not yet durable.
     #[derive(Debug)]
     pub(crate) struct GatedWalStore {
-        inner: InMemory,
+        inner: Arc<InMemory>,
         /// Current WAL upload policy; tests switch it with `send_replace`.
         pub(crate) uploads: watch::Sender<WalUploads>,
     }
@@ -290,7 +292,17 @@ pub(crate) mod gated_wal {
         /// Creates an empty store whose WAL uploads are open.
         pub(crate) fn new() -> Self {
             Self {
-                inner: InMemory::new(),
+                inner: Arc::new(InMemory::new()),
+                uploads: watch::Sender::new(WalUploads::Open),
+            }
+        }
+
+        /// The same objects as a restarted process sees them, with open
+        /// uploads. Uploads this store holds never land, so a database it
+        /// served loses its WAL tail as a crash would.
+        pub(crate) fn restarted(&self) -> Self {
+            Self {
+                inner: Arc::clone(&self.inner),
                 uploads: watch::Sender::new(WalUploads::Open),
             }
         }

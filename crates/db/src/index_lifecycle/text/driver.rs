@@ -397,7 +397,10 @@ impl PreparedTextOperationStep {
             Self::CompactionRetirement(prepared) => {
                 let next = prepared
                     .source_operation
-                    .progressed(prepared.progress.clone())
+                    .progressed(
+                        prepared.progress.clone(),
+                        crate::index_lifecycle::ClaimContinuation::Release,
+                    )
                     .ok();
                 let input_bytes = next.as_ref().map_or(0, |next| {
                     operation_input_delta(&prepared.source_operation, next)
@@ -635,6 +638,7 @@ impl IndexOperationDriver for TextIndexDriver {
 
     async fn acquire_step_permit(
         &self,
+        db: &Db,
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
@@ -660,7 +664,7 @@ impl IndexOperationDriver for TextIndexDriver {
                 return Err(corruption("text driver received another family progress"));
             }
         };
-        Ok(self.scope_gates.step_permit(scope, gate).await)
+        self.scope_gates.step_permit(db, scope, gate).await
     }
 
     async fn prepare_step(
@@ -673,7 +677,7 @@ impl IndexOperationDriver for TextIndexDriver {
         let progress = operation.progress();
         let IndexOperationProgress::TextBuild(TextBuildProgress::Constructing(stage)) = progress
         else {
-            let permit = self.acquire_step_permit(scope, operation).await?;
+            let permit = self.acquire_step_permit(db, scope, operation).await?;
             return Ok(PreparedIndexOperationStep::driver_owned(
                 IndexOperationFamily::Text,
                 permit,
@@ -765,7 +769,7 @@ impl IndexOperationDriver for TextIndexDriver {
             // also advances the scope's catalog version as it is released.
             TextBuildStage::Activate(_) => Ok(PreparedIndexOperationStep::driver_owned(
                 IndexOperationFamily::Text,
-                self.acquire_step_permit(scope, operation).await?,
+                self.acquire_step_permit(db, scope, operation).await?,
             )),
         }
     }
@@ -2123,12 +2127,10 @@ async fn scan_partition_documents(
         empty_root = Some(root);
     }
 
+    // The partition scan revisits entities the source scan already counted:
+    // they bound the batch and add bytes and operations, never entities.
     let completed_counters = OperationCounters {
-        entities: checked_add(
-            progress.counters.entities,
-            batch_entities as u64,
-            "cumulative entities",
-        )?,
+        entities: progress.counters.entities,
         input_bytes: checked_add(
             progress.counters.input_bytes,
             checked_add(

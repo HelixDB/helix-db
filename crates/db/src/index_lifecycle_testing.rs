@@ -987,18 +987,22 @@ impl LifecycleTestController {
                 .await?;
             let mutations =
                 crate::index_lifecycle::secondary::load_mutation_set(&transaction, scope).await?;
+            let mut staged =
+                crate::index_lifecycle::secondary::delta_ledger::StagedBuildDeltas::default();
             for entity_id in batch_start..batch_end {
                 let properties = properties(entity_id - ids.start);
-                crate::index_lifecycle::secondary::maintain_entity(
-                    &transaction,
-                    scope,
-                    &mutations,
-                    crate::index_lifecycle::IndexElementKind::Node,
-                    entity_id,
-                    &[],
-                    &properties,
-                )
-                .await?;
+                staged.append(
+                    crate::index_lifecycle::secondary::maintain_entity(
+                        &transaction,
+                        scope,
+                        &mutations,
+                        crate::index_lifecycle::IndexElementKind::Node,
+                        entity_id,
+                        &[],
+                        &properties,
+                    )
+                    .await?,
+                );
                 transaction.put(
                     DataKey::Data {
                         scope,
@@ -1008,7 +1012,9 @@ impl LifecycleTestController {
                     encode_properties(&properties),
                 )?;
             }
-            transaction.commit().await?;
+            let committed = transaction.commit().await;
+            db.inner.index_scope_gates.delta_ledgers().record(staged);
+            committed?;
             batch_start = batch_end;
         }
         Ok(ids)
@@ -1744,8 +1750,10 @@ impl HelixDB {
             driver.as_ref(),
             limits,
             now_unix_millis,
+            crate::index_lifecycle::ClaimContinuation::Release,
         )
-        .await?;
+        .await?
+        .evidence;
         let outcome = match committed.outcome {
             outbox::CommittedOperationStep::Progressed => LifecycleStepOutcome::Progressed,
             outbox::CommittedOperationStep::TransientFailure => {

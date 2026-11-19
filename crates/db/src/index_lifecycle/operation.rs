@@ -997,6 +997,15 @@ impl IndexOperationQueueSchedule {
     }
 }
 
+/// What a progressed step does with the claim it ran under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ClaimContinuation {
+    /// Requeue the operation, so any worker may claim its next step.
+    Release,
+    /// Keep the claim, so the worker holding it runs the next step directly.
+    Retain,
+}
+
 /// Canonical durable index operation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IndexOperationRecord {
@@ -1207,7 +1216,13 @@ impl IndexOperationRecord {
         &self.progress
     }
 
-    /// Returns the persisted transient-failure attempt counter.
+    /// Returns how many claims have tried the current checkpoint.
+    ///
+    /// A claim adds one. A committed step that advances the checkpoint resets
+    /// the count: to zero when it releases its claim, or to one when the
+    /// claim it keeps carries on with the next step. Failures, blockers, and
+    /// retries leave it unchanged, so it counts consecutive attempts that
+    /// made no progress, which is what transient-failure backoff scales by.
     pub const fn attempt(&self) -> u32 {
         self.attempt
     }
@@ -1254,10 +1269,17 @@ impl IndexOperationRecord {
         )
     }
 
-    /// Persists a successful bounded checkpoint and releases its claim.
+    /// Persists a successful bounded checkpoint, then requeues the operation
+    /// or keeps its claim as `claim` asks.
+    ///
+    /// A kept claim is the exact claim the step ran under, so the worker that
+    /// holds it can run the next step without claiming again. Progress resets
+    /// the attempt counter: a released checkpoint has had no attempt yet, and
+    /// a kept claim is the one attempt at its new checkpoint.
     pub(crate) fn progressed(
         &self,
         progress: IndexOperationProgress,
+        claim: ClaimContinuation,
     ) -> Result<Self, IndexOperationModelError> {
         if !matches!(
             self.execution_state,
@@ -1268,13 +1290,20 @@ impl IndexOperationRecord {
                 transition: "progress",
             });
         }
+        let (attempt, execution_state) = match claim {
+            ClaimContinuation::Release => (
+                0,
+                IndexOperationExecutionState::Queued {
+                    not_before_unix_millis: None,
+                },
+            ),
+            ClaimContinuation::Retain => (1, self.execution_state.clone()),
+        };
         self.next(
             self.index_record_revision,
             progress,
-            self.attempt,
-            IndexOperationExecutionState::Queued {
-                not_before_unix_millis: None,
-            },
+            attempt,
+            execution_state,
         )
     }
 
@@ -1397,7 +1426,8 @@ impl IndexOperationRecord {
     }
 
     /// Converts a constructing BUILD into the family's initial cleanup
-    /// checkpoint while invalidating any queued delay or worker claim.
+    /// checkpoint while invalidating any queued delay or worker claim. The
+    /// cleanup checkpoint has had no attempt, so the attempt counter resets.
     pub(crate) fn begin_abort(
         &self,
         index_record_revision: IndexRevision,
@@ -1448,7 +1478,7 @@ impl IndexOperationRecord {
         self.next(
             index_record_revision,
             progress,
-            self.attempt,
+            0,
             IndexOperationExecutionState::Queued {
                 not_before_unix_millis: None,
             },
@@ -2397,14 +2427,30 @@ mod tests {
         let replaced = claimed.claim(claim(2, 2)).unwrap();
         assert_eq!(replaced.attempt(), 8);
 
-        let progressed = claimed.progressed(secondary_constructing()).unwrap();
+        let progressed = claimed
+            .progressed(secondary_constructing(), ClaimContinuation::Release)
+            .unwrap();
         assert!(matches!(
             progressed.execution_state(),
             IndexOperationExecutionState::Queued {
                 not_before_unix_millis: None
             }
         ));
+        assert_eq!(progressed.attempt(), 0, "progress resets the attempts");
+        let retained = claimed
+            .progressed(secondary_constructing(), ClaimContinuation::Retain)
+            .unwrap();
+        assert_eq!(retained.execution_state(), claimed.execution_state());
+        assert_eq!(retained.attempt(), 1, "a kept claim is one attempt");
+        assert_eq!(retained.claim(claim(1, 3)).unwrap().attempt(), 2);
+        assert_eq!(progressed.claim(claim(1, 3)).unwrap().attempt(), 1);
+        assert_eq!(
+            retained.operation_revision(),
+            claimed.operation_revision().checked_next().unwrap()
+        );
+        assert_eq!(retained.queue_schedule(), None);
         let failed = claimed.transient_failure(30).unwrap();
+        assert_eq!(failed.attempt(), claimed.attempt(), "failures accumulate");
         assert!(failed
             .queue_schedule()
             .unwrap()
@@ -2421,6 +2467,8 @@ mod tests {
             blocked.retry().unwrap().execution_state(),
             IndexOperationExecutionState::Queued { .. }
         ));
+        assert_eq!(blocked.attempt(), claimed.attempt());
+        assert_eq!(blocked.retry().unwrap().attempt(), claimed.attempt());
         let completed = claimed
             .complete(
                 IndexOperationOutcome::Build(BuildOperationOutcome::Succeeded),
@@ -2430,7 +2478,8 @@ mod tests {
         assert_eq!(completed.index_record_revision().get(), 8);
 
         for transition in [
-            queued.progressed(secondary_constructing()),
+            queued.progressed(secondary_constructing(), ClaimContinuation::Release),
+            queued.progressed(secondary_constructing(), ClaimContinuation::Retain),
             queued.transient_failure(1),
             queued.block(IndexOperationBlocker::InvariantViolation),
             queued.complete(
@@ -2463,6 +2512,7 @@ mod tests {
             .begin_abort(IndexRevision::new(10).unwrap())
             .unwrap();
             assert!(aborted.progress().is_aborting_build());
+            assert_eq!(aborted.attempt(), 0, "cleanup starts a new checkpoint");
             assert_eq!(aborted.index_record_revision().get(), 10);
         }
         let already_aborting = record(

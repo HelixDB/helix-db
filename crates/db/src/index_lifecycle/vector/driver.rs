@@ -1062,6 +1062,7 @@ impl IndexOperationDriver for VectorIndexDriver {
 
     async fn acquire_step_permit(
         &self,
+        db: &Db,
         scope: DataScope,
         operation: &IndexOperationRecord,
     ) -> Result<Box<dyn IndexOperationStepPermit>> {
@@ -1087,17 +1088,17 @@ impl IndexOperationDriver for VectorIndexDriver {
                 return Err(corruption("vector driver received another family progress"));
             }
         };
-        Ok(self.scope_gates.step_permit(scope, gate).await)
+        self.scope_gates.step_permit(db, scope, gate).await
     }
 
     async fn prepare_step(
         &self,
-        _db: &Db,
+        db: &Db,
         scope: DataScope,
         operation: &IndexOperationRecord,
         _limits: SearchIndexBatchLimits,
     ) -> Result<PreparedIndexOperationStep> {
-        let permit = self.acquire_step_permit(scope, operation).await?;
+        let permit = self.acquire_step_permit(db, scope, operation).await?;
         Ok(PreparedIndexOperationStep::driver_owned(
             self.family(),
             permit,
@@ -2244,6 +2245,8 @@ async fn step_build<D: Distance>(
                 )
                 .map_err(|error| corruption(error.to_string()))?;
                 let legacy = VectorIndex::<D>::for_legacy_migration(source.physical_name(), scope);
+                #[cfg(test)]
+                crate::migrations::await_held_legacy_vector_preflight().await;
                 #[cfg(test)]
                 crate::migrations::trip_migration_failpoint(
                     crate::migrations::MigrationFailpoint::LegacyVectorMetadataPublicationBefore,
@@ -3738,7 +3741,12 @@ async fn validate_descriptor<D: Distance>(
         if !accounting.can_read_another() {
             exhausted = false;
         }
-        let counters = accounting.finish()?;
+        // Validation revisits entities the scan and catch-up already counted:
+        // its rows bound the batch and add bytes and operations, never entities.
+        let counters = OperationCounters {
+            entities: progress.counters.entities,
+            ..accounting.finish()?
+        };
         if !exhausted {
             return Ok(progressed_build(VectorBuildStage::ValidateDescriptor(
                 PrefixScanProgress { cursor, counters },
@@ -3898,7 +3906,11 @@ async fn validate_mappings_or_finish<D: Distance>(
     if !accounting.can_read_another() {
         exhausted = false;
     }
-    let counters = accounting.finish()?;
+    // Mappings are partitions, not entities: they bound the batch only.
+    let counters = OperationCounters {
+        entities: counters.entities,
+        ..accounting.finish()?
+    };
     Ok(progressed_build(if exhausted {
         VectorBuildStage::Activate(NoCursorProgress { counters })
     } else {

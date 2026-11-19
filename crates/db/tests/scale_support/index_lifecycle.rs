@@ -778,7 +778,7 @@ async fn execute_ddl_to_success(
                     if started.elapsed() >= next_progress_log {
                         let common = status.common();
                         eprintln!(
-                            "index_lifecycle_scale_progress family={:?} stage={:?} entities={} output_operations={} claims={} elapsed_ms={}",
+                            "index_lifecycle_scale_progress family={:?} stage={:?} entities={} output_operations={} attempt={} elapsed_ms={}",
                             common.family,
                             common.stage,
                             common.progress.entities,
@@ -817,7 +817,7 @@ async fn execute_ddl_to_success(
 /// Emits one stable release-observation line for the audit ledger.
 fn record_measurement(name: &str, elapsed: Duration, status: &IndexOperationStatusCommon) {
     eprintln!(
-        "index_lifecycle_scale name={name} family={:?} entities={} input_bytes={} output_operations={} output_bytes={} claims={} elapsed_ms={}",
+        "index_lifecycle_scale name={name} family={:?} entities={} input_bytes={} output_operations={} output_bytes={} attempt={} elapsed_ms={}",
         status.family,
         status.progress.entities,
         status.progress.input_bytes,
@@ -1546,7 +1546,7 @@ async fn build_traversal_vector_index(
                     if started.elapsed() >= next_progress_log {
                         let common = status.common();
                         eprintln!(
-                            "TRAVERSAL_VECTOR_PREFILTER benchmark={benchmark} build_entities={} claims={} elapsed_ms={}",
+                            "TRAVERSAL_VECTOR_PREFILTER benchmark={benchmark} build_entities={} attempt={} elapsed_ms={}",
                             common.progress.entities,
                             common.attempt,
                             started.elapsed().as_millis(),

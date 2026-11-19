@@ -715,7 +715,7 @@ async fn run_family_tenant_reopen_recovery(ordinal: usize, family: IndexDefiniti
     let controller = LifecycleTestController::new();
 
     let definition = recovery_definition(family, &format!("ReopenActive{ordinal}"));
-    let _entity_ids = seed_recovery_rows(&db, &controller, scope, &definition).await;
+    let entity_ids = seed_recovery_rows(&db, &controller, scope, &definition).await;
     let IndexDdlReceipt::Accepted { operation_id, .. } = controller
         .create_index(
             &db,
@@ -728,19 +728,24 @@ async fn run_family_tenant_reopen_recovery(ordinal: usize, family: IndexDefiniti
     else {
         panic!("fresh tenant recovery build must enqueue");
     };
-    assert!(matches!(
-        drive_to_terminal_with_reopen(
-            &mut db,
-            &database,
-            &object_store,
-            &config,
-            &controller,
-            scope,
-            operation_id,
-        )
-        .await,
-        IndexOperationStatus::Succeeded { .. }
-    ));
+    let built = drive_to_terminal_with_reopen(
+        &mut db,
+        &database,
+        &object_store,
+        &config,
+        &controller,
+        scope,
+        operation_id,
+    )
+    .await;
+    assert!(matches!(built, IndexOperationStatus::Succeeded { .. }));
+    // Every later pass revisits the scanned entities without counting them,
+    // across a reopen after every step.
+    assert_eq!(
+        built.common().progress.entities,
+        entity_ids.end - entity_ids.start,
+        "{family:?} counts each source entity once"
+    );
     let active = crate::index_lifecycle::repository::load_index_record(
         db.lifecycle_test_writer_db()
             .expect("tenant recovery writer storage is available"),
@@ -1255,7 +1260,7 @@ async fn run_active_drop_and_mutation_serialization() {
     let mutations = crate::index_lifecycle::secondary::load_mutation_set(&transaction, scope)
         .await
         .expect("spanning graph transaction captures Active authority");
-    crate::index_lifecycle::secondary::maintain_entity(
+    let staged = crate::index_lifecycle::secondary::maintain_entity(
         &transaction,
         scope,
         &mutations,
@@ -1284,6 +1289,7 @@ async fn run_active_drop_and_mutation_serialization() {
         transaction.commit().await.is_err(),
         "transaction retaining old Active authority must conflict with DROP"
     );
+    db.inner.index_scope_gates.delta_ledgers().record(staged);
     mutate_source(&db, scope, entity_id, &before, &after)
         .await
         .expect("graph mutation retries safely after DROP hides the index");
@@ -1462,9 +1468,10 @@ async fn run_create_batch_durability() {
 }
 
 /// Proves the automatic worker claims each operation in its own task: with
-/// eight secondary slots, sixteen empty builds created in one batch step side
-/// by side instead of one claim per WAL upload, and every build converges
-/// without a worker failure or restart.
+/// eight secondary slots, sixteen builds created in one batch step side by
+/// side instead of one claim at a time, and every build converges without a
+/// worker failure or restart. Each build runs a hundred one-entity steps, so
+/// a task outlasts the dispatch of the next ones.
 async fn run_concurrent_claim_convergence() {
     let concurrency =
         IndexLifecycleConcurrency::try_new(8, 8, 1, 1).expect("eight secondary slots validate");
@@ -1472,13 +1479,27 @@ async fn run_concurrent_claim_convergence() {
         HelixDbSource::InMemory {
             database: "index-lifecycle-concurrent-claims".to_string(),
         },
-        DbConfig::new().with_index_lifecycle_throughput_tuning(
-            IndexLifecycleThroughputTuning::new(Default::default(), concurrency),
-        ),
+        DbConfig::new()
+            .with_index_lifecycle_throughput_tuning(IndexLifecycleThroughputTuning::new(
+                Default::default(),
+                concurrency,
+            ))
+            .with_secondary_index_lifecycle_tuning(
+                SecondaryIndexLifecycleTuning::default().with_batch_rows(
+                    SecondaryIndexLifecycleBatchRows::new(1).expect("one row is positive"),
+                ),
+            ),
         LifecycleTestScheduling::Automatic,
     )
     .await
     .expect("concurrent claim writer opens");
+    for ordinal in 0..16 {
+        db.cypher(crate::cypher::Request::new(format!(
+            "UNWIND range(0, 99) AS value CREATE (:ConcurrentClaim{ordinal} {{value: value}})"
+        )))
+        .await
+        .expect("build sources load");
+    }
     let controller = LifecycleTestController::new();
     let scope = DataScope::LegacyUnscoped;
     let names: Vec<String> = (0..16).map(|ordinal| format!("i{ordinal}")).collect();
@@ -1834,7 +1855,7 @@ async fn run_secondary_mutation_interleaving() {
     let mutations = crate::index_lifecycle::secondary::load_mutation_set(&transaction, scope)
         .await
         .expect("activation-spanning mutation captures Building authority");
-    crate::index_lifecycle::secondary::maintain_entity(
+    let staged = crate::index_lifecycle::secondary::maintain_entity(
         &transaction,
         scope,
         &mutations,
@@ -1866,6 +1887,7 @@ async fn run_secondary_mutation_interleaving() {
         transaction.commit().await.is_err(),
         "transaction retaining Building authority must conflict with activation"
     );
+    db.inner.index_scope_gates.delta_ledgers().record(staged);
     mutate_source(&db, scope, spanning_id, &spanning_before, &spanning_after)
         .await
         .expect("activation-spanning mutation retries against Active authority");
@@ -3284,21 +3306,24 @@ async fn mutate_source(
     before: &[Property],
     after: &[Property],
 ) -> crate::error::Result<()> {
-    let _scope_permit = db.index_mutation_scope_permit(scope).await;
+    let mut scope_permit = db.index_mutation_scope_permit(scope).await;
     let writer = db.lifecycle_test_writer_db()?;
     let transaction = writer.begin(IsolationLevel::SerializableSnapshot).await?;
     let mutations =
         crate::index_lifecycle::secondary::load_mutation_set(&transaction, scope).await?;
-    crate::index_lifecycle::secondary::maintain_entity(
-        &transaction,
-        scope,
-        &mutations,
-        IndexElementKind::Node,
-        entity_id,
-        before,
-        after,
-    )
-    .await?;
+    // Recorded when the permit drops, after the commit.
+    scope_permit.stage_build_deltas(
+        crate::index_lifecycle::secondary::maintain_entity(
+            &transaction,
+            scope,
+            &mutations,
+            IndexElementKind::Node,
+            entity_id,
+            before,
+            after,
+        )
+        .await?,
+    );
     if after.is_empty() {
         transaction.delete(source_key(scope, entity_id))?;
     } else {
@@ -3316,21 +3341,24 @@ async fn mutate_edge_source(
     before: &[Property],
     after: &[Property],
 ) -> crate::error::Result<()> {
-    let _scope_permit = db.index_mutation_scope_permit(scope).await;
+    let mut scope_permit = db.index_mutation_scope_permit(scope).await;
     let writer = db.lifecycle_test_writer_db()?;
     let transaction = writer.begin(IsolationLevel::SerializableSnapshot).await?;
     let mutations =
         crate::index_lifecycle::secondary::load_mutation_set(&transaction, scope).await?;
-    crate::index_lifecycle::secondary::maintain_entity(
-        &transaction,
-        scope,
-        &mutations,
-        IndexElementKind::Edge,
-        entity_id,
-        before,
-        after,
-    )
-    .await?;
+    // Recorded when the permit drops, after the commit.
+    scope_permit.stage_build_deltas(
+        crate::index_lifecycle::secondary::maintain_entity(
+            &transaction,
+            scope,
+            &mutations,
+            IndexElementKind::Edge,
+            entity_id,
+            before,
+            after,
+        )
+        .await?,
+    );
     if after.is_empty() {
         transaction.delete(edge_source_key(scope, entity_id))?;
     } else {

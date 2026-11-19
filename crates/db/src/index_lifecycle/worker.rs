@@ -31,9 +31,28 @@ use super::outbox::{
 };
 use super::queue::publication::{NextTarget, PublicationOutcome, QueuePublisher};
 use super::queue::QueueTarget;
-use super::{ClaimSequence, IndexOperationFamily, IndexOperationId, WriterEpoch};
+use super::{
+    ClaimContinuation, ClaimSequence, IndexOperationFamily, IndexOperationId, WriterEpoch,
+};
 
 const DEFAULT_OPERATION_PAGE_SIZE: usize = 64;
+/// Longest one task runs consecutive steps of one operation under a single
+/// claim.
+///
+/// Within a slice each step keeps its claim, so the next one needs no claim
+/// transaction. The first step after the slice ends, or after shutdown is
+/// requested, releases it: the dispatcher can then give the family's lane to
+/// another queued operation, and shutdown or a failing cycle joins the task
+/// within about one slice plus one step.
+///
+/// Steps commit without waiting for their WAL upload, so the task ends each
+/// slice by uploading them. A build therefore runs at most one slice ahead of
+/// durability: when object storage falls behind, the build slows down
+/// instead of growing the WAL tail that every durable write and every gated
+/// step waits behind. Measured on S3, a clean 1M-row range build took as
+/// long as unbounded (about 20 s), and one under 1,000 writes/s about 7%
+/// longer.
+const CLAIM_SLICE: Duration = Duration::from_secs(1);
 const SUPERVISOR_RESTART_DELAY: Duration = Duration::from_millis(10);
 const IDLE_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
 /// Operation-family lanes plus the queued-publication lane.
@@ -265,6 +284,8 @@ enum InFlightTask {
         claim: Box<PendingClaim>,
         driver: Arc<dyn IndexOperationDriver>,
         limits: SearchIndexBatchLimits,
+        /// Ends the claim slice early once shutdown is requested.
+        shutdown: watch::Receiver<bool>,
         _permits: InFlightPermits,
         #[cfg(feature = "index-lifecycle-testing")]
         lifecycle_metrics: Arc<crate::index_lifecycle_testing::AutomaticLifecycleMetrics>,
@@ -296,6 +317,7 @@ impl InFlightTask {
                 claim,
                 driver,
                 limits,
+                shutdown,
                 _permits,
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_metrics,
@@ -348,26 +370,55 @@ impl InFlightTask {
                             crate::index_lifecycle_testing::AutomaticLifecycleTaskKind::Text
                         }
                     });
-                #[cfg(feature = "index-lifecycle-testing")]
-                lifecycle_metrics.observe_operation(
-                    outbox::execute_claimed_step_with_evidence(
+                // The task target keeps every other task of this writer off
+                // the operation for the whole slice; see [`CLAIM_SLICE`].
+                let slice = std::time::Instant::now();
+                let mut claimed = claimed;
+                // Whether a step of this slice committed without waiting for
+                // its WAL upload.
+                let mut applied = false;
+                loop {
+                    // The dispatcher observed only the slice's first step.
+                    #[cfg(test)]
+                    crate::migrations::observe_legacy_text_migration_operation(&claimed.record)?;
+                    let claim = if *shutdown.borrow() || slice.elapsed() >= CLAIM_SLICE {
+                        ClaimContinuation::Release
+                    } else {
+                        ClaimContinuation::Retain
+                    };
+                    let executed = outbox::execute_claimed_step_with_evidence(
                         db.as_ref(),
                         &claimed,
                         driver.as_ref(),
                         limits,
                         now_unix_millis(),
+                        claim,
                     )
-                    .await?,
-                );
-                #[cfg(not(feature = "index-lifecycle-testing"))]
-                outbox::execute_claimed_step(
-                    db.as_ref(),
-                    &claimed,
-                    driver.as_ref(),
-                    limits,
-                    now_unix_millis(),
-                )
-                .await?;
+                    .await?;
+                    #[cfg(feature = "index-lifecycle-testing")]
+                    lifecycle_metrics.observe_operation(executed.evidence);
+                    applied |=
+                        executed.evidence.outcome == outbox::CommittedOperationStep::Progressed;
+                    let Some(retained) = executed.retained else {
+                        // See [`CLAIM_SLICE`]: the slice ends once its steps
+                        // are durable. A blocked or completed step waited for
+                        // its upload, which made every earlier one durable;
+                        // after any other last step, such as a progressed one
+                        // or a retained claim found superseded, the slice
+                        // uploads what its progressed steps applied.
+                        if applied
+                            && !matches!(
+                                executed.evidence.outcome,
+                                outbox::CommittedOperationStep::Blocked
+                                    | outbox::CommittedOperationStep::Completed
+                            )
+                        {
+                            db.flush().await?;
+                        }
+                        break;
+                    };
+                    claimed = retained;
+                }
                 (None, true)
             }
             Self::TextCompaction { driver, _permits } => {
@@ -779,6 +830,7 @@ async fn dispatch_worker_cycle(
             writer_epoch,
             same_epoch_proof,
             claim_sequences,
+            shutdown,
             &mut earliest_delay,
             #[cfg(feature = "index-lifecycle-testing")]
             lifecycle_metrics,
@@ -1044,6 +1096,7 @@ async fn schedule_operation_task(
     writer_epoch: WriterEpoch,
     same_epoch_proof: Option<SameEpochRecoveryProof>,
     claim_sequences: &ClaimSequenceAllocator,
+    shutdown: &watch::Receiver<bool>,
     earliest_delay: &mut Option<u64>,
     #[cfg(feature = "index-lifecycle-testing")] lifecycle_metrics: &Arc<
         crate::index_lifecycle_testing::AutomaticLifecycleMetrics,
@@ -1096,6 +1149,7 @@ async fn schedule_operation_task(
                 }),
                 driver,
                 limits,
+                shutdown: shutdown.clone(),
                 _permits: task_permits,
                 #[cfg(feature = "index-lifecycle-testing")]
                 lifecycle_metrics: Arc::clone(lifecycle_metrics),
@@ -1131,11 +1185,13 @@ mod tests {
     use crate::config::{SearchIndexBackfillLimits, SecondaryIndexDefinition};
     use crate::encoding::v2::keys::scope::DataScope;
     use crate::index_lifecycle::{
-        IndexGenerationId, IndexId, IndexOperationExecutionState, IndexOperationKind,
-        IndexOperationProgress, IndexOperationRecord, IndexOperationRevision, IndexRecordV2,
-        IndexRevision, NoCursorProgress, OperationCounters, PhysicalGeneration,
-        SecondaryBuildProgress, SecondaryBuildStage, ValidatedDynamicIndexDefinition,
+        BuildOperationOutcome, IndexGenerationId, IndexId, IndexOperationExecutionState,
+        IndexOperationKind, IndexOperationOutcome, IndexOperationProgress, IndexOperationRecord,
+        IndexOperationRevision, IndexOperationStatus, IndexRecordV2, IndexRevision,
+        NoCursorProgress, OperationCounters, PhysicalGeneration, SecondaryBuildProgress,
+        SecondaryBuildStage, ValidatedDynamicIndexDefinition,
     };
+    use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
 
     /// A driver for a task whose claim is lost before any step.
     struct NeverSteps;
@@ -1244,6 +1300,7 @@ mod tests {
             }),
             driver: Arc::new(NeverSteps),
             limits: SearchIndexBackfillLimits::default().batch(),
+            shutdown: watch::channel(false).1,
             _permits: permits
                 .try_operation(IndexOperationFamily::Secondary)
                 .expect("a secondary slot is free"),
@@ -1255,5 +1312,475 @@ mod tests {
         let completion = task.execute(db).await.unwrap();
         assert!(completion.did_work);
         assert_eq!(completion.delay_millis, None);
+    }
+
+    /// Progresses one entity per step, sleeping `delay` first, and completes
+    /// once `completes_at` entities are counted.
+    struct CountingDriver {
+        completes_at: u64,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl IndexOperationDriver for CountingDriver {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn step(
+            &self,
+            _db: &Db,
+            _transaction: &DbTransaction,
+            _scope: DataScope,
+            operation: &IndexOperationRecord,
+            _limits: SearchIndexBatchLimits,
+        ) -> Result<outbox::IndexOperationStepExecution> {
+            let entities = IndexOperationStatus::from_record(operation)
+                .common()
+                .progress
+                .entities;
+            if entities >= self.completes_at {
+                return Ok(outbox::IndexOperationStepExecution::new(
+                    outbox::IndexOperationStepResult::Completed(IndexOperationOutcome::Build(
+                        BuildOperationOutcome::Succeeded,
+                    )),
+                ));
+            }
+            tokio::time::sleep(self.delay).await;
+            Ok(outbox::IndexOperationStepExecution::new(
+                outbox::IndexOperationStepResult::Progressed(activate_progress(entities + 1)),
+            ))
+        }
+    }
+
+    fn activate_progress(entities: u64) -> IndexOperationProgress {
+        IndexOperationProgress::SecondaryBuild(SecondaryBuildProgress::Constructing(
+            SecondaryBuildStage::Activate(NoCursorProgress {
+                counters: OperationCounters {
+                    entities,
+                    ..OperationCounters::default()
+                },
+            }),
+        ))
+    }
+
+    /// Enqueues one secondary build at activation with no counted entities.
+    async fn enqueue(db: &Db, id_byte: u8) -> IndexOperationRecord {
+        let definition = ValidatedDynamicIndexDefinition::try_from(
+            SecondaryIndexDefinition::node_equality("User", "email").unwrap(),
+        )
+        .unwrap();
+        let operation_id = IndexOperationId::from_bytes([id_byte; 16]).unwrap();
+        let index = IndexRecordV2::building(
+            IndexId::initial(),
+            definition,
+            IndexRevision::initial(),
+            PhysicalGeneration::Secondary {
+                generation: IndexGenerationId::initial(),
+            },
+            operation_id,
+        )
+        .unwrap();
+        let operation = IndexOperationRecord::try_new(
+            operation_id,
+            index.index_id(),
+            index.identity().clone(),
+            index.state().generation(),
+            index.revision(),
+            IndexOperationRevision::initial(),
+            IndexOperationKind::Build,
+            IndexOperationFamily::Secondary,
+            activate_progress(0),
+            0,
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None,
+            },
+        )
+        .unwrap();
+        outbox::enqueue_operation(
+            db,
+            DataScope::LegacyUnscoped,
+            outbox::ExpectedCanonicalRevision::Absent,
+            &index,
+            &operation,
+        )
+        .await
+        .unwrap();
+        operation
+    }
+
+    /// Runs one operation task for `operation` to its end and returns the
+    /// operation's record afterwards.
+    async fn run_task(
+        db: &Arc<Db>,
+        operation: &IndexOperationRecord,
+        driver: impl IndexOperationDriver + 'static,
+        shutdown: watch::Receiver<bool>,
+    ) -> IndexOperationRecord {
+        let epoch = WriterEpoch::from_bytes([5; 16]).unwrap();
+        let OperationPointerObservation::Eligible(eligible) =
+            outbox::observe_operation_pointer(db, operation.operation_id(), epoch, 0)
+                .await
+                .unwrap()
+        else {
+            panic!("a queued operation is eligible");
+        };
+        let permits = WorkerPermits::new(IndexLifecycleConcurrency::default());
+        let task = InFlightTask::Operation {
+            target: operation.operation_id(),
+            claim: Box::new(PendingClaim {
+                eligible,
+                writer_epoch: epoch,
+                sequence: ClaimSequence::new(1).unwrap(),
+                permission: ClaimPermission::Normal,
+            }),
+            driver: Arc::new(driver),
+            limits: SearchIndexBackfillLimits::default().batch(),
+            shutdown,
+            _permits: permits
+                .try_operation(IndexOperationFamily::Secondary)
+                .expect("a secondary slot is free"),
+            #[cfg(feature = "index-lifecycle-testing")]
+            lifecycle_metrics: Arc::new(
+                crate::index_lifecycle_testing::AutomaticLifecycleMetrics::new(),
+            ),
+        };
+        let completion = task.execute(Arc::clone(db)).await.unwrap();
+        assert!(completion.did_work);
+        outbox::read_operation(
+            db.as_ref(),
+            DataScope::LegacyUnscoped,
+            operation.operation_id(),
+        )
+        .await
+        .unwrap()
+        .expect("the operation is retained")
+    }
+
+    /// Progresses like [`CountingDriver`], and once `superseded_at` entities
+    /// are counted holds WAL uploads and advances the operation's revision
+    /// without waiting for its upload, as a concurrent abort or claim does,
+    /// so the slice's next step finds its claim superseded.
+    struct SupersedingDriver {
+        counting: CountingDriver,
+        superseded_at: u64,
+        db: Arc<Db>,
+        store: Arc<GatedWalStore>,
+    }
+
+    #[async_trait]
+    impl IndexOperationDriver for SupersedingDriver {
+        fn family(&self) -> IndexOperationFamily {
+            IndexOperationFamily::Secondary
+        }
+
+        async fn step(
+            &self,
+            db: &Db,
+            transaction: &DbTransaction,
+            scope: DataScope,
+            operation: &IndexOperationRecord,
+            limits: SearchIndexBatchLimits,
+        ) -> Result<outbox::IndexOperationStepExecution> {
+            self.counting
+                .step(db, transaction, scope, operation, limits)
+                .await
+        }
+
+        async fn after_commit(
+            &self,
+            scope: DataScope,
+            _index: &IndexRecordV2,
+            operation: &IndexOperationRecord,
+            committed: outbox::CommittedOperationStep,
+            _state: Option<outbox::CommittedStepState>,
+        ) {
+            let entities = IndexOperationStatus::from_record(operation)
+                .common()
+                .progress
+                .entities
+                + 1;
+            if committed != outbox::CommittedOperationStep::Progressed
+                || entities != self.superseded_at
+            {
+                return;
+            }
+            self.store.uploads.send_replace(WalUploads::Held);
+            let current = outbox::read_operation(self.db.as_ref(), scope, operation.operation_id())
+                .await
+                .unwrap()
+                .expect("the operation is retained");
+            let superseding = current
+                .progressed(activate_progress(entities), ClaimContinuation::Retain)
+                .unwrap();
+            // The record and its queue pointer, as the superseding write
+            // leaves them.
+            let mut batch = slatedb::WriteBatch::new();
+            batch.put(
+                outbox::scoped_operation_key(scope, operation.operation_id()),
+                crate::encoding::v2::values::encode_operation_record(&superseding),
+            );
+            batch.put(
+                outbox::global_operation_key(operation.operation_id()),
+                crate::encoding::v2::values::encode_metadata_value(
+                    &crate::index_lifecycle::IndexV2MetadataValue::OperationQueuePointer(
+                        outbox::pointer_for(scope, &superseding),
+                    ),
+                ),
+            );
+            self.db
+                .write_with_options(
+                    batch,
+                    &slatedb::config::WriteOptions {
+                        await_durable: false,
+                        ..slatedb::config::WriteOptions::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    /// A slice whose retained step finds its claim superseded commits
+    /// nothing more, yet still ends by uploading the steps it progressed:
+    /// the task waits for that upload instead of letting the build run more
+    /// than one slice ahead of it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_superseded_slice_still_uploads_its_progressed_steps() {
+        let store = Arc::new(GatedWalStore::new());
+        let db = Arc::new(
+            Db::builder(
+                "worker-superseded-slice",
+                Arc::clone(&store) as Arc<dyn slatedb::object_store::ObjectStore>,
+            )
+            .build()
+            .await
+            .unwrap(),
+        );
+        let operation = enqueue(&db, 12).await;
+        let task = tokio::spawn({
+            let db = Arc::clone(&db);
+            let driver = SupersedingDriver {
+                counting: CountingDriver {
+                    completes_at: 1_000,
+                    delay: Duration::ZERO,
+                },
+                superseded_at: 5,
+                db: Arc::clone(&db),
+                store: Arc::clone(&store),
+            };
+            async move { run_task(&db, &operation, driver, watch::channel(false).1).await }
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            store
+                .uploads
+                .subscribe()
+                .wait_for(|uploads| *uploads == WalUploads::Held),
+        )
+        .await
+        .expect("the build reaches the superseding step")
+        .expect("the gate outlives its store");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !task.is_finished(),
+            "the superseded slice waits for the upload of its progressed steps"
+        );
+        store.uploads.send_replace(WalUploads::Open);
+        let superseded = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the slice ends once its upload lands")
+            .unwrap();
+        assert_eq!(
+            IndexOperationStatus::from_record(&superseded)
+                .common()
+                .progress
+                .entities,
+            5,
+            "no step ran after the claim was superseded"
+        );
+    }
+
+    /// One task runs every step of a short build under its single claim:
+    /// the claim attempt counts one claim, not one per step.
+    #[tokio::test]
+    async fn a_task_runs_consecutive_steps_under_one_claim() {
+        let db = Arc::new(
+            Db::builder("worker-claim-slice", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let operation = enqueue(&db, 8).await;
+        let finished = run_task(
+            &db,
+            &operation,
+            CountingDriver {
+                completes_at: 50,
+                delay: Duration::ZERO,
+            },
+            watch::channel(false).1,
+        )
+        .await;
+        assert!(matches!(
+            finished.execution_state(),
+            IndexOperationExecutionState::Completed(IndexOperationOutcome::Build(
+                BuildOperationOutcome::Succeeded
+            ))
+        ));
+        assert_eq!(finished.attempt(), 1, "fifty steps ran under one claim");
+        // Fifty progressed steps and the completion, plus the claim.
+        assert_eq!(finished.operation_revision().get(), 1 + 1 + 50 + 1);
+    }
+
+    /// The public status reports a build as running from its claim until
+    /// it completes: the steps of one slice keep the claim, so the status
+    /// never falls back to queued between them.
+    #[tokio::test]
+    async fn status_stays_running_across_the_steps_of_a_slice() {
+        let db = Arc::new(
+            Db::builder("worker-claim-slice-status", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let operation = enqueue(&db, 11).await;
+        let operation_id = operation.operation_id();
+        let poller = tokio::spawn({
+            let db = Arc::clone(&db);
+            async move {
+                let mut observed = Vec::new();
+                loop {
+                    // What `get_index_operation` projects for a writer.
+                    let status = IndexOperationStatus::from_record(
+                        &outbox::read_operation(
+                            db.as_ref(),
+                            DataScope::LegacyUnscoped,
+                            operation_id,
+                        )
+                        .await
+                        .unwrap()
+                        .expect("the operation is retained"),
+                    );
+                    assert!(
+                        !matches!(&status, IndexOperationStatus::Running { common } if common.attempt != 1),
+                        "a running build reports one attempt: {status:?}"
+                    );
+                    let terminal = matches!(status, IndexOperationStatus::Succeeded { .. });
+                    if observed.last().is_none_or(|last| {
+                        std::mem::discriminant(last) != std::mem::discriminant(&status)
+                    }) {
+                        observed.push(status);
+                    }
+                    if terminal {
+                        return observed;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        let finished = run_task(
+            &db,
+            &operation,
+            CountingDriver {
+                completes_at: 40,
+                delay: Duration::from_millis(2),
+            },
+            watch::channel(false).1,
+        )
+        .await;
+        let observed = poller.await.unwrap();
+        let kinds = observed
+            .iter()
+            .map(|status| match status {
+                IndexOperationStatus::Queued { .. } => "queued",
+                IndexOperationStatus::Running { .. } => "running",
+                IndexOperationStatus::Succeeded { .. } => "succeeded",
+                IndexOperationStatus::Blocked { .. } | IndexOperationStatus::Aborted { .. } => {
+                    "other"
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                kinds.as_slice(),
+                ["running", "succeeded"] | ["queued", "running", "succeeded"]
+            ),
+            "the status went {kinds:?}"
+        );
+        assert_eq!(finished.attempt(), 1);
+    }
+
+    /// A slice ends by releasing its claim, so the dispatcher can schedule
+    /// other queued work; shutdown ends it after one step.
+    #[tokio::test]
+    async fn a_claim_slice_releases_after_its_time_or_on_shutdown() {
+        let db = Arc::new(
+            Db::builder("worker-claim-slice-release", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let slow = enqueue(&db, 9).await;
+        let started = std::time::Instant::now();
+        let released = run_task(
+            &db,
+            &slow,
+            CountingDriver {
+                completes_at: 1_000,
+                delay: CLAIM_SLICE / 3,
+            },
+            watch::channel(false).1,
+        )
+        .await;
+        assert!(started.elapsed() >= CLAIM_SLICE);
+        assert!(matches!(
+            released.execution_state(),
+            IndexOperationExecutionState::Queued {
+                not_before_unix_millis: None
+            }
+        ));
+        let entities = IndexOperationStatus::from_record(&released)
+            .common()
+            .progress
+            .entities;
+        assert!(
+            (2..1_000).contains(&entities),
+            "several steps ran under the claim before the slice released it: {entities}"
+        );
+        assert_eq!(released.attempt(), 0, "progress resets the attempts");
+
+        // One index per database: the fixture always uses the first index ID.
+        let db = Arc::new(
+            Db::builder("worker-claim-slice-stop", Arc::new(InMemory::new()))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let stopping = enqueue(&db, 10).await;
+        let (stop, shutdown) = watch::channel(false);
+        stop.send_replace(true);
+        let stopped = run_task(
+            &db,
+            &stopping,
+            CountingDriver {
+                completes_at: 1_000,
+                delay: Duration::ZERO,
+            },
+            shutdown,
+        )
+        .await;
+        assert!(matches!(
+            stopped.execution_state(),
+            IndexOperationExecutionState::Queued { .. }
+        ));
+        assert_eq!(
+            IndexOperationStatus::from_record(&stopped)
+                .common()
+                .progress
+                .entities,
+            1,
+            "a stopping worker releases its claim with its first step"
+        );
     }
 }

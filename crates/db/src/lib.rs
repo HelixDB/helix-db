@@ -2331,6 +2331,13 @@ impl HelixDB {
     ///
     /// A wrong scope is intentionally indistinguishable from an unknown or
     /// evicted operation ID.
+    ///
+    /// A writer reads its applied state, so it sees the operation a CREATE
+    /// committed without waiting for durability, and a build's claims and
+    /// progressed steps before their WAL upload. A crash or failover can
+    /// lose those, so the status a writer reported can move back to the last
+    /// durable step (see [`index_lifecycle::IndexOperationPublicProgress`]).
+    /// A reader reports durable state only.
     pub async fn get_index_operation(
         &self,
         scope: DataScope,
@@ -2360,9 +2367,14 @@ impl HelixDB {
     /// Advances at most one immediately eligible secondary lifecycle step.
     ///
     /// This writer-only surface is available only when secondary background
-    /// scheduling is Disabled. It returns `true` after one durable queue or
-    /// operation transition and `false` only after a complete queue scan finds
-    /// no immediately eligible secondary work.
+    /// scheduling is Disabled. It returns `true` after one queue or operation
+    /// transition applied on the writer and `false` only after a complete
+    /// queue scan finds no immediately eligible secondary work.
+    ///
+    /// Completion, blocked and retry transitions are durable when it returns.
+    /// A claim and a progressed step do not wait for their WAL upload: a
+    /// crash before it loses them, and the operation redoes the step from its
+    /// last durable one.
     ///
     /// Cancelling the call while it waits behind another manual step runs
     /// nothing. Once the step starts, cancelling only stops the wait: the step
@@ -2484,8 +2496,14 @@ impl HelixDB {
             .await
     }
 
-    /// Conflicted DROP attempts retried before the conflict reaches the caller.
-    const DROP_CONFLICT_RETRIES: u32 = 8;
+    /// Conflicted DROP or abort attempts retried before the conflict reaches
+    /// the caller.
+    ///
+    /// A build step that commits between the command's reads and its commit
+    /// wins the serializable conflict. The losing command wrote nothing, and
+    /// it learns of the conflict just after a step committed, so it retries
+    /// at once: the next step's whole preparation is its window.
+    const DDL_CONFLICT_RETRIES: u32 = 8;
 
     /// Enqueues one request-owned DROP at its exact durable commit boundary.
     pub(crate) async fn enqueue_index_drop_with_control(
@@ -2557,7 +2575,7 @@ impl HelixDB {
                     {
                         Err(error)
                             if error.is_transaction_conflict()
-                                && retries < Self::DROP_CONFLICT_RETRIES =>
+                                && retries < Self::DDL_CONFLICT_RETRIES =>
                         {
                             retries += 1;
                             tokio::task::yield_now().await;
@@ -2640,13 +2658,27 @@ impl HelixDB {
                 actual: self.mode().as_str(),
             });
         };
-        let operation = index_lifecycle::outbox::abort_operation_with_control(
-            writer.db(),
-            scope,
-            operation_id,
-            execution_control,
-        )
-        .await?;
+        // A running build's retained steps rewrite its operation back to
+        // back; see [`Self::DDL_CONFLICT_RETRIES`].
+        let mut retries = 0;
+        let operation = loop {
+            match index_lifecycle::outbox::abort_operation_with_control(
+                writer.db(),
+                scope,
+                operation_id,
+                execution_control,
+            )
+            .await
+            {
+                Err(error)
+                    if error.is_transaction_conflict() && retries < Self::DDL_CONFLICT_RETRIES =>
+                {
+                    retries += 1;
+                    tokio::task::yield_now().await;
+                }
+                outcome => break outcome,
+            }
+        }?;
         if matches!(
             operation.execution_state(),
             index_lifecycle::IndexOperationExecutionState::Queued { .. }
@@ -6701,6 +6733,177 @@ mod tests {
             Err(HelixDbError::SecondaryLifecycleSteppingRequiresDisabledMode)
         ));
         enabled.close().await.expect("Enabled-mode writer closes");
+    }
+
+    /// The worker ends each claim slice by uploading its steps, so a build
+    /// whose WAL upload is held stops within about one slice instead of
+    /// running ahead of durability for as long as the upload stays held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_build_runs_at_most_one_slice_ahead_of_its_upload() {
+        use crate::search::vector::gated_wal::{GatedWalStore, WalUploads};
+
+        let scope = DataScope::LegacyUnscoped;
+        let store = Arc::new(GatedWalStore::new());
+        // One entity per step keeps the build running for many slices.
+        let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
+            config::SecondaryIndexLifecycleTuning::default().with_batch_rows(
+                config::SecondaryIndexLifecycleBatchRows::new(1).expect("one row is positive"),
+            ),
+        );
+        let db = HelixDB::open_with_object_store_and_config(
+            "build-bounded-by-its-upload",
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            config,
+        )
+        .await
+        .expect("writer opens");
+        db.cypher(cypher::Request::new(
+            "UNWIND range(0, 49999) AS rank CREATE (:User {rank: rank})",
+        ))
+        .await
+        .expect("users load");
+        let created = db
+            .query(QueryRequest::write(
+                write_batch()
+                    .var_as(
+                        "index",
+                        g().create_index_if_not_exists(helix_ast::index::IndexSpec::node_equality(
+                            "User", "rank",
+                        )),
+                    )
+                    .returning(["index"]),
+            ))
+            .await
+            .expect("the build enqueues");
+        let operation_id = index_lifecycle::IndexOperationId::new(
+            uuid::Uuid::parse_str(
+                created["index"]["operation_id"]
+                    .as_str()
+                    .expect("the receipt names its operation"),
+            )
+            .expect("operation ids are uuids"),
+        )
+        .expect("operation ids are not nil");
+        let entities = || async {
+            db.get_index_operation(scope, operation_id)
+                .await
+                .expect("status reads")
+                .common()
+                .progress
+                .entities
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while entities().await == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the build runs its steps");
+
+        store.uploads.send_replace(WalUploads::Held);
+        // A slice is one second; by then the task waits for its upload.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let stalled = entities().await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert_eq!(
+            entities().await,
+            stalled,
+            "the build stops while its upload is held"
+        );
+        assert!(
+            stalled < 50_000,
+            "the build must still be scanning when it stops"
+        );
+        store.uploads.send_replace(WalUploads::Open);
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while entities().await == stalled {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the build continues once its upload lands");
+        db.close().await.expect("writer closes");
+    }
+
+    /// A running build's retained steps rewrite its operation back to back,
+    /// with no claim transaction or WAL wait between them, so an abort or a
+    /// DROP that read the operation often loses the serializable conflict to
+    /// the next step. Both retry against the new state and land.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn abort_and_drop_land_between_retained_build_steps() {
+        const TRIALS: usize = 8;
+        let scope = DataScope::LegacyUnscoped;
+        let spec = helix_ast::index::IndexSpec::node_equality("User", "rank");
+        // One entity per step keeps the build's steps short and back to back.
+        let config = DbConfig::new().with_secondary_index_lifecycle_tuning(
+            config::SecondaryIndexLifecycleTuning::default().with_batch_rows(
+                config::SecondaryIndexLifecycleBatchRows::new(1).expect("one row is positive"),
+            ),
+        );
+        for trial in 0..TRIALS {
+            let db = HelixDB::open_with_config(
+                HelixDbSource::InMemory {
+                    database: format!("ddl-between-retained-steps-{trial}"),
+                },
+                config.clone(),
+            )
+            .await
+            .expect("writer opens");
+            db.cypher(cypher::Request::new(
+                "UNWIND range(0, 1999) AS rank CREATE (:User {rank: rank})",
+            ))
+            .await
+            .expect("users load");
+            let created = db
+                .query(QueryRequest::write(
+                    write_batch()
+                        .var_as("index", g().create_index_if_not_exists(spec.clone()))
+                        .returning(["index"]),
+                ))
+                .await
+                .expect("the build enqueues");
+            let operation_id = index_lifecycle::IndexOperationId::new(
+                uuid::Uuid::parse_str(
+                    created["index"]["operation_id"]
+                        .as_str()
+                        .expect("the receipt names its operation"),
+                )
+                .expect("operation ids are uuids"),
+            )
+            .expect("operation ids are not nil");
+            tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    let status = db
+                        .get_index_operation(scope, operation_id)
+                        .await
+                        .expect("status reads");
+                    if matches!(
+                        status,
+                        index_lifecycle::IndexOperationStatus::Running { .. }
+                    ) && status.common().progress.entities > 0
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the build runs its steps");
+            if trial % 2 == 0 {
+                db.abort_index_operation(scope, operation_id)
+                    .await
+                    .expect("the abort lands between steps");
+            } else {
+                db.query(QueryRequest::write(
+                    write_batch()
+                        .var_as("dropped", g().drop_index(spec.clone()))
+                        .returning(["dropped"]),
+                ))
+                .await
+                .expect("the DROP lands between steps");
+            }
+            db.close().await.expect("writer closes");
+        }
     }
 
     #[tokio::test]

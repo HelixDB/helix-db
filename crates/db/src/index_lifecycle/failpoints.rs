@@ -22,7 +22,7 @@ pub enum IndexOutboxFailpoint {
     DdlEnqueueAfterStaging,
     /// Immediately before an eligible pointer is claimed.
     ClaimBefore,
-    /// Immediately after the claim commit is durable.
+    /// Immediately after the claim commit is applied.
     ClaimAfter,
     /// Immediately before a claimed operation's bounded read.
     BatchReadBefore,

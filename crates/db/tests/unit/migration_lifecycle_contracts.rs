@@ -1261,23 +1261,43 @@ pub(crate) async fn run_vector_adoption_contract() {
 /// Requires every adoption-checkpoint failure to return from writer-open,
 /// preserve the adopted HNSW source, and cold-recover exact ownership.
 pub(crate) async fn run_vector_adoption_failpoint_recovery_contracts() -> Vec<&'static str> {
-    // SlateDB's default 100 ms flush, not `one_row_config`'s 1 ms: a fast
-    // flush lets the recovery open race a resumed index operation into a
-    // transaction conflict (HEL-996).
-    let adoption_config = || one_row_config().with_slate_settings(slatedb::Settings::default());
-    const BOUNDARIES: [MigrationFailpoint; 8] = [
-        MigrationFailpoint::LegacyVectorValidationCheckpointBefore,
-        MigrationFailpoint::LegacyVectorValidationCheckpointAfter,
-        MigrationFailpoint::LegacyVectorMetadataPublicationBefore,
-        MigrationFailpoint::LegacyVectorMetadataPublicationAfter,
-        MigrationFailpoint::LegacyVectorReservationTransitionBefore,
-        MigrationFailpoint::LegacyVectorReservationTransitionAfter,
-        MigrationFailpoint::LegacyDefinitionRetirementBefore,
-        MigrationFailpoint::LegacyDefinitionRetirementAfter,
-    ];
+    recover_interrupted_vector_adoptions(
+        &[
+            MigrationFailpoint::LegacyVectorValidationCheckpointBefore,
+            MigrationFailpoint::LegacyVectorValidationCheckpointAfter,
+            MigrationFailpoint::LegacyVectorMetadataPublicationBefore,
+            MigrationFailpoint::LegacyVectorMetadataPublicationAfter,
+            MigrationFailpoint::LegacyVectorReservationTransitionBefore,
+            MigrationFailpoint::LegacyVectorReservationTransitionAfter,
+            MigrationFailpoint::LegacyDefinitionRetirementBefore,
+            MigrationFailpoint::LegacyDefinitionRetirementAfter,
+        ],
+        None,
+    )
+    .await
+}
 
-    let mut recovered_boundaries = Vec::with_capacity(BOUNDARIES.len());
-    for failpoint in BOUNDARIES {
+/// Requires the recovery open to converge when the resumed adoption commits
+/// its activation while the open's last legacy vector preflight is open
+/// (HEL-996). The recovery open runs two preflights, one before and one after
+/// the blocking migration, so the second is held for the activation.
+pub(crate) async fn run_vector_adoption_recovery_preflight_overlap_contract() -> Vec<&'static str> {
+    recover_interrupted_vector_adoptions(
+        &[MigrationFailpoint::LegacyVectorMetadataPublicationBefore],
+        std::num::NonZeroUsize::new(2),
+    )
+    .await
+}
+
+/// Interrupts one adoption per boundary, then cold-recovers it, holding the
+/// `held_preflight`-th preflight of the recovery open for the resumed
+/// activation when one is named.
+async fn recover_interrupted_vector_adoptions(
+    boundaries: &[MigrationFailpoint],
+    held_preflight: Option<std::num::NonZeroUsize>,
+) -> Vec<&'static str> {
+    let mut recovered_boundaries = Vec::with_capacity(boundaries.len());
+    for &failpoint in boundaries {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let database = database(&format!("migration-vector-adoption-{}", failpoint.as_str()));
         let definition: ValidatedDynamicIndexDefinition = VectorIndexDefinition::new_node(
@@ -1327,7 +1347,7 @@ pub(crate) async fn run_vector_adoption_failpoint_recovery_contracts() -> Vec<&'
             HelixDB::open_with_object_store_for_migration_parity(
                 database.clone(),
                 Arc::clone(&store),
-                adoption_config(),
+                one_row_config(),
             ),
         )
         .await
@@ -1416,13 +1436,12 @@ pub(crate) async fn run_vector_adoption_failpoint_recovery_contracts() -> Vec<&'
             .await
             .expect("adoption recovery inspection closes");
 
+        if let Some(preflight) = held_preflight {
+            crate::migrations::hold_legacy_vector_preflight(preflight);
+        }
         let recovered = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            HelixDB::open_with_object_store_for_migration_parity(
-                database,
-                store,
-                adoption_config(),
-            ),
+            HelixDB::open_with_object_store_for_migration_parity(database, store, one_row_config()),
         )
         .await
         .unwrap_or_else(|_| {
