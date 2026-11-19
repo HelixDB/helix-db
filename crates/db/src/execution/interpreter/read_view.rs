@@ -153,8 +153,12 @@ impl StableRequestReadView {
                 }
             }
             HelixStorage::Writer(writer) => {
+                // Read before the snapshot opens: publication known by now is in
+                // the snapshot, so its exact rows are complete there. Known only
+                // afterwards, it could follow a snapshot whose exact rows are not.
+                let known = writer.known_label_row_writes();
                 let snapshot = writer.db().snapshot().await?;
-                let writes = match writer.known_label_row_writes() {
+                let writes = match known {
                     Some(known) => known,
                     None => crate::index_lifecycle::repository::LabelRowWrites::of_stored_version(
                         crate::migrations::startup::stored_storage_version(snapshot.as_ref())

@@ -67,8 +67,10 @@ the complete hash rows, and every graph write files each label row change under
 both its hash and its exact key with the same members. The background migration
 worker copies the hash rows written before then: each step walks every scope's
 hash rows in key order on one iterator, seeking past other rows, and copies at most
-8,192 rows, 32 MiB, and 262,144 members in one transaction that begins before it
-reads. Each exact row is a disjoint membership merge whose tokens are the members it
+16,384 rows, 8 MiB (or a sixteenth of the writer's `max_unflushed_bytes`, if that is
+less), and 262,144 members in one transaction that begins before it reads. A step
+whose commit takes over 500 ms halves the next step's limits, and quicker commits
+grow them back. Each exact row is a disjoint membership merge whose tokens are the members it
 adds, so a graph write that removes or relabels a copied member after the step
 began conflicts with it in either order, and the step is taken again with halved
 limits; writes that add other members do not conflict. A row with more members
