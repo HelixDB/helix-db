@@ -1,4 +1,5 @@
-//! The `Server-Timing` value both transports report for an executed request.
+//! The `Server-Timing` value both transports report for a query request,
+//! executed or explained.
 //!
 //! HTTP sends it as the `Server-Timing` response header and gRPC as
 //! `server-timing` response metadata. It carries durations only.

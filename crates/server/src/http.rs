@@ -193,29 +193,31 @@ async fn explain_cypher(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    let (options, request, _) = match read_json_request::<db::cypher::Request>(&headers, body).await
-    {
-        Ok(request) => request,
-        Err(response) => return *response,
-    };
-    match request.compile() {
+    let (options, request, received) =
+        match read_json_request::<db::cypher::Request>(&headers, body).await {
+            Ok(request) => request,
+            Err(response) => return *response,
+        };
+    let response = match request.compile() {
         Ok(request) => explain_compiled(&state, &options, request).await,
         Err(error) => cypher_error_response(error.into()),
-    }
+    };
+    timed(received, CommitTimings::default(), response)
 }
 
 /// `POST /v2/sql/explain`: translate one SQL statement, then plan it exactly
 /// like `POST /v2/cypher/explain`.
 async fn explain_sql(State(state): State<ServerState>, headers: HeaderMap, body: Body) -> Response {
-    let (options, request, _) =
+    let (options, request, received) =
         match read_json_request::<db::cypher::sql::request::Request>(&headers, body).await {
             Ok(request) => request,
             Err(response) => return *response,
         };
-    match request.compile() {
+    let response = match request.compile() {
         Ok(request) => explain_compiled(&state, &options, request).await,
         Err(error) => cypher_error_response(error.into()),
-    }
+    };
+    timed(received, CommitTimings::default(), response)
 }
 
 /// Explaining never executes, so even a modifying statement uses read options.
