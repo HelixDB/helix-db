@@ -2215,21 +2215,28 @@ async fn background_label_steps_leave_foreground_writes_room_under_a_slow_store(
             peak
         }
     });
-    // Foreground writes, timed one by one, while the copy runs.
+    // Foreground writes, timed one by one, while the copy runs. A write that
+    // read the copy still running conflicts with publication; it is not
+    // applied, and is taken again as any client retries a conflict.
     let mut latencies = Vec::new();
+    let mut conflicts = 0_usize;
     while !steps.is_finished() {
         let started = Instant::now();
-        db.query(QueryRequest::write(
-            write_batch()
-                .var_as(
-                    "node",
-                    g().add_n("Person", vec![("name", PropertyInput::from("load"))]),
-                )
-                .returning(Vec::<String>::new()),
-        ))
-        .await
-        .unwrap();
-        latencies.push(started.elapsed());
+        let written = db
+            .query(QueryRequest::write(
+                write_batch()
+                    .var_as(
+                        "node",
+                        g().add_n("Person", vec![("name", PropertyInput::from("load"))]),
+                    )
+                    .returning(Vec::<String>::new()),
+            ))
+            .await;
+        match written {
+            Ok(_) => latencies.push(started.elapsed()),
+            Err(error) if error.is_transaction_conflict() => conflicts += 1,
+            Err(error) => panic!("foreground write failed: {error}"),
+        }
     }
     let yields = steps.await.unwrap();
     done.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2244,8 +2251,9 @@ async fn background_label_steps_leave_foreground_writes_room_under_a_slow_store(
     let slowest = *latencies.last().unwrap();
     let p99 = latencies[latencies.len() * 99 / 100];
     eprintln!(
-        "foreground writes: {} during the copy and cleanup, p99 {p99:?}, slowest {slowest:?}; \
-         steps held back {yields} times; unflushed peak {peak} of {} bytes",
+        "foreground writes: {} during the copy and cleanup, {conflicts} retried after a \
+         conflict, p99 {p99:?}, slowest {slowest:?}; steps held back {yields} times; unflushed \
+         peak {peak} of {} bytes",
         latencies.len(),
         unflushed.max_unflushed_bytes
     );
