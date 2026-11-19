@@ -544,155 +544,207 @@ async fn clock_relative_filters_read_range_indexes_as_a_scan_does() {
     }
 }
 
-/// Text is never read as a datetime, so comparing it with a stored datetime
-/// fails with a type error naming the conversion, in Cypher and SQL, rather
-/// than silently matching nothing. A scan raises it at the first such pair.
-/// An index lookup returns only values of the lookup's type, except that text
-/// which reads as a datetime also looks up that datetime (an equality, a
-/// member, a range bound), so a node holding it reaches the same comparison.
+/// Text is never read as a datetime, so a stored datetime compared with text
+/// is unknown, as a comparison with null is: no equality, inequality, range,
+/// membership, text match, simple CASE, pattern property or join matches the
+/// pair, and none fails. Each query returns the same rows with no index, an
+/// equality or a range index on the property, or an index on another
+/// property, in Cypher and SQL, and the index plans read no datetime the text
+/// may name. Only operands whose types are both known, parameters included,
+/// fail, before anything runs.
 #[tokio::test]
-async fn text_never_compares_with_stored_datetimes() {
+async fn text_never_matches_stored_datetimes_whatever_the_indexes() {
     use cypher::sql::request::Request;
     let scanned = database().await;
     let equality = database().await;
     let range = database().await;
-    for db in [&scanned, &equality, &range] {
+    let other = database().await;
+    let dbs = [
+        ("scan", &scanned),
+        ("equality", &equality),
+        ("range", &range),
+        ("other", &other),
+    ];
+    for (_, db) in dbs {
         events(db).await;
         read(db, "CREATE (:Query {text: '2023-11-15T01:13:20Z'})").await;
     }
     create_index(&equality, index::IndexSpec::node_equality("Event", "at")).await;
     create_index(&range, index::IndexSpec::node_range("Event", "at")).await;
-    let dbs = [
-        ("scan", &scanned),
-        ("equality", &equality),
-        ("range", &range),
-    ];
-    let compared = |error: r::QueryError, query: &str| {
-        assert_eq!(
-            (error.category.as_str(), error.detail.as_str()),
-            (r::category::TYPE_ERROR, r::detail::DATETIME_TEXT_COMPARISON),
-            "{query}: {error}"
-        );
-        assert!(
-            error.message.contains("datetime('…')") || error.message.contains("toString("),
-            "{query}: {}",
-            error.message
-        );
-        error.phase
+    create_index(&other, index::IndexSpec::node_equality("Event", "seq")).await;
+    let text = || Q::String("2023-11-15T01:13:20Z".into());
+    let parameters = || {
+        [
+            ("text", text()),
+            ("texts", Q::Array(vec![Q::String("x".into()), text()])),
+            ("at", Q::DateTime(BASE + 3 * HOUR)),
+        ]
     };
+    let none = Vec::<Vec<Value>>::new;
     // '2023-11-15T01:13:20Z' is seq 3's instant.
-    for (query, phase, parameters) in [
+    let cases = [
+        // Equality, either way round, from a literal, a parameter or a
+        // pattern property, never matches, and nor does its negation.
         (
             "MATCH (e:Event) WHERE e.at = '2023-11-15T01:13:20Z' RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
+            none(),
         ),
         (
-            "MATCH (e:Event {at: '2023-11-15 01:13:20'}) RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
-        ),
-        (
-            "MATCH (e:Event) WHERE e.at IN ['x', '2023-11-15T01:13:20.000Z'] RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
+            "MATCH (e:Event) WHERE '2023-11-15T01:13:20.000Z' = e.at RETURN e.seq",
+            none(),
         ),
         (
             "MATCH (e:Event) WHERE e.at <> '2023-11-15T01:13:20Z' RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
+            none(),
         ),
         (
+            "MATCH (e:Event) WHERE NOT e.at = 'soon' RETURN e.seq",
+            none(),
+        ),
+        (
+            "MATCH (e:Event {at: '2023-11-15 01:13:20'}) RETURN e.seq",
+            none(),
+        ),
+        ("MATCH (e:Event) WHERE e.at = $text RETURN e.seq", none()),
+        ("MATCH (e:Event {at: $text}) RETURN e.seq", none()),
+        // Ranges.
+        (
             "MATCH (e:Event) WHERE e.at >= '2023-11-15T01:13:20Z' RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
+            none(),
         ),
         (
             "MATCH (e:Event) WHERE e.at < '2023-11-15' RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
+            none(),
         ),
         (
-            "MATCH (e:Event) WHERE e.at = $text RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![("text", Q::String("2023-11-15T01:13:20Z".into()))],
+            "MATCH (e:Event) WHERE e.at > '2023' AND e.at < '2024' RETURN e.seq",
+            none(),
         ),
+        ("MATCH (e:Event) WHERE e.at <= $text RETURN e.seq", none()),
+        // Membership.
+        (
+            "MATCH (e:Event) WHERE e.at IN ['x', '2023-11-15T01:13:20.000Z'] RETURN e.seq",
+            none(),
+        ),
+        ("MATCH (e:Event) WHERE e.at IN $texts RETURN e.seq", none()),
+        (
+            "MATCH (e:Event) WHERE NOT e.at IN ['x'] RETURN e.seq",
+            none(),
+        ),
+        // Text matches.
         (
             "MATCH (e:Event) WHERE e.at STARTS WITH '2023-11-15' RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
+            none(),
         ),
         (
-            "MATCH (e:Event) WHERE e.at CONTAINS 'T01' RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
+            "MATCH (e:Event) WHERE e.at CONTAINS 'T01' OR e.at ENDS WITH 'Z' RETURN e.seq",
+            none(),
+        ),
+        // Another conjunct an index may answer leaves the comparison as a
+        // residual, which still never matches, while OR may still match.
+        (
+            "MATCH (e:Event) WHERE e.at = 'soon' AND e.seq = 3 RETURN e.seq",
+            none(),
         ),
         (
-            "MATCH (e:Event {seq: 3}) RETURN CASE e.at WHEN '2023-11-15T01:13:20Z' THEN 1 END",
-            r::ErrorPhase::Runtime,
-            vec![],
+            "MATCH (e:Event) WHERE e.seq = 3 AND e.at < '2023-11-16' RETURN e.seq",
+            none(),
         ),
         (
-            "MATCH (e:Event {seq: 3}) RETURN [e.at] = ['2023-11-15T01:13:20Z']",
-            r::ErrorPhase::Runtime,
-            vec![],
+            "MATCH (e:Event) WHERE e.seq = 3 AND NOT e.at = 'soon' RETURN e.seq",
+            none(),
         ),
-        // A correlated lookup and a join compare stored values with each other.
+        (
+            "MATCH (e:Event) WHERE e.seq IN [3, 4] AND e.at STARTS WITH '2023' RETURN e.seq",
+            none(),
+        ),
+        (
+            "MATCH (e:Event {seq: 3}) WHERE e.at = '2023-11-15T01:13:20Z' RETURN e.seq",
+            none(),
+        ),
+        (
+            "MATCH (e:Event) WHERE e.seq = 3 AND (e.at = 'soon' OR e.tag = 'odd') RETURN e.seq",
+            seqs([3]),
+        ),
+        // A simple CASE and comparisons nested in lists and maps.
+        (
+            "MATCH (e:Event {seq: 3}) \
+             RETURN CASE e.at WHEN '2023-11-15T01:13:20Z' THEN 1 ELSE 0 END",
+            vec![vec![json!(0)]],
+        ),
+        (
+            "MATCH (e:Event {seq: 3}) RETURN [e.at] = ['2023-11-15T01:13:20Z'], \
+             {at: e.at} <> {at: 'x'}, e.at IN ['x'], [e.at] < ['x']",
+            vec![vec![Value::Null, Value::Null, Value::Null, Value::Null]],
+        ),
+        // A correlated lookup and joins compare stored values with each other.
         (
             "MATCH (q:Query) MATCH (e:Event {at: q.text}) RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
+            none(),
         ),
         (
             "MATCH (q:Query), (e:Event) WHERE e.at = q.text RETURN e.seq",
-            r::ErrorPhase::Runtime,
-            vec![],
-        ),
-        // Known types fail before anything runs.
-        (
-            "RETURN datetime() > '2000-01-01'",
-            r::ErrorPhase::Compile,
-            vec![],
+            none(),
         ),
         (
-            "MATCH (e:Event) WHERE datetime('2024-01-01') = '2024-01-01' RETURN e.seq",
-            r::ErrorPhase::Compile,
-            vec![],
+            "MATCH (q:Query), (e:Event) WHERE e.at <> q.text RETURN count(*)",
+            vec![vec![json!(0)]],
         ),
-    ] {
+        // The forms that read the text as a datetime, or the datetime as
+        // text, compare as intended.
+        (
+            "MATCH (e:Event) WHERE e.at = datetime('2023-11-15T01:13:20Z') RETURN e.seq",
+            seqs([3]),
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at = datetime($text) RETURN e.seq",
+            seqs([3]),
+        ),
+        (
+            "MATCH (e:Event) WHERE toString(e.at) STARTS WITH '2023-11-15T01' RETURN e.seq",
+            seqs([3]),
+        ),
+        (
+            "MATCH (q:Query) MATCH (e:Event {at: datetime(q.text)}) RETURN e.seq",
+            seqs([3]),
+        ),
+    ];
+    for (query, expected) in &cases {
         for (name, db) in dbs {
-            let mut request = cypher::Request::new(query);
-            request.parameters = parameters
-                .iter()
-                .cloned()
-                .map(|(k, v)| (k.to_owned(), v))
-                .collect();
-            let error = query_error(db, request).await;
-            assert_eq!(compared(error, query), phase, "{name}: {query}");
+            assert_eq!(
+                &rows(db, request(query, parameters())).await,
+                expected,
+                "{name}: {query}"
+            );
         }
     }
-    // Each index path also reads the datetime the text names.
-    for (db, query) in [
+    // The index plans are the plain lookups by text: no union with a lookup
+    // of the datetime the text names.
+    for (db, query, expected) in [
         (
             &equality,
             "MATCH (e:Event) WHERE e.at = '2023-11-15T01:13:20Z' RETURN e.seq",
-        ),
-        (
-            &equality,
-            "MATCH (e:Event) WHERE e.at IN ['x', '2023-11-15T01:13:20.000Z'] RETURN e.seq",
+            "Bitmap",
         ),
         (
             &range,
             "MATCH (e:Event) WHERE e.at = '2023-11-15T01:13:20Z' RETURN e.seq",
+            "RangeIndex",
         ),
         (
             &range,
             "MATCH (e:Event) WHERE e.at < '2023-11-15' RETURN e.seq",
+            "RangeIndex",
+        ),
+        (
+            &other,
+            "MATCH (e:Event) WHERE e.at = 'soon' AND e.seq = 3 RETURN e.seq",
+            "Bitmap",
         ),
     ] {
         assert_eq!(
             access(db, cypher::Request::new(query)).await,
-            "SecondarySet",
+            expected,
             "{query}"
         );
         let explanation = db
@@ -703,48 +755,125 @@ async fn text_never_compares_with_stored_datetimes() {
             panic!("an access step");
         };
         let plan = format!("{:?}", step.op);
-        assert!(plan.contains("DateTime("), "{query}: {plan}");
+        assert!(
+            !plan.contains("DateTime(") && !plan.contains("Union"),
+            "{query}: {plan}"
+        );
     }
-    for (name, db) in dbs {
-        for query in [
+    // Operands whose types are both known, a bound parameter's among them,
+    // fail before anything runs, naming the conversion.
+    for query in [
+        "RETURN datetime() > '2000-01-01'",
+        "MATCH (e:Event) WHERE datetime('2024-01-01') = '2024-01-01' RETURN e.seq",
+        "MATCH (e:Event) WHERE e.seq = 3 AND $at = '2023-11-15T01:13:20Z' RETURN e.seq",
+        "MATCH (e:Event) WHERE datetime() >= $text RETURN e.seq",
+        "RETURN $at STARTS WITH '2023'",
+        "RETURN $at = $text",
+    ] {
+        for (name, db) in dbs {
+            let error = query_error(db, request(query, parameters())).await;
+            assert_eq!(
+                (error.category.as_str(), error.detail.as_str(), error.phase),
+                (
+                    r::category::TYPE_ERROR,
+                    r::detail::DATETIME_TEXT_COMPARISON,
+                    r::ErrorPhase::Compile
+                ),
+                "{name}: {query}: {error}"
+            );
+            assert!(error.message.contains("datetime('…')"), "{}", error.message);
+        }
+    }
+    // SQL compares as Cypher does.
+    let sql = |query: &str, parameters: Vec<Q>| {
+        let mut request = Request::new(query);
+        request.parameters = parameters
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| ((index + 1).to_string(), value))
+            .collect();
+        request
+    };
+    for (query, parameters, expected) in [
+        (
             "SELECT e.seq FROM Event e WHERE e.at = '2023-11-15 01:13:20'",
+            vec![],
+            none(),
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE e.at <> '2023-11-15 01:13:20'",
+            vec![],
+            none(),
+        ),
+        (
             "SELECT e.seq FROM Event e WHERE e.at BETWEEN '2023-11-15' AND '2023-11-16'",
-        ] {
-            let Err(cypher::Error::Query(error)) = db.sql(Request::new(query)).await else {
-                panic!("{name}: {query} compares text with datetimes");
-            };
-            compared(error, query);
+            vec![],
+            none(),
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE e.at IN ('x', '2023-11-15T01:13:20Z')",
+            vec![],
+            none(),
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE e.seq = 3 AND e.at < '2023-11-16'",
+            vec![],
+            none(),
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE e.at = ?",
+            vec![text()],
+            none(),
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE e.at LIKE '2023%'",
+            vec![],
+            none(),
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE e.at = TIMESTAMP '2023-11-15 01:13:20'",
+            vec![],
+            seqs([3]),
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE e.at = CAST(? AS TIMESTAMP)",
+            vec![text()],
+            seqs([3]),
+        ),
+    ] {
+        for (name, db) in dbs {
+            let response = db
+                .sql(sql(query, parameters.clone()))
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {query}: {error:?}"));
+            assert_eq!(response.rows, expected, "{name}: {query}");
         }
-        // The forms that read the text as a datetime, or the datetime as
-        // text, compare as intended.
-        for query in [
-            "MATCH (e:Event) WHERE e.at = datetime('2023-11-15T01:13:20Z') RETURN e.seq",
-            "MATCH (e:Event) WHERE toString(e.at) STARTS WITH '2023-11-15T01' RETURN e.seq",
-            "MATCH (q:Query) MATCH (e:Event {at: datetime(q.text)}) RETURN e.seq",
-        ] {
-            assert_eq!(read(db, query).await, seqs([3]), "{name}: {query}");
-        }
-        let sql = db
-            .sql(Request::new(
-                "SELECT e.seq FROM Event e WHERE e.at = TIMESTAMP '2023-11-15 01:13:20'",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(sql.rows, seqs([3]), "{name}");
     }
-    // Text naming no stored instant: a scan still compares it with each
-    // datetime and fails, while an index returns only what it holds, here
-    // nothing, as it reads no node whose value is of another type.
-    let elsewhere = "MATCH (e:Event) WHERE e.at = '2023-11-15T01:00:00Z' RETURN e.seq";
-    compared(
-        query_error(&scanned, cypher::Request::new(elsewhere)).await,
-        elsewhere,
-    );
-    assert_eq!(read(&equality, elsewhere).await, seqs([]));
-    assert_eq!(read(&range, elsewhere).await, seqs([]));
+    for (query, parameters) in [
+        (
+            "SELECT e.seq FROM Event e WHERE TIMESTAMP '2024-01-01' = '2024-01-01'",
+            vec![],
+        ),
+        (
+            "SELECT e.seq FROM Event e WHERE CURRENT_TIMESTAMP > ?",
+            vec![text()],
+        ),
+    ] {
+        for (name, db) in dbs {
+            let Err(cypher::Error::Query(error)) = db.sql(sql(query, parameters.clone())).await
+            else {
+                panic!("{name}: {query} compares a datetime with text");
+            };
+            assert_eq!(
+                (error.detail.as_str(), error.phase),
+                (r::detail::DATETIME_TEXT_COMPARISON, r::ErrorPhase::Compile),
+                "{name}: {query}"
+            );
+        }
+    }
     // An untyped SET stores text, as the store is schemaless. The property
-    // then holds datetimes and text, and every comparison that meets the
-    // pair fails as above: the scan does; an index reads only its own type.
+    // then holds datetimes and text: datetimes compare with datetimes, text
+    // with text, and neither with the other, whatever the indexes.
     for (_, db) in dbs {
         read(
             db,
@@ -756,14 +885,61 @@ async fn text_never_compares_with_stored_datetimes() {
             vec![vec![json!("2023-11-15T01:13:20Z")]]
         );
     }
-    let by_datetime = "MATCH (e:Event) WHERE e.at = datetime('2023-11-15T02:13:20Z') RETURN e.seq";
-    compared(
-        query_error(&scanned, cypher::Request::new(by_datetime)).await,
-        by_datetime,
-    );
-    assert_eq!(read(&equality, by_datetime).await, seqs([4]));
-    assert_eq!(read(&range, by_datetime).await, seqs([4]));
-    for db in [scanned, equality, range] {
+    for (query, expected) in [
+        (
+            "MATCH (e:Event) WHERE e.at = datetime('2023-11-15T02:13:20Z') RETURN e.seq",
+            seqs([4]),
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at < datetime('2023-11-15T02:00:00Z') \
+             RETURN e.seq ORDER BY e.seq",
+            seqs([0, 1, 2]),
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at <> datetime('2023-11-15T02:13:20Z') \
+             RETURN e.seq ORDER BY e.seq",
+            seqs([0, 1, 2, 5, 6, 7, 8, 9]),
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at = '2023-11-15T01:13:20Z' RETURN e.seq",
+            seqs([3]),
+        ),
+        ("MATCH (e:Event) WHERE e.at >= '2023' RETURN e.seq", seqs([3])),
+        (
+            "MATCH (e:Event) WHERE e.at <> '2023-11-15T01:13:20Z' RETURN e.seq",
+            none(),
+        ),
+        (
+            "MATCH (e:Event) WHERE e.at IN ['2023-11-15T01:13:20Z', datetime('2023-11-15T02:13:20Z')] \
+             RETURN e.seq ORDER BY e.seq",
+            seqs([3, 4]),
+        ),
+        (
+            "MATCH (e:Event) WHERE e.seq IN [3, 4] AND e.at = '2023-11-15T01:13:20Z' RETURN e.seq",
+            seqs([3]),
+        ),
+        (
+            "MATCH (e:Event) WHERE e.seq IN [3, 4] AND e.at < datetime() RETURN e.seq",
+            seqs([4]),
+        ),
+        (
+            "MATCH (q:Query), (e:Event) WHERE e.at = q.text RETURN e.seq",
+            seqs([3]),
+        ),
+        (
+            "MATCH (q:Query) MATCH (e:Event {at: q.text}) RETURN e.seq",
+            seqs([3]),
+        ),
+        (
+            "MATCH (e:Event) RETURN e.seq ORDER BY e.at DESC LIMIT 2",
+            seqs([3, 9]),
+        ),
+    ] {
+        for (name, db) in dbs {
+            assert_eq!(read(db, query).await, expected, "{name}: {query}");
+        }
+    }
+    for db in [scanned, equality, range, other] {
         db.close().await.unwrap();
     }
 }
