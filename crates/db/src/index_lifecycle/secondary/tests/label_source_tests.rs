@@ -426,8 +426,11 @@ async fn a_label_of_large_rows_scans_about_one_input_limit_a_step() {
     )
     .await;
     assert_eq!(end, CommittedOperationStep::Completed);
-    // Fifteen rows of 512 KiB fit 8 MiB: forty rows take three steps.
-    assert_eq!(scan_steps, 3);
+    // The label's rows fill half their range, so steps scan it, and the
+    // other label's rows between them count towards the limit as the
+    // prefix scan's did: sixteen rows of 512 KiB reach 8 MiB, eight of them
+    // the label's, so forty rows take five steps.
+    assert_eq!(scan_steps, 5);
     assert_generation_equals_source(&db, scope, &definition, index_id, generation, &sources).await;
     db.close().await.expect("database closes");
 }
