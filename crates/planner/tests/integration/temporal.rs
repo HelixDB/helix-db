@@ -150,34 +150,30 @@ fn mixed_domain_comparisons_match_string_against_integer() {
     }
 }
 
-/// Text is never read as a datetime, so comparing the two is a type error
-/// wherever they meet: every comparison and text match, membership, a simple
-/// CASE, and inside lists and maps. Null still compares as unknown.
+/// Text is never read as a datetime, so a datetime and text compare as
+/// unknown wherever they meet, as a comparison with null does: every
+/// comparison and text match, membership, a simple CASE, and inside lists and
+/// maps. No such comparison fails or matches, under `=` or `<>` alike.
 #[test]
-fn datetimes_and_text_never_compare() {
+fn datetimes_and_text_compare_as_unknown() {
     use r::Binary as B;
-    let failure = |op: B, left: V, right: V| {
-        let error = eval(&E::Binary(
-            op,
-            Box::new(E::Literal(left.clone())),
-            Box::new(E::Literal(right.clone())),
-        ))
-        .unwrap_err();
+    let unknown = |op: B, left: V, right: V| {
         assert_eq!(
-            (error.category.as_str(), error.detail.as_str(), error.phase),
-            (
-                r::category::TYPE_ERROR,
-                r::detail::DATETIME_TEXT_COMPARISON,
-                r::ErrorPhase::Runtime
-            ),
+            binary(op, left.clone(), right.clone()),
+            V::Null,
             "{op:?} {left:?} {right:?}"
         );
-        // The message names the conversion that would make the comparison.
-        assert!(
-            error.message.contains("datetime('…')") || error.message.contains("toString("),
-            "{}",
-            error.message
-        );
+        // NOT of unknown is unknown, so the negation never matches either.
+        let negated = eval(&E::Unary(
+            r::Unary::Not,
+            Box::new(E::Binary(
+                op,
+                Box::new(E::Literal(left.clone())),
+                Box::new(E::Literal(right.clone())),
+            )),
+        ))
+        .unwrap();
+        assert_eq!(negated, V::Null, "NOT {op:?} {left:?} {right:?}");
     };
     let text = || V::String("1970-01-01T00:00:00.001Z".into());
     let unreadable = || V::String("soon".into());
@@ -193,29 +189,45 @@ fn datetimes_and_text_never_compare() {
         B::Contains,
     ] {
         for other in [text(), unreadable(), V::String(String::new())] {
-            failure(op, V::DateTime(1), other.clone());
-            failure(op, other, V::DateTime(1));
+            unknown(op, V::DateTime(1), other.clone());
+            unknown(op, other, V::DateTime(1));
         }
     }
     for op in [B::Equal, B::NotEqual, B::Less, B::GreaterEqual] {
-        failure(op, V::List(vec![V::DateTime(1)]), V::List(vec![text()]));
-        failure(
+        unknown(op, V::List(vec![V::DateTime(1)]), V::List(vec![text()]));
+        unknown(
             op,
             V::List(vec![V::Integer(1), text()]),
             V::List(vec![V::Integer(1), V::DateTime(1)]),
         );
     }
     let map = |value: V| V::Map(BTreeMap::from([("at".to_owned(), value)]));
-    failure(B::Equal, map(V::DateTime(1)), map(text()));
-    failure(B::In, V::DateTime(1), V::List(vec![V::Integer(1), text()]));
-    failure(B::In, text(), V::List(vec![V::DateTime(1)]));
-    // A comparison that never reaches the pair does not fail: lists of other
-    // lengths are unequal, and an earlier element decides the order.
+    unknown(B::Equal, map(V::DateTime(1)), map(text()));
+    unknown(B::NotEqual, map(V::DateTime(1)), map(text()));
+    unknown(B::In, V::DateTime(1), V::List(vec![V::Integer(1), text()]));
+    unknown(B::In, text(), V::List(vec![V::DateTime(1)]));
+    unknown(
+        B::In,
+        V::List(vec![V::DateTime(1)]),
+        V::List(vec![V::List(vec![text()])]),
+    );
+    // Another member or element still decides, as it does past a null: lists
+    // of other lengths are unequal, an unequal element makes the lists
+    // unequal, an earlier element decides the order, and an equal member is
+    // found.
     assert_eq!(
         binary(
             B::Equal,
             V::List(vec![V::DateTime(1)]),
             V::List(vec![text(), text()])
+        ),
+        V::Boolean(false)
+    );
+    assert_eq!(
+        binary(
+            B::Equal,
+            V::List(vec![V::DateTime(1), V::Integer(1)]),
+            V::List(vec![text(), V::Integer(2)])
         ),
         V::Boolean(false)
     );
@@ -228,7 +240,7 @@ fn datetimes_and_text_never_compare() {
         V::Boolean(true)
     );
     assert_eq!(
-        binary(B::In, V::DateTime(1), V::List(vec![V::DateTime(1), text()])),
+        binary(B::In, V::DateTime(1), V::List(vec![text(), V::DateTime(1)])),
         V::Boolean(true)
     );
     for op in [B::Equal, B::Less, B::StartsWith] {
@@ -244,11 +256,12 @@ fn datetimes_and_text_never_compare() {
             )),
             otherwise: E::Literal(V::Integer(0)),
         })))
+        .unwrap()
     };
-    let error = case(V::DateTime(1), text()).unwrap_err();
-    assert_eq!(error.detail, r::detail::DATETIME_TEXT_COMPARISON);
-    assert_eq!(case(V::DateTime(1), V::DateTime(1)).unwrap(), V::Integer(1));
-    assert_eq!(case(V::DateTime(1), V::Integer(1)).unwrap(), V::Integer(0));
+    assert_eq!(case(V::DateTime(1), text()), V::Integer(0));
+    assert_eq!(case(text(), V::DateTime(1)), V::Integer(0));
+    assert_eq!(case(V::DateTime(1), V::DateTime(1)), V::Integer(1));
+    assert_eq!(case(V::DateTime(1), V::Integer(1)), V::Integer(0));
 }
 
 #[test]
@@ -672,7 +685,7 @@ fn static_types_follow_datetime_values() {
     .unwrap_err();
     assert_eq!(error.phase, r::ErrorPhase::Compile);
     // A datetime against text fails before anything runs when both types
-    // are known, and runs, to fail on the values, when either is not.
+    // are known, and runs, to compare as unknown, when either is not.
     for op in [r::Binary::Less, r::Binary::Equal, r::Binary::Contains] {
         for (left, right) in [
             (
@@ -705,6 +718,76 @@ fn static_types_follow_datetime_values() {
             r::ValueType::Boolean
         );
     }
+    // So does an IN member, written out or a literal list, or a simple CASE's
+    // WHEN value against its subject, in either order; a member or WHEN value
+    // of unknown type, or a list of unknown members, runs.
+    let text = || E::Literal(V::String("x".into()));
+    let clock = || E::Function(F::DateTime, vec![]);
+    let member = |value: E, list: E| E::Binary(r::Binary::In, Box::new(value), Box::new(list));
+    let case = |operand: E, comparisons: Vec<E>| {
+        E::SimpleCase(Box::new(r::SimpleCase {
+            operand,
+            branches: helix_planner::ir::AtLeast::try_from_vec(
+                comparisons
+                    .into_iter()
+                    .map(|comparison| (comparison, E::Literal(V::Integer(1))))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+            otherwise: E::Literal(V::Null),
+        }))
+    };
+    for expression in [
+        member(clock(), E::List(vec![E::Literal(V::Integer(1)), text()])),
+        member(text(), E::List(vec![clock()])),
+        member(
+            clock(),
+            E::Literal(V::List(vec![V::Null, V::String("x".into())])),
+        ),
+        member(text(), E::Literal(V::List(vec![V::DateTime(1)]))),
+        case(clock(), vec![E::Literal(V::Integer(1)), text()]),
+        case(text(), vec![clock()]),
+    ] {
+        let error = infer(expression.clone()).unwrap_err();
+        assert_eq!(
+            (error.detail.as_str(), error.phase),
+            (r::detail::DATETIME_TEXT_COMPARISON, r::ErrorPhase::Compile),
+            "{expression:?}"
+        );
+    }
+    for (expression, expected) in [
+        (
+            member(clock(), E::List(vec![E::Parameter("p".into()), clock()])),
+            r::ValueType::Boolean,
+        ),
+        (
+            member(clock(), E::Parameter("p".into())),
+            r::ValueType::Boolean,
+        ),
+        (
+            member(text(), E::Literal(V::List(vec![V::Null]))),
+            r::ValueType::Boolean,
+        ),
+        (
+            case(clock(), vec![E::Parameter("p".into())]),
+            r::ValueType::Integer,
+        ),
+        (
+            case(E::Parameter("p".into()), vec![text(), clock()]),
+            r::ValueType::Integer,
+        ),
+    ] {
+        assert_eq!(
+            infer(expression.clone()).unwrap(),
+            expected,
+            "{expression:?}"
+        );
+    }
+    // A non-list IN operand of known type is still rejected as before.
+    assert_eq!(
+        infer(member(clock(), text())).unwrap_err().detail,
+        r::detail::INVALID_ARGUMENT_TYPE
+    );
     // Conversions that are null where they cannot convert accept any type.
     for (function, expected) in [
         (F::ToStringOrNull, r::ValueType::String),

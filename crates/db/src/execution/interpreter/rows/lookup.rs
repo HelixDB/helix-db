@@ -86,13 +86,6 @@ impl Probe {
         if lookup.matches == r::LookupMatch::Member {
             return Self::members(context, lookup, probe).await;
         }
-        // Text that reads as a datetime also looks up the datetime it names,
-        // as a member list does, so a node holding it reaches the pattern's
-        // comparison, which fails as a scan's does.
-        if matches!(probe, r::Value::String(text) if r::parse_datetime(text).is_ok()) {
-            let _list = context.row_budget().reserve(probe.allocated_bytes())?;
-            return Self::members(context, lookup, &r::Value::List(vec![probe.clone()])).await;
-        }
         let string_bytes = match probe {
             r::Value::Null => return Ok(Self::Empty),
             r::Value::String(value) => value.len(),
@@ -169,8 +162,7 @@ impl Probe {
     /// Candidates for every member of a probe list, read through one batched
     /// lookup. Null and NaN members select nothing. A member the index cannot
     /// answer exactly, such as a list or a string too large to index, scans
-    /// the source instead. Text that reads as a datetime also looks up the
-    /// datetime it names, for the pattern's comparison to reject.
+    /// the source instead.
     async fn members(
         context: &ExecutionContext<'_>,
         lookup: &r::PatternLookup,
@@ -201,10 +193,7 @@ impl Probe {
                         .saturating_add(2 * size_of::<exec::ExecIndexedEqualityValue>())
                         .saturating_add(2 * size_of::<Member<'_>>())
                         .saturating_add(match member {
-                            // Its text and the datetime it may name.
-                            r::Value::String(value) => (2 * value.len())
-                                .saturating_add(2 * size_of::<exec::ExecIndexedEqualityValue>())
-                                .saturating_add(2 * size_of::<Member<'_>>()),
+                            r::Value::String(value) => 2 * value.len(),
                             r::Value::Null
                             | r::Value::Boolean(_)
                             | r::Value::Integer(_)
@@ -227,18 +216,9 @@ impl Probe {
             String(&'a str),
             DateTime(i64),
         }
-        let datetimes = members
-            .iter()
-            .filter_map(|member| {
-                let r::Value::String(text) = member else {
-                    return None;
-                };
-                r::parse_datetime(text).ok().map(r::Value::DateTime)
-            })
-            .collect::<Vec<_>>();
-        let mut seen = std::collections::HashSet::with_capacity(members.len() + datetimes.len());
-        let mut literals = Vec::with_capacity(members.len() + datetimes.len());
-        for member in members.iter().chain(&datetimes) {
+        let mut seen = std::collections::HashSet::with_capacity(members.len());
+        let mut literals = Vec::with_capacity(members.len());
+        for member in members {
             let (value, key) = match member {
                 r::Value::Null => continue,
                 r::Value::Boolean(value) => (P::Bool(*value), Member::Boolean(*value)),

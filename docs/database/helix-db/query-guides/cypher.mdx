@@ -448,8 +448,8 @@ equality index holds and an equality such as
 - Datetimes compare in time order. Against any type other than text, `=` is
   false and `<`, `>`, `<=`, `>=` are null, as for a string against a number.
   Against text, every comparison, `IN`, `CASE` match, and `STARTS WITH`,
-  `ENDS WITH`, or `CONTAINS` fails with `type_error`
-  (`datetime_text_comparison`); see below. `ORDER BY` places datetimes after
+  `ENDS WITH`, or `CONTAINS` is null, so it never matches; see below.
+  `ORDER BY` places datetimes after
   paths and before strings. `min`, `max`, `DISTINCT`, and grouping work on
   datetimes; `sum`, `avg`, and arithmetic reject them.
 - Fields read UTC components as integers: `dt.year`, `dt.quarter`,
@@ -474,28 +474,37 @@ not read that text back; use `datetime({epochMillis: n})`. Past about
 calendar field fails with `argument_error` (`datetime_out_of_range`), as a
 native response does.
 
-Text is never read as a datetime, so comparing a datetime with text fails
-with `type_error` (`datetime_text_comparison`) instead of silently matching
-nothing. A filter such as `e.at > '2026-01-01'`, or `e.at >= $since` with a
-string parameter, fails as soon as it compares a stored datetime; read the
-text first with `datetime('2026-01-01')` or `datetime($since)`, or compare
-`toString(e.at)` as text. When both sides' types are known, such as
-`datetime() > '2026-01-01'`, the error comes before anything runs.
+Text is never read as a datetime, so a datetime compared with text is null,
+as a comparison with null is, and never matches. A filter such as
+`e.at > '2026-01-01'`, `e.at = '2026-01-01T00:00:00Z'`, or `e.at >= $since`
+with a string parameter matches no node whose `at` is a datetime, and nor
+does `e.at <> '…'` or `NOT e.at = '…'`; read the text first with
+`datetime('2026-01-01')` or `datetime($since)`, or compare `toString(e.at)`
+as text. The same holds at any depth inside lists and maps, for pattern
+properties such as `{at: '…'}`, and for joins and lookups that compare two
+stored values. Indexes never change the result: a scan, an equality or range
+index on the property, and an index on another property in the same `WHERE`
+all return the same rows.
 
-A scan compares every candidate, so it fails at the first datetime it meets.
-An index lookup reads only values of its own type, so a lookup by text does not
-read stored datetimes, except one: text that reads as a datetime also looks up
-the datetime it names, through an equality, an `IN` list, a range bound, or a
-correlated lookup, and a node holding it fails the same comparison. Querying a
-converted property with its old text therefore fails on both paths. Text that
-names no stored instant matches only text through an index.
+When both types are known before the query runs, it fails instead, with
+`type_error` (`datetime_text_comparison`). This applies to a comparison or
+text match (`datetime() > '2026-01-01'`), an `IN` member
+(`datetime() IN ['2026-01-01']`), and a simple `CASE` value against its
+subject (`CASE datetime() WHEN '2026-01-01' THEN …`). A parameter's type is
+known from its bound value when the parameter is compared directly
+(`$at = '…'`), through a property of a map parameter (`$obj.at`), or through a
+variable set from either (`WITH $at AS a`). Each member of a list parameter is
+checked the same way, so `datetime() IN $texts` fails too. A written-out list or
+`CASE` that mixes datetimes and text fails even when an earlier member matches.
+Any other operand built from a
+parameter, such as `UNWIND $dates AS d` or `coalesce($at, …)`, runs and
+compares as null.
 
 The store has no schema, so a `SET` of text, such as
 `SET e.at = '2026-06-01T00:00:00Z'`, stores text even where the property
 otherwise holds datetimes. Comparisons over such a mixed property follow the
-same rule: a scan with a datetime fails when it meets the text, and one with
-text fails when it meets a datetime, while an index lookup reads only its own
-type. Write `SET e.at = datetime('…')` to keep the property one type.
+same rule: a datetime matches only datetimes and text only text. Write
+`SET e.at = datetime('…')` to keep the property one type.
 
 ```cypher
 MATCH (e:Event)

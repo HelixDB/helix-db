@@ -555,24 +555,24 @@ fn property_hydration_excludes_identity_and_unused_bindings() {
 
 #[test]
 fn numeric_predicate_equality_is_separate_from_grouping() {
-    assert_eq!(r::Value::Null.equals(&r::Value::Null), Ok(None));
+    assert_eq!(r::Value::Null.equals(&r::Value::Null), None);
     assert!(r::Value::Null.total_cmp(&r::Value::Null).is_eq());
     assert_eq!(
         r::Value::Float(f64::NAN).equals(&r::Value::Float(f64::NAN)),
-        Ok(Some(false))
+        Some(false)
     );
     assert_eq!(
         r::Value::Integer(i64::MAX).equals(&r::Value::Float(i64::MAX as f64)),
-        Ok(Some(false))
+        Some(false)
     );
     assert_eq!(
         r::Value::Integer(9_007_199_254_740_993).equals(&r::Value::Float(9_007_199_254_740_992.0)),
-        Ok(Some(false))
+        Some(false)
     );
     assert_eq!(
         r::Value::List(vec![r::Value::Null, r::Value::Integer(1)])
             .equals(&r::Value::List(vec![r::Value::Null, r::Value::Integer(2)])),
-        Ok(Some(false))
+        Some(false)
     );
 }
 

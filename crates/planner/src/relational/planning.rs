@@ -352,7 +352,6 @@ fn plan_accesses(
                     .collect::<Vec<_>>();
                 let mut memberships = Vec::new();
                 let mut ranges = Vec::new();
-                let mut datetime_ranges = Vec::new();
                 let range_index = |property: &str| {
                     [
                         helix_ast::index::RangeIndexDirection::Asc,
@@ -374,8 +373,7 @@ fn plan_accesses(
                 if let Some(predicate) = total_predicate {
                     collect_equalities(predicate, node.slot, &mut equalities);
                     collect_memberships(predicate, node.slot, &mut memberships);
-                    collect_ranges(predicate, node.slot, ctx, false, &mut ranges);
-                    collect_ranges(predicate, node.slot, ctx, true, &mut datetime_ranges);
+                    collect_ranges(predicate, node.slot, ctx, &mut ranges);
                 }
                 let mut exact = BTreeSet::new();
                 let mut unique = false;
@@ -397,75 +395,48 @@ fn plan_accesses(
                     else {
                         continue;
                     };
-                    // Text that reads as a datetime also looks up the datetime
-                    // it names, so a node holding that datetime reaches the
-                    // residual comparison, which fails as a scan's does, rather
-                    // than the index silently leaving it out.
-                    let datetime = match &value {
-                        helix_ast::value::PropertyValue::String(text) => parse_datetime(text)
-                            .ok()
-                            .map(helix_ast::value::PropertyValue::DateTime),
-                        _ => None,
-                    };
-                    let lookups = |lookup: &dyn Fn(
-                        helix_ast::value::PropertyValue,
-                    )
-                        -> Option<ir::NodeAccessPlan>| {
-                        let first = lookup(value.clone())?;
-                        let Some(datetime) = datetime.clone() else {
-                            return Some(first);
-                        };
-                        Some(ir::NodeAccessPlan::Union(ir::AtLeast::from_pair(
-                            ir::NodeAccessSourcePlan::from_unfiltered(first),
-                            ir::NodeAccessSourcePlan::from_unfiltered(lookup(datetime)?),
-                        )))
-                    };
                     let Some(index) = ctx.indexes.node_eq.get(&key) else {
                         // A range index orders every indexable value, so the
                         // closed range [v, v] holds the nodes equal to v.
-                        let Some((key, index)) = range_index(&property) else {
-                            continue;
-                        };
-                        let point = lookups(&|value| {
-                            if matches!(&value, helix_ast::value::PropertyValue::String(text)
-                                if text.len() > ir::MAX_INDEXED_EQUALITY_BYTES / 2)
-                            {
-                                return None;
-                            }
-                            let value = ir::RangeIndexValue::literal(value)?;
-                            Some(ir::NodeAccessPlan::RangeIndex {
-                                index: index.clone(),
-                                key: key.clone(),
-                                range: ir::IndexRange::Between(ir::IndexBetweenRange::new(
+                        let point =
+                            (!matches!(&value, helix_ast::value::PropertyValue::String(text)
+                            if text.len() > ir::MAX_INDEXED_EQUALITY_BYTES / 2))
+                            .then(|| ir::RangeIndexValue::literal(value))
+                            .flatten()
+                            .and_then(|value| {
+                                ir::IndexBetweenRange::new(
                                     ir::IndexBound::Inclusive(value.clone()),
                                     ir::IndexBound::Inclusive(value),
-                                )?),
+                                )
+                            });
+                        if let Some(range) = point
+                            && let Some((key, index)) = range_index(&property)
+                        {
+                            exact.insert(property);
+                            candidates.push(ir::NodeAccessPlan::RangeIndex {
+                                index,
+                                key,
+                                range: ir::IndexRange::Between(range),
                                 iteration: ir::RangeScanIteration::Forward,
-                            })
-                        });
-                        let Some(point) = point else {
-                            continue;
-                        };
-                        exact.insert(property);
-                        candidates.push(point);
+                            });
+                        }
                         continue;
                     };
                     // Storage rejects an oversized lookup, while no indexed
                     // element can hold one, so only the scan answers exactly.
-                    let lookup = lookups(&|value| {
-                        let value = ir::SecondaryIndexLiteral::new(value).ok()?;
-                        (!value.may_exceed_index_key()).then(|| ir::NodeAccessPlan::EqualityIndex {
-                            index: index.clone(),
-                            key: key.clone(),
-                            value: ir::IndexValue::Literal(value),
-                        })
-                    });
-                    let Some(lookup) = lookup else {
+                    let Ok(value) = ir::SecondaryIndexLiteral::new(value) else {
                         continue;
                     };
+                    if value.may_exceed_index_key() {
+                        continue;
+                    }
                     unique |= index.uniqueness == catalog::IndexUniqueness::Unique;
                     exact.insert(property);
-                    candidates.push(lookup);
+                    candidates.push(ir::NodeAccessPlan::EqualityIndex {
+                        index: index.clone(),
+                        key,
+                        value: ir::IndexValue::Literal(value),
+                    });
                 }
                 // The residual predicate still checks every candidate, so each
                 // membership source only needs to contain the matching nodes.
@@ -490,21 +461,9 @@ fn plan_accesses(
                     let Some(index) = ctx.indexes.node_eq.get(&key) else {
                         continue;
                     };
-                    let Some(mut values) = membership_values(&list, ctx) else {
+                    let Some(values) = membership_values(&list, ctx) else {
                         continue;
                     };
-                    // As for an equality, text that reads as a datetime also
-                    // looks up the datetime it names.
-                    let datetimes = values
-                        .iter()
-                        .filter_map(|value| match value {
-                            helix_ast::value::PropertyValue::String(text) => parse_datetime(text)
-                                .ok()
-                                .map(helix_ast::value::PropertyValue::DateTime),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>();
-                    values.extend(datetimes);
                     let Some(domain) = analysis::literal_equality_domain(values) else {
                         continue;
                     };
@@ -562,18 +521,6 @@ fn plan_accesses(
                     let Some((key, index)) = range_index(&property) else {
                         continue;
                     };
-                    // Text bounds that read as datetimes also read the
-                    // datetimes they bound, for the residual comparison to
-                    // reject, as a scan's does. Such a union is not ordered.
-                    let datetimes = datetime_ranges
-                        .iter()
-                        .find(|(datetime, _)| *datetime == property)
-                        .map(|(_, range)| ir::NodeAccessPlan::RangeIndex {
-                            index: index.clone(),
-                            key: key.clone(),
-                            range: range.clone(),
-                            iteration: ir::RangeScanIteration::Forward,
-                        });
                     // An index whose own direction is the ORDER BY direction
                     // reads the sort property in order. Reverse iteration is
                     // not used: the storage engine's descending scans do not
@@ -591,17 +538,10 @@ fn plan_accesses(
                         range,
                         iteration: ir::RangeScanIteration::Forward,
                     };
-                    let Some(datetimes) = datetimes else {
-                        if sorted {
-                            ordered = Some(candidate.clone());
-                        }
-                        candidates.push(candidate);
-                        continue;
-                    };
-                    candidates.push(ir::NodeAccessPlan::Union(ir::AtLeast::from_pair(
-                        ir::NodeAccessSourcePlan::from_unfiltered(candidate),
-                        ir::NodeAccessSourcePlan::from_unfiltered(datetimes),
-                    )));
+                    if sorted {
+                        ordered = Some(candidate.clone());
+                    }
+                    candidates.push(candidate);
                 }
                 // An ordered range lets the LIMIT stop the scan, unless an
                 // equality, ID read or another range may bound the candidates
@@ -1624,20 +1564,17 @@ fn collect_equalities(expression: &Expression, slot: Slot, out: &mut Vec<(String
 /// an operand built from them resolves to its planning-time value
 /// ([`bound_value`]), so `n.at > datetime({epochMillis: timestamp() - $w})`
 /// bounds `at` below; unorderable, NaN and oversized bounds are skipped,
-/// so a scan never fails where the comparison would yield null. With
-/// `text_as_datetime`, only text bounds that read as datetimes count, as the
-/// datetimes they name.
+/// so a scan never fails where the comparison would yield null.
 fn collect_ranges(
     expression: &Expression,
     slot: Slot,
     ctx: &context::PlannerContext,
-    text_as_datetime: bool,
     out: &mut Vec<(String, ir::IndexRange)>,
 ) {
     let (op, a, b) = match expression {
         Expression::Connective(Connective::And, operands) => {
             for operand in operands {
-                collect_ranges(operand, slot, ctx, text_as_datetime, out);
+                collect_ranges(operand, slot, ctx, out);
             }
             return;
         }
@@ -1660,15 +1597,6 @@ fn collect_ranges(
         let value = match value.as_ref() {
             Expression::Literal(value) => literal(value.clone()),
             value => bound_value(value, ctx).map(Cow::into_owned),
-        };
-        let value = match value {
-            Some(helix_ast::value::PropertyValue::String(text)) if text_as_datetime => {
-                parse_datetime(&text)
-                    .ok()
-                    .map(helix_ast::value::PropertyValue::DateTime)
-            }
-            _ if text_as_datetime => None,
-            value => value,
         };
         // Escaping can double a string's encoded key.
         let Some(value) = value

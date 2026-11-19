@@ -317,6 +317,7 @@ fn prepare_request(request: Input, limits: Limits) -> Result<PreparedRequest> {
         values,
         footprint: parameter_memory,
     } = parameters::prepare(parameters, limits.memory_bytes)?;
+    query.check_parameter_comparisons(&values)?;
     Ok(PreparedRequest {
         query,
         params,

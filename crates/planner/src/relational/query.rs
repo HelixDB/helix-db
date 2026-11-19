@@ -492,6 +492,171 @@ impl Query {
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings
     }
+    /// Fails before anything runs where a comparison pairs a datetime with
+    /// text once each parameter has the type of its bound value: a
+    /// comparison, a text match, an IN member or a simple CASE's WHEN value
+    /// against its subject. An operand takes its bound value's type when it is
+    /// a parameter, a property path into a map parameter (`$obj.at`), or a
+    /// variable a projection set to either (`WITH $at AS a`). The binder
+    /// rejects the pairs whose types it knows without parameters; any other
+    /// datetime and text compare as unknown at run time.
+    ///
+    /// ```
+    /// use helix_planner::relational as r;
+    /// let query = |expression: r::Expression| {
+    ///     r::Query::new(
+    ///         vec![r::Binding {
+    ///             name: "x".into(), kind: r::BindingType::Scalar,
+    ///             nullable: true, value_type: r::ValueType::Any,
+    ///         }],
+    ///         vec![r::Operator::Unwind {
+    ///             expression: r::Expression::List(vec![expression]),
+    ///             slot: r::Slot(0),
+    ///         }],
+    ///         vec![],
+    ///     )
+    ///     .unwrap()
+    /// };
+    /// let compare = |left: r::Expression, right: r::Expression| {
+    ///     query(r::Expression::Binary(r::Binary::Equal, Box::new(left), Box::new(right)))
+    /// };
+    /// let at = || r::Expression::Parameter("at".into());
+    /// let text = r::Expression::Literal(r::Value::String("2026-01-01".into()));
+    /// let parameters = [("at".to_owned(), r::Value::DateTime(0))].into();
+    /// let error = compare(at(), text.clone()).check_parameter_comparisons(&parameters).unwrap_err();
+    /// assert_eq!(error.detail, r::detail::DATETIME_TEXT_COMPARISON);
+    /// assert_eq!(error.phase, r::ErrorPhase::Compile);
+    /// let clock = r::Expression::Function(r::Function::DateTime, vec![]);
+    /// let text_parameter = [("at".to_owned(), r::Value::String("x".into()))].into();
+    /// assert!(compare(clock.clone(), at()).check_parameter_comparisons(&text_parameter).is_err());
+    /// // An IN member and a property of a map parameter count too.
+    /// let member = query(r::Expression::Binary(
+    ///     r::Binary::In,
+    ///     Box::new(clock.clone()),
+    ///     Box::new(r::Expression::List(vec![at()])),
+    /// ));
+    /// assert!(member.check_parameter_comparisons(&text_parameter).is_err());
+    /// let object = [(
+    ///     "at".to_owned(),
+    ///     r::Value::Map([("text".to_owned(), r::Value::String("x".into()))].into()),
+    /// )]
+    /// .into();
+    /// let property = r::Expression::Property(Box::new(at()), "text".into());
+    /// assert!(compare(clock.clone(), property).check_parameter_comparisons(&object).is_err());
+    /// // A parameter of another type, or a pair with no parameter, is left to run.
+    /// assert!(compare(clock, at()).check_parameter_comparisons(&parameters).is_ok());
+    /// let integer = [("at".to_owned(), r::Value::Integer(0))].into();
+    /// assert!(compare(at(), text).check_parameter_comparisons(&integer).is_ok());
+    /// ```
+    pub fn check_parameter_comparisons(
+        &self,
+        parameters: &std::collections::BTreeMap<String, super::Value>,
+    ) -> Result<()> {
+        use super::{Binary as B, Value, ValueType as T};
+        use std::collections::BTreeMap;
+        fn bound<'a>(
+            operand: &Expression,
+            parameters: &'a BTreeMap<String, Value>,
+            slots: &BTreeMap<Slot, &'a Value>,
+        ) -> Option<&'a Value> {
+            match operand {
+                Expression::Parameter(name) => parameters.get(name),
+                Expression::Slot(slot) => slots.get(slot).copied(),
+                Expression::Property(value, key) => match bound(value, parameters, slots)? {
+                    Value::Map(entries) => entries.get(key),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        // Each slot a projection sets to a parameter-bound value, as of the
+        // last operator that sets it.
+        let mut slots = BTreeMap::new();
+        for operator in &self.operators {
+            match operator {
+                Operator::Project { items, .. } => {
+                    let assigned = items
+                        .iter()
+                        .map(|item| (item.slot, bound(&item.expression, parameters, &slots)))
+                        .collect::<Vec<_>>();
+                    for (slot, value) in assigned {
+                        match value {
+                            Some(value) => slots.insert(slot, value),
+                            None => slots.remove(&slot),
+                        };
+                    }
+                }
+                Operator::Unwind { slot, .. } => {
+                    slots.remove(slot);
+                }
+                _ => {}
+            }
+        }
+        let bound = |operand: &Expression| bound(operand, parameters, &slots);
+        let value_type = |operand: &Expression| {
+            bound(operand)
+                .map(T::of)
+                .or_else(|| operand.value_type(&self.bindings).ok())
+        };
+        // Pairs with no parameter-bound operand were checked by the binder.
+        let check = |a: Option<T>, b: Option<T>| match (a, b) {
+            (Some(a), Some(b)) => super::types::comparable(a, b),
+            _ => Ok(()),
+        };
+        self.operators
+            .iter()
+            .flat_map(Operator::expressions)
+            .try_for_each(|expression| {
+                expression.try_visit(&mut |expression| match expression {
+                    Expression::Binary(B::In, a, list) => {
+                        let a_bound = bound(a).is_some();
+                        // Inferred only for a pair that needs it.
+                        let a_type = std::cell::LazyCell::new(|| value_type(a));
+                        let values = |members: &[Value]| {
+                            members
+                                .iter()
+                                .try_for_each(|member| check(*a_type, Some(T::of(member))))
+                        };
+                        match (list.as_ref(), bound(list)) {
+                            (_, Some(Value::List(members))) => values(members),
+                            (Expression::Literal(Value::List(members)), _) if a_bound => {
+                                values(members)
+                            }
+                            (Expression::List(members), _) => members
+                                .iter()
+                                .filter(|member| a_bound || bound(member).is_some())
+                                .try_for_each(|member| check(*a_type, value_type(member))),
+                            _ => Ok(()),
+                        }
+                    }
+                    Expression::Binary(
+                        B::Equal
+                        | B::NotEqual
+                        | B::Less
+                        | B::LessEqual
+                        | B::Greater
+                        | B::GreaterEqual
+                        | B::StartsWith
+                        | B::EndsWith
+                        | B::Contains,
+                        a,
+                        b,
+                    ) if bound(a).is_some() || bound(b).is_some() => {
+                        check(value_type(a), value_type(b))
+                    }
+                    Expression::SimpleCase(case) => {
+                        let operand_bound = bound(&case.operand).is_some();
+                        let operand_type = std::cell::LazyCell::new(|| value_type(&case.operand));
+                        case.branches
+                            .iter()
+                            .map(|(comparison, _)| comparison)
+                            .filter(|comparison| operand_bound || bound(comparison).is_some())
+                            .try_for_each(|comparison| check(*operand_type, value_type(comparison)))
+                    }
+                    _ => Ok(()),
+                })
+            })
+    }
     pub fn operators(&self) -> &[Operator] {
         &self.operators
     }

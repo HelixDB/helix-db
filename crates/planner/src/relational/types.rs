@@ -35,19 +35,7 @@ impl Expression {
         };
         let infer = |e: &Expression| e.value_type(bindings);
         Ok(match self {
-            Self::Literal(value) => match value {
-                Value::Null => T::Null,
-                Value::Boolean(_) => T::Boolean,
-                Value::Integer(_) => T::Integer,
-                Value::Float(_) => T::Float,
-                Value::String(_) => T::String,
-                Value::DateTime(_) => T::DateTime,
-                Value::List(_) => T::List,
-                Value::Map(_) => T::Map,
-                Value::Entity(super::Entity::Node(_)) => T::Node,
-                Value::Entity(super::Entity::Relationship(_)) => T::Relationship,
-                Value::Path(_) => T::Path,
-            },
+            Self::Literal(value) => T::of(value),
             Self::Slot(slot) => {
                 bindings
                     .get(slot.0 as usize)
@@ -111,6 +99,24 @@ impl Expression {
                     Unary::IsNull | Unary::IsNotNull => T::Boolean,
                 }
             }
+            Self::Binary(Binary::In, a, list) => {
+                let a = infer(a)?;
+                // Each member of a list written out is compared with `a`.
+                match list.as_ref() {
+                    Self::List(members) => {
+                        for member in members {
+                            comparable(a, infer(member)?)?;
+                        }
+                    }
+                    Self::Literal(Value::List(members)) => {
+                        for member in members {
+                            comparable(a, T::of(member))?;
+                        }
+                    }
+                    list => require(infer(list)?, &[T::List], category::SYNTAX_ERROR)?,
+                }
+                T::Boolean
+            }
             Self::Binary(op, a, b) => {
                 let a = infer(a)?;
                 let b = infer(b)?;
@@ -123,30 +129,11 @@ impl Expression {
                     | Binary::GreaterEqual
                     | Binary::StartsWith
                     | Binary::EndsWith
-                    | Binary::Contains
-                        if matches!(
-                            (a, b),
-                            (T::DateTime, T::String) | (T::String, T::DateTime)
-                        ) =>
-                    {
-                        return Err(QueryError::compile(
-                            category::TYPE_ERROR,
-                            detail::DATETIME_TEXT_COMPARISON,
-                            "cannot compare a datetime with text; read the text as a datetime \
-                             with datetime('…') in Cypher or TIMESTAMP '…' in SQL",
-                        ));
-                    }
-                    Binary::In => {
-                        require(b, &[T::List], category::SYNTAX_ERROR)?;
+                    | Binary::Contains => {
+                        comparable(a, b)?;
                         T::Boolean
                     }
-                    Binary::StartsWith | Binary::EndsWith | Binary::Contains => T::Boolean,
-                    Binary::Equal
-                    | Binary::NotEqual
-                    | Binary::Less
-                    | Binary::LessEqual
-                    | Binary::Greater
-                    | Binary::GreaterEqual => T::Boolean,
+                    Binary::In => unreachable!("matched above"),
                     Binary::Add if a == T::List || b == T::List => T::List,
                     Binary::Add if a == T::String || b == T::String => T::String,
                     Binary::Add
@@ -218,10 +205,10 @@ impl Expression {
                 result
             }
             Self::SimpleCase(case) => {
-                infer(&case.operand)?;
+                let operand = infer(&case.operand)?;
                 let mut result = infer(&case.otherwise)?;
                 for (comparison, value) in &case.branches {
-                    infer(comparison)?;
+                    comparable(operand, infer(comparison)?)?;
                     let value_type = infer(value)?;
                     if result == T::Null {
                         result = value_type;
@@ -329,4 +316,46 @@ impl Expression {
             }
         })
     }
+}
+
+impl ValueType {
+    /// The type of a value, as of a literal holding it.
+    ///
+    /// ```
+    /// use helix_planner::relational as r;
+    /// assert_eq!(r::ValueType::of(&r::Value::DateTime(0)), r::ValueType::DateTime);
+    /// assert_eq!(r::ValueType::of(&r::Value::List(vec![])), r::ValueType::List);
+    /// ```
+    pub fn of(value: &Value) -> Self {
+        match value {
+            Value::Null => Self::Null,
+            Value::Boolean(_) => Self::Boolean,
+            Value::Integer(_) => Self::Integer,
+            Value::Float(_) => Self::Float,
+            Value::String(_) => Self::String,
+            Value::DateTime(_) => Self::DateTime,
+            Value::List(_) => Self::List,
+            Value::Map(_) => Self::Map,
+            Value::Entity(super::Entity::Node(_)) => Self::Node,
+            Value::Entity(super::Entity::Relationship(_)) => Self::Relationship,
+            Value::Path(_) => Self::Path,
+        }
+    }
+}
+
+/// Fails with the compile-time type error of comparing operands known to be a
+/// datetime and text, in either order: a comparison, a text match, an IN
+/// member or a simple CASE's WHEN value. Only these fail: at run time the pair
+/// compares as unknown, so whether a row matches never depends on an index.
+pub(super) fn comparable(a: ValueType, b: ValueType) -> Result<()> {
+    use ValueType as T;
+    if !matches!((a, b), (T::DateTime, T::String) | (T::String, T::DateTime)) {
+        return Ok(());
+    }
+    Err(QueryError::compile(
+        category::TYPE_ERROR,
+        detail::DATETIME_TEXT_COMPARISON,
+        "cannot compare a datetime with text; read the text as a datetime with \
+         datetime('…') in Cypher or TIMESTAMP '…' in SQL",
+    ))
 }

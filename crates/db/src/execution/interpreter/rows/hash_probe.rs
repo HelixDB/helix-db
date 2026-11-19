@@ -65,10 +65,7 @@ impl ProbeCursor {
                     continue;
                 };
                 let value = self.graph.property(entity, property)?;
-                // Before the null check: a list holding null matches nothing,
-                // yet its other members still compare with the keys'.
-                table.check_probe(value)?;
-                if value.equals(value)? != Some(true) {
+                if value.equals(value) != Some(true) {
                     self.parent += 1;
                     continue;
                 }
